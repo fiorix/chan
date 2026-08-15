@@ -199,6 +199,10 @@ pub(crate) fn build_tar_into<F>(
 pub(crate) struct TerminalDownloadQuery {
     #[serde(default)]
     download: Option<String>,
+    /// Consumed only by the standalone Files read this handler dispatches
+    /// to on a bare GET; the download lane ignores it.
+    #[serde(default)]
+    stream: Option<String>,
 }
 
 /// What the plan resolved to, reported before the first byte so the response
@@ -361,10 +365,22 @@ pub async fn api_terminal_read_file(
     Query(query): Query<TerminalDownloadQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // The slim terminal tenant fetches no file content inline (no editor, no
-    // file browser); the only legitimate GET here is the download gesture, so a
-    // bare read is refused rather than serving arbitrary bytes.
+    // A bare GET is the standalone Files application's read lane: this
+    // route owns the path, so the dispatch happens here rather than as a
+    // second registration axum would refuse at router build. On a tenant
+    // without Files state the historical refusal stands: the plain slim
+    // tenant fetches no file content inline, and the only legitimate GET
+    // is the download gesture.
     if !query_flag(&query.download) {
+        if let Some(files) = state.standalone_files.clone() {
+            return crate::routes::standalone_fs::standalone_read_file(
+                files,
+                path,
+                query_flag(&query.stream),
+                &headers,
+            )
+            .await;
+        }
         return err(
             StatusCode::BAD_REQUEST,
             "terminal file route requires ?download=1".into(),
@@ -547,14 +563,39 @@ struct TerminalUploadResponse {
     size: u64,
 }
 
+/// Query marker splitting the upload route's two contracts. `app=files`
+/// selects the standalone File Browser lane; anything else (including a
+/// missing marker) keeps the historical `cs upload` behavior. A plain
+/// string rather than a typed enum so an unknown `app` value stays
+/// ignored, exactly as it was before the parameter existed.
+#[derive(Default, Deserialize)]
+pub(crate) struct TerminalUploadQuery {
+    #[serde(default)]
+    app: Option<String>,
+    #[serde(default)]
+    w: Option<String>,
+}
+
 /// `POST /api/files/upload` on the terminal tenant: write the uploaded file into
-/// the cwd / uid-scoped `dir`. No replace (`path`) flow -- the slim tenant has no
-/// file browser. Mounted only on the terminal router, so `dir` is absolute.
+/// the cwd / uid-scoped `dir`. This is the `cs upload` lane, which has no
+/// replace (`path`) flow: it targets a directory, not a file the user picked.
+/// Mounted only on the terminal router, so `dir` is absolute.
+///
+/// `?app=files` dispatches to the standalone Files upload instead: this
+/// route owns the path, so the fork happens here rather than as a second
+/// registration axum would refuse at router build.
 pub async fn api_terminal_upload_file(
     State(state): State<std::sync::Arc<crate::state::AppState>>,
+    Query(query): Query<TerminalUploadQuery>,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
+    if query.app.as_deref() == Some("files") {
+        return crate::routes::standalone_fs::standalone_upload_file(
+            state, query.w, headers, multipart,
+        )
+        .await;
+    }
     let mut dir = String::new();
     let mut dir_seen = false;
     loop {

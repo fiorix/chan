@@ -42,6 +42,7 @@ function win(
     token: "",
     persisted: true,
     connected: true,
+    active_transfer: false,
     control: false,
     ...over,
   };

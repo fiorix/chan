@@ -12,6 +12,7 @@ registerCommands([
     id: "app.settings.open",
     title: "Settings",
     category: "Global",
+    requirement: "any",
     keywords: ["preferences", "configuration", "config", "options"],
     icon: "settings",
     available: () => true,

@@ -80,6 +80,7 @@ function record(over: Partial<WindowRecord>): WindowRecord {
     token: "tok",
     persisted: true,
     connected: true,
+    active_transfer: false,
     control: false,
     ...over,
   };

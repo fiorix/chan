@@ -61,6 +61,8 @@ registerCommands([
     id: "app.slides.new",
     title: "New slide deck",
     category: "Apps",
+    // Deck creation drafts through the workspace tenant, like New draft.
+    requirement: "workspace",
     keywords: ["slides", "presentation", "deck", "present"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => {
@@ -77,6 +79,7 @@ registerCommands([
     id: "app.slides.preview",
     title: "Preview slide deck",
     category: "Editor",
+    requirement: "files",
     keywords: ["slides", "preview", "deck", "presentation"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => {
@@ -88,6 +91,7 @@ registerCommands([
     id: "app.slides.present",
     title: "Present slide deck fullscreen",
     category: "Editor",
+    requirement: "files",
     keywords: ["slides", "present", "deck", "fullscreen", "play"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => {

@@ -26,6 +26,7 @@ import {
 import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
 import { uiConfirm } from "./confirm.svelte";
+import { windowCaps } from "./windowCaps";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
 import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
@@ -2403,6 +2404,13 @@ let lastTerminalCloseWasMoveOut = false;
 /// One-shot read for the window-discard guard: was the close that just emptied
 /// this window a terminal move-out? If so the source's discard must DELETE its
 /// blob but NOT reap -- the moved PTY lives on, re-bound to the target window.
+///
+/// A window that outlives its terminals (one holding a browser or an editor
+/// after its last shell moved away) does not need this flag to stay set: the
+/// server's reap is window-scoped (`close_for_window` matches a session's
+/// CURRENT window id) and the target's attach re-binds the moved session long
+/// before the user closes the remaining tab. The flag exists for the race the
+/// move itself opens, where the source's DELETE can beat that attach.
 export function consumeLastCloseWasMoveOut(): boolean {
   const v = lastTerminalCloseWasMoveOut;
   lastTerminalCloseWasMoveOut = false;
@@ -4148,17 +4156,6 @@ function insertSiblingPaneIn(
 /// draft tree only; Enter seals the split and any tabs spawned during
 /// the mode, Esc rolls everything back. Structural actions are
 /// constrained to right + down.
-/// Standalone terminal windows carry `?kind=terminal`. Read here directly
-/// (rather than importing the store's `ui.terminalOnly`) to avoid a
-/// tabs <-> store import cycle.
-function isTerminalWindow(): boolean {
-  try {
-    return new URLSearchParams(location.search).get("kind") === "terminal";
-  } catch {
-    return false;
-  }
-}
-
 export function paneModeSplit(direction: "row" | "column"): void {
   const draft = draftLayout();
   if (!draft) return;
@@ -4174,7 +4171,9 @@ export function paneModeSplit(direction: "row" | "column"): void {
   draft.activePaneId = newPane.id;
   // Terminal-only windows never have an empty pane: a freshly-split pane gets
   // its own terminal so the new split is immediately usable.
-  if (isTerminalWindow()) paneModeOpenTerminal();
+  // A window with no workspace never sits on an empty pane: there is no
+  // welcome surface to fill it, so a split lands a terminal.
+  if (!windowCaps.workspace) paneModeOpenTerminal();
 }
 
 /// Context for a Hybrid Nav spawn key. The in-mode spawn handlers
@@ -4661,7 +4660,7 @@ export function splitActive(direction: "row" | "column"): void {
   const paneId = splitPane(layout.activePaneId, direction, "after");
   // Terminal-only windows never have an empty pane: the new split pane (now
   // active) gets its own terminal.
-  if (paneId && isTerminalWindow()) openTerminalInActivePane({});
+  if (paneId && !windowCaps.workspace) openTerminalInActivePane({});
 }
 
 /// Materialize an R×C grid of panes starting from `startPaneId`.

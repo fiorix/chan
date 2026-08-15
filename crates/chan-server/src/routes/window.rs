@@ -130,13 +130,16 @@ mod tests {
             window_bus: Arc::new(crate::window_bus::WindowBus::new()),
             handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
             ephemeral_sessions: Mutex::new(std::collections::HashMap::new()),
+            ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: std::sync::Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),
             instance_id: "test-instance".to_string(),
+            standalone_files: None,
         });
         (cfg, root, crate::router(state))
     }

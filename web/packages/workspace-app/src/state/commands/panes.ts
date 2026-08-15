@@ -17,6 +17,7 @@ function focusColor(color: FocusColor): Command {
     id: `app.pane.focusColor.${color}`,
     title: `Focus border: ${color}`,
     category: "Panes",
+    requirement: "any",
     keywords: ["focus", "border", "colour", "color", "pane"],
     available: () => true,
     run: () =>

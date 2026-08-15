@@ -57,6 +57,7 @@ registerCommands([
     id: "app.editor.surfaceTheme.light",
     title: "Editor theme: light",
     category: "Editor",
+    requirement: "files",
     keywords: ["theme", "light", "appearance"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => setHybridSurfaceTheme("editor", "light"),
@@ -65,6 +66,7 @@ registerCommands([
     id: "app.editor.surfaceTheme.dark",
     title: "Editor theme: dark",
     category: "Editor",
+    requirement: "files",
     keywords: ["theme", "dark", "appearance"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => setHybridSurfaceTheme("editor", "dark"),
@@ -73,6 +75,7 @@ registerCommands([
     id: "app.editor.toggleMode",
     title: "Show source code",
     category: "Editor",
+    requirement: "files",
     keywords: ["source", "raw", "markdown", "wysiwyg", "toggle"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => dispatchChanCommand("app.editor.toggleMode"),
@@ -81,6 +84,7 @@ registerCommands([
     id: "app.file.new",
     title: "New file",
     category: "Editor",
+    requirement: "files",
     keywords: ["create", "file"],
     // A workspace create action, not surface-bound; hidden only in a
     // standalone terminal window.
@@ -91,6 +95,7 @@ registerCommands([
     id: "app.file.duplicate",
     title: "Duplicate file",
     category: "Editor",
+    requirement: "files",
     keywords: ["copy", "clone"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -101,6 +106,7 @@ registerCommands([
     id: "app.file.rename",
     title: "Rename file",
     category: "Editor",
+    requirement: "files",
     keywords: ["move", "rename"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -111,6 +117,7 @@ registerCommands([
     id: "app.editor.styleToolbar",
     title: "Toggle style toolbar",
     category: "Editor",
+    requirement: "files",
     keywords: ["format", "markdown", "toolbar", "style"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => setTabStyleToolbarOpen(tab, !tab.styleToolbarOpen)),
@@ -119,6 +126,7 @@ registerCommands([
     id: "app.editor.toggleCollapse",
     title: "Toggle collapse code blocks",
     category: "Editor",
+    requirement: "files",
     keywords: ["fold", "code", "collapse", "expand", "blocks"],
     available: (ctx) => onSurface(ctx, "file"),
     // The editor view owns fold ranges, so reach it through the mounted
@@ -129,6 +137,7 @@ registerCommands([
     id: "app.editor.copyPath",
     title: "Copy path to file",
     category: "Editor",
+    requirement: "files",
     keywords: ["clipboard", "path"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -142,6 +151,7 @@ registerCommands([
     id: "app.editor.copyParentPath",
     title: "Copy path to parent directory",
     category: "Editor",
+    requirement: "files",
     keywords: ["clipboard", "directory", "folder", "parent"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -155,6 +165,8 @@ registerCommands([
     id: "app.editor.terminalFromHere",
     title: "Terminal from here",
     category: "Editor",
+    // Spawns a terminal; the file path rides along as plain spawn data.
+    requirement: "terminal",
     keywords: ["shell", "console", "cwd"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -165,6 +177,8 @@ registerCommands([
     id: "app.editor.graphFromHere",
     title: "Graph from here",
     category: "Editor",
+    // The graph surface reads the workspace index.
+    requirement: "workspace",
     keywords: ["graph", "links", "scope"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => openFsGraphForFile(tab.path)),
@@ -173,6 +187,7 @@ registerCommands([
     id: "app.editor.showInBrowser",
     title: "Show in file browser",
     category: "Editor",
+    requirement: "files",
     keywords: ["reveal", "files", "tree", "explorer"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -183,6 +198,8 @@ registerCommands([
     id: "app.editor.searchSelection",
     title: "Search selection",
     category: "Editor",
+    // Seeds the global search panel, which queries the workspace index.
+    requirement: "workspace",
     keywords: ["search", "find", "selection"],
     available: (ctx) => onSurface(ctx, "file"),
     // The selection lives in the editor view's state, so it survives the
@@ -199,6 +216,7 @@ registerCommands([
     id: "app.editor.toggleTrailingWs",
     title: "Toggle highlight trailing whitespace",
     category: "Editor",
+    requirement: "files",
     keywords: ["whitespace", "trailing", "highlight"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) =>
@@ -209,6 +227,7 @@ registerCommands([
     id: "app.editor.stripTrailingWs",
     title: "Remove trailing whitespace",
     category: "Editor",
+    requirement: "files",
     keywords: ["whitespace", "trailing", "strip", "clean"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
@@ -219,6 +238,7 @@ registerCommands([
     id: "app.editor.outline",
     title: "Toggle outline",
     category: "Editor",
+    requirement: "files",
     keywords: ["outline", "headings", "toc"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => setTabOutlineOpen(tab, !tab.outlineOpen)),
@@ -227,6 +247,8 @@ registerCommands([
     id: "app.editor.details",
     title: "Toggle details",
     category: "Editor",
+    // The details panel surfaces index-backed metadata and backlinks.
+    requirement: "workspace",
     keywords: ["inspector", "details", "info", "metadata"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => setTabInspectorOpen(tab, !tab.inspectorOpen)),
@@ -235,6 +257,7 @@ registerCommands([
     id: "app.editor.syntaxHighlight",
     title: "Toggle syntax highlighting",
     category: "Editor",
+    requirement: "files",
     keywords: ["syntax", "highlight", "colors", "source", "code"],
     available: (ctx) => onSurface(ctx, "file"),
     // The flag persists per tab and Source mode honours it, so without this
@@ -245,6 +268,7 @@ registerCommands([
     id: "app.editor.reloadFromDisk",
     title: "Reload from disk",
     category: "Editor",
+    requirement: "files",
     keywords: ["reload", "revert", "discard", "disk", "refresh"],
     available: (ctx) => onSurface(ctx, "file"),
     // forceReloadFromDisk runs its own confirm when the buffer would lose

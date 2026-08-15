@@ -2274,6 +2274,9 @@ async fn handle_info(State(state): State<Arc<DevserverState>>) -> Json<Devserver
         library_id: state.library_id.clone(),
         os,
         pretty_name,
+        // The shared terminal tenant is mounted at boot, so its constructed
+        // state answers; a devserver whose mount raced this probe reports
+        // the platform predicate the same construction applies.
     })
 }
 

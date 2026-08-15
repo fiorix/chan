@@ -6,7 +6,8 @@
 //
 // The query contract mirrors what the workspace-app SPA reads on boot:
 //   ?w=<window_id>    per-window session key (panes/tabs, /ws presence)
-//   ?kind=terminal    terminal-only mode; ?kind=control adds the control
+//   ?kind=terminal    a standalone window (terminals, plus the file
+///                       browser and editor where its tenant serves them); ?kind=control adds the control
 //                     sub-mode. Absent for a workspace window (full mode).
 //   ?lib=<library_id> the owning chan-library (cross-window tab-DnD scope);
 //                     the SPA defaults a missing ?lib= to "local".
@@ -26,6 +27,9 @@ export function windowUrl(record: WindowRecord, origin: string): string {
   url.pathname = `/${prefix}/`;
   url.searchParams.set("w", record.window_id);
   if (record.kind === "terminal") {
+    // The SPA reads ?kind= as its window-mode signal. A standalone window is
+    // one family: whether it can also browse files is the serving tenant's
+    // answer, not the launcher's, so only the control sub-mode is named here.
     url.searchParams.set("kind", record.control ? "control" : "terminal");
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);

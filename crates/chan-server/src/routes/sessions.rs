@@ -22,7 +22,10 @@ use crate::util::raw_json_response;
 /// NOT reap the window's sessions; the moved PTY survives. Get /
 /// put ignore it. `client` is the writer's per-SPA-instance nonce, echoed on
 /// the `session_changed` broadcast so the writer can drop its own frame; GET
-/// accepts and ignores it.
+/// accepts and ignores it. `app=files` addresses the Files blob namespace on a
+/// workspace-less tenant (a `files/` child of the terminal blob dir, or the
+/// sibling in-memory map), so a Terminal-mode client never restores a Files
+/// layout; workspace tenants keep their one on-disk store and ignore it.
 #[derive(Deserialize)]
 pub struct SessionQuery {
     w: String,
@@ -30,6 +33,43 @@ pub struct SessionQuery {
     moved: Option<String>,
     #[serde(default)]
     client: Option<String>,
+    #[serde(default)]
+    app: Option<crate::app_query::AppQuery>,
+}
+
+/// `GET /api/sessions` query: `app=files` lists the Files namespace instead of
+/// the ordinary Terminal one.
+#[derive(Deserialize)]
+pub struct SessionListQuery {
+    #[serde(default)]
+    app: Option<crate::app_query::AppQuery>,
+}
+
+/// The on-disk blob dir for a standalone namespace: the terminal blob dir
+/// itself, or its `files/` child for `app=files`. `None` when this tenant has
+/// no durable store (control / desktop-local terminals).
+fn standalone_blob_dir(
+    state: &AppState,
+    app: Option<crate::app_query::AppQuery>,
+) -> Option<std::path::PathBuf> {
+    let dir = state.terminal_session_dir.clone()?;
+    Some(match app {
+        Some(crate::app_query::AppQuery::Files) => crate::terminal_blob::files_dir(&dir),
+        None => dir,
+    })
+}
+
+/// The in-memory session map for a standalone namespace, mirroring
+/// [`standalone_blob_dir`] for store-less tenants.
+fn ephemeral_map_lock(
+    state: &AppState,
+    app: Option<crate::app_query::AppQuery>,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<u8>>> {
+    let map = match app {
+        Some(crate::app_query::AppQuery::Files) => &state.ephemeral_files_sessions,
+        None => &state.ephemeral_sessions,
+    };
+    map.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 async fn blocking_response(
@@ -44,18 +84,6 @@ async fn blocking_response(
         )
             .into_response(),
     }
-}
-
-/// Lock the workspace-less tenant's in-memory session store. Recovers from a
-/// poisoned lock (the critical sections are simple map ops that never leave
-/// it inconsistent) so a session request can never itself panic the server.
-fn ephemeral_lock(
-    state: &AppState,
-) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<u8>>> {
-    state
-        .ephemeral_sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// Broadcast a `session_changed` frame on the per-tenant `/ws` bus after a
@@ -87,8 +115,8 @@ pub async fn api_get_session(
     let Ok(workspace) = state.try_workspace() else {
         // Workspace-less terminal tenant: a persistent launcher store when one
         // is configured (a persisted devserver terminal), else the in-memory
-        // store (control / desktop-local terminals).
-        if let Some(dir) = state.terminal_session_dir.clone() {
+        // store (control / desktop-local terminals). `app` picks the namespace.
+        if let Some(dir) = standalone_blob_dir(&state, q.app) {
             return blocking_response(
                 move || match crate::terminal_blob::get(&dir, &key) {
                     Ok(Some(bytes)) => raw_json_response(bytes),
@@ -99,7 +127,7 @@ pub async fn api_get_session(
             )
             .await;
         }
-        return match ephemeral_lock(&state).get(&key) {
+        return match ephemeral_map_lock(&state, q.app).get(&key) {
             Some(bytes) => raw_json_response(bytes.clone()),
             None => StatusCode::NO_CONTENT.into_response(),
         };
@@ -123,21 +151,26 @@ pub async fn api_put_session(
     Query(q): Query<SessionQuery>,
     body: Bytes,
 ) -> Response {
-    let response = put_session_response(&state, q.w.clone(), body).await;
+    let response = put_session_response(&state, q.w.clone(), q.app, body).await;
     if response.status().is_success() {
         broadcast_session_changed(&state, &q.w, q.client.as_deref(), false);
     }
     response
 }
 
-async fn put_session_response(state: &Arc<AppState>, key: String, body: Bytes) -> Response {
+async fn put_session_response(
+    state: &Arc<AppState>,
+    key: String,
+    app: Option<crate::app_query::AppQuery>,
+    body: Bytes,
+) -> Response {
     // A saved layout blob makes this window PERSISTED: its detached terminal
     // sessions are kept alive (reattachable) instead of orphan-reaped. The SPA
     // PUTs only windows with durable content; an explicit discard DELETEs (see
     // `api_delete_session`). Marked regardless of which blob backend stores it.
     state.terminal_sessions.mark_window_persisted(&key);
     let Ok(workspace) = state.try_workspace() else {
-        if let Some(dir) = state.terminal_session_dir.clone() {
+        if let Some(dir) = standalone_blob_dir(state, app) {
             return blocking_response(
                 move || match crate::terminal_blob::put(&dir, &key, &body) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -147,7 +180,7 @@ async fn put_session_response(state: &Arc<AppState>, key: String, body: Bytes) -
             )
             .await;
         }
-        ephemeral_lock(state).insert(key, body.to_vec());
+        ephemeral_map_lock(state, app).insert(key, body.to_vec());
         return StatusCode::NO_CONTENT.into_response();
     };
     blocking_response(
@@ -165,14 +198,19 @@ pub async fn api_delete_session(
     Query(q): Query<SessionQuery>,
 ) -> Response {
     let moved = matches!(q.moved.as_deref(), Some("1"));
-    let response = delete_session_response(&state, q.w.clone(), moved).await;
+    let response = delete_session_response(&state, q.w.clone(), q.app, moved).await;
     if response.status().is_success() {
         broadcast_session_changed(&state, &q.w, q.client.as_deref(), true);
     }
     response
 }
 
-async fn delete_session_response(state: &Arc<AppState>, key: String, moved: bool) -> Response {
+async fn delete_session_response(
+    state: &Arc<AppState>,
+    key: String,
+    app: Option<crate::app_query::AppQuery>,
+    moved: bool,
+) -> Response {
     // A DELETE either DISCARDS the window or signals a cross-window MOVE-OUT:
     // - `?w=W` (discard: ^W to empty / ^D / Ctrl+Shift+W (off-mac tab close) /
     //   Ctrl+Alt+W (off-mac window close) / an empty window):
@@ -192,7 +230,7 @@ async fn delete_session_response(state: &Arc<AppState>, key: String, moved: bool
         state.terminal_sessions.forget_window(&key);
     }
     let Ok(workspace) = state.try_workspace() else {
-        if let Some(dir) = state.terminal_session_dir.clone() {
+        if let Some(dir) = standalone_blob_dir(state, app) {
             return blocking_response(
                 move || match crate::terminal_blob::delete(&dir, &key) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -202,7 +240,7 @@ async fn delete_session_response(state: &Arc<AppState>, key: String, moved: bool
             )
             .await;
         }
-        ephemeral_lock(state).remove(&key);
+        ephemeral_map_lock(state, app).remove(&key);
         return StatusCode::NO_CONTENT.into_response();
     };
     blocking_response(
@@ -215,9 +253,12 @@ async fn delete_session_response(state: &Arc<AppState>, key: String, moved: bool
     .await
 }
 
-pub async fn api_list_sessions(State(state): State<Arc<AppState>>) -> Response {
+pub async fn api_list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SessionListQuery>,
+) -> Response {
     let Ok(workspace) = state.try_workspace() else {
-        if let Some(dir) = state.terminal_session_dir.clone() {
+        if let Some(dir) = standalone_blob_dir(&state, q.app) {
             return blocking_response(
                 move || match crate::terminal_blob::list(&dir) {
                     Ok(keys) => Json(keys).into_response(),
@@ -227,7 +268,7 @@ pub async fn api_list_sessions(State(state): State<Arc<AppState>>) -> Response {
             )
             .await;
         }
-        let keys: Vec<String> = ephemeral_lock(&state).keys().cloned().collect();
+        let keys: Vec<String> = ephemeral_map_lock(&state, q.app).keys().cloned().collect();
         return Json(keys).into_response();
     };
     blocking_response(
@@ -256,7 +297,92 @@ mod tests {
             w: w.to_string(),
             moved: None,
             client: client.map(str::to_string),
+            app: None,
         })
+    }
+
+    fn files_query(w: &str) -> Query<SessionQuery> {
+        Query(SessionQuery {
+            w: w.to_string(),
+            moved: None,
+            client: None,
+            app: Some(crate::app_query::AppQuery::Files),
+        })
+    }
+
+    #[tokio::test]
+    async fn the_files_marker_addresses_a_separate_ephemeral_namespace() {
+        // A layout PUT with `app=files` must not land in the plain map: the
+        // same window booted against a host that serves no filesystem would
+        // otherwise restore browser/editor tabs against routes it lacks.
+        let state = make_test_state(false);
+        let resp = api_put_session(
+            State(state.clone()),
+            files_query("w-files"),
+            Bytes::from_static(b"{\"files\":true}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(
+            state
+                .ephemeral_sessions
+                .lock()
+                .unwrap()
+                .get("w-files")
+                .is_none(),
+            "the Terminal namespace must not see a Files blob"
+        );
+        assert!(state
+            .ephemeral_files_sessions
+            .lock()
+            .unwrap()
+            .get("w-files")
+            .is_some());
+
+        // A DELETE without the app leaves the Files blob; with it, reaps it.
+        let resp = api_delete_session(State(state.clone()), query("w-files", None)).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .ephemeral_files_sessions
+            .lock()
+            .unwrap()
+            .get("w-files")
+            .is_some());
+        let resp = api_delete_session(State(state.clone()), files_query("w-files")).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .ephemeral_files_sessions
+            .lock()
+            .unwrap()
+            .get("w-files")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn the_files_marker_addresses_the_files_child_blob_dir() {
+        let mut state = make_test_state(false);
+        let dir = tempfile::tempdir().expect("tempdir");
+        Arc::get_mut(&mut state)
+            .expect("sole test ref")
+            .terminal_session_dir = Some(dir.path().to_path_buf());
+        let resp = api_put_session(
+            State(state.clone()),
+            files_query("w-files"),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(
+            crate::terminal_blob::get(dir.path(), "w-files")
+                .unwrap()
+                .is_none(),
+            "the Terminal namespace must not see a Files blob"
+        );
+        assert!(
+            crate::terminal_blob::get(&crate::terminal_blob::files_dir(dir.path()), "w-files")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

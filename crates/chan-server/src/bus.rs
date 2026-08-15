@@ -119,6 +119,28 @@ fn event_is_self_echo(event: &WatchEvent, sw: &SelfWrites) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubId(u64);
 
+/// Global refcount transitions produced by one registry lifecycle call:
+/// `attach` holds directories whose refcount went 0 -> 1, `detach` those
+/// that went 1 -> 0. A tenant with a real per-directory watcher (the
+/// standalone Files watch manager) turns these into OS watch attach and
+/// detach commands; workspace tenants derive frames from their one
+/// recursive feed and ignore the deltas.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ScopeDelta {
+    pub attach: Vec<String>,
+    pub detach: Vec<String>,
+}
+
+impl ScopeDelta {
+    /// Whether this lifecycle call crossed any global refcount edge.
+    /// Gated to tests like `subscriber_count` until a production caller
+    /// needs to skip no-op deltas.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.attach.is_empty() && self.detach.is_empty()
+    }
+}
+
 /// Per-directory scoped watcher pub/sub registry.
 ///
 /// There is one recursive OS watcher on the workspace (it feeds the
@@ -190,40 +212,59 @@ impl ScopeRegistry {
     /// Subscribe `id` to `dir`. Idempotent: a repeat `sub` for a dir the
     /// socket already holds does not double-count (the subscriber set is
     /// keyed by `SubId`). The first subscriber for a dir creates the
-    /// scope entry; later subscribers reuse it.
-    pub fn subscribe(&self, id: SubId, dir: &str) {
+    /// scope entry; later subscribers reuse it. The returned delta names
+    /// `dir` in `attach` only on the global 0 -> 1 transition, computed
+    /// under the same lock as the map mutation so deltas can never be
+    /// observed out of order. No filesystem or notify work runs here.
+    pub fn subscribe(&self, id: SubId, dir: &str) -> ScopeDelta {
         let dir = normalize_dir(dir);
         let mut inner = self.lock();
         let Some(sub) = inner.subscribers.get_mut(&id) else {
-            return; // socket already unregistered; drop the late frame.
+            return ScopeDelta::default(); // socket already unregistered; drop the late frame.
         };
         sub.dirs.insert(dir.clone());
-        inner.scopes.entry(dir).or_default().insert(id);
+        let scope = inner.scopes.entry(dir.clone()).or_default();
+        let was_empty = scope.is_empty();
+        scope.insert(id);
+        let mut delta = ScopeDelta::default();
+        if was_empty {
+            delta.attach.push(dir);
+        }
+        delta
     }
 
     /// Unsubscribe `id` from `dir`. The scope stays alive while any
     /// other subscriber remains; the last unsubscribe removes the scope
-    /// entry entirely.
-    pub fn unsubscribe(&self, id: SubId, dir: &str) {
+    /// entry entirely and names `dir` in the returned delta's `detach`.
+    pub fn unsubscribe(&self, id: SubId, dir: &str) -> ScopeDelta {
         let dir = normalize_dir(dir);
         let mut inner = self.lock();
         if let Some(sub) = inner.subscribers.get_mut(&id) {
             sub.dirs.remove(&dir);
         }
-        Self::drop_scope_member(&mut inner, &dir, id);
+        let mut delta = ScopeDelta::default();
+        if Self::drop_scope_member(&mut inner, &dir, id) {
+            delta.detach.push(dir);
+        }
+        delta
     }
 
     /// Drop a socket entirely (disconnect). Removes the subscriber and
     /// decrements every scope it held, tearing down any scope whose
-    /// refcount reaches zero. A disconnect therefore cannot leak scopes.
-    pub fn unregister(&self, id: SubId) {
+    /// refcount reaches zero. A disconnect therefore cannot leak scopes;
+    /// the returned delta names every finally-removed directory.
+    pub fn unregister(&self, id: SubId) -> ScopeDelta {
         let mut inner = self.lock();
         let Some(sub) = inner.subscribers.remove(&id) else {
-            return;
+            return ScopeDelta::default();
         };
+        let mut delta = ScopeDelta::default();
         for dir in sub.dirs {
-            Self::drop_scope_member(&mut inner, &dir, id);
+            if Self::drop_scope_member(&mut inner, &dir, id) {
+                delta.detach.push(dir);
+            }
         }
+        delta
     }
 
     /// Current refcount for `dir` (number of distinct subscribers).
@@ -258,6 +299,15 @@ impl ScopeRegistry {
     /// surfaces on both parents' scopes, matching the contract that a
     /// straddling rename is seen by each side.
     pub fn emit_fs(&self, event: &WatchEvent) {
+        self.emit_fs_attributed(event, None);
+    }
+
+    /// [`Self::emit_fs`] with an optional originating window id. A frame
+    /// whose `source_w` names the receiving window is that window's own
+    /// mutation echoed deterministically: it relists but does not mark its
+    /// clean buffers externally changed. External changes (shell writes,
+    /// the legacy transfer lane) carry no source and keep today's shape.
+    pub fn emit_fs_attributed(&self, event: &WatchEvent, source_w: Option<&str>) {
         let inner = self.lock();
         if inner.scopes.is_empty() {
             return;
@@ -281,11 +331,14 @@ impl ScopeRegistry {
             if subs.is_empty() {
                 continue;
             }
-            let frame = serde_json::json!({
+            let mut frame = serde_json::json!({
                 "type": "fs",
                 "dir": dir,
                 "event": event,
             });
+            if let Some(source_w) = source_w {
+                frame["source_w"] = source_w.into();
+            }
             let Ok(serialized) = serde_json::to_string(&frame) else {
                 continue;
             };
@@ -301,13 +354,58 @@ impl ScopeRegistry {
         }
     }
 
-    fn drop_scope_member(inner: &mut ScopeInner, dir: &str, id: SubId) {
+    /// Remove `id` from `dir`'s subscriber set, tearing the scope down when
+    /// it was the last member. Returns whether the scope entry was removed
+    /// (the 1 -> 0 transition a delta reports as `detach`).
+    fn drop_scope_member(inner: &mut ScopeInner, dir: &str, id: SubId) -> bool {
         if let Some(set) = inner.scopes.get_mut(dir) {
             set.remove(&id);
             if set.is_empty() {
                 inner.scopes.remove(dir);
+                return true;
             }
         }
+        false
+    }
+
+    /// Deliver an `fs_reset` frame to the subscribers of one directory. A
+    /// reset tells them their view of `dir` may have gaps (a watch just
+    /// attached, failed, overflowed, or the directory was replaced) and one
+    /// authoritative one-level relist is required. `reason` is a fixed
+    /// vocabulary, never a raw provider message, so backend error text can
+    /// never masquerade as a path. Same delivery discipline as `emit_fs`:
+    /// only unbounded channel pushes happen under the lock.
+    pub fn emit_fs_reset(&self, dir: &str, reason: FsResetReason) {
+        let dir = normalize_dir(dir);
+        let inner = self.lock();
+        let Some(subs) = inner.scopes.get(&dir) else {
+            return;
+        };
+        if subs.is_empty() {
+            return;
+        }
+        let frame = serde_json::json!({
+            "type": "fs_reset",
+            "dir": dir,
+            "reason": reason.as_str(),
+        });
+        let Ok(serialized) = serde_json::to_string(&frame) else {
+            return;
+        };
+        for id in subs {
+            if let Some(sub) = inner.subscribers.get(id) {
+                let _ = sub.outbox.send(serialized.clone());
+            }
+        }
+    }
+
+    /// The directories currently holding at least one subscriber. The
+    /// standalone watch manager tracks its own desired scope set, so this
+    /// is gated to tests like `subscriber_count` until a server-side
+    /// reader needs it in production.
+    #[cfg(test)]
+    pub fn subscribed_dirs(&self) -> Vec<String> {
+        self.lock().scopes.keys().cloned().collect()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ScopeInner> {
@@ -316,6 +414,34 @@ impl ScopeRegistry {
         // this bookkeeping is unrecoverable. Recover the guard rather
         // than propagate, matching the rest of chan-server's Mutex use.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Why a scope needs an authoritative relist. The wire strings are the
+/// contract with the frontend's reset handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsResetReason {
+    /// The scope's OS watch just became live; relist once to close the
+    /// initial-list/watch-attachment race.
+    Subscribed,
+    /// The OS watch could not be attached; events may be missing until the
+    /// bounded retry succeeds.
+    WatchError,
+    /// The provider reported a queue overflow or rescan; events were lost.
+    Overflow,
+    /// The watched directory was removed or replaced; the watch is being
+    /// re-attached to whatever now sits at the path.
+    DirectoryReplaced,
+}
+
+impl FsResetReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FsResetReason::Subscribed => "subscribed",
+            FsResetReason::WatchError => "watch_error",
+            FsResetReason::Overflow => "overflow",
+            FsResetReason::DirectoryReplaced => "directory_replaced",
+        }
     }
 }
 
@@ -540,14 +666,18 @@ mod tests {
         let (s2, _rx2) = reg.register();
         let dir = "notes/recipes";
 
-        // sub1: first subscriber creates the scope, refcount = 1.
-        reg.subscribe(s1, dir);
+        // sub1: first subscriber creates the scope, refcount = 1. The
+        // 0 -> 1 edge is the only attach a real watcher would act on.
+        let delta = reg.subscribe(s1, dir);
+        assert_eq!(delta.attach, vec![dir.to_string()]);
         assert!(reg.scope_exists(dir), "sub1 must create the scope");
         assert_eq!(reg.subscriber_count(dir), 1);
+        assert_eq!(reg.subscribed_dirs(), vec![dir.to_string()]);
 
-        // sub2: a different socket reuses the SAME scope, refcount = 2.
-        // No second scope entry appears; the key is identical.
-        reg.subscribe(s2, dir);
+        // sub2: a different socket reuses the SAME scope, refcount = 2,
+        // and the delta reports nothing (no refcount edge crossed).
+        let delta = reg.subscribe(s2, dir);
+        assert!(delta.is_empty(), "sub2 crosses no refcount edge");
         assert!(reg.scope_exists(dir));
         assert_eq!(reg.subscriber_count(dir), 2, "sub2 reuses, refcount = 2");
 
@@ -567,6 +697,10 @@ mod tests {
             "unsub2 (last) must tear the scope down"
         );
         assert_eq!(reg.subscriber_count(dir), 0);
+        assert!(
+            reg.subscribed_dirs().is_empty(),
+            "a torn-down scope leaves no live directory behind"
+        );
     }
 
     #[test]

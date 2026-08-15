@@ -52,6 +52,10 @@ pub struct TerminalQuery {
     generation: Option<u64>,
     mcp_env: Option<TerminalMcpEnv>,
     cwd: Option<String>,
+    /// Application marker for the shared standalone tenant: `app=files`
+    /// opts the spawn into capability-rooted `cwd` resolution. Absent
+    /// keeps the plain Terminal behavior in both tenants.
+    app: Option<crate::app_query::AppQuery>,
     command: Option<String>,
     /// JSON-encoded spawn environment map. This is an internal SPA transport;
     /// the public control-socket request carries the map as structured JSON.
@@ -370,11 +374,39 @@ pub async fn api_terminal_ws(
                     .into_response()
             }
         }
+    } else if matches!(query.app, Some(crate::app_query::AppQuery::Files)) {
+        match state.standalone_files.clone() {
+            Some(files) => {
+                // A spawn from the file browser or an editor tab lands in
+                // the requested directory, resolved through the capability root
+                // (a real, non-symlink directory only). An absent or
+                // invalid cwd falls back to the canonical home because the
+                // spawn gesture must always land somewhere sensible.
+                let cwd = query.cwd.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    resolve_standalone_files_cwd(&files.fs, cwd.as_deref())
+                })
+                .await;
+                match result {
+                    Ok(cwd) => Some(cwd),
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("terminal cwd task panicked: {e}"),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+            // No Files state on this tenant: keep the plain drop-cwd
+            // posture below.
+            None => None,
+        }
     } else {
-        // Workspace-less terminal tenant (standalone terminal window): no
-        // workspace to resolve a relative cwd against, so new sessions open
-        // in the registry default ($HOME). The SPA gates off the
-        // From-$CWD spawn actions in this mode, so `query.cwd` is unset.
+        // Workspace-less tenant with no `?app=files` marker: no root to
+        // resolve a relative cwd against, so new sessions open in the registry
+        // default ($HOME). A spawn from the file browser or an editor carries
+        // the marker and takes the capability-rooted branch above.
         None
     };
     let opts = TerminalWsOptions {
@@ -1210,6 +1242,23 @@ fn resolve_terminal_cwd(
         .map_err(|e| format!("invalid terminal cwd: {e}"))
 }
 
+/// Resolve a Files-window spawn cwd through the standalone capability
+/// root. The wire form is root-relative, so an absolute path is refused
+/// by `MiniWorkspace` rather than joined under the root (joining would
+/// double-prefix a PTY-reported absolute cwd); every refusal falls back
+/// to the canonical home so the gesture stays usable when the requested
+/// directory disappeared.
+fn resolve_standalone_files_cwd(fs: &chan_workspace::MiniWorkspace, cwd: Option<&str>) -> PathBuf {
+    if let Some(raw) = cwd {
+        if let Ok(abs) = fs.resolve_directory(raw.trim()) {
+            return abs;
+        }
+    }
+    fs.resolve_directory(fs.start_rel())
+        .or_else(|_| fs.resolve_directory(""))
+        .unwrap_or_else(|_| fs.root().to_path_buf())
+}
+
 /// `GET /api/terminal/next-name`: hand out the next per-tenant default
 /// terminal name (`Terminal-1`, `Terminal-2`, ...). The counter lives on the
 /// per-tenant terminal registry, so it does the right thing in BOTH modes:
@@ -1328,6 +1377,63 @@ mod tests {
             .is_err(),
             "unknown Hybrid sides must not be accepted silently"
         );
+    }
+
+    #[test]
+    fn terminal_query_parses_the_files_app_marker() {
+        let uri: axum::http::Uri = "/api/terminal/ws?app=files&cwd=home/user".parse().unwrap();
+        let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).expect("files marker");
+        assert!(matches!(query.app, Some(crate::app_query::AppQuery::Files)));
+        assert_eq!(query.cwd.as_deref(), Some("home/user"));
+
+        // Absent app stays None so plain Terminal spawns keep the
+        // drop-cwd behavior on workspace-less tenants.
+        let uri: axum::http::Uri = "/api/terminal/ws?cols=80".parse().unwrap();
+        let Query(query) = Query::<TerminalQuery>::try_from_uri(&uri).expect("plain terminal");
+        assert!(query.app.is_none());
+    }
+
+    #[test]
+    fn standalone_files_cwd_resolves_dirs_and_falls_back_to_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("home/user/proj")).unwrap();
+        std::fs::write(root.join("home/user/f.txt"), "x").unwrap();
+        let mini =
+            chan_workspace::MiniWorkspace::open(root, &root.join("home/user"), 1024).unwrap();
+        let canon = root.canonicalize().unwrap();
+
+        assert_eq!(
+            resolve_standalone_files_cwd(&mini, Some("home/user/proj")),
+            canon.join("home/user/proj")
+        );
+        // Absent, missing, and non-directory cwds all land at home.
+        for cwd in [None, Some("missing"), Some("home/user/f.txt")] {
+            assert_eq!(
+                resolve_standalone_files_cwd(&mini, cwd),
+                canon.join("home/user"),
+                "cwd {cwd:?} must fall back to the canonical home"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_files_cwd_never_double_prefixes_an_absolute_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("home/user/proj")).unwrap();
+        let mini =
+            chan_workspace::MiniWorkspace::open(root, &root.join("home/user"), 1024).unwrap();
+        let canon = root.canonicalize().unwrap();
+
+        // A PTY reports its cwd absolute. The wire form is root-relative,
+        // so the absolute form is refused and falls back to home; joining
+        // it under the root would nest the root path inside itself.
+        let absolute = canon.join("home/user/proj");
+        let resolved = resolve_standalone_files_cwd(&mini, Some(absolute.to_str().unwrap()));
+        assert_eq!(resolved, canon.join("home/user"));
+        let doubled = canon.join(absolute.strip_prefix("/").expect("absolute test path"));
+        assert_ne!(resolved, doubled, "no root-inside-root concatenation");
     }
 
     #[test]

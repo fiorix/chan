@@ -35,6 +35,7 @@
   } from "../api/types";
   import {
     workspace,
+    currentPreferences,
     indexStatus,
     ui,
     openGraphForContact,
@@ -359,7 +360,7 @@
   /// reading a slide; both axes independently suppress the timer.
   /// Defaults to true so `undefined` reads as "auto-rotate on".
   const cycling = $derived<boolean>(
-    workspace.info?.preferences?.empty_pane_carousel_cycling ?? true,
+    currentPreferences()?.empty_pane_carousel_cycling ?? true,
   );
   const paused = $derived(
     hovering || focused || !cycling || !active || !autoRotate,

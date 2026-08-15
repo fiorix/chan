@@ -24,6 +24,7 @@ use crate::markdown;
 use crate::paths::{ensure_workspace_metadata_dirs_in, WorkspacePaths};
 use crate::registry::KnownWorkspace;
 use crate::report::{ReportFanOut, ReportState};
+use crate::rooted_fs::{canonical_posix, describe_cap_file_kind, RootedFs};
 use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
 use crate::watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
 use crate::{Report, ReportScope};
@@ -158,14 +159,14 @@ pub struct WritableFile {
 
 /// Bounded opaque-byte reader backed by one owned producer thread.
 pub struct BoundedFileReader {
-    stat: FileStat,
-    slice: (u64, u64),
+    pub(crate) stat: FileStat,
+    pub(crate) slice: (u64, u64),
     /// Open handle, already positioned at the slice start. Chunks are read on
     /// the consumer's own thread rather than by a producer running ahead of
     /// it, so a bulk transfer costs the lane worker that is already reading it
     /// and no second thread.
-    file: Option<cap_std::fs::File>,
-    remaining: u64,
+    pub(crate) file: Option<cap_std::fs::File>,
+    pub(crate) remaining: u64,
 }
 
 impl BoundedFileReader {
@@ -598,24 +599,10 @@ impl Drop for RecoveryExecutionGuard<'_> {
 /// Cheap reads are unlocked; writes go through the locked handle.
 pub struct Workspace {
     entry: KnownWorkspace,
-    /// Canonical form of `entry.root_path`, computed once at open.
-    /// Used where we need an absolute path and as the slow-path
-    /// baseline for trash::restore.
-    root_canon: std::path::PathBuf,
-    /// Device/inode identity of the capability root on Unix. A deleted root
-    /// can be recreated at the same path while this handle still points at the
-    /// unlinked original; path existence alone cannot distinguish them.
-    #[cfg(unix)]
-    root_identity: (u64, u64),
-    /// Capability-based handle to the workspace root. All filesystem
-    /// ops on user-controllable paths go through this so a mid-path
-    /// symlink swap between path-resolution and the actual op
-    /// cannot escape the sandbox: cap-std opens each path component
-    /// with O_NOFOLLOW and refuses paths that walk outside the
-    /// dir handle. The previous resolve_safe_strict + std::fs::op
-    /// pair had a small TOCTOU window between the lexical sandbox
-    /// check and the kernel-side path walk; cap-std closes it.
-    dir: cap_std::fs::Dir,
+    /// Capability-rooted filesystem core: the cap-std root handle, the
+    /// canonical root and its unix identity, and the transfer ceiling.
+    /// Every user-path filesystem primitive routes through it.
+    fs: RootedFs,
     /// Validated in-root drafts directory name (single path segment,
     /// e.g. `.Drafts`). Resolved from the global `drafts_dir` config at
     /// open; falls back to the default when the configured value is
@@ -630,9 +617,6 @@ pub struct Workspace {
     /// operate on the drafts directory as a whole. Created lazily on
     /// the first `create_draft_dir`.
     drafts_root: std::path::PathBuf,
-    /// Effective transfer ceiling inherited immutably from the owning Library.
-    /// Kept separate from the current fixed transfer enforcement sites.
-    transfer_max_bytes: u64,
     paths: WorkspacePaths,
     /// Held for the lifetime of the Workspace. Released on drop.
     _lock: WorkspaceLock,
@@ -821,62 +805,8 @@ impl Workspace {
         transfer_max_bytes: u64,
         chan_home: &Path,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
-        // Defensive check: the registered path must still resolve to
-        // a directory. A user (or another tool) could have replaced
-        // the workspace directory with a symlink, file, or socket since
-        // the registry entry was written, in which case our path
-        // sandbox and per-op gates would still apply but the workspace
-        // shape itself is no longer what the user signed up for.
-        // `exists()` follows symlinks, so we use lstat here to catch
-        // a "directory turned into a symlink" replacement.
-        let meta = match std::fs::symlink_metadata(&entry.root_path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(entry.root_path.clone()));
-            }
-            Err(e) => return Err(ChanError::Io(e.to_string())),
-        };
-        let ft = meta.file_type();
-        if !ft.is_dir() || ft.is_symlink() {
-            return Err(ChanError::SpecialFile {
-                kind: fs_ops::describe_file_kind(&ft).to_string(),
-                path: entry.root_path.clone(),
-            });
-        }
-        let root_canon = match entry.root_path.canonicalize() {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(entry.root_path.clone()));
-            }
-            Err(error) => {
-                return Err(ChanError::Io(format!(
-                    "canonicalize workspace root: {error}"
-                )));
-            }
-        };
         let fd_permit = crate::fd_budget::acquire_workspace_permit();
-        let dir =
-            cap_std::fs::Dir::open_ambient_dir(&entry.root_path, cap_std::ambient_authority())
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        ChanError::WorkspaceRootMissing(entry.root_path.clone())
-                    } else {
-                        ChanError::Io(format!("open workspace root: {error}"))
-                    }
-                })?;
-        #[cfg(unix)]
-        let root_identity = {
-            use cap_std::fs::MetadataExt as _;
-            let opened = dir
-                .dir_metadata()
-                .map_err(|e| ChanError::Io(format!("stat open workspace root: {e}")))?;
-            let identity = (opened.dev(), opened.ino());
-            use std::os::unix::fs::MetadataExt as _;
-            if identity != (meta.dev(), meta.ino()) {
-                return Err(ChanError::WorkspaceRootMissing(entry.root_path.clone()));
-            }
-            identity
-        };
+        let fs = RootedFs::open(entry.root_path.clone(), transfer_max_bytes)?;
         if entry.metadata_key.is_empty() {
             return Err(ChanError::Io(format!(
                 "registry entry for {:?} has empty metadata key; open the workspace via Library::open_workspace",
@@ -885,7 +815,7 @@ impl Workspace {
         }
         let paths = ensure_workspace_metadata_dirs_in(chan_home, &entry.metadata_key)
             .map_err(|e| ChanError::Io(format!("ensure workspace metadata dirs: {e}")))?;
-        let lock = WorkspaceLock::acquire(&paths.lock, &root_canon)?;
+        let lock = WorkspaceLock::acquire(&paths.lock, fs.canonical_root())?;
         // Lazy GC: reclaim expired trash entries on every open. No
         // background thread, matches the codebase's sync-only rule.
         // Errors are swallowed: a corrupt trash dir must never block
@@ -1023,13 +953,9 @@ impl Workspace {
         };
         let workspace = Arc::new(Self {
             entry,
-            root_canon,
-            #[cfg(unix)]
-            root_identity,
-            dir,
+            fs,
             drafts_dir_name,
             drafts_root,
-            transfer_max_bytes,
             paths,
             _lock: lock,
             _fd_permit: fd_permit,
@@ -1281,18 +1207,7 @@ impl Workspace {
     /// error. cap-std would refuse a bad path anyway; this gate
     /// gives crisp error variants.
     fn rel(&self, rel: &str) -> Result<std::path::PathBuf> {
-        fs_ops::validate_rel(rel)
-    }
-
-    /// Resolve a workspace-relative rel to the (cap-std dir, validated
-    /// PathBuf inside that dir) pair the IO helpers operate against.
-    /// Every path now routes through the workspace-root `dir` handle:
-    /// drafts are real in-root files under `<drafts_dir_name>/...`, so
-    /// `.Drafts/untitled-1/draft.md` resolves like any other path. The
-    /// cap-std sandbox prevents traversal escape.
-    fn resolve_io(&self, rel: &str) -> Result<(&cap_std::fs::Dir, std::path::PathBuf)> {
-        let validated = fs_ops::validate_rel(rel)?;
-        Ok((&self.dir, validated))
+        self.fs.rel(rel)
     }
 
     /// Resolve a public chan path to the real host filesystem path,
@@ -1300,21 +1215,12 @@ impl Workspace {
     /// `<drafts_dir_name>/<name>/...` resolves under the root like any
     /// other in-tree path.
     pub fn resolve_physical_path(&self, rel: &str) -> Result<std::path::PathBuf> {
-        let trimmed = rel.trim_matches('/');
-        if trimmed.is_empty() || trimmed == "." {
-            return Ok(self.root_canon.clone());
-        }
-        fs_ops::resolve_safe_strict_canon(self.root(), &self.root_canon, trimmed)
+        self.fs.resolve_physical_path(rel)
     }
 
     /// Resolve a public chan path to an existing real directory.
     pub fn resolve_physical_dir(&self, rel: &str) -> Result<std::path::PathBuf> {
-        let abs = self.resolve_physical_path(rel)?;
-        let meta = std::fs::metadata(&abs).map_err(|e| ChanError::Io(e.to_string()))?;
-        if !meta.is_dir() {
-            return Err(ChanError::Io("path is not a directory".into()));
-        }
-        Ok(abs)
+        self.fs.resolve_physical_dir(rel)
     }
 
     /// Convert a real filesystem path back to chan's public path
@@ -1322,25 +1228,18 @@ impl Workspace {
     /// in-root under `<drafts_dir_name>/...`, so they fall out of the
     /// normal root-relative mapping with no special case.
     pub fn physical_path_to_virtual(&self, path: &std::path::Path) -> Option<String> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if path == self.root_canon {
-            return Some(String::new());
-        }
-        if let Ok(rel) = path.strip_prefix(&self.root_canon) {
-            return Some(posix_path(rel));
-        }
-        None
+        self.fs.physical_path_to_virtual(path)
     }
 
     pub fn root(&self) -> &std::path::Path {
-        &self.entry.root_path
+        self.fs.root()
     }
 
     /// Effective transfer ceiling captured by the Library that opened this
     /// workspace. The fixed transfer limits remain authoritative until their
     /// call sites consume this value.
     pub fn transfer_max_bytes(&self) -> u64 {
-        self.transfer_max_bytes
+        self.fs.transfer_max_bytes()
     }
 
     /// Verify that the workspace root still resolves to the directory this
@@ -1354,55 +1253,12 @@ impl Workspace {
     /// missing roots are typed, and a root replaced by a symlink or non-
     /// directory is refused.
     pub fn ensure_root_available(&self) -> Result<()> {
-        let meta = match std::fs::symlink_metadata(&self.entry.root_path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(
-                    self.entry.root_path.clone(),
-                ));
-            }
-            Err(error) => return Err(ChanError::Io(error.to_string())),
-        };
-        let file_type = meta.file_type();
-        if !file_type.is_dir() || file_type.is_symlink() {
-            return Err(ChanError::SpecialFile {
-                kind: fs_ops::describe_file_kind(&file_type).to_string(),
-                path: self.entry.root_path.clone(),
-            });
-        }
-        let live_canon = match self.entry.root_path.canonicalize() {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(
-                    self.entry.root_path.clone(),
-                ));
-            }
-            Err(error) => {
-                return Err(ChanError::Io(format!(
-                    "canonicalize workspace root: {error}"
-                )));
-            }
-        };
-        if live_canon != self.root_canon {
-            return Err(ChanError::WorkspaceRootMissing(
-                self.entry.root_path.clone(),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            if (meta.dev(), meta.ino()) != self.root_identity {
-                return Err(ChanError::WorkspaceRootMissing(
-                    self.entry.root_path.clone(),
-                ));
-            }
-        }
-        Ok(())
+        self.fs.ensure_root_available()
     }
 
     /// Canonical workspace root captured when the writer handle opened.
     pub fn canonical_root(&self) -> &std::path::Path {
-        &self.root_canon
+        self.fs.canonical_root()
     }
 
     /// Stable registry key for this workspace's sidecar state.
@@ -1413,10 +1269,11 @@ impl Workspace {
     /// Effective display label: configured name, then root basename.
     pub fn display_name(&self) -> String {
         self.entry.display_name.clone().unwrap_or_else(|| {
-            self.root_canon
+            self.fs
+                .canonical_root()
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.root_canon.display().to_string())
+                .unwrap_or_else(|| self.fs.canonical_root().display().to_string())
         })
     }
 
@@ -1479,23 +1336,7 @@ impl Workspace {
     /// A missing leaf is a normal value. Lexical traversal and mid-path
     /// symlink escapes remain typed errors.
     pub fn classify_workspace_path(&self, rel: &str) -> Result<WorkspacePath> {
-        let rel_path = self.rel(rel)?;
-        let metadata = match self.dir.symlink_metadata(&rel_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(WorkspacePath::Missing);
-            }
-            Err(error) => return Err(map_cap_err(error, &rel_path)),
-        };
-        let file_type = metadata.file_type();
-        let stat = file_stat_from_cap(&metadata);
-        if file_type.is_file() && !file_type.is_symlink() {
-            return Ok(WorkspacePath::Regular(stat));
-        }
-        if file_type.is_dir() {
-            return Ok(WorkspacePath::Directory(stat));
-        }
-        Ok(WorkspacePath::Special(path_kind_cap(&file_type)))
+        self.fs.classify_workspace_path(rel)
     }
 
     /// Verify that an atomic replacement can create its same-directory temp.
@@ -1504,68 +1345,7 @@ impl Workspace {
     /// allowed, and their parent directories are created with the same
     /// semantics as the eventual write.
     pub fn ensure_writable(&self, rel: &str) -> Result<WritableFile> {
-        // A capability directory can outlive an unlinked workspace path on
-        // Unix. Never preflight or create parents inside that unreachable
-        // directory: callers need a typed root-loss error instead.
-        self.ensure_root_available()?;
-        let rel_path = self.rel(rel)?;
-        let stat = match self.dir.symlink_metadata(&rel_path) {
-            Ok(metadata) => {
-                let file_type = metadata.file_type();
-                if !file_type.is_file() || file_type.is_symlink() {
-                    return Err(ChanError::SpecialFile {
-                        kind: describe_cap_file_kind(&file_type).to_string(),
-                        path: rel_path,
-                    });
-                }
-                if metadata.permissions().readonly() {
-                    return Err(ChanError::Io(format!(
-                        "path is read-only: {}",
-                        rel_path.display()
-                    )));
-                }
-                Some(file_stat_from_cap(&metadata))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(map_cap_err(error, &rel_path)),
-        };
-
-        if let Some(parent) = rel_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                self.dir
-                    .create_dir_all(parent)
-                    .map_err(|error| map_cap_err(error, &rel_path))?;
-            }
-        }
-        let parent = rel_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty());
-        let parent_dir;
-        let target_dir = match parent {
-            Some(parent) => {
-                parent_dir = self
-                    .dir
-                    .open_dir(parent)
-                    .map_err(|error| map_cap_err(error, &rel_path))?;
-                &parent_dir
-            }
-            None => &self.dir,
-        };
-        let parent_metadata = target_dir
-            .dir_metadata()
-            .map_err(|error| map_cap_err(error, &rel_path))?;
-        if parent_metadata.permissions().readonly() {
-            return Err(ChanError::Io(format!(
-                "destination directory is read-only: {}",
-                parent
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .display()
-            )));
-        }
-        let probe = cap_tempfile::TempFile::new(target_dir)
-            .map_err(|error| map_cap_err(error, &rel_path))?;
-        drop(probe);
-        Ok(WritableFile { stat })
+        self.fs.ensure_writable(rel)
     }
 
     /// Atomically replace one workspace file from caller-fed chunks.
@@ -1581,56 +1361,12 @@ impl Workspace {
     where
         F: FnOnce(&mut dyn AtomicWriteSink) -> Result<()>,
     {
-        if kind == AtomicWriteKind::Text && !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let writable = self.ensure_writable(rel)?;
-        let existing_size = writable.stat.as_ref().map(|stat| stat.size);
-        let limit = match kind {
-            AtomicWriteKind::Text => semantic_write_budget(existing_size),
-            // The byte budget is this workspace's configured transfer ceiling,
-            // not a compiled-in constant, so one server-reported value governs
-            // uploads, copies and every other opaque-byte write. The
-            // `max(existing_size, ...)` rule is unchanged: a file already
-            // larger than the ceiling stays rewritable at its current size, so
-            // lowering the ceiling cannot turn existing files read-only.
-            AtomicWriteKind::Bytes => {
-                std::cmp::max(existing_size.unwrap_or(0), self.transfer_max_bytes)
-            }
-        };
-        let bytes_target_is_text = kind == AtomicWriteKind::Bytes && fs_ops::is_editable_text(rel);
-        let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        if let Err(error) =
-            fs_ops::atomic_write_stream_in(dir, &rel_path, kind, limit, validate_utf8, feed)
-        {
-            // Prefer the terminal root-loss condition over an incidental
-            // mid-delete I/O failure. This keeps an editor autosave racing
-            // `rm -rf <root>` on the stable typed 404 path.
-            self.ensure_root_available()?;
-            if bytes_target_is_text
-                && matches!(
-                    &error,
-                    ChanError::Io(message)
-                        if message == "invalid UTF-8 in streamed text write"
-                )
-            {
-                return Err(ChanError::Io(format!(
-                    "refusing to write non-UTF-8 bytes to editable text file: {rel}"
-                )));
-            }
-            return Err(error);
-        }
-        // The write may have begun while the root still existed and completed
-        // through the retained capability after its pathname was removed.
-        // Do not report that unreachable commit as success.
-        self.ensure_root_available()?;
-        self.stat(rel)
+        self.fs.write_atomic_stream(rel, kind, feed)
     }
 
     /// Open one regular file and stream it through a fixed-size bounded queue.
     pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
-        self.read_bytes_bounded_slice(rel, 0, u64::MAX)
+        self.fs.read_bytes_bounded(rel)
     }
 
     /// Open one regular file and stream the byte window `[start, start+len)`
@@ -1646,27 +1382,7 @@ impl Workspace {
         start: u64,
         len: u64,
     ) -> Result<BoundedFileReader> {
-        use std::io::{Seek, SeekFrom};
-
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut file = dir
-            .open(&rel_path)
-            .map_err(|error| map_cap_err(error, &rel_path))?;
-        let stat = file_stat_from_cap(&file.metadata()?);
-        let start = start.min(stat.size);
-        let len = len.min(stat.size - start);
-        let slice = (start, len);
-        // Seek once, here, so a bad offset fails the caller before any
-        // response framing is derived from the slice.
-        file.seek(SeekFrom::Start(start))
-            .map_err(|error| ChanError::Io(error.to_string()))?;
-        Ok(BoundedFileReader {
-            stat,
-            slice,
-            file: Some(file),
-            remaining: len,
-        })
+        self.fs.read_bytes_bounded_slice(rel, start, len)
     }
 
     /// Read raw bytes from a file relative to the workspace root. No
@@ -1675,15 +1391,7 @@ impl Workspace {
     /// workspace root; symlinks, FIFOs, sockets, and devices are
     /// rejected.
     pub fn read(&self, rel: &str) -> Result<Vec<u8>> {
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        use std::io::Read;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        Ok(buf)
+        self.fs.read(rel)
     }
 
     /// Sniff whether `rel` is editable text by *content*. Reads up to
@@ -1695,51 +1403,13 @@ impl Workspace {
     /// refuses. Returns false on any I/O error or non-regular file: a
     /// file we cannot sample stays non-editable.
     pub fn sniff_is_text(&self, rel: &str) -> bool {
-        use std::io::Read;
-        let Ok((dir, rel_path)) = self.resolve_io(rel) else {
-            return false;
-        };
-        if ensure_regular_file_in(dir, &rel_path).is_err() {
-            return false;
-        }
-        let Ok(f) = dir.open(&rel_path) else {
-            return false;
-        };
-        let mut buf = Vec::with_capacity(fs_ops::TEXT_SNIFF_BYTES);
-        if f.take(fs_ops::TEXT_SNIFF_BYTES as u64)
-            .read_to_end(&mut buf)
-            .is_err()
-        {
-            return false;
-        }
-        fs_ops::looks_like_text(&buf)
-    }
-
-    /// The editable-text gate for `read_text` / `write_text` and
-    /// friends: a path the extension classifier already types as text,
-    /// OR an unknown-extension file whose leading bytes sniff as text.
-    /// Keep the sniff out of `fs_ops::is_editable_text` (which stays a
-    /// pure, I/O-free path predicate used in hot index walks); the
-    /// content read belongs only on the per-file read/write path.
-    fn editable_text_gate(&self, rel: &str) -> bool {
-        fs_ops::is_editable_text(rel) || self.sniff_is_text(rel)
+        self.fs.sniff_is_text(rel)
     }
 
     /// Read UTF-8 text. Errors if the file isn't editable text (by
     /// extension or content sniff) or isn't a regular file.
     pub fn read_text(&self, rel: &str) -> Result<String> {
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        use std::io::Read;
-        let mut buf = String::new();
-        f.read_to_string(&mut buf)?;
-        Ok(buf)
+        self.fs.read_text(rel)
     }
 
     /// Read UTF-8 text and return the file's stat alongside the
@@ -1748,25 +1418,7 @@ impl Workspace {
     /// no second-syscall race window. Pair with `write_text_if_unchanged`
     /// for optimistic-concurrency editor saves.
     pub fn read_text_with_stat(&self, rel: &str) -> Result<(String, FileStat)> {
-        use std::io::Read;
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        let meta = f.metadata()?;
-        let mut content = String::new();
-        f.read_to_string(&mut content)?;
-        let stat = FileStat {
-            size: meta.len(),
-            mtime: mtime_secs_cap(&meta),
-            mtime_ns: mtime_ns_cap(&meta),
-            is_dir: false,
-        };
-        Ok((content, stat))
+        self.fs.read_text_with_stat(rel)
     }
 
     /// Stream UTF-8 text in chunks and include the open-handle stat.
@@ -1777,50 +1429,13 @@ impl Workspace {
         &self,
         rel: &str,
         chunk_size: usize,
-        mut on_event: F,
+        on_event: F,
     ) -> Result<()>
     where
         F: FnMut(TextReadEvent<'_>) -> bool,
     {
-        use std::io::Read;
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        let meta = f.metadata()?;
-        let stat = FileStat {
-            size: meta.len(),
-            mtime: mtime_secs_cap(&meta),
-            mtime_ns: mtime_ns_cap(&meta),
-            is_dir: false,
-        };
-        if !on_event(TextReadEvent::Meta(&stat)) {
-            return Ok(());
-        }
-
-        let mut read_buf = vec![0u8; chunk_size.max(1)];
-        let mut pending = Vec::new();
-        loop {
-            let n = f.read(&mut read_buf)?;
-            if n == 0 {
-                break;
-            }
-            pending.extend_from_slice(&read_buf[..n]);
-            if !emit_valid_utf8_chunks(rel, &mut pending, &mut on_event)? {
-                return Ok(());
-            }
-        }
-        if !pending.is_empty() {
-            return Err(ChanError::Io(format!(
-                "invalid UTF-8 in editable text file: {rel}"
-            )));
-        }
-        let _ = on_event(TextReadEvent::Done);
-        Ok(())
+        self.fs
+            .read_text_with_stat_chunked(rel, chunk_size, on_event)
     }
 
     /// Atomically write UTF-8 text. Editable-text gate applies.
@@ -1829,10 +1444,7 @@ impl Workspace {
     /// must remove the existing entry first if they intend to
     /// replace it.
     pub fn write_text(&self, rel: &str, content: &str) -> Result<()> {
-        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
-            sink.write_chunk(content.as_bytes())
-        })
-        .map(|_| ())
+        self.fs.write_text(rel, content)
     }
 
     /// Optimistic-concurrency write: succeeds only when the file's
@@ -1886,40 +1498,8 @@ impl Workspace {
         expected_disk: Option<&str>,
         content: &str,
     ) -> Result<()> {
-        if !self.editable_text_gate(rel) {
-            return Err(ChanError::NotEditableText(rel.to_string()));
-        }
-        let writable = self.ensure_writable(rel)?;
-        let (current, exists) = match writable.stat.as_ref() {
-            Some(stat) => (stat.mtime_ns, true),
-            None => (None, false),
-        };
-        let conflict = match (expected_mtime_ns, exists) {
-            (None, false) => false,
-            (Some(m), true) => current != Some(m) || !self.disk_still_holds(rel, expected_disk),
-            _ => true,
-        };
-        if conflict {
-            return Err(ChanError::WriteConflict {
-                current_mtime_ns: current,
-            });
-        }
-        self.write_atomic_stream(rel, AtomicWriteKind::Text, |sink| {
-            sink.write_chunk(content.as_bytes())
-        })
-        .map(|_| ())
-    }
-
-    /// Whether the file still carries the bytes a CAS caller last
-    /// observed. No belief to check means nothing to contradict, so
-    /// the mtime stands alone. An unreadable disk answers false: a
-    /// write that cannot be shown to be safe is refused rather than
-    /// risked.
-    fn disk_still_holds(&self, rel: &str, expected_disk: Option<&str>) -> bool {
-        let Some(expected) = expected_disk else {
-            return true;
-        };
-        self.read_text(rel).is_ok_and(|disk| disk == expected)
+        self.fs
+            .write_text_if_unchanged(rel, expected_mtime_ns, expected_disk, content)
     }
 
     /// Atomically write raw bytes. Text-class targets still require
@@ -1927,10 +1507,7 @@ impl Workspace {
     /// the editor as markdown or source text. Same special-file
     /// refusal as `write_text`.
     pub fn write_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
-        self.write_atomic_stream(rel, AtomicWriteKind::Bytes, |sink| {
-            sink.write_chunk(content)
-        })
-        .map(|_| ())
+        self.fs.write_bytes(rel, content)
     }
 
     /// True iff the path resolves under the workspace and refers to a
@@ -1938,13 +1515,7 @@ impl Workspace {
     /// so a `true` return is a strong signal that a read will
     /// succeed.
     pub fn exists(&self, rel: &str) -> bool {
-        let Ok((dir, rel_path)) = self.resolve_io(rel) else {
-            return false;
-        };
-        match dir.symlink_metadata(&rel_path) {
-            Ok(m) => m.is_file() && !m.file_type().is_symlink(),
-            Err(_) => false,
-        }
+        self.fs.exists(rel)
     }
 
     /// True iff the path resolves under the workspace and refers to a
@@ -1952,13 +1523,7 @@ impl Workspace {
     /// `resolve_link` uses it to route a link that points at a folder to
     /// the file browser instead of the text editor.
     pub fn is_dir(&self, rel: &str) -> bool {
-        let Ok((dir, rel_path)) = self.resolve_io(rel) else {
-            return false;
-        };
-        match dir.symlink_metadata(&rel_path) {
-            Ok(m) => m.is_dir(),
-            Err(_) => false,
-        }
+        self.fs.is_dir(rel)
     }
 
     /// Stat the path using `lstat` semantics (so a symlink reports
@@ -1967,16 +1532,7 @@ impl Workspace {
     /// `<drafts_dir_name>/...` resolve through the workspace-root
     /// handle like any other in-tree path.
     pub fn stat(&self, rel: &str) -> Result<FileStat> {
-        let (dir, rel_path) = self.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        Ok(FileStat {
-            size: if meta.is_dir() { 0 } else { meta.len() },
-            mtime: mtime_secs_cap(&meta),
-            mtime_ns: mtime_ns_cap(&meta),
-            is_dir: meta.is_dir(),
-        })
+        self.fs.stat(rel)
     }
 
     /// One-level directory listing. Use `list_tree` for the
@@ -1994,66 +1550,7 @@ impl Workspace {
     /// shows up in `tracing` output and the indexer / status surface
     /// can act on the count later if needed.
     pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
-        let at_root = rel.is_empty() || rel == "." || rel == "/";
-        // Drafts are real in-root files under `<drafts_dir_name>/...`,
-        // so `.Drafts/<name>` lists through the workspace-root handle
-        // like any other path.
-        let read = if at_root {
-            self.dir
-                .read_dir(".")
-                .map_err(|e| ChanError::Io(e.to_string()))?
-        } else {
-            let rel_path = self.rel(rel)?;
-            self.dir
-                .read_dir(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))?
-        };
-        let mut out = Vec::new();
-        let mut skipped = 0usize;
-        for entry in read {
-            if out.len() >= fs_ops::LIST_DIR_LIMIT {
-                return Err(ChanError::ListingTooLarge {
-                    observed: out.len(),
-                    limit: fs_ops::LIST_DIR_LIMIT,
-                });
-            }
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(?rel, ?e, "list: read_dir entry error; skipping");
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if at_root && (name == ".chan" || name == ".git") {
-                continue;
-            }
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(e) => {
-                    tracing::warn!(?rel, ?name, ?e, "list: file_type failed; skipping");
-                    skipped += 1;
-                    continue;
-                }
-            };
-            if !(ft.is_dir() || ft.is_symlink() || ft.is_file()) {
-                continue;
-            }
-            out.push(DirEntry {
-                name,
-                is_dir: ft.is_dir(),
-            });
-        }
-        if skipped > 0 {
-            tracing::warn!(
-                ?rel,
-                skipped,
-                returned = out.len(),
-                "list: directory listing partial",
-            );
-        }
-        Ok(out)
+        self.fs.list(rel)
     }
 
     pub fn list_tree(&self) -> Result<Vec<TreeEntry>> {
@@ -2120,11 +1617,7 @@ impl Workspace {
     }
 
     pub fn create_dir(&self, rel: &str) -> Result<()> {
-        let rel_path = self.rel(rel)?;
-        self.dir
-            .create_dir_all(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        Ok(())
+        self.fs.create_dir(rel)
     }
 
     /// Soft-delete a file or directory: move it into the per-workspace
@@ -2147,7 +1640,8 @@ impl Workspace {
         // TOCTOU window. The damage if exploited is "wrong file
         // goes to trash" - recoverable via `trash_restore`.
         let meta = self
-            .dir
+            .fs
+            .dir()
             .symlink_metadata(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         let ft = meta.file_type();
@@ -2276,7 +1770,8 @@ impl Workspace {
     /// back to the next reindex pass.
     pub fn trash_restore(&self, id: &str) -> Result<()> {
         let _ = trash::sweep_expired(&self.paths.trash, TRASH_RETENTION_SECS);
-        let restored = trash::restore(&self.paths.trash, self.root(), &self.root_canon, id)?;
+        let restored =
+            trash::restore(&self.paths.trash, self.root(), self.fs.canonical_root(), id)?;
         self.reindex_after_restore(&restored);
         Ok(())
     }
@@ -2370,13 +1865,13 @@ impl Workspace {
         // `rm -rf <root>` cannot recreate the absolute workspace pathname.
         // The postcondition turns an otherwise-successful orphaned create into
         // the shared typed root-loss error.
-        self.dir.create_dir_all(drafts_rel).map_err(|error| {
+        self.fs.dir().create_dir_all(drafts_rel).map_err(|error| {
             ChanError::Io(format!(
                 "failed to create drafts directory {}: {error}",
                 self.drafts_root.display()
             ))
         })?;
-        self.dir.create_dir(&rel).map_err(|error| {
+        self.fs.dir().create_dir(&rel).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 ChanError::Io(format!(
                     "draft `{name}` already exists at {}",
@@ -2432,7 +1927,7 @@ impl Workspace {
         drafts::promote(
             &self.drafts_root,
             self.root(),
-            &self.root_canon,
+            self.fs.canonical_root(),
             name,
             target_rel,
         )
@@ -2531,38 +2026,7 @@ impl Workspace {
     }
 
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let from_rel = self.rel(from)?;
-        let to_rel = self.rel(to)?;
-        // Source must exist as a regular file or directory; refuse
-        // to move a symlink or special file. (renaming a symlink
-        // is well-defined at the syscall level but not something
-        // the editor should ever do silently.)
-        let src_meta = self
-            .dir
-            .symlink_metadata(&from_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        let src_ft = src_meta.file_type();
-        if !(src_ft.is_dir() || (src_ft.is_file() && !src_ft.is_symlink())) {
-            return Err(ChanError::SpecialFile {
-                kind: describe_cap_file_kind(&src_ft).to_string(),
-                path: self.entry.root_path.join(&from_rel),
-            });
-        }
-        self.ensure_writable(to)?;
-        if let Some(parent) = to_rel.parent() {
-            if !parent.as_os_str().is_empty() {
-                self.dir
-                    .create_dir_all(parent)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
-            }
-        }
-        // cap-std rename within the same Dir is TOCTOU-free: source
-        // and destination resolve through the dir handle, no
-        // path-walk through swappable ancestors.
-        self.dir
-            .rename(&from_rel, &self.dir, &to_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        Ok(())
+        self.fs.rename(from, to)
     }
 
     /// Copy a regular file or a directory subtree from `from` to `to`,
@@ -2591,119 +2055,7 @@ impl Workspace {
     /// POSIX), so the server can note them as self-writes and the UI /
     /// graph can react. Sorted for stable diffs.
     pub fn copy(&self, from: &str, to: &str) -> Result<CopyOutcome> {
-        let from_rel = self.rel(from)?;
-        let to_rel = self.rel(to)?;
-        let src_meta = self
-            .dir
-            .symlink_metadata(&from_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        let src_ft = src_meta.file_type();
-        if src_ft.is_symlink() || !(src_ft.is_dir() || src_ft.is_file()) {
-            return Err(ChanError::SpecialFile {
-                kind: describe_cap_file_kind(&src_ft).to_string(),
-                path: self.entry.root_path.join(&from_rel),
-            });
-        }
-        // Refuse to clobber: paste-collision resolution happens in the
-        // server (it picks a free name); a bare copy onto an existing
-        // path is a programming error, not a silent overwrite.
-        if self.dir.symlink_metadata(&to_rel).is_ok() {
-            return Err(ChanError::Io(format!(
-                "copy destination already exists: {to}"
-            )));
-        }
-        let to_canon = canonical_posix(to);
-        let mut created = Vec::new();
-        if src_ft.is_file() {
-            self.copy_one_file(&from_rel, &to_rel, &to_canon, &mut created)?;
-        } else {
-            // Create the destination root dir, then walk descendants.
-            self.dir
-                .create_dir_all(&to_rel)
-                .map_err(|e| ChanError::Io(e.to_string()))?;
-            self.copy_subtree(&from_rel, &to_rel, &to_canon, &mut created)?;
-        }
-        created.sort();
-        Ok(CopyOutcome { created })
-    }
-
-    /// Copy one regular file from `src_rel` to `dst_rel` (both relative
-    /// to `self.dir`), recording the destination's workspace-rooted POSIX
-    /// path in `created`.
-    fn copy_one_file(
-        &self,
-        src_rel: &std::path::Path,
-        dst_rel: &std::path::Path,
-        dst_canon: &str,
-        created: &mut Vec<String>,
-    ) -> Result<()> {
-        let src_str = src_rel.to_string_lossy();
-        let dst_str = dst_rel.to_string_lossy();
-        let mut reader = self.read_bytes_bounded(&src_str)?;
-        // The semantic sink supplies the real binary budget, incremental UTF-8
-        // validation for editable destinations, same-directory atomic commit,
-        // and temp cleanup for every source-read or sink failure.
-        self.write_atomic_stream(&dst_str, AtomicWriteKind::Bytes, |sink| {
-            if reader.stat().size > sink.limit() {
-                return Err(ChanError::WriteTooLarge {
-                    kind: "bytes",
-                    size: reader.stat().size,
-                    limit: sink.limit(),
-                });
-            }
-            for chunk in reader.by_ref() {
-                sink.write_chunk(&chunk?)?;
-            }
-            Ok(())
-        })?;
-        created.push(dst_canon.to_string());
-        Ok(())
-    }
-
-    /// Recursively copy the contents of directory `src_rel` into the
-    /// already-created `dst_rel`. Skips control dirs; refuses special
-    /// files; recreates child directories before copying their files.
-    fn copy_subtree(
-        &self,
-        src_rel: &std::path::Path,
-        dst_rel: &std::path::Path,
-        dst_canon: &str,
-        created: &mut Vec<String>,
-    ) -> Result<()> {
-        let read = self
-            .dir
-            .read_dir(src_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        for entry in read {
-            let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy().to_string();
-            // Skip VCS / app control dirs: never duplicate them.
-            if matches!(name_str.as_str(), ".chan" | ".git" | ".hg") {
-                continue;
-            }
-            let ft = entry
-                .file_type()
-                .map_err(|e| ChanError::Io(e.to_string()))?;
-            let child_src = src_rel.join(&name);
-            let child_dst = dst_rel.join(&name);
-            let child_dst_canon = format!("{dst_canon}/{name_str}");
-            if ft.is_symlink() || !(ft.is_dir() || ft.is_file()) {
-                return Err(ChanError::SpecialFile {
-                    kind: describe_cap_file_kind(&ft).to_string(),
-                    path: self.entry.root_path.join(&child_src),
-                });
-            }
-            if ft.is_dir() {
-                self.dir
-                    .create_dir_all(&child_dst)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
-                self.copy_subtree(&child_src, &child_dst, &child_dst_canon, created)?;
-            } else {
-                self.copy_one_file(&child_src, &child_dst, &child_dst_canon, created)?;
-            }
-        }
-        Ok(())
+        self.fs.copy(from, to)
     }
 
     /// Resolve a non-colliding destination path for pasting `name` into
@@ -2719,45 +2071,7 @@ impl Workspace {
     /// a lost race, at which point the caller can retry with the next
     /// suffix.
     pub fn resolve_free_name(&self, dest_dir: &str, name: &str) -> Result<String> {
-        let base_dir = canonical_posix(dest_dir);
-        let prefix = if base_dir.is_empty() {
-            String::new()
-        } else {
-            format!("{base_dir}/")
-        };
-        let (stem, ext) = split_name_ext(name);
-        let mut candidate = format!("{prefix}{name}");
-        if !self.path_exists_any(&candidate) {
-            return Ok(candidate);
-        }
-        // First collision uses " copy", then " copy 2", " copy 3", ...
-        let mut n = 1u32;
-        loop {
-            let suffixed = if n == 1 {
-                format!("{stem} copy{ext}")
-            } else {
-                format!("{stem} copy {n}{ext}")
-            };
-            candidate = format!("{prefix}{suffixed}");
-            if !self.path_exists_any(&candidate) {
-                return Ok(candidate);
-            }
-            n += 1;
-            if n > 10_000 {
-                return Err(ChanError::Io(format!(
-                    "could not find a free name for {name} in {dest_dir}"
-                )));
-            }
-        }
-    }
-
-    /// Existence check for collision resolution: true if a file OR
-    /// directory (or any non-regular node) occupies `rel`.
-    fn path_exists_any(&self, rel: &str) -> bool {
-        let Ok(rel_path) = self.rel(rel) else {
-            return false;
-        };
-        self.dir.symlink_metadata(&rel_path).is_ok()
+        self.fs.resolve_free_name(dest_dir, name)
     }
 
     /// Rename a file or directory and rewrite every inbound link
@@ -3012,7 +2326,7 @@ impl Workspace {
     /// is one file. Directories return one entry per descendant file.
     fn snapshot_rename_mapping(&self, from: &str, to: &str) -> Result<HashMap<String, String>> {
         let from_rel = self.rel(from)?;
-        let meta = match self.dir.symlink_metadata(&from_rel) {
+        let meta = match self.fs.dir().symlink_metadata(&from_rel) {
             Ok(m) => m,
             Err(_) => return Ok(HashMap::new()),
         };
@@ -4471,48 +3785,6 @@ pub fn semantic_write_budget(existing_file_size: Option<u64>) -> u64 {
     std::cmp::max(existing_file_size.unwrap_or(0), TEXT_WRITE_LIMIT)
 }
 
-fn emit_valid_utf8_chunks<F>(rel: &str, pending: &mut Vec<u8>, on_event: &mut F) -> Result<bool>
-where
-    F: FnMut(TextReadEvent<'_>) -> bool,
-{
-    if pending.is_empty() {
-        return Ok(true);
-    }
-    match std::str::from_utf8(pending) {
-        Ok(s) => {
-            let keep_going = s.is_empty() || on_event(TextReadEvent::Chunk(s));
-            pending.clear();
-            Ok(keep_going)
-        }
-        Err(e) => {
-            if e.error_len().is_some() {
-                return Err(ChanError::Io(format!(
-                    "invalid UTF-8 in editable text file: {rel}"
-                )));
-            }
-            let valid_up_to = e.valid_up_to();
-            if valid_up_to > 0 {
-                let keep_going = {
-                    let valid = std::str::from_utf8(&pending[..valid_up_to]).map_err(|e| {
-                        ChanError::Io(format!("invalid UTF-8 in editable text file: {rel}: {e}"))
-                    })?;
-                    on_event(TextReadEvent::Chunk(valid))
-                };
-                if !keep_going {
-                    return Ok(false);
-                }
-                pending.drain(..valid_up_to);
-            }
-            if pending.len() > 4 {
-                return Err(ChanError::Io(format!(
-                    "invalid UTF-8 in editable text file: {rel}"
-                )));
-            }
-            Ok(true)
-        }
-    }
-}
-
 /// `u64` byte counts (from `Metadata::len()` / `TreeEntry.size`)
 /// projected into the `i64` column the graph uses for `size`.
 /// Saturates instead of wrapping; a real-world file will never come
@@ -4639,126 +3911,6 @@ fn index_file_between_stat_and_read_hook() {
 #[cfg(test)]
 fn arm_index_file_stat_read_hook(f: Box<dyn FnOnce()>) {
     INDEX_FILE_STAT_READ_HOOK.with(|h| *h.borrow_mut() = Some(f));
-}
-
-/// Map a `std::io::Error` returned by a cap-std op into our error
-/// enum. cap-std rejects sandbox escapes (mid-path symlink pointing
-/// outside the dir handle, absolute path passed as rel, `..` that
-/// would walk above the root) with a generic io::Error; the message
-/// it produces ("a path led outside of the filesystem") is the only
-/// portable signal we have to distinguish "you tried to escape"
-/// from "regular I/O error". Fragile if cap-std changes the string;
-/// a regression test in this module pins it.
-fn map_cap_err(err: std::io::Error, rel: &std::path::Path) -> ChanError {
-    let msg = err.to_string();
-    if msg.contains("outside of the filesystem") || msg.contains("path escape") {
-        return ChanError::SymlinkEscape(rel.to_path_buf());
-    }
-    ChanError::Io(msg)
-}
-
-/// cap-std variant of `mtime_secs` for `cap_std::fs::Metadata`.
-fn mtime_secs_cap(meta: &cap_std::fs::Metadata) -> Option<i64> {
-    meta.modified()
-        .ok()
-        .map(|t| t.into_std())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-}
-
-/// cap-std variant of `mtime_ns` for `cap_std::fs::Metadata`.
-fn mtime_ns_cap(meta: &cap_std::fs::Metadata) -> Option<i64> {
-    meta.modified()
-        .ok()
-        .map(|t| t.into_std())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| i64::try_from(d.as_nanos()).ok())
-}
-
-fn file_stat_from_cap(meta: &cap_std::fs::Metadata) -> FileStat {
-    FileStat {
-        size: if meta.is_dir() { 0 } else { meta.len() },
-        mtime: mtime_secs_cap(meta),
-        mtime_ns: mtime_ns_cap(meta),
-        is_dir: meta.is_dir(),
-    }
-}
-
-fn path_kind_cap(ft: &cap_std::fs::FileType) -> fs_ops::PathKind {
-    if ft.is_dir() {
-        return fs_ops::PathKind::Directory;
-    }
-    if ft.is_symlink() {
-        return fs_ops::PathKind::Symlink;
-    }
-    if ft.is_file() {
-        return fs_ops::PathKind::RegularFile;
-    }
-    #[cfg(unix)]
-    {
-        use cap_std::fs::FileTypeExt;
-        if ft.is_fifo() {
-            return fs_ops::PathKind::Fifo;
-        }
-        if ft.is_socket() {
-            return fs_ops::PathKind::Socket;
-        }
-        if ft.is_block_device() {
-            return fs_ops::PathKind::BlockDevice;
-        }
-        if ft.is_char_device() {
-            return fs_ops::PathKind::CharDevice;
-        }
-    }
-    fs_ops::PathKind::Other
-}
-
-/// Human-readable name for a cap-std `FileType`. Mirrors
-/// `fs_ops::describe_file_kind`. cap-std exposes the same is_*
-/// predicates plus the unix-only fifo/socket/char/block via
-/// `FileTypeExt`.
-fn describe_cap_file_kind(ft: &cap_std::fs::FileType) -> &'static str {
-    if ft.is_dir() {
-        return "directory";
-    }
-    if ft.is_symlink() {
-        return "symlink";
-    }
-    if ft.is_file() {
-        return "regular";
-    }
-    #[cfg(unix)]
-    {
-        use cap_std::fs::FileTypeExt;
-        if ft.is_fifo() {
-            return "fifo";
-        }
-        if ft.is_socket() {
-            return "socket";
-        }
-        if ft.is_char_device() {
-            return "char_device";
-        }
-        if ft.is_block_device() {
-            return "block_device";
-        }
-    }
-    "unknown"
-}
-
-/// cap-std equivalent of `fs_ops::ensure_regular_file`. Lstat
-/// through the sandboxed `Dir`; refuse anything that isn't a real
-/// regular file (symlink / FIFO / socket / device / directory).
-fn ensure_regular_file_in(dir: &cap_std::fs::Dir, rel: &std::path::Path) -> Result<()> {
-    let meta = dir.symlink_metadata(rel).map_err(|e| map_cap_err(e, rel))?;
-    let ft = meta.file_type();
-    if ft.is_file() && !ft.is_symlink() {
-        return Ok(());
-    }
-    Err(ChanError::SpecialFile {
-        kind: describe_cap_file_kind(&ft).to_string(),
-        path: rel.to_path_buf(),
-    })
 }
 
 /// Parse a file's content into the graph-side structures: the
@@ -4893,35 +4045,6 @@ fn path_under(path: &str, prefix: &str) -> bool {
         return false;
     }
     path_b[..pb.len()].eq_ignore_ascii_case(pb) && path_b[pb.len()] == b'/'
-}
-
-/// Canonicalize a workspace-relative POSIX path for use as a mapping key.
-/// Strips a leading `./` and a trailing `/`; leaves an empty string
-/// for the workspace root. We intentionally do NOT collapse `..` here;
-/// the rename API rejects those upstream via the cap-std sandbox.
-fn canonical_posix(p: &str) -> String {
-    let s = p.strip_prefix("./").unwrap_or(p);
-    s.trim_end_matches('/').to_string()
-}
-
-/// Split a basename into `(stem, ext)` where `ext` includes the leading
-/// dot, for collision-suffix insertion ("foo.md" -> ("foo", ".md") so a
-/// collision becomes "foo copy.md"). A dotfile with no other extension
-/// ("`.gitignore`") or a name with no dot keeps the whole name as stem
-/// and an empty ext, so the suffix appends at the end ("`.gitignore`" ->
-/// "`.gitignore copy`"). A trailing dot is treated as part of the stem.
-fn split_name_ext(name: &str) -> (String, String) {
-    match name.rfind('.') {
-        // A leading dot at index 0 is a dotfile prefix, not an ext.
-        Some(idx) if idx > 0 && idx < name.len() - 1 => {
-            (name[..idx].to_string(), name[idx..].to_string())
-        }
-        _ => (name.to_string(), String::new()),
-    }
-}
-
-fn posix_path(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 
 /// Read the persisted rename log from `graph_dir/rename_log.json`.
@@ -5174,8 +4297,8 @@ fn split_path_suffix(href: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod cap_err_tests {
-    use super::map_cap_err;
     use crate::error::ChanError;
+    use crate::rooted_fs::map_cap_err;
     use std::io;
     use std::path::Path;
 
@@ -5338,6 +4461,7 @@ fn split_anchor(target: &str) -> (String, Option<String>) {
 mod tests {
     use super::*;
     use crate::library::Library;
+    use crate::rooted_fs::split_name_ext;
     use tempfile::TempDir;
 
     fn fixture() -> (TempDir, TempDir, Arc<Workspace>) {

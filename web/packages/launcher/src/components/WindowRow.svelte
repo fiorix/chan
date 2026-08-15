@@ -82,7 +82,7 @@
   // devserver that stopped responding AND a disconnected one whose control
   // script died (kept open at "process exited"), so the flash is event-driven.
   function needsAttention(rec: WindowRecord): boolean {
-    return rec.control && hasControlAttention(rec.library_id);
+    return rec.control === true && hasControlAttention(rec.library_id);
   }
 
   // The user acting on the window (focus or show/hide) acknowledges the

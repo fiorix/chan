@@ -25,7 +25,9 @@ use tower::ServiceExt;
 use crate::desktop_window_ops::DesktopBridge;
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
-use crate::tenant::{HostControl, TenantArtifacts, TenantBuilder, UnserveMode};
+use crate::tenant::{
+    BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts, TenantBuilder, UnserveMode,
+};
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
 use crate::terminal_sessions::{
@@ -389,6 +391,11 @@ pub struct WorkspaceHost {
     /// resolves a terminal window's `(prefix, token)` to it (the terminal
     /// analogue of a workspace tenant). Unset until the tenant mounts.
     terminal_tenant_prefix: OnceLock<String>,
+    /// The standalone window this host last routed an escaping `cs open` to.
+    /// Read before liveness so a burst of opens fills one window instead of
+    /// minting one per file, since the first window is still opening when the
+    /// second call arrives.
+    last_routed_standalone: Mutex<Option<String>>,
     /// Control-terminal window_id → its LOCAL `/control-N` tenant prefix. A
     /// devserver control row runs on its OWN command tenant (not the shared
     /// terminal tenant), so [`control_window_live`](Self::control_window_live)
@@ -529,6 +536,7 @@ impl WorkspaceHost {
             #[cfg(target_os = "linux")]
             terminal_fd_parker: OnceLock::new(),
             terminal_tenant_prefix: OnceLock::new(),
+            last_routed_standalone: Mutex::new(None),
             control_tenants: RwLock::new(HashMap::new()),
             library_change_notify: Arc::new(Notify::new()),
             local_color_notify: Arc::new(Notify::new()),
@@ -1901,6 +1909,190 @@ impl WorkspaceHost {
         }
     }
 
+    /// Open an absolute path that lies OUTSIDE the calling workspace, in a
+    /// standalone window of this host. The workspace tenant routes here instead
+    /// of refusing; the path is resolved by the tenant that mounted a
+    /// filesystem, never here.
+    ///
+    /// Reuses a live standalone window when there is one and mints one when
+    /// there is not, so a loop of opens lands in one window rather than a
+    /// window each. A minted window has no socket yet, so its frame is parked
+    /// for its first `/ws` attach.
+    ///
+    /// Lock discipline: every step that follows takes `self.workspaces` again
+    /// (window assembly, the mint's persist), so the surface handles are cloned
+    /// out and the read guard is dropped before anything else runs. Holding it
+    /// across those calls deadlocks against a queued writer from
+    /// `open_workspace` / `close_workspace`.
+    pub async fn open_outside_workspace(
+        &self,
+        requested: &Path,
+        caller_window_id: &str,
+    ) -> Result<OpenOutsideAck, Error> {
+        let (files, pending, session_registry, events_tx) =
+            {
+                let prefix = self.terminal_tenant_prefix.get().ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                let workspaces = self
+                    .workspaces
+                    .read()
+                    .map_err(|_| Error::Config("workspace map poisoned".into()))?;
+                let runtime = workspaces.get(prefix).ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                let files = runtime.artifacts.standalone_files.clone().ok_or_else(|| {
+                    Error::Config("this host serves no standalone filesystem".into())
+                })?;
+                (
+                    files,
+                    runtime.artifacts.pending_window_commands.clone(),
+                    runtime.artifacts.session_registry.clone(),
+                    runtime.artifacts.events_tx.clone(),
+                )
+            };
+
+        // A minted window is created by the surface that asked for it: a
+        // browser-origin caller gets a browser-origin row, which the desktop
+        // watcher deliberately never opens a native twin for, and which the
+        // calling page opens as a tab -- the browser's equivalent of a window.
+        // A native caller gets a native row, which the watcher opens for it.
+        let caller_origin = self
+            .assemble_window_records()
+            .into_iter()
+            .find(|row| row.window_id == caller_window_id)
+            .map(|row| row.origin)
+            .unwrap_or_default();
+        let (window_id, minted, browser_target) = match self.select_standalone_window() {
+            Some(id) => (id, false, None),
+            None => {
+                let record =
+                    self.mint_window_with_origin(WindowKind::Terminal, None, caller_origin)?;
+                let target = (!caller_origin.is_native()).then(|| BrowserWindowTarget {
+                    prefix: record.prefix.clone(),
+                    token: record.token.clone(),
+                });
+                (record.window_id, true, target)
+            }
+        };
+        self.remember_routed_standalone(&window_id);
+        let open = files
+            .open_frame(&window_id, requested)
+            .map_err(Error::BadRequest)?;
+
+        // Deliver to a live window, or park for the one that is opening. The
+        // re-check after the park closes the window between the liveness test
+        // and the park, where an attach could drain an empty map and then miss
+        // the frame.
+        let delivered = session_registry
+            .dispatch_if_live(&window_id, || events_tx.send(open.frame.clone()))
+            .is_some();
+        if !delivered {
+            pending
+                .park(&window_id, open.frame.clone())
+                .map_err(Error::BadRequest)?;
+            if session_registry
+                .dispatch_if_live(&window_id, || events_tx.send(open.frame.clone()))
+                .is_some()
+            {
+                let _ = pending.take(&window_id);
+            }
+        }
+
+        // Best effort: raise the window that now holds the file. A window the
+        // desktop has not opened yet, or no desktop at all, simply stays where
+        // it is.
+        let _ = self
+            .desktop
+            .dispatch(|reply| crate::desktop_window_ops::DesktopWindowOp::Open {
+                id: window_id.clone(),
+                reply,
+            })
+            .await;
+
+        Ok(OpenOutsideAck {
+            path: open.path,
+            window_id,
+            minted,
+            inside_workspace: self.workspace_containing(requested),
+            open_in_browser: browser_target,
+        })
+    }
+
+    /// The standalone window an escaping open should land in: this library's
+    /// own (never a connected devserver's, whose rows ride the same feed), not
+    /// a control terminal, not hidden. `None` mints.
+    ///
+    /// The window this host last routed to wins even while it is still
+    /// OPENING, which is what keeps `for f in *; do cs open "$f"; done` in one
+    /// window: the second call arrives long before the first window's webview
+    /// connects, and a liveness-only rule would mint a window per file.
+    /// Otherwise the lowest-ordinal connected window takes it, so repeated
+    /// opens keep landing in the same place.
+    fn select_standalone_window(&self) -> Option<String> {
+        let rows: Vec<WindowRecord> = self
+            .assemble_window_records()
+            .into_iter()
+            .filter(|row| {
+                row.library_id == self.library_id()
+                    && matches!(row.kind, WindowKind::Terminal)
+                    && !row.control
+                    && !row.hidden
+            })
+            .collect();
+        let sticky = self
+            .last_routed_standalone
+            .lock()
+            .ok()
+            .and_then(|last| last.clone());
+        if let Some(sticky) = sticky {
+            if rows.iter().any(|row| row.window_id == sticky) {
+                return Some(sticky);
+            }
+        }
+        let mut connected: Vec<WindowRecord> =
+            rows.into_iter().filter(|row| row.connected).collect();
+        connected.sort_by_key(|row| row.ordinal);
+        connected.into_iter().next().map(|row| row.window_id)
+    }
+
+    /// Remember the window an escaping open just went to, so the opens that
+    /// follow it land there too. Cleared implicitly: a window that leaves the
+    /// registry stops matching and the next open picks again.
+    fn remember_routed_standalone(&self, window_id: &str) {
+        if let Ok(mut last) = self.last_routed_standalone.lock() {
+            *last = Some(window_id.to_string());
+        }
+    }
+
+    /// The registered workspace whose root contains `path`, if any. Named in
+    /// the acknowledgement so a user opening a file that belongs to another
+    /// workspace learns an indexed view of it exists; the open still lands on
+    /// the machine surface, which is the one that can show any path at all.
+    fn workspace_containing(&self, path: &Path) -> Option<String> {
+        let canonical = path.canonicalize().ok()?;
+        self.library
+            .list_workspaces()
+            .into_iter()
+            .filter(|known| {
+                known
+                    .root_path
+                    .canonicalize()
+                    .is_ok_and(|root| canonical.starts_with(root))
+            })
+            // Longest root wins: nested workspaces resolve to the innermost.
+            .max_by_key(|known| known.root_path.as_os_str().len())
+            .map(|known| {
+                known.display_name.clone().unwrap_or_else(|| {
+                    known
+                        .root_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| known.root_path.to_string_lossy().into_owned())
+                })
+            })
+    }
+
     /// Discard a window: drop its registry row, reap its terminal sessions, and
     /// fire the watch. Returns whether a row existed (a `DELETE` handler maps
     /// `false` to 404). Reaping on discard frees the fds a busy detached session
@@ -2801,6 +2993,15 @@ impl HostControl for WorkspaceHost {
         self.live_terminal_count(window_id)
     }
 
+    async fn open_outside_workspace(
+        &self,
+        requested: &Path,
+        caller_window_id: &str,
+    ) -> Result<OpenOutsideAck, Error> {
+        self.open_outside_workspace(requested, caller_window_id)
+            .await
+    }
+
     fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
         self.tunnel_registry()
     }
@@ -3058,6 +3259,8 @@ mod tests {
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: Arc::new(Default::default()),
+            standalone_files: None,
             events_tx: tokio::sync::broadcast::channel(16).0,
             cell,
             keepalive: Box::new(()),
@@ -5209,6 +5412,41 @@ mod tests {
         assert_eq!(*reaped.lock().unwrap(), vec![rec.window_id.clone()]);
     }
 
+    #[tokio::test]
+    async fn a_burst_of_routed_opens_fills_one_window() {
+        // The window a routed open mints has no socket for a second or two,
+        // and the next `cs open` of a loop arrives long before it connects. A
+        // liveness-only pick would mint a window per file, which is what this
+        // remembers not to do.
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        host.open_terminal_session(serve_config("/api/terminal"), None)
+            .await
+            .expect("mount shared terminal tenant");
+        let store = tempfile::tempdir().expect("store dir");
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        host.install_window_registry(registry.clone(), "local".into());
+
+        // Nothing open yet: the first routed open has to mint.
+        assert_eq!(host.select_standalone_window(), None);
+        let first = host
+            .mint_window(WindowKind::Terminal, None)
+            .expect("mint")
+            .window_id;
+        host.remember_routed_standalone(&first);
+
+        // The next open lands in that same window even though it never
+        // connected, and even with a second (also disconnected) window around.
+        let _second = host.mint_window(WindowKind::Terminal, None).expect("mint");
+        assert_eq!(host.select_standalone_window(), Some(first.clone()));
+
+        // A window that leaves the registry stops winning: the pick falls back
+        // rather than routing into a row that no longer exists.
+        registry.remove(&first);
+        assert_eq!(host.select_standalone_window(), None);
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn fdstore_skip_cleanup_reaps_only_terminal_windows() {
@@ -5246,7 +5484,6 @@ mod tests {
         let workspace = host
             .mint_window(WindowKind::Workspace, Some("/tmp/fdstore-notes".into()))
             .expect("mint workspace");
-
         let skipped = vec![
             crate::terminal_sessions::FdStoreSkippedSession {
                 tenant_prefix: "/api/terminal".into(),

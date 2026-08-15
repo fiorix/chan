@@ -37,7 +37,7 @@ import {
 import { findDateMatches, type DateFormatId } from "../dateFormats";
 import { selectionInRange } from "../decorations/selection";
 import { openDatePopover } from "../overlays/date_popover";
-import { workspace, persistDateFormat } from "../../state/store.svelte";
+import { currentPreferences, workspace, persistDateFormat } from "../../state/store.svelte";
 
 /// Nodes whose interior should never get pilled. Code (inline +
 /// fenced) is obvious: dates in `2026-04-15` snippets are part of
@@ -186,7 +186,7 @@ function scanDates(view: EditorView): DecorationSet {
   const endLine = state.doc.lineAt(Math.min(to, state.doc.length)).number;
   for (let n = startLine; n <= endLine; n++) {
     const line = state.doc.line(n);
-    const matches = findDateMatches(line.text, workspace.info?.preferences?.date_format);
+    const matches = findDateMatches(line.text, currentPreferences()?.date_format);
     for (const m of matches) {
       const matchFrom = line.from + m.start;
       const matchTo = line.from + m.end;

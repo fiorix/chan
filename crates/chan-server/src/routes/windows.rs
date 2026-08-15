@@ -50,14 +50,19 @@ pub struct WindowInfo {
     pub kind: Option<String>,
 }
 
-/// Join saved blob keys and live socket ids into one sorted list.
-/// BTreeMap so the response order is deterministic (id-sorted).
-/// pub(crate): the `cs window list` control-socket handler serves the
-/// same rows. Rows carry no title/kind here -- see
+/// Join saved blob keys and live socket ids into one sorted list. A standalone
+/// window's layout lives in one of two namespaces -- the plain one, or the
+/// `files/` child that holds a layout with browser/editor tabs -- and a row
+/// saved in either is saved, so both are merged here. BTreeMap so the response
+/// order is deterministic (id-sorted). Rows carry no title/kind here -- see
 /// [`join_windows_with_titles`] for the desktop-enriched variant.
-pub(crate) fn join_windows(saved: Vec<String>, connected: Vec<String>) -> Vec<WindowInfo> {
+pub(crate) fn join_windows(
+    saved: Vec<String>,
+    saved_files: Vec<String>,
+    connected: Vec<String>,
+) -> Vec<WindowInfo> {
     let mut by_id: BTreeMap<String, (bool, bool)> = BTreeMap::new();
-    for id in saved {
+    for id in saved.into_iter().chain(saved_files) {
         by_id.entry(id).or_insert((false, false)).1 = true;
     }
     for id in connected {
@@ -81,10 +86,11 @@ pub(crate) fn join_windows(saved: Vec<String>, connected: Vec<String>) -> Vec<Wi
 /// dropped carry no title -- correct, there is no live OS title for them.
 pub(crate) fn join_windows_with_titles(
     saved: Vec<String>,
+    saved_files: Vec<String>,
     connected: Vec<String>,
     titles: &crate::window_titles::WindowTitles,
 ) -> Vec<WindowInfo> {
-    let mut rows = join_windows(saved, connected);
+    let mut rows = join_windows(saved, saved_files, connected);
     for row in &mut rows {
         if let Some(meta) = titles.get(&row.id) {
             row.title = Some(meta.title);
@@ -103,22 +109,37 @@ pub(crate) fn join_windows_with_titles(
 pub(crate) fn enumerate_windows(state: &AppState) -> Vec<WindowInfo> {
     let connected = state.window_presence.connected_ids();
     let titles = state.window_titles.clone();
-    let saved: Vec<String> = match state.try_workspace() {
-        Ok(workspace) => workspace.list_sessions().unwrap_or_default(),
+    let (saved, saved_files): (Vec<String>, Vec<String>) = match state.try_workspace() {
+        Ok(workspace) => (workspace.list_sessions().unwrap_or_default(), Vec::new()),
         // Workspace-less terminal tenant: a persistent launcher store when one
-        // is configured (a persisted devserver terminal), else in memory.
+        // is configured (a persisted devserver terminal), else in memory. Both
+        // standalone namespaces (Terminal and Files) merge into one id list,
+        // Files rows stamped with their app.
         Err(_) => match &state.terminal_session_dir {
-            Some(dir) => crate::terminal_blob::list(dir).unwrap_or_default(),
-            None => state
-                .ephemeral_sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .keys()
-                .cloned()
-                .collect(),
+            Some(dir) => (
+                crate::terminal_blob::list(dir).unwrap_or_default(),
+                crate::terminal_blob::list(&crate::terminal_blob::files_dir(dir))
+                    .unwrap_or_default(),
+            ),
+            None => (
+                state
+                    .ephemeral_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect(),
+                state
+                    .ephemeral_files_sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect(),
+            ),
         },
     };
-    join_windows_with_titles(saved, connected, &titles)
+    join_windows_with_titles(saved, saved_files, connected, &titles)
 }
 
 pub async fn api_list_windows(State(state): State<Arc<AppState>>) -> Response {
@@ -141,6 +162,7 @@ mod tests {
     fn join_is_a_sorted_union_with_per_source_flags() {
         let joined = join_windows(
             vec!["w-b".into(), "w-a".into()],
+            Vec::new(),
             vec!["w-c".into(), "w-b".into()],
         );
         let view: Vec<(&str, bool, bool)> = joined
@@ -197,6 +219,27 @@ mod tests {
     }
 
     #[test]
+    fn a_layout_saved_in_either_namespace_reads_as_saved() {
+        // A standalone window's layout lives in the plain namespace or in the
+        // `files/` child, depending on whether it holds file tabs. Either way
+        // the window has a saved layout, and it is ONE row: the merge must not
+        // double-list a window that moved between them.
+        let rows = join_windows(
+            vec!["w-term".into()],
+            vec!["w-files".into()],
+            vec!["w-files".into()],
+        );
+        assert_eq!(rows.len(), 2);
+        let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        assert!(by_id("w-term").saved && !by_id("w-term").connected);
+        assert!(by_id("w-files").saved && by_id("w-files").connected);
+        // The wire keeps the base triple: the namespace is a server-side
+        // storage detail, not something a client reads.
+        let json = serde_json::to_string(by_id("w-files")).unwrap();
+        assert_eq!(json, r#"{"id":"w-files","connected":true,"saved":true}"#);
+    }
+
+    #[test]
     fn join_with_titles_stamps_only_known_ids() {
         let titles = crate::window_titles::WindowTitles::new();
         titles.set(
@@ -206,7 +249,8 @@ mod tests {
                 kind: Some("workspace".into()),
             },
         );
-        let rows = join_windows_with_titles(vec!["w-a".into()], vec!["w-b".into()], &titles);
+        let rows =
+            join_windows_with_titles(vec!["w-a".into()], Vec::new(), vec!["w-b".into()], &titles);
         let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
         // The closed-but-saved row has no live title.
         assert_eq!(by_id("w-a").title, None);

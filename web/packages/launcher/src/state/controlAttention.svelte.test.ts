@@ -19,6 +19,7 @@ function controlWin(libraryId: string): WindowRecord {
     token: "",
     persisted: true,
     connected: false,
+    active_transfer: false,
     control: true,
   };
 }

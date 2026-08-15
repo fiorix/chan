@@ -748,11 +748,11 @@ impl DevserverFeed {
     }
 
     /// Drop a disconnected devserver from the per-connection feeds (windows +
-    /// workspace + colour). KEEPS `library_ids` (the same devserver keeps its id
-    /// on reconnect). Clears its buried-label overrides so a reconnect
-    /// doesn't show its reopened windows as hidden. The control terminal is no
-    /// longer a desktop feed record (it is a chan-library registry row
-    /// now); its reap is `reap_control_window` on the connect-script PTY exit /
+    /// workspace + colour). KEEPS `library_ids` (the same
+    /// devserver keeps its id on reconnect). Clears its buried-label overrides so
+    /// a reconnect doesn't show its reopened windows as hidden. The control
+    /// terminal is no longer a desktop feed record (it is a chan-library registry
+    /// row now); its reap is `reap_control_window` on the connect-script PTY exit /
     /// teardown, not a `forget` drop.
     fn forget(&self, id: &str) {
         self.windows.lock().unwrap().remove(id);

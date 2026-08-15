@@ -230,6 +230,7 @@ function terminal(
     token: "tok_demo",
     persisted: true,
     connected,
+    active_transfer: false,
     control,
     hidden: !connected,
   };
@@ -255,6 +256,7 @@ function workspaceWindow(
     token: "tok_demo",
     persisted: true,
     connected,
+    active_transfer: false,
     control: false,
     hidden: !connected,
   };

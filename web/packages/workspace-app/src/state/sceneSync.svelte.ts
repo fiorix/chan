@@ -38,6 +38,7 @@ import {
 import { sessionWindowId } from "../api/client";
 import { isDraftPath } from "./workspace.svelte";
 import { isExcalidraw } from "./fileTypes";
+import { windowCaps } from "./windowCaps";
 import {
   markTabFileMissing,
   registerDocReleaseHook,
@@ -89,6 +90,11 @@ const SCENE_MAX_LEN = 2 * 1024 * 1024;
 let serverSupportsSceneSync: boolean | null = null;
 
 export function sceneSyncEnabled(): boolean {
+  // Live sessions are a workspace-tenant capability. The gate must fire
+  // BEFORE any dial: on a standalone window the first failed connect would
+  // latch the module off, a silently-correct state that masks a real
+  // gating bug, so the window mode short-circuits it instead.
+  if (!windowCaps.workspace) return false;
   if (serverSupportsSceneSync === false) return false;
   if (typeof localStorage === "undefined") return false;
   try {
