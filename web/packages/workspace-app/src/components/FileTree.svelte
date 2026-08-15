@@ -31,6 +31,7 @@
   import { isEditableText } from "../state/fileTypes";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor } from "../state/kinds";
+  import { windowCaps } from "../state/windowCaps";
   import {
     classifyFileActions,
     fileMediaKind,
@@ -680,7 +681,10 @@
         serverKind: entryKind,
         isDraft: menu.path === draftsDir() || isDraftPath(menu.path),
       },
-      { open: true, reveal: true, graph: true, upload: true },
+      // The graph is built from the workspace index, so a window with no
+      // workspace behind it has nothing to graph FROM: the row would spawn a
+      // tab that can never load.
+      { open: true, reveal: true, graph: windowCaps.workspace, upload: true },
     );
     return [set.main, ...set.secondary].map((id) =>
       menuRowFor(id, menu!.path, menu!.isDir),

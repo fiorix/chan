@@ -23,6 +23,7 @@
   import { tabMenu } from "../state/tabMenu.svelte";
   import { chordFor } from "../state/shortcuts";
   import { classifyEntry, isOpenableTextKind } from "../state/kinds";
+  import { windowCaps } from "../state/windowCaps";
   import {
     browserSelection,
     browserSidePanes,
@@ -576,7 +577,9 @@
                `openFsGraphForDirectory` / `openFsGraphForFile` both
                spawn a fresh tab, never re-scope). -->
           <WorkspaceInfoBody
-            onSetAsScope={() => openFsGraphForDirectory("")}
+            onSetAsScope={windowCaps.workspace
+              ? () => openFsGraphForDirectory("")
+              : undefined}
             onLanguageClick={openGraphForLanguage}
             onContactNavigate={openGraphForContact}
           />
@@ -585,7 +588,7 @@
             path={browserSelection.path}
             onOpen={openSelected}
             onClose={clearSelection}
-            onSetAsScope={graphSelection}
+            onSetAsScope={windowCaps.workspace ? graphSelection : undefined}
             showRefs
             onNavigate={(p) => {
               void openInActivePane(p);

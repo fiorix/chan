@@ -39,6 +39,7 @@
     X,
   } from "lucide-svelte";
   import { chordFor, currentOS } from "../state/shortcuts";
+  import { windowCaps } from "../state/windowCaps";
   import { builtInChordSuperseded } from "../state/keymapOverrides.svelte";
   import FindBar from "./FindBar.svelte";
   import Inspector from "./Inspector.svelte";
@@ -1512,7 +1513,9 @@
           showRefs
           onNavigate={(p) => void openInActivePane(p)}
           onReveal={revealInBrowser}
-          onSetAsScope={() => openFsGraphForFile(tab.path)}
+          onSetAsScope={windowCaps.workspace
+            ? () => openFsGraphForFile(tab.path)
+            : undefined}
         />
       </Inspector>
     {/if}
