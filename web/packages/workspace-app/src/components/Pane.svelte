@@ -742,17 +742,18 @@
   //   - cross-window tab move (drop from another Tauri window on the
   //     same chan-app instance): CROSS_TAB_MIME carries the full
   //     payload needed to reconstruct the tab in the target window.
-  //     File tabs only; special tabs are window-bound on native.
+  //     EVERY tab kind crosses, each carrying what its kind needs; see
+  //     crossWindowPayload, which is exhaustive over the Tab union.
   //   - file open (from the file tree): FILE_DRAG_MIME carries
   //     `{path}`.
   //
-  // dragstart sets both TAB_DRAG_MIME and CROSS_TAB_MIME for file
-  // tabs so the same drag works whether the user drops in the same
-  // window (intra) or another (cross). The receiver tries intra
-  // first; if `fromPaneId` is not in its layout, it falls through to
-  // the cross path. The source's dragend handler removes the tab if
-  // the drop happened cross-window (intra moves already mutated the
-  // local layout).
+  // dragstart sets both TAB_DRAG_MIME and CROSS_TAB_MIME for every tab
+  // so the same drag works whether the user drops in the same window
+  // (intra) or another (cross). The receiver tries intra first; if
+  // `fromPaneId` is not in its layout, it falls through to the cross
+  // path. The source's dragend handler removes the tab if the drop
+  // happened cross-window (intra moves already mutated the local
+  // layout).
   const TAB_DRAG_MIME = "application/x-md-tab";
   const CROSS_TAB_MIME = "application/x-chan-tab+json";
   const FILE_DRAG_MIME = "application/x-md-file";
