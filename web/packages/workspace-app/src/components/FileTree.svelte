@@ -49,6 +49,7 @@
   import { chordFor } from "../state/shortcuts";
   import {
     browserSelection,
+    clearTreeDirError,
     clearTreeLoadingForPath,
     draftsDir,
     isDraftPath,
@@ -429,7 +430,22 @@
     function collect(nodes: Node[]): void {
       for (const n of nodes) {
         if (n.kind !== "dir" || !expanded[n.path]) continue;
-        if (!tree.loadedDirs[n.path] && !tree.loadingDirs[n.path]) {
+        // A directory that FAILED is not retried here. This effect re-runs on
+        // every `loadingDirs` write, and a failed load leaves the directory
+        // neither loaded nor loading -- so without this the effect requeues it
+        // the instant it fails, and an unreadable directory becomes a hot
+        // retry loop that renders a permanent "Loading..." and hammers the
+        // server. A macOS TCC directory (`Operation not permitted` even for
+        // root) reaches this on any machine, and so does any directory the
+        // server's uid cannot read.
+        //
+        // Retry stays available and explicit: collapsing clears the error, so
+        // re-expanding tries again.
+        if (
+          !tree.loadedDirs[n.path] &&
+          !tree.loadingDirs[n.path] &&
+          !tree.dirErrors[n.path]
+        ) {
           pending.push(n.path);
         }
         collect(n.children);
@@ -508,6 +524,11 @@
 
   function setExpanded(path: string, value: boolean): void {
     expanded[path] = value;
+    // Collapsing forgets a previous failure, so re-expanding is the retry
+    // gesture for a directory that could not be listed. The load effect skips
+    // errored directories to avoid a retry loop, so without this a transient
+    // failure would stick for the life of the window.
+    if (!value) clearTreeDirError(path);
     // Persist this surface's expansion (tab variant writes through to the
     // layout tab's `expanded` field for reload restore; dock/overlay is
     // session-scoped). FileBrowserSurface's per-instance effects mirror

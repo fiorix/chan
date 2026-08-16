@@ -2548,6 +2548,17 @@ export async function loadTreeDir(dir: string): Promise<void> {
   }
 }
 
+/// Forget a directory's recorded listing failure, so the tree's load effect
+/// will attempt it again. The effect deliberately skips errored directories
+/// (a failed load leaves the directory neither loaded nor loading, which would
+/// otherwise requeue it immediately and spin), so clearing the error is what
+/// makes a retry possible.
+export function clearTreeDirError(path: string): void {
+  if (!(path in tree.dirErrors)) return;
+  const { [path]: _gone, ...rest } = tree.dirErrors;
+  tree.dirErrors = rest;
+}
+
 export function clearTreeLoadingForPath(path: string): void {
   const { [path]: _done, ...rest } = tree.loadingDirs;
   tree.loadingDirs = rest;
