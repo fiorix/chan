@@ -383,9 +383,11 @@ fn prime_terminal_shell() {
     // later through the `OnceLock`. `drop` rather than `let _` keeps clippy's
     // `let_underscore_future` happy.
 
-    // Shell-profile discovery is primed on EVERY platform, not just Windows:
-    // it reads `/etc/shells` on unix and shells out to `where`/`reg`/`git` on
-    // Windows, so the block-the-tokio-worker hazard is the same on both.
+    // Shell-profile discovery shells out to `where`/`reg`/`git` on Windows and
+    // is empty elsewhere, so the block-the-tokio-worker hazard is Windows-only
+    // -- but the prime stays unconditional: the cost off Windows is one
+    // immediately-returning task, and a platform gate here would be a second
+    // place to keep in step with `shell_profiles::discover`.
     drop(tokio::task::spawn_blocking(
         crate::terminal_sessions::shell_profiles::prime_shell_profiles,
     ));

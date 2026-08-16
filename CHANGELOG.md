@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`cs window new` opens another window like the calling one**, and `cs terminal new --path` starts a terminal where the files are.
 
-- **Terminals open on a shell you pick.** The server lists the shells the machine actually has -- on Windows that means PowerShell 7, Windows PowerShell, cmd, Git BASH and every installed WSL distribution; on macOS and Linux, your `$SHELL` plus `/etc/shells` -- and the pane's New terminal menu offers them. Each profile carries its own argument convention, so a login shell, `-NoLogo` and a WSL one-shot are each spawned the way that shell expects. A tab keeps the shell it was opened with across restart, server restart and reload.
+- **Terminals open on a shell you pick, on Windows.** The server lists the shells the machine actually has -- PowerShell 7, Windows PowerShell, cmd, Git BASH and every installed WSL distribution -- and the pane's New terminal menu offers them. macOS and Linux discover nothing and keep using your login shell, because that is already the system-wide answer there; the picker stays out of the way unless you declare profiles yourself. Each profile carries its own argument convention, so a login shell, `-NoLogo` and a WSL one-shot are each spawned the way that shell expects. A tab keeps the shell it was opened with across restart, server restart and reload.
 
 - **`[[terminal.profiles]]` in `server.toml`** renames a discovered shell, replaces its arguments, hides one you never use, or adds one discovery cannot find, and `terminal.default_profile` chooses which one new terminals get. A malformed entry costs you that entry and nothing else in the file.
 

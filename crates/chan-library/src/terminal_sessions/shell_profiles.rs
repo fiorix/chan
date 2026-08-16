@@ -346,16 +346,27 @@ pub fn resolve_default<'a>(
 }
 
 /// Run every generator for this platform, in display order.
+///
+/// Windows only, by design. Windows has no single system-wide answer to "the
+/// user's shell" -- PowerShell 7, Windows PowerShell, cmd, Git BASH and each
+/// WSL distribution are all plausible, and they do not share an argument
+/// convention -- so chan discovers them and offers the choice, following
+/// Windows Terminal.
+///
+/// macOS and Linux already have that answer: the login shell, which the user
+/// sets once with `chsh` and every terminal emulator honours. Enumerating
+/// `/etc/shells` there produced a picker listing shells the user had never
+/// chosen and did not want, in place of a system setting that already worked.
+/// So unix discovers nothing and the built-in `$SHELL` resolution stands.
+///
+/// This is discovery only. `[[terminal.profiles]]` still works on every
+/// platform: a user who does want named shells on unix declares them, and
+/// with nothing discovered to layer over, each declared entry simply appears.
 fn discover() -> Vec<ShellProfile> {
-    let mut profiles = Vec::new();
     #[cfg(windows)]
-    {
-        profiles.extend(discover_windows());
-    }
-    #[cfg(unix)]
-    {
-        profiles.extend(discover_unix());
-    }
+    let profiles = discover_windows();
+    #[cfg(not(windows))]
+    let profiles: Vec<ShellProfile> = Vec::new();
     dedupe_by_id(profiles)
 }
 
@@ -368,61 +379,6 @@ fn dedupe_by_id(profiles: Vec<ShellProfile>) -> Vec<ShellProfile> {
         .into_iter()
         .filter(|p| seen.insert(p.id.clone()))
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Unix generators
-// ---------------------------------------------------------------------------
-
-/// `/etc/shells` plus `$SHELL`, filtered to what actually exists.
-#[cfg(unix)]
-fn discover_unix() -> Vec<ShellProfile> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(shell) = std::env::var("SHELL") {
-        if !shell.is_empty() {
-            candidates.push(PathBuf::from(shell));
-        }
-    }
-    if let Ok(contents) = std::fs::read_to_string("/etc/shells") {
-        candidates.extend(parse_etc_shells(&contents));
-    }
-    candidates
-        .into_iter()
-        .filter(|p| p.is_file())
-        .map(|program| posix_profile(&program))
-        .collect()
-}
-
-/// Parse `/etc/shells`: one path per line, `#` comments and blanks skipped.
-/// Pure, so the comment/blank handling is covered without touching the host's
-/// real `/etc/shells`.
-#[cfg(any(unix, test))]
-fn parse_etc_shells(contents: &str) -> Vec<PathBuf> {
-    contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(PathBuf::from)
-        .collect()
-}
-
-/// A POSIX shell profile named after its file stem (`/bin/zsh` -> "zsh").
-#[cfg(any(unix, test))]
-fn posix_profile(program: &Path) -> ShellProfile {
-    let stem = program
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("shell")
-        .to_string();
-    ShellProfile {
-        id: format!("posix:{stem}"),
-        name: stem,
-        program: program.to_path_buf(),
-        args: vec!["-l".into()],
-        kind: ShellKind::Posix,
-        path_prepend: Vec::new(),
-        source: ProfileSource::Discovered,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -905,25 +861,32 @@ mod tests {
     }
 
     #[test]
-    fn etc_shells_skips_comments_and_blanks() {
-        let contents = "# /etc/shells\n/bin/sh\n\n  /bin/bash  \n# comment\n/usr/bin/fish\n";
-        assert_eq!(
-            parse_etc_shells(contents),
-            vec![
-                PathBuf::from("/bin/sh"),
-                PathBuf::from("/bin/bash"),
-                PathBuf::from("/usr/bin/fish"),
-            ],
-        );
+    fn discovery_is_empty_off_windows() {
+        // macOS and Linux answer "which shell" with the login shell, so chan
+        // proposes nothing there and the built-in `$SHELL` resolution stands.
+        // A declared profile is unaffected: see
+        // `a_declared_profile_stands_alone_with_nothing_discovered`.
+        #[cfg(not(windows))]
+        assert!(discover().is_empty());
     }
 
     #[test]
-    fn posix_profile_is_named_for_its_stem() {
-        let p = posix_profile(Path::new("/usr/bin/zsh"));
-        assert_eq!(p.id, "posix:zsh");
-        assert_eq!(p.name, "zsh");
-        assert_eq!(p.kind, ShellKind::Posix);
-        assert_eq!(p.args, vec!["-l"]);
+    fn a_declared_profile_stands_alone_with_nothing_discovered() {
+        // The feature still exists off Windows; it is only unseeded. With no
+        // discovered profiles to layer over, a declared entry is the whole
+        // list rather than being dropped.
+        let declared = crate::config::TerminalProfile {
+            id: "work".into(),
+            name: Some("work".into()),
+            program: Some("/bin/zsh".into()),
+            args: Some(vec!["-l".into()]),
+            kind: None,
+            hidden: false,
+        };
+        let effective = effective_profiles(&[], std::slice::from_ref(&declared));
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].id, "work");
+        assert_eq!(effective[0].program, PathBuf::from("/bin/zsh"));
     }
 
     fn discovered(id: &str, name: &str, program: &str, kind: ShellKind) -> ShellProfile {
