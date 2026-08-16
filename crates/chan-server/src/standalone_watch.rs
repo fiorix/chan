@@ -19,7 +19,10 @@
 //! Frames are addressed in the subscriber's own namespace: an event's wire
 //! path is rebuilt from the wire dir that asked for the watch, never
 //! relativized from the absolute path, because the OS does not necessarily
-//! spell a directory the way the client did (see [`Attached`]).
+//! spell a directory the way the client did (see [`Watch`]). Several wire
+//! dirs can name one directory, and they share its single registration, so
+//! an event is emitted once per spelling and the registration underneath
+//! them is refcounted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -106,18 +109,28 @@ impl Drop for ScopedWatchManager {
     }
 }
 
-/// One live OS watch, in both the spellings its events can arrive under.
-/// The backends disagree: inotify echoes the path exactly as it was passed
-/// to `watch`, while FSEvents reports the fully resolved path. A directory
-/// reached through a symlinked ancestor (`/tmp`, `/var` and `/etc` are all
-/// symlinks on macOS) therefore arrives spelled differently from the way
-/// it was attached, and matching only one form drops every event.
-struct Attached {
+/// One live OS registration, shared by every wire dir naming that
+/// directory.
+///
+/// Two forms are kept because the backends disagree on which one they
+/// report: inotify echoes the path exactly as it was passed to `watch`,
+/// while FSEvents reports the fully resolved path. A directory reached
+/// through a symlinked ancestor (`/tmp`, `/var` and `/etc` are all symlinks
+/// on macOS) therefore arrives spelled differently from the way it was
+/// attached, and matching only one form drops every event.
+///
+/// It is refcounted because `notify` collapses duplicate registrations
+/// itself: FSEvents canonicalizes before touching its `recursive_info` map,
+/// and inotify returns the same watch descriptor for two paths reaching one
+/// inode. A second `watch` would overwrite the first rather than add to it,
+/// and an `unwatch` from either scope would silence the other with nothing
+/// left to re-attach it. So the manager attaches once per directory and
+/// releases only when the last scope naming it detaches.
+struct Watch {
     /// The path handed to the watcher, and the one `unwatch` needs back.
     watched: PathBuf,
-    /// Fully resolved form, or a copy of `watched` when it no longer
-    /// resolves -- a watch outlives the directory it was attached to.
-    canonical: PathBuf,
+    /// How many attached scopes name this directory.
+    scopes: usize,
 }
 
 struct ActorState {
@@ -127,8 +140,11 @@ struct ActorState {
     mutations: Arc<StandaloneMutationBus>,
     /// Wire-relative directories with at least one live subscriber.
     desired: HashSet<String>,
-    /// Successfully attached watches, keyed by wire dir.
-    attached: HashMap<String, Attached>,
+    /// Attached scopes: wire dir -> the canonical directory it names.
+    /// Several wire dirs can map to one canonical directory.
+    scopes: HashMap<String, PathBuf>,
+    /// Live OS registrations, keyed by canonical directory.
+    watches: HashMap<PathBuf, Watch>,
     /// Desired but unattached; retried on [`RETRY_INTERVAL`].
     pending: HashSet<String>,
 }
@@ -146,7 +162,8 @@ fn actor_loop(
         registry,
         mutations,
         desired: HashSet::new(),
-        attached: HashMap::new(),
+        scopes: HashMap::new(),
+        watches: HashMap::new(),
         pending: HashSet::new(),
     };
     let mut next_retry = Instant::now() + RETRY_INTERVAL;
@@ -190,20 +207,34 @@ impl ActorState {
                 return;
             }
         };
+        // Re-attaching a scope that already holds a registration must not
+        // claim a second reference against it.
+        self.release_scope(dir);
+        let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+        // A directory already watched under another spelling needs no
+        // second OS registration; see [`Watch`] for why asking for one
+        // would silence both scopes rather than serve them.
+        if let Some(watch) = self.watches.get_mut(&canonical) {
+            watch.scopes += 1;
+            self.pending.remove(dir);
+            self.scopes.insert(dir.to_string(), canonical);
+            self.registry.emit_fs_reset(dir, FsResetReason::Subscribed);
+            return;
+        }
         match self
             .watcher
             .watch(&abs, notify::RecursiveMode::NonRecursive)
         {
             Ok(()) => {
                 self.pending.remove(dir);
-                let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
-                self.attached.insert(
-                    dir.to_string(),
-                    Attached {
+                self.watches.insert(
+                    canonical.clone(),
+                    Watch {
                         watched: abs,
-                        canonical,
+                        scopes: 1,
                     },
                 );
+                self.scopes.insert(dir.to_string(), canonical);
                 self.registry.emit_fs_reset(dir, FsResetReason::Subscribed);
             }
             Err(error) => {
@@ -214,51 +245,104 @@ impl ActorState {
         }
     }
 
-    fn detach(&mut self, dir: &str) {
-        self.desired.remove(dir);
-        self.pending.remove(dir);
-        if let Some(watch) = self.attached.remove(dir) {
-            let _ = self.watcher.unwatch(&watch.watched);
+    /// Drop `dir`'s claim on its OS registration, unwatching only once no
+    /// other wire dir names that directory. A no-op for an unattached
+    /// scope.
+    fn release_scope(&mut self, dir: &str) {
+        let Some(canonical) = self.scopes.remove(dir) else {
+            return;
+        };
+        let Some(watch) = self.watches.get_mut(&canonical) else {
+            return;
+        };
+        watch.scopes = watch.scopes.saturating_sub(1);
+        if watch.scopes == 0 {
+            if let Some(watch) = self.watches.remove(&canonical) {
+                let _ = self.watcher.unwatch(&watch.watched);
+            }
         }
     }
 
-    /// Wire path for one absolute event path, expressed under the wire
-    /// directory whose subscription produced the watch.
+    fn detach(&mut self, dir: &str) {
+        self.desired.remove(dir);
+        self.pending.remove(dir);
+        self.release_scope(dir);
+    }
+
+    /// Every wire path one absolute event path has: one per attached scope
+    /// naming its directory, sorted so frame order never rides on hash
+    /// order. Empty when no scope names it.
     ///
     /// A non-recursive watch reports only the watched directory itself and
-    /// its direct children, so the owning scope is exact. Deriving the wire
-    /// path from that scope, rather than relativizing the absolute path
-    /// against the capability root, is what keeps the frame addressed to
-    /// its subscriber: [`ScopeRegistry::emit_fs`] routes on the wire dir
-    /// string the client subscribed with, and the OS may spell that same
-    /// directory another way (see [`Attached`]).
-    fn wire_path(&self, abs: &Path) -> Option<String> {
+    /// its direct children, so the scopes that match are exactly those
+    /// whose subscribers can see this path. Deriving each wire path from
+    /// its scope, rather than relativizing the absolute path against the
+    /// capability root, is what keeps a frame addressed to its subscriber:
+    /// [`ScopeRegistry::emit_fs`] routes on the wire dir string the client
+    /// subscribed with, and the OS may spell that directory another way
+    /// (see [`Watch`]). Where a symlink lets two scopes name one directory
+    /// both are returned, because both share the one registration and a
+    /// frame naming only one of them leaves the other silent.
+    fn wire_paths(&self, abs: &Path) -> Vec<String> {
         let parent = abs.parent();
-        let mut owner: Option<(&str, bool)> = None;
-        for (dir, watch) in &self.attached {
-            let is_self = watch.watched == abs || watch.canonical == abs;
-            let is_child =
-                !is_self && parent.is_some_and(|p| p == watch.watched || p == watch.canonical);
-            if !is_self && !is_child {
+        let name = abs.file_name().and_then(|name| name.to_str());
+        let mut wires = Vec::new();
+        for (dir, canonical) in &self.scopes {
+            let Some(watch) = self.watches.get(canonical) else {
                 continue;
-            }
-            // A symlink lets two live scopes name one directory; the
-            // lexicographically first wire dir owns the event so the
-            // choice does not ride on hash order.
-            if owner.is_none_or(|(current, _)| dir.as_str() < current) {
-                owner = Some((dir, is_child));
+            };
+            if watch.watched.as_path() == abs || canonical.as_path() == abs {
+                wires.push(dir.clone());
+            } else if parent
+                .is_some_and(|p| p == watch.watched.as_path() || p == canonical.as_path())
+            {
+                let Some(name) = name else { continue };
+                wires.push(if dir.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{dir}/{name}")
+                });
             }
         }
-        let (dir, is_child) = owner?;
-        if !is_child {
-            return Some(dir.to_string());
+        wires.sort();
+        wires
+    }
+
+    /// The wire event a single frame carries, in the namespace of `paths`.
+    fn translate(event: &notify::Event, paths: &[&str]) -> WatchEvent {
+        let generation = WorkspaceGeneration::default();
+        match event.kind {
+            notify::EventKind::Create(_) => {
+                WatchEvent::file(WatchKind::Created, paths[0], generation)
+            }
+            notify::EventKind::Remove(_) => {
+                WatchEvent::file(WatchKind::Removed, paths[0], generation)
+            }
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(mode)) => {
+                use notify::event::RenameMode;
+                match (mode, paths.len()) {
+                    (RenameMode::Both, 2..) => WatchEvent::rename(
+                        Some(paths[0].to_string()),
+                        Some(paths[1].to_string()),
+                        false,
+                        None,
+                        generation,
+                    ),
+                    (RenameMode::From, _) => WatchEvent::rename(
+                        Some(paths[0].to_string()),
+                        None,
+                        false,
+                        None,
+                        generation,
+                    ),
+                    (RenameMode::To, _) => {
+                        WatchEvent::file(WatchKind::Created, paths[0], generation)
+                    }
+                    _ => WatchEvent::file(WatchKind::Modified, paths[0], generation),
+                }
+            }
+            _ => WatchEvent::file(WatchKind::Modified, paths[0], generation),
         }
-        let name = abs.file_name()?.to_str()?;
-        Some(if dir.is_empty() {
-            name.to_string()
-        } else {
-            format!("{dir}/{name}")
-        })
     }
 
     fn retry_pending(&mut self) {
@@ -293,75 +377,79 @@ impl ActorState {
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return;
         }
-        let paths: Vec<String> = event
+        // Every spelling of every path the event touches, keeping the
+        // from/to order a rename depends on. A path no scope names drops
+        // out entirely.
+        let spellings: Vec<Vec<String>> = event
             .paths
             .iter()
-            .filter_map(|abs| self.wire_path(abs))
+            .map(|abs| self.wire_paths(abs))
+            .filter(|wires| !wires.is_empty())
             .collect();
-        if paths.is_empty() {
+        if spellings.is_empty() {
             return;
         }
         // A watched directory vanishing or being replaced invalidates its
-        // watch: move it back to pending (the bounded retry re-attaches when
-        // something reappears) and tell its subscribers to relist.
+        // watch: release every scope naming it (the bounded retry
+        // re-attaches when something reappears) and tell its subscribers to
+        // relist.
         if matches!(
             event.kind,
             notify::EventKind::Remove(_)
                 | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
         ) {
-            for rel in &paths {
-                if let Some(watch) = self.attached.remove(rel) {
-                    let _ = self.watcher.unwatch(&watch.watched);
-                    self.pending.insert(rel.clone());
-                    self.registry
-                        .emit_fs_reset(rel, FsResetReason::DirectoryReplaced);
-                }
+            let mut hits: Vec<String> = spellings
+                .iter()
+                .flatten()
+                .filter(|rel| self.scopes.contains_key(*rel))
+                .cloned()
+                .collect();
+            hits.sort();
+            hits.dedup();
+            for rel in hits {
+                self.release_scope(&rel);
+                self.pending.insert(rel.clone());
+                self.registry
+                    .emit_fs_reset(&rel, FsResetReason::DirectoryReplaced);
             }
         }
-        let generation = WorkspaceGeneration::default();
-        let wire = match event.kind {
-            notify::EventKind::Create(_) => {
-                let rel = &paths[0];
-                WatchEvent::file(WatchKind::Created, rel, generation)
-            }
-            notify::EventKind::Remove(_) => {
-                WatchEvent::file(WatchKind::Removed, &paths[0], generation)
-            }
-            notify::EventKind::Modify(notify::event::ModifyKind::Name(mode)) => {
-                use notify::event::RenameMode;
-                match (mode, paths.len()) {
-                    (RenameMode::Both, 2..) => WatchEvent::rename(
-                        Some(paths[0].clone()),
-                        Some(paths[1].clone()),
-                        false,
-                        None,
-                        generation,
-                    ),
-                    (RenameMode::From, _) => {
-                        WatchEvent::rename(Some(paths[0].clone()), None, false, None, generation)
-                    }
-                    (RenameMode::To, _) => {
-                        WatchEvent::file(WatchKind::Created, &paths[0], generation)
-                    }
-                    _ => WatchEvent::file(WatchKind::Modified, &paths[0], generation),
-                }
-            }
-            _ => WatchEvent::file(WatchKind::Modified, &paths[0], generation),
-        };
+        // One frame per spelling, each path riding at its own spelling of
+        // the same index and holding at its last once exhausted. Every
+        // spelling of every path therefore appears in at least one frame,
+        // which is the property that keeps a co-named directory from going
+        // silent; where nothing is co-named each path has exactly one
+        // spelling and this emits the single frame it always did.
+        let breadth = spellings.iter().map(Vec::len).max().unwrap_or(0);
+        let frames: Vec<WatchEvent> = (0..breadth)
+            .map(|index| {
+                let paths: Vec<&str> = spellings
+                    .iter()
+                    .map(|wires| wires[index.min(wires.len() - 1)].as_str())
+                    .collect();
+                Self::translate(&event, &paths)
+            })
+            .collect();
         // Echoes of this tenant's own mutations are replaced by the
         // deterministic attributed frames the mutation bus emits at commit;
-        // everything else is a genuine external change.
-        if self.mutations.suppress_raw(&wire) {
+        // everything else is a genuine external change. Asked once per
+        // frame it would spend one commit's budget several times over, so
+        // the question stops at the first yes: one raw event answers for
+        // one mutation however many spellings address it. A `no` costs
+        // nothing, which is what lets the scan run to the end.
+        if frames.iter().any(|wire| self.mutations.suppress_raw(wire)) {
             return;
         }
-        self.registry.emit_fs(&wire);
+        for wire in &frames {
+            self.registry.emit_fs(wire);
+        }
     }
 
     /// Coverage was lost (provider error or queue overflow): every desired
     /// scope must relist, and the attached set is rebuilt through the
     /// bounded retry so a watch invalidated by the loss recovers too.
     fn reset_all_desired(&mut self) {
-        for (_, watch) in self.attached.drain() {
+        self.scopes.clear();
+        for (_, watch) in self.watches.drain() {
             let _ = self.watcher.unwatch(&watch.watched);
         }
         self.pending.extend(self.desired.iter().cloned());
@@ -480,6 +568,77 @@ mod tests {
         assert_eq!(frame["type"], "fs");
         assert_eq!(frame["dir"], "link/notes");
         assert_eq!(frame["event"]["path"], "link/notes/a.md");
+    }
+
+    /// Two scopes can name one directory: a client subscribed through a
+    /// symlink and another through the real path. They share the single OS
+    /// registration, so a frame addressed to one spelling only would leave
+    /// the other silent while its watch reported itself subscribed.
+    #[cfg(unix)]
+    #[test]
+    fn co_named_scopes_each_receive_their_own_spelling() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.root.join("real/notes")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join("real"), fx.root.join("link")).unwrap();
+
+        let (a, mut rx_a) = fx.registry.register();
+        let (b, mut rx_b) = fx.registry.register();
+        fx.manager
+            .apply_delta(fx.registry.subscribe(a, "link/notes"));
+        fx.manager
+            .apply_delta(fx.registry.subscribe(b, "real/notes"));
+        assert_eq!(
+            recv_frame(&mut rx_a, Duration::from_secs(5)).expect("A subscribed")["reason"],
+            "subscribed"
+        );
+        assert_eq!(
+            recv_frame(&mut rx_b, Duration::from_secs(5)).expect("B subscribed")["reason"],
+            "subscribed"
+        );
+
+        std::fs::write(fx.root.join("real/notes/a.md"), "x").unwrap();
+        let frame_a = recv_frame(&mut rx_a, Duration::from_secs(5)).expect("A fs frame");
+        let frame_b = recv_frame(&mut rx_b, Duration::from_secs(5)).expect("B fs frame");
+        assert_eq!(frame_a["dir"], "link/notes");
+        assert_eq!(frame_a["event"]["path"], "link/notes/a.md");
+        assert_eq!(frame_b["dir"], "real/notes");
+        assert_eq!(frame_b["event"]["path"], "real/notes/a.md");
+    }
+
+    /// The registration is shared, so releasing it on the first detach
+    /// would silence the scope still holding it -- and nothing would
+    /// re-attach it, because an attached scope is not pending.
+    #[cfg(unix)]
+    #[test]
+    fn detaching_one_co_named_scope_leaves_the_other_watching() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.root.join("real/notes")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join("real"), fx.root.join("link")).unwrap();
+
+        let (a, mut rx_a) = fx.registry.register();
+        let (b, mut rx_b) = fx.registry.register();
+        fx.manager
+            .apply_delta(fx.registry.subscribe(a, "link/notes"));
+        fx.manager
+            .apply_delta(fx.registry.subscribe(b, "real/notes"));
+        assert!(recv_frame(&mut rx_a, Duration::from_secs(5)).is_some());
+        assert!(recv_frame(&mut rx_b, Duration::from_secs(5)).is_some());
+
+        fx.manager
+            .apply_delta(fx.registry.unsubscribe(a, "link/notes"));
+        // Let the detach land, then clear anything already queued for B.
+        std::thread::sleep(Duration::from_millis(300));
+        while recv_frame(&mut rx_b, Duration::from_millis(50)).is_some() {}
+
+        std::fs::write(fx.root.join("real/notes/b.md"), "y").unwrap();
+        let frame = recv_frame(&mut rx_b, Duration::from_secs(5))
+            .expect("the surviving scope keeps its watch");
+        assert_eq!(frame["dir"], "real/notes");
+        assert_eq!(frame["event"]["path"], "real/notes/b.md");
+        assert!(
+            recv_frame(&mut rx_a, Duration::from_millis(400)).is_none(),
+            "the detached scope receives nothing"
+        );
     }
 
     #[test]
