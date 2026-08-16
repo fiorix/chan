@@ -19,17 +19,6 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.91.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [a-standalone-window-cannot-reach-the-files-it-is-about](v0.91.0/a-standalone-window-cannot-reach-the-files-it-is-about.md) | implemented and merged into the candidate; registered after the fact | a standalone terminal window browses and edits the machine's files through a metadata-free `MiniWorkspace` over an extracted `RootedFs` core, with server-side capability gating and a scoped watcher, and `cs open` routes an escaping path into such a window instead of refusing; open on hand-smoke and on the owner's sign-off for the widened filesystem reach |
-| [a-terminal-opens-whatever-shell-the-server-picked](v0.91.0/a-terminal-opens-whatever-shell-the-server-picked.md) | implemented and merged into the candidate; registered after the fact | the machine's shells are discovered as named profiles, `[[terminal.profiles]]` overrides, hides and adds them, and the pane's New terminal menu offers them; open on Windows and WSL hand-smoke, with `WSLENV` not carried into a WSL profile recorded as a known gap |
-| [an-external-edit-intermittently-never-reaches-a-dirty-editor](v0.91.0/an-external-edit-intermittently-never-reaches-a-dirty-editor.md) | carried from v0.88.0 through v0.90.0, still deferred on its recorded precondition | an external write to a file open with unsaved edits leaves the API serving stale content and the editor never converging; the conflict banner shows throughout so nothing is silently lost, and the reproduction rate wanders on a timescale of hours with no code change |
-| [the-webgl-present-stall-is-unmeasured-and-costs-linux-the-grid](v0.91.0/the-webgl-present-stall-is-unmeasured-and-costs-linux-the-grid.md) | measured 2026-08-11 and reframed rather than closed; untouched in v0.90.0 | the stall does not reproduce, but with the AppImage's `WEBKIT_DISABLE_DMABUF_RENDERER=1` the WebGL layer composites nothing at all; the question is now why that config paints zero ink and whether the AppImage can stop needing the switch, a desktop-shell question rather than a renderer one |
-| [a-frame-rate-acceptance-needs-guards-that-can-fire](v0.91.0/a-frame-rate-acceptance-needs-guards-that-can-fire.md) | carried from v0.88.0, no code shipped through v0.90.0 | an fps acceptance recorded against a renderer string is satisfied by a pure software stack, so it cannot prove hardware acceleration; give the class a guard that fails when the reading is not what it claims |
-| [aur-publication-is-suspended](v0.91.0/aur-publication-is-suspended.md) | restored in the candidate 2026-08-15 on an amended condition; open until the GA run proves it | the AUR re-enabled pushes on 2026-08-11 and four re-checks missed it, because they watched the news index while the announcement went to aur-general; the condition is amended to its operative half, the three jobs and the refusal job are restored, and the acceptance lines that need a real publication run stay unmet until the tag |
-
 ### v0.92.0
 
 | item | state | what needs to happen |

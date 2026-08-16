@@ -113,6 +113,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.88.0](release-v0.88.0.md) - the browser smokes, runnable in the project's containers for the first time, immediately found a real stale-read defect; plus `chan ps` answering what a workspace is doing, the boot overlay no longer locking a healthy rebuild, and a publish=false dry run on the tagged run's code path.
 - [release-v0.89.0](release-v0.89.0.md) - rebindable deck chords, a configurable graph palette, Settings by concern, ghostty as the Linux desktop default, agy as a submit agent, and a load-sensitive test diagnosed to a process-global injection slot; a second team finished the round after infrastructure killed the first.
 - [release-v0.90.0](release-v0.90.0.md) - the Windows execution release: server-spawned Windows terminals unwedged from ConPTY's own startup handshake, the workspace lock's holder record readable while held, chan.exe executed by CI for the first time, and AppImage terminals keeping the bundle environment out; writing the CI smoke surfaced two of the three fixes.
+- [release-v0.91.0](release-v0.91.0.md) - a standalone window that browses and edits the machine's files, Windows shell profiles with a picker, cross-window tab drag that stops turning tabs into terminals, and AUR publication restored; four candidates, and everything after the first came from the owner testing them rather than from review.
 
 ## Conventions
 

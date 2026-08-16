@@ -35,3 +35,5 @@ So the surface a user actually drives from -- an agent working in a terminal, a 
 ## Rough size
 
 Large, and the largest single surface in the release. The security boundary is the part that deserves the review time; the SPA work is broad but shallow.
+
+CLOSED: shipped in [v0.91.0](../../release/release-v0.91.0.md).

@@ -99,3 +99,5 @@ The "Nothing else" instruction at line 21 was wrong and would have produced a re
 
 - The credential was registered before aurweb v6.5.0, which changed push and account handling. Prove it with a `publish=false` dispatch, and note what that cannot cover: the "Push to the AUR" step is gated on `PUBLISH == 'true'`, so a dry run exercises the credential probe and the render, never the clone-and-push path.
 - Both pkgbases report a server-side `LastModified` of 2026-08-01T12:33Z with the version unchanged at `0.82.0-1`, the same day pushes were disabled. Nothing in this tree explains what touched them. Read both pkgbases before trusting the first push.
+
+CLOSED: restored in [v0.91.0](../../release/release-v0.91.0.md) on an amended condition; the GA run is what proves it.

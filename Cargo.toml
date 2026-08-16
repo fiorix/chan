@@ -21,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.91.0-rc4"
+version = "0.91.0"
 edition = "2021"
 # Mirrors `rust-toolchain.toml`; pre-push and CI compile under the
 # same compiler. Bumping requires updating both files in the same
@@ -40,25 +40,25 @@ repository = "https://github.com/fiorix/chan"
 # in-process (`chan::run(.., Personality::Desktop)`) when invoked through a
 # `~/.local/bin/chan` shim. Default features (incl. `embeddings`) on; the
 # crate's own macOS target deps add candle's metal backend.
-chan = { version = "0.91.0-rc4", path = "crates/chan" }
-chan-workspace = { version = "0.91.0-rc4", path = "crates/chan-workspace", default-features = false }
-chan-llm = { version = "0.91.0-rc4", path = "crates/chan-llm" }
-chan-report = { version = "0.91.0-rc4", path = "crates/chan-report" }
-chan-library = { version = "0.91.0-rc4", path = "crates/chan-library" }
+chan = { version = "0.91.0", path = "crates/chan" }
+chan-workspace = { version = "0.91.0", path = "crates/chan-workspace", default-features = false }
+chan-llm = { version = "0.91.0", path = "crates/chan-llm" }
+chan-report = { version = "0.91.0", path = "crates/chan-report" }
+chan-library = { version = "0.91.0", path = "crates/chan-library" }
 # default-features off drops the desktop half (the WebSocket dialer and the
 # listener) so chan-server links only the wire contract, the spec parser, and
 # the byte pump. chan-desktop and the end-to-end harness take the default.
-chan-revtunnel = { version = "0.91.0-rc4", path = "crates/chan-revtunnel", default-features = false }
-chan-systemd = { version = "0.91.0-rc4", path = "crates/chan-systemd" }
-chan-server = { version = "0.91.0-rc4", path = "crates/chan-server", default-features = false }
+chan-revtunnel = { version = "0.91.0", path = "crates/chan-revtunnel", default-features = false }
+chan-systemd = { version = "0.91.0", path = "crates/chan-systemd" }
+chan-server = { version = "0.91.0", path = "crates/chan-server", default-features = false }
 # default-features off so chan-server can pull just the wire types
 # (`ControlRequest` / `ControlResponse`) without the clap-backed `cs`
 # client; the binaries (chan / chan-desktop) re-enable the `client`
 # feature for the full surface.
-chan-shell = { version = "0.91.0-rc4", path = "crates/chan-shell", default-features = false }
-chan-tunnel-client = { version = "0.91.0-rc4", path = "crates/chan-tunnel-client" }
-chan-tunnel-proto = { version = "0.91.0-rc4", path = "crates/chan-tunnel-proto" }
-chan-tunnel-server = { version = "0.91.0-rc4", path = "crates/chan-tunnel-server" }
+chan-shell = { version = "0.91.0", path = "crates/chan-shell", default-features = false }
+chan-tunnel-client = { version = "0.91.0", path = "crates/chan-tunnel-client" }
+chan-tunnel-proto = { version = "0.91.0", path = "crates/chan-tunnel-proto" }
+chan-tunnel-server = { version = "0.91.0", path = "crates/chan-tunnel-server" }
 
 anyhow = "1"
 # Native OS clipboard for chan-desktop: the terminal "Paste" menu and the

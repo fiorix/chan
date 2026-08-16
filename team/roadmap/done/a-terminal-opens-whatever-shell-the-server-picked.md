@@ -34,3 +34,5 @@ That is thinnest where a machine genuinely has several. On Windows the realistic
 ## Rough size
 
 Medium. The discovery matrix is the bulk of it and most of that is Windows.
+
+CLOSED: shipped in [v0.91.0](../../release/release-v0.91.0.md), with discovery narrowed to Windows -- macOS and Linux keep the login shell, and the feature stays available there through declared profiles.

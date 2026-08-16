@@ -60,3 +60,5 @@ The four dead animations are the four fastest arms, at the empty page's own rate
 ## Rough size
 
 Small, and mostly already done. The instrument exists. What is open is whether these become a written rule for acceptance lines that claim a rate, or stay as one instrument nobody remembers to reach for.
+
+CLOSED without code in [v0.91.0](../../release/release-v0.91.0.md): the finding moved into `.agents/playbook.md`, where the next person writing a frame-rate acceptance will meet it, rather than being carried a third release.

@@ -94,3 +94,5 @@ Whichever way it goes, the comment inside `enableWebglRenderer()` is now wrong a
 Small to answer and unbounded to act on, and those are different numbers that used to be one. Answering is a fifteen-minute command on a box that exists somewhere. Acting on a reproducing stall is open-ended. The measurement getting cheap should not be read as the repair getting cheap.
 
 That still holds, with the answer in hand and the target moved. Answering cost fifteen minutes as predicted. What it bought is a better-posed question rather than a repair: the grid residual is now blocked on a GPU-abort workaround in the desktop shell, which is a different lane from the renderer predicate this item names.
+
+CLOSED in [v0.91.0](../../release/release-v0.91.0.md): the stall does not reproduce (0 of 144 trials), and the blank-WebGL configuration that kept this open stopped being everyone's in v0.89.0 when the dma-buf override became driver-scoped. The surviving half is `the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed` for v0.92.0.
