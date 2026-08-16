@@ -35,7 +35,7 @@ cargo clippy --all-targets -- -D warnings
 
 The Rust toolchain is pinned in `rust-toolchain.toml` (1.95.0). `cargo` auto-installs through rustup on first use, so contributor and CI clippy lint sets stay locked together. Bumping Rust = edit `rust-toolchain.toml` and fix any new clippy findings in the same commit.
 
-The pre-push hook (`./scripts/install-hooks` to install) runs `make pre-push`, the same gate as CI: static shell and workflow lints, the build-matrix and sdme contracts, formatting, clippy, tests, the no-default-features build, the separate gateway workspace, the web checks, and a release devserver smoke plus the native desktop package. The authoritative step list and the isolated/own-gate model for multi-agent rounds live in [skills/gate/SKILL.md](skills/gate/SKILL.md).
+The pre-push hook (`./scripts/install-hooks` to install) runs `make pre-push`, the same gate as CI: static shell and workflow lints, the build-matrix and sdme contracts, formatting, clippy, tests, the no-default-features build, the separate gateway workspace, the web checks, and a release devserver smoke plus the native desktop package. The sdme-contract and gateway steps are the LINUX arm's: the Nix driver calls GNU coreutils and the gateway builds inside an sdme container, so `pre-push` skips them on macOS and Windows (where those targets refuse outright and name `make ci-macos` / `make ci-windows`), which keeps the git hook usable on those hosts instead of guaranteed-red. The authoritative step list and the isolated/own-gate model for multi-agent rounds live in [skills/gate/SKILL.md](skills/gate/SKILL.md).
 
 ## Documentation
 

@@ -21,9 +21,9 @@ The gate runs, in order:
 1. `make shell-check` (shellcheck over every tracked shell script)
 2. `make workflow-check` (actionlint over `.github/workflows`, with shellcheck on the `run:` blocks)
 3. `make build-matrix-check` (the static contract tying native CI, distro, and container jobs to their real build targets)
-4. `make nix-sdme-contract-check` (the sdme Nix driver exercised against a stub, without starting a guest)
+4. `make nix-sdme-contract-check` (the sdme Nix driver exercised against a stub, without starting a guest). **Linux only**, like every gateway step below: the driver calls GNU coreutils and the gateway builds inside an sdme container, so neither means anything on a macOS or Windows host and `pre-push` skips the pair there. Those targets refuse outright if invoked directly, naming `make ci-macos` / `make ci-windows` instead. The Linux arm's coverage is unchanged, and it is the arm the release gate runs on
 5. `make web-lock-check` (strict `npm ci --dry-run`; rejects a desynced `web/package-lock.json` that every other web target's `npm install` would silently repair in place). It enforces npm >= 10, because older npm removes `node_modules` under `--dry-run`. The `chan-ann-ubuntu` build rootfs ships npm 9.2.0, so a container built from it fails this step until npm is raised in the guest; the step says so with the resolved version rather than failing obscurely.
-6. `cargo fmt --check` for the root workspace and `make gateway-fmt` for the separate gateway workspace
+6. `cargo fmt --check` for the root workspace, and `make gateway-fmt` for the separate gateway workspace (Linux only; see step 4)
 7. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
 8. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
 9. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)

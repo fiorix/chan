@@ -260,6 +260,13 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
 	$(MAKE) build-matrix-check
+ifeq ($(UNAME_S),Linux)
+	# Linux-only (see LINUX_ONLY), but kept HERE with the other static checks
+	# rather than beside the gateway block below: it is seconds long and needs
+	# no compile, so a finding in it should not cost a full clippy + test +
+	# build first. The gateway steps stay below because they ARE compiles.
+	$(MAKE) nix-sdme-contract-check
+endif
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
@@ -275,7 +282,6 @@ ifeq ($(UNAME_S),Linux)
 	# gateway-test executes the database-free subset and reports the seven
 	# Postgres-backed integration-test files as not run; gateway-build only
 	# compiles the release crates.
-	$(MAKE) nix-sdme-contract-check
 	$(MAKE) gateway-fmt
 	$(MAKE) gateway-lint
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-test
