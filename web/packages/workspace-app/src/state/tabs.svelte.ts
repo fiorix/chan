@@ -1842,7 +1842,7 @@ function nextBrowserTitle(): string {
   return `Files ${Math.max(max + 1, 2)}`;
 }
 
-function defaultBrowserInspectorOpen(): boolean {
+export function defaultBrowserInspectorOpen(): boolean {
   if (typeof window === "undefined") return true;
   return window.innerWidth >= 768;
 }

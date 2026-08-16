@@ -28,6 +28,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A window with no workspace no longer offers, or tries to load, workspace-only things.** The file browser and the editor's details panel asked for code reports and inspector metadata that only exist on a workspace, so every selection made requests that could only 404 and then showed "report unavailable" where the section should simply be absent. "New Graph" and "Graph from here" are gone from the same surfaces for the same reason: the graph is built from the workspace index, so there was nothing to graph from.
 
+- **Opening a file browser lands in the directory you asked for.** It expanded the ancestors and highlighted the target, so a standalone window -- whose root is the whole machine -- showed `/` with your home directory selected somewhere below it, and you had to walk down to it. A directory target is now opened; a file target is still selected inside its parent.
+
 - **`chan open` no longer leaks the Windows `\\?\` verbatim prefix** from the serve root into the desktop window title.
 
 ## [v0.90.0] - 2026-08-14

@@ -60,6 +60,7 @@
     refreshTree,
     resolveSpawnContext,
     revealAndSelect,
+    revealPathInBrowser,
     scheduleSessionSave,
     searchPanel,
     launcherPanel,
@@ -98,6 +99,7 @@
     isWindowFullyReadOnly,
     layout,
     createTeamWorkLeadTerminal,
+    defaultBrowserInspectorOpen,
     openBrowserInActivePane,
     toggleActiveTerminalBroadcastSelectAll,
     isDocSavePaused,
@@ -496,7 +498,25 @@
     // a standalone window's root is `/`, so it lands on the home directory
     // its tenant reported instead of the whole machine.
     const rootless = windowCaps.workspace ? null : (filesContext.current?.homeWire ?? null);
-    const select = ctx.file ?? (ctx.dir || rootless);
+    const dir = ctx.dir || rootless;
+    // A directory target is ENTERED, not merely highlighted. `revealAndSelect`
+    // expands ancestors only, so a standalone window -- whose root is the whole
+    // machine -- rendered `/` with the target collapsed somewhere below it, and
+    // the user had to walk down to the directory they had just asked for. This
+    // is the same defect the fresh-Files-window boot already fixed for itself;
+    // the spawn path kept selecting. Opening at `$HOME` rather than `/` is the
+    // visible half of it on a standalone terminal window.
+    if (dir !== null && dir !== undefined && ctx.file === undefined) {
+      revealPathInBrowser(dir, {
+        enter: true,
+        // Keep the pane's own default rather than forcing the inspector open:
+        // this is a spawn, not a reveal-this-entry gesture.
+        inspectorOpen: defaultBrowserInspectorOpen(),
+      });
+      scheduleSessionSave();
+      return;
+    }
+    const select = ctx.file;
     // Prime the expanded-dirs map + browserSelection so the new
     // tab's tree opens with the context path visible.
     if (select) revealAndSelect(select);
