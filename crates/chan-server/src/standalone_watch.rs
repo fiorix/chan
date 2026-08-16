@@ -15,6 +15,11 @@
 //! resumes without a new client subscription. Every reset the frontend
 //! must relist on is a typed [`FsResetReason`]; raw provider messages stay
 //! in the server log and never enter a path or dir field.
+//!
+//! Frames are addressed in the subscriber's own namespace: an event's wire
+//! path is rebuilt from the wire dir that asked for the watch, never
+//! relativized from the absolute path, because the OS does not necessarily
+//! spell a directory the way the client did (see [`Attached`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -39,10 +44,6 @@ pub trait WatchScopeResolver: Send + Sync {
     /// Refuses traversal, symlinks, and anything that is not a real
     /// directory; the error text goes to the server log only.
     fn resolve_dir(&self, rel: &str) -> Result<PathBuf, String>;
-
-    /// Convert an absolute event path back to the wire-relative form, or
-    /// `None` for paths outside the root or with non-UTF-8 components.
-    fn relativize(&self, abs: &Path) -> Option<String>;
 }
 
 enum Command {
@@ -105,6 +106,20 @@ impl Drop for ScopedWatchManager {
     }
 }
 
+/// One live OS watch, in both the spellings its events can arrive under.
+/// The backends disagree: inotify echoes the path exactly as it was passed
+/// to `watch`, while FSEvents reports the fully resolved path. A directory
+/// reached through a symlinked ancestor (`/tmp`, `/var` and `/etc` are all
+/// symlinks on macOS) therefore arrives spelled differently from the way
+/// it was attached, and matching only one form drops every event.
+struct Attached {
+    /// The path handed to the watcher, and the one `unwatch` needs back.
+    watched: PathBuf,
+    /// Fully resolved form, or a copy of `watched` when it no longer
+    /// resolves -- a watch outlives the directory it was attached to.
+    canonical: PathBuf,
+}
+
 struct ActorState {
     watcher: notify::RecommendedWatcher,
     resolver: Arc<dyn WatchScopeResolver>,
@@ -112,8 +127,8 @@ struct ActorState {
     mutations: Arc<StandaloneMutationBus>,
     /// Wire-relative directories with at least one live subscriber.
     desired: HashSet<String>,
-    /// Successfully attached watches: wire dir -> absolute path.
-    attached: HashMap<String, PathBuf>,
+    /// Successfully attached watches, keyed by wire dir.
+    attached: HashMap<String, Attached>,
     /// Desired but unattached; retried on [`RETRY_INTERVAL`].
     pending: HashSet<String>,
 }
@@ -181,7 +196,14 @@ impl ActorState {
         {
             Ok(()) => {
                 self.pending.remove(dir);
-                self.attached.insert(dir.to_string(), abs);
+                let canonical = std::fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+                self.attached.insert(
+                    dir.to_string(),
+                    Attached {
+                        watched: abs,
+                        canonical,
+                    },
+                );
                 self.registry.emit_fs_reset(dir, FsResetReason::Subscribed);
             }
             Err(error) => {
@@ -195,9 +217,48 @@ impl ActorState {
     fn detach(&mut self, dir: &str) {
         self.desired.remove(dir);
         self.pending.remove(dir);
-        if let Some(abs) = self.attached.remove(dir) {
-            let _ = self.watcher.unwatch(&abs);
+        if let Some(watch) = self.attached.remove(dir) {
+            let _ = self.watcher.unwatch(&watch.watched);
         }
+    }
+
+    /// Wire path for one absolute event path, expressed under the wire
+    /// directory whose subscription produced the watch.
+    ///
+    /// A non-recursive watch reports only the watched directory itself and
+    /// its direct children, so the owning scope is exact. Deriving the wire
+    /// path from that scope, rather than relativizing the absolute path
+    /// against the capability root, is what keeps the frame addressed to
+    /// its subscriber: [`ScopeRegistry::emit_fs`] routes on the wire dir
+    /// string the client subscribed with, and the OS may spell that same
+    /// directory another way (see [`Attached`]).
+    fn wire_path(&self, abs: &Path) -> Option<String> {
+        let parent = abs.parent();
+        let mut owner: Option<(&str, bool)> = None;
+        for (dir, watch) in &self.attached {
+            let is_self = watch.watched == abs || watch.canonical == abs;
+            let is_child =
+                !is_self && parent.is_some_and(|p| p == watch.watched || p == watch.canonical);
+            if !is_self && !is_child {
+                continue;
+            }
+            // A symlink lets two live scopes name one directory; the
+            // lexicographically first wire dir owns the event so the
+            // choice does not ride on hash order.
+            if owner.is_none_or(|(current, _)| dir.as_str() < current) {
+                owner = Some((dir, is_child));
+            }
+        }
+        let (dir, is_child) = owner?;
+        if !is_child {
+            return Some(dir.to_string());
+        }
+        let name = abs.file_name()?.to_str()?;
+        Some(if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}/{name}")
+        })
     }
 
     fn retry_pending(&mut self) {
@@ -235,7 +296,7 @@ impl ActorState {
         let paths: Vec<String> = event
             .paths
             .iter()
-            .filter_map(|abs| self.resolver.relativize(abs))
+            .filter_map(|abs| self.wire_path(abs))
             .collect();
         if paths.is_empty() {
             return;
@@ -249,10 +310,8 @@ impl ActorState {
                 | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
         ) {
             for rel in &paths {
-                if self.attached.contains_key(rel) {
-                    if let Some(abs) = self.attached.remove(rel) {
-                        let _ = self.watcher.unwatch(&abs);
-                    }
+                if let Some(watch) = self.attached.remove(rel) {
+                    let _ = self.watcher.unwatch(&watch.watched);
                     self.pending.insert(rel.clone());
                     self.registry
                         .emit_fs_reset(rel, FsResetReason::DirectoryReplaced);
@@ -302,8 +361,8 @@ impl ActorState {
     /// scope must relist, and the attached set is rebuilt through the
     /// bounded retry so a watch invalidated by the loss recovers too.
     fn reset_all_desired(&mut self) {
-        for (_, abs) in self.attached.drain() {
-            let _ = self.watcher.unwatch(&abs);
+        for (_, watch) in self.attached.drain() {
+            let _ = self.watcher.unwatch(&watch.watched);
         }
         self.pending.extend(self.desired.iter().cloned());
         for dir in &self.desired {
@@ -331,12 +390,6 @@ mod tests {
                 return Err("not a real directory".into());
             }
             Ok(abs)
-        }
-
-        fn relativize(&self, abs: &Path) -> Option<String> {
-            let rel = abs.strip_prefix(&self.root).ok()?;
-            let rel = rel.to_str()?;
-            Some(rel.replace('\\', "/"))
         }
     }
 
@@ -399,6 +452,34 @@ mod tests {
         assert_eq!(frame["type"], "fs");
         assert_eq!(frame["dir"], "notes");
         assert!(frame.get("source_w").is_none(), "shell writes are external");
+    }
+
+    /// The OS need not spell a watched directory the way the client did:
+    /// FSEvents resolves symlinks in the paths it reports, so a directory
+    /// subscribed through a symlinked ancestor arrives canonicalized. Its
+    /// frames must still be addressed to the wire dir that subscribed, or
+    /// they route to no one. Every macOS tempdir is already such a path
+    /// (`/var` is a symlink); this builds one explicitly so the case is
+    /// covered on Linux too, where inotify reports the other spelling.
+    #[cfg(unix)]
+    #[test]
+    fn events_under_a_symlinked_ancestor_keep_the_subscribed_dir() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.root.join("real/notes")).unwrap();
+        std::os::unix::fs::symlink(fx.root.join("real"), fx.root.join("link")).unwrap();
+
+        let (id, mut rx) = fx.registry.register();
+        fx.manager
+            .apply_delta(fx.registry.subscribe(id, "link/notes"));
+        let reset = recv_frame(&mut rx, Duration::from_secs(5)).expect("subscribed reset");
+        assert_eq!(reset["dir"], "link/notes");
+        assert_eq!(reset["reason"], "subscribed");
+
+        std::fs::write(fx.root.join("real/notes/a.md"), "x").unwrap();
+        let frame = recv_frame(&mut rx, Duration::from_secs(5)).expect("fs frame");
+        assert_eq!(frame["type"], "fs");
+        assert_eq!(frame["dir"], "link/notes");
+        assert_eq!(frame["event"]["path"], "link/notes/a.md");
     }
 
     #[test]

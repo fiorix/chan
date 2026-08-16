@@ -1246,10 +1246,6 @@ impl crate::standalone_watch::WatchScopeResolver for MiniScopeResolver {
     fn resolve_dir(&self, rel: &str) -> Result<std::path::PathBuf, String> {
         self.0.resolve_directory(rel).map_err(|e| e.to_string())
     }
-
-    fn relativize(&self, abs: &std::path::Path) -> Option<String> {
-        self.0.wire_path_from_absolute(abs)
-    }
 }
 
 /// Slim sibling of [`router`] for a workspace-less terminal tenant.
