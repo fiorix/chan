@@ -46,8 +46,10 @@
     workspace,
   } from "../state/store.svelte";
   import {
+    layout,
     openBrowserInActivePane,
     openInActivePane,
+    paneActiveTabId,
   } from "../state/tabs.svelte";
   import type { BrowserTab } from "../state/tabs.svelte";
   import {
@@ -171,13 +173,14 @@
   /// instance. The dock + overlay variants own their own instance maps
   /// independently.
   function snapshotIntoTab(target: BrowserTab): void {
-    target.selected = browserSelection.path ?? undefined;
-    // The multi-selection travels with the tab too (FB capabilities).
-    // Only persist when it's a genuine multi-set; a single/empty
-    // selection is fully described by `selected` and restores from it.
-    const multi = browserSelection.paths;
-    target.selectedPaths = multi.length > 1 ? [...multi] : undefined;
-    target.showWorkspace = browserSelection.showWorkspace ? true : undefined;
+    // Selection is NOT resnapshotted here, for the same reason as scroll
+    // below. `browserSelection` is a single global, and by teardown it may
+    // already describe the INCOMING tab -- so reading it here wrote another
+    // tab's path into this one, and the label, derived from `tab.selected`,
+    // renamed the outgoing tab. `cs open ~/dev` renaming the tab showing
+    // `/etc` was this. The on-screen mirror effect keeps `target.selected`
+    // current while the tab is the one displayed, which is the only time the
+    // global selection is actually about it.
     // Read the live instance NON-destructively. On a tab-switch unmount the
     // instance may already be disposed: the dispose effect's teardown
     // (fbWatchDispose) runs before this one, and `ensureFbTreeInstance` would
@@ -192,8 +195,13 @@
       );
       target.expanded = expanded.length > 0 ? expanded : undefined;
     }
-    const scroll = treeWrapEl?.scrollTop ?? 0;
-    target.scroll = scroll > 0 ? Math.round(scroll) : undefined;
+    // Scroll is NOT resnapshotted here. `onTreeWrapScroll` already records it
+    // on every scroll, including the programmatic restore, so `target.scroll`
+    // is current before this runs. Reading the element again at teardown is
+    // worse than useless: this is the one moment the DOM may already belong to
+    // the incoming tab, whose shorter tree clamps `scrollTop` to 0 -- and the
+    // clamped 0 then overwrote the outgoing tab's real position, so spawning a
+    // browser tab from the inspector sent the original back to the top.
   }
 
   function restoreFromTab(source: BrowserTab): void {
@@ -228,6 +236,24 @@
     return () => untrack(() => snapshotIntoTab(captured));
   });
 
+  /// Whether this surface's tab is the one a pane is currently showing.
+  ///
+  /// `browserSelection` is a single global, so every mounted browser surface
+  /// sees every selection change -- including one caused by a DIFFERENT tab.
+  /// A surface that mirrors such a change writes another tab's path into its
+  /// own record, and since the tab label is derived from `tab.selected`, the
+  /// old tab visibly renames itself: `cs open ~/dev` renamed the tab showing
+  /// `/etc`. A surface only persists a selection while it is the tab on
+  /// screen.
+  function isOnScreen(tabId: string): boolean {
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      if (paneActiveTabId(node, "a") === tabId) return true;
+      if (paneActiveTabId(node, "b") === tabId) return true;
+    }
+    return false;
+  }
+
   $effect(() => {
     if (!isTab || !tab) return;
     const captured = tab;
@@ -235,6 +261,7 @@
     const showWorkspace = browserSelection.showWorkspace;
     const multi = browserSelection.paths;
     untrack(() => {
+      if (!isOnScreen(captured.id)) return;
       captured.selected = path ?? undefined;
       captured.selectedPaths = multi.length > 1 ? [...multi] : undefined;
       captured.showWorkspace = showWorkspace ? true : undefined;
