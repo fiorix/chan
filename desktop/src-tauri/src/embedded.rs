@@ -561,6 +561,14 @@ impl EmbeddedServer {
         self.host.pane_color(library_id)
     }
 
+    /// Whether this window was minted by a routed `cs open` and is still
+    /// waiting for the frame parked for it. The watcher appends `seed=0` for
+    /// such a window so the SPA does not seed a default terminal beside the
+    /// tab it is about to be handed.
+    pub fn is_routed_mint(&self, window_id: &str) -> bool {
+        self.host.is_routed_mint(window_id)
+    }
+
     /// The launcher's light/dark choice from the local theme store, or `None`
     /// to follow the OS. Reads the same store the launcher's `local-theme`
     /// route writes; used to theme the desktop's own notice windows.
