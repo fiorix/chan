@@ -837,7 +837,11 @@ mod tests {
         assert!(fx.mini.remove_safe("pipe").is_err());
     }
 
-    #[cfg(unix)]
+    /// Not macOS: APFS validates filenames as UTF-8 and rejects this one
+    /// at creation with EILSEQ, so the fixture cannot be built there. The
+    /// listing code under test is platform-neutral, and an entry it could
+    /// alias cannot exist on an APFS volume in the first place.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn non_utf8_entries_are_skipped_not_aliased() {
         use std::os::unix::ffi::OsStrExt as _;
