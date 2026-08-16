@@ -2872,7 +2872,10 @@ export async function openInPane(
   // A binary file is refused (it stays view-only in the browser/inspector); a
   // real read error falls through to a normal open so the tab shows the cause.
   if (!isEditableText(path) && (await probeOpenableAsText(path)) === "binary") {
-    notify(`'${path}' is not a text file`);
+    // Says what happened, not what the file failed to be. "is not a text file"
+    // reads as a complaint about the user's file; the editor simply cannot
+    // open it, and the browser and inspector still can.
+    notify(`'${path}' cannot be opened in the editor`);
     return;
   }
   const destination = resolveTabDestination(requestedDestination);
