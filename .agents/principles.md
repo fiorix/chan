@@ -2,7 +2,9 @@
 
 ## Workspace is the boundary
 
-All filesystem operations route through `chan_workspace::Workspace`, which sandboxes paths under the registered workspace root, refuses non-regular files (symlinks, FIFOs, sockets, devices), and performs atomic writes. Nothing in this repo should ever call `std::fs::*` on user content directly.
+All filesystem operations route through a `chan_workspace` facade, and nothing in this repo should ever call `std::fs::*` on user content directly. There are two facades over one crate-private `RootedFs` capability core, so a guard added to the core cannot be silently missing from either. `chan_workspace::Workspace` sandboxes paths under a registered workspace root and carries the machinery around it: the registry row, the lock, the index, the graph. `chan_workspace::MiniWorkspace` is the metadata-free face of the standalone Files application, rooted at a capability root with the canonical start directory protected; it registers nothing, takes no lock, starts no indexer and opens no graph, so a write through it is an external write to any real `Workspace` covering the same physical file. Both refuse non-regular files (symlinks, FIFOs, sockets, devices) and perform atomic writes, and the standalone dialect is the stricter of the two: symlinks are inert everywhere, deletion reaches only regular files and empty directories, and moves and copies refuse to clobber.
+
+Which facade a window gets is decided by the tenant it was built with, never by the caller. That is the boundary now: not "everything is under a workspace root", but "everything goes through a facade, and the tenant decides which one".
 
 ## Single binary, no runtime deps
 
@@ -17,6 +19,8 @@ Tunnel mode (`chan devserver --tunnel-token ...`, or `CHAN_TUNNEL_TOKEN` env var
 ## App-level vs core
 
 The layering is a hard line: chan-workspace is the core (filesystem, search, graph, watch, report), chan-library is the multi-tenant orchestration layer (`WorkspaceHost`, the window registry, the launcher slot, terminal sessions), and chan-server is the serving layer (per-tenant HTTP/WS, SPA embed, MCP host, devserver builder). Don't push library concerns into chan-workspace, and don't reimplement library primitives in chan-server. When in doubt, read `crates/chan-workspace/design.md`.
+
+One watcher sits outside the core on purpose. A workspace tenant derives its per-directory `fs` frames from the core's one recursive watcher (`chan-workspace/src/watch.rs`), but the standalone Files tenant serves the whole machine from `/`, where a recursive watch is unacceptable. `chan-server/src/standalone_watch.rs` therefore attaches exactly one non-recursive OS watch per directory that has a live `/ws` subscriber, driven by the serving layer's own `ScopeRegistry` refcounts. Its lifetime is a subscription's, not a workspace's, which is why it belongs to the serving layer; it is the exception the "watch is core" reading has to account for, not a precedent for moving filesystem primitives out of the core.
 
 ## MCP server only, no in-app agent
 
