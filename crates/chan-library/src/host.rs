@@ -1968,6 +1968,9 @@ impl WorkspaceHost {
             None => {
                 let record =
                     self.mint_window_with_origin(WindowKind::Terminal, None, caller_origin)?;
+                // The window seeds no default terminal: its content is the
+                // frame parked below, arriving on its first `/ws` attach.
+                pending.mark_routed(&record.window_id);
                 let target = (!caller_origin.is_native()).then(|| BrowserWindowTarget {
                     prefix: record.prefix.clone(),
                     token: record.token.clone(),
@@ -2059,6 +2062,29 @@ impl WorkspaceHost {
     /// Remember the window an escaping open just went to, so the opens that
     /// follow it land there too. Cleared implicitly: a window that leaves the
     /// registry stops matching and the next open picks again.
+    /// Whether this window was minted by a routed `cs open` and has not yet
+    /// been handed its frame, so the surface opening it should not seed a
+    /// default terminal. False for every window on a host that serves no
+    /// standalone filesystem, and false again once the frame is drained or
+    /// expires.
+    pub fn is_routed_mint(&self, window_id: &str) -> bool {
+        let Some(prefix) = self.terminal_tenant_prefix.get() else {
+            return false;
+        };
+        let Ok(workspaces) = self.workspaces.read() else {
+            return false;
+        };
+        workspaces
+            .get(prefix)
+            .map(|runtime| {
+                runtime
+                    .artifacts
+                    .pending_window_commands
+                    .is_routed(window_id)
+            })
+            .unwrap_or(false)
+    }
+
     fn remember_routed_standalone(&self, window_id: &str) {
         if let Ok(mut last) = self.last_routed_standalone.lock() {
             *last = Some(window_id.to_string());

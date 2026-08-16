@@ -1533,6 +1533,24 @@ fn workspace_window_target_url(
             parsed.query_pairs_mut().append_pair("pane", &color);
         }
     }
+    // `seed=0` tells a standalone window not to open its default terminal: it
+    // was minted BY a routed `cs open`, and its content is the frame parked for
+    // its first `/ws` attach. Without it the window opens a terminal the user
+    // never asked for and the routed tab lands beside it. Deliberately its own
+    // parameter rather than a third `kind=`: this is not a different KIND of
+    // window, it is the same standalone window told what it will be handed.
+    // Absent for every other window, including `cs window new`, which keeps
+    // seeding a terminal because that is what it means.
+    if !session_id.is_empty() {
+        let routed = app
+            .state::<Arc<AppState>>()
+            .embedded()
+            .map(|embedded| embedded.is_routed_mint(session_id))
+            .unwrap_or(false);
+        if routed {
+            parsed.query_pairs_mut().append_pair("seed", "0");
+        }
+    }
     if !url_hash_seed.is_empty() {
         parsed.set_fragment(Some(url_hash_seed));
     }

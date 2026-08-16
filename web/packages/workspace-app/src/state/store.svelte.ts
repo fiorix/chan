@@ -2238,6 +2238,25 @@ async function workspaceWithRetry(): ReturnType<typeof api.workspace> {
 /// terminal-only windows), falling back to the OS media query wired by
 /// `watchSystemTheme()` when the launcher has set none (or on a devserver /
 /// remote terminal, whose host installs no theme store).
+/// How long a `seed=0` window waits for its parked frame before falling back
+/// to a terminal. Generous on purpose: the frame is already requested when the
+/// socket comes up, so this only ever elapses when delivery failed, and a
+/// too-eager fallback would race a slow-but-working open and leave the user
+/// with both a terminal and their tab -- the very thing `seed=0` prevents.
+const ROUTED_SEED_FALLBACK_MS = 10_000;
+
+/// Whether this window was minted by a routed `cs open` (`seed=0`) and should
+/// therefore not seed itself with a default terminal. Read from the URL, like
+/// `kind` and `lib`, so the answer is available before any request.
+function mintedWithoutSeed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return new URL(window.location.href).searchParams.get("seed") === "0";
+  } catch {
+    return false;
+  }
+}
+
 async function bootstrapStandalone(): Promise<void> {
   // `terminalOnly` means terminals and nothing else -- the narrow command
   // set, the Control chrome, the close-when-empty rule. A window whose
@@ -2342,12 +2361,26 @@ async function bootstrapStandalone(): Promise<void> {
   // fresh window), open the first tab so an empty pane never shows. A Cmd+R
   // reload restores the saved layout instead and re-attaches to the surviving
   // server-side PTYs, so this only fires on a genuinely fresh window.
-  if (!hasAnyTab()) {
+  //
+  // `seed=0` is the exception: the window was minted BY a routed `cs open` and
+  // its content is the frame parked for its first `/ws` attach, so seeding a
+  // terminal here would put one beside a tab the user never asked to sit next
+  // to it. The frame has already been requested by the time the socket is up.
+  if (!hasAnyTab() && !mintedWithoutSeed()) {
     openTerminalInActivePane({});
   }
-  // Arm the close-when-empty watcher (App.svelte) only AFTER the first tab
-  // exists, so the transient empty boot layout can't close the window.
-  ui.terminalArmed = true;
+  // Self-heal. Delivery is take-once and unacknowledged: `ws.rs` removes every
+  // parked frame from the map before sending any of them, so a socket that
+  // dies mid-delivery loses them with nobody told. A `seed=0` window would
+  // then sit empty forever -- and it cannot even close itself, because arming
+  // waits for a first tab. If nothing has arrived shortly after the socket is
+  // up, fall back to the terminal, which is exactly what this window would
+  // have done before. Never fires on the happy path: by then a tab exists.
+  if (mintedWithoutSeed()) {
+    window.setTimeout(() => {
+      if (!hasAnyTab()) openTerminalInActivePane({});
+    }, ROUTED_SEED_FALLBACK_MS);
+  }
 }
 
 /// Open a tab onto a window the server minted for a routed `cs open`.
@@ -2376,6 +2409,10 @@ async function openRoutedWindowTab(frame: {
   if (token) url.searchParams.set("t", token);
   url.searchParams.set("kind", "terminal");
   url.searchParams.set("lib", windowLibraryId());
+  // Same contract as the desktop watcher: this window was minted BY this
+  // routed open, so it must not seed a default terminal -- the tab it is about
+  // to be handed IS its content.
+  url.searchParams.set("seed", "0");
   const target = url.toString();
   if (window.open(target, windowId)) return;
   const confirmed = await uiConfirm({

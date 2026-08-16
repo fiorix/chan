@@ -1160,6 +1160,17 @@
   // first tab exists, so the transient empty layout during boot can't trip
   // this. No-op in workspace mode and on the web (requestCloseWindow gates on
   // the desktop).
+  //
+  // Arming is the FIRST TAB of any kind -- terminal, file browser or editor --
+  // rather than a line at the end of bootstrap. A `seed=0` window (minted by a
+  // routed `cs open`) deliberately boots with no tab at all and waits for the
+  // frame parked for it, so arming at boot would let it close itself, reaping
+  // its own session blob, before its content ever arrived.
+  $effect(() => {
+    if (windowCaps.workspace || ui.terminalArmed) return;
+    if (hasAnyTab()) ui.terminalArmed = true;
+  });
+
   $effect(() => {
     if (windowCaps.workspace || !ui.terminalArmed) return;
     if (hasAnyTab()) return;

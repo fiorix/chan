@@ -50,6 +50,17 @@ struct Parked {
 #[derive(Default)]
 pub struct PendingWindowCommands {
     by_window: Mutex<HashMap<String, Vec<Parked>>>,
+    /// Windows minted BY a routed open, which must not seed themselves with a
+    /// default terminal: their content is the frame parked above, arriving on
+    /// their first `/ws` attach.
+    ///
+    /// It lives here rather than on the registry row because it is the same
+    /// fact as the park, with the same lifetime, and because the drain is the
+    /// natural place to forget it. Nothing persists: the mint and the first
+    /// attach are seconds apart in one process, and a restart in that gap
+    /// degrades to a window that seeds a terminal -- the old behaviour, which
+    /// is the right failure.
+    routed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl PendingWindowCommands {
@@ -63,10 +74,24 @@ impl PendingWindowCommands {
     pub fn park(&self, window_id: &str, frame: String) -> Result<(), String> {
         let mut map = self.lock();
         let now = Instant::now();
-        map.retain(|_, frames| {
+        let mut swept: Vec<String> = Vec::new();
+        map.retain(|id, frames| {
             frames.retain(|parked| now.duration_since(parked.at) < TTL);
-            !frames.is_empty()
+            if frames.is_empty() {
+                swept.push(id.clone());
+                return false;
+            }
+            true
         });
+        // A window whose frames all aged out is never going to be handed one,
+        // so its routed mark is spent too. Without this an abandoned mint --
+        // a webview that never opened, a dismissed browser prompt -- would keep
+        // its entry for the life of the process.
+        drop(map);
+        for id in swept {
+            self.forget_routed(&id);
+        }
+        let mut map = self.lock();
         let frames = map.entry(window_id.to_string()).or_default();
         if frames.len() >= MAX_PER_WINDOW {
             return Err(format!(
@@ -77,9 +102,38 @@ impl PendingWindowCommands {
         Ok(())
     }
 
+    /// Mark a window as minted by a routed open.
+    pub fn mark_routed(&self, window_id: &str) {
+        if let Ok(mut set) = self.routed.lock() {
+            set.insert(window_id.to_string());
+        }
+    }
+
+    /// Whether this window was minted by a routed open and has not yet been
+    /// handed its frame. The surface that opens the window reads this to decide
+    /// whether the window seeds a default terminal.
+    pub fn is_routed(&self, window_id: &str) -> bool {
+        self.routed
+            .lock()
+            .map(|set| set.contains(window_id))
+            .unwrap_or(false)
+    }
+
+    fn forget_routed(&self, window_id: &str) {
+        if let Ok(mut set) = self.routed.lock() {
+            set.remove(window_id);
+        }
+    }
+
     /// Take everything parked for `window_id`, oldest first. Removes what it
     /// returns, so a later reload of the same window replays nothing.
     pub fn take(&self, window_id: &str) -> Vec<String> {
+        // The intent is spent the moment the window attaches, whether or not
+        // anything is still parked for it: either the frames go out now, or
+        // they expired and never will. Forgetting here means a later reload of
+        // the same window seeds a terminal like any other standalone window,
+        // rather than opening empty forever.
+        self.forget_routed(window_id);
         let mut map = self.lock();
         let now = Instant::now();
         let Some(frames) = map.remove(window_id) else {
