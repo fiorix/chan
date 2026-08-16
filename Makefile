@@ -39,6 +39,21 @@ CHAN_TARGET ?=
 DISTRO ?= ubuntu
 UNAME_S := $(shell uname -s)
 SDME ?= $(if $(filter Darwin,$(UNAME_S)),limactl shell default sudo sdme,sudo sdme)
+
+# chan-gateway and the Nix packaging build are Linux-only. The gateway is
+# built and tested inside an sdme container, and the Nix driver calls GNU
+# coreutils under a PATH that deliberately excludes a Homebrew prefix, so
+# neither means anything on a macOS or Windows host. Their targets refuse
+# there rather than half-run and report a failure that says nothing about
+# the tree: `realpath: illegal option -- m` and a wall of timed-out
+# devserver-proxy control tests read like a broken branch, and cost a
+# reviewer real time before they read like the wrong host.
+LINUX_ONLY = @if [ "$(UNAME_S)" != "Linux" ]; then \
+		echo "error: $@ is Linux-only; this host is $(UNAME_S)." >&2; \
+		echo "  chan-gateway and the Nix build run on Linux, in an sdme container." >&2; \
+		echo "  On this host run 'make ci-macos' (macOS) or 'make ci-windows' (Windows)." >&2; \
+		exit 1; \
+	fi
 WINDOWS_CROSS_TARGET_DIR ?= $(REPO_ROOT)/target/windows-cross-check
 NIX_SDME_OUT ?= /var/tmp/chan-nix-sdme-check
 
@@ -213,6 +228,7 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 
 .PHONY: nix-check
 nix-check: ## Evaluate, build, and smoke both Nix packages.
+	$(LINUX_ONLY)
 	$(NIX) flake check --all-systems --no-build "$(NIX_FLAKE)"
 	@set -e; \
 	for package in chan chan-desktop; do \
@@ -226,12 +242,14 @@ nix-check: ## Evaluate, build, and smoke both Nix packages.
 
 .PHONY: nix-sdme-check
 nix-sdme-check: ## Run Nix checks in a disposable Ubuntu sdme guest.
+	$(LINUX_ONLY)
 	NIX_PACKAGE="$(NIX_PACKAGE)" NIX_SDME_ROOTFS="$(NIX_SDME_ROOTFS)" \
 		OUT="$(NIX_SDME_OUT)" SDME="$(SDME)" \
 		packaging/nix/build-with-sdme.sh
 
 .PHONY: nix-sdme-contract-check
 nix-sdme-contract-check: ## Check the sdme Nix driver without starting a guest.
+	$(LINUX_ONLY)
 	TMPDIR=/var/tmp packaging/nix/test-build-with-sdme.sh
 
 .PHONY: pre-push
@@ -242,20 +260,27 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
 	$(MAKE) build-matrix-check
-	$(MAKE) nix-sdme-contract-check
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
-	$(MAKE) gateway-fmt
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
+ifeq ($(UNAME_S),Linux)
+	# chan-gateway and the Nix packaging driver are Linux-only (see
+	# LINUX_ONLY), so this block is the Linux arm's alone. A macOS or
+	# Windows host runs the rest and the git hook stays usable there;
+	# ci-linux is what covers these, and it is the gate CI runs for them.
+	#
 	# gateway-lint compiles every gateway test target without executing it;
 	# gateway-test executes the database-free subset and reports the seven
 	# Postgres-backed integration-test files as not run; gateway-build only
 	# compiles the release crates.
+	$(MAKE) nix-sdme-contract-check
+	$(MAKE) gateway-fmt
 	$(MAKE) gateway-lint
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-test
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-build
+endif
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
 	$(MAKE) shortcuts-check
@@ -358,14 +383,17 @@ ci-release: pre-push ## Run the local release validation target.
 
 .PHONY: gateway-spa
 gateway-spa: ## Build the gateway identity SPA bundle (rust-embed input).
+	$(LINUX_ONLY)
 	cd web && $(NPM) install && $(NPM) run build -w @chan/profile
 
 .PHONY: gateway-fmt
 gateway-fmt: ## Check formatting in the separate gateway workspace.
+	$(LINUX_ONLY)
 	cd gateway && $(CARGO) fmt --check
 
 .PHONY: gateway-build
 gateway-build: gateway-spa ## Build, but do not test, the gateway release crates (GATEWAY_CARGO_FLAGS adds cross/release).
+	$(LINUX_ONLY)
 	# Depends on gateway-spa: identity embeds web/dist via rust-embed at
 	# compile time, so the bundle must exist or the derive fails to build.
 	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
@@ -373,6 +401,7 @@ gateway-build: gateway-spa ## Build, but do not test, the gateway release crates
 
 .PHONY: gateway-lint
 gateway-lint: gateway-spa ## Clippy all gateway targets without executing tests.
+	$(LINUX_ONLY)
 	# The gateway is a separate Cargo workspace, so the root clippy run does
 	# not reach it. Depends on gateway-spa for the same rust-embed reason as
 	# gateway-build.
@@ -380,6 +409,7 @@ gateway-lint: gateway-spa ## Clippy all gateway targets without executing tests.
 
 .PHONY: gateway-test
 gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
+	$(LINUX_ONLY)
 	@printf '%s\n' \
 		'gateway-test: EXECUTE: all gateway library unit tests' \
 		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
