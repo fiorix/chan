@@ -35,6 +35,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [one-filesystem-namespace-and-a-workspace-window-that-can-reach-it](v0.92.0/one-filesystem-namespace-and-a-workspace-window-that-can-reach-it.md) | accepted 2026-08-16, not started | `cs download` / `cs upload` refuse a path outside the workspace root from a workspace window while a standalone terminal allows any path its uid can reach; migrate the filesystem surface to one `/api/fs` namespace rooted at the serving tenant's capability root, retire `/api/files` over a release, and make both commands behave the same in every window kind; open on whether a tunnel-served workspace keeps that reach unconditionally or behind a config key |
+| [graph-from-here-on-a-directory-comes-up-without-its-files](v0.92.0/graph-from-here-on-a-directory-comes-up-without-its-files.md) | noted 2026-08-16, not investigated | "Graph from here" on a directory opens a tab without the directory's files, while the inspector beside it counts them and an existing graph tab navigated to the same directory shows them; reproduce and find where the opening path differs from a re-scope |
 
 ## Completed
 
