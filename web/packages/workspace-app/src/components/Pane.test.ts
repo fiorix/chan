@@ -1411,10 +1411,11 @@ describe("Pane cross-window payload contract", () => {
       /case "graph":\s*case "browser":\s*case "dashboard":\s*return \{ kind: t\.kind, ser: crossWindowTabSnapshot\(t\) \};/,
     );
     expect(paneSource).toMatch(/const unhandled: never = t;\s*return unhandled;/);
-    expect(paneSource).toMatch(/const crossPayload = t \? crossWindowPayload\(t\) : null;/);
     expect(paneSource).toMatch(
-      /if \(crossPayload\) \{\s*e\.dataTransfer\.setData\(CROSS_TAB_MIME, JSON\.stringify\(crossPayload\)\);/,
+      /if \(t\) \{\s*e\.dataTransfer\.setData\(CROSS_TAB_MIME, JSON\.stringify\(crossWindowPayload\(t\)\)\);/,
     );
+    expect(paneSource).not.toMatch(/crossWindowPayload\(t\) : null/);
+    expect(paneSource).not.toMatch(/if \(crossPayload\)/);
   });
 
   test("an intra-window move still works for every kind", () => {
