@@ -1,6 +1,6 @@
 # "Graph from here" on a directory comes up without its files
 
-Status: REPRODUCED AND FIXED 2026-08-17, not yet gated or merged. Raised as a NOTE on 2026-08-16 against the v0.91.0 candidate. The reproduction is below, under the note's own text; it corrects the note's guess about where the difference is.
+Status: FIXED AND GATED 2026-08-17, merged into the 0.92.0-rc1 candidate and not yet released. Raised as a NOTE on 2026-08-16 against the v0.91.0 candidate. The reproduction is below, under the note's own text; it corrects the note's guess about where the difference is.
 
 ## What was seen
 
@@ -59,3 +59,63 @@ Deliberately out of scope: the workspace-scoped graph, which has the same shape 
 - `scripts/e2e/browser-smoke/checks/112-graph-from-here-dir.mjs` drives the tree row's own "New Graph" entry in a real browser over three legs: a directory with files among its children, the same scope reached by a breadcrumb re-scope (they must render one set), and a directory whose files are one level below. Floors are computed from the payload rather than from fixture constants, and each leg asserts the scope of the panel it read, because hidden graph tabs stay mounted and a leg reading an earlier leg's panel agrees with itself perfectly.
 - The check was measured RED on the unmodified tree, failing the third leg at 4 nodes / 3 edges against a floor of 6 while the other two legs stayed green, and GREEN with the fix at 7 nodes / 7 edges.
 - `shallowestFileDepth` is unit-tested in `graph/depth.test.ts`; the panel wiring is pinned in `components/graphDirScopeReveal.test.ts` (the `?raw` convention this repo uses for logic inside a Svelte component). `svelte-check` is clean.
+
+## Resolution
+
+Resolved 2026-08-17 as fixed, gated, and accepted into the 0.92.0-rc1 candidate.
+It is not released until the GA tag. A directory graph now reveals deep enough to
+include its files, with `112-graph-from-here-dir` asserting all three legs in a
+real browser and computing its floors from the panel's own payload sources.
+
+The change was held until `111-graph-palette` was attributed, because that check
+flipped from PASS to FAIL in the run that first carried this work and it is a
+graph check, so it sits inside this change's blast radius.
+
+### What the attribution measured
+
+Twenty-five fresh-server repetitions of `111-graph-palette` on each of two
+commits, the one immediately before this change and this change itself, in an
+isolated worktree with the binary and bundle built per arm. Both integrity
+controls held: every result recorded a binary path inside that worktree, and the
+two bundle hashes differed, so the arms genuinely served different frontends.
+
+The check's own measurement is the count of pixels still carrying a retired
+palette hue after a malformed palette edit. Per arm:
+
+| | before this change | with this change |
+| --- | --- | --- |
+| pass / fail | 23 / 2 | 17 / 8 |
+| residue median | 0 | 2 |
+| residue max | 8 | 27 |
+| zero-residue runs | 16 / 25 | 8 / 25 |
+
+A rank comparison of the full residue distributions gives p = 0.027, so the
+distributions differ. The comparison metric and its threshold were fixed in
+advance of the second arm's data.
+
+### Why it shipped anyway
+
+The shift is real and sub-visible, and both halves matter.
+
+A fully-hued node covers about 2564 pixels. The median residue moves from 0 to 2
+pixels, and even the largest observed value, 27, is about one percent of a single
+node. No node retains the retired hue in either arm, and the failure captures
+show identical node and edge counts. What changed is anti-aliasing fringe on
+differently-positioned nodes, which a force-directed layout re-seeds every run.
+
+Stated against the conclusion: excluding the two largest values moves the rank
+comparison to p = 0.070, so the result is partly sensitive to them. The
+zero-residue comparison, 16 against 8, does not depend on them.
+
+The failure rate roughly quadruples because `111-graph-palette` derives its
+tolerance from a single frame sampled before the render settles, and uses it as an
+upper bound with no margin. When that sample reads 0 the assertion becomes an
+absolute zero, which the check's own design comment forbids. A shift from usually
+zero fringe pixels to usually two is therefore enough to turn it red. That check
+defect is tracked separately and is not a property of this change.
+
+### Not established
+
+Whether additional residual fringe after a palette change indicates that some
+element is not fully repainted. Pixel counts cannot answer it, and no observation
+here distinguishes an incomplete repaint from layout-dependent anti-aliasing.
