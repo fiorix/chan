@@ -21,6 +21,8 @@ const TAG = "#palette-smoke";
 const LENS_TITLE = `tag=${TAG}`;
 const CUSTOM_CONTACT = "#00ff00";
 const CUSTOM_DOC = "#ff00ff";
+const BASELINE_SAMPLES = 5;
+const STALE_CONTACT_FRACTION = 0.05;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -147,6 +149,20 @@ export default {
         await sleep(300);
       }
     };
+    const sampleHueBaseline = async (hex, label) => {
+      const samples = [];
+      for (const deadline = Date.now() + 20_000; ; ) {
+        const count = await canvasHueCount(hex);
+        if (count >= 0) samples.push(count);
+        if (samples.length === BASELINE_SAMPLES) {
+          return { pixels: Math.max(...samples), samples };
+        }
+        if (Date.now() > deadline) {
+          throw new Error(`${label} (readable samples ${JSON.stringify(samples)})`);
+        }
+        await sleep(300);
+      }
+    };
     const inspectorChipColor = () =>
       page.evaluate(() => {
         const chip = [...document.querySelectorAll(".inspector .kind-chip")].find(
@@ -269,16 +285,16 @@ export default {
       // elsewhere in the render (focus rings, pulse frames) must not
       // vacate the check, so every canvas assertion is a DELTA against
       // the pre-override count, never an absolute zero.
-      const preContactPx = await pollHue(
+      const preContactBaseline = await sampleHueBaseline(
         CUSTOM_CONTACT,
-        (count) => count >= 0,
         "canvas unreadable before any override",
       );
-      const preDocPx = await pollHue(
+      const preDocBaseline = await sampleHueBaseline(
         CUSTOM_DOC,
-        (count) => count >= 0,
         "canvas unreadable before any override (doc hue)",
       );
+      const preContactPx = preContactBaseline.pixels;
+      const preDocPx = preDocBaseline.pixels;
 
       mark("baselines-1-done");
       // JSON tree: the pretty renderer colours keys with var(--g-doc).
@@ -437,9 +453,18 @@ export default {
           ),
         { timeout: 20_000, polling: 250 },
       );
+      // Exact-hue anti-aliasing fringe is small but nonzero after a repaint.
+      // Bound it against the full custom-hue signal measured above so a node
+      // that keeps the retired hue remains far beyond the accepted residue.
+      const staleContactPxLimit =
+        preContactPx +
+        Math.max(
+          20,
+          Math.ceil((contactPixels - preContactPx) * STALE_CONTACT_FRACTION),
+        );
       const stalePixels = await pollHue(
         CUSTOM_CONTACT,
-        (count) => count >= 0 && count <= preContactPx,
+        (count) => count >= 0 && count <= staleContactPxLimit,
         "canvas kept the stale hue after the malformed edit",
       );
       const docPixelsAfter = await pollHue(
@@ -451,12 +476,15 @@ export default {
       return {
         preContactPx,
         preDocPx,
+        preContactSamples: preContactBaseline.samples,
+        preDocSamples: preDocBaseline.samples,
         fileTreeContact: fileTreeContactColor,
         inspectorChip: chipBaseline,
         carousel: carouselBaseline,
         contactPixels,
         docPixels,
         dotColor,
+        staleContactPxLimit,
         stalePixelsAfterMalformedEdit: stalePixels,
         docPixelsAfterMalformedEdit: docPixelsAfter,
       };
