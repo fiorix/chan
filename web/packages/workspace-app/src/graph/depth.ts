@@ -50,6 +50,37 @@ export function relativeDepth(root: string, path: string): number {
   return cleanPath.slice(prefix.length).split("/").filter(Boolean).length;
 }
 
+/// A node carrying a workspace-relative path, structurally typed so both
+/// the wire nodes (`GraphViewNode`) and the panel's rendered nodes satisfy
+/// it. Media files are files here: "show me this directory" means its
+/// contents, not its markdown.
+type PathedNode = { kind: string; path?: string | null };
+
+/// The shallowest depth BELOW `root` at which a file sits, or 0 when the
+/// set holds none under that root.
+///
+/// A directory-scoped graph renders one level at a time (the expanded-set
+/// gate), so a directory whose immediate children are all directories opens
+/// with no file on screen even though its subtree is already in the
+/// payload. This is what "Graph from here" has to reach to answer the
+/// question it was asked: the first level that actually holds content.
+/// Paths outside `root` score 0 in `relativeDepth` and are skipped, so a
+/// workspace-wide node set can be passed as-is.
+export function shallowestFileDepth(
+  root: string,
+  nodes: readonly PathedNode[],
+): number {
+  let best = 0;
+  for (const node of nodes) {
+    if (node.kind !== "file" && node.kind !== "media") continue;
+    if (!node.path) continue;
+    const depth = relativeDepth(root, node.path);
+    if (depth < 1) continue;
+    if (best === 0 || depth < best) best = depth;
+  }
+  return best;
+}
+
 function maxDepthFromPaths(root: string, paths: readonly string[]): number {
   let max = 1;
   for (const path of paths) {

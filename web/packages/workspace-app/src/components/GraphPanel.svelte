@@ -84,7 +84,12 @@
     type FileKind,
   } from "../state/kinds";
   import { chordFor } from "../state/shortcuts";
-  import { FS_GRAPH_DEPTH_MAX, graphDepthCap, relativeDepth } from "../graph/depth";
+  import {
+    FS_GRAPH_DEPTH_MAX,
+    graphDepthCap,
+    relativeDepth,
+    shallowestFileDepth,
+  } from "../graph/depth";
   import { pullMetaNeighbours } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
 
@@ -459,6 +464,44 @@
       if (rel >= 1 && rel < depth) next[dir] = true;
     }
     graphState.expanded = next;
+  }
+
+  /// A directory-scoped graph opens deep enough to show that directory's
+  /// files. "Graph from here" on a directory spawns its tab at depth 1 and
+  /// the expanded-set gate renders one level, so a directory whose immediate
+  /// children are all directories comes up as folder bubbles with no file on
+  /// screen -- while the payload that tab already fetched carries the files
+  /// and the inspector beside it counts them. Raising the depth to the
+  /// shallowest level that holds one re-enters the reseed above on the next
+  /// load, which expands the levels in between; the slider then reads the
+  /// depth actually on screen.
+  ///
+  /// Three guards keep this to the case it is for. Only a `dir:` scope: a
+  /// workspace graph is the whole tree's overview and opens at its root by
+  /// design. Only while nothing BELOW the scope root is expanded, so a
+  /// restored tab's own expand / collapse state stays the user's and a
+  /// re-scope (which reseeds the root and nothing under it) still qualifies.
+  /// And only when the current depth holds no file at all: a directory with
+  /// files among its immediate children has already answered the question,
+  /// and keeping its tight one-level view is the point of opening at depth 1.
+  ///
+  /// The caller fires this on arrival at a scope, never on a depth change,
+  /// so a user who drags the slider back down to a level with no files keeps
+  /// the depth they asked for.
+  function revealDirScopeFiles(): void {
+    if (filesystemMode) return;
+    if (currentScope?.kind !== "dir") return;
+    const root = currentScope.path;
+    const expanded = graphState.expanded ?? {};
+    const below = `${root}/`;
+    if (
+      Object.keys(expanded).some((dir) => expanded[dir] && dir.startsWith(below))
+    ) {
+      return;
+    }
+    const reveal = shallowestFileDepth(root, nodes);
+    if (reveal <= graphState.depth) return;
+    graphState.depth = Math.min(reveal, FS_GRAPH_DEPTH_MAX);
   }
 
   /// Fetch children for any expanded directory whose degree isn't loaded
@@ -2249,17 +2292,18 @@
         (currentScope.kind === "workspace" || currentScope.kind === "dir")
       ) {
         const scopeKey = graphState.scopeId;
-        if (appliedDepth === null) {
-          appliedDepth = graphState.depth;
-          appliedScopeKey = scopeKey;
-        } else if (
-          graphState.depth !== appliedDepth ||
-          scopeKey !== appliedScopeKey
-        ) {
+        const firstLoad = appliedDepth === null;
+        const scopeChanged = firstLoad || scopeKey !== appliedScopeKey;
+        if (!firstLoad && (graphState.depth !== appliedDepth || scopeChanged)) {
           seedExpandedFromSelected(graphState.depth);
-          appliedDepth = graphState.depth;
-          appliedScopeKey = scopeKey;
         }
+        appliedDepth = graphState.depth;
+        appliedScopeKey = scopeKey;
+        // Arrival at a directory scope, not a depth move: open deep enough
+        // to show the directory's files. Raising the depth re-enters this
+        // block through a reload, where the branch above expands the levels
+        // it opened.
+        if (scopeChanged) revealDirScopeFiles();
       }
     } catch (e) {
       if (seq === graphLoadSeq && (e as DOMException).name !== "AbortError") {
