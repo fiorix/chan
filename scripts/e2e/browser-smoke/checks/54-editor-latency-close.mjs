@@ -9,45 +9,20 @@
 
 const DOC = "latency-doc.md";
 
-async function openFile(page, filename) {
+async function openFile(ctx, page, windowId, filename) {
   await page.bringToFront();
-  if (!(await page.$(".file-tree, [role=tree]"))) {
-    await page.evaluate(() => {
-      window.dispatchEvent(
-        new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-      );
-    });
-    await page.waitForSelector('[role="treeitem"]', { timeout: 30_000 });
-  }
-  const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    if (!row) return false;
-    row.click();
-    return true;
-  }, filename);
-  if (!clicked) throw new Error(`tree row not found: ${filename}`);
-  await page.waitForFunction(
-    (name) =>
-      [...document.querySelectorAll(".pane .browser .inspector .info")].some((info) => {
-        const title = info.querySelector(".title")?.textContent?.trim();
-        const action = info.querySelector(".actions-section .pill-main")?.textContent?.trim();
-        return title === name && action === "Open";
-      }),
-    { timeout: 30_000, polling: 200 },
-    filename,
-  );
-  const opened = await page.evaluate((name) => {
-    const info = [...document.querySelectorAll(".pane .browser .inspector .info")].find(
-      (candidate) => candidate.querySelector(".title")?.textContent?.trim() === name,
-    );
-    const action = info?.querySelector(".actions-section .pill-main");
-    if (!(action instanceof HTMLElement) || action.textContent?.trim() !== "Open") return false;
-    action.click();
-    return true;
-  }, filename);
-  if (!opened) throw new Error(`Open action vanished for ${filename}`);
+  const socket = ctx.controlSocket;
+  if (!socket) throw new Error("control socket not found for the server pid");
+  await ctx.waitWindowLive(windowId, 60_000);
+  await ctx.exec(ctx.chanBin, ["shell", "open", filename], {
+    cwd: ctx.workspaceDir,
+    env: {
+      ...process.env,
+      CHAN_CONTROL_SOCKET: socket,
+      CHAN_WINDOW_ID: windowId,
+    },
+    timeout: 30_000,
+  });
   await page.waitForFunction(
     (name) =>
       [...document.querySelectorAll(".pane")].some((pane) => {
@@ -80,6 +55,60 @@ async function openFile(page, filename) {
   }
   await editor.click();
   await editor.dispose();
+  await page.waitForFunction(
+    (name) => {
+      const pane = [...document.querySelectorAll(".pane")].find((candidate) =>
+        [...candidate.querySelectorAll(".tab.active")].some((tab) =>
+          tab.textContent?.includes(name),
+        ),
+      );
+      const content = pane?.querySelector(".editor-tab.active .cm-content");
+      return content !== null && content !== undefined && content.contains(document.activeElement);
+    },
+    { timeout: 5_000, polling: 100 },
+    filename,
+  );
+  await page.keyboard.down("Control");
+  await page.keyboard.press("Home");
+  await page.keyboard.up("Control");
+  // The initial document-session attach can replace the editor state and move
+  // the selection. Start the scenario only after the caret remains at offset 0.
+  let stableCaretReads = 0;
+  for (const deadline = Date.now() + 10_000; ; ) {
+    const caretOffset = await page.evaluate((name) => {
+      const pane = [...document.querySelectorAll(".pane")].find((candidate) =>
+        [...candidate.querySelectorAll(".tab.active")].some((tab) =>
+          tab.textContent?.includes(name),
+        ),
+      );
+      const content = pane?.querySelector(".editor-tab.active .cm-content");
+      const selection = getSelection();
+      if (
+        !content ||
+        !selection?.anchorNode ||
+        !content.contains(selection.anchorNode)
+      ) {
+        return -1;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(content);
+      range.setEnd(selection.anchorNode, selection.anchorOffset);
+      return range.toString().length;
+    }, filename);
+    if (caretOffset === 0) {
+      stableCaretReads += 1;
+      if (stableCaretReads === 6) break;
+    } else {
+      stableCaretReads = 0;
+      await page.keyboard.down("Control");
+      await page.keyboard.press("Home");
+      await page.keyboard.up("Control");
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`editor caret did not settle at document start (offset ${caretOffset})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 }
 
 export default {
@@ -93,19 +122,31 @@ export default {
     const proxy = await ctx.latencyProxy(100);
     const page = await browser.newPage();
     try {
-      await page.goto(`${proxy.url}&w=smoke-latency`, {
+      const windowId = "smoke-latency";
+      const windowUrl = new URL(proxy.url);
+      windowUrl.searchParams.set("w", windowId);
+      await page.goto(windowUrl.toString(), {
         waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
       await page.waitForSelector(".pane", { timeout: 60_000 });
-      await openFile(page, DOC);
+      await openFile(ctx, page, windowId, DOC);
 
       proxy.setLatency(1500);
       const marker = `SMOKE-LAT-${Date.now()}`;
-      await page.keyboard.down("Control");
-      await page.keyboard.press("Home");
-      await page.keyboard.up("Control");
       await page.keyboard.type(`${marker} `, { delay: 15 });
+      await page.waitForFunction(
+        ({ name, marker }) =>
+          [...document.querySelectorAll(".pane")].some((pane) => {
+            const activeTab = [...pane.querySelectorAll(".tab.active")].find((tab) =>
+              tab.textContent?.includes(name),
+            );
+            const content = pane.querySelector(".editor-tab.active .cm-content");
+            return activeTab !== undefined && content?.textContent?.includes(marker);
+          }),
+        { timeout: 5_000, polling: 100 },
+        { name: DOC, marker },
+      );
       await page.evaluate(() => {
         window.dispatchEvent(
           new CustomEvent("chan:command", { detail: { name: "app.tab.close" } }),
