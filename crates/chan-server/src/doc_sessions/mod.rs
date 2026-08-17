@@ -3645,6 +3645,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_edit_after_intermediate_flush_enters_retained_conflict() {
+        let baseline = "MAT-C-V1-123\n";
+        let flushed_prefix = "MAT-C-TYPED-12";
+        let intermediate = format!("{flushed_prefix}{baseline}");
+        let local = "MAT-C-TYPED-123 MAT-C-V1-123\n";
+        let disk = "MAT-C-V2-123\n";
+        let baseline_len = changes::utf16_len(baseline);
+        let prefix_len = changes::utf16_len(flushed_prefix);
+        let fx = fixture(&[("a.md", baseline)]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+
+        // Capture a flush after only a prefix of the browser's typed
+        // input, then land the rest while that write is in flight.
+        ha.push(
+            0,
+            vec![update("c1", json!([[0, flushed_prefix], baseline_len]))],
+        )
+        .unwrap();
+        let job = ha.session().begin_flush().expect("dirty session");
+        assert_eq!(job.text, intermediate);
+        ha.push(
+            1,
+            vec![update("c1", json!([prefix_len, [0, "3 "], baseline_len]))],
+        )
+        .unwrap();
+        fx.workspace
+            .write_text_if_unchanged(
+                "a.md",
+                job.expected_mtime_ns,
+                job.expected_disk.as_deref(),
+                &job.text,
+            )
+            .unwrap();
+        let stat = fx.workspace.stat("a.md").unwrap();
+        ha.session().finish_flush(job.epoch, &stat, &job.text);
+
+        {
+            let st = ha.session().lock_state();
+            assert_eq!(st.baseline.content, intermediate);
+            assert_eq!(st.baseline.authority_version, job.epoch);
+            assert_eq!(st.text, local);
+            assert!(st.session_state.is_dirty(), "the newer input stays dirty");
+        }
+        drain(&mut rxa);
+
+        fx.external_write("a.md", disk);
+        reconcile_session(ha.session(), &fx.workspace).await;
+        assert!(matches!(
+            ha.session().lock_state().session_state,
+            SessionState::Observing {
+                dirty_since: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(drain(&mut rxa).len(), 0, "first observation only parks");
+
+        // Relative to the intermediate durable ancestor, the disk side
+        // deletes the typed prefix while the authority extends that
+        // prefix. This is a real overlap, unlike the existing V1-based
+        // control, so retaining all three sides is the correct result.
+        backdate_pending_fold(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        {
+            let st = ha.session().lock_state();
+            let SessionState::Conflicted(conflict) = &st.session_state else {
+                panic!("the corroborated overlap must enter Conflicted");
+            };
+            assert_eq!(st.baseline.content, intermediate);
+            assert_eq!(st.text, local);
+            assert_eq!(conflict.baseline_version, content_hash(&intermediate));
+            assert_eq!(conflict.disk_version, content_hash(disk));
+            assert_eq!(conflict.authority_version, st.version);
+            assert_eq!(conflict.disk_content, disk);
+        }
+        let frames = drain(&mut rxa);
+        assert_eq!(frames.len(), 1, "the conflict transition fans once");
+        assert_eq!(frames[0]["type"], "conflict");
+        assert_eq!(frames[0]["active"], true);
+        assert!(
+            ha.session().begin_flush().is_none(),
+            "the retained conflict pauses automatic flushes"
+        );
+    }
+
+    #[tokio::test]
     async fn detach_forces_flush_grace_reaps_and_reattach_within_grace_is_incremental() {
         let fx = fixture(&[("a.md", "")]);
         let (ha, _rxa) = attach(&fx, "a.md", "w1", None).await;
