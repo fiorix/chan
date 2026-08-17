@@ -21,3 +21,9 @@ The desktop side is the About window's fixed height and the comment that justifi
 ## Acceptance
 
 On both surfaces, the space below the last row matches the space above the first row, with the build id line present and wrapped as it wraps today. On the desktop window that is checked at its shipped fixed size with no scrollbar; on the Dashboard slide it is checked with the slide scrolled to its bottom.
+
+## Implementation and validation
+
+Commit `3a315f8a` separates the desktop version and build id onto fixed lines, raises the non-resizable window to 420x460, centers the card's spare vertical space safely, and gives the Dashboard About slide a 2rem bottom pad matching its top gap. Check `114-about-slide-margin` now fails closed unless it finds a viewport where the slide scrolls. It passed at height 460 with `above=32`, `below=32`, and `scrolls=true`, so the browser-driven half is complete.
+
+The item remains open. The fixed-size desktop window still needs observation in native WebKitGTK and WKWebView builds with the build id present, confirming equal visible margins and no scrollbar. Chromium rendering of the same DOM does not substitute for those native engines.

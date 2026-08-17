@@ -58,3 +58,15 @@ Its most dangerous property is that it goes quiet. Anything that closes it needs
 ## Not established, deliberately
 
 Whether it is a regression or long-standing; whether it is a data-loss path under any sequence; and any diagnosis of the mechanism. Nobody has read the reconciler. All three were left open rather than guessed, and the measurements above are the entire evidence.
+
+## Resolution
+
+Resolved 2026-08-17 as not a defect. The non-converging arm is a retained conflict, a stable terminal state rather than a reconcile that never ran. Once the session enters `SessionState::Conflicted`, automatic flushing pauses. A later `reconcile_conflicted_locked` with `hash == retained` refreshes the retained disk token and returns, leaving the authority and durable baseline frozen until the user chooses a side. The read API therefore serves the old authority indefinitely rather than serving the external edit late.
+
+The two modes differ because the durable ancestor can change while the browser is typing. Without an intermediate flush, the baseline remains the original V1: the local prefix insertion and the external V1-to-V2 edit do not overlap, so the merge succeeds. A partial flush can instead commit a typed prefix as the durable baseline while later keys leave a newer dirty authority. Relative to that intermediate baseline, the external side deletes text that the local side extends, so the edits genuinely overlap and retaining all three sides is correct.
+
+Commit `d8cdab63` adds `external_edit_after_intermediate_flush_enters_retained_conflict`, which constructs that transition deterministically and passed in 0.02s. The unchanged control `same_line_nonoverlapping_external_edit_merges_without_conflict` proves that the same endpoint triplet merges when the durable baseline has not advanced. For the conflicting inputs, the banner appears before any save and offers both `Reload from disk` and `Keep mine`. That preserves both sides and satisfies the visible-decision precondition under which the behavior was accepted as not data loss.
+
+Whether the historical red runs had the intermediate-baseline input shape cannot be established. The preserved archive contains no durable baseline, authority version, or flush epoch, and was searched for those records rather than assumed not to have them. The preserved banner screenshot does establish that the non-converging arm was conflicted.
+
+Two test risks remain. `56-external-edit-matrix` fails solely when `editorHasV2` is false and never queries the banner, so it can go red on a correct visible retained conflict. The suite also never presses Ctrl+S while that conflict is pending or asserts the `Keep mine` resolution, leaving the silent-no-op-save half of the original acceptance precondition unguarded.
