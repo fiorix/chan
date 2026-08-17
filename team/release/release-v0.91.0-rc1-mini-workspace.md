@@ -2,7 +2,7 @@
 
 ## Scope
 
-A standalone terminal window becomes a full file surface over the server machine's disk, with no workspace behind it. Item: [a-standalone-window-cannot-reach-the-files-it-is-about](../roadmap/v0.91.0/a-standalone-window-cannot-reach-the-files-it-is-about.md).
+A standalone terminal window becomes a full file surface over the server machine's disk, with no workspace behind it. Item: [a-standalone-window-cannot-reach-the-files-it-is-about](../roadmap/done/a-standalone-window-cannot-reach-the-files-it-is-about.md).
 
 1. **`RootedFs` core, extracted.** `chan-workspace` grows a crate-private capability core carved out of `Workspace`, which now delegates to it rather than keeping a second copy of the guards.
 2. **`MiniWorkspace`.** A public, metadata-free facade over that core, rooted at `/` with canonical `$HOME` as a protected start directory: no registry row, no lock, no index, no graph. Symlinks inert, deletes limited to regular files and empty directories, no-clobber moves and copies with a whole-tree preflight and a temp-sibling commit.

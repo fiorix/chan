@@ -2,7 +2,7 @@
 
 ## Scope
 
-A terminal can open a named shell the user chose, instead of the one the server picked. Item: [a-terminal-opens-whatever-shell-the-server-picked](../roadmap/v0.91.0/a-terminal-opens-whatever-shell-the-server-picked.md).
+A terminal can open a named shell the user chose, instead of the one the server picked. Item: [a-terminal-opens-whatever-shell-the-server-picked](../roadmap/done/a-terminal-opens-whatever-shell-the-server-picked.md).
 
 1. **Discovery.** The server enumerates the machine's shells as selectable profiles. On Windows: PowerShell 7, Windows PowerShell, cmd, Git BASH across four resolution tiers, and every WSL distribution read from the Lxss registry. On unix: `$SHELL` plus `/etc/shells`. Cached in a `OnceLock` and primed at boot.
 2. **User declarations.** `[[terminal.profiles]]` in `server.toml` layers over discovery: override a discovered entry's name or arguments, hide one, or add a shell discovery cannot find. `terminal.default_profile` names which one new terminals get. Authored by hand; not surfaced in Settings, and the config reference says so.
