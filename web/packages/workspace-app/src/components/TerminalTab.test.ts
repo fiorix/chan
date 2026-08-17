@@ -128,6 +128,17 @@ const immediateAnimationFrame = ((cb: FrameRequestCallback) => {
 }) as any;
 globalThis.requestAnimationFrame = immediateAnimationFrame;
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
+// jsdom does not implement the CSS Font Loading API. Chan's supported browser
+// runtimes do, and TerminalTab now waits for the bundled terminal face before
+// constructing either canvas renderer. Model that runtime contract here; the
+// loader's unavailable/rejected branches are covered directly in font.test.ts.
+Object.defineProperty(document, "fonts", {
+  configurable: true,
+  value: {
+    load: vi.fn(async () => [{}]),
+    ready: Promise.resolve(),
+  },
+});
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
@@ -183,6 +194,7 @@ async function renderTerminal(
   mounted.push(component);
   await tick();
   await tick();
+  await vi.waitFor(() => expect(sockets).toHaveLength(1));
   return { component, target };
 }
 
@@ -250,6 +262,7 @@ describe("TerminalTab activity frames", () => {
     mounted.push(component);
     await tick();
     await tick();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
     const socket = openSocket();
     await tick();
     const connectionCount = sockets.length;

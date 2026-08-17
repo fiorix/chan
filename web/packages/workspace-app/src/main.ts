@@ -2,9 +2,9 @@
 
 import { mount } from "svelte";
 import App from "./App.svelte";
-// Source Code Pro Regular @font-face declaration for the in-app
-// terminal. Imported at app boot rather than at first terminal spawn
-// so the face is in flight before xterm.js needs it.
+// Source Code Pro Regular @font-face declaration for the in-app terminal.
+// Importing it here registers the face before terminal/font.ts explicitly
+// loads it and allows either canvas renderer to start.
 import "./fonts.css";
 // Editor themes. base.css declares every `--chan-editor-*` variable
 // with a neutral default; per-theme files override under

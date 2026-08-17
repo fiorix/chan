@@ -152,8 +152,8 @@ export type TerminalPreferences = {
   default_term?: string;
   /// Terminal-font preference. Optional on the wire so older
   /// servers (no field) deserialize as the default `os-default`
-  /// (per-OS native mono). `source-code-pro` opts into Source
-  /// Code Pro; the SPA triggers the download endpoint when needed.
+  /// (per-OS native mono). `source-code-pro` opts into the bundled Source
+  /// Code Pro face, which the SPA loads before constructing the renderer.
   font?: TerminalFontChoice;
   /// Terminal renderer font size in pixels. Captured when a renderer is
   /// constructed; mounted renderers keep their current value. Optional for

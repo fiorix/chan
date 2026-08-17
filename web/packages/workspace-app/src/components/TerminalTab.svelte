@@ -42,7 +42,6 @@
     chordFor,
     currentOS,
     shouldEscapeTerminal,
-    type OS,
   } from "../state/shortcuts";
   import {
     allTerminalTabs,
@@ -158,6 +157,7 @@
     shouldUseWebglRenderer,
     webglRendererOverride,
   } from "../terminal/renderer";
+  import { resolveReadyTerminalFont } from "../terminal/font";
   import {
     createTrailingFitScheduler,
     proposeGhosttyDimensions,
@@ -871,6 +871,25 @@
     secretMaskingEnabled = terminalPrefs?.secret_masking ?? false;
     const secretMaskSuffixes =
       terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
+    const fontPref = terminalPrefs?.font ?? "os-default";
+    // Canvas terminal renderers cache glyph metrics synchronously. Resolve the
+    // selected chain before either backend exists so the bundled face cannot
+    // swap in halfway through atlas warmup. A failed load returns a system-only
+    // chain, which keeps the live renderer stable if the face appears later.
+    const readyFont = await resolveReadyTerminalFont(
+      currentOS(),
+      fontPref,
+      rendererFontSize,
+      typeof document === "undefined" ? undefined : document.fonts,
+    );
+    if (!host || term) return;
+    const fontFamily = readyFont.fontFamily;
+    if (readyFont.status === "fallback") {
+      console.warn(
+        "[chan] Source Code Pro unavailable; using the system terminal font:",
+        readyFont.error,
+      );
+    }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
     // terminals). Absent field (older server) means xterm.js. The
@@ -900,37 +919,6 @@
     // row's descenders. Cursor is a non-blinking block, matching
     // iTerm's defaults.
     //
-    // Font chain, per OS. A single cross-platform chain cannot express
-    // this: macOS and Windows each have a native mono the user already
-    // reads code in, and naming those faces ahead of everything else is
-    // the whole point of `os-default`. Linux has no such face. Whatever
-    // fontconfig installed first wins there, in practice DejaVu Sans
-    // Mono, which is wider and squarer than SF Mono, so the same
-    // session renders materially differently from the macOS one. The
-    // bundled Source Code Pro leads the Linux arm instead, which makes
-    // it deterministic across distros and closer in colour to SF Mono.
-    // `ui-monospace` must sit BEHIND the bundled face there: ahead of
-    // it, it resolves to the fontconfig monospace and the bundled face
-    // never wins.
-    const FONT_CHAIN_OS_DEFAULT: Record<OS, string> = {
-      mac: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace',
-      windows:
-        '"Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace',
-      linux:
-        '"Source Code Pro", ui-monospace, "DejaVu Sans Mono", "Liberation Mono", monospace',
-    };
-    // Opting into Source Code Pro promotes the bundled face to the head
-    // of the same per-OS chain; the tail stays as the fallback if the
-    // woff2 has not decoded yet. Spawn-time-only, like the scrollback
-    // contract: existing terminals keep their font until session
-    // restart.
-    const SOURCE_CODE_PRO = '"Source Code Pro"';
-    const osChain = FONT_CHAIN_OS_DEFAULT[currentOS()];
-    const fontPref = currentPreferences()?.terminal?.font ?? "os-default";
-    const fontFamily =
-      fontPref === "source-code-pro" && !osChain.startsWith(SOURCE_CODE_PRO)
-        ? `${SOURCE_CODE_PRO}, ${osChain}`
-        : osChain;
     // Reset the negotiated keyboard-protocol state ONLY on a fresh spawn
     // (no surviving session to reattach to). Reattaching to a long-lived
     // PTY keeps the protocol the program already announced, since a

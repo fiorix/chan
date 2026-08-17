@@ -10,10 +10,10 @@
  * where the launcher root fallback answers with index.html and the
  * face fails to decode.
  *
- * The face is loaded with `font-display: swap` so the terminal stays
- * usable while the woff2 is in flight (the fallback chain in
- * TerminalTab.svelte's renderer config matches the same family
- * preference, so the swap is visually subtle).
+ * The face keeps `font-display: swap` for ordinary CSS consumers. Terminal
+ * renderers never observe the swap: terminal/font.ts explicitly awaits the
+ * face before either canvas renderer starts and pins a system-only fallback
+ * chain if loading fails.
  *
  * License: SIL Open Font License 1.1. The OFL notice ships beside the
  * font in the bundle (`<prefix>/static/fonts/OFL.txt`, copied by

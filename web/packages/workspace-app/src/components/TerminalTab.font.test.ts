@@ -11,46 +11,19 @@ const fonts = readFileSync("src/fonts.css", "utf8");
 const viteConfig = readFileSync("vite.config.ts", "utf8");
 
 // TerminalTab ships Source Code Pro Regular and defaults renderers to a
-// non-blinking block cursor at 14 px. The os-default chain is per-OS:
-// macOS and Windows lead with their native mono, Linux leads with the
-// bundled face because it has no single native mono to lead with.
+// non-blinking block cursor at 14 px. terminal/font.test.ts owns the complete
+// OS/preference chain matrix; this file pins the component integration.
 
 describe("TerminalTab font + cursor parity", () => {
-  test("os-default chain leads with native mono on macOS and Windows", () => {
-    expect(tab).toMatch(/mac:\s*'"SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace'/);
-    expect(tab).toMatch(/windows:\s*\n?\s*'"Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace'/);
-  });
-
-  test("os-default chain leads with the bundled face on Linux", () => {
-    // The parity fix. Without this, Linux lands on whatever fontconfig
-    // installed first (DejaVu Sans Mono on most distros) and the same
-    // session looks nothing like the macOS one.
-    expect(tab).toMatch(/linux:\s*\n?\s*'"Source Code Pro", ui-monospace,/);
-  });
-
-  test("ui-monospace never precedes the bundled face on Linux", () => {
-    // Ahead of it, `ui-monospace` resolves to the fontconfig monospace
-    // and Source Code Pro can never win, which silently undoes the fix.
-    const linuxChain = tab.match(/linux:\s*\n?\s*'([^']*)'/)?.[1] ?? "";
-    expect(linuxChain).not.toBe("");
-    expect(linuxChain.indexOf('"Source Code Pro"')).toBeLessThan(
-      linuxChain.indexOf("ui-monospace"),
-    );
-  });
-
-  test("opting into Source Code Pro promotes it without duplicating it", () => {
+  test("awaits font readiness before constructing or opening either renderer", () => {
     expect(tab).toMatch(
-      /fontPref === "source-code-pro" && !osChain\.startsWith\(SOURCE_CODE_PRO\)/,
+      /import \{[^}]*resolveReadyTerminalFont[^}]*\} from "\.\.\/terminal\/font"/,
     );
-  });
-
-  test("fontFamily reads the persisted preference at spawn time", () => {
-    // The preference is read once at spawn; existing terminals keep
-    // their font until session restart.
-    expect(tab).toMatch(
-      /currentPreferences\(\)\?\.terminal\?\.font\s*\?\?\s*"os-default"/,
-    );
-    expect(tab).toMatch(/const osChain = FONT_CHAIN_OS_DEFAULT\[currentOS\(\)\]/);
+    const readyAt = tab.indexOf("await resolveReadyTerminalFont(");
+    expect(readyAt).toBeGreaterThan(-1);
+    expect(readyAt).toBeLessThan(tab.indexOf("new ghosttyKit.Terminal({"));
+    expect(readyAt).toBeLessThan(tab.indexOf("term = new Terminal({"));
+    expect(readyAt).toBeLessThan(tab.indexOf("term.open(host)"));
   });
 
   test("fontSize is captured once for both backends and cell measurement", () => {
