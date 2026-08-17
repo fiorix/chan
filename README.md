@@ -1,6 +1,6 @@
 # Chan
 
-This is the source code of Chan, the modern engineer's IDE. Download binaries from [chan.app](https://chan.app) or build locally using the Makefile here.
+This is the source code of Chan, an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager. Download binaries from [chan.app](https://chan.app) or build locally using the Makefile here.
 
 Contributors and agents: start at [.agents/README.md](.agents/README.md); the practical guide is [CONTRIBUTING.md](CONTRIBUTING.md).
 

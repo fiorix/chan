@@ -13,8 +13,8 @@ Package: chan
 Architecture: amd64 arm64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Recommends: systemd
-Description: AI-native IDE for the modern engineer
- chan is an AI-native IDE for the modern engineer: a CLI plus an HTTP
- server that serves a hybrid editor, terminal, file browser, and graph
- over a folder on disk. Cross-file [[wiki-link]] autocomplete, BM25
- content search, and an MCP server for agents included.
+Description: Headless terminal multiplexer and workspace manager
+ chan is an IDE in a single binary: a terminal emulator and multiplexer
+ plus a workspace manager for directories on disk. It provides search,
+ terminals, a text editor, file browser, graph, and dashboard as tiling
+ tabs and panes.

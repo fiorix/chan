@@ -1,6 +1,6 @@
 # chan-workspace
 
-Sandboxed filesystem, full-text search, and link-graph primitives for the chan markdown editor. One handle per workspace (a directory of notes); reads and writes go through a strict path sandbox, every write is atomic, and a tantivy index plus a sqlite link graph sit alongside the file tree without writing anything inside it.
+Sandboxed filesystem, full-text search, link-graph, and report primitives for chan. A registered workspace can be any directory; its reads and writes go through a strict path sandbox, every write is atomic, and a tantivy index plus a sqlite link graph sit alongside the file tree without writing anything inside it. The same filesystem-capability core also serves standalone Files windows without registering a workspace or starting its metadata services.
 
 ## Add to your project
 
@@ -21,6 +21,7 @@ Hybrid (BM25 + dense) search is on by default via the `embeddings` feature. Disa
     - Graph: `graph()` returns a `GraphView` with `neighbors`, `backlinks`, `tags`, `files_with_tag`, `replace_file`.
     - Watch: `watch(Arc<dyn WatchCallback>)` returns a `WatchHandle`; drop to stop.
     - Blob storage: `put_session` and friends for opaque host JSON (window/session state).
+  - `MiniWorkspace`: metadata-free filesystem facade for the standalone Files surface. It registers nothing, takes no writer lock, and starts no index or graph.
   - `ChanError`: one umbrella enum, primitive payloads, FFI-safe.
 
 All public types are owned (no lifetimes), `Send + Sync`, and shaped for a future uniffi binding to Swift / Kotlin shells. No public `async fn`; async runs internal to the crate where it exists at all.

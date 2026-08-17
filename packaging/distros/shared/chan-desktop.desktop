@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Chan
-Comment=AI-native IDE for the modern engineer
+Comment=Desktop terminal multiplexer and workspace manager
 Exec=chan-desktop %U
 Icon=chan-desktop
 Terminal=false

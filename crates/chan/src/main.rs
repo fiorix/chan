@@ -1,4 +1,4 @@
-// chan: an AI-native workspace for your Markdown notes and projects.
+// chan: a terminal emulator and multiplexer plus a workspace manager.
 //
 // The standalone `chan` binary. The whole CLI surface lives in the `chan`
 // library (`src/lib.rs`) so chan-desktop can dispatch `chan` in-process too;

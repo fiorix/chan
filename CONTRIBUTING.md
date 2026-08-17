@@ -1,6 +1,6 @@
 # Contributing to chan
 
-Thanks for the interest. chan is a small, single-binary AI-native IDE for the modern engineer: a CLI plus an HTTP server that serves an embedded hybrid editor, terminal, file browser, and graph over a folder on disk. Contributions are welcome.
+Thanks for the interest. chan is an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager for any directory on disk. Contributions are welcome.
 
 Agents and contributors: start at [`.agents/README.md`](.agents/README.md).
 

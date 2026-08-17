@@ -37,8 +37,8 @@
       "icons/icon.png"
     ],
     "category": "Productivity",
-    "shortDescription": "Chan Desktop markdown editor",
-    "longDescription": "Chan Desktop - markdown editor with local workspaces.",
+    "shortDescription": "Terminal multiplexer and workspace manager",
+    "longDescription": "Chan Desktop is an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager.",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "Developer ID Application: Alexandre Fiori (W73XV5CK3N)"

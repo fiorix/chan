@@ -5,7 +5,7 @@
 # not apply). The tarball asset name must match
 # web/packages/marketing/scripts/release-assets.mjs (cliAssets).
 class Chan < Formula
-  desc "Modern engineer's IDE (headless CLI)"
+  desc "Headless terminal multiplexer and workspace manager"
   homepage "https://chan.app/"
   # No version stanza: brew scans it from the /v@PKGVER@/ URL path and
   # audit rejects an explicit duplicate.

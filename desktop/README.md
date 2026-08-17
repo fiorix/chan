@@ -1,14 +1,14 @@
 # chan-desktop
 
-Desktop edition of the [chan](https://chan.app) markdown editor.
+Desktop edition of [chan](https://chan.app), an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager.
 
 chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a window for managing workspaces, and a one-click "open workspace" flow without a separate per-workspace `chan open` process.
 
-The web editor itself is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or by explicit remote attachments.
+The workspace UI is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or by explicit remote attachments.
 
 ## Download
 
-Notarized macOS builds and Linux builds (`.AppImage`, `.deb`, `.rpm`) are published on https://chan.app. Windows builds are not published yet. End users should grab the build from there rather than building from source.
+Notarized macOS builds, signed Windows installers, and Linux builds (`.AppImage`, `.deb`, `.rpm`) are published on https://chan.app. End users should grab the build from there rather than building from source.
 
 ## Build and run
 

@@ -121,7 +121,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   meta = {
-    description = "Desktop edition of the Chan AI-native IDE";
+    description = "Desktop terminal multiplexer and workspace manager";
     homepage = "https://chan.app";
     license = lib.licenses.asl20;
     mainProgram = "chan-desktop";

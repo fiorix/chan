@@ -5,7 +5,7 @@
 //! no lifetimes on public types, owned strings only, all handle types are
 //! `Arc<Self>`-able.
 //!
-//! Two top-level handles:
+//! Three top-level handles:
 //!
 //!   Library: owns the per-machine registry (~/.chan/config.toml) of known
 //!   workspaces and resolves OS state/cache locations. Process-wide singleton
@@ -15,9 +15,12 @@
 //!   primitives (read/write/stat/list), search, graph, and watch. Holds a
 //!   per-workspace cross-process lock for the index writer.
 //!
+//!   MiniWorkspace: metadata-free filesystem facade for the standalone Files
+//!   surface. Registers nothing and starts no index or graph.
+//!
 //! What is intentionally NOT here:
 //!   - HTTP server, WebSocket transport, frontend bundle. Those live in
-//!     `chan` (the CLI + embedded editor).
+//!     `chan-server`.
 //!   - LLM/agent code, API key storage. App-level concern.
 //!   - Editor preferences (fonts, theme). App-level concern.
 

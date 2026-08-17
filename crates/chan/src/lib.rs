@@ -1,4 +1,4 @@
-// chan: an AI-native workspace for your Markdown notes and projects.
+// chan: a terminal emulator and multiplexer plus a workspace manager.
 //
 // This library holds the whole `chan` CLI surface so two binaries can
 // drive it: the standalone `chan` binary (`src/main.rs`, a thin shim
@@ -251,15 +251,16 @@ the focused tab's kind.
 "#;
 
 /// One line of `chan --help`. Kept separate from the Cargo description,
-/// which is package metadata and runs to 155 columns.
-const CHAN_ABOUT: &str = "An AI-native IDE: a CLI and a local server over a folder on disk";
+/// which is package metadata with its own downstream constraints.
+const CHAN_ABOUT: &str = "Terminal multiplexer and workspace manager";
 
 /// Orientation for anyone (or anything) meeting chan for the first time.
 /// This is the opening section of `chan dump-skill`, so it carries the one
 /// distinction everything else depends on: whether you are in a workspace
 /// window or a standalone terminal.
 const CHAN_LONG_ABOUT: &str = "\
-An AI-native IDE: a CLI and a local server over a folder on disk.
+An IDE in a single binary: a terminal emulator and multiplexer plus a
+workspace manager.
 
 `chan open PATH` registers a folder as a workspace and serves it. The
 workspace indexes its content for search, builds a graph from the links,

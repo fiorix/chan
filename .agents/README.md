@@ -4,7 +4,9 @@ The canonical home for agent and contributor standards in this repo. Read this f
 
 ## What This Project Is
 
-`chan` is an IDE for the modern engineer: a single binary that serves a hybrid workspace (editor, terminal, file browser, graph, dashboard as tiling tabs and panes) over a folder on disk. You drive projects in Markdown and put AI to work on them; agents run in embedded terminals and coordinate through `cs` (the chan-shell control client) and the in-process MCP server, and Team Work provisions whole agent teams into named tabs. The CLI manages the workspace registry and contents, search, the devserver, and self-upgrade.
+`chan` is an IDE in a single binary. It is a terminal emulator and multiplexer, usable locally or over a remote connection, together with a workspace manager that provides search, terminals, a text editor, file browser, graph, and dashboard as tiling tabs and panes. A workspace can be any directory and is commonly associated with a git repository; a window can also run without one, as terminals and a file surface over the machine's own filesystem.
+
+External agents run in embedded terminals and can connect through the in-process MCP server; they coordinate through `cs` (the chan-shell control client), and Team Work provisions agent teams into named tabs. The CLI manages the workspace registry and contents, search, the devserver, and self-upgrade.
 
 The server binds `127.0.0.1` by default behind a persisted bearer token; the opt-in tunnel publishes the devserver at its gateway tenant origin for sign-in and sharing. One devserver process owns its library's writes; sessions on it are multi-participant (a leader/follower roster with handover).
 

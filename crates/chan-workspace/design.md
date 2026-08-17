@@ -4,7 +4,7 @@ Canonical design reference for `chan-workspace`. Update in the same commit as an
 
 ## 1. Problem and scope
 
-`chan-workspace` is the local-first storage layer for a single-user markdown editor. It owns the per-machine registry of known workspaces, exposes a path-based sandboxed filesystem API rooted at each workspace, and wraps the per-workspace search index, link graph, and code/SLOC report. The same crate backs the `chan` CLI, chan-server, and the desktop app, and its API is shaped to survive a uniffi boundary for native iOS / Android shells.
+`chan-workspace` is the local-first filesystem, search, graph, and workspace-state core for chan. It owns the per-machine registry of known workspaces and the per-workspace search index, link graph, and code/SLOC report. Its `Workspace` facade provides sandboxed filesystem access rooted at a registered directory; its metadata-free `MiniWorkspace` facade provides the standalone Files surface without a registry row, writer lock, index, or graph. Both share the same crate-private filesystem-capability core. The crate backs the `chan` CLI, chan-server, and the desktop app, and its API is shaped to survive a uniffi boundary for native iOS / Android shells.
 
 In scope:
 

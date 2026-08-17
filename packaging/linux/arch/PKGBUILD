@@ -1,7 +1,7 @@
 pkgname=chan
 pkgver=${CHAN_PKG_VERSION:?}
 pkgrel=1
-pkgdesc='AI-native IDE with embedded web editor'
+pkgdesc='Headless terminal multiplexer and workspace manager'
 arch=("${CHAN_ARCH:?}")
 url='https://chan.app'
 license=('Apache-2.0')

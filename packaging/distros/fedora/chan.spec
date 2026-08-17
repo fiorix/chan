@@ -15,7 +15,7 @@
 Name:           chan
 Version:        %(echo %{upstream_version} | tr - '~')
 Release:        1%{?dist}
-Summary:        AI-native IDE for the modern engineer
+Summary:        Headless terminal multiplexer and workspace manager
 License:        Apache-2.0
 URL:            https://chan.app
 Source0:        chan-vendored-%{upstream_version}.tar.xz
@@ -36,10 +36,10 @@ BuildRequires:  systemd-rpm-macros
 Requires:       systemd
 
 %description
-chan is an AI-native IDE for the modern engineer: a CLI plus an HTTP
-server that serves a hybrid editor, terminal, file browser, and graph
-over a folder on disk. Cross-file [[wiki-link]] autocomplete, BM25
-content search, and an MCP server for agents included.
+chan is an IDE in a single binary: a terminal emulator and multiplexer
+plus a workspace manager for directories on disk. It provides search,
+terminals, a text editor, file browser, graph, and dashboard as tiling
+tabs and panes.
 
 %prep
 %autosetup -n chan-%{upstream_version}

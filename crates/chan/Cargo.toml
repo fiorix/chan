@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "chan: an AI-native IDE for the modern engineer; a CLI plus an HTTP server serving a hybrid editor, terminal, file browser, and graph over a folder on disk."
+description = "chan is an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager for directories on disk."
 publish = false
 
 [[bin]]
@@ -109,11 +109,10 @@ maintainer = "Alexandre Fiori <fiorix@gmail.com>"
 copyright = "2026 Alexandre Fiori"
 license-file = ["../../LICENSE", "0"]
 extended-description = """
-chan is an AI-native IDE for the modern engineer:
-a CLI plus an HTTP server that serves a hybrid editor, terminal, file
-browser, and graph over a folder on disk. Cross-file [[wiki-link]]
-autocomplete, BM25 content search, and an MCP server for agents
-included."""
+chan is an IDE in a single binary: a terminal emulator and multiplexer
+plus a workspace manager for directories on disk. It provides search,
+terminals, a text editor, file browser, graph, and dashboard as tiling
+tabs and panes."""
 section = "utility"
 priority = "optional"
 assets = [
@@ -124,7 +123,7 @@ assets = [
 
 [package.metadata.generate-rpm]
 license = "Apache-2.0"
-summary = "AI-native IDE for the modern engineer"
+summary = "Headless terminal multiplexer and workspace manager"
 # cargo-generate-rpm resolves asset `source` paths relative to
 # the package directory (`crates/chan/`), unlike cargo-deb which
 # is workspace-aware. The binary lives at the workspace target

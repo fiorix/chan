@@ -77,7 +77,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   meta = {
-    description = "Headless CLI and devserver for the Chan AI-native IDE";
+    description = "Headless terminal multiplexer and workspace manager";
     homepage = "https://chan.app";
     license = lib.licenses.asl20;
     mainProgram = "chan";
