@@ -37,12 +37,12 @@ sudo apt install ./chan-gateway-admin_*.deb
 | `CHAN_ADMIN_IDENTITY_URL` | `http://127.0.0.1:7000`  | identity-service   |
 | `CHAN_ADMIN_WORKSPACE_URL` | `http://127.0.0.1:7003` | devserver-control  |
 
-Each bearer is scoped to one service. `--token` is retained as a compatibility alias for `--operator-token`; it is not sent to profile or identity.
+Each bearer is scoped to one service. `--token` is retained as a compatibility alias for `--operator-token`; it is not sent to profile or identity. Every command requires the bearer of each service it touches; a missing or empty token fails closed before any request leaves the CLI.
 
 ## Commands
 
 ```text
-chan-gateway-admin user list   [--blocked|--active] [--email PAT] [--username U]
+chan-gateway-admin user list   [--blocked|--active] [--email PAT] [--username U] [--limit <n>] [--offset <n>]
 chan-gateway-admin user get    <ident>
 chan-gateway-admin user create --email <e> [--name <n>]
 chan-gateway-admin user update <ident> --name <n>
@@ -54,13 +54,14 @@ chan-gateway-admin user unblock <ident>
 chan-gateway-admin user audit  <ident> [--limit <n>]
 chan-gateway-admin user tokens <ident>
 
+chan-gateway-admin token create <email> [--scope <s>]... [--label <l>] [--expires-days <n>]
 chan-gateway-admin token list   <ident>
 chan-gateway-admin token revoke <token-uuid>
 chan-gateway-admin token audit  <token-uuid> [--limit <n>]
 
-chan-gateway-admin tunnel ps    [--user <ident>]
+chan-gateway-admin tunnel ps    [--user <username>]
 chan-gateway-admin tunnel kill  <user> <workspace>
-chan-gateway-admin tunnel watch [--user <ident>]
+chan-gateway-admin tunnel watch [--user <username>]
 
 chan-gateway-admin proxy ps
 chan-gateway-admin proxy watch
@@ -96,7 +97,11 @@ chan-gateway-admin fleet status
 chan-gateway-admin overview [--since <duration>]
 ```
 
-`<ident>` resolves in this order: a uuid (exact); an email substring (must match exactly one row); an exact username.
+`<ident>` resolves in this order: a uuid (exact); an email (exact, case-insensitive); a username (exact).
+
+`token create` is the only token command that talks to identity-service (`POST /admin/v1/tokens`); every other token command goes through profile-service. `--scope` defaults to `tunnel`; repeat it for several scopes. The minted secret prints exactly once and is never retrievable again.
+
+`flag create` defaults the flag to OFF when neither `--default-on` nor `--default-off` is given. `tunnel kill` forces one registration offline; the devserver peer is free to reconnect. `overview --since` takes an `s`, `m`, `h`, or `d` duration and defaults to `24h`.
 
 `policy suspend` preserves the stored limit. `policy resume` requires an existing policy. `fleet pause` requires `--drain` and always invokes the fleet-wide tenant-session and tunnel cuts.
 

@@ -6,7 +6,7 @@ The gateway services need one implementation of the contracts they share:
 
 - typed clients for profile-service and devserver-control;
 - Ed25519 entry credentials for the identity-to-proxy browser handoff;
-- controller admission-lease verification at identity boundaries;
+- the controller tunnel-row shape, including the signed admission lease that consumers verify at their own boundaries;
 - protected internal-transport validation;
 - username validation, throttling, static-file serving, and shutdown plumbing.
 
@@ -26,8 +26,10 @@ flowchart LR
   identity --> internal
   profile_service[profile-service] --> control
   identity --> static[static_files]
-  identity --> validators[validators and token_bucket]
-  proxy --> validators
+  identity --> validators[validators]
+  profile_service --> validators
+  identity --> bucket[token_bucket]
+  proxy --> bucket
 ```
 
 The important module contracts are:

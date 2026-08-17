@@ -110,26 +110,7 @@ Reconciliation loser kills and routine eviction kills are the same mechanism: on
 
 ## Admin tree
 
-All routes are Bearer-gated with constant-time comparison. Operator credentials may use the whole tree. Identity credentials can read owner rows and issue owner, exact, and fleet-wide tunnel/session mutations. Profile credentials can read owner rows plus redacted tunnel/proxy snapshots and can issue owner/exact tunnel kills plus exact/subject session revocation. The generic revocation handler checks the decoded variant, so a profile credential cannot select identity-only admin-id, owner, or all forms. Credentials are distinct across scopes and each scope accepts at most two rotation values.
-
-| Method | Path                                         | Behavior          |
-|--------|----------------------------------------------|-------------------|
-| GET    | `/admin/v1/tunnels`                          | aggregate tunnels |
-| GET    | `/admin/v1/owners/{owner_user_id}/tunnels`    | one owner's indexed rows |
-| GET    | `/admin/v1/proxies`                          | proxy directory   |
-| POST   | `/admin/v1/tunnels/{owner_user_id}/{devserver_id}/kill` | exact kill; 204 |
-| POST   | `/admin/v1/owners/{owner_user_id}/tunnels/kill` | owner-wide kill |
-| POST   | `/admin/v1/tunnels/kill-all`                 | fleet-wide tunnel drain |
-| POST   | `/admin/v1/sessions/revoke`                  | scoped revocation variants |
-| GET    | `/admin/v1/browser-sessions`                 | filtered tenant-session inventory |
-| POST   | `/admin/v1/browser-sessions/{id}/revoke`     | admin-id revocation |
-| POST   | `/admin/v1/browser-sessions/subjects/{id}/revoke` | subject revocation |
-| POST   | `/admin/v1/browser-sessions/owners/{id}/revoke` | owner revocation |
-| POST   | `/admin/v1/browser-sessions/revoke-all`      | fleet-wide session drain |
-| GET    | `/admin/v1/overview`                         | bounded fleet aggregates |
-| GET    | `/admin/v1/tunnels/watch`                    | SSE snapshots     |
-| GET    | `/admin/v1/proxies/watch`                    | SSE snapshots     |
-| GET    | `/admin/v1/browser-sessions/watch`           | SSE snapshots     |
+All routes are Bearer-gated with constant-time comparison. Operator credentials may use the whole tree. Identity credentials can read owner rows and issue owner, exact, and fleet-wide tunnel/session mutations. Profile credentials can read owner rows plus redacted tunnel/proxy snapshots and can issue owner/exact tunnel kills plus exact/subject session revocation. The generic revocation handler checks the decoded variant, so a profile credential cannot select identity-only admin-id, owner, or all forms. Credentials are distinct across scopes and each scope accepts at most two rotation values. The exact route catalog lives in the crate [`README.md`](README.md#routes); this section describes only the behavior behind it.
 
 The tunnel snapshot sorts by `(user, devserver_id)` and each row carries its owning `proxy_id` and `proxy_base_url`; the proxy directory carries each node's status, package version, boot id, and tunnel count. The per-user read returns `[]` for a well-formed user with nothing live rather than a 404, so callers do not special-case the steady state.
 

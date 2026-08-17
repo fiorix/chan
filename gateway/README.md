@@ -2,20 +2,20 @@
 
 The self-hostable server side of chan's tunnel: the identity, profile, devserver-control, and devserver-proxy services that sit behind `gw.{domain}` and `usr.{domain}`.
 
-A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`, turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
+A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.usr.{domain}/` (each workspace tenant mounted at `/{slug}-{8hex}/`), turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
 
 `chan devserver --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `usr.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
 
 ## What's here
 
-Seven crates; see [`CONTEXT.md`](CONTEXT.md) for the topology and request-flow diagram.
+Seven crates; see [`design.md`](design.md) for the system design and lifecycles, [`CONTEXT.md`](CONTEXT.md) for the vocabulary.
 
 - `profile`: internal HTTP API over Postgres. Users, OAuth identities, devserver grants, feature flags, durable user/fleet devserver policy, and auth audit.
 - `identity`: `gw.{domain}`. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, and composite account/fleet admin operations.
 - `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, signed-cap admission, aggregate tunnel and tenant-session inventory, and command routing.
 - `devserver-control-proto`: control protocol frames, validated ids/origins, and shared tunnel/proxy view types.
-- `devserver-proxy`: `{proxy}.usr.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
-- `admin`: operator CLI against profile's and devserver-control's admin trees.
+- `devserver-proxy`: `{proxy}.usr.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
+- `admin`: operator CLI against profile's, identity's, and devserver-control's admin trees.
 - `gateway-common`: shared library (HTTP clients, devserver-gate JWT, token bucket, static files, validators).
 
 Personal access tokens (PATs, `chan_pat_...`) are the only credential the chan CLI / chan-tunnel side uses; they carry the `tunnel` scope. Adding another OAuth provider is one new file under `crates/identity/src/providers/` plus wiring in `Config::from_env`. Microsoft and Apple are intentionally excluded (Microsoft because tenant admins can mint unverified-email accounts that defeat our email-as-link key; Apple because the OAuth setup is high-touch for the value at this scale).
@@ -32,7 +32,7 @@ identity's SPA (`@chan/profile`) and the shared chrome (`@chan/web-shared`) live
 
 ### Postgres
 
-One database covers everything; `profile` owns users / identities / workspaces, `identity` owns the `tower_sessions` table. Both auto-migrate on boot.
+One database covers everything; `profile` owns users / identities / devservers / grants, `identity` owns the `tower_sessions` table. Neither service migrates on boot: migrations are a dedicated step (`CHAN_GATEWAY_MIGRATIONS=only`), and the runtime services boot with `CHAN_GATEWAY_MIGRATIONS=external`. The setup script below runs both for you.
 
 ```sh
 createdb chan_gateway
@@ -55,8 +55,8 @@ npm run build -w @chan/profile
 
 Register one at https://github.com/settings/developers:
 
-- Homepage URL: `https://id.localtest.me:17000`
-- Authorization callback URL: `https://id.localtest.me:17000/auth/github/callback`
+- Homepage URL: `https://gw.localtest.me:17000`
+- Authorization callback URL: `https://gw.localtest.me:17000/auth/github/callback`
 
 Save the client id and secret.
 
@@ -71,7 +71,7 @@ packaging/gateway/scripts/dev/setup.sh
 packaging/gateway/scripts/dev/run.sh
 ```
 
-Identity serves browser routes on `https://id.localtest.me:17000` through the generated local TLS edge and exposes its separate internal proxy/operator listener on `127.0.0.1:17004`. Proxies use the internal listener for validation. Import `packaging/gateway/scripts/dev/secrets/tls/ca.crt` into the development browser. The setup script is idempotent; pass `--force` only when every generated credential and the local CA should rotate.
+Identity serves browser routes on `https://gw.localtest.me:17000` through the generated local TLS edge and exposes its separate internal proxy/operator listener on `127.0.0.1:17004`. Proxies use the internal listener for validation. Import `packaging/gateway/scripts/dev/secrets/tls/ca.crt` into the development browser. The setup script is idempotent; pass `--force` only when every generated credential and the local CA should rotate.
 
 devserver-proxy holds no database and reads no identity session, and admits no tunnel until its control session to devserver-control reaches `FleetReady`. Opening a workspace submits a separate, short-lived Ed25519 entry credential to the fixed `/_chan/entry` endpoint in a bounded form POST from identity's exact origin. The credential never appears in a URL and succeeds once; the proxy exchanges it for opaque `__Host-devserver_gate` plus `__Host-devserver_csrf` host-only cookies. For the full local stack use `../packaging/gateway/scripts/dev/setup.sh` + `../packaging/gateway/scripts/dev/run.sh`.
 
@@ -189,7 +189,7 @@ chan-gateway-admin token audit  <token-uuid>
 # Live tunnels (devserver-control's aggregate fleet view)
 chan-gateway-admin tunnel ps
 chan-gateway-admin tunnel ps --user alice
-chan-gateway-admin tunnel kill alice home          # force one workspace offline
+chan-gateway-admin tunnel kill alice <devserver-id>  # force one devserver offline; it may reconnect
 chan-gateway-admin tunnel watch                    # SSE stream, top-style
 
 # Durable user policy. Suspend preserves PAT rows and the stored limit.
@@ -223,7 +223,7 @@ chan-gateway-admin flag create my_feature --default-on --description "..."
 
 Add `--json` to any subcommand for jq-friendly output.
 
-The two seeded flags govern the rollout posture. `oauth_login` gates the OAuth callback; an account without the override is denied at sign-in with `?denied=oauth_login` in the redirect. `share_workspaces` is the SPA-side toggle for the per-workspace sharing UI; flipping it off hides the Workspaces tab and the share panel. Both default to off so a fresh deploy has to grant the first user out-of-band (or pre-create users via `chan-gateway-admin user create` and then `flag grant`).
+The two seeded flags govern the rollout posture. `oauth_login` gates the OAuth callback; an account without the override is denied at sign-in with `?denied=oauth_login` in the redirect. `share_workspaces` is the SPA-side toggle for the devserver sharing UI; flipping it off hides the Devservers tab. Neither flag is enforced inside profile; only `oauth_login` is enforced server-side, by identity. Both default to off so a fresh deploy has to grant the first user out-of-band (or pre-create users via `chan-gateway-admin user create` and then `flag grant`).
 
 The user account survives a block; deletion is via the SPA's "Delete account" disclosure (account holder only). Account delete also evicts every live tunnel for that user.
 

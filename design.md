@@ -13,7 +13,7 @@ The dependency direction keeps local-first workspace code independent from app a
 The split is load-bearing:
 
 - `chan-server` links only chan-shell's wire types (`ControlRequest` / `ControlResponse`), not its clap actions or transport.
-- The gateway is a separate Cargo workspace with its own lockfile and dependency stack, so the core single-binary build never pulls in Postgres, OAuth, or proxy-only code. It consumes the in-repo tunnel crates through the tunnel protocol boundary. See [`gateway/README.md`](./gateway/README.md).
+- The gateway is a separate Cargo workspace with its own lockfile and dependency stack, so the core single-binary build never pulls in Postgres, OAuth, or proxy-only code. It consumes the in-repo tunnel crates through the tunnel protocol boundary. See [`gateway/design.md`](./gateway/design.md) for the system design and [`gateway/README.md`](./gateway/README.md) for the component index.
 - The embedding-model bundler is an explicit release helper, not an implicit `cargo build` step.
 - Naming traps: the launcher is the `web-launcher` package, devserver is a `chan-server` mode, and `chan-llm` is an MCP tool sandbox rather than a provider client.
 

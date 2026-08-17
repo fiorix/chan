@@ -25,15 +25,15 @@ export DEVSERVER_ENTRY_VERIFYING_KEYS=<base64-ed25519-public-key>
 export DEVSERVER_ADMISSION_VERIFYING_KEYS=<base64-ed25519-public-key>
 export IDENTITY_PUBLIC_ORIGIN=http://127.0.0.1:7000
 export DASHBOARD_URL=http://127.0.0.1:7000/workspaces
-export DEVSERVER_CONTROL_URL=http://127.0.0.1:7200
+export DEVSERVER_CONTROL_URL=http://127.0.0.1:7101
 export DEVSERVER_PROXY_TOKEN=dev-proxy-token
 export DEVSERVER_PROXY_ID=p1
-export DEVSERVER_PROXY_BASE_URL=http://devserver.localtest.me:7002
-export DEVSERVER_TUNNEL_ORIGIN=http://devserver.localtest.me:7100
+export DEVSERVER_PROXY_BASE_URL=https://p1.devserver.localtest.me:7002
+export DEVSERVER_TUNNEL_ORIGIN=https://p1.devserver.localtest.me:7100
 cargo run -p devserver-proxy
 ```
 
-For the full local stack (with identity + profile + Postgres), prefer `packaging/gateway/scripts/dev/setup.sh` + `packaging/gateway/scripts/dev/run.sh`. Two listeners come up:
+The recorded public origins use `https` because the config refuses a cleartext public origin whose host is not a loopback literal; the listeners themselves stay loopback cleartext in dev. For the full local stack (with identity + profile + Postgres), prefer `packaging/gateway/scripts/dev/setup.sh` + `packaging/gateway/scripts/dev/run.sh`. Two listeners come up:
 
 - `BIND_ADDR` (7002): public HTTP. `usr.{domain}` sits behind nginx + TLS in production; loopback in dev.
 - `TUNNEL_BIND_ADDR` (7100): h2c. nginx `grpc_pass`es the `usr.{domain}/v1/tunnel` ingress here; `chan devserver` instances dial it for the handshake.
@@ -61,7 +61,7 @@ Optional:
 |----------------------------|--------------------------|----------------------|
 | `BIND_ADDR`                | `127.0.0.1:7002`         | public listener      |
 | `TUNNEL_BIND_ADDR`         | `127.0.0.1:7100`         | tunnel listener (h2c)|
-| `IDENTITY_URL`             | `http://127.0.0.1:7004`  | proxy-only validate API |
+| `IDENTITY_URL`             | `http://127.0.0.1:7000`  | identity validate API base |
 | `MAX_RESPONSE_BYTES`       | `100 MiB` (`0` disables) | response body cap    |
 | `MAX_REQUEST_BYTES`        | `100 MiB` (`0` disables) | request body cap     |
 | `REQUEST_TIMEOUT_SECS`     | `60` (`0` disables)      | end-to-end timeout   |
@@ -69,6 +69,10 @@ Optional:
 | `SESSION_MAX_ACTIVE`       | `10000`                  | process-wide opaque-session cap |
 | `SESSION_LIFETIME_SECS`    | `3600`                   | opaque-session lifetime (max 1h) |
 | `ENTRY_REPLAY_MAX_ACTIVE`  | `10000`                  | active entry-replay cap |
+| `CHAN_GATEWAY_INTERNAL_TRANSPORT` | unset           | set exactly `protected-overlay` only behind a protected overlay |
+| `RUST_LOG`                 | `info`                   | tracing filter         |
+
+The packaged env file and the dev-run example point `IDENTITY_URL` at identity's separate internal listener (`127.0.0.1:7004`); the default above is what applies when the variable is unset.
 
 ## Routes
 
@@ -77,7 +81,7 @@ Optional:
 
 Each opaque tenant session receives a separate random admin UUID plus wall-clock creation and expiry. The proxy publishes only that redacted record over control protocol v2. Cookie ids, entry replay ids, audiences, assertions, and transport internals stay local. Controller revocations support exact subject/owner/devserver, subject, admin UUID, owner, and all sessions, and acknowledgement waits for matching HTTP and WebSocket transports to drain.
 
-See [`design.md`](design.md) for the authoritative route list, the auth-gate order, and the reverse-proxy hygiene rules.
+See [`design.md`](design.md) for the auth-gate order, the session and revocation model, and the reverse-proxy hygiene rules.
 
 ## Design rationale
 

@@ -49,11 +49,11 @@ Then open:
 
 * https://gw.localtest.me:17000 -- dashboard. Sign in with GitHub; GitHub redirects to the TLS callback, identity-service mints a Secure host-only session cookie, and the SPA loads.
 
-The Workspaces tab is empty until a `chan devserver` instance registers a workspace (see below).
+The Devservers tab is empty until a `chan devserver` instance registers (see below).
 
 ### First-time sign-in: enrol yourself
 
-Both feature flags ship default-off, so the first OAuth sign-in will land on `/?denied=oauth_login` and the Workspaces tab stays hidden. Two-step bootstrap:
+Both feature flags ship default-off, so the first OAuth sign-in will land on `/?denied=oauth_login` and the Devservers tab stays hidden. Two-step bootstrap:
 
 ```sh
 # 1. Try sign-in once. This creates your user row (the gate runs
@@ -64,31 +64,31 @@ CHAN_ADMIN_PROFILE_TOKEN="$PT" CHAN_ADMIN_PROFILE_URL=http://127.0.0.1:17001 \
   ../../target/debug/chan-gateway-admin user list
 
 # 2. Grant the two seeded flags on your account, then sign in
-#    again. Workspaces tab + share UI appear.
+#    again. Devservers tab + share UI appear.
 CHAN_ADMIN_PROFILE_TOKEN="$PT" CHAN_ADMIN_PROFILE_URL=http://127.0.0.1:17001 \
   ../../target/debug/chan-gateway-admin flag grant oauth_login <your-email>
 CHAN_ADMIN_PROFILE_TOKEN="$PT" CHAN_ADMIN_PROFILE_URL=http://127.0.0.1:17001 \
   ../../target/debug/chan-gateway-admin flag grant share_workspaces <your-email>
 ```
 
-Subsequent users repeat step 2. To open sign-in for everyone, flip the default with `chan-admin flag create oauth_login --default-on`.
+Subsequent users repeat step 2. To open sign-in for everyone, flip the default with `chan-gateway-admin flag create oauth_login --default-on`.
 
-## Registering a test workspace
+## Publishing a devserver
 
-In the `chan` repo (sibling of chan-gateway):
+From the repository root:
 
 ```
 # Create a PAT under the Tokens tab on the dashboard, copy it.
 export CHAN_TUNNEL_TOKEN=chan_pat_...
 export SSL_CERT_FILE="$PWD/packaging/gateway/scripts/dev/secrets/tls/ca.crt"
 
-cd ../chan
-cargo run -p chan -- serve <some-workspace-dir> \
+cargo run -p chan -- workspace add <some-workspace-dir>
+cargo run -p chan -- devserver \
   --tunnel-url=https://127.0.0.1:17100/v1/tunnel \
-  --tunnel-workspace-name=blog
+  --tunnel-devserver-name=blog
 ```
 
-The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open targets `https://<user>--<disc>.p1.usr.localtest.me:17002/blog/`.
+One tunnel carries the devserver's whole library, so every workspace you add is reachable over the single registration. The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open on a workspace targets `https://<user>--<disc>.p1.usr.localtest.me:17002/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
 
 ## Notes
 

@@ -1,5 +1,7 @@
 # identity-service: design
 
+This document owns identity-service's component boundaries, invariants, rationale, and failure behavior. The executable contract (how to run it, the exact route and environment catalogs) lives in [README.md](README.md); routes appear here only where a flow needs them.
+
 ## Problem
 
 Public sign-in surface plus the only user-facing UI in the chan-gateway suite. Owns:
@@ -8,7 +10,7 @@ Public sign-in surface plus the only user-facing UI in the chan-gateway suite. O
 - The session cookie. Host-only on the identity origin, `gw.{domain}` (ex `gw.chan.app`); it never spans subdomains.
 - Personal access tokens for the chan CLI / chan-tunnel.
 - The dashboard: profile management plus the live-devserver list.
-- Devserver-gate entry-token mint for the cross-origin handoff to the proxy fleet's per-tenant origins.
+- Devserver-gate entry-credential mint for the cross-origin handoff to the proxy fleet's per-tenant origins.
 
 Profile data (canonical user record, identities, audit) lives in profile-service; identity must not race with itself or duplicate user rows on concurrent first-time logins.
 
@@ -130,7 +132,7 @@ Durable state is never rolled back after a partial drain. A 502 contains only th
 3. Call devserver-control admin `GET /admin/v1/owners/{owner_user_id}/tunnels` (immutable owner id, not username) for the live-devserver list (one row per live devserver; a user can hold several). Empty for blocked users, and empty (with a log line, not a 500) on a devserver-control outage so the rest of the dashboard still loads from profile.
 4. Return `{user, devservers: [{devserver_id, status}], flags}`, where `flags` is the per-user resolved feature-flag map.
 
-The dashboard renders one card per devserver and flips it online/offline against that list. The card's "Open" navigates to `/s/{username}?d=<disc>` (the whole-devserver share landing, below, qualified with the card's devserver); the entry token is minted server-side at click time, not at page render, so a short-exp token can't go stale before the click.
+The dashboard renders one card per devserver and flips it online/offline against that list. The card's "Open" navigates to `/s/{username}?d=<disc>` (the whole-devserver share landing, below, qualified with the card's devserver); the entry credential is minted server-side at click time, not at page render, so a short-exp token can't go stale before the click.
 
 ### Devserver-gate mint
 
@@ -164,13 +166,13 @@ sequenceDiagram
 
 *Share-landing handoff: resolve owner and live devserver, run the profile access check, mint a 30s entry JWT, then devserver-proxy verifies it and sets the gate cookies.*
 
-The share-landing handlers (below) mint the entry token; there is no standalone open endpoint. The mint targets one of the owner's live devservers (`?d=` selector, single live, else first accessible):
+The share-landing handlers (below) mint the entry credential; there is no standalone open endpoint. The mint targets one of the owner's live devservers (`?d=` selector, single live, else first accessible):
 
 1. Resolve session; refuse if anonymous or blocked.
 2. Resolve the owner handle to a user record via profile `GET /v1/users/by-username`. Unknown handle returns 404 (same shape as no-access).
 3. Resolve the owner's live devserver id from devserver-control's immutable per-owner endpoint; no live devserver returns 404. Every row must carry a valid signed admission lease and the owning proxy's `proxy_base_url`, which anchors the handoff origin below.
 4. Call profile `GET /v1/users/{owner_id}/devservers/{devserver_id}/access?as={session.user_id}`. The owner or an accepted grantee returns binary `access: true`; anything else is 404. A grant is whole-devserver, so the `{workspace}` segment never enters the access check.
-5. Sign a 30s Ed25519 `entry` credential with `{sub: session.user_id, owner_user_id: owner_id, drv: <devserver_id>, aud: "{owner}--{disc}.{proxy}.<proxy-apex>", proxy_id, next_path, jti, iat, exp}`. The `aud` authority is built from the controller row's `proxy_base_url`: `{owner}--{disc}.` prefixed to the node base host, scheme and effective port preserved, canonicalized lowercase with default ports stripped. The node base must validate as a canonical origin exactly one DNS label below the configured `DEVSERVER_PROXY_ORIGIN` apex with matching scheme and effective port; a row that fails the check is a 502 upstream error, never a fallback to the shared apex. `sub` is the *caller's* id, not the owner's, so the opaque session minted on the next leg carries the right identity for upstream collab attribution. The mint also attaches the caller's display identity as optional claims, best-effort; they are never an authorization input.
+5. Sign a 30s Ed25519 `entry` credential with `{sub: session.user_id, owner_user_id: owner_id, drv: <devserver_id>, aud: "{owner}--{disc}.{proxy}.<proxy-apex>", proxy_id, next_path, jti, iat, exp}`. The `aud` authority is built from the controller row's `proxy_base_url`: `{owner}--{disc}.` prefixed to the node base host, scheme and effective port preserved, canonicalized lowercase with default ports stripped. The node base must validate as a canonical origin exactly one DNS label below the configured `DEVSERVER_PROXY_ORIGIN` apex with matching scheme and effective port; a row that fails the check is a 502 upstream error, never a fallback to the shared apex. `sub` is the *caller's* id, not the owner's, so the opaque session minted on the next leg carries the right identity for upstream collab attribution.
 6. Return a no-store HTML handoff whose nonce-bound script POSTs the credential to `{tenant-origin}/_chan/entry`; the proxy can redirect only to the credential's signed clean path.
 
 devserver-proxy verifies and consumes the Ed25519 entry credential, creates a bounded revocable opaque session (maximum one hour), sets the host-only `__Host-devserver_gate` (HttpOnly) and readable `__Host-devserver_csrf` cookies, and 303s to the signed clean path. The shared entry envelope lives in `gateway_common::devserver_gate`.
@@ -181,7 +183,7 @@ devserver-proxy verifies and consumes the Ed25519 entry credential, creates a bo
 
 1. Validate `owner` (username shape) and `workspace` (1-64 lowercase alnum + `[._-]`); malformed values 404. An optional `?d=<disc-or-full-id>` (lowercase hex) picks one of the owner's devservers; malformed selectors 404.
 2. No session: stash `/s/{owner}/{workspace}` (with the sanitized `?d=` when present) under `post_login_redirect` and 303 to `/`. The SPA renders the OAuth picker; on callback, the stash is consumed and the user lands back here with a fresh session.
-3. With a session: resolve owner -> pick the target devserver (`?d=` match, single live, or the first live one the caller can access) -> profile access check -> mint entry JWT -> 303 to the owning node's tenant origin (`{owner}--{disc}.{proxy}.<proxy-apex>`). This is the devserver-gate mint above; the `{workspace}` is only the redirect path, not part of the access check.
+3. With a session: resolve owner -> pick the target devserver (`?d=` match, single live, or the first live one the caller can access) -> profile access check -> mint entry JWT -> return the auto-submitting no-store POST handoff aimed at the owning node's tenant origin (`{owner}--{disc}.{proxy}.<proxy-apex>`). This is the devserver-gate mint above; the `{workspace}` is only the redirect path, not part of the access check.
 
 The post-login redirect is validated to start with a single `/` and to contain no `:` or `//` prefix, so a hostile stash cannot point the callback at another origin.
 
@@ -204,7 +206,7 @@ All forward to profile-service over the service bearer. Validation re-runs in pr
 identity reads the per-user resolved flag map from profile (`GET /v1/users/{id}/flags`) at two points:
 
 - OAuth callback (`oauth_login`): the allowlist gate described in the callback flow above. Fresh deploys ship `default_enabled = false`, so the operator must `chan-gateway-admin flag grant oauth_login <ident>` for the first user before they can sign in.
-- `/api/me` (full map): the SPA gates UI affordances on the resolved values. Today that's `share_workspaces` (hides the Devservers tab and the share panel when off). The map is re-fetched on every `/api/me`, so a rollout takes effect on the next dashboard reload -- no SPA logout / login dance.
+- `/api/me` (full map): the SPA gates UI affordances on the resolved values. Today that's `share_workspaces` (hides the Devservers tab, and with it the grant-management UI, when off). The map is re-fetched on every `/api/me`, so a rollout takes effect on the next dashboard reload -- no SPA logout / login dance.
 
 Profile errors on either call degrade-soft: identity falls back to an empty flag map, which is the safe default (every flag off = no sign-in, no UI features). Tracing log captures the failure so the operator can see why callers were getting denied.
 
@@ -259,6 +261,8 @@ Additional username guards:
 
 - `RESERVED_USERNAMES` blocks anything that could collide with a top-level path under `gw.{domain}/` (ex `gw.chan.app`). Sorted alphabetically (test-pinned); checked with `binary_search`.
 - `rustrict` filter blocks profanity / leet-speak heuristically. False positives surface as 400; users can unblock specific handles via the `RUSTRICT_ALLOWLIST` env var (comma-separated, case-insensitive).
+
+A rename kills the caller's live tunnels (`kill_owner_tunnels`) before profile persists the new handle: identity matches controller rows to the current username (`t.user == user.username`) and the tenant host label embeds it (`{owner}--{disc}.`), so registrations under the old name would fail the owner check and mint origins that no longer resolve to the caller.
 
 ### Session contract
 

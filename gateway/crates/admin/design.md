@@ -14,7 +14,7 @@ Three HTTP clients live inside the binary:
 
 - `AdminClient`: profile-service (`CHAN_ADMIN_PROFILE_URL`). Resolves `<ident>` and calls the admin tree.
 - `IdentityClient`: identity-service (`CHAN_ADMIN_IDENTITY_URL`). Calls OAuth-session and composite policy/access routes.
-- `WorkspaceClient`: devserver-control (`CHAN_ADMIN_WORKSPACE_URL`). Talks to `/admin/v1/*` and decodes the SSE snapshot streams for `tunnel watch` and `proxy watch`.
+- `WorkspaceClient`: devserver-control (`CHAN_ADMIN_WORKSPACE_URL`). Talks to `/admin/v1/*` and decodes the SSE snapshot streams for `tunnel watch`, `proxy watch`, and `session tenant watch`.
 
 Each client has its own bearer and destination. The CLI sets per-call timeouts (15 seconds on profile and identity calls, 10 or 15 seconds on controller calls), permits 65 seconds for user-deletion quiet-window settlement, and sets no global timeout on watch streams.
 
@@ -70,7 +70,7 @@ No menus, no TUI. All commands are non-interactive except `user delete`, `user c
 
 ### Minimal local URL encoding
 
-Path segments contain only `[a-z0-9_.-]` (validated upstream), so the CLI ships a tiny inline `urlencoding::encode_path` rather than pulling in a real urlencoding crate. The full RFC 3986 table is overkill for a value that already passed username / workspace-name validation.
+Path segments stay within the username / workspace-slug alphabet (`[a-z0-9-]` plus `_` and `.`, validated upstream), so the CLI ships a tiny inline `urlencoding::encode_path` rather than pulling in a real urlencoding crate. The full RFC 3986 table is overkill for a value that already passed username / workspace-name validation.
 
 ## Invariants
 

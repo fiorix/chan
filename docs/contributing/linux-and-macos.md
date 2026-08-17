@@ -4,7 +4,7 @@ chan's gates run on Linux (the canonical CI target) and macOS. The reproducible 
 
 `sdme` is a local-development tool only. CI does not use it: GitHub Actions runs on its own ubuntu runners (native, with apt-installed deps and service containers). The dev setup and the CI setup are intentionally different, the same as the rest of chan; see "How this maps to CI" at the end.
 
-This doc covers the local Linux flow. For the core build/test commands themselves (fmt, clippy, tests, web) on your host directly, see [`CONTRIBUTING.md`](../../CONTRIBUTING.md). For the gateway's Postgres-backed tests, see [`gateway/docs/testing-on-linux-and-macos.md`](../../gateway/docs/testing-on-linux-and-macos.md).
+This doc covers the local Linux flow. For the core build/test commands themselves (fmt, clippy, tests, web) on your host directly, see [`CONTRIBUTING.md`](../../CONTRIBUTING.md). For the gateway's Postgres-backed tests, see [`gateway/docs/dev-setup.md`](../../gateway/docs/dev-setup.md).
 
 ## Prerequisites
 
@@ -236,13 +236,13 @@ Run a devserver in lima/sdme as in the Devserver section above -- a smoke does n
 
 ## Gateway: Postgres-backed tests
 
-The gateway is a separate workspace with Postgres-backed integration tests. Its container setup (a `chan-psql` Postgres rootfs) and the test commands live in [`gateway/docs/testing-on-linux-and-macos.md`](../../gateway/docs/testing-on-linux-and-macos.md).
+The gateway is a separate workspace with Postgres-backed integration tests. Its container setup (a `chan-psql` Postgres rootfs) and the test commands live in [`gateway/docs/dev-setup.md`](../../gateway/docs/dev-setup.md).
 
 The gateway's per-change test loop runs `cargo` + `npm` **on your host** against the `chan-psql` container at `localhost:5432` (host networking makes it reachable). That inner loop needs Rust + Node on the host; only Postgres lives in a container. Binding the source into a container instead does not help here: lima mounts `/Users` read-only, so `cargo`/`npm` could not write `target/`, `node_modules`, or `web/dist`. The in-container flows on this page (the core gate above, the packaging validation below) are for CI parity and deploy validation, not the inner loop.
 
 ## Packaging: validate a deploy locally
 
-The gateway ships four `.deb` packages run under systemd. To verify the prod path (packages -> postinst user -> systemd units -> `configure.sh` -> running services) end to end, build and install them in a systemd container with a reachable Postgres (the `chan-psql` container from the gateway doc; host networking makes it reachable at `localhost:5432`).
+The gateway ships five `.deb` packages run under systemd. To verify the prod path (packages -> postinst user -> systemd units -> `configure.sh` -> running services) end to end, build and install them in a systemd container with a reachable Postgres (the `chan-psql` container from the gateway doc; host networking makes it reachable at `localhost:5432`).
 
 ```sh
 # create a build container and seed the repo (tracked files only)
@@ -270,22 +270,22 @@ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 . "$HOME/.cargo/env"
 cargo install cargo-deb
 
-# build the SPA, then the four .debs
+# build the SPA, then the five .debs
 (cd /root/chan/web && npm ci && npm run build -w @chan/profile)
 cd /root/chan/gateway
-cargo build --release -p profile -p identity -p devserver-proxy -p admin
-for c in profile identity devserver-proxy admin; do cargo deb --no-build -p "$c"; done
+cargo build --release -p profile -p identity -p devserver-proxy -p devserver-control -p admin
+for c in profile identity devserver-proxy devserver-control admin; do cargo deb --no-build -p "$c"; done
 
 # install (postinst creates the chan-gateway user + units + default env),
 # generate config, start, and check health
 dpkg -i target/debian/*.deb || apt-get -f install -y
 bash ../packaging/gateway/scripts/configure.sh   # answers: PG user/pass/db, base domain, scheme, >=1 provider
-systemctl enable --now chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy
-systemctl is-active chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy
-for p in 7001 7000 7002; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; done
+systemctl enable --now chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy chan-gateway-devserver-control
+systemctl is-active chan-gateway-profile chan-gateway-identity chan-gateway-devserver-proxy chan-gateway-devserver-control
+for p in 7001 7000 7002 7003; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; done
 ```
 
-`configure.sh` points `DATABASE_URL` at `127.0.0.1` for the answers above, so the `chan-psql` container must be running on the same host network. All three `/healthz` returning `ok` means the deb assets, the systemd units (which load the shared `domain.env` first), the generated secrets, and the workspace-gate wiring are all consistent.
+`configure.sh` points `DATABASE_URL` at `127.0.0.1` for the answers above, so the `chan-psql` container must be running on the same host network. All four `/healthz` returning `ok` means the deb assets, the systemd units (which load the shared `domain.env` first), the generated secrets, and the devserver-gate wiring are all consistent.
 
 ## How this maps to CI
 

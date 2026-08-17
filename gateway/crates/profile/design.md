@@ -1,8 +1,10 @@
 # profile-service: design
 
+This document owns profile-service's component boundaries, invariants, rationale, and failure behavior. The route and environment-variable catalogs live in [`README.md`](README.md) and are not repeated here.
+
 ## Problem
 
-Other gateway services need a single, authoritative store for user identity. Two writers must not race when a user signs in for the first time on two providers concurrently; an admin block must revoke every live PAT in one operation and tear down the user's live yamux registrations fleet-wide via devserver-control; renames must be capped so the public username namespace (`gw.{domain}/s/{username}`, the `{owner}--{disc}` host labels) doesn't churn.
+Other gateway services need a single, authoritative store for user identity. Two writers must not race when a user signs in for the first time on two providers concurrently; an admin block must revoke every live PAT in one transaction and durably schedule the fleet-wide cut of the user's live tunnels and browser sessions through devserver-control; renames must be capped so the public username namespace (`gw.{domain}/s/{username}`, the `{owner}--{disc}` host labels) doesn't churn.
 
 ## Architecture
 
@@ -13,7 +15,7 @@ Small axum service in front of Postgres. Schema:
 - `api_tokens (id, user_id, label, token_hash, expires_at, created_at, revoked_at, last_used_at, scopes)`
 - `api_token_audit (id, ts, token_id, action, ip, user_agent)`
 - `auth_audit (id, ts, user_id, action, ip, user_agent, note)`
-- `devservers (id, owner_user_id, devserver_id, label, created_at, last_seen_at)` with `UNIQUE (owner_user_id, devserver_id)`. First-class entity for an owner's shareable devserver: lets the dashboard list a devserver that has no grants and no live tunnel yet, and acts as the FK target for grants. `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (produced by identity); `label` mirrors the PAT label. A registry sweeper marks rows from the controller's live-tunnel snapshot and deletes rows offline longer than `DEVSERVER_RETENTION_MINUTES` (default 15m; 0 disables).
+- `devservers (id, owner_user_id, devserver_id, label, created_at, last_seen_at)` with `UNIQUE (owner_user_id, devserver_id)`. First-class entity for an owner's shareable devserver: lets the dashboard list a devserver that has no grants and no live tunnel yet, and acts as the FK target for grants. `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (produced by identity); `label` mirrors the PAT label. A registry sweeper marks rows from the controller's live-tunnel snapshot once a minute and deletes rows offline longer than `DEVSERVER_RETENTION_MINUTES` (default 15m; 0 disables). Rows carrying grants are never swept, and a tick that cannot fetch the snapshot deletes nothing.
 - `devserver_grants (id, owner_user_id, devserver_id, grantee_email, grantee_user_id, created_at, accepted_at)` with `UNIQUE (owner_user_id, devserver_id, lower(grantee_email))` and an FK on `(owner_user_id, devserver_id)` -> `devservers` (cascade delete). A grant is one binary, shell-equivalent authority; there is no role column.
 - `feature_flags (key PK, description, default_enabled, created_at, updated_at)`: registry of named flags.
 - `feature_flag_overrides (flag_key, user_id, enabled, set_at, PRIMARY KEY (flag_key, user_id))`: per-user explicit enable/disable rows. The effective value for `(flag, user)` is the override row when present, else `default_enabled`.
@@ -89,7 +91,7 @@ erDiagram
 
 *Gateway Postgres schema: table relationships and key constraints; the bullet list above stays the authoritative column and constraint detail.*
 
-Migrations run on startup.
+The service never migrates the schema at serve time. `CHAN_GATEWAY_MIGRATIONS=only` applies the sqlx migrations under `gateway/migrations/` and exits (the packaged migrate oneshot and the kube migrate job run this mode with the database-owner credential); `CHAN_GATEWAY_MIGRATIONS=external` serves without touching DDL. An unset or otherwise shaped value fails startup.
 
 The router splits into three sub-routers:
 
@@ -99,7 +101,7 @@ The router splits into three sub-routers:
 
 All bearer comparisons run through `subtle::ConstantTimeEq` via the shared `bearer_eq` helper. Both checks always run on the service API so a wrong token cannot oracle which leg matched first.
 
-profile-service requires a `DevserverControlClient` configured with `DEVSERVER_ADMIN_URL` and the profile-scoped `DEVSERVER_PROFILE_ADMIN_TOKEN`. Denial mutations write their primary state, audit record, and a durable revocation-outbox generation in one transaction. The worker then cuts tunnels and browser sessions across the fleet, confirms a post-commit first cut, waits the full entry-credential quiet window, and makes a second cut before settling the job. Retries survive profile restarts.
+profile-service requires a `DevserverControlClient` configured with `DEVSERVER_ADMIN_URL` and the profile-scoped `DEVSERVER_PROFILE_ADMIN_TOKEN`. Denial mutations write their primary state, audit record, and a durable revocation-outbox generation in one transaction. The background worker then runs the data-plane cut against devserver-control (`kill_owner_tunnels` plus `revoke_subject_sessions` for a subject or account-delete job, `revoke_sessions_exact` for a single-grant job), confirms a post-commit first cut, waits the full entry-credential quiet window (40 seconds: entry lifetime plus symmetric clock skew), and makes a second cut before settling the job. Attempts retry with backoff up to a five-minute deadline; exhaustion writes a `session_revoke_failed` audit row and drops the job. The outbox row survives profile restarts.
 
 ## Key decisions
 
@@ -147,7 +149,9 @@ Profile does not perform the product-facing drain inside policy PUT. Identity fi
 3. Append an `auth_audit` row with action `blocked`.
 4. Reserve a durable subject-revocation generation in the same transaction.
 
-The worker confirms a post-commit fleet cut, waits the entry-credential quiet window, and confirms a second cut. identity's composite block path additionally revokes OAuth sessions and kills owner tunnels synchronously; partial confirmation is a retryable 502 and never rolls back `blocked_at`.
+The handler returns 202 as soon as the transaction commits; the background worker performs the fleet cut as described above, so a down devserver-control delays the cut but never rolls back `blocked_at`. The operator CLI follows a block with identity's composite access-revoke route, which synchronously revokes OAuth sessions and tenant sessions and kills owner tunnels; partial confirmation there surfaces as a retryable 502 from the CLI's perspective.
+
+Unblock clears `blocked_at` and `block_reason` only: PATs revoked at block time stay revoked, and the route answers 409 while an account-delete job is pending for the user.
 
 Account deletion uses the dominant `AccountDelete` outbox job. The initial transaction blocks the user and revokes PATs but retains the profile row. Only after the quiet-window cuts settle does the worker delete the user and let foreign-key cascades remove identities, indexed OAuth sessions, tokens, and grants.
 
@@ -177,9 +181,9 @@ Listings: `GET /v1/users/{id}/grants/owned` returns `(owner_user_id, devserver_i
 
 ### Feature flags
 
-Two-tier table layout (`feature_flags` + `feature_flag_overrides`) behind admin endpoints. Resolution is `COALESCE(override.enabled, flag.default_enabled, false)` so unknown flags are closed by default. identity-service reads the resolved map for a user via `GET /v1/users/{id}/flags` (service tier) to gate OAuth sign-in (`oauth_login`) and to surface UI affordances on the SPA (`share_workspaces`).
+Two-tier table layout (`feature_flags` + `feature_flag_overrides`) behind admin endpoints. Resolution is `COALESCE(override.enabled, flag.default_enabled, false)` so unknown flags are closed by default. identity-service reads the resolved map for a user via `GET /v1/users/{id}/flags` (service tier). Neither seeded flag is enforced inside profile: `oauth_login` gates identity's OAuth callback, and `share_workspaces` is an SPA-only UI toggle shipped in `/api/me`.
 
-The seeded flags ship `default_enabled = false`, so a fresh deploy refuses every sign-in until an operator grants `oauth_login` on at least one user. Override-or-default keeps the rollout knob simple: flip the default once the feature is ready for everyone; revoke the per-user override for a deny rule. Audit-style history is the `set_at` column on each override; full audit is deferred.
+The seeded flags ship `default_enabled = false`, so a fresh deploy refuses every sign-in at the identity callback until an operator grants `oauth_login` on at least one user. Override-or-default keeps the rollout knob simple: flip the default once the feature is ready for everyone; revoke the per-user override for a deny rule. Audit-style history is the `set_at` column on each override; full audit is deferred.
 
 ### All SQL is parameterized
 

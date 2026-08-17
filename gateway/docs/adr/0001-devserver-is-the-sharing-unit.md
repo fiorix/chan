@@ -2,7 +2,7 @@
 
 Status: accepted (grill-with-docs, 2026-06-21).
 
-The gateway migrates from per-workspace (`workspace-proxy`) to a devserver-centric model (`devserver-proxy`). The **devserver** is the unit of tunnel registration (1 token : 1 devserver, `--tunnel-name` dropped, identity resolved from the token), of the access gate (`drv` = devserver, cookie `Path=/`, one `devserver_access(owner, devserver, caller)` check), and of sharing (a grant gives a collaborator the whole devserver). Per-workspace permissions are dropped; the path `{workspace}` segment is tenant routing only, never a gate key. Chosen for simplicity and to match the one-devserver-per-user product model; pre-release with a fresh-state cutover (`rm -rf ~/.chan`, no migration) makes the profile grant reshape free.
+The gateway migrates from per-workspace (`workspace-proxy`) to a devserver-centric model (`devserver-proxy`). The **devserver** is the unit of tunnel registration (1 token : 1 devserver, `--tunnel-name` dropped, identity resolved from the token), of the access gate (`drv` = devserver, cookie `Path=/`, one `devserver_access(owner, devserver, caller)` check), and of sharing (a grant gives a collaborator the whole devserver). Per-workspace permissions are dropped; the path `{workspace}` segment is tenant routing only, never a gate key. Chosen for simplicity; pre-release with a fresh-state cutover (`rm -rf ~/.chan`, no migration) makes the profile grant reshape free.
 
 ## Considered options
 

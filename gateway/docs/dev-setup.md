@@ -90,7 +90,7 @@ export CHAN_TUNNEL_TOKEN=chan_pat_...     # mint under the dashboard Tokens tab
 cargo run -p chan -- devserver --tunnel-url=https://usr.localtest.me/v1/tunnel
 ```
 
-Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.usr.localtest.me/<workspace>/`.
+Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.usr.localtest.me/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
 
 ## From local to a real host
 

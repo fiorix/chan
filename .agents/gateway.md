@@ -154,7 +154,7 @@ Per-crate rules that come up often when editing this code. For the full design r
 - **Placeholder usernames are deterministic.** New rows seed `username = 'u' || substr(replace(uuid::text, '-', ''), 1, 12)`. identity-service renames on first sign-in; the hard cap of 4 lifetime renames is enforced in `update_username` via a CAS update. Don't invent an alternate seeding scheme.
 - **All SQL is parameterized.** Constants like `USER_COLS` are `format!`'d into queries; user input always goes through `.bind()` and `$N`.
 - **The devserver is the sharing unit.** `devserver_access(owner, devserver, caller)` is the single per-request access decision: `{access: true}` for the owner or a claimed grant, 404 in every other case (no-grant and unknown-devserver share one shape so the endpoint cannot enumerate shares). Access is binary; there are no roles. A grant gives the WHOLE devserver, not a single workspace; `create_devserver_grant` auto-bootstraps the parent `devservers` row so callers don't need a separate hop.
-- **Block fans out server-side.** `POST /v1/admin/users/{id}/block` also calls devserver-control `kill_user_tunnels` (best-effort) when a `DevserverControlClient` is configured, so the live registrations drop across the proxy fleet at the same time the DB row changes.
+- **Block fans out server-side.** `POST /v1/admin/users/{id}/block` reserves a durable revocation job in the same transaction that marks the user and revokes every PAT; a background worker then drives devserver-control `kill_owner_tunnels` plus `revoke_subject_sessions` with retry to a deadline, so the live registrations drop across the proxy fleet without the request waiting on them.
 
 ### identity
 
@@ -163,7 +163,7 @@ Per-crate rules that come up often when editing this code. For the full design r
 - **The devserver id is the PAT digest.** `devserver_id_from_pat` is the lowercase-hex SHA-256 of the raw PAT (same digest as the stored hash, hex-encoded). One token identifies one devserver; this 64-char string is the cross-service handle the tunnel registry keys on and the `drv` claim carries. The raw PAT never leaves identity.
 - **OAuth callback validates state before provider.** Plain `pending.provider != provider` runs only after a constant-time state compare so timing on the provider check can't be used to oracle the session's expected provider.
 - **Session id rotates on login.** `session.cycle_id()` runs at the privilege boundary, before storing `user_id`. Closes session fixation.
-- **Token revoke and account delete evict tunnels.** `DELETE /api/tokens/{id}` and profile delete fire devserver-proxy `kill_user_tunnels` best-effort after the DB update.
+- **Token revoke and account delete evict tunnels.** `DELETE /api/tokens/{id}` and profile delete fire devserver-control `kill_owner_tunnels` plus `revoke_subject_sessions` best-effort after the DB update. One revoke pulls down all of the user's tunnels, because registrations do not retain which PAT backed them.
 - **Entry-credential mint is the share-landing route.** `GET /s/{owner}` (whole-devserver open, owner-only) and `GET /s/{owner}/{workspace}` (per-tenant) resolve a live devserver of the owner's (`?d=` selector, single live, else first accessible), call `profile.devserver_access`, and mint a 30s Ed25519 entry credential (`drv` = that live `devserver_id`, `aud` = the tenant origin `{owner}--{disc}.{proxy}.usr.{domain}` built from the controller-reported node base) that the browser POSTs to the proxy's `/_chan/entry`, so the credential is minted at click time and never rides a URL.
 
 ### devserver-proxy
@@ -191,10 +191,11 @@ Per-crate rules that come up often when editing this code. For the full design r
 ## Documentation
 
 - **Workspace overview**: [`gateway/README.md`](../gateway/README.md)
+- **System design**: [`gateway/design.md`](../gateway/design.md), the canonical desktop-to-devserver architecture: deployment boundaries, publication, desktop account, roster, entry, and data-path lifecycles.
 - **Domain glossary**: [`gateway/CONTEXT.md`](../gateway/CONTEXT.md) fixes the devserver / library / workspace / tenant language; the decision behind the per-devserver model is [`gateway/docs/adr/0001-devserver-is-the-sharing-unit.md`](../gateway/docs/adr/0001-devserver-is-the-sharing-unit.md), the fleet control plane is [`gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md`](../gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md), and the shared control authority over tunnels and tenant sessions is [`gateway/docs/adr/0003-tunnels-and-tenant-sessions-share-control-authority.md`](../gateway/docs/adr/0003-tunnels-and-tenant-sessions-share-control-authority.md).
 - **Crate design references** (canonical; `README.md` next to each is the consumer-facing entry):
   - [`gateway/crates/profile/design.md`](../gateway/crates/profile/design.md): schema, two-tier auth, atomic upsert, devserver grants, block fan-out.
-  - [`gateway/crates/identity/design.md`](../gateway/crates/identity/design.md): OAuth providers, PAT lifecycle, session contract, entry-token mint, dashboard.
+  - [`gateway/crates/identity/design.md`](../gateway/crates/identity/design.md): OAuth providers, PAT lifecycle, session contract, entry-credential mint, dashboard.
   - [`gateway/crates/devserver-proxy/design.md`](../gateway/crates/devserver-proxy/design.md): apex / wildcard split, devserver-gate verify, registry model, reverse-proxy hygiene.
   - [`gateway/crates/devserver-control/design.md`](../gateway/crates/devserver-control/design.md): proxy directory, fleet admission, aggregate admin tree, control protocol (frames in `devserver-control-proto`).
   - [`gateway/crates/admin/design.md`](../gateway/crates/admin/design.md): command surface, output contract, exit codes.

@@ -17,7 +17,7 @@ cargo test  -p gateway-common
 
 ## Modules
 
-- `profile_client`: typed reqwest wrapper over profile-service's HTTP API. Owns its own `ProfileError` enum so this crate has no axum / IntoResponse dependency.
+- `profile_client`: typed reqwest wrapper over profile-service's HTTP API. Owns its own `ProfileError` enum so the client itself carries no axum / IntoResponse coupling; each consumer maps it onto its local error via a `From` impl.
 - `shutdown`: graceful-shutdown future (SIGTERM or Ctrl-C) used by every service binary.
 - `static_files`: generic SPA-fallback handler over `rust_embed::RustEmbed`. Each consumer keeps its own `#[derive(Embed)]` (rust_embed resolves the `#[folder]` path relative to the deriving crate) and calls `static_files::serve::<Assets>(uri, banner)`.
 - `token_bucket`: per-fingerprint token bucket with a bounded map, plus the shared default limits for the two validate throttles.
