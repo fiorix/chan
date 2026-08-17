@@ -11,6 +11,7 @@
 // one off the laid-out boxes.
 
 const SLIDE_LABEL = "slide 3";
+const VIEWPORT_HEIGHTS = [520, 460, 400, 340];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
 async function dispatch(page, name) {
@@ -75,6 +76,25 @@ async function readMargins(page) {
   });
 }
 
+/// Find a viewport where the slide's bottom edge is observable. A viewport
+/// that still fits the whole card is not evidence about its scroll padding,
+/// so exhaust the bounded height sequence and fail closed if none scrolls.
+async function readScrollingMargins(page) {
+  const attempts = [];
+  for (const height of VIEWPORT_HEIGHTS) {
+    await page.setViewport({ width: 900, height });
+    await delay(400);
+    const margins = await readMargins(page);
+    if (!margins) throw new Error("About slide did not render its rows");
+    const measured = { height, ...margins };
+    attempts.push(measured);
+    if (margins.scrolls) return measured;
+  }
+  throw new Error(
+    `About slide did not scroll at any test height: ${JSON.stringify(attempts)}`,
+  );
+}
+
 export default {
   name: "about-slide-margin",
   async run(ctx) {
@@ -86,15 +106,7 @@ export default {
     await showAboutSlide(page);
 
     try {
-      // Small enough that the About card cannot fit the stage, which is the
-      // only state in which the bottom margin is observable at all.
-      await page.setViewport({ width: 900, height: 520 });
-      await delay(400);
-      const margins = await readMargins(page);
-      if (!margins) throw new Error("About slide did not render its rows");
-      if (!margins.scrolls) {
-        ctx.skip(`About slide still fits the stage: ${JSON.stringify(margins)}`);
-      }
+      const margins = await readScrollingMargins(page);
       await ctx.shot("about-slide-bottom");
 
       // 2rem top and bottom. The tolerance absorbs sub-pixel layout, not a
