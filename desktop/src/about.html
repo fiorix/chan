@@ -19,9 +19,14 @@
       <img class="about-mark" src="chan-mark.png" alt="" aria-hidden="true" />
       <div class="about-headtext">
         <div class="about-name">Chan Desktop</div>
+        <!-- Version and build id on their OWN lines. Sharing one line, the
+             pair wrapped or not depending on how long the build id ran
+             ("unknown" against "a1b2c3d-dirty"), which made the head block's
+             height a property of the string. The window is a fixed size, so
+             that height has to be knowable from the markup. -->
         <div class="about-version">
-          chan version <span class="mono" id="version">n/a</span>
-          build <span class="mono" id="build">n/a</span>
+          <div>chan version <span class="mono" id="version">n/a</span></div>
+          <div>build <span class="mono" id="build">n/a</span></div>
         </div>
       </div>
     </div>

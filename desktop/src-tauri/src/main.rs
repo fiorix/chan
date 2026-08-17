@@ -6784,10 +6784,20 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::App(format!("about.html?v={version}&b={build}").into()),
     )
     .title("About Chan Desktop")
-    // Sized to fit the content with equal top/bottom margin: app head,
-    // links, the Fund-the-work card, separator, and the credits line.
-    // Fixed, since the window is non-resizable.
-    .inner_size(420.0, 426.0)
+    // Tall enough that the content never has to scroll; about.css centers
+    // it, so any slack is split evenly above and below rather than piling
+    // up under the card. 426 was the old height, and it was the content's
+    // exact height at the time, which is why one extra line in the head
+    // (the build id) started clipping the bottom margin off.
+    //
+    // 460 is measured, not guessed: the same DOM lays out at 422 (head 67,
+    // links 20, Fund card 182, separator 1, credits 36, four 16px gaps,
+    // 52px of padding), plus one wrapped line each for the links row and
+    // the credits line. Those two are the only rows whose height depends
+    // on the platform's font: the Fund card is pinned by its 150px QR and
+    // the head by its two fixed lines. Fixed, since the window is
+    // non-resizable.
+    .inner_size(420.0, 460.0)
     .min_inner_size(420.0, 380.0)
     .resizable(false)
     .initialization_script(&init)

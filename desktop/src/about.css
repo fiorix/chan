@@ -15,6 +15,18 @@
   max-width: 380px;
   margin: 0 auto;
   padding: 26px 22px;
+  /* The launcher base makes every `main` the window's scroll container
+     (`flex: 1`), so this card owns the window's full height and its own
+     padding is only a floor. Left at the default flex-start, every spare
+     pixel piles up under the card and the margins match only when the
+     window's height equals the content's exactly -- which stopped being
+     true the moment the build id added a line to the head. Centering the
+     free space is what makes the margin below the last row equal the one
+     above the first, whatever the platform's fonts do to the rows in
+     between. `safe` keeps the top reachable if the content is ever taller
+     than the window: plain centering would scroll the app name out of
+     reach instead of the credits line. */
+  justify-content: safe center;
 }
 
 .about-head {

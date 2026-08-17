@@ -812,7 +812,11 @@
     gap: 0.9rem;
     color: var(--text);
     opacity: 1;
-    padding: 0 0.25rem;
+    /* The bottom pad matches the carousel's own 2rem above the slide. The
+       slide owns the vertical scroll, so without it the credits line ends
+       flush against the stage edge whenever the About content is taller
+       than the tab, while the top of the same card keeps its margin. */
+    padding: 0 0.25rem 2rem;
   }
   .slide-about .slide-title {
     align-self: center;
