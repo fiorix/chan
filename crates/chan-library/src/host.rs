@@ -2949,6 +2949,21 @@ impl WorkspaceHost {
             .map(|(_, runtime)| runtime.router()))
     }
 
+    /// Whether `path` belongs to a tenant currently mounted in this host.
+    ///
+    /// Devserver startup uses this narrow query to keep its root management
+    /// surface responsive while temporarily refusing tenant traffic until
+    /// inherited terminal sessions have been restored.
+    pub fn owns_mounted_tenant_path(&self, path: &str) -> Result<bool, Error> {
+        let workspaces = self
+            .workspaces
+            .read()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        Ok(workspaces
+            .keys()
+            .any(|prefix| path_matches_prefix(path, prefix)))
+    }
+
     /// If `path` is exactly a mounted tenant prefix `/{prefix}` or its trailing-
     /// slash form `/{prefix}/`, return the bare prefix. `host_dispatch` uses it
     /// to canonicalize the tenant root (axum's nest 404s the exact `/{prefix}/`).

@@ -1761,6 +1761,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_retry_hint_survives_the_gateway_response_filter() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+
+        let stripped = strip_response_headers(&headers);
+        assert!(stripped.iter().any(|(name, value)| {
+            name == header::RETRY_AFTER && value == HeaderValue::from_static("1")
+        }));
+    }
+
+    #[test]
     fn is_management_path_matches_devserver_api() {
         assert!(is_management_path("/api/devserver"));
         assert!(is_management_path("/api/devserver/workspaces"));
@@ -1781,6 +1792,10 @@ mod tests {
         assert_eq!(forward_path(&u("/blog/assets/x.js")), "/blog/assets/x.js");
         assert_eq!(forward_path(&u("/blog/?a=1")), "/blog/?a=1");
         assert_eq!(forward_path(&u("/blog")), "/blog");
+        assert_eq!(
+            forward_path(&u("/notes-deadbeef/api/terminal/ws?session=pty-1")),
+            "/notes-deadbeef/api/terminal/ws?session=pty-1"
+        );
     }
 
     #[test]

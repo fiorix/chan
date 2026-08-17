@@ -486,8 +486,8 @@ impl MountAttempt {
 enum StartupPhase {
     PreparingRows,
     Binding,
-    FdstoreApplied,
     ServingAndRestoring,
+    ApplyingFdstore,
     Ready,
     Stopping,
     Stopped,
@@ -527,11 +527,8 @@ impl StartupCoordinator {
         let valid = matches!(
             (inner.phase, next),
             (StartupPhase::PreparingRows, StartupPhase::Binding)
-                | (StartupPhase::Binding, StartupPhase::FdstoreApplied)
-                | (
-                    StartupPhase::FdstoreApplied,
-                    StartupPhase::ServingAndRestoring
-                )
+                | (StartupPhase::Binding, StartupPhase::ServingAndRestoring)
+                | (StartupPhase::ApplyingFdstore, StartupPhase::Ready)
                 | (StartupPhase::Stopping, StartupPhase::Stopped)
         );
         if !valid {
@@ -548,9 +545,13 @@ impl StartupCoordinator {
 
     fn track(&self, attempt: MountAttemptKey) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.phase == StartupPhase::Ready {
-            // Post-readiness user mounts are ordinary serving work. They still
-            // carry generations, but cannot retroactively gate READY.
+        if matches!(
+            inner.phase,
+            StartupPhase::ApplyingFdstore | StartupPhase::Ready
+        ) {
+            // Once fdstore finalization begins, later user mounts are ordinary
+            // serving work. They still carry generations, but cannot
+            // retroactively join the startup barrier.
             return Ok(());
         }
         if !matches!(
@@ -580,14 +581,17 @@ impl StartupCoordinator {
         }
     }
 
-    async fn ready_after_restore(&self) -> bool {
+    /// Wait for every mount registered during startup to settle, then close the
+    /// startup barrier atomically so inherited fdstore sessions can be applied
+    /// against the complete mounted tenant set.
+    async fn begin_fdstore_apply_after_restore(&self) -> bool {
         loop {
             let notified = self.changed.notified();
             {
                 let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 match inner.phase {
                     StartupPhase::ServingAndRestoring if inner.pending.is_empty() => {
-                        inner.phase = StartupPhase::Ready;
+                        inner.phase = StartupPhase::ApplyingFdstore;
                         return true;
                     }
                     StartupPhase::Stopping | StartupPhase::Stopped => return false,
@@ -596,6 +600,10 @@ impl StartupCoordinator {
             }
             notified.await;
         }
+    }
+
+    fn tenant_routes_ready(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase == StartupPhase::Ready
     }
 
     fn stop(&self) {
@@ -1699,20 +1707,6 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         state.bound_port.store(local_addr.port(), Ordering::Relaxed);
         state.persist_state();
     }
-    // Inherited terminals are adopted exactly once before any local, discovery,
-    // or tunnel route can reconnect to them.
-    fdstore_restore.apply(&state);
-    // Adopted sessions and any boot-time spawn become parked + manifested
-    // before routes expose: nothing can observe a session whose fd name is
-    // not yet durable.
-    if let Some(parker) = &fd_parker {
-        parker.activate();
-    }
-    state
-        .startup
-        .advance(StartupPhase::FdstoreApplied)
-        .map_err(anyhow::Error::msg)?;
-
     // Shutdown wiring is installed before route exposure. The observer moves
     // startup to Stopping and cancels reindex work; the owned restore task uses
     // another receiver and joins before this function returns.
@@ -1781,7 +1775,20 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 state.startup.stop();
                 let _ = signal_tx.send(true);
             }
-            let ready = restore_join.is_ok() && state.startup.ready_after_restore().await;
+            let ready = if restore_join.is_ok()
+                && state.startup.begin_fdstore_apply_after_restore().await
+            {
+                // Persisted workspaces are mounted now, so every inherited PTY
+                // can resolve its tenant. Tenant routes remain gated until the
+                // adoption and parking manifest are both complete.
+                fdstore_restore.apply(&state);
+                if let Some(parker) = &fd_parker {
+                    parker.activate();
+                }
+                state.startup.advance(StartupPhase::Ready).is_ok()
+            } else {
+                false
+            };
             let notify_result = if ready {
                 println!("chan devserver: listening on http://{local_addr}/?t={token}");
                 println!("{DEVSERVER_TOKEN_MARKER}{token}");
@@ -1841,7 +1848,17 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 state.startup.stop();
                 let _ = signal_tx.send(true);
             }
-            let ready = restore_join.is_ok() && state.startup.ready_after_restore().await;
+            let ready = if restore_join.is_ok()
+                && state.startup.begin_fdstore_apply_after_restore().await
+            {
+                fdstore_restore.apply(&state);
+                if let Some(parker) = &fd_parker {
+                    parker.activate();
+                }
+                state.startup.advance(StartupPhase::Ready).is_ok()
+            } else {
+                false
+            };
             let notify_result = if ready {
                 match &tunnel_url {
                     Some(url) => println!(
@@ -2077,8 +2094,37 @@ fn build_devserver_app(
         Some(state.token.clone()),
         Some(serve_addr.clone()),
     );
-    let app = public.merge(authed).merge(host.router());
+    let app = public
+        .merge(authed)
+        .merge(host.router())
+        .layer(middleware::from_fn_with_state(
+            state,
+            gate_tenant_during_startup,
+        ));
     (app, serve_addr)
+}
+
+/// Keep the launcher, health, and management APIs responsive while persisted
+/// workspaces mount, but refuse every mounted tenant until inherited PTYs have
+/// been adopted and continuous parking is active.
+async fn gate_tenant_during_startup(
+    State(state): State<Arc<DevserverState>>,
+    req: HttpRequest<Body>,
+    next: Next,
+) -> Response {
+    if state.startup.tenant_routes_ready() {
+        return next.run(req).await;
+    }
+    match state.host.owns_mounted_tenant_path(req.uri().path()) {
+        Ok(true) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "devserver is restoring terminal sessions",
+        )
+            .into_response(),
+        Ok(false) => next.run(req).await,
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 /// Middleware that stamps every request entering the tunnel-only app clone with
@@ -2814,19 +2860,23 @@ mod tests {
             .advance(StartupPhase::Binding)
             .expect("preparing -> binding");
         startup
-            .advance(StartupPhase::FdstoreApplied)
-            .expect("binding -> fdstore");
-        startup
             .advance(StartupPhase::ServingAndRestoring)
-            .expect("fdstore -> serving");
+            .expect("binding -> serving");
 
         let ready_startup = startup.clone();
-        let ready = tokio::spawn(async move { ready_startup.ready_after_restore().await });
+        let ready =
+            tokio::spawn(async move { ready_startup.begin_fdstore_apply_after_restore().await });
         tokio::task::yield_now().await;
-        assert!(!ready.is_finished(), "READY fired with a mount pending");
+        assert!(
+            !ready.is_finished(),
+            "fdstore apply began with a mount pending"
+        );
         startup.settle(&attempt);
         assert!(ready.await.unwrap());
-        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.phase(), StartupPhase::ApplyingFdstore);
+        startup
+            .advance(StartupPhase::Ready)
+            .expect("fdstore -> ready");
     }
 
     #[tokio::test]
@@ -2845,12 +2895,8 @@ mod tests {
             .expect("preparing -> binding");
         state
             .startup
-            .advance(StartupPhase::FdstoreApplied)
-            .expect("binding -> fdstore");
-        state
-            .startup
             .advance(StartupPhase::ServingAndRestoring)
-            .expect("fdstore -> serving");
+            .expect("binding -> serving");
 
         let serialization = state.mount_attempt_lock.lock().await;
         let mount_state = state.clone();
@@ -2868,12 +2914,16 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(200),
-                state.startup.ready_after_restore()
+                state.startup.begin_fdstore_apply_after_restore()
             )
             .await
-            .expect("cancelled attempt must not wedge READY"),
-            "startup stopped instead of becoming ready"
+            .expect("cancelled attempt must not wedge fdstore apply"),
+            "startup stopped instead of finalizing fdstore"
         );
+        state
+            .startup
+            .advance(StartupPhase::Ready)
+            .expect("fdstore -> ready");
         let row = state.entry_for(&prefix).expect("cancelled mount row");
         assert_eq!(row.status, WorkspaceStatus::Error);
         assert!(
@@ -3247,26 +3297,45 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fdstore_apply_is_single_and_precedes_route_exposure() {
-        let startup = StartupCoordinator::new();
+    #[tokio::test]
+    async fn fdstore_finalization_is_single_and_precedes_tenant_readiness() {
+        let startup = Arc::new(StartupCoordinator::new());
         startup
             .advance(StartupPhase::Binding)
             .expect("preparing -> binding");
         assert!(
-            startup.advance(StartupPhase::ServingAndRestoring).is_err(),
-            "routes must not serve before fdstore adoption"
-        );
-        startup
-            .advance(StartupPhase::FdstoreApplied)
-            .expect("fdstore applies once");
-        assert!(
-            startup.advance(StartupPhase::FdstoreApplied).is_err(),
-            "fdstore adoption cannot run twice"
+            startup.advance(StartupPhase::Ready).is_err(),
+            "tenant routes cannot become ready before restore"
         );
         startup
             .advance(StartupPhase::ServingAndRestoring)
-            .expect("routes expose after fdstore");
+            .expect("binding -> serving");
+        assert!(!startup.tenant_routes_ready());
+        let during_restore = MountAttemptKey::new("/during-restore", 1);
+        startup
+            .track(during_restore.clone())
+            .expect("mount begun during restore joins the barrier");
+        let finalizing_startup = startup.clone();
+        let finalizing =
+            tokio::spawn(
+                async move { finalizing_startup.begin_fdstore_apply_after_restore().await },
+            );
+        tokio::task::yield_now().await;
+        assert!(!finalizing.is_finished());
+        startup.settle(&during_restore);
+        assert!(finalizing.await.unwrap());
+        assert_eq!(startup.phase(), StartupPhase::ApplyingFdstore);
+        startup
+            .track(MountAttemptKey::new("/after-barrier", 1))
+            .expect("mount begun after the barrier is ordinary serving work");
+        assert!(
+            startup.advance(StartupPhase::ApplyingFdstore).is_err(),
+            "fdstore adoption cannot run twice"
+        );
+        startup
+            .advance(StartupPhase::Ready)
+            .expect("fdstore -> ready");
+        assert!(startup.tenant_routes_ready());
     }
 
     #[tokio::test]
@@ -3751,6 +3820,71 @@ mod tests {
         assert_eq!(json["instance"], "lib-test");
     }
 
+    #[tokio::test]
+    async fn startup_gate_keeps_root_healthy_and_refuses_tenant_routes() {
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state
+            .mount_shared_terminal_tenant()
+            .await
+            .expect("mount shared terminal tenant");
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state.clone(), host);
+
+        let root = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+
+        let tenant_request = || {
+            HttpRequest::builder()
+                .uri("/api/terminal/api/session?w=w-test")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let gated = app.clone().oneshot(tenant_request()).await.unwrap();
+        assert_eq!(gated.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(gated.headers()[header::RETRY_AFTER], "1");
+
+        // The tunnel receives this same router after the gateway-origin
+        // assertion layer. A segment-preserved tenant path must hit the same
+        // startup gate as the direct listener.
+        let tunnel = app.clone().layer(middleware::from_fn_with_state(
+            test_tunnel_assertion(),
+            mark_tunnel_origin,
+        ));
+        let tunnel = tunnel.layer(axum::Extension(test_tunnel_registration()));
+        let tunneled = tunnel
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/terminal/api/session?w=w-test")
+                    .header("x-forwarded-host", "owner.dev")
+                    .header(
+                        chan_tunnel_proto::gateway_assertion::HEADER_NAME,
+                        test_gateway_assertion(&test_tunnel_assertion(), "owner.dev", "owner"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tunneled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(tunneled.headers()[header::RETRY_AFTER], "1");
+
+        complete_test_startup(&state).await;
+        let routed = app.oneshot(tenant_request()).await.unwrap();
+        assert_eq!(routed.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[test]
     fn store_save_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
@@ -3915,6 +4049,22 @@ mod tests {
         })
     }
 
+    async fn complete_test_startup(state: &DevserverState) {
+        state
+            .startup
+            .advance(StartupPhase::Binding)
+            .expect("preparing -> binding");
+        state
+            .startup
+            .advance(StartupPhase::ServingAndRestoring)
+            .expect("binding -> serving");
+        assert!(state.startup.begin_fdstore_apply_after_restore().await);
+        state
+            .startup
+            .advance(StartupPhase::Ready)
+            .expect("fdstore -> ready");
+    }
+
     #[tokio::test]
     async fn devserver_root_health_names_the_build_that_is_answering() {
         // The devserver root is what a supervised restart relaunches, so this
@@ -4062,6 +4212,7 @@ mod tests {
             .mount_shared_terminal_tenant()
             .await
             .expect("mount shared terminal tenant");
+        complete_test_startup(&state).await;
         let host = state.host.clone();
         let (app, _serve_addr) = build_devserver_app(state, host);
         let tunnel = app.clone().layer(middleware::from_fn_with_state(
@@ -5910,6 +6061,7 @@ mod tests {
                 .await
                 .expect("mount shared terminal tenant");
             parker.activate();
+            complete_test_startup(&state).await;
 
             let term = state
                 .host

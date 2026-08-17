@@ -335,14 +335,18 @@ mod linux {
             self.shared.write_if_active();
         }
 
-        /// Active -> Sealed, at the head of graceful shutdown: refuse
-        /// further parks, take the final manifest write, then remove and
-        /// detach exactly the parked set. Between the write and the detach
-        /// the set can only SHRINK (exit/close unpark), so every fd left
-        /// stored for preservation is described by the final manifest.
+        /// Seal parking at the head of graceful shutdown. Active parking takes
+        /// one final manifest write, then removes and detaches exactly the
+        /// parked set. A shutdown before activation preserves the inherited
+        /// manifest untouched: the mounted tenant set is incomplete and cannot
+        /// truthfully replace it.
         pub(crate) fn seal_flush_detach(&self) -> usize {
             {
                 let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
+                if *phase != ParkerPhase::Active {
+                    *phase = ParkerPhase::Sealed;
+                    return 0;
+                }
                 *phase = ParkerPhase::Sealed;
                 if let Err(error) = self.shared.write_manifest_locked(&phase) {
                     tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
@@ -864,6 +868,25 @@ mod linux {
                 "Sealed must refuse park"
             );
             assert!(!hook.adopt("chan.pty.a.3"), "Sealed must refuse adoption");
+            parker.stop().await;
+        }
+
+        #[tokio::test]
+        async fn shutdown_before_activation_preserves_the_inherited_manifest() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, manifest) = test_parker(store.clone());
+            let inherited =
+                br#"{"version":2,"library_id":"lib-test","sessions":[{"sentinel":true}]}"#;
+            std::fs::write(&manifest, inherited).expect("seed inherited manifest");
+
+            assert_eq!(parker.seal_flush_detach(), 0);
+            assert_eq!(
+                std::fs::read(&manifest).expect("read preserved manifest"),
+                inherited,
+                "an incomplete mounted tenant set must not replace inherited state"
+            );
+            assert!(store.calls().is_empty());
+            assert!(!hook.adopt("chan.pty.late.1"), "shutdown seals adoption");
             parker.stop().await;
         }
 

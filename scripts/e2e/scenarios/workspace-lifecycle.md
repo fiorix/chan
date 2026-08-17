@@ -10,6 +10,7 @@ Each scenario states behavior that must hold today. Where an executable check or
 - startup and shutdown cancel without resurrection or leaked tasks;
 - durable workspace, session, document, and scene state survives a clean cycle;
 - terminal, editor, collaboration, pane, index, graph, and file browser behavior keeps working across a cycle;
+- shared-terminal and workspace PTYs survive every non-destructive devserver restart;
 - stopping a workspace is distinct from removing it;
 - an editor open on a file converges on external filesystem edits in both directions, including shrinkage, byte-exact restores, and truncation;
 - a workspace root that disappears is a terminal filesystem state, never an empty workspace and never an invitation to recreate the root.
@@ -22,7 +23,7 @@ Look up the area you changed and run the scenarios listed against it.
 - **Shutdown, task ownership, cancellation**: WL-02, WL-03, WL-04
 - **Editor and scene sessions, collaboration, CAS**: WL-07, WL-08, WL-09, WL-10, WL-15
 - **Watcher, index, graph, recovery**: WL-11, WL-14, WL-15
-- **Terminal and pane state, layout restore**: WL-05, WL-06, WL-10
+- **Terminal and pane state, layout restore, devserver restart**: WL-05, WL-06, WL-10, WL-16
 - **File browser**: WL-12, WL-14
 - **Anything that touches path resolution or the workspace root**: WL-13, WL-14
 
@@ -45,6 +46,7 @@ Look up the area you changed and run the scenarios listed against it.
 | WL-13 | Root disappears during startup | automated |
 | WL-14 | Root disappears while fully in use | destructive |
 | WL-15 | Filesystem-driven edits converge in an open editor | automated |
+| WL-16 | Devserver restart preserves shared and workspace PTYs | destructive |
 
 Automated coverage runs from two places. The Rust cases run under the normal test command; the browser cases run through the smoke harness:
 
@@ -210,6 +212,18 @@ One asymmetry is deliberate and must survive. Content this session wrote to disk
 **Backing.** Those checks, plus `doc_sessions::tests::external_restore_of_adopted_content_converges_at_watcher_speed`, `doc_sessions::tests::truncation_on_a_never_flushed_session_needs_only_corroboration`, and the origin-window cases in `disk_echo::tests`.
 
 **Evidence.** Per-step convergence timings from both checks, the restore and truncate steps included, and the `apiShows` field showing the HTTP read agrees with the editor.
+
+### WL-16 - devserver restart preserves shared and workspace PTYs
+
+**Expectation.** A windowed PTY in the shared terminal tenant and one in a mounted workspace tenant keep the same session ids and live child processes across a bare systemd restart, `chan devserver --restart`, watchdog recovery, and kill-9 crash recovery. The fd store retains exactly one entry per live windowed session across every adoption. Session close removes only its entry; `chan devserver --stop`, `--restart --force`, and a bare stop end the relevant children and empty the store.
+
+During startup, root health and management routes remain responsive while persisted workspaces mount. Whether a request arrives on the direct listener or through the segment-preserving gateway tunnel, mounted tenant routes return 503 with a retry hint until workspace restoration, inherited-session adoption, and continuous parking finish. A shutdown before parking activates leaves the inherited manifest untouched.
+
+**Run.** Inside a fresh sdme container with a lingering non-root user manager, run `scripts/e2e/devserver-fdstore.sh` with `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`. Set `TMPDIR` and `CARGO_TARGET_DIR` to writable guest-local `/var/tmp` paths when the source is mounted read-only. The suite refuses to run outside a container.
+
+**Backing.** `scripts/e2e/devserver-fdstore.sh`; `devserver::tests::startup_gate_keeps_root_healthy_and_refuses_tenant_routes`; `devserver::tests::fdstore_finalization_is_single_and_precedes_tenant_readiness`; `devserver::fdstore::linux::parker_tests::shutdown_before_activation_preserves_the_inherited_manifest`.
+
+**Evidence.** Child liveness, exact per-window tenant rosters, session ids, restart counters, and systemd `NFileDescriptorStore` after every phase.
 
 ## Manual and soak
 

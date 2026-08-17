@@ -124,7 +124,7 @@ Six things bite in practice, all found on the first real run:
 | `SKIP: node required` / `python3 required`, **exit 0** | The suite skips on missing deps and exits 0, so a skip is indistinguishable from a pass. Read the log for a `SKIP:` line before believing a green run. |
 | `node: bad option: --experimental-websocket` | apt's Node on noble is v18; the flag needs 21+. Install Node 22 from the official tarball. **This is not Windows-specific** -- any guest built from a noble base hits it. |
 | `could not compile <crate> (build script)`, `os error 2` | No linker in the guest. A toolchain bound in from WSL is not enough; the guest needs `build-essential` of its own. |
-| `/repo/target/debug/chan: No such file or directory` | Do **not** set `CARGO_TARGET_DIR`: the suite runs the binary from `$REPO/target/debug/chan`. With `/repo` bound to a WSL clone the target dir is already on ext4. |
+| `/repo/target/debug/chan: No such file or directory` | The suite resolves the binary through `CARGO_TARGET_DIR` when it is set. Point it at a writable guest-local path such as `/var/tmp/chan-target` when the source is read-only; otherwise leave it unset to use `$REPO/target`. |
 | `fatal: not a git repository: /repo/C:/...` | The Windows linked-worktree `.git` pointer; see the filesystem notes below. Use a WSL clone. |
 
 A passing run prints `PASS: all 8 cases at <sha>` and asserts the fd-store count after every phase -- restart, CLI restart, watchdog `SIGSTOP`, `kill -9` crash restore, session close, stop, `--restart --force`, and bare stop.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Continuous fdstore parking e2e against a REAL `systemctl --user` unit.
 #
-# Proves the devserver terminal-survival contract end to end: a live PTY
-# survives (1) a bare `systemctl --user restart`, including distinct live
+# Proves the devserver terminal-survival contract end to end: shared-terminal
+# and workspace PTYs survive (1) a bare `systemctl --user restart`, including distinct live
 # and spawn metadata, (2) `chan devserver --restart`, (3) a watchdog kill
 # (SIGSTOP the main process), and (4) a kill -9 crash restart including a
 # session spawned after the previous boot; session close, `--stop`,
@@ -88,6 +88,10 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "cleanup-order" ]; then
 fi
 
 command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 0; }
+command -v systemd-detect-virt >/dev/null \
+    || { log "REFUSE: systemd-detect-virt is required to prove container isolation"; exit 1; }
+systemd-detect-virt --container >/dev/null 2>&1 \
+    || { log "REFUSE: this destructive fixed-unit suite must run inside a container"; exit 1; }
 systemctl --user show-environment >/dev/null 2>&1 \
     || { log "SKIP: no systemd user session"; exit 0; }
 command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
@@ -208,7 +212,7 @@ json_field() { # field  (stdin: json object)
     python3 -c 'import json,sys;print(json.load(sys.stdin)[sys.argv[1]])' "$1"
 }
 
-terminal_route() { # window-id  (prints "prefix token")
+window_route() { # window-id  (prints "prefix token")
     local wid="$1" token rows
     token="$(devserver_token)"
     rows="$(api GET /api/library/windows "$token")"
@@ -216,17 +220,14 @@ terminal_route() { # window-id  (prints "prefix token")
 import json, sys
 wid = sys.argv[1]
 rows = json.load(sys.stdin)
-row = next(
-    r for r in rows
-    if r["kind"] == "terminal" and r["window_id"] == wid
-)
+row = next(r for r in rows if r["window_id"] == wid)
 print(row["prefix"], row["token"])' "$wid"
 }
 
 terminal_ws_url() { # sid window-id query-name query-group
     local sid="$1" wid="$2" query_name="$3" query_group="$4"
     local prefix ttoken
-    read -r prefix ttoken <<<"$(terminal_route "$wid")"
+    read -r prefix ttoken <<<"$(window_route "$wid")"
     python3 -c '
 import sys
 from urllib.parse import urlencode
@@ -325,29 +326,46 @@ spawn_windowed_sleep() { # magic-seconds
     printf '%s %s %s\n' "$sid" "$pid" "$wid"
 }
 
+# Register a throwaway workspace, mint a window in its tenant, and spawn a
+# windowed PTY there. Prints "sid pid window-id" like spawn_windowed_sleep.
+spawn_workspace_sleep() { # magic-seconds workspace-root
+    local magic="$1" root="$2" token payload window prefix ttoken wid sid pid
+    token="$(devserver_token)"
+    payload="$(python3 -c 'import json,sys;print(json.dumps({"path": sys.argv[1]}))' "$root")"
+    curl -fsS -m 60 -X POST -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' -d "$payload" \
+        "$BASE/api/devserver/workspaces" >/dev/null
+    payload="$(python3 -c '
+import json, sys
+print(json.dumps({"kind": "workspace", "workspace_path": sys.argv[1]}))
+' "$root")"
+    window="$(curl -fsS -m 10 -X POST -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' -d "$payload" \
+        "$BASE/api/library/windows")"
+    wid="$(printf '%s' "$window" | json_field window_id)"
+    prefix="$(printf '%s' "$window" | json_field prefix)"
+    ttoken="$(printf '%s' "$window" | json_field token)"
+    sid="$(curl -fsS -m 10 -X POST -H "Authorization: Bearer $ttoken" \
+        -H 'Content-Type: application/json' \
+        -d "{\"name\":\"e2e-$magic\",\"command\":\"exec sleep $magic\",\"window_id\":\"$wid\"}" \
+        "$BASE$prefix/api/terminals" | json_field session)"
+    wait_until 15 "workspace child sleep $magic" \
+        sh -c "pgrep -f 'sleep ${magic%?}[${magic: -1}]' >/dev/null"
+    pid="$(pgrep -f "sleep ${magic%?}[${magic: -1}]" | head -1)"
+    printf '%s %s %s\n' "$sid" "$pid" "$wid"
+}
+
 child_alive() { kill -0 "$1" 2>/dev/null; }
 
-# The session id must be reachable through a tenant roster after a boot:
-# re-discover the shared terminal tenant via the windows feed each time
-# (tenant tokens re-mint across restarts).
-assert_session_listed() { # sid
-    local sid="$1" token rows
-    token="$(devserver_token)"
-    rows="$(api GET /api/library/windows "$token")"
-    local prefix ttoken
-    prefix="$(printf '%s' "$rows" | python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-row = next(r for r in rows if r["kind"] == "terminal")
-print(row["prefix"])')" || fail "no terminal window row listed"
-    ttoken="$(printf '%s' "$rows" | python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-row = next(r for r in rows if r["kind"] == "terminal")
-print(row["token"])')"
+# The session id must be reachable through its exact window's tenant roster
+# after a boot (tenant tokens re-mint across restarts).
+assert_session_listed() { # sid window-id
+    local sid="$1" wid="$2" prefix ttoken
+    read -r prefix ttoken <<<"$(window_route "$wid")" \
+        || fail "window $wid is not listed"
     api GET "$prefix/api/terminals/roster" "$ttoken" | grep -q "$sid" \
-        || fail "session $sid missing from the tenant roster"
-    log "session $sid listed in the roster"
+        || fail "session $sid missing from window $wid tenant roster"
+    log "session $sid listed in window $wid tenant roster"
 }
 
 main_pid() {
@@ -374,8 +392,13 @@ wait_restarted() { # old-nrestarts old-mainpid why
 
 # ---- build the exact commit under test ----
 log "building chan (debug) at $SHA"
-cargo build -q -p chan --manifest-path "$REPO/Cargo.toml"
-CHAN="$REPO/target/debug/chan"
+cargo build --locked -q -p chan --manifest-path "$REPO/Cargo.toml"
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
+case "$TARGET_DIR" in
+    /*) ;;
+    *) TARGET_DIR="$REPO/$TARGET_DIR" ;;
+esac
+CHAN="$TARGET_DIR/debug/chan"
 
 # ---- first start, with a fast-watchdog drop-in in place from boot ----
 mkdir -p "$DROPIN_DIR"
@@ -413,26 +436,37 @@ wait_until 15 "distinct live/spawn metadata in restart manifest" \
     "$SID1" "$LIVE_NAME1" "$LIVE_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1"
 log "restart manifest records distinct live and spawn metadata"
 
+WORKSPACE="$WORK/workspace"
+mkdir -p "$WORKSPACE"
+printf '# fdstore workspace\n' > "$WORKSPACE/README.md"
+read -r WS_SID1 WS_PID1 WS_WID1 <<<"$(spawn_workspace_sleep 86315 "$WORKSPACE")"
+log "workspace session $WS_SID1 child $WS_PID1 window $WS_WID1"
+assert_store 2 "shared and workspace sessions parked at spawn"
+
 # ---- case 1: bare systemctl restart ----
 log "case 1: bare systemctl --user restart"
 systemctl --user restart "$UNIT_NAME"
 wait_until 60 "readiness after bare restart" ready
 child_alive "$PID1" || fail "child died across bare restart"
-assert_session_listed "$SID1"
+child_alive "$WS_PID1" || fail "workspace child died across bare restart"
+assert_session_listed "$SID1" "$WID1"
+assert_session_listed "$WS_SID1" "$WS_WID1"
 METADATA1="$(probe_terminal_metadata \
     "$SID1" "$WID1" "stale-query-86311" "stale-query-group")"
 printf '%s' "$METADATA1" | assert_probe_metadata \
     "fdstore adoption after bare restart" \
     "$LIVE_NAME1" "$LIVE_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1"
-assert_store 1 "adoption after bare restart must not grow the store"
+assert_store 2 "adoption after bare restart must not grow the store"
 
 # ---- case 2: chan devserver --restart ----
 log "case 2: chan devserver --restart"
 "$CHAN" devserver --service=systemd --restart --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "readiness after CLI restart" ready
 child_alive "$PID1" || fail "child died across CLI restart"
-assert_session_listed "$SID1"
-assert_store 1 "adoption after CLI restart must not grow the store"
+child_alive "$WS_PID1" || fail "workspace child died across CLI restart"
+assert_session_listed "$SID1" "$WID1"
+assert_session_listed "$WS_SID1" "$WS_WID1"
+assert_store 2 "adoption after CLI restart must not grow the store"
 
 # ---- case 3: watchdog kill (SIGSTOP the main process) ----
 log "case 3: watchdog restart via SIGSTOP"
@@ -446,44 +480,40 @@ wait_until 90 "readiness after watchdog restart" ready
 journalctl --user -u "$UNIT_NAME" -n 200 --no-pager 2>/dev/null | grep -qi "watchdog" \
     || log "note: journal shows no watchdog line (may be unreadable here)"
 child_alive "$PID1" || fail "child died across watchdog restart"
-assert_session_listed "$SID1"
-assert_store 1 "watchdog restart must not grow the store"
+child_alive "$WS_PID1" || fail "workspace child died across watchdog restart"
+assert_session_listed "$SID1" "$WID1"
+assert_session_listed "$WS_SID1" "$WS_WID1"
+assert_store 2 "watchdog restart must not grow the store"
 
 # ---- case 4: crash restore, including a post-boot spawn ----
 log "case 4: kill -9 crash restore with a second session"
 read -r SID2 PID2 WID2 <<<"$(spawn_windowed_sleep 86312)"
 log "session2 $SID2 child $PID2 window $WID2"
-assert_store 2 "second parked session"
+assert_store 3 "second shared session parked alongside workspace session"
 OLD_RESTARTS="$(unit_prop NRestarts)"
 OLD_MAIN="$(main_pid)"
 kill -9 "$OLD_MAIN"
 wait_restarted "$OLD_RESTARTS" "$OLD_MAIN" "crash"
 child_alive "$PID1" || fail "session1 child died across crash restart"
+child_alive "$WS_PID1" || fail "workspace child died across crash restart"
 child_alive "$PID2" || fail "session2 child died across crash restart"
-assert_session_listed "$SID1"
-assert_session_listed "$SID2"
-assert_store 2 "crash adoption must not grow the store"
+assert_session_listed "$SID1" "$WID1"
+assert_session_listed "$WS_SID1" "$WS_WID1"
+assert_session_listed "$SID2" "$WID2"
+assert_store 3 "crash adoption must not grow the store"
 
 # ---- case 5: closing a session removes its store entry ----
 log "case 5: session close removes the store entry"
-TOKEN="$(devserver_token)"
-ROWS="$(api GET /api/library/windows "$TOKEN")"
-TPREFIX="$(printf '%s' "$ROWS" | python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-print(next(r for r in rows if r["kind"] == "terminal")["prefix"])')"
-TTOKEN="$(printf '%s' "$ROWS" | python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-print(next(r for r in rows if r["kind"] == "terminal")["token"])')"
+read -r TPREFIX TTOKEN <<<"$(window_route "$WID2")"
 api DELETE "$TPREFIX/api/terminals/$SID2" "$TTOKEN" >/dev/null
 wait_until 15 "session2 child death" sh -c "! kill -0 $PID2 2>/dev/null"
-assert_store 1 "closed session left the store"
+assert_store 2 "closed session left the shared and workspace entries"
 
 # ---- case 6: chan devserver --stop kills the child before the unit exits ----
 log "case 6: chan devserver --stop"
 "$CHAN" devserver --service=systemd --stop
 child_alive "$PID1" && fail "child survived --stop's explicit drain"
+child_alive "$WS_PID1" && fail "workspace child survived --stop's explicit drain"
 systemctl --user is-active --quiet "$UNIT_NAME" && fail "unit still active after --stop"
 assert_store 0 "stop released the store"
 
