@@ -29,16 +29,57 @@ async function openFile(page, filename) {
   }, filename);
   if (!clicked) throw new Error(`tree row not found: ${filename}`);
   await page.waitForFunction(
-    () =>
-      [...document.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Open"),
+    (name) =>
+      [...document.querySelectorAll(".pane .browser .inspector .info")].some((info) => {
+        const title = info.querySelector(".title")?.textContent?.trim();
+        const action = info.querySelector(".actions-section .pill-main")?.textContent?.trim();
+        return title === name && action === "Open";
+      }),
     { timeout: 30_000, polling: 200 },
+    filename,
   );
-  await page.evaluate(() => {
-    [...document.querySelectorAll("button")]
-      .find((b) => b.textContent?.trim() === "Open")
-      ?.click();
-  });
-  await page.waitForSelector(".cm-content", { timeout: 60_000 });
+  const opened = await page.evaluate((name) => {
+    const info = [...document.querySelectorAll(".pane .browser .inspector .info")].find(
+      (candidate) => candidate.querySelector(".title")?.textContent?.trim() === name,
+    );
+    const action = info?.querySelector(".actions-section .pill-main");
+    if (!(action instanceof HTMLElement) || action.textContent?.trim() !== "Open") return false;
+    action.click();
+    return true;
+  }, filename);
+  if (!opened) throw new Error(`Open action vanished for ${filename}`);
+  await page.waitForFunction(
+    (name) =>
+      [...document.querySelectorAll(".pane")].some((pane) => {
+        const activeTab = [...pane.querySelectorAll(".tab.active")].find((tab) =>
+          tab.textContent?.includes(name),
+        );
+        const editor = pane.querySelector(".editor-tab.active");
+        return (
+          activeTab !== undefined &&
+          editor !== null &&
+          editor.querySelector(".cm-content") !== null &&
+          editor.querySelector(".loading-toolbar") === null
+        );
+      }),
+    { timeout: 60_000, polling: 200 },
+    filename,
+  );
+  const handle = await page.evaluateHandle((name) => {
+    const pane = [...document.querySelectorAll(".pane")].find((candidate) =>
+      [...candidate.querySelectorAll(".tab.active")].some((tab) =>
+        tab.textContent?.includes(name),
+      ),
+    );
+    return pane?.querySelector(".editor-tab.active .cm-content") ?? null;
+  }, filename);
+  const editor = handle.asElement();
+  if (!editor) {
+    await handle.dispose();
+    throw new Error(`active editor missing for ${filename}`);
+  }
+  await editor.click();
+  await editor.dispose();
 }
 
 export default {
@@ -58,11 +99,9 @@ export default {
       });
       await page.waitForSelector(".pane", { timeout: 60_000 });
       await openFile(page, DOC);
-      await new Promise((r) => setTimeout(r, 1500));
 
       proxy.setLatency(1500);
       const marker = `SMOKE-LAT-${Date.now()}`;
-      await page.click(".cm-content");
       await page.keyboard.down("Control");
       await page.keyboard.press("Home");
       await page.keyboard.up("Control");
