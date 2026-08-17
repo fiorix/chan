@@ -33,6 +33,33 @@ export function toggleCollapse(current, side) {
   return normalizeCollapse(current) === side ? "none" : normalizeCollapse(side);
 }
 
+// The launcher temporarily covers the whole viewport when the desktop is
+// hidden, but that visual width is not a new window-manager boundary. Keep the
+// last real dock width so a view-only collapse cannot move every frame away.
+export function windowManagerLeftOffset(collapse, dockWidth, normalDockWidth) {
+  const side = normalizeCollapse(collapse);
+  if (side === "dock") return 16;
+  if (side === "desktop") return normalDockWidth;
+  return dockWidth;
+}
+
+// Keep a restored or moved frame reachable inside the current desktop. Width
+// and height remain the user's geometry; an oversized frame pins to the near
+// edge rather than losing its titlebar beyond the far edge.
+export function clampFramePosition(frame, area) {
+  const finite = (value, fallback) => (Number.isFinite(value) ? value : fallback);
+  const left = finite(area.left, 0);
+  const top = finite(area.top, 0);
+  const width = Math.max(0, finite(frame.width, 0));
+  const height = Math.max(0, finite(frame.height, 0));
+  const maxX = Math.max(left, left + Math.max(0, finite(area.width, 0)) - width);
+  const maxY = Math.max(top, top + Math.max(0, finite(area.height, 0)) - height);
+  return {
+    x: Math.min(Math.max(finite(frame.x, left), left), maxX),
+    y: Math.min(Math.max(finite(frame.y, top), top), maxY),
+  };
+}
+
 // Mirror of the launcher's windowUrl(record, origin): the same-origin in-app
 // URL for a window record, with ?w= always stamped so the SPA keys its
 // session on the record instead of minting a random per-tab id.

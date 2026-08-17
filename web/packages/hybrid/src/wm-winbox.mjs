@@ -2,7 +2,12 @@
 // The shell talks frames (create/focus/close/retitle/list + focus events), so
 // a tab-strip presentation would be a sibling adapter over the same calls.
 
-import { cascadePlacement, loadGeometry, saveGeometry } from "./hybrid-core.mjs";
+import {
+  cascadePlacement,
+  clampFramePosition,
+  loadGeometry,
+  saveGeometry,
+} from "./hybrid-core.mjs";
 
 export function createWinboxWm(opts) {
   const {
@@ -25,8 +30,7 @@ export function createWinboxWm(opts) {
     if (onFramesChanged) onFramesChanged();
   }
 
-  function usableArea() {
-    const off = offsets();
+  function usableArea(off = offsets()) {
     const root = document.documentElement;
     return {
       left: off.left,
@@ -75,7 +79,10 @@ export function createWinboxWm(opts) {
 
     const off = offsets();
     const saved = loadGeometry(storage, id);
-    const place = saved || cascadePlacement(frames.size, usableArea());
+    const area = usableArea(off);
+    const place = saved
+      ? { ...saved, ...clampFramePosition(saved, area) }
+      : cascadePlacement(frames.size, area);
     const entry = {
       id,
       wb: null,
@@ -212,6 +219,7 @@ export function createWinboxWm(opts) {
   // maximized window re-maximizes so it fills the new area.
   function applyOffsets() {
     const off = offsets();
+    const area = usableArea(off);
     for (const entry of frames.values()) {
       const wb = entry.wb;
       wb.top = off.top;
@@ -220,7 +228,8 @@ export function createWinboxWm(opts) {
         wb.restore();
         wb.maximize(true);
       } else if (!inState(entry, "min")) {
-        wb.move(Math.max(wb.x, off.left), Math.max(wb.y, off.top));
+        const position = clampFramePosition(wb, area);
+        wb.move(position.x, position.y);
       }
     }
   }

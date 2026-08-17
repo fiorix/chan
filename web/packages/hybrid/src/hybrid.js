@@ -30,6 +30,7 @@ import {
   reconcileFrames,
   toggleCollapse,
   watchBackoff,
+  windowManagerLeftOffset,
   windowUrlFor,
 } from "./hybrid-core.mjs";
 import * as host from "./host-bridge.mjs";
@@ -805,6 +806,10 @@ function followLauncherTheme() {
 
 // ------------------------------------------------------------------- collapse
 
+// Seed this before a persisted desktop collapse applies its `width: 100%` to
+// the launcher. That width is only paint; WinBox keeps the last real boundary.
+let normalDockWidth = els.dock.offsetWidth;
+
 // Which side of the seam is collapsed: "dock", "desktop", or "none". One value
 // rather than a flag each, so collapsing both -- a window with nothing in it --
 // is not a state that can be reached.
@@ -841,9 +846,12 @@ function applyCollapse() {
 // that the shell has no chrome above it; the left edge clears the dock, or just
 // the collapse rail when the dock is hidden.
 function currentOffsets() {
+  const side = collapsed();
+  const dockWidth = els.dock.offsetWidth;
+  if (side === "none" && dockWidth > 0) normalDockWidth = dockWidth;
   return {
     top: 0,
-    left: collapsed() === "dock" ? 16 : els.dock.offsetWidth,
+    left: windowManagerLeftOffset(side, dockWidth, normalDockWidth),
   };
 }
 

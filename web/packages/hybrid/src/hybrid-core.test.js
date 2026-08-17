@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   FRAME_GRACE_MS,
   cascadePlacement,
+  clampFramePosition,
   closeDecision,
   closesWindowOnCloseTab,
   createOpenShim,
@@ -21,6 +22,7 @@ import {
   tenantLeader,
   toggleCollapse,
   watchBackoff,
+  windowManagerLeftOffset,
   windowIdFromUrl,
   windowUrlFor,
 } from "./hybrid-core.mjs";
@@ -503,6 +505,13 @@ describe("collapse", () => {
       }
     }
   });
+
+  it("keeps the real desktop boundary while the launcher covers it", () => {
+    expect(windowManagerLeftOffset("none", 420, 420)).toBe(420);
+    expect(windowManagerLeftOffset("dock", 0, 420)).toBe(16);
+    // The launcher's temporary 100% width must not become a frame coordinate.
+    expect(windowManagerLeftOffset("desktop", 1200, 420)).toBe(420);
+  });
 });
 
 describe("frame identity", () => {
@@ -533,6 +542,28 @@ describe("frame identity", () => {
 });
 
 describe("geometry", () => {
+  it("clamps poisoned and oversized frame positions into the usable desktop", () => {
+    const area = { left: 420, top: 0, width: 780, height: 800 };
+    expect(
+      clampFramePosition(
+        { x: 1200, y: 600, width: 560, height: 500 },
+        area,
+      ),
+    ).toEqual({ x: 640, y: 300 });
+    expect(
+      clampFramePosition(
+        { x: -50, y: -20, width: 1400, height: 900 },
+        area,
+      ),
+    ).toEqual({ x: 420, y: 0 });
+    expect(
+      clampFramePosition(
+        { x: 500, y: 100, width: 560, height: 500 },
+        area,
+      ),
+    ).toEqual({ x: 500, y: 100 });
+  });
+
   it("round-trips through a storage stub and survives junk", () => {
     const store = new Map();
     const storage = {
