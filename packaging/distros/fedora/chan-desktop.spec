@@ -8,7 +8,7 @@
 # package instead of depending on it.
 
 %global debug_package %{nil}
-%global upstream_version 0.91.0
+%global upstream_version 0.92.0
 
 Name:           chan-desktop
 Version:        %(echo %{upstream_version} | tr - '~')
@@ -99,6 +99,9 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/chan-desktop.desktop
 %{_userunitdir}/chan-devserver.service
 
 %changelog
+* Mon Aug 17 2026 Alexandre Fiori <fiorix@gmail.com> - 0.92.0-1
+- Update to 0.92.0.
+
 * Sun Aug 16 2026 Alexandre Fiori <fiorix@gmail.com> - 0.91.0-1
 - Update to 0.91.0.
 

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.92.0] - 2026-08-17
+
+The gateway gets a canonical design, workspace terminals survive a devserver restart, and an intermittent stale-read closes as correct behaviour rather than a defect.
+
+### Added
+
+- **The gateway has one canonical design document.** `gateway/design.md` explains how a `chan-desktop` account discovers a gateway, signs in, receives a roster of owned and shared devservers, and enters a selected devserver through its exact proxy origin, alongside how each devserver publishes itself through an outbound tunnel. Four diagrams carry the deployment boundaries and the publication, account, and entry sequences. Every document under `gateway/` was checked against the running code rather than against its neighbours, which removed stale claims about automatic database migrations, ports and origins, one devserver per user, an admin service that is really a CLI, retired tunnel flags, and revocation and systemd behaviour that had drifted.
+- **The dashboard About card shows the build id.** Two builds of one version are now distinguishable from inside the app, matching what the native About window already showed. The Apache 2.0 link left the card; the licence is in the repository.
+
+### Changed
+
+- **Mounted tenant routes answer 503 with a retry hint during startup.** While a devserver restores persisted workspaces, adopts inherited terminal sessions, and resumes parking, routes into a mounted workspace say to retry rather than failing outright. Root health and management routes stay responsive throughout, on the direct listener and through a gateway tunnel alike.
+
+### Fixed
+
+- **A terminal in a workspace survives a devserver restart.** Restoring inherited terminals ran before persisted workspaces were mounted, so a shared-terminal shell came back while a workspace shell was rejected and its process killed. Workspaces now mount first, and a shutdown that lands before parking resumes leaves the inherited terminals recorded rather than dropping them.
+- **A terminal renderer no longer caches glyphs before its font has loaded**, so a freshly opened terminal renders in the font it was configured with.
+- **"Graph from here" on a directory shows the files inside it.** A directory whose immediate children are all directories opened as folder bubbles with no file on screen, while the inspector beside it reported a file count for the same directory; the graph now opens deep enough to reach them. A workspace-scoped graph with the same shape is unchanged.
+- **The About window ends with the margin it starts with**, and it scrolls rather than clipping when the window is too small for its content.
+
 ## [v0.91.0] - 2026-08-16
 
 ### Added
