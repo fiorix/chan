@@ -7,6 +7,10 @@ use serde::Serialize;
 #[derive(Serialize)]
 struct BuildInfo {
     version: &'static str,
+    /// The running binary's build id, so a reader can tell two builds of one
+    /// version apart. Reads `unknown` until a binary declares it, which is the
+    /// same fallback `/api/health` serves rather than an empty field.
+    build: &'static str,
     features: BuildFeatures,
 }
 
@@ -24,6 +28,7 @@ struct BuildFeatures {
 pub async fn api_build_info() -> Response {
     Json(BuildInfo {
         version: env!("CARGO_PKG_VERSION"),
+        build: crate::routes::build_id(),
         features: BuildFeatures {
             // Mirrors chan-workspace's `embeddings` cargo feature. ON in
             // default builds; OFF on platforms where candle won't

@@ -477,14 +477,9 @@
         <div class="slide-title">About</div>
         <div class="about-grid">
           <span class="k">chan version</span>
-          <span class="v mono">
-            {buildInfo?.version ?? "n/a"}
-            <a
-              class="version-license"
-              href="https://github.com/fiorix/chan/blob/main/LICENSE"
-              target="_blank"
-              rel="noopener">Apache 2.0</a>
-          </span>
+          <span class="v mono">{buildInfo?.version ?? "n/a"}</span>
+          <span class="k">build</span>
+          <span class="v mono">{buildInfo?.build ?? "n/a"}</span>
         </div>
 
         <div class="about-links">
@@ -529,14 +524,13 @@
         </div>
 
         <!-- Separator below the Fund-the-work QR, above the
-             free/open-source tagline. Chan's own Apache 2.0 license sits
-             on the version row. -->
+             free/open-source tagline. -->
         <div class="about-sep" role="separator" aria-hidden="true"></div>
 
-        <!-- A one-line statement that
-             chan is built on open source + is itself free/open-source
-             (Apache 2.0, on the version row above). The detailed dependency
-             list was too much for the About page, so it was dropped. -->
+        <!-- A one-line statement that chan is built on open source and is
+             itself free/open-source. The detailed dependency list was too
+             much for the About page, so it was dropped, and the license link
+             lives in the repository rather than on this surface. -->
         <div class="about-credits">
           <p class="credits-tagline">
             Built on a strong open-source foundation. Chan is free and
@@ -839,11 +833,6 @@
   }
   /* Chan's own license sits on the version row, spaced from the
      version string and styled as a link rather than mono text. */
-  .about-grid .version-license {
-    margin-left: 0.6rem;
-    color: var(--link, var(--text));
-    text-decoration: underline;
-  }
   .about-links {
     display: flex;
     flex-wrap: wrap;

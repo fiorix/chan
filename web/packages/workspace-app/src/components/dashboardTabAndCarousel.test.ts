@@ -136,8 +136,8 @@ describe("carousel slides", () => {
     expect(carousel).not.toMatch(/>embeddings</);
     expect(carousel).not.toMatch(/features\.embeddings/);
     // The third-party font + screensaver attributions were dropped from
-    // the About slide; only chan's own Apache 2.0 (on the version row)
-    // and the website / source links remain.
+    // the About slide; only the version / build rows and the website /
+    // source links remain.
     expect(carousel).not.toMatch(/Source Code Pro Regular/);
     expect(carousel).not.toMatch(/dcragusa\/MatrixScreensaver/);
     expect(carousel).not.toMatch(/about-licenses/);
@@ -165,26 +165,26 @@ describe("carousel slides", () => {
     );
   });
 
-  test("chan's Apache 2.0 sits on the version row; the licenses block is gone", () => {
-    // Chan's own Apache 2.0 link sits on the version row
-    // (`chan version {version} Apache 2.0`). The About slide carries no
-    // third-party font / screensaver attributions and no
-    // `.about-licenses` block to hold them.
+  test("the version row carries the build id and no license link", () => {
+    // The About grid mirrors the native About window: a `chan version` row
+    // followed by a `build` row carrying the binary's build id, so two builds
+    // of one version are distinguishable from the dashboard.
     expect(carousel).toMatch(
-      /<span class="k">chan version<\/span>[\s\S]{1,260}class="version-license"[\s\S]{1,160}Apache 2\.0<\/a>/,
+      /<span class="k">chan version<\/span>\s*<span class="v mono">\{buildInfo\?\.version \?\? "n\/a"\}<\/span>/,
     );
+    expect(carousel).toMatch(
+      /<span class="k">build<\/span>\s*<span class="v mono">\{buildInfo\?\.build \?\? "n\/a"\}<\/span>/,
+    );
+    // No license link on this surface: the LICENSE anchor and the styling that
+    // carried it are both gone.
+    expect(carousel).not.toMatch(/LICENSE/);
+    expect(carousel).not.toMatch(/Apache/);
+    expect(carousel).not.toMatch(/version-license/);
     // No `.about-licenses` block (markup or CSS) and no attributions.
     expect(carousel).not.toMatch(/about-licenses/);
     expect(carousel).not.toMatch(/<span class="k">terminal font<\/span>/);
     expect(carousel).not.toMatch(/<span class="k">matrix screen lock<\/span>/);
-    // The chan / Apache 2.0 row no longer renders inside a k/v block
-    // ("chan version" on the grid does not match this exact-text span).
     expect(carousel).not.toMatch(/<span class="k">chan<\/span>/);
-    // The LICENSE anchor appears exactly once now (only the version row).
-    const apacheMatches = carousel.match(
-      /href="https:\/\/github\.com\/fiorix\/chan\/blob\/main\/LICENSE"/g,
-    );
-    expect(apacheMatches?.length ?? 0).toBe(1);
     // The separator below the Fund-the-work QR stays.
     expect(carousel).toMatch(/\.about-sep \{[\s\S]{1,400}background: var\(--border\)/);
   });

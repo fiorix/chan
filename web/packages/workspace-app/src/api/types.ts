@@ -1148,6 +1148,8 @@ export type ContentSearchResponse = {
 /// version they're on and whether semantic search is available.
 export type BuildInfo = {
   version: string;
+  /// Build id of the running binary, `unknown` until one is declared.
+  build: string;
   features: {
     embeddings: boolean;
   };
