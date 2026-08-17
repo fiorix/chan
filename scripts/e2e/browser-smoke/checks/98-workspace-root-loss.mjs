@@ -149,6 +149,13 @@ export default {
     const windowUrl = new URL(ctx.serverUrl);
     windowUrl.searchParams.set("w", "smoke-root-loss");
 
+    // The runner's shared page can retain mounted surfaces from every other
+    // check. Retire it before deleting the root so those unrelated clients do
+    // not retry against the missing workspace while this check drives its own
+    // fully populated window.
+    if (!ctx.page.isClosed()) {
+      await ctx.page.goto("about:blank", { waitUntil: "load", timeout: 30_000 });
+    }
     const page = await ctx.browser.newPage();
     const httpFailures = [];
     const recordHttpFailure = (response) => {
@@ -586,6 +593,9 @@ export default {
         rootRemainedAbsent: true,
         httpFailures,
       };
+    } catch (error) {
+      await ctx.shot("root-loss-failure", page).catch(() => {});
+      throw error;
     } finally {
       page.off("response", recordHttpFailure);
       await page.close().catch(() => {});
