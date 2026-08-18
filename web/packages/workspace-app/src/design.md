@@ -6,10 +6,12 @@ Design reference for the chan web frontend: first the two web SPAs and how each 
 
 chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles and built on the color system below:
 
-- **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix and whether Settings is disabled, so a reverse-proxied instance builds correct `/api` URLs and can grey restricted controls.
+- **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix, whether Settings is disabled, and an optional desktop terminal-renderer capability, so a reverse-proxied instance builds correct `/api` URLs, can grey restricted controls, and follows the native WebKit process's renderer decision.
 - **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces** -- devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.usr.{domain}/`), and desktop loopback -- the same bundle per-surface installed, with three surfaces (desktop / devserver / readonly) derived from that meta, and owner-vs-grantee mutation over the gateway enforced by the proxy's signed assertion. Its serving and auth contract is documented in the launcher design doc.
 
 The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
+
+chan-desktop appends `chan-renderer=webgl|dom` to every workspace URL after deciding whether its WebKit process has the accelerated path. The serving tenant converts the last recognized value into `<meta name="chan-webgl-renderer" content="1|0">`, including when the tenant runs behind a tunnel on another machine. The main SPA uses that signal for xterm.js on native windows, treats a missing or invalid native signal as DOM, and ignores it in ordinary browsers, which keep WebGL. The `chan:terminal-webgl` localStorage override remains the diagnostic hatch in both directions.
 
 Both SPAs mount the same `@chan/web-shared/CommandDeck`, rendered inline inside the page that invoked it on every surface; there is no native launcher window. When hosted by a `WorkspaceHost`, the workspace adapter may mint a live-window-bound capability for the one library serving it. A direct `chan open --standalone` tenant has no root launcher router; after that route answers 404/405, its adapter exposes only same-tenant browser navigation for `New terminal` and `New window`, with a fresh `w` each time. It never fabricates a library roster or window controls. A remote workspace never receives the desktop launcher's aggregate bearer, inventory, or query.
 
@@ -18,7 +20,7 @@ Local extensions are a main-SPA-only surface. Bootstrap fetches the process-read
 ```mermaid
 flowchart TB
     subgraph web["main SPA (the workspace UI)"]
-        WAPP["workspace app · editor · file browser · graph · terminals · dashboard · local extensions<br/>over /api/* (files · drafts · index · contacts · config · extensions · fs/transfer · /ws)<br/>reads &lt;meta chan-prefix&gt; + &lt;meta chan-settings-disabled&gt;"]
+        WAPP["workspace app · editor · file browser · graph · terminals · dashboard · local extensions<br/>over /api/* (files · drafts · index · contacts · config · extensions · fs/transfer · /ws)<br/>reads &lt;meta chan-prefix&gt; + &lt;meta chan-settings-disabled&gt; + &lt;meta chan-webgl-renderer&gt;"]
     end
     subgraph launcher["launcher SPA (the registry)"]
         LAPP["TopBar · ScreenFlip (Library | Gateways) · SelectionBar · NewWorkspaceDialog<br/>pure /api/library/* client (workspaces · windows · devservers · gateways)<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
