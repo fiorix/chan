@@ -89,16 +89,16 @@ pub struct TerminalConfig {
     /// SPA at terminal start time; the server only persists the value.
     /// Applies to newly opened terminals.
     ///
-    /// On by default on Linux, off elsewhere. The Linux desktop ships
-    /// xterm.js's DOM renderer, which defers box drawing and block elements
-    /// to the font and so leaves one unpainted scanline at every cell
-    /// boundary: 96.0% rule continuity and 95.2% block coverage against a
-    /// 99.5% bar, measured in the desktop's own webview. Ghostty draws those
-    /// characters itself and measures 100% on every arm, including with the
-    /// dma-buf renderer disabled, which is the one backend that holds on both
-    /// sides of that switch. macOS and Windows ship xterm.js's WebGL
-    /// renderer, which also measures 100%, so they stay on the
-    /// battle-tested path.
+    /// On by default on Linux, off elsewhere. Linux xterm.js follows the
+    /// desktop's dma-buf capability: WebGL measures 100%, while the DOM
+    /// fallback used when dma-buf is disabled defers box drawing and block
+    /// elements to the font and leaves one unpainted scanline at every cell
+    /// boundary, 96.0% rule continuity and 95.2% block coverage against a
+    /// 99.5% bar in the desktop's own webview. Ghostty draws those characters
+    /// itself and measures 100% on every arm, including with the dma-buf
+    /// renderer disabled, which is the one backend that holds on both sides
+    /// of that switch. macOS and Windows ship xterm.js's WebGL renderer,
+    /// which also measures 100%, so they stay on the battle-tested path.
     ///
     /// Keyed on the SERVER's platform, which is where the terminals run. A
     /// Linux server reached from a browser on another OS gets the Linux
@@ -648,10 +648,11 @@ mod tests {
 
     #[test]
     fn the_terminal_backend_default_follows_the_platform() {
-        // Linux ships xterm.js's DOM renderer, which cannot draw box drawing
-        // or block elements to the cell edge; ghostty is the backend that
-        // measures 100% there. Everywhere else xterm.js gets its WebGL
-        // renderer and stays the default.
+        // Linux xterm.js follows the dma-buf capability: WebGL measures 100%,
+        // but the DOM fallback cannot draw box drawing or block elements to
+        // the cell edge. Ghostty is the backend that measures 100% on both
+        // sides of that switch. Everywhere else xterm.js gets WebGL and stays
+        // the default.
         assert_eq!(TerminalConfig::default().ghostty, cfg!(target_os = "linux"));
     }
 

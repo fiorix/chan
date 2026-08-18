@@ -1,7 +1,7 @@
 # Terminal grid rendering
 
 What the terminal grid must paint in the desktop app's own webview, across
-the shipped backend and font matrix. Runs on
+the backend, font and renderer reference matrix. Runs on
 [`../terminal-pixels.py`](../terminal-pixels.py) on Linux, which mounts a
 real terminal in WebKitGTK, and on
 [`../terminal-pixels.mjs`](../terminal-pixels.mjs) on Windows, which mounts
@@ -25,13 +25,13 @@ preferences, plus a second-tab arm per backend:
 | `ghostty-os-default`      | ghostty    | `os-default`      |
 | `ghostty-source-code-pro` | ghostty    | `source-code-pro` |
 
-Which xterm renderer those two xterm rows carry is a per-OS answer, so the
-matrix is the same four scenarios on both platforms but not the same four
-measurements. `shouldUseWebglRenderer` is false only for a Linux desktop:
-Linux ships the DOM renderer and Windows ships WebGL. Each driver therefore
-runs its own platform's renderer as the shipped arm, and `--include-renderers`
-adds the other one as a reference rather than a scenario -- the WebGL arm on
-Linux, the DOM arm on Windows.
+Which xterm renderer a desktop carries is a runtime capability answer, not a
+property of these four scenario names. The Linux driver keeps DOM as its
+default explicit reference and `--include-renderers` adds WebGL. Linux ships
+the WebGL arm when dma-buf is available and the DOM arm when it is disabled,
+including the proprietary NVIDIA default; the harness does not execute that
+driver policy. The Windows driver defaults to the shipped WebGL arm and
+`--include-renderers` adds DOM as its reference.
 
 ## Scenarios
 
@@ -89,25 +89,28 @@ seeing them converge would mean the preference stopped being honoured.
 
 ### Linux
 
-A clean run is not the current state. On WebKitGTK 2.52.5 with a 14px face
-and a 21px cell:
+The explicit reference arms on WebKitGTK 2.52.5 with a 14px face and a 21px
+cell measure:
 
-| Scenario                | TG-01 rule | TG-02 rule | TG-03 block |
-| ----------------------- | ---------- | ---------- | ----------- |
-| xterm, either font      | 96.0%      | 100%       | 95.2%       |
-| ghostty, either font    | 100%       | 100%       | 100%        |
-| xterm +webgl (not ship) | 100%       | 100%       | 100%        |
+| Scenario                  | TG-01 rule | TG-02 rule | TG-03 block |
+| ------------------------- | ---------- | ---------- | ----------- |
+| xterm DOM, either font    | 96.0%      | 100%       | 95.2%       |
+| ghostty, either font      | 100%       | 100%       | 100%        |
+| xterm WebGL, either font  | 100%       | 100%       | 100%        |
 
-The xterm rows are the open defect, not a harness fault: one unpainted row of
-pixels at every cell boundary, because the DOM renderer defers box drawing
-and block elements to the font and has no custom-glyph path to switch on.
-The two font preferences produce byte-identical renders on Linux, which is
-TG-06 holding rather than a duplicate scenario.
+The xterm DOM rows expose one unpainted row at every cell boundary because
+that renderer defers box drawing and block elements to the font and has no
+custom-glyph path to switch on. They are the proprietary NVIDIA default and
+the forced dma-buf-off reference. The WebGL rows are the non-NVIDIA default
+and forced dma-buf-on reference. The two font preferences produce
+byte-identical renders on Linux, which is TG-06 holding rather than a
+duplicate scenario.
 
-**Independently reproduced.** The same table came back from a second machine
-sharing nothing with the first: WebKitGTK 2.52.3 under Xvfb on a headless VM
-with llvmpipe and a QEMU Cirrus VGA, no GPU and no display. 96.0% and 95.2% to
-the digit, ghostty clean at 100%, the same 8.00x21.00px cell.
+**Independently reproduced.** The same DOM and ghostty rows came back from a
+second machine sharing nothing with the first: WebKitGTK 2.52.3 under Xvfb on
+a headless VM with llvmpipe and a QEMU Cirrus VGA, no GPU and no display.
+96.0% and 95.2% to the digit, ghostty clean at 100%, the same 8.00x21.00px
+cell.
 
 The gap *positions* reproduced too, which is what makes it the same mechanism
 rather than two numbers agreeing: vertical rule gaps at 10+1px, 31+1px, 52+1px,
@@ -177,26 +180,13 @@ Recorded so a later session does not relitigate them from scratch.
   the latter would file a defect against the one renderer that measures 100%
   everywhere it can actually be observed. The DOM and ghostty arms are
   unaffected, because glyph rasterisation is CPU-side.
+- The shipped Linux selector on the three required real-driver states: WebGL
+  on a non-NVIDIA desktop, DOM on a proprietary NVIDIA desktop, and WebGL on
+  that same NVIDIA desktop with `CHAN_LINUX_DMABUF=on`. Unit and served-shell
+  tests prove the signal chain, but only those pixel readings can accept it.
 - Any device pixel ratio other than each harness host's. The Windows run
   covers a fractional ratio (1.5) and the Linux run covers 1, but neither
   sweeps the ratio, and 1.5 is where the drivers' own rounding starts to show
  -- see the one-device-pixel inset on the block measurement in
   `terminal-pixels.mjs`, which the Python driver does not need at a ratio of
   1 and does not have.
-- Whether the WebGL present stall that keeps `shouldUseWebglRenderer` false
-  on Linux still reproduces. A separate probe found five idle writes out of
-  five presented on WebKitGTK 2.52.5 in a bare webview, which is evidence
-  against it but not against an intermittent fault in the Tauri shell.
-
-  Weaker than that reads, for a reason found afterwards: **that probe ran with
-  the dma-buf renderer on, and the shipped AppImage runs with it off.**
-  `linux_gui_stack.rs` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` only on an
-  AppImage launch, so the configuration measured and the configuration shipped
-  sit on opposite sides of the switch that controls how WebKit hands GPU
-  buffers to the compositor -- which is the handoff a present stall would live
-  in. Five of five says nothing about the shipped side.
-
-  `../webgl-present-stall.py` settles it: it sweeps that variable as an
-  explicit arm, runs a DOM control arm so a harness fault reports as
-  inconclusive rather than as a defect, and needs a GPU and an **Xorg**
-  session. It refuses Wayland rather than approximating it.

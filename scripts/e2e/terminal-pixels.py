@@ -2,17 +2,20 @@
 """Measure what the terminal grid actually paints in the real Linux webview.
 
 WHY this exists as its own harness: chan's terminal glyphs are drawn by the
-engine, not by chan, and the Linux desktop app ships on WebKitGTK with the
-DOM renderer (see shouldUseWebglRenderer). Whether a box-drawing rule joins
-across a cell boundary, or a solid block tiles without a seam, is a property
-of that engine, that renderer and the resolved font face together. No unit
-test can see it: jsdom paints nothing and Chrome is a different rasteriser
-with a different font stack.
+engine, not by chan, and the Linux desktop app ships on WebKitGTK with an
+xterm renderer selected from the desktop's dma-buf capability. Whether a
+box-drawing rule joins across a cell boundary, or a solid block tiles without
+a seam, is a property of that engine, that renderer and the resolved font face
+together. No unit test can see it: jsdom paints nothing and Chrome is a
+different rasteriser with a different font stack.
 
-The four scenarios are the shipped matrix: {os-default, source-code-pro} x
-{xterm, ghostty}. The font chain is not restated here; it is read out of
-TerminalTab.svelte, and the @font-face block is read out of the app's own
-fonts.css, so a chain edit moves the measurement with it.
+The four default scenarios are explicit DOM and ghostty reference arms over
+{os-default, source-code-pro}; --include-renderers adds the xterm WebGL
+reference. They cover the NVIDIA fallback and accelerated readings without
+pretending to execute chan-desktop's driver policy. The font chain is not
+restated here; it is read out of TerminalTab.svelte, and the @font-face block
+is read out of the app's own fonts.css, so a chain edit moves the measurement
+with it.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
@@ -457,7 +460,7 @@ def measure(pixels: Pixels, report) -> dict:
 
 
 class Scenario:
-    """One cell of the shipped matrix: a backend, a font preference."""
+    """One cell of the explicit reference matrix."""
 
     def __init__(
         self,
@@ -499,8 +502,8 @@ class Scenario:
         return f"http://127.0.0.1:{port}/index.html#{fragment}"
 
 
-# The shipped matrix, in the order the settings present it, then the same
-# backends opening a second tab while the first still holds its content.
+# The default reference matrix, in the order the settings present it, then the
+# same backends opening a second tab while the first still holds its content.
 SCENARIOS = [
     Scenario("xterm", "os-default"),
     Scenario("xterm", "source-code-pro"),
@@ -510,10 +513,11 @@ SCENARIOS = [
     Scenario("ghostty", "os-default", new_tab=True),
 ]
 
-# Not shipped on the Linux desktop. Runs only under --include-renderers, to
-# measure what the renderer chan turns off there would have painted. WebGL is
-# the only alternative xterm renderer available: @xterm/addon-canvas has no
-# release for xterm 6, and installing it pulls the core back to 5.5.
+# Explicit accelerated-path reference, run only under --include-renderers.
+# Linux ships this arm when dma-buf is available and the default DOM arm when
+# it is disabled. WebGL is the only alternative xterm renderer available:
+# @xterm/addon-canvas has no release for xterm 6, and installing it pulls the
+# core back to 5.5.
 RENDERER_SCENARIOS = [
     Scenario("xterm", "os-default", renderer="webgl"),
     Scenario("xterm", "source-code-pro", renderer="webgl"),
@@ -592,7 +596,7 @@ def main() -> int:
     parser.add_argument(
         "--include-renderers",
         action="store_true",
-        help="also measure the xterm renderers the Linux desktop turns off",
+        help="also measure the explicit xterm WebGL reference arms",
     )
     parser.add_argument(
         "--only",
