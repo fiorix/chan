@@ -1,6 +1,6 @@
 # The Linux desktop still refuses WebGL after its blocker was fixed
 
-Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No renderer-policy change landed in v0.92.0; `shouldUseWebglRenderer` still refuses the Linux desktop by default. Supersedes `the-webgl-present-stall-is-unmeasured-and-costs-linux-the-grid`, whose question is answered and whose blocker has since shipped a fix.
+Status: SHIPPED in [v0.93.0](../../release/release-v0.93.0.md) for the AppImage only. `shouldUseWebglRenderer` follows the desktop's own dma-buf decision instead of the operating system, carried to the serving tenant on the window URL; other Linux packages never run that bootstrap, emit no signal, and keep the DOM renderer on every driver. All three pixel acceptance readings are unmeasured and remain a named evidence gap: this round's machine has no GPU or display, and two of the three additionally require an NVIDIA proprietary-driver host that was not available.
 
 ## What the earlier item settled
 

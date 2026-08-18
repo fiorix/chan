@@ -1,6 +1,6 @@
 # One filesystem namespace, and a workspace window that can reach the disk
 
-Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No v0.92.0 commit touched the implementation boundaries below; `/api/files` remains the content namespace and a workspace-window transfer still rejects an escaping path. The investigation record is `projects/backlog/workspace-window-transfer-reach.md` in chan-dev.
+Status: SHIPPED in [v0.93.0](../../release/release-v0.93.0.md). File content and transfers serve from one `/api/fs` namespace rooted at the serving tenant's capability root, and `cs download` / `cs upload` behave identically in every window kind; `/api/files` is kept as a compatibility alias documented for removal in v0.94.0. Five of the six acceptance lines are met by named tests, three of them parity or refusal tests, and the sixth is partly measurable because four of the eleven browser-smoke checks it names are red on unmodified code for reasons this change did not cause.
 
 ## What
 

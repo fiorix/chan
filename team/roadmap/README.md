@@ -19,15 +19,19 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.93.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [one-filesystem-namespace-and-a-workspace-window-that-can-reach-it](v0.93.0/one-filesystem-namespace-and-a-workspace-window-that-can-reach-it.md) | deferred from v0.92.0, not started | `cs download` / `cs upload` refuse a path outside the workspace root from a workspace window while a standalone terminal allows any path its uid can reach; migrate the filesystem surface to one `/api/fs` namespace rooted at the serving tenant's capability root, retire `/api/files` over a release, and make both commands behave the same in every window kind; open on whether a tunnel-served workspace keeps that reach unconditionally or behind a config key |
-| [the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed](v0.93.0/the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed.md) | deferred from v0.92.0, not started | the dma-buf decision is driver-scoped but `shouldUseWebglRenderer` still refuses every Linux desktop, so the grid ships at 96.0/95.2 against 100% elsewhere; make both decisions follow one driver signal, with a pixel measurement as the acceptance |
-| [the-desktop-liveness-probe-test-is-load-sensitive-and-unexplained](v0.93.0/the-desktop-liveness-probe-test-is-load-sensitive-and-unexplained.md) | deferred from v0.92.0, no mechanism yet | measured 3 red in 15 full-binary runs on unmodified `main`; the probe reports live for a socket with no listener, so the timeout is the wrong lever, and a mechanism is wanted before any bound moves |
+No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
+
+### v0.93.0
+
+Shipped 2026-08-18; see [release-v0.93.0](../release/release-v0.93.0.md). Closed items in [`done/`](done/):
+
+- [one-filesystem-namespace-and-a-workspace-window-that-can-reach-it](done/one-filesystem-namespace-and-a-workspace-window-that-can-reach-it.md) - file content and transfers serve from one `/api/fs` namespace rooted at the serving tenant's capability root, `cs download` and `cs upload` behave identically in every window kind, and `/api/files` stays as an alias documented for removal in v0.94.0; the migration was 243 live references across 73 files against an item that estimated five.
+- [the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed](done/the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed.md) - the renderer follows the desktop's own dma-buf decision instead of the operating system, delivered for the AppImage only, and the lane caught a shipping blocker in its own change that the lead had already cleared; all three pixel readings are unmeasured and named as a gap.
+- [the-desktop-liveness-probe-test-is-load-sensitive-and-unexplained](done/the-desktop-liveness-probe-test-is-load-sensitive-and-unexplained.md) - the mechanism is fork-time descriptor inheritance, close-on-exec acting at exec rather than at fork, proven outside the flaky test and repaired structurally; the rig measured 0 red in 15 on unmodified code, so the acceptance is a deterministic 20-of-20 forced race rather than a rate.
+
+Three items closed and none carried. The round also produced work no item asked for: a package-parameterised one-CPU reproduction rig, the first measured flake rates this project holds for that population (3 in 15 and 1 in 15 for two unrelated tests), a pre-existing transfer-ceiling disagreement between the browser-smoke checks and the product on unmodified code, and a bounded production reach for the liveness mechanism that `try_handoff` contains. Its two genuine gate reds were both in places a scoped check cannot see: the separate gateway workspace, which the root formatter never reaches, and stale in-tree guards that only the full `web-check` and `--all-targets` runs exercise.
 
 ### v0.92.0
 

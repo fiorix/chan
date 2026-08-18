@@ -1,6 +1,6 @@
 # The desktop liveness probe test is load-sensitive, and nobody has a mechanism for it
 
-Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No mechanism or repair landed in v0.92.0; the connect-only probe and the stale-socket assertion remain unchanged. Carried out of `done/load-sensitive-tests-keep-recurring-after-three-sweeps`, which closed while this member was still red.
+Status: SHIPPED in [v0.93.0](../../release/release-v0.93.0.md). The mechanism is fork-time descriptor inheritance, close-on-exec acting at exec rather than at fork, proven outside the flaky test with a forced race and `strace`; the repair creates the stale socket in an exec'd helper so the parent never owns the listener and no concurrent fork can inherit it. The natural red-run rate was 0 in 15 on the one-CPU rig, so no before-and-after rate comparison exists, and the acceptance is a deterministic 20-of-20 forced-race result instead.
 
 ## What
 
