@@ -1,6 +1,6 @@
 # "Graph from here" on a directory comes up without its files
 
-Status: FIXED AND GATED 2026-08-17, merged into the 0.92.0-rc1 candidate and not yet released. Raised as a NOTE on 2026-08-16 against the v0.91.0 candidate. The reproduction is below, under the note's own text; it corrects the note's guess about where the difference is.
+Status: SHIPPED in [v0.92.0](../../release/release-v0.92.0.md). Raised as a NOTE on 2026-08-16 against the v0.91.0 candidate. The reproduction is below, under the note's own text; it corrects the note's guess about where the difference is.
 
 ## What was seen
 
@@ -62,10 +62,7 @@ Deliberately out of scope: the workspace-scoped graph, which has the same shape 
 
 ## Resolution
 
-Resolved 2026-08-17 as fixed, gated, and accepted into the 0.92.0-rc1 candidate.
-It is not released until the GA tag. A directory graph now reveals deep enough to
-include its files, with `112-graph-from-here-dir` asserting all three legs in a
-real browser and computing its floors from the panel's own payload sources.
+Shipped in v0.92.0. A directory graph now reveals deep enough to include its files, with `112-graph-from-here-dir` asserting all three legs in a real browser and computing its floors from the panel's own payload sources.
 
 The change was held until `111-graph-palette` was attributed, because that check
 flipped from PASS to FAIL in the run that first carried this work and it is a

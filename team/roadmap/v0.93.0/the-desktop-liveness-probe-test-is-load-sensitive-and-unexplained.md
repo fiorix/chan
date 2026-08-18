@@ -1,6 +1,6 @@
 # The desktop liveness probe test is load-sensitive, and nobody has a mechanism for it
 
-Status: ACCEPTED 2026-08-16 for v0.92.0. Carried out of `done/load-sensitive-tests-keep-recurring-after-three-sweeps`, which closed while this member was still red.
+Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No mechanism or repair landed in v0.92.0; the connect-only probe and the stale-socket assertion remain unchanged. Carried out of `done/load-sensitive-tests-keep-recurring-after-three-sweeps`, which closed while this member was still red.
 
 ## What
 

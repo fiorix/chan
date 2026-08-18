@@ -1,6 +1,6 @@
 # An external edit intermittently never reaches an editor with unsaved text
 
-Status: REGISTERED 2026-08-10, ruled forward out of v0.88.0 rather than into it. Found while closing [browser-smoke-is-unrunnable-and-rate-based](../done/browser-smoke-is-unrunnable-and-rate-based.md): removing that item's network-idle waits let a content assertion run for the first time, and it failed. Accepted as not data loss and deliberately left out of scope, on a precondition recorded below that a later change could invalidate.
+Status: CLOSED in [v0.92.0](../../release/release-v0.92.0.md) as not a defect. No behavior change shipped for this item; commit `d8cdab63` characterizes the retained-conflict transition that explains the observation. Found while closing [browser-smoke-is-unrunnable-and-rate-based](browser-smoke-is-unrunnable-and-rate-based.md): removing that item's network-idle waits let a content assertion run for the first time, and it failed.
 
 ## What
 

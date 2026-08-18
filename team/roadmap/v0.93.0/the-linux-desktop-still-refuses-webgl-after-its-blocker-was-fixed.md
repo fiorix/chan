@@ -1,6 +1,6 @@
 # The Linux desktop still refuses WebGL after its blocker was fixed
 
-Status: ACCEPTED 2026-08-16 for v0.92.0. Supersedes `the-webgl-present-stall-is-unmeasured-and-costs-linux-the-grid`, whose question is answered and whose blocker has since shipped a fix. That item closes; this is the half that is still true.
+Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No renderer-policy change landed in v0.92.0; `shouldUseWebglRenderer` still refuses the Linux desktop by default. Supersedes `the-webgl-present-stall-is-unmeasured-and-costs-linux-the-grid`, whose question is answered and whose blocker has since shipped a fix.
 
 ## What the earlier item settled
 

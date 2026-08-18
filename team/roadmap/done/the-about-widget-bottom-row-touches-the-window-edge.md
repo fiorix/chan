@@ -1,6 +1,6 @@
 # The About widget's bottom row touches the window edge
 
-Status: ACCEPTED, 2026-08-17. Observed on v0.91.0. Cosmetic, small, and self-contained.
+Status: SHIPPED in [v0.92.0](../../release/release-v0.92.0.md). The browser check measured equal 32px margins, and the owner confirmed the fixed native window on macOS/WKWebView.
 
 ## What was seen
 
@@ -26,4 +26,4 @@ On both surfaces, the space below the last row matches the space above the first
 
 Commit `3a315f8a` separates the desktop version and build id onto fixed lines, raises the non-resizable window to 420x460, centers the card's spare vertical space safely, and gives the Dashboard About slide a 2rem bottom pad matching its top gap. Check `114-about-slide-margin` now fails closed unless it finds a viewport where the slide scrolls. It passed at height 460 with `above=32`, `below=32`, and `scrolls=true`, so the browser-driven half is complete.
 
-The item remains open. The fixed-size desktop window still needs observation in native WebKitGTK and WKWebView builds with the build id present, confirming equal visible margins and no scrollbar. Chromium rendering of the same DOM does not substitute for those native engines.
+The owner confirmed the fixed-size desktop window on macOS/WKWebView with the build id present. WebKitGTK was not exercised because the validation container had no display or GTK/WebKit runtime; that remains a named release evidence gap rather than a claimed acceptance pass.

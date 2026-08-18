@@ -1,6 +1,6 @@
 # The gateway has no canonical desktop-to-devserver design
 
-Status: ACCEPTED 2026-08-17 for v0.92.0, not started. The documentation review is based on `43726ab7`.
+Status: SHIPPED in [v0.92.0](../../release/release-v0.92.0.md). The documentation review was grounded against the live implementation from `43726ab7`.
 
 ## What is missing
 
@@ -44,3 +44,7 @@ This is documentation work. It does not change runtime APIs, schemas, configurat
 - Migration mode, service ports and origins, desktop account and roster routes, multiple-devserver semantics, devserver terminology, admin CLI behavior, tunnel flags, revocation behavior, and systemd support match the current code and deployment configuration.
 - Redundant material is removed or replaced by a link to its canonical owner, and no repository link points at a removed document.
 - A repository-wide stale-term search, relative Markdown link check, and `git diff --check` pass.
+
+## Resolution
+
+`gateway/design.md` now owns the cross-component design and its four Mermaid diagrams. The v0.92.0 close read 24 gateway documents against the implementation, removed the stale topology and operational claims named above, retargeted links away from the redundant testing stub, parsed all four diagrams with repository tooling, and passed the release gate.

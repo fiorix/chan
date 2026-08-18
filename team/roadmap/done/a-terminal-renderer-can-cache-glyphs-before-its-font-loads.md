@@ -1,6 +1,6 @@
 # A terminal renderer can cache its glyphs before its font has loaded
 
-Status: ACCEPTED 2026-08-17 for v0.92.0. An implementation already exists on `fix/terminal-font-readiness` (`72684b26`, off v0.91.0), reported gate-green by the owner; this item is registered so the branch has scope to land against rather than arriving unattributed. Registered after the work, which the process allows as long as the item says so.
+Status: SHIPPED in [v0.92.0](../../release/release-v0.92.0.md). Commit `bd0b2cb7` makes renderer construction wait for the selected webfont and fixes the fallback chain when that face cannot load.
 
 ## What
 
@@ -36,6 +36,6 @@ It is also the platform-parity surface: Linux leads with the bundled face precis
 - macOS and Windows `os-default` terminals never wait on a webfont: their chains are system faces, and spawn is not delayed behind a load that cannot help them.
 - The web unit suite and the pre-push gate are green on the branch, and the gate is re-run at intake rather than taken on the branch's word.
 
-## Open
+## Closing evidence
 
-The "no metric change after first paint" line is a visual claim, and the repository already has a lesson about accepting a rendering claim from anything other than pixels (see [the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed](the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed.md), whose acceptance is worded around ink for exactly this reason). Whether `scripts/e2e/terminal-pixels.py` is extended to measure a cold-cache spawn, or the line is accepted on a hand-run, is open and should be settled before the item is closed.
+The implementation passed the web suite and the v0.92.0 pre-push gate, and the release report records it as shipped. The release record does not contain a separate cold-cache pixel measurement or hand-run for the "no metric change after first paint" line. That visual acceptance remains an evidence gap rather than being claimed complete; the related Linux renderer item continues in [v0.93.0](../v0.93.0/the-linux-desktop-still-refuses-webgl-after-its-blocker-was-fixed.md).

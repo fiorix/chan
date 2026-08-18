@@ -1,6 +1,6 @@
 # One filesystem namespace, and a workspace window that can reach the disk
 
-Status: ACCEPTED 2026-08-16 for v0.92.0. Raised against v0.91.0-rc1 while testing it, analysed during the rc2 cycle, and deliberately kept out of v0.91.0 so the candidate could ship. The investigation record is `projects/backlog/workspace-window-transfer-reach.md` in chan-dev.
+Status: DEFERRED from v0.92.0 to v0.93.0 during roadmap close on 2026-08-18. No v0.92.0 commit touched the implementation boundaries below; `/api/files` remains the content namespace and a workspace-window transfer still rejects an escaping path. The investigation record is `projects/backlog/workspace-window-transfer-reach.md` in chan-dev.
 
 ## What
 
