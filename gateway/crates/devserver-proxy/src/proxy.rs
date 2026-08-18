@@ -1830,10 +1830,7 @@ mod tests {
 
         // The same paths under the wrong method stay general.
         for method in [Method::GET, Method::PUT, Method::DELETE] {
-            assert!(
-                class(&method, "/blog/api/fs/upload").is_none(),
-                "{method}"
-            );
+            assert!(class(&method, "/blog/api/fs/upload").is_none(), "{method}");
             assert!(
                 class(&method, "/blog/api/fs/transfer").is_none(),
                 "{method}"
