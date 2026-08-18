@@ -27,9 +27,10 @@ preferences, plus a second-tab arm per backend:
 
 Which xterm renderer a desktop carries is a runtime capability answer, not a
 property of these four scenario names. The Linux driver keeps DOM as its
-default explicit reference and `--include-renderers` adds WebGL. Linux ships
-the WebGL arm when dma-buf is available and the DOM arm when it is disabled,
-including the proprietary NVIDIA default; the harness does not execute that
+default explicit reference and `--include-renderers` adds WebGL. The Linux
+AppImage ships the WebGL arm when dma-buf is available and the DOM arm when it
+is disabled, including the proprietary NVIDIA default; other Linux packages
+keep DOM because they do not run that policy. The harness does not execute the
 driver policy. The Windows driver defaults to the shipped WebGL arm and
 `--include-renderers` adds DOM as its reference.
 
@@ -100,9 +101,10 @@ cell measure:
 
 The xterm DOM rows expose one unpainted row at every cell boundary because
 that renderer defers box drawing and block elements to the font and has no
-custom-glyph path to switch on. They are the proprietary NVIDIA default and
-the forced dma-buf-off reference. The WebGL rows are the non-NVIDIA default
-and forced dma-buf-on reference. The two font preferences produce
+custom-glyph path to switch on. They are the proprietary NVIDIA AppImage
+default, the forced dma-buf-off reference, and the default for other Linux
+packages. The WebGL rows are the non-NVIDIA AppImage default and forced
+dma-buf-on reference. The two font preferences produce
 byte-identical renders on Linux, which is TG-06 holding rather than a
 duplicate scenario.
 
@@ -180,10 +182,11 @@ Recorded so a later session does not relitigate them from scratch.
   the latter would file a defect against the one renderer that measures 100%
   everywhere it can actually be observed. The DOM and ghostty arms are
   unaffected, because glyph rasterisation is CPU-side.
-- The shipped Linux selector on the three required real-driver states: WebGL
-  on a non-NVIDIA desktop, DOM on a proprietary NVIDIA desktop, and WebGL on
-  that same NVIDIA desktop with `CHAN_LINUX_DMABUF=on`. Unit and served-shell
-  tests prove the signal chain, but only those pixel readings can accept it.
+- The shipped AppImage selector on the three required real-driver states:
+  WebGL on a non-NVIDIA desktop, DOM on a proprietary NVIDIA desktop, and
+  WebGL on that same NVIDIA desktop with `CHAN_LINUX_DMABUF=on`. Unit and
+  served-shell tests prove the signal chain, but only those pixel readings can
+  accept it.
 - Any device pixel ratio other than each harness host's. The Windows run
   covers a fractional ratio (1.5) and the Linux run covers 1, but neither
   sweeps the ratio, and 1.5 is where the drivers' own rounding starts to show

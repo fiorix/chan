@@ -2,8 +2,9 @@
 """Measure what the terminal grid actually paints in the real Linux webview.
 
 WHY this exists as its own harness: chan's terminal glyphs are drawn by the
-engine, not by chan, and the Linux desktop app ships on WebKitGTK with an
-xterm renderer selected from the desktop's dma-buf capability. Whether a
+engine, not by chan, and the Linux AppImage ships on WebKitGTK with an xterm
+renderer selected from its dma-buf capability. Other Linux packages keep the
+DOM renderer because they do not run that AppImage policy. Whether a
 box-drawing rule joins across a cell boundary, or a solid block tiles without
 a seam, is a property of that engine, that renderer and the resolved font face
 together. No unit test can see it: jsdom paints nothing and Chrome is a
@@ -11,11 +12,11 @@ different rasteriser with a different font stack.
 
 The four default scenarios are explicit DOM and ghostty reference arms over
 {os-default, source-code-pro}; --include-renderers adds the xterm WebGL
-reference. They cover the NVIDIA fallback and accelerated readings without
-pretending to execute chan-desktop's driver policy. The font chain is not
-restated here; it is read out of TerminalTab.svelte, and the @font-face block
-is read out of the app's own fonts.css, so a chain edit moves the measurement
-with it.
+reference. They cover the AppImage's NVIDIA fallback and accelerated readings
+without pretending to execute chan-desktop's driver policy. The font chain is
+not restated here; it is read out of TerminalTab.svelte, and the @font-face
+block is read out of the app's own fonts.css, so a chain edit moves the
+measurement with it.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
@@ -514,8 +515,9 @@ SCENARIOS = [
 ]
 
 # Explicit accelerated-path reference, run only under --include-renderers.
-# Linux ships this arm when dma-buf is available and the default DOM arm when
-# it is disabled. WebGL is the only alternative xterm renderer available:
+# The Linux AppImage ships this arm when dma-buf is available and the default
+# DOM arm when it is disabled; other Linux packages stay on DOM. WebGL is the
+# only alternative xterm renderer available:
 # @xterm/addon-canvas has no release for xterm 6, and installing it pulls the
 # core back to 5.5.
 RENDERER_SCENARIOS = [

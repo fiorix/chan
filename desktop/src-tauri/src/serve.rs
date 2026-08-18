@@ -1485,7 +1485,20 @@ pub(crate) fn browser_window_url(
     )
 }
 
-fn append_renderer_signal(url: &mut tauri::Url, webgl_renderer: bool) {
+fn append_renderer_signal(url: &mut tauri::Url, webgl_renderer: Option<bool>) {
+    let Some(webgl_renderer) = webgl_renderer else {
+        if !url.query_pairs().any(|(key, _)| key == "chan-renderer") {
+            return;
+        }
+        let retained = url
+            .query_pairs()
+            .filter(|(key, _)| key != "chan-renderer")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        url.set_query(None);
+        url.query_pairs_mut().extend_pairs(retained);
+        return;
+    };
     url.query_pairs_mut().append_pair(
         "chan-renderer",
         if webgl_renderer { "webgl" } else { "dom" },
@@ -2423,15 +2436,22 @@ mod tests {
         let mut url: tauri::Url = "https://example.test/workspace/index.html?existing=1"
             .parse()
             .unwrap();
-        append_renderer_signal(&mut url, false);
+        append_renderer_signal(&mut url, Some(false));
         assert_eq!(
             url.query(),
             Some("existing=1&chan-renderer=dom"),
             "the DOM decision must reach the served shell",
         );
 
-        append_renderer_signal(&mut url, true);
+        append_renderer_signal(&mut url, Some(true));
         assert!(url.query().unwrap().ends_with("chan-renderer=webgl"));
+
+        let mut undecided: tauri::Url =
+            "https://example.test/workspace/index.html?chan-renderer=webgl&existing=1"
+                .parse()
+                .unwrap();
+        append_renderer_signal(&mut undecided, None);
+        assert_eq!(undecided.query(), Some("existing=1"));
     }
 
     #[test]

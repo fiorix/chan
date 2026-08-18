@@ -31,18 +31,19 @@ pub fn prefer_system_gui_stack() {
     linux::prefer_system_gui_stack();
 }
 
-/// Whether the desktop WebKit process has the accelerated renderer path.
+/// Whether the desktop WebKit process has a decided renderer path.
 ///
-/// The Linux GUI bootstrap decides this before any webview is built. Other
-/// platforms do not use WebKitGTK's dma-buf override and always keep WebGL.
-pub fn webgl_renderer_available() -> bool {
+/// The Linux AppImage bootstrap returns its dma-buf result. Other Linux
+/// packages return `None` because that bootstrap does not run, which leaves
+/// the SPA on its fail-safe DOM renderer. Other platforms return WebGL.
+pub fn webgl_renderer_available() -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
         linux::webgl_renderer_available()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        true
+        Some(true)
     }
 }
 
@@ -217,15 +218,18 @@ mod linux {
         }
     }
 
-    /// Read the result of [`set_webkit_env_defaults`] without probing the
-    /// driver again. WebKit keys the fallback on the variable's presence, so
-    /// this is also the exact renderer capability the webview observes.
-    pub fn webgl_renderer_available() -> bool {
-        renderer_available(std::env::var_os(WEBKIT_DISABLE_DMABUF_ENV).is_some())
+    /// Expose the AppImage bootstrap's result without probing the driver again.
+    /// A non-AppImage has no result because [`set_webkit_env_defaults`] never
+    /// runs there, so it emits no renderer signal and the SPA stays on DOM.
+    pub fn webgl_renderer_available() -> Option<bool> {
+        renderer_signal(
+            cs_install::appimage_path().is_some(),
+            std::env::var_os(WEBKIT_DISABLE_DMABUF_ENV).is_some(),
+        )
     }
 
-    fn renderer_available(dma_buf_disabled: bool) -> bool {
-        !dma_buf_disabled
+    fn renderer_signal(decision_ran: bool, dma_buf_disabled: bool) -> Option<bool> {
+        decision_ran.then_some(!dma_buf_disabled)
     }
 
     /// Whether to disable dma-buf, given the policy value and a driver probe
@@ -269,7 +273,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            dma_buf_disabled, nvidia_proprietary_driver, renderer_available, NVIDIA_DRIVER_MARKERS,
+            dma_buf_disabled, nvidia_proprietary_driver, renderer_signal, NVIDIA_DRIVER_MARKERS,
         };
         use std::fs;
 
@@ -318,16 +322,22 @@ mod linux {
         fn the_driver_decision_selects_the_matching_terminal_renderer() {
             let nvidia = root_with(Some(NVIDIA_DRIVER_MARKERS[0]));
             let nvidia_auto = dma_buf_disabled("auto", || nvidia_proprietary_driver(nvidia.path()));
-            assert!(!renderer_available(nvidia_auto));
+            assert_eq!(renderer_signal(true, nvidia_auto), Some(false));
 
             let nvidia_forced_on =
                 dma_buf_disabled("on", || nvidia_proprietary_driver(nvidia.path()));
-            assert!(renderer_available(nvidia_forced_on));
+            assert_eq!(renderer_signal(true, nvidia_forced_on), Some(true));
 
             let non_nvidia = root_with(None);
             let non_nvidia_auto =
                 dma_buf_disabled("auto", || nvidia_proprietary_driver(non_nvidia.path()));
-            assert!(renderer_available(non_nvidia_auto));
+            assert_eq!(renderer_signal(true, non_nvidia_auto), Some(true));
+        }
+
+        #[test]
+        fn a_non_appimage_has_no_renderer_signal() {
+            assert_eq!(renderer_signal(false, false), None);
+            assert_eq!(renderer_signal(false, true), None);
         }
 
         #[test]
