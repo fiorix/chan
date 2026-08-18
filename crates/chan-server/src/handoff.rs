@@ -1791,6 +1791,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn desktop_liveness_probe_bounds_missing_and_stale_sockets() {
+        const STALE_SOCKET_CHILD: &str = "CHAN_TEST_HANDOFF_STALE_SOCKET_CHILD";
+
+        if let Some(path) = std::env::var_os(STALE_SOCKET_CHILD) {
+            drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.sock");
         let missing_result =
@@ -1800,7 +1807,24 @@ mod tests {
         assert!(!missing_result);
 
         let stale = dir.path().join("stale.sock");
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        // Bind after exec in a single-test child, then wait for it to exit. The
+        // parent never owns the listener fd, so another parent test's fork
+        // cannot inherit it and keep the supposedly stale socket alive.
+        let output = tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("handoff::tests::desktop_liveness_probe_bounds_missing_and_stale_sockets")
+            .arg("--nocapture")
+            .env(STALE_SOCKET_CHILD, &stale)
+            .output()
+            .await
+            .expect("run stale-socket child");
+        assert!(
+            output.status.success(),
+            "stale-socket child failed (status={}):\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
         assert!(stale.exists(), "stale socket node should remain");
         let stale_result = tokio::time::timeout(Duration::from_secs(1), desktop_is_live_at(&stale))
             .await
