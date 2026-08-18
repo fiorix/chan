@@ -37,3 +37,21 @@ A Linux desktop uses the WebGL renderer where the accelerated path is actually a
 ## Why the acceptance is worded around ink
 
 The earlier round's lesson: WebGL context creation succeeded, `webglLoaded` was true, the renderer string said `webgl`, there were no warnings, and nothing painted. Every signal above the pixels agreed and every one of them was wrong. Only a pixel measurement can close this.
+
+## Round evidence, v0.93.0
+
+`shouldUseWebglRenderer` no longer keys on the operating system. It takes the desktop's own renderer capability, and its override argument is unchanged. The desktop carries that capability to the serving tenant on the window URL rather than through the server's environment, because a remote devserver serves its own shell and cannot observe the desktop client's WebKit environment; the served shell then stamps it as `<meta name="chan-webgl-renderer">` beside the existing file-surface declaration.
+
+The capability is tri-state, and that correction is the round's most important finding on this item. `linux::prefer_system_gui_stack` returns before `set_webkit_env_defaults` when the process is not an AppImage, so outside an AppImage no dma-buf decision is ever made. A two-state signal read the absent environment variable as "accelerated path available" and would have selected WebGL on `.deb`, `.rpm`, Nix and source builds, including on the NVIDIA proprietary driver, which is the blank-grid configuration this item exists to prevent. The signal now distinguishes a decision that ran from one that never did: a non-AppImage emits no signal at all, strips any renderer value already present on the URL, and reaches the SPA's existing null-to-DOM fallback.
+
+Delivery is therefore deliberately AppImage-only on Linux. `.deb`, `.rpm`, Nix, source and developer builds keep the DOM renderer on every driver, including where their accelerated path is available. Extending driver detection beyond the AppImage bootstrap is deferred and is recorded as a candidate for a later version.
+
+Acceptance:
+
+1. Not measured. No non-NVIDIA reading was taken, because the round's machine has no display, no GPU and no WebKit2 typelib, where `--include-renderers` reports a confident 0.0% that means nothing was captured. The exact host command, the expected numbers for every measure, and the conditions that would make a reading meaningless are prepared and handed to the host.
+2. Not measured, and unmeasurable this round: no NVIDIA proprietary-driver machine was available. The decision half is proven by `the_driver_decision_selects_the_matching_terminal_renderer`, which covers NVIDIA auto to DOM and `CHAN_LINUX_DMABUF=on` to WebGL at the decision boundary, and an NVIDIA AppImage lands on the DOM renderer it lands on today.
+3. Not measured, for the same reason.
+
+`a_non_appimage_has_no_renderer_signal` proves a non-AppImage returns unknown regardless of the dma-buf environment, and `renderer_signal_is_appended_for_the_serving_tenant` proves unknown removes a carried renderer query. `served_shell_carries_the_desktop_renderer_signal` proves the value reaches the SPA through the real handler rather than through a unit test of the injector.
+
+Named evidence gap: no test drives `chan-renderer` through a registered tunnel into `serve_static` and asserts the returned meta tag. The gateway preserves generic path and query, and the desktop URL append and the served-shell response are each proven separately. The gap is safe because the signal is absent-means-DOM at every link, so a tunneled desktop that loses it keeps today's renderer rather than risking a blank grid.

@@ -53,3 +53,20 @@ So the decision is a product one rather than a security escalation: either the b
 ## Rough size
 
 Small. Under a hundred lines of non-test change across roughly five files for the reach itself, plus the mechanical namespace rename and its alias. The migration is the larger half, and it is mostly find-and-replace with a public-URL compatibility window to honour.
+
+## Round evidence, v0.93.0
+
+The open question is answered: reach is unconditional, with no configuration key, on the host's ruling that the shared standalone tenant is already mounted unconditionally at devserver startup and already carries the uid-scoped transfer routes, so this documents an existing reach rather than widening one.
+
+Implemented across two commits: the contract, which serves `/api/fs` rooted at the serving tenant's capability root and keeps `/api/files` as an alias, and the caller migration, which moves 66 files onto the primary namespace. The surface was larger than this item's five-file sketch: 243 live references across 73 files, established by `git grep -n -I -E '(/api/files|api/files)'` at `1d2762e6`. That count was still incomplete, because a consumer that escapes the namespace for a regex is invisible to a search for the namespace; `git grep -nF 'api\/files'` found the one remaining site, a raw-source pin in `components/fileTreeDragOut.test.ts`.
+
+Acceptance:
+
+1. Met. `the_same_out_of_root_download_succeeds_from_workspace_and_terminal_windows` drives the same absolute out-of-root download through both tenant kinds and asserts the `filesystem` root frame.
+2. Met. `upload_download_on_a_terminal_tenant_signal_the_window_cwd_scoped` and `terminal_router_serves_absolute_paths_via_wildcard_capture`.
+3. Met. `workspace_and_terminal_routes_report_the_same_unreadable_path` sends an unreadable socket entry through both full routers and asserts identical status and body, refusing with `400` and `cannot read`.
+4. Met. `workspace_and_terminal_routes_apply_the_same_directory_ceiling` configures a 4096-byte ceiling, builds a 4097-byte plan through both routers, and asserts identical `413` responses naming the exceeded count.
+5. Met. `workspace_router_serves_the_fs_namespace_and_files_alias` and `terminal_router_serves_absolute_paths_via_wildcard_capture`. The removal version is documented as v0.94.0 in `design.md`, `.agents/gateway.md`, and both mount comments.
+6. Partly measurable. The eleven browser-smoke URL assertions are migrated. Seven checks were green in the round's baseline and provide usable harnesses. `video-inspector` and `excalidraw-collab` are environment gaps that reproduce on a fresh baseline server and browser in this container. `large-file-streaming` and `binary-transfer-streaming-queue` cannot certify the namespace here because unmodified `1d2762e6` already disagrees with their transfer-ceiling expectations, in opposite directions: one receives a limit where it expects content, the other content where it expects a limit. That disagreement is pre-existing, is not caused by this change, and is recorded as a candidate for a later version.
+
+No preflight, atomic-write, admission or ceiling policy changed. `routes/transfer.rs` relocates `transfer_max_bytes` without altering it.

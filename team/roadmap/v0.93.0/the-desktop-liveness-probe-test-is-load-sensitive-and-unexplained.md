@@ -32,3 +32,19 @@ Reproduce under the instrument the playbook mandates -- `scripts/e2e/one-cpu-tes
 ## Acceptance
 
 A measured red-run rate of zero under the same instrument that measured 3 in 15, with the cause stated. Not a green series.
+
+## Round evidence, v0.93.0
+
+The mechanism is fork-time descriptor inheritance. A Rust `UnixListener` is `SOCK_CLOEXEC`, but close-on-exec acts at exec rather than at fork, so a concurrent `Command::spawn` anywhere in the test binary leaves the forked child temporarily owning the listening file description. The connect the test expects to be refused succeeds honestly, because the socket is still alive. This was established outside the flaky test, with a standalone probe that holds a spawned child in `pre_exec` and `strace -ff` recording `connect(...)=0` while the child is held and `ECONNREFUSED` after `execve`.
+
+That retires the item's open questions. The timeout is not the cause, because the connect genuinely succeeds; lengthening the deadline can only widen the interval in which a live-but-doomed socket is reachable; load sensitivity follows from contention widening the fork-to-exec window; and a green series on a quiet box reflects the window closing rather than the defect leaving.
+
+The repair creates the stale socket in an exact-filtered self-exec of the test binary. The helper binds only after exec and exits before the probe, so the parent never owns the listener and a concurrent fork from the parent has nothing to inherit. This eliminates the race rather than narrowing it, and preserves what the test asserts: an existing socket node with nothing listening reports not-live, which is the real crash-residue case.
+
+Acceptance, restated during the round because the original was unattainable. The instrument named in this item could only ever select `chan-workspace`, so the 3-in-15 rate it cites was never measured by it; the instrument is now package-parameterised. On a host-verified one-CPU cap, 15 runs of 1,145 chan-server tests at 32 threads with `nr_throttled_delta=5557`, the target passed **15 out of 15**, so this rig does not reproduce the recorded failure at that sample size and no natural before-and-after rate comparison exists.
+
+The acceptance was therefore replaced with a deterministic one, which is stronger than the rate it replaces. Under a forced schedule, the old construction reported the dropped socket live in **20 of 20** runs and returned `ECONNREFUSED` in all 20 after the child exec'd. The repaired construction returned `ECONNREFUSED` in **20 of 20** while an unrelated child was held pre-exec, which is the adversarial condition rather than a quiet one. That is evidence by observation as well as by construction.
+
+The mechanism reaches production and is bounded there. `handoff::start_listener` holds a `UnixListener` for process lifetime while the desktop spawns pty shells, extension commands and `xdg-open`, so a desktop dying inside a child's fork-to-exec window leaves its socket connectable. `desktop_is_live` returning true biases `decide_open_route`, but `try_handoff` independently requires a valid desktop response, so a child-held listener with no accept loop times out into `Outcome::NoDesktop` and the caller falls back. The cost is a wrong initial route and up to the three-second handoff timeout, never a false success. This is recorded as a candidate for a later version and was not changed here.
+
+Two further load-sensitive tests were measured in the same population, on the same verified cap: `state::test_support::reset_contention_does_not_starve_single_worker_runtime` at 3 red in 15, and `routes::preferences::tests::broadcast_config_changed_refreshes_direct_terminal_spawns` at 1 in 15. These are the first measured rates recorded for this population and are candidates for a later version.

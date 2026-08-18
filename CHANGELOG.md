@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+File operations move to one `/api/fs` namespace reachable from every window kind, the Linux desktop AppImage follows its own driver decision when choosing the terminal renderer, and a long-standing intermittent test failure gets a named mechanism and a structural repair.
+
+### Added
+
+- **File operations use one `/api/fs` namespace rooted at the serving tenant's capability root.** A workspace tenant resolves paths from its workspace and a standalone terminal tenant resolves them from `/`. `cs download` and `cs upload` reach any path the shell's uid can access from a workspace window and a standalone terminal window alike, under the same readability preflight, atomic writes, admission bound and transfer ceiling in both. `/api/files` remains a compatibility alias in v0.93.0 and is removed in v0.94.0.
+
+### Changed
+
+- **A Linux desktop AppImage uses the WebGL terminal renderer where its driver supports the accelerated path.** The AppImage bootstrap already decides whether to keep WebKit off its dma-buf renderer, which it does for the NVIDIA proprietary driver, and the terminal renderer follows that same decision instead of refusing WebGL on every Linux desktop. The decision travels to the browser as a signal on the window URL, so a window served by a remote devserver makes the same choice as a local one. Other Linux packages do not run that bootstrap, make no decision, and keep the DOM renderer on every driver. macOS and Windows are unchanged, and `CHAN_LINUX_DMABUF` still selects the dma-buf behaviour by hand.
+
 ## [v0.92.0] - 2026-08-17
 
 The gateway gets a canonical design, workspace terminals survive a devserver restart, and an intermittent stale-read closes as correct behaviour rather than a defect.
