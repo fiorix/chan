@@ -10,7 +10,7 @@
 
 # Upstream semver may carry a -rcN prerelease; RPM's Version grammar
 # reserves '-', so it maps to '~' (which sorts before the final release).
-%global upstream_version 0.94.0
+%global upstream_version 0.94.0-hybrid
 
 Name:           chan
 Version:        %(echo %{upstream_version} | tr - '~')
