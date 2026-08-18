@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure one chan-workspace test selector repeatedly under a host-verified
+# Measure one Cargo package test selector repeatedly under a host-verified
 # one-CPU sdme cap. Test failures are rate data; setup and instrument failures
 # refuse the series instead of manufacturing an uncapped green result.
 
@@ -15,11 +15,11 @@ refuse() { say "REFUSED: $*"; exit 2; }
 usage() {
     cat <<'EOF'
 Usage: sudo scripts/e2e/one-cpu-test-series.sh [--verbose] \
-           --container NAME SELECTOR RUNS THREADS
+           --container NAME --package PACKAGE SELECTOR RUNS THREADS
 
 Runs this fixed command shape inside an existing sdme container:
 
-    cargo test -p chan-workspace SELECTOR -- --test-threads=THREADS
+    cargo test -p PACKAGE SELECTOR -- --test-threads=THREADS
 
 The container must be running on btrfs with a disk cap, expose a clean checkout
 at /work/chan, and have an exact one-CPU cap visible from the host cgroup.
@@ -80,8 +80,8 @@ guest_revision() {
 
 run_cargo() {
     sdme exec "$CONTAINER" -- env HOME=/root CARGO_TARGET_DIR="$GUEST_TARGET" \
-        bash -lc 'cd /work/chan && exec cargo test -p chan-workspace "$@"' \
-        bash "$@"
+        bash -lc 'cd /work/chan && exec cargo test -p "$1" "${@:2}"' \
+        bash "$PACKAGE" "$@"
 }
 
 confirm_instrument() {
@@ -102,12 +102,18 @@ fi
 
 VERBOSE=0
 CONTAINER=''
+PACKAGE=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -v | --verbose) VERBOSE=1; shift ;;
         --container)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             CONTAINER=$2
+            shift 2
+            ;;
+        --package)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            PACKAGE=$2
             shift 2
             ;;
         -h | --help) usage; exit 0 ;;
@@ -117,11 +123,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$CONTAINER" ] && [ "$#" -eq 3 ] || { usage >&2; exit 64; }
+[ -n "$CONTAINER" ] && [ -n "$PACKAGE" ] && [ "$#" -eq 3 ] || { usage >&2; exit 64; }
 SELECTOR=$1
 RUNS=$2
 THREADS=$3
 [[ "$CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || refuse "invalid container name"
+[[ "$PACKAGE" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || refuse "invalid package name"
 [[ "$SELECTOR" =~ ^[A-Za-z0-9_:.+-]+$ ]] || refuse "invalid test selector"
 [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || refuse "run count must be a positive integer"
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || refuse "thread count must be a positive integer"
@@ -169,7 +176,7 @@ fi
 confirm_instrument || refuse "cap or revision changed during selector validation"
 selected=$(awk '/: test$/ { count++ } END { print count + 0 }' "$LIST_LOG")
 [ "$selected" -gt 0 ] || refuse "selector matched no tests; log=$LIST_LOG"
-say "selector=$SELECTOR selected_tests=$selected runs=$RUNS threads=$THREADS"
+say "package=$PACKAGE selector=$SELECTOR selected_tests=$selected runs=$RUNS threads=$THREADS"
 
 red=0
 for ((run = 1; run <= RUNS; run++)); do
@@ -196,6 +203,6 @@ confirm_instrument || refuse "cap or revision changed before the result was reco
 throttled_delta=$((THROTTLED_AFTER - THROTTLED_BEFORE))
 [ "$throttled_delta" -ge 0 ] || die "nr_throttled moved backwards"
 green=$((RUNS - red))
-summary="container=$CONTAINER backend=$backend disk=$disk_cap cpu_max='$CPU_MAX' threads=$THREADS revision=$REVISION selector=$SELECTOR selected_tests=$selected red=$red runs=$RUNS rate=$red/$RUNS green=$green nr_throttled_delta=$throttled_delta output=$RESULT_DIR"
+summary="container=$CONTAINER backend=$backend disk=$disk_cap cpu_max='$CPU_MAX' threads=$THREADS revision=$REVISION package=$PACKAGE selector=$SELECTOR selected_tests=$selected red=$red runs=$RUNS rate=$red/$RUNS green=$green nr_throttled_delta=$throttled_delta output=$RESULT_DIR"
 printf '%s\n' "$summary" > "$RESULT_DIR/result.txt"
 printf '%s\n' "$summary"

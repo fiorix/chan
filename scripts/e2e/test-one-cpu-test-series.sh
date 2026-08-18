@@ -14,6 +14,21 @@ FAILURES=0
 pass() { printf 'PASS %s\n' "$*"; }
 fail() { printf 'FAIL %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
 
+expect_invocation() {
+    local expected_rc=$1 expected_text=$2 output rc
+    shift 2
+    if output=$("$SCRIPT_DIR/one-cpu-test-series.sh" "$@" 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -eq "$expected_rc" ] && grep -Fq "$expected_text" <<< "$output"; then
+        pass "invocation exits $expected_rc with: $expected_text"
+    else
+        fail "invocation exited $rc without: $expected_text"
+    fi
+}
+
 accept_cap() {
     local value=$1 expected=$2 actual
     printf '%s\n' "$value" > "$WORK/cpu.max"
@@ -83,6 +98,11 @@ if read_nr_throttled "$WORK" >/dev/null; then
 else
     pass 'rejects duplicate nr_throttled fields'
 fi
+
+expect_invocation 64 'Usage:' --container rig selector 1 1
+expect_invocation 64 'Usage:' --container rig --package
+expect_invocation 2 'REFUSED: invalid package name' \
+    --container rig --package 'bad/name' selector 1 1
 
 if [ "$FAILURES" -ne 0 ]; then
     printf 'RESULT: %d assertion(s) failed\n' "$FAILURES"
