@@ -3128,18 +3128,81 @@ mod write_tests {
     #[test]
     fn route_table_delegates_streaming_limits_to_semantic_sinks() {
         let route_table = include_str!("../lib.rs");
+        // Four semantic sinks are mounted on both the primary namespace and its compatibility alias, so this enumeration keeps the global count tied to reviewed routes.
+        let semantic_sink_mounts = [
+            (
+                "terminal upload via /api/fs",
+                r#".route(
+            "/api/fs/upload",
+            post(crate::routes::transfer::api_terminal_upload_file)
+                .layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "terminal upload via /api/files",
+                r#".route(
+            "/api/files/upload",
+            post(crate::routes::transfer::api_terminal_upload_file)
+                .layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "standalone write via /api/fs",
+                r#".route(
+            "/api/fs/{*path}",
+            put(crate::routes::standalone_fs::api_standalone_write_file)
+                .layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "standalone write via /api/files",
+                r#".route(
+            "/api/files/{*path}",
+            put(crate::routes::standalone_fs::api_standalone_write_file)
+                .layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "workspace upload via /api/fs",
+                r#".route(
+            "/api/fs/upload",
+            post(api_upload_file).layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "workspace upload via /api/files",
+                r#".route(
+            "/api/files/upload",
+            post(api_upload_file).layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "workspace write via /api/fs",
+                r#".route(
+            "/api/fs/{*path}",
+            put(api_write_file).layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+            (
+                "workspace write via /api/files",
+                r#".route(
+            "/api/files/{*path}",
+            put(api_write_file).layer(DefaultBodyLimit::disable()),
+        )"#,
+            ),
+        ];
+
+        for (name, mount) in &semantic_sink_mounts {
+            assert!(
+                route_table.contains(*mount),
+                "route table omits the {name} semantic sink"
+            );
+        }
         assert_eq!(
             route_table.matches("DefaultBodyLimit::disable()").count(),
-            4
+            semantic_sink_mounts.len(),
+            "every body-limit disable must belong to an enumerated semantic sink"
         );
-        assert!(route_table.contains("post(api_upload_file).layer(DefaultBodyLimit::disable())"));
-        assert!(route_table.contains(
-            "post(crate::routes::transfer::api_terminal_upload_file)\n                .layer(DefaultBodyLimit::disable())"
-        ));
-        assert!(route_table.contains("put(api_write_file).layer(DefaultBodyLimit::disable())"));
-        assert!(route_table.contains(
-            "put(crate::routes::standalone_fs::api_standalone_write_file)\n                .layer(DefaultBodyLimit::disable())"
-        ));
     }
 
     /// A multipart body naming a destination and one file part, so a test can
