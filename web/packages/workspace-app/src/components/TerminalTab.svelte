@@ -156,6 +156,7 @@
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
     webglRendererOverride,
+    webglRendererSignal,
   } from "../terminal/renderer";
   import { resolveReadyTerminalFont } from "../terminal/font";
   import {
@@ -790,22 +791,14 @@
     // xterm-backend only: the ghostty backend paints through its own
     // canvas renderer, and the WebglAddon needs xterm internals.
     if (!term || backend !== "xterm") return;
-    // WebKitGTK (the Linux desktop webview) does not reliably composite the
-    // WebGL render layer while the page is idle: a write (paste, keystroke
-    // echo) is drawn into the GL canvas but not presented to screen until a
-    // later event wakes the compositor, so typed/pasted text appears to lag
-    // and the cursor desyncs until the next keypress flushes it. The DOM
-    // renderer paints through normal DOM mutation and has no such layer, so
-    // stay on it on the Linux desktop. macOS WKWebView and every browser
-    // composite the WebGL layer fine, so this is scoped to the Linux desktop
-    // webview ONLY (where box-drawing glyphs fall back to the system font's,
-    // with the lineHeight gap the WebGL customGlyphs path otherwise fills).
-    // The env-level WEBKIT_DISABLE_DMABUF_RENDERER fix in linux_gui_stack.rs
-    // is about webview creation, not this per-layer present stall.
+    // The desktop carries its process-wide WebKit renderer decision in the
+    // served shell. A browser ignores that native signal, while a desktop
+    // without one stays on DOM so an unclassified host cannot paint a blank
+    // WebGL grid.
     if (
       !shouldUseWebglRenderer(
         isTauriDesktop(),
-        currentOS(),
+        webglRendererSignal(),
         webglRendererOverride(),
       )
     ) {

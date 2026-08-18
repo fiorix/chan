@@ -4,12 +4,9 @@
 //! from disk on each request (debug). The fallback handler returns
 //! `index.html` for any path that isn't a baked asset and isn't an
 //! `/api`/`/ws` route, so client-side routes work without server-side
-//! awareness of them. The SPA shell gets `<meta name="chan-prefix">`
-//! and (when set) `<meta name="chan-settings-disabled">` and
-//! `<meta name="chan-files">` tags injected so the frontend transport
-//! layer prepends the prefix to fetch and WebSocket URLs, the Settings
-//! entry point can grey itself out, and a standalone terminal window
-//! knows whether this tenant serves a filesystem for it to browse.
+//! awareness of them. The SPA shell gets boot metadata injected for its URL
+//! prefix, settings and file capabilities, and the desktop's terminal renderer
+//! signal.
 
 use std::sync::Arc;
 
@@ -72,6 +69,7 @@ const LAUNCHER_MANIFEST: &str = r##"{
 /// silently get HTML when they expected JSON.
 pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
     let path = uri.path();
+    let webgl_renderer = webgl_renderer_hint(&uri);
     // Refuse to serve the SPA shell for /api or /ws misses; those
     // are programmatic surfaces, not browser navigation.
     if path.starts_with("/api") || path == "/ws" {
@@ -97,7 +95,13 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     let files = state.standalone_files.is_some();
     if let Some(file) = WebAssets::get(candidate) {
         let body = if is_index {
-            inject_chan_meta(&file.data, &prefix, settings_disabled, files)
+            inject_chan_meta(
+                &file.data,
+                &prefix,
+                settings_disabled,
+                files,
+                webgl_renderer,
+            )
         } else {
             file.data.into_owned()
         };
@@ -108,7 +112,13 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     }
     // SPA fallback: route paths the frontend handles client-side.
     if let Some(file) = WebAssets::get("index.html") {
-        let body = inject_chan_meta(&file.data, &prefix, settings_disabled, files);
+        let body = inject_chan_meta(
+            &file.data,
+            &prefix,
+            settings_disabled,
+            files,
+            webgl_renderer,
+        );
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
             true,
@@ -120,6 +130,26 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
         "frontend bundle not built; run `cd web && npm install && npm run build`",
     )
         .into_response()
+}
+
+/// Read the renderer result appended by chan-desktop. The last recognized
+/// value wins because the desktop appends its result to URLs that may already
+/// carry a query string.
+fn webgl_renderer_hint(uri: &axum::http::Uri) -> Option<bool> {
+    uri.query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .filter_map(|(key, value)| {
+                if key != "chan-renderer" {
+                    return None;
+                }
+                match value.as_ref() {
+                    "webgl" => Some(true),
+                    "dom" => Some(false),
+                    _ => None,
+                }
+            })
+            .last()
+    })
 }
 
 /// Which launcher surface is being served. The single boot-time discriminator
@@ -246,6 +276,10 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool) -> Respons
 ///     the authority because it is the thing that either mounted that
 ///     surface or did not, and the SPA needs the answer before its
 ///     first render.
+///   - `<meta name="chan-webgl-renderer" content="1|0">` when a native
+///     desktop supplied its WebKit renderer result. The explicit false value
+///     keeps affected hosts on xterm.js's DOM renderer, while true enables the
+///     accelerated path where WebKit can composite it.
 ///
 /// No-op when no hint applies, or when `<head>` isn't found in
 /// the document (returns the original bytes unchanged).
@@ -254,8 +288,9 @@ pub fn inject_chan_meta(
     prefix: &str,
     settings_disabled: bool,
     files: bool,
+    webgl_renderer: Option<bool>,
 ) -> Vec<u8> {
-    if prefix.is_empty() && !settings_disabled && !files {
+    if prefix.is_empty() && !settings_disabled && !files && webgl_renderer.is_none() {
         return html.to_vec();
     }
     let needle = b"<head>";
@@ -273,6 +308,12 @@ pub fn inject_chan_meta(
     }
     if files {
         insert.push_str("<meta name=\"chan-files\" content=\"1\">");
+    }
+    if let Some(enabled) = webgl_renderer {
+        insert.push_str(&format!(
+            "<meta name=\"chan-webgl-renderer\" content=\"{}\">",
+            u8::from(enabled)
+        ));
     }
     let mut out = Vec::with_capacity(html.len() + insert.len());
     let after_head = pos + needle.len();
@@ -366,7 +407,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_prefix_after_head() {
         let html = b"<!doctype html><html><head><title>x</title></head></html>";
-        let out = inject_chan_meta(html, "/foo", false, false);
+        let out = inject_chan_meta(html, "/foo", false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-prefix\" content=\"/foo\"><title>"));
         assert!(!s.contains("chan-settings-disabled"));
@@ -375,7 +416,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_settings_disabled_after_head() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", true, false);
+        let out = inject_chan_meta(html, "", true, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-settings-disabled\" content=\"1\"><title>"));
         assert!(!s.contains("chan-prefix"));
@@ -384,7 +425,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_combines_both_tags() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "/foo", true, false);
+        let out = inject_chan_meta(html, "/foo", true, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         // Prefix is injected first, settings-disabled second; both
         // sit immediately after the opening <head>.
@@ -400,27 +441,76 @@ mod tests {
         // reads it before its first render to decide whether a standalone
         // terminal window offers the file browser and the editor.
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", false, true);
+        let out = inject_chan_meta(html, "", false, true, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-files\" content=\"1\"><title>"));
         // A tenant without it stays silent, which is what a host with no
         // usable home directory serves.
-        let out = inject_chan_meta(html, "", false, false);
+        let out = inject_chan_meta(html, "", false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains("chan-files"));
     }
 
     #[test]
+    fn inject_chan_meta_carries_both_renderer_signal_values() {
+        let html = b"<head><title>x</title></head>";
+        let webgl = inject_chan_meta(html, "", false, false, Some(true));
+        let webgl = std::str::from_utf8(&webgl).unwrap();
+        assert!(webgl.contains("<head><meta name=\"chan-webgl-renderer\" content=\"1\"><title>"));
+
+        let dom = inject_chan_meta(html, "", false, false, Some(false));
+        let dom = std::str::from_utf8(&dom).unwrap();
+        assert!(dom.contains("<head><meta name=\"chan-webgl-renderer\" content=\"0\"><title>"));
+    }
+
+    #[test]
+    fn renderer_query_uses_the_desktop_appended_value() {
+        let uri: axum::http::Uri = "/index.html?chan-renderer=dom&x=1&chan-renderer=webgl"
+            .parse()
+            .unwrap();
+        assert_eq!(webgl_renderer_hint(&uri), Some(true));
+
+        let uri: axum::http::Uri = "/index.html?chan-renderer=unknown".parse().unwrap();
+        assert_eq!(webgl_renderer_hint(&uri), None);
+    }
+
+    #[tokio::test]
+    async fn served_shell_carries_the_desktop_renderer_signal() {
+        use axum::body::to_bytes;
+
+        let state = crate::state::test_support::make_test_state(false);
+        for (uri, expected) in [
+            (
+                "/index.html?chan-renderer=webgl",
+                "<meta name=\"chan-webgl-renderer\" content=\"1\">",
+            ),
+            (
+                "/client/route?chan-renderer=dom",
+                "<meta name=\"chan-webgl-renderer\" content=\"0\">",
+            ),
+        ] {
+            let response = serve_static(State(state.clone()), uri.parse().unwrap()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(
+                body.contains(expected),
+                "{uri} served no {expected}: {body}"
+            );
+        }
+    }
+
+    #[test]
     fn inject_chan_meta_noop_when_nothing_set() {
         let html = b"<head></head>";
-        let out = inject_chan_meta(html, "", false, false);
+        let out = inject_chan_meta(html, "", false, false, None);
         assert_eq!(out, html);
     }
 
     #[test]
     fn inject_chan_meta_noop_when_head_missing() {
         let html = b"<html></html>";
-        let out = inject_chan_meta(html, "/foo", true, false);
+        let out = inject_chan_meta(html, "/foo", true, false, None);
         assert_eq!(out, html);
     }
 

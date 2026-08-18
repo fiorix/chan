@@ -1,13 +1,11 @@
 import { describe, expect, test } from "vitest";
 import tab from "./TerminalTab.svelte?raw";
 
-// TerminalTab uses the WebGL renderer everywhere EXCEPT the Linux desktop
-// webview (WebKitGTK), where it stays on the DOM renderer (WebKitGTK does
-// not composite the WebGL layer while idle, so writes lag until an event
-// flushes them). The DOM renderer draws box-drawing characters via the
-// system font, leaving vertical gaps at lineHeight: 1.2; the WebGL
-// customGlyphs path fills the whole cell including line-height padding.
-// These pins guard the wiring.
+// TerminalTab follows the renderer capability the desktop carries through the
+// served shell. The DOM renderer draws box-drawing characters via the system
+// font, leaving vertical gaps at lineHeight: 1.2; the WebGL customGlyphs path
+// fills the whole cell including line-height padding. These pins guard the
+// wiring.
 
 describe("TerminalTab WebGL renderer", () => {
   test("imports WebglAddon from @xterm/addon-webgl", () => {
@@ -35,24 +33,23 @@ describe("TerminalTab WebGL renderer", () => {
     expect(tab).toMatch(/falling back to DOM/);
   });
 
-  test("skips WebGL on the Linux desktop webview (WebKitGTK), staying on DOM", () => {
-    // The Linux desktop stays on the DOM renderer while the present-stall
-    // question is open. Scoped to it only: macOS WKWebView and every browser
-    // keep WebGL. The decision is one predicate, taken before the addon is
-    // constructed, so nothing downstream has to re-derive it.
+  test("takes the served renderer signal before constructing WebGL", () => {
+    // The decision is one predicate, taken before the addon is constructed, so
+    // nothing downstream has to re-derive it.
     expect(tab).toMatch(
       /import \{[^}]*\bisTauriDesktop\b[^}]*\} from "\.\.\/api\/desktop"/,
     );
     expect(tab).toMatch(
-      /shouldUseWebglRenderer\(\s*isTauriDesktop\(\),\s*currentOS\(\),[\s\S]{0,80}?\)\s*\)\s*\{\s*return;[\s\S]{0,80}try \{/,
+      /shouldUseWebglRenderer\(\s*isTauriDesktop\(\),\s*webglRendererSignal\(\),[\s\S]{0,80}?\)\s*\)\s*\{\s*return;[\s\S]{0,80}try \{/,
+    );
+    expect(tab).toMatch(
+      /import \{[^}]*\bwebglRendererSignal\b[^}]*\} from "\.\.\/terminal\/renderer"/,
     );
   });
 
   test("the renderer choice can be overridden per host", () => {
-    // The platform rule keeps Linux on the DOM renderer, and the only way to
-    // settle whether it still needs to is readings from real hosts. The
-    // override is passed INTO the predicate rather than checked beside it, so
-    // there is one answer to "which renderer" rather than two.
+    // The override is passed INTO the predicate rather than checked beside it,
+    // so there is one answer to "which renderer" rather than two.
     expect(tab).toMatch(/webglRendererOverride\(\)/);
     expect(tab).toMatch(
       /import \{[^}]*\bwebglRendererOverride\b[^}]*\} from "\.\.\/terminal\/renderer"/,

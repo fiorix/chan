@@ -31,6 +31,21 @@ pub fn prefer_system_gui_stack() {
     linux::prefer_system_gui_stack();
 }
 
+/// Whether the desktop WebKit process has the accelerated renderer path.
+///
+/// The Linux GUI bootstrap decides this before any webview is built. Other
+/// platforms do not use WebKitGTK's dma-buf override and always keep WebGL.
+pub fn webgl_renderer_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::webgl_renderer_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use crate::cs_install;
@@ -50,6 +65,8 @@ mod linux {
     /// dma-buf policy knob: `auto` (default, disable only for the NVIDIA
     /// proprietary driver), `on` (never disable), `off` (always disable).
     const DMABUF_ENV: &str = "CHAN_LINUX_DMABUF";
+
+    const WEBKIT_DISABLE_DMABUF_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
     // The sonames chan-desktop links. BOTH must be present on the host before
     // we shadow the bundle: a partial shadow (host libgtk against a bundled
@@ -190,14 +207,25 @@ mod linux {
     /// WEBKIT_DISABLE_COMPOSITING_MODE is left alone on purpose; forcing it
     /// off degrades rendering on healthy hosts.
     fn set_webkit_env_defaults() {
-        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+        if std::env::var_os(WEBKIT_DISABLE_DMABUF_ENV).is_some() {
             return;
         }
         if dma_buf_disabled(&std::env::var(DMABUF_ENV).unwrap_or_default(), || {
             nvidia_proprietary_driver(Path::new("/"))
         }) {
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            std::env::set_var(WEBKIT_DISABLE_DMABUF_ENV, "1");
         }
+    }
+
+    /// Read the result of [`set_webkit_env_defaults`] without probing the
+    /// driver again. WebKit keys the fallback on the variable's presence, so
+    /// this is also the exact renderer capability the webview observes.
+    pub fn webgl_renderer_available() -> bool {
+        renderer_available(std::env::var_os(WEBKIT_DISABLE_DMABUF_ENV).is_some())
+    }
+
+    fn renderer_available(dma_buf_disabled: bool) -> bool {
+        !dma_buf_disabled
     }
 
     /// Whether to disable dma-buf, given the policy value and a driver probe
@@ -240,7 +268,9 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use super::{dma_buf_disabled, nvidia_proprietary_driver, NVIDIA_DRIVER_MARKERS};
+        use super::{
+            dma_buf_disabled, nvidia_proprietary_driver, renderer_available, NVIDIA_DRIVER_MARKERS,
+        };
         use std::fs;
 
         fn root_with(marker: Option<&str>) -> tempfile::TempDir {
@@ -282,6 +312,22 @@ mod linux {
             assert!(!dma_buf_disabled("on", || true));
             assert!(dma_buf_disabled("off", || false));
             assert!(dma_buf_disabled(" off ", || false));
+        }
+
+        #[test]
+        fn the_driver_decision_selects_the_matching_terminal_renderer() {
+            let nvidia = root_with(Some(NVIDIA_DRIVER_MARKERS[0]));
+            let nvidia_auto = dma_buf_disabled("auto", || nvidia_proprietary_driver(nvidia.path()));
+            assert!(!renderer_available(nvidia_auto));
+
+            let nvidia_forced_on =
+                dma_buf_disabled("on", || nvidia_proprietary_driver(nvidia.path()));
+            assert!(renderer_available(nvidia_forced_on));
+
+            let non_nvidia = root_with(None);
+            let non_nvidia_auto =
+                dma_buf_disabled("auto", || nvidia_proprietary_driver(non_nvidia.path()));
+            assert!(renderer_available(non_nvidia_auto));
         }
 
         #[test]

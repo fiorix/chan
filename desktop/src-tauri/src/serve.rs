@@ -1485,6 +1485,13 @@ pub(crate) fn browser_window_url(
     )
 }
 
+fn append_renderer_signal(url: &mut tauri::Url, webgl_renderer: bool) {
+    url.query_pairs_mut().append_pair(
+        "chan-renderer",
+        if webgl_renderer { "webgl" } else { "dom" },
+    );
+}
+
 fn workspace_window_target_url(
     app: &AppHandle,
     window_label: &str,
@@ -1501,6 +1508,14 @@ fn workspace_window_target_url(
     // `?w=`; that is the `session_id`, NOT the Tauri label (they diverge only
     // for watcher-opened windows, where the label is the composite native key).
     parsed.query_pairs_mut().append_pair("w", session_id);
+    // The desktop GUI bootstrap has already decided whether WebKit's
+    // accelerated renderer is usable. Carry that one result to whichever
+    // tenant serves the shell, including a remote devserver, so the SPA never
+    // repeats driver detection or guesses from the operating system.
+    append_renderer_signal(
+        &mut parsed,
+        crate::linux_gui_stack::webgl_renderer_available(),
+    );
     // `kind=terminal` / `kind=control` are the SPA's only signal that this
     // window has no workspace (no workspace fetch); `control` additionally
     // selects the singleton control sub-mode. There is no third spelling: what
@@ -2402,6 +2417,22 @@ const KEY_BRIDGE_JS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renderer_signal_is_appended_for_the_serving_tenant() {
+        let mut url: tauri::Url = "https://example.test/workspace/index.html?existing=1"
+            .parse()
+            .unwrap();
+        append_renderer_signal(&mut url, false);
+        assert_eq!(
+            url.query(),
+            Some("existing=1&chan-renderer=dom"),
+            "the DOM decision must reach the served shell",
+        );
+
+        append_renderer_signal(&mut url, true);
+        assert!(url.query().unwrap().ends_with("chan-renderer=webgl"));
+    }
 
     #[test]
     fn compose_window_title_appends_the_caption_in_brackets() {

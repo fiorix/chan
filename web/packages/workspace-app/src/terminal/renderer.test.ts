@@ -3,6 +3,7 @@ import {
   refreshTerminalRows,
   shouldUseWebglRenderer,
   webglRendererOverride,
+  webglRendererSignal,
   WEBGL_RENDERER_OVERRIDE_KEY,
 } from "./renderer";
 
@@ -17,19 +18,36 @@ describe("terminal renderer helpers", () => {
     expect(() => refreshTerminalRows({ rows: 1 })).not.toThrow();
   });
 
-  test("keeps Linux desktop on the DOM renderer", () => {
-    expect(shouldUseWebglRenderer(true, "linux")).toBe(false);
-    expect(shouldUseWebglRenderer(true, "mac")).toBe(true);
-    expect(shouldUseWebglRenderer(false, "linux")).toBe(true);
+  test("uses each desktop renderer signal and keeps browsers on WebGL", () => {
+    expect(shouldUseWebglRenderer(true, true)).toBe(true);
+    expect(shouldUseWebglRenderer(true, false)).toBe(false);
+    expect(shouldUseWebglRenderer(true, null)).toBe(false);
+    expect(shouldUseWebglRenderer(false, false)).toBe(true);
   });
 
   test("an explicit override wins in both directions", () => {
-    // The hatch exists so a Linux host can be asked for a reading on the
-    // renderer that measures 100%; forcing it OFF matters too, as the way
-    // back if it misbehaves on a host we cannot reproduce.
-    expect(shouldUseWebglRenderer(true, "linux", true)).toBe(true);
-    expect(shouldUseWebglRenderer(false, "mac", false)).toBe(false);
-    expect(shouldUseWebglRenderer(true, "linux", null)).toBe(false);
+    // The hatch permits a reading on either renderer without adding a second
+    // platform rule beside the desktop's signal.
+    expect(shouldUseWebglRenderer(true, false, true)).toBe(true);
+    expect(shouldUseWebglRenderer(false, true, false)).toBe(false);
+    expect(shouldUseWebglRenderer(true, false, null)).toBe(false);
+  });
+
+  test("reads both renderer signal values from the served shell", () => {
+    const meta = document.createElement("meta");
+    meta.setAttribute("name", "chan-webgl-renderer");
+    document.head.append(meta);
+    try {
+      meta.setAttribute("content", "1");
+      expect(webglRendererSignal()).toBe(true);
+      meta.setAttribute("content", "0");
+      expect(webglRendererSignal()).toBe(false);
+      meta.setAttribute("content", "unknown");
+      expect(webglRendererSignal()).toBeNull();
+    } finally {
+      meta.remove();
+    }
+    expect(webglRendererSignal()).toBeNull();
   });
 
   test("only the two documented values are an override", () => {
