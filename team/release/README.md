@@ -117,6 +117,8 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 
 - [release-v0.92.0](release-v0.92.0.md) - the gateway's canonical design written against the running code, workspace terminals surviving a devserver restart, and an intermittent stale read that closed as correct behaviour; a pre-registered threshold overturned the lead's own first conclusion about a flaky check.
 
+- [release-v0.93.0](release-v0.93.0.md) - one filesystem namespace reachable from every window, the Linux desktop AppImage following its own driver decision for the terminal renderer, and a fork-inheritance mechanism found for a load-sensitive test nobody had explained; a lane caught a shipping blocker inside its own change that the lead had already cleared, and the release pipeline caught a defect the local gate had been configured not to see.
+
 ## Conventions
 
 Agent references in prose use plain names for people and lanes; the `@@` sigil is reserved for the five reusable skill identities (`@@architect`, `@@fabler`, `@@rustacean`, `@@syseng`, `@@webdev`) plus the generic `@@agent` for an unidentifiable past skill. A historical lane named for a discipline (Architect, Syseng, Rustacean, Web/Frontend) is rendered as its skill sigil (`@@architect`, `@@syseng`, `@@rustacean`, `@@webdev`) even where it sits among plain lane names; reused or suffixed slots (FrontendB, WebMain, FullStackA) stay plain. The coordination scheme evolved over the project; each report records the scheme that era ran on, and the cross-project summary is in [`.agents/playbook.md`](../../.agents/playbook.md). Reports are text only; a load-bearing screenshot is described in prose rather than embedded.

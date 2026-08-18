@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.93.0] - 2026-08-18
 
 File operations move to one `/api/fs` namespace reachable from every window kind, the Linux desktop AppImage follows its own driver decision when choosing the terminal renderer, and a long-standing intermittent test failure gets a named mechanism and a structural repair.
 
