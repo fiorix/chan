@@ -7,9 +7,8 @@
 //! terminal already grants that filesystem access. The `cs` CLI absolutizes the
 //! path against its cwd (the session cwd) before it reaches the control socket;
 //! the control socket sends that absolute path with its leading `/` stripped so
-//! the SPA's existing transfer bubble builds clean `/api/files/...` URLs. These
-//! handlers -- mounted only on the terminal tenant -- re-root that path at `/` and
-//! read or write it directly, so no SPA change is needed.
+//! the SPA's transfer bubble builds clean `/api/fs/...` URLs. These handlers
+//! re-root that path at `/` and read or write it directly.
 //!
 //! Downloads pre-flight readability before building the tarball.
 //! Terminal uploads rely on their atomic writer as the authoritative
@@ -40,6 +39,18 @@ use crate::routes::files::{
     read_multipart_text_field, upload_leaf_filename,
 };
 use crate::static_assets::content_type_for;
+
+/// Capability root selected by a window-command transfer.
+///
+/// Normal Files operations omit this marker and use the tenant root. A
+/// workspace window may select `filesystem` for a `cs` transfer whose absolute
+/// path escapes its workspace; a terminal window always selects it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransferRoot {
+    Workspace,
+    Filesystem,
+}
 
 /// Re-root a terminal-tenant `{*path}` (the control socket strips the leading
 /// `/` before sending it) at the filesystem root. A standalone-terminal
@@ -355,7 +366,23 @@ async fn stream_planned_download_tracked(
         .into_response()
 }
 
-/// `GET /api/files/{*path}?download=1` on the terminal tenant: stream the cwd /
+/// Stream one uid-filesystem download using the shared preflight and ceiling.
+pub(crate) async fn filesystem_download_response(
+    state: &std::sync::Arc<crate::state::AppState>,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    stream_planned_download_tracked(
+        &state.bulk_transfer,
+        Some(state.events_tx.clone()),
+        TransferTracking::from_headers(headers),
+        abs_from_terminal_path(path),
+        state.library.transfer_max_bytes(),
+    )
+    .await
+}
+
+/// `GET /api/fs/{*path}?download=1` on the terminal tenant: stream the cwd /
 /// uid-scoped file or a tar of the directory. Mounted only on the slim terminal
 /// router, so `{*path}` is always a filesystem-absolute target (see
 /// [`abs_from_terminal_path`]).
@@ -386,14 +413,7 @@ pub async fn api_terminal_read_file(
             "terminal file route requires ?download=1".into(),
         );
     }
-    stream_planned_download_tracked(
-        &state.bulk_transfer,
-        Some(state.events_tx.clone()),
-        TransferTracking::from_headers(&headers),
-        abs_from_terminal_path(&path),
-        state.library.transfer_max_bytes(),
-    )
-    .await
+    filesystem_download_response(&state, &path, &headers).await
 }
 
 /// One absolute regular-file stream, read lazily by whoever pulls it.
@@ -576,7 +596,7 @@ pub(crate) struct TerminalUploadQuery {
     w: Option<String>,
 }
 
-/// `POST /api/files/upload` on the terminal tenant: write the uploaded file into
+/// `POST /api/fs/upload` on the terminal tenant: write the uploaded file into
 /// the cwd / uid-scoped `dir`. This is the `cs upload` lane, which has no
 /// replace (`path`) flow: it targets a directory, not a file the user picked.
 /// Mounted only on the terminal router, so `dir` is absolute.
@@ -588,7 +608,7 @@ pub async fn api_terminal_upload_file(
     State(state): State<std::sync::Arc<crate::state::AppState>>,
     Query(query): Query<TerminalUploadQuery>,
     headers: axum::http::HeaderMap,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Response {
     if query.app.as_deref() == Some("files") {
         return crate::routes::standalone_fs::standalone_upload_file(
@@ -596,6 +616,15 @@ pub async fn api_terminal_upload_file(
         )
         .await;
     }
+    filesystem_upload_response(state, headers, multipart).await
+}
+
+/// Write one uid-filesystem upload using the shared atomic writer and ceiling.
+pub(crate) async fn filesystem_upload_response(
+    state: std::sync::Arc<crate::state::AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
     let mut dir = String::new();
     let mut dir_seen = false;
     loop {

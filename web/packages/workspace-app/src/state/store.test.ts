@@ -826,8 +826,9 @@ describe("window commands", () => {
       command: "download",
       path: "notes/a.md",
       is_dir: false,
+      root: "workspace",
     });
-    expect(spy).toHaveBeenCalledWith("notes/a.md", false);
+    expect(spy).toHaveBeenCalledWith("notes/a.md", false, "workspace");
 
     // The workspace root downloads as a dir (zip), mirroring the root pill.
     onWatchEvent({
@@ -836,8 +837,9 @@ describe("window commands", () => {
       command: "download",
       path: "",
       is_dir: true,
+      root: "workspace",
     });
-    expect(spy).toHaveBeenCalledWith("", true);
+    expect(spy).toHaveBeenCalledWith("", true, "workspace");
     spy.mockRestore();
   });
 
@@ -855,6 +857,7 @@ describe("window commands", () => {
       window_id: "window-a",
       command: "upload",
       path: "notes",
+      root: "workspace",
     });
 
     expect(clickSpy).toHaveBeenCalledTimes(1);
@@ -884,11 +887,13 @@ describe("window commands", () => {
         window_id: "window-a",
         command: "upload",
         path: "notes",
+        root: "filesystem",
       });
       await vi.waitFor(() =>
         expect(invokeSpy).toHaveBeenCalledWith(
           "upload_files_native",
           expect.objectContaining({
+            url: expect.stringContaining("/api/fs/upload?root=filesystem"),
             target: { dir: "notes", multiple: true },
           }),
         ),
@@ -915,12 +920,14 @@ describe("window commands", () => {
       command: "download",
       path: "notes/a.md",
       is_dir: false,
+      root: "workspace",
     });
     onWatchEvent({
       type: "window_command",
       window_id: "window-OTHER",
       command: "upload",
       path: "notes",
+      root: "workspace",
     });
     expect(dl).not.toHaveBeenCalled();
     expect(clickSpy).not.toHaveBeenCalled();

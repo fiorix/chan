@@ -1282,9 +1282,18 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             post(api_set_terminal_broadcast),
         )
         // Standalone-terminal file transfer: `cs upload` / `cs download` from a
-        // workspace-less terminal land here (cwd / shell-uid scoped). Same URLs
-        // as the workspace router so the SPA's transfer bubble is unchanged; the
+        // workspace-less terminal land here (cwd / shell-uid scoped). The
         // handlers re-root the path at `/` and pre-flight read/write access.
+        .route(
+            "/api/fs/upload",
+            post(crate::routes::transfer::api_terminal_upload_file)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/fs/{*path}",
+            get(crate::routes::transfer::api_terminal_read_file),
+        )
+        // `/api/files` remains a compatibility alias through v0.93.0.
         .route(
             "/api/files/upload",
             post(crate::routes::transfer::api_terminal_upload_file)
@@ -1306,7 +1315,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             get(crate::routes::standalone_fs::api_standalone_fs_context),
         )
         .route(
-            "/api/files",
+            "/api/fs",
             get(crate::routes::standalone_fs::api_standalone_list_files)
                 .post(crate::routes::standalone_fs::api_standalone_create_file),
         )
@@ -1314,6 +1323,20 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         // (max(existing size, TEXT_WRITE_LIMIT)); a fixed framework cap
         // would reject a valid legacy-file shrink before it reaches that
         // policy, same as the workspace mount.
+        .route(
+            "/api/fs/{*path}",
+            put(crate::routes::standalone_fs::api_standalone_write_file)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/fs/{*path}",
+            delete(crate::routes::standalone_fs::api_standalone_delete_file),
+        )
+        .route(
+            "/api/files",
+            get(crate::routes::standalone_fs::api_standalone_list_files)
+                .post(crate::routes::standalone_fs::api_standalone_create_file),
+        )
         .route(
             "/api/files/{*path}",
             put(crate::routes::standalone_fs::api_standalone_write_file)
@@ -1846,6 +1869,12 @@ fn router_with_extensions(
         .route("/api/workspace", get(api_get_workspace))
         .route("/api/workspace/bootstrap", get(api_workspace_bootstrap))
         .route("/api/cloud-workspaces", get(api_cloud_workspaces))
+        .route("/api/fs", get(api_list_files).post(api_create_file))
+        .route(
+            "/api/fs/upload",
+            post(api_upload_file).layer(DefaultBodyLimit::disable()),
+        )
+        // `/api/files` remains a compatibility alias through v0.93.0.
         .route("/api/files", get(api_list_files).post(api_create_file))
         .route(
             "/api/files/upload",
@@ -1895,13 +1924,21 @@ fn router_with_extensions(
             post(api_session_handover_reply),
         )
         .route(
-            "/api/files/{*path}",
+            "/api/fs/{*path}",
             get(api_read_file).delete(api_delete_file),
         )
         // The progressive raw-text sink owns the semantic limit:
         // max(existing size, TEXT_WRITE_LIMIT). Any fixed framework
         // cap would reject a valid legacy-file shrink before it reaches
         // that policy and its atomic cleanup path.
+        .route(
+            "/api/fs/{*path}",
+            put(api_write_file).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/files/{*path}",
+            get(api_read_file).delete(api_delete_file),
+        )
         .route(
             "/api/files/{*path}",
             put(api_write_file).layer(DefaultBodyLimit::disable()),
@@ -2294,7 +2331,7 @@ mod terminal_router_tests {
 
     // Constructing the slim terminal router asserts its routes assemble without
     // an axum conflict -- in particular the standalone-transfer pair
-    // (`/api/files/upload` POST + `/api/files/{*path}` GET) coexisting on this
+    // (`/api/fs/upload` POST + `/api/fs/{*path}` GET) coexisting on this
     // tenant. A conflict panics at build time, which would otherwise only
     // surface when a real standalone-terminal window opens.
     #[tokio::test]
@@ -2304,7 +2341,7 @@ mod terminal_router_tests {
     }
 
     // The terminal tenant's transfer route re-roots its wildcard capture at
-    // the filesystem root, so `/api/files/<abs-path>` must resolve and serve
+    // the filesystem root, so `/api/fs/<abs-path>` must resolve and serve
     // the absolute target. Serving real bytes through the assembled router
     // pins the capture shape the handler depends on.
     #[tokio::test]
@@ -2318,18 +2355,90 @@ mod terminal_router_tests {
 
         let state = crate::state::test_support::make_test_state(false);
         let app = terminal_router(state);
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!("/api/files{}?download=1", file.display()))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
-        assert_eq!(&bytes[..], b"wildcard capture probe");
+        for namespace in ["fs", "files"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/api/{namespace}{}?download=1", file.display()))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+            assert_eq!(&bytes[..], b"wildcard capture probe");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_and_terminal_routes_report_the_same_unreadable_path() {
+        use axum::body::to_bytes;
+        use std::os::unix::net::UnixListener;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("not-a-readable-file.sock");
+        let _listener = UnixListener::bind(&socket).expect("bind socket");
+        let state = crate::state::test_support::make_test_state(false);
+        let apps = [router(state.clone()), terminal_router(state)];
+        let mut refusals = Vec::new();
+        for app in apps {
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!(
+                            "/api/fs{}?download=1&root=filesystem",
+                            socket.display()
+                        ))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            refusals.push((status, body));
+        }
+        assert_eq!(refusals[0], refusals[1]);
+        assert_eq!(refusals[0].0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&refusals[0].1).contains("cannot read"));
+    }
+
+    #[tokio::test]
+    async fn workspace_and_terminal_routes_apply_the_same_directory_ceiling() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        const CAP: u64 = 4096;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("over.bin"), vec![b'x'; CAP as usize + 1]).unwrap();
+        let state =
+            crate::state::test_support::make_test_state_with_transfer_max_bytes(false, Some(CAP));
+        let apps = [router(state.clone()), terminal_router(state)];
+        let mut refusals = Vec::new();
+        for app in apps {
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!(
+                            "/api/fs{}?download=1&root=filesystem",
+                            dir.path().display()
+                        ))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            refusals.push((status, body));
+        }
+        assert_eq!(refusals[0], refusals[1]);
+        assert_eq!(refusals[0].0, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(String::from_utf8_lossy(&refusals[0].1).contains("4097 bytes exceeds"));
     }
 
     /// The shells endpoint must be reachable from the SLIM terminal router,

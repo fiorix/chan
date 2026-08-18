@@ -120,11 +120,10 @@ what makes it a way to pull files off a devserver box.
 
 PATH is required; "." is the terminal's current directory. A directory
 downloads as a tar named <leaf>.tar, built and streamed on the fly with
-nothing staged on disk first. In a workspace window the source is
-resolved workspace-relative, must stay inside the workspace root, and
-its tar skips .chan and .git; in a standalone terminal the source is
-the absolute path the shell itself can reach and is pre-flighted
-readable before any archive work begins.
+nothing staged on disk first. The source may be any absolute path the
+shell uid can reach, in workspace and terminal windows alike. A path
+inside a workspace uses that workspace's filtered tar semantics; any
+other path is pre-flighted readable before archive work begins.
 "#;
 
 /// `cs download` examples, side effects, and caveats.
@@ -1654,11 +1653,10 @@ your laptop.
 
 PATH is required and names the destination DIRECTORY: "." is the
 terminal's current directory, and a file path targets its parent so an
-upload always lands in a folder. In a workspace window the destination
-is resolved workspace-relative and must stay inside the workspace root;
-in a standalone terminal it is the absolute path the shell itself can
-reach, and the transfer route pre-flights that the directory is
-writable before writing anything.
+upload always lands in a folder. The destination may be any absolute
+path the shell uid can reach, in workspace and terminal windows alike.
+The transfer route preserves the same atomic write and configured
+ceiling for either root.
 "#;
 
 /// `cs upload` examples, side effects, and caveats.

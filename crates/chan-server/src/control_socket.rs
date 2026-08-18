@@ -41,6 +41,7 @@ pub use chan_shell::{ControlRequest, ControlResponse};
 // The survey types are part of the same shared wire module; the handler
 // pushes a SurveySpec to the SPA and formats the SurveyReply for the CLI.
 // TeamOp tags the `cs terminal team` op (new | load).
+use crate::routes::transfer::TransferRoot;
 use chan_shell::{
     submit_writes, Identity, PaneOp, PastePrefer, ServeKind, SubmitAgent, SurveyReply, SurveySpec,
     TabDestination, TeamOp, MAX_CLIPBOARD_BYTES, MAX_CONTROL_REQUEST_BYTES,
@@ -131,10 +132,12 @@ enum WindowCommand {
     // commands.
     Upload {
         path: String,
+        root: TransferRoot,
     },
     Download {
         path: String,
         is_dir: bool,
+        root: TransferRoot,
     },
     // Raise the `cs terminal survey` overlay. The SurveySpec nests under
     // `survey` (it is camelCase, unlike the snake_case sibling fields, so
@@ -205,7 +208,7 @@ enum WindowCommand {
     // `cs export`: ask the window to render `path` to `format` and write the
     // result back into the workspace. The SPA renders through its
     // `format -> exporter` registry, uploads the bytes with the existing
-    // `POST /api/files/upload` (`replace_path` = `out`), then POSTs
+    // `POST /api/fs/upload` (`replace_path` = `out`), then POSTs
     // `{ ok: true, out }` / `{ ok: false, error }` to `POST /api/window/reply`
     // echoing this frame's `id`, which fires the parked window-bus oneshot.
     // The `export-job` tag and the `id` payload key (not `request_id`) are
@@ -4014,7 +4017,13 @@ fn upload_path(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
+    let rel = match abs_to_workspace_rel(workspace.root(), requested) {
+        Ok(rel) => rel,
+        Err(WorkspaceRelError::Escape) => {
+            return upload_path_standalone(window_id, requested, events_tx)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let dir = if rel.is_empty() || workspace.stat(&rel).map(|s| s.is_dir).unwrap_or(false) {
         rel
     } else {
@@ -4022,7 +4031,10 @@ fn upload_path(
     };
     send_window_command(
         window_id,
-        WindowCommand::Upload { path: dir.clone() },
+        WindowCommand::Upload {
+            path: dir.clone(),
+            root: TransferRoot::Workspace,
+        },
         events_tx,
     )?;
     Ok(if dir.is_empty() {
@@ -4043,7 +4055,13 @@ fn download_path(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let rel = abs_to_workspace_rel(workspace.root(), requested).map_err(|e| e.to_string())?;
+    let rel = match abs_to_workspace_rel(workspace.root(), requested) {
+        Ok(rel) => rel,
+        Err(WorkspaceRelError::Escape) => {
+            return download_path_standalone(window_id, requested, events_tx)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let is_dir = if rel.is_empty() {
         true
     } else {
@@ -4057,6 +4075,7 @@ fn download_path(
         WindowCommand::Download {
             path: rel.clone(),
             is_dir,
+            root: TransferRoot::Workspace,
         },
         events_tx,
     )?;
@@ -4072,7 +4091,7 @@ fn download_path(
 /// the user means; we resolve the target DIRECTORY (the path itself if it is a
 /// directory, else its parent) and signal the window. The path is sent with its
 /// leading `/` stripped so the SPA's transfer bubble builds a clean
-/// `/api/files/upload` request; the terminal-tenant route re-roots it and
+/// `/api/fs/upload` request; the terminal-tenant route re-roots it and
 /// pre-flights writability. No workspace wall -- the reach is the shell's uid.
 fn upload_path_standalone(
     window_id: &str,
@@ -4094,6 +4113,7 @@ fn upload_path_standalone(
         window_id,
         WindowCommand::Upload {
             path: strip_leading_slash(&dir),
+            root: TransferRoot::Filesystem,
         },
         events_tx,
     )?;
@@ -4117,6 +4137,7 @@ fn download_path_standalone(
         WindowCommand::Download {
             path: strip_leading_slash(requested),
             is_dir: meta.is_dir(),
+            root: TransferRoot::Filesystem,
         },
         events_tx,
     )?;
@@ -4126,7 +4147,7 @@ fn download_path_standalone(
     ))
 }
 
-/// Drop the leading `/` from an absolute path so the SPA's `/api/files/{path}`
+/// Drop the leading `/` from an absolute path so the SPA's `/api/fs/{path}`
 /// URL stays clean (no `//`); the terminal-tenant route re-roots the value at
 /// `/`. See `crate::routes::transfer`.
 fn strip_leading_slash(p: &Path) -> String {
@@ -5649,6 +5670,7 @@ mod tests {
         let frame = rx.try_recv().expect("download window command broadcast");
         let stripped_file = file.to_string_lossy().trim_start_matches('/').to_string();
         assert!(frame.contains("download"), "frame: {frame}");
+        assert!(frame.contains("\"root\":\"filesystem\""), "frame: {frame}");
         assert!(
             frame.contains(&stripped_file),
             "frame missing stripped path: {frame}"
@@ -5676,7 +5698,43 @@ mod tests {
             .trim_start_matches('/')
             .to_string();
         assert!(frame.contains("upload"), "frame: {frame}");
+        assert!(frame.contains("\"root\":\"filesystem\""), "frame: {frame}");
         assert!(frame.contains(&stripped_dir), "frame: {frame}");
+    }
+
+    #[tokio::test]
+    async fn the_same_out_of_root_download_succeeds_from_workspace_and_terminal_windows() {
+        let (_cfg, _root, workspace_cell) = bound_empty_cell();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("artifact.bin");
+        std::fs::write(&file, b"payload").unwrap();
+
+        for (tenant, cell, window_id) in [
+            (ControlTenant::Workspace, workspace_cell, "workspace-win"),
+            (
+                ControlTenant::TerminalOnly,
+                Arc::new(RwLock::new(None)),
+                "terminal-win",
+            ),
+        ] {
+            let ctx = test_ctx(cell, tenant);
+            let _window = ctx.session_registry.join(window_id, true, None).guard;
+            let mut rx = ctx.events_tx.subscribe();
+            let response = handle_request(
+                ControlRequest::Download {
+                    window_id: window_id.into(),
+                    path: file.clone(),
+                },
+                &ctx,
+            )
+            .await;
+
+            assert!(matches!(response, ControlResponse::Ok { .. }));
+            let frame: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(frame["command"], "download");
+            assert_eq!(frame["root"], "filesystem");
+            assert_eq!(frame["is_dir"], false);
+        }
     }
 
     #[tokio::test]

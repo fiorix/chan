@@ -1113,8 +1113,8 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
         ShellAction::Upload { path } => {
             let env = open_env()?;
             // PATH is required (`.` for the current dir). absolutize resolves it
-            // against the CLI's cwd; the server relativizes it to the workspace
-            // (bounded) or keeps it cwd-scoped on a standalone terminal.
+            // against the CLI's cwd; the server selects the workspace root for
+            // an in-root path and the shell uid's filesystem reach otherwise.
             let abs = absolutize(path)?;
             let message = send_control_request(
                 &env.control_socket,

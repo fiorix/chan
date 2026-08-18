@@ -647,13 +647,13 @@ enum TransferRoute {
 /// stripped before matching so workspace and terminal tenants classify
 /// identically. Only the sanctioned bulk shapes qualify:
 ///
-/// - `POST /{tenant}/api/files/upload` (multipart upload),
-/// - `GET /{tenant}/api/files/{*path}` with a truthy `download` query
+/// - `POST /{tenant}/api/fs/upload` (multipart upload),
+/// - `GET /{tenant}/api/fs/{*path}` with a truthy `download` query
 ///   flag (file and directory-archive downloads),
 /// - `POST /{tenant}/api/fs/transfer` (server-side copy).
 ///
 /// Plain GET reads, `stream=1` reads, PUT writes, DELETE, the bare
-/// `/api/files` listing and create routes, other tenant APIs, and
+/// `/api/fs` listing and create routes, other tenant APIs, and
 /// root-level paths all retain the general policy.
 fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<TransferRoute> {
     let mut parts = path_and_query.splitn(2, '?');
@@ -662,7 +662,7 @@ fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<Transfe
     let rest = path.strip_prefix('/')?;
     let tenant_path = rest.split_once('/').map(|(_, tail)| tail).unwrap_or("");
     if method == Method::POST {
-        if tenant_path == "api/files/upload" {
+        if matches!(tenant_path, "api/fs/upload" | "api/files/upload") {
             return Some(TransferRoute::Bulk);
         }
         if tenant_path == "api/fs/transfer" {
@@ -671,7 +671,7 @@ fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<Transfe
         return None;
     }
     if method == Method::GET
-        && tenant_path.starts_with("api/files/")
+        && (tenant_path.starts_with("api/fs/") || tenant_path.starts_with("api/files/"))
         && query_flag_truthy(query, "download")
     {
         return Some(TransferRoute::Bulk);
@@ -1814,6 +1814,9 @@ mod tests {
         let copy = |m: Option<TransferRoute>| matches!(m, Some(TransferRoute::ServerSideCopy));
 
         // The sanctioned bulk shapes.
+        assert!(bulk(class(&Method::POST, "/blog/api/fs/upload")));
+        assert!(bulk(class(&Method::GET, "/blog/api/fs/big.bin?download=1")));
+        // Compatibility alias through v0.93.0.
         assert!(bulk(class(&Method::POST, "/blog/api/files/upload")));
         assert!(bulk(class(
             &Method::GET,

@@ -174,13 +174,14 @@ pub fn validated_endpoint(
         .ok_or_else(|| "native transfer URL changed workspace prefix".to_string())?;
     let expected = match kind {
         EndpointKind::Download => {
-            path.strip_prefix("/api/files/")
+            path.strip_prefix("/api/fs/")
+                .or_else(|| path.strip_prefix("/api/files/"))
                 .is_some_and(|file_path| !file_path.is_empty())
                 && endpoint
                     .query_pairs()
                     .any(|(key, value)| key == "download" && matches!(value.as_ref(), "1" | "true"))
         }
-        EndpointKind::Upload => path == "/api/files/upload",
+        EndpointKind::Upload => matches!(path, "/api/fs/upload" | "/api/files/upload"),
     };
     if !expected {
         return Err("native transfer URL is not the expected file API route".into());
@@ -251,7 +252,7 @@ pub fn request_headers(
 /// the server.
 ///
 /// What that fallback is worth depends on the direction and the tenant, and
-/// this process cannot tell them apart: both tenants serve `/api/files/...`,
+/// this process cannot tell them apart: both tenants serve `/api/fs/...`,
 /// so the URL does not say which will answer. An upload is refused by the
 /// server on either tenant, and a terminal download is refused by the ceiling
 /// on its route, so for those the unreadable ceiling costs the client-side
@@ -296,8 +297,10 @@ impl TransferCap {
 /// other query parameter is dropped.
 pub fn config_url_for_transfer(endpoint: &Url) -> Result<Url, String> {
     let path = endpoint.path();
-    let at = path
-        .rfind("/api/files")
+    let at = ["/api/fs", "/api/files"]
+        .into_iter()
+        .filter_map(|marker| path.rfind(marker))
+        .max()
         .ok_or_else(|| "transfer endpoint is not a file API URL".to_string())?;
     let token = endpoint
         .query_pairs()
@@ -356,6 +359,19 @@ mod tests {
     #[test]
     fn transfer_endpoints_are_same_origin_and_exact_route_shapes() {
         let current = Url::parse("https://alice.example/prefix/?w=1").unwrap();
+        assert!(validated_endpoint(
+            &current,
+            "https://alice.example/prefix/api/fs/a.md?download=1&t=x",
+            EndpointKind::Download,
+        )
+        .is_ok());
+        assert!(validated_endpoint(
+            &current,
+            "https://alice.example/prefix/api/fs/upload?t=x",
+            EndpointKind::Upload,
+        )
+        .is_ok());
+        // Compatibility alias through v0.93.0.
         assert!(validated_endpoint(
             &current,
             "https://alice.example/prefix/api/files/a.md?download=1&t=x",
@@ -426,23 +442,29 @@ mod tests {
     #[test]
     fn native_transfer_cap_config_url_derives_from_the_validated_endpoint() {
         let endpoint =
-            Url::parse("https://alice.example/prefix/api/files/a.md?download=1&t=secret").unwrap();
+            Url::parse("https://alice.example/prefix/api/fs/a.md?download=1&t=secret").unwrap();
         let config = config_url_for_transfer(&endpoint).unwrap();
         assert_eq!(
             config.as_str(),
             "https://alice.example/prefix/api/config?t=secret"
         );
 
-        let upload = Url::parse("http://127.0.0.1:4090/api/files/upload?t=tok").unwrap();
+        let upload = Url::parse("http://127.0.0.1:4090/api/fs/upload?t=tok").unwrap();
         assert_eq!(
             config_url_for_transfer(&upload).unwrap().as_str(),
             "http://127.0.0.1:4090/api/config?t=tok"
         );
 
         // No token to carry means no query at all, not an empty one.
-        let bare = Url::parse("https://alice.example/prefix/api/files/a.md?download=1").unwrap();
+        let bare = Url::parse("https://alice.example/prefix/api/fs/a.md?download=1").unwrap();
         assert_eq!(
             config_url_for_transfer(&bare).unwrap().as_str(),
+            "https://alice.example/prefix/api/config"
+        );
+
+        let alias = Url::parse("https://alice.example/prefix/api/files/a.md?download=1").unwrap();
+        assert_eq!(
+            config_url_for_transfer(&alias).unwrap().as_str(),
             "https://alice.example/prefix/api/config"
         );
 

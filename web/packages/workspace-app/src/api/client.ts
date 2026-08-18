@@ -338,6 +338,8 @@ function xhrTextError(status: number, statusText: string, text: string): never {
   throw new ApiError(status, message);
 }
 
+export type TransferRoot = "workspace" | "filesystem";
+
 interface UploadProgressOptions {
   signal?: AbortSignal;
   onProgress?: (progress: {
@@ -351,6 +353,13 @@ interface UploadProgressOptions {
   /// the request is still admitted and still obeys the same bound, it simply
   /// reports no position. Untracked is a normal case, not a degraded one.
   transferId?: string;
+  root?: TransferRoot;
+}
+
+function transferSuffix(root: TransferRoot | undefined, includeFilesApp: boolean): string {
+  const standalone = filesMutationSuffix(false, { app: includeFilesApp && root !== "filesystem" });
+  if (root !== "filesystem") return standalone;
+  return standalone ? `${standalone}&root=filesystem` : "?root=filesystem";
 }
 
 interface XhrResponse {
@@ -410,7 +419,7 @@ function uploadXhrAttempt(
     const xhr = createXhr();
     xhr.open(
       "POST",
-      apiPath(`/api/files/upload${filesMutationSuffix(false, { app: true })}`),
+      apiPath(`/api/fs/upload${transferSuffix(opts.root, true)}`),
     );
     for (const [name, value] of Object.entries(directAuthHeaders())) {
       xhr.setRequestHeader(name, value);
@@ -962,7 +971,10 @@ export const api = {
     req<DraftPromoteResponse>("POST", "/api/drafts/promote", { path, target }),
   remove: (path: string) =>
     req<void>("DELETE", `/api/files/${encPath(path)}${filesMutationSuffix(false)}`),
-  downloadUrl: (path: string) => withTokenQuery(`/api/files/${encPath(path)}?download=1`),
+  downloadUrl: (path: string, root?: TransferRoot) =>
+    withTokenQuery(
+      `/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`,
+    ),
   move: (from: string, to: string) =>
     req<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
   /// Multi-entry move/copy for the File Browser clipboard + multi-drag.

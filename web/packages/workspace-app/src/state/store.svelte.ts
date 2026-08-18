@@ -26,8 +26,10 @@ import {
   openWatchSocket,
   sessionPath,
   sessionWindowId,
+  usesStandaloneFiles,
   windowLibraryId,
   type SurveySpec,
+  type TransferRoot,
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
@@ -1110,17 +1112,17 @@ type WindowCommandFrame =
       type: "window_command";
       window_id: string;
       command: "upload";
-      // Workspace-relative target directory ("" = workspace root).
       path: string;
+      root: TransferRoot;
     }
   | {
       type: "window_command";
       window_id: string;
       command: "download";
-      // Workspace-relative file/dir path ("" = workspace root).
       path: string;
       // Server-resolved (the SPA names the download / a dir downloads as a zip).
       is_dir: boolean;
+      root: TransferRoot;
     }
   | {
       type: "window_command";
@@ -1597,9 +1599,9 @@ function isSurveyCloseReason(value: unknown): value is SurveyCloseReason {
 /// programmatic file-input `.click()` made outside a user gesture. Rust opens
 /// the native picker and streams the chosen paths directly to the upload API;
 /// paths and bytes never cross webview IPC.
-export function raiseUploadPicker(destDir: string): void {
+export function raiseUploadPicker(destDir: string, root?: TransferRoot): void {
   if (isTauriDesktop()) {
-    void raiseDesktopUploadPicker(destDir);
+    void raiseDesktopUploadPicker(destDir, root);
     return;
   }
   const input = document.createElement("input");
@@ -1611,7 +1613,7 @@ export function raiseUploadPicker(destDir: string): void {
     () => {
       const files = input.files;
       input.remove();
-      if (files && files.length > 0) void fileOps.uploadFilesTo(destDir, files);
+      if (files && files.length > 0) void fileOps.uploadFilesTo(destDir, files, root);
     },
     { once: true },
   );
@@ -1644,15 +1646,18 @@ export function raiseReplacePicker(targetPath: string): void {
   input.click();
 }
 
-async function raiseDesktopUploadPicker(destDir: string): Promise<void> {
+async function raiseDesktopUploadPicker(destDir: string, root?: TransferRoot): Promise<void> {
   try {
     const uploaded = await runDesktopUpload(
       { dir: destDir, multiple: true },
       destDir ? `Upload to ${destDir}` : "Upload files",
+      root,
     );
     if (uploaded.length === 0) return;
-    for (const file of uploaded) await refreshTreeForPath(file.path);
-    revealAndSelect(uploaded[uploaded.length - 1]!.path);
+    if (root !== "filesystem" || usesStandaloneFiles()) {
+      for (const file of uploaded) await refreshTreeForPath(file.path);
+      revealAndSelect(uploaded[uploaded.length - 1]!.path);
+    }
     setTransientStatus(
       uploaded.length === 1
         ? `Uploaded '${uploaded[0]!.path}'`
@@ -1819,13 +1824,13 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // `cs upload`: raise the SAME upload UI the Inspector pill uses -- open a
     // file picker, then hand the picked files to fileOps.uploadFilesTo (which
     // drives the shared transfer-progress indicator). Reuse, not a parallel path.
-    raiseUploadPicker(frame.path);
+    raiseUploadPicker(frame.path, frame.root);
     setTransientStatus(`upload to ${frame.path || "/"}`);
     return;
   }
   if (frame.command === "download" && typeof frame.path === "string") {
     // `cs download`: reuse the Inspector's download-with-progress action.
-    fileOps.downloadPathWithProgress(frame.path, frame.is_dir === true);
+    fileOps.downloadPathWithProgress(frame.path, frame.is_dir === true, frame.root);
     setTransientStatus(`downloading ${frame.path || "/"}`);
     return;
   }
@@ -5334,10 +5339,10 @@ function uploadNameReason(name: string): string | null {
 }
 
 export const fileOps = {
-  downloadPath(path: string, isDir: boolean): void {
+  downloadPath(path: string, isDir: boolean, root?: TransferRoot): void {
     if (handleDemoDownload(path, isDir)) return;
     const link = document.createElement("a");
-    link.href = api.downloadUrl(path);
+    link.href = api.downloadUrl(path, root);
     link.download = downloadFilename(path, isDir);
     link.rel = "noopener";
     link.style.display = "none";
@@ -5354,11 +5359,11 @@ export const fileOps = {
   /// driving the transfer bubble (the single download surface).
   /// Fire-and-forget: the transfer model carries progress / error /
   /// savedPath so callers don't await.
-  downloadPathWithProgress(path: string, isDir: boolean): void {
+  downloadPathWithProgress(path: string, isDir: boolean, root?: TransferRoot): void {
     if (handleDemoDownload(path, isDir)) return;
     if (isTauriDesktop()) {
       const url = new URL(
-        api.downloadUrl(path),
+        api.downloadUrl(path, root),
         window.location.href,
       ).toString();
       // Pass the source so an interrupted download (window reload) can offer
@@ -5369,7 +5374,7 @@ export const fileOps = {
       }).catch(() => {});
       return;
     }
-    this.downloadPath(path, isDir);
+    this.downloadPath(path, isDir, root);
   },
   async replaceFileAt(targetPath: string, picked: File): Promise<void> {
     const draftsReason = fileBrowserDraftsPathReason(targetPath);
@@ -5416,7 +5421,11 @@ export const fileOps = {
       }
     }
   },
-  async uploadFilesTo(destDir: string, dropped: FileList | File[]): Promise<void> {
+  async uploadFilesTo(
+    destDir: string,
+    dropped: FileList | File[],
+    root?: TransferRoot,
+  ): Promise<void> {
     const files = Array.from(dropped);
     if (files.length === 0) return;
     const seen = new Set<string>();
@@ -5428,13 +5437,16 @@ export const fileOps = {
         return;
       }
       const target = uploadTargetPath(destDir, file.name);
-      const draftsReason = fileBrowserDraftsPathReason(target);
+      const draftsReason = root === "filesystem" ? null : fileBrowserDraftsPathReason(target);
       if (draftsReason) {
         ui.status = `upload failed: ${draftsReason}`;
         ui.statusKind = "persistent";
         return;
       }
-      if (seen.has(target) || tree.entries.some((entry) => entry.path === target)) {
+      if (
+        seen.has(target) ||
+        (root !== "filesystem" && tree.entries.some((entry) => entry.path === target))
+      ) {
         ui.status = `upload failed: '${target}' already exists`;
         ui.statusKind = "persistent";
         return;
@@ -5472,17 +5484,22 @@ export const fileOps = {
         const result = await api.uploadFile(file, destDir, {
           signal: activeAbort.signal,
           transferId: xferId,
+          root,
           onProgress: (progress) => reportProgress(file, progress.loaded),
         });
         activeAbort = null;
         if (cancelRequested) throw uploadCancelledError();
         completedBytes += file.size;
         uploaded.push(result.path);
-        await refreshTreeForPath(result.path);
+        if (root !== "filesystem" || usesStandaloneFiles()) {
+          await refreshTreeForPath(result.path);
+        }
       }
       finishTransfer(xferId);
       if (uploaded.length > 0) {
-        revealAndSelect(uploaded[uploaded.length - 1]!);
+        if (root !== "filesystem" || usesStandaloneFiles()) {
+          revealAndSelect(uploaded[uploaded.length - 1]!);
+        }
         setTransientStatus(
           uploaded.length === 1
             ? `Uploaded '${uploaded[0]}'`

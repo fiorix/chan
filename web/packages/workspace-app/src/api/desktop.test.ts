@@ -332,12 +332,14 @@ describe("native streaming transfers", () => {
     const uploaded = await runDesktopUpload(
       { dir: "docs", multiple: true },
       "Upload files",
+      "filesystem",
     );
 
     expect(uploaded).toEqual([{ path: "docs/a.bin", size: 9 }]);
     expect(invokeSpy).toHaveBeenCalledWith(
       "upload_files_native",
       expect.objectContaining({
+        url: expect.stringContaining("/api/fs/upload?root=filesystem"),
         target: { dir: "docs", multiple: true },
         transferId: expect.stringMatching(/^native-/),
       }),

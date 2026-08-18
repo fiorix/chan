@@ -1227,6 +1227,8 @@ pub struct ReadFileQuery {
     download: Option<String>,
     #[serde(default)]
     stream: Option<String>,
+    #[serde(default)]
+    root: Option<crate::routes::transfer::TransferRoot>,
 }
 
 pub(crate) fn query_flag(value: &Option<String>) -> bool {
@@ -1242,6 +1244,16 @@ pub async fn api_read_file(
     Query(query): Query<ReadFileQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if query.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        if !query_flag(&query.download) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "filesystem root is available only for transfers".into(),
+            );
+        }
+        return crate::routes::transfer::filesystem_download_response(&state, &path, &headers)
+            .await;
+    }
     // Editable-text files (.md / .txt) come back as FileResponse
     // JSON since the frontend's editor wants the content as a
     // string. Anything else (images, attachments) comes back as
@@ -2202,6 +2214,25 @@ pub(crate) struct UploadFileResponse {
 
 pub async fn api_upload_file(
     State(state): State<Arc<AppState>>,
+    Query(root): Query<UploadRootQuery>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Response {
+    if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
+            .await;
+    }
+    workspace_upload_response(state, headers, multipart).await
+}
+
+#[derive(Default, Deserialize)]
+pub struct UploadRootQuery {
+    #[serde(default)]
+    root: Option<crate::routes::transfer::TransferRoot>,
+}
+
+async fn workspace_upload_response(
+    state: Arc<AppState>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
@@ -3160,6 +3191,7 @@ mod write_tests {
 
         let refused = super::api_upload_file(
             State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
             HeaderMap::new(),
             upload_multipart("refused-upload", "", "declined.bin", "payload").await,
         )
@@ -3191,6 +3223,7 @@ mod write_tests {
 
         let admitted = super::api_upload_file(
             State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
             HeaderMap::new(),
             upload_multipart("admitted-upload", "", "admitted.bin", "payload").await,
         )
@@ -3284,6 +3317,7 @@ mod write_tests {
 
         let exact = super::api_upload_file(
             State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
             HeaderMap::new(),
             upload_multipart("cap-exact", "", "exact.bin", &"z".repeat(CAP as usize)).await,
         )
@@ -3302,6 +3336,7 @@ mod write_tests {
 
         let over = super::api_upload_file(
             State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
             HeaderMap::new(),
             upload_multipart("cap-over", "", "over.bin", &"z".repeat(CAP as usize + 1)).await,
         )
@@ -5149,6 +5184,32 @@ mod doc_divert_tests {
         assert!(!root.path().join("docs/wrong.bin").exists());
     }
 
+    #[tokio::test]
+    async fn workspace_router_serves_the_fs_namespace_and_files_alias() {
+        let (_cfg, _root, state) = divert_app();
+        state
+            .try_workspace()
+            .unwrap()
+            .write_text("alias.md", "namespace probe")
+            .unwrap();
+        let app = crate::router(state);
+
+        for namespace in ["fs", "files"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/{namespace}/alias.md"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body_json(response).await["content"], "namespace probe");
+        }
+    }
+
     pub(super) async fn raw_put_body(
         state: State<Arc<AppState>>,
         path: AxumPath<String>,
@@ -5308,6 +5369,7 @@ mod doc_divert_tests {
             Query(ReadFileQuery {
                 download: None,
                 stream: None,
+                root: None,
             }),
             HeaderMap::new(),
         )
@@ -5328,6 +5390,7 @@ mod doc_divert_tests {
             Query(ReadFileQuery {
                 download: None,
                 stream: Some("1".into()),
+                root: None,
             }),
             HeaderMap::new(),
         )
@@ -5356,6 +5419,7 @@ mod doc_divert_tests {
             Query(ReadFileQuery {
                 download: Some("1".into()),
                 stream: None,
+                root: None,
             }),
             HeaderMap::new(),
         )
@@ -5763,6 +5827,7 @@ mod doc_divert_tests {
             Query(ReadFileQuery {
                 download: None,
                 stream: Some("1".into()),
+                root: None,
             }),
             HeaderMap::new(),
         )
@@ -6031,6 +6096,7 @@ mod scene_divert_tests {
             Query(ReadFileQuery {
                 download: None,
                 stream: None,
+                root: None,
             }),
             HeaderMap::new(),
         )

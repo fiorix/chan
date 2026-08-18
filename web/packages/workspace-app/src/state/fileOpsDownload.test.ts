@@ -46,7 +46,7 @@ describe("fileOps.downloadPathWithProgress branch", () => {
     // Absolute (resolved against window.location), and the suggested
     // name is the basename (downloadFilename for a file).
     expect(url).toMatch(/^https?:\/\//);
-    expect(url).toContain("/api/files/");
+    expect(url).toContain("/api/fs/");
     expect(filename).toBe("note.md");
     // The browser <a download> path must NOT fire on desktop.
     expect(click).not.toHaveBeenCalled();
@@ -60,6 +60,15 @@ describe("fileOps.downloadPathWithProgress branch", () => {
     expect(runDesktopDownload).toHaveBeenCalledTimes(1);
     const [, filename] = runDesktopDownload.mock.calls[0]!;
     expect(filename).toBe("notes.tar");
+  });
+
+  test("filesystem-root download carries the typed root marker", () => {
+    isTauriDesktop.mockReturnValue(true);
+
+    fileOps.downloadPathWithProgress("tmp/build.bin", false, "filesystem");
+
+    const [url] = runDesktopDownload.mock.calls[0]!;
+    expect(url).toContain("/api/fs/tmp/build.bin?download=1&root=filesystem");
   });
 
   test("browser falls back to the <a download> manager", () => {

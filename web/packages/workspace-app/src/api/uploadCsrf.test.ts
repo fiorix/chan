@@ -25,6 +25,7 @@ class FakeXhr {
   status = 0;
   statusText = "";
   responseText = "";
+  url = "";
   upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
     onprogress: null,
   };
@@ -32,7 +33,9 @@ class FakeXhr {
   onerror: (() => void) | null = null;
   onabort: (() => void) | null = null;
   onloadend: (() => void) | null = null;
-  open(): void {}
+  open(_method: string, url: string): void {
+    this.url = url;
+  }
   setRequestHeader(name: string, value: string): void {
     this.headers[name] = value;
   }
@@ -140,6 +143,14 @@ describe("XHR multipart gateway CSRF mirror", () => {
 
     expect(Array.from((created[0].body as FormData).keys())).toEqual(["dir", "file"]);
     expect(Array.from((created[1].body as FormData).keys())).toEqual(["path", "file"]);
+  });
+
+  test("filesystem-root upload uses the primary namespace and root marker", async () => {
+    const created = installFakeXhr();
+
+    await api.uploadFile(new File(["x"], "a.txt"), "tmp", { root: "filesystem" });
+
+    expect(created[0].url).toContain("/api/fs/upload?root=filesystem");
   });
 
   test("uploadFile sends no csrf header without the cookie (loopback)", async () => {

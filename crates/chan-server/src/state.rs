@@ -320,6 +320,14 @@ pub(crate) mod test_support {
     /// The returned `AppState` is safe to wrap in `Arc` and hand to
     /// axum extractors; workspace access returns `StateAccessError::Missing`.
     pub fn make_test_state(settings_disabled: bool) -> Arc<AppState> {
+        make_test_state_with_transfer_max_bytes(settings_disabled, None)
+    }
+
+    /// Build a workspace-less test state with an explicit transfer ceiling.
+    pub fn make_test_state_with_transfer_max_bytes(
+        settings_disabled: bool,
+        transfer_max_bytes: Option<u64>,
+    ) -> Arc<AppState> {
         // The TempDir's path is what Library::open_at uses for any
         // later registry writes (register_workspace, ...). Letting it
         // drop here would delete the directory and
@@ -330,7 +338,15 @@ pub(crate) mod test_support {
         // the process exits in seconds), avoids the footgun, and is
         // simpler than threading a lifetime through AppState.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let lib = Library::open_at(tmp.path().join("config.toml")).expect("open library");
+        let config_path = tmp.path().join("config.toml");
+        if let Some(max_bytes) = transfer_max_bytes {
+            std::fs::write(
+                &config_path,
+                format!("workspaces = []\n[transfer]\nmax_bytes = {max_bytes}\n"),
+            )
+            .expect("write transfer config");
+        }
+        let lib = Library::open_at(config_path).expect("open library");
         std::mem::forget(tmp);
         let (events_tx, _) = broadcast::channel::<String>(1);
         let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);

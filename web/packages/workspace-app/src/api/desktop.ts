@@ -14,6 +14,7 @@ import {
   waitForTransferSlot,
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
+import type { TransferRoot } from "./client";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
@@ -575,6 +576,7 @@ export interface NativeUploadedFile {
 export async function runDesktopUpload(
   target: { dir?: string; path?: string; multiple: boolean },
   label: string,
+  root?: TransferRoot,
 ): Promise<NativeUploadedFile[]> {
   if (!isTauriDesktop()) {
     throw new Error("runDesktopUpload called outside chan-desktop");
@@ -589,7 +591,7 @@ export async function runDesktopUpload(
     if (!(await waitForTransferSlot(xferId))) return [];
     stopProgress = pollNativeProgress(nativeId, xferId);
     const url = new URL(
-      withTokenQuery("/api/files/upload"),
+      withTokenQuery(`/api/fs/upload${root === "filesystem" ? "?root=filesystem" : ""}`),
       window.location.href,
     ).toString();
     const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {
