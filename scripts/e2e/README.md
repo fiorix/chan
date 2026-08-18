@@ -19,12 +19,13 @@ A scenario graduates into the gate only after it has proven stable across severa
 
 ### One-CPU test series
 
-Prepare a clean detached worktree outside `/tmp`, then create the fixed-shape guest with build output on its capped btrfs volume. The main `.git` bind is read-only and exists only so Git can resolve the detached worktree metadata; `/work/chan` is also read-only, while `CARGO_TARGET_DIR` is fixed by the script at `/var/tmp/chan-target` inside the guest:
+Prepare a clean detached worktree outside `/tmp`, then create the fixed-shape guest with build output on its capped btrfs volume. The empty gitignored embed directories let `chan-server` build against read-only source without its build script trying to create them. The main `.git` bind is read-only and exists only so Git can resolve the detached worktree metadata; `/work/chan` is also read-only, while `CARGO_TARGET_DIR` is fixed by the script at `/var/tmp/chan-target` inside the guest:
 
 ```bash
 rig_tree=/var/tmp/chan-one-cpu-source
 git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
 git worktree add --detach "$rig_tree" REVISION
+mkdir -p "$rig_tree/web/dist" "$rig_tree/web-launcher/dist"
 source packaging/sdme-build-policy.sh
 sudo sdme create --name chan-one-cpu -r chan-ann-ubuntu \
   --storage btrfs --disk "$SDME_BUILD_DISK" --cpus 1 \
