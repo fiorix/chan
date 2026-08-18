@@ -479,6 +479,13 @@ mod tests {
         use axum::body::to_bytes;
 
         let state = crate::state::test_support::make_test_state(false);
+        // The Rust tests run before the frontend bundle is built, so a clean
+        // checkout has no embedded shell for this handler to serve. Assert the
+        // injection where the bundle exists and the absent-bundle answer where
+        // it does not, so neither arm passes without asserting something. A
+        // real server serving a real shell is covered by
+        // `scripts/e2e/browser-smoke`.
+        let embedded = WebAssets::get("index.html").is_some();
         for (uri, expected) in [
             (
                 "/index.html?chan-renderer=webgl",
@@ -490,6 +497,10 @@ mod tests {
             ),
         ] {
             let response = serve_static(State(state.clone()), uri.parse().unwrap()).await;
+            if !embedded {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+                continue;
+            }
             assert_eq!(response.status(), StatusCode::OK, "{uri}");
             let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
             let body = std::str::from_utf8(&body).unwrap();
