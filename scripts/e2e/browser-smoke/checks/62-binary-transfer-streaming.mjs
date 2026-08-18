@@ -105,7 +105,7 @@ async function fetchPrefix(page, path, query, stopAfterBytes) {
       const params = new URLSearchParams(query);
       if (token) params.set("t", token);
       const started = performance.now();
-      const response = await fetch(`/api/files/${encodedPath}?${params}`);
+      const response = await fetch(`/api/fs/${encodedPath}?${params}`);
       if (!response.ok || !response.body) {
         throw new Error(`stream prefix ${path}: ${response.status} ${await response.text()}`);
       }
@@ -322,7 +322,7 @@ export default {
           "";
         const params = new URLSearchParams();
         if (token) params.set("t", token);
-        const response = await fetch(`/api/files/${encodeURIComponent(path)}?${params}`);
+        const response = await fetch(`/api/fs/${encodeURIComponent(path)}?${params}`);
         if (!response.ok) throw new Error(`threshold probe: ${response.status}`);
         return (await response.json()).max_editable_bytes;
       }, thresholdProbe);
@@ -402,7 +402,7 @@ export default {
               "";
             const params = new URLSearchParams({ download: "1" });
             if (token) params.set("t", token);
-            const response = await fetch(`/api/files/${encodeURIComponent(path)}?${params}`, {
+            const response = await fetch(`/api/fs/${encodeURIComponent(path)}?${params}`, {
               headers: { range },
             });
             return {
@@ -490,7 +490,7 @@ export default {
             "";
           const started = performance.now();
           const response = await fetch(
-            `/api/files/${encodeURIComponent(path)}?download=1&t=${encodeURIComponent(token)}`,
+            `/api/fs/${encodeURIComponent(path)}?download=1&t=${encodeURIComponent(token)}`,
           );
           if (!response.ok || !response.body) {
             throw new Error(`binary download: ${response.status}`);
@@ -542,7 +542,7 @@ export default {
             const started = performance.now();
             return await new Promise((resolve, reject) => {
               const xhr = new XMLHttpRequest();
-              xhr.open("POST", "/api/files/upload");
+              xhr.open("POST", "/api/fs/upload");
               if (token) xhr.setRequestHeader("authorization", `Bearer ${token}`);
               xhr.upload.onprogress = (event) => {
                 progress.push({
@@ -596,7 +596,7 @@ export default {
           return await new Promise((resolve) => {
             const xhr = new XMLHttpRequest();
             let sawProgress = false;
-            xhr.open("POST", "/api/files/upload");
+            xhr.open("POST", "/api/fs/upload");
             if (token) xhr.setRequestHeader("authorization", `Bearer ${token}`);
             xhr.upload.onprogress = (event) => {
               if (!sawProgress && event.loaded > 0) {

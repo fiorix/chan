@@ -68,7 +68,7 @@ describe("openMediaViewer routing", () => {
     expect(viewer.querySelector(".md-image-zoom-counter")?.textContent).toBe(
       "2 / 2",
     );
-    expect(viewer.querySelector("img")?.src).toContain("/api/files/a/2.jpg");
+    expect(viewer.querySelector("img")?.src).toContain("/api/fs/a/2.jpg");
   });
 
   test("an svg routes to the image zoom like any image", () => {
@@ -138,7 +138,7 @@ describe("viewer dismissal lifecycle", () => {
     const video = document.querySelector<HTMLVideoElement>(
       ".md-video-viewer video",
     )!;
-    expect(video.getAttribute("src")).toContain("/api/files/media/clip.mp4");
+    expect(video.getAttribute("src")).toContain("/api/fs/media/clip.mp4");
     expect(pressEscape().defaultPrevented).toBe(true);
     expect(document.querySelector(".md-video-viewer")).toBeNull();
     expect(pauseSpy).toHaveBeenCalledTimes(1);

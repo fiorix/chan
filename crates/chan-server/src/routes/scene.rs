@@ -90,7 +90,7 @@ pub(crate) enum ServerFrame {
     /// Full scene state: answers every attach and any hard resync.
     /// `elements` includes tombstones so a stale local element cannot
     /// win reconciliation against a delete. `mtime_ns` is the
-    /// flushed-to-disk CAS token as a decimal string (the `/api/files`
+    /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
     /// convention), null when the disk state is unknown.
     #[serde(rename = "snapshot")]
     Snapshot {

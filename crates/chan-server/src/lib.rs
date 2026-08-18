@@ -896,8 +896,8 @@ async fn build_app_with_extensions(
 /// terminal-only message. The terminal registry's PTY cwd is `$HOME`,
 /// so a new pane lands in the user's home directory rather than a
 /// workspace root. The SLIM router (see [`terminal_router`]) mounts only the
-/// terminal + window-session routes, so a workspace-content request
-/// (`/api/files`, `/api/graph`, ...) 404s instead of panicking on the
+/// terminal, optional Files, and window-session routes, so a workspace-only
+/// request (`/api/graph`, `/api/index/status`, ...) 404s instead of panicking on the
 /// missing `workspace_cell`.
 async fn build_terminal_app(
     library: Library,
@@ -1884,7 +1884,7 @@ fn router_with_extensions(
         // in the in-root drafts dir (`.Drafts/` by default) as ordinary
         // workspace content; it indexes and graphs through the normal walk.
         // SPA Cmd+N chord routes here; the response path opens via the
-        // existing /api/files/<path> GET path like any other file.
+        // existing /api/fs/<path> GET path like any other file.
         .route("/api/drafts/new", post(api_create_draft))
         .route("/api/diagrams/new", post(api_create_diagram))
         .route("/api/drafts/inspect", post(api_inspect_draft))

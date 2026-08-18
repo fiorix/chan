@@ -131,7 +131,7 @@ sudo sdme logs chan-upload-test --oci      # upload-tester prints PASS: ...
 sudo sdme kube delete chan-upload-test
 ```
 
-The `upload-tester` container drives a real headless Chromium that POSTs a file to `/api/files/upload` from the chan page's origin, then stat's the landed file on the shared `/workspace` volume.
+The `upload-tester` container drives a real headless Chromium that POSTs a file to `/api/fs/upload` from the chan page's origin, then stat's the landed file on the shared `/workspace` volume.
 
 ## Apply to a real cluster
 

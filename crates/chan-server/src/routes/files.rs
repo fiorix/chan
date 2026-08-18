@@ -323,7 +323,7 @@ fn read_file_sync(
     // image content-type REGARDLESS of what their content looks like.
     // Without this gate an SVG (XML text) passes the editable-text
     // content sniff below and ships as the editor's JSON envelope --
-    // making every `<img src=.../api/files/x.svg>` render broken
+    // making every `<img src=.../api/fs/x.svg>` render broken
     // while binary formats (png/jpg) work fine. FileClass::Image's
     // own contract is read-only via `read` / `write_bytes`.
     match chan_workspace::fs_ops::classify(path) {
@@ -1258,7 +1258,7 @@ pub async fn api_read_file(
     // JSON since the frontend's editor wants the content as a
     // string. Anything else (images, attachments) comes back as
     // raw bytes with a sniffed Content-Type so `<img src=...>`
-    // pointing at /api/files/<path> resolves correctly.
+    // pointing at /api/fs/<path> resolves correctly.
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
@@ -2872,7 +2872,7 @@ mod write_tests {
     fn read_file_sync_serves_svg_as_binary_despite_text_content() {
         // An SVG is XML text and would pass the editable-text content
         // sniff, but Image-class paths must come back as raw bytes so
-        // `<img src=/api/files/x.svg>` renders (the route pairs the
+        // `<img src=/api/fs/x.svg>` renders (the route pairs the
         // Binary arm with content_type_for -> image/svg+xml). The
         // editor never opens Image-class paths as text, so nothing
         // loses the text view. Fragment-bearing embeds
@@ -3163,7 +3163,7 @@ mod write_tests {
         );
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/files/upload")
+            .uri("/api/fs/upload")
             .body(Body::from(body))
             .map(|mut request| {
                 request.headers_mut().insert(
@@ -5137,7 +5137,7 @@ mod doc_divert_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/files/upload")
+                    .uri("/api/fs/upload")
                     .header(
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
@@ -5169,7 +5169,7 @@ mod doc_divert_tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/files/upload")
+                    .uri("/api/fs/upload")
                     .header(
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
@@ -5283,7 +5283,7 @@ mod doc_divert_tests {
         // over axum's 2 MiB default (rejected without the raised
         // DefaultBodyLimit on the route).
         let shrunk = "z".repeat(5 * 1024 * 1024 / 2);
-        let uri = format!("/api/files/legacy.md?expected_mtime_ns={}", token_ns);
+        let uri = format!("/api/fs/legacy.md?expected_mtime_ns={}", token_ns);
         let resp = router
             .oneshot(
                 Request::builder()
@@ -5298,7 +5298,7 @@ mod doc_divert_tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "the raised DefaultBodyLimit on PUT /api/files was removed"
+            "the raised DefaultBodyLimit on PUT /api/fs was removed"
         );
         assert_eq!(
             std::fs::read_to_string(root.path().join("legacy.md")).unwrap(),

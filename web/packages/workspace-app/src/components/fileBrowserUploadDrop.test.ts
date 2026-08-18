@@ -45,7 +45,7 @@ describe("File Browser upload via the Upload button", () => {
     // swap in a mock; it is still an XMLHttpRequest on the production path.
     expect(client).toContain("createXhr()");
     expect(client).toContain("xhr.upload.onprogress");
-    expect(client).toContain('/api/files/upload');
+    expect(client).toContain('/api/fs/upload');
     expect(client).toContain("opts.signal?.addEventListener");
   });
 

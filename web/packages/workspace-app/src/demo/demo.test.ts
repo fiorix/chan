@@ -150,35 +150,48 @@ describe("createDemoFetch router", () => {
     expect(patched.preferences.theme).toBe("light");
   });
 
-  test("GET /api/files lists root and ?dir lists a subdir", async () => {
+  test("GET /api/fs lists root and ?dir lists a subdir", async () => {
     const f = demoFetch(store());
-    const root = (await (await f("/api/files")).json()) as TreeEntry[];
+    const root = (await (await f("/api/fs")).json()) as TreeEntry[];
     expect(root.map((e) => e.path)).toContain("README.md");
-    const docs = (await (await f("/api/files?dir=docs")).json()) as TreeEntry[];
+    const docs = (await (await f("/api/fs?dir=docs")).json()) as TreeEntry[];
     expect(docs.map((e) => e.path)).toEqual(["docs/a.md"]);
   });
 
-  test("GET /api/files/<path> reads content; missing is 404", async () => {
+  test("GET /api/fs/<path> reads content; missing is 404", async () => {
     const f = demoFetch(store());
-    const ok = await f("/api/files/README.md");
+    const ok = await f("/api/fs/README.md");
     expect(ok.status).toBe(200);
     expect(((await ok.json()) as FileResponse).content).toBe("hello");
-    expect((await f("/api/files/missing.md")).status).toBe(404);
+    expect((await f("/api/fs/missing.md")).status).toBe(404);
   });
 
-  test("PUT /api/files/<path> writes and DELETE removes", async () => {
+  test("PUT /api/fs/<path> writes and DELETE removes", async () => {
     const st = store();
     const f = demoFetch(st);
-    await f("/api/files/README.md", { method: "PUT", body: "x" });
+    await f("/api/fs/README.md", { method: "PUT", body: "x" });
     expect(st.read("README.md")?.content).toBe("x");
-    const del = await f("/api/files/README.md", { method: "DELETE" });
+    const del = await f("/api/fs/README.md", { method: "DELETE" });
     expect(del.status).toBe(204);
     expect(st.read("README.md")).toBeNull();
   });
 
+  test("POST /api/fs/transfer is not consumed by the file wildcard", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const response = await f("/api/fs/transfer", {
+      method: "POST",
+      body: JSON.stringify({ op: "move", sources: ["docs/a.md"], dest_dir: "" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(st.read("a.md")?.content).toBe("A");
+    expect(st.read("docs/a.md")).toBeNull();
+  });
+
   test("streaming read emits meta/chunk/done NDJSON", async () => {
     const f = demoFetch(store());
-    const body = await (await f("/api/files/README.md?stream=1")).text();
+    const body = await (await f("/api/fs/README.md?stream=1")).text();
     const events = body.trim().split("\n").map((l) => JSON.parse(l));
     expect(events.map((e) => e.type)).toEqual(["meta", "chunk", "done"]);
     expect(events[0]).toMatchObject({
@@ -498,7 +511,7 @@ describe("uploads", () => {
     const form = new FormData();
     form.append("file", new File(["hello"], "up.txt"));
     form.append("dir", "docs");
-    xhr.open("POST", "/api/files/upload");
+    xhr.open("POST", "/api/fs/upload");
     const done = new Promise<void>((resolve, reject) => {
       xhr.onload = () => resolve();
       xhr.onerror = () => reject(new Error(xhr.responseText));
@@ -527,7 +540,7 @@ describe("metadata export / import", () => {
   test("export carries archive headers and captures live edits", async () => {
     const st = new MockWorkspaceStore(fixture());
     const f = demoFetch(st);
-    await f("/api/files/README.md", { method: "PUT", body: "edited" });
+    await f("/api/fs/README.md", { method: "PUT", body: "edited" });
     const res = await f("/api/metadata/export", { method: "POST" });
     expect(res.headers.get("content-disposition")).toContain("metadata.json");
     expect(Number(res.headers.get("x-chan-metadata-files"))).toBeGreaterThan(0);
@@ -539,7 +552,7 @@ describe("metadata export / import", () => {
   test("import applies an exported archive into a fresh in-memory store", async () => {
     const src = new MockWorkspaceStore(fixture());
     const fsrc = demoFetch(src);
-    await fsrc("/api/files/README.md", { method: "PUT", body: "edited" });
+    await fsrc("/api/fs/README.md", { method: "PUT", body: "edited" });
     const archive = await (await fsrc("/api/metadata/export", { method: "POST" })).text();
 
     const dst = new MockWorkspaceStore(fixture());

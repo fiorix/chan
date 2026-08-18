@@ -95,7 +95,7 @@ export default {
       const apiRead = () =>
         page.evaluate(
           async ({ tok, file }) => {
-            const r = await fetch(`/api/files/${file}`, {
+            const r = await fetch(`/api/fs/${file}`, {
               headers: { authorization: `Bearer ${tok}` },
             });
             if (!r.ok) return `HTTP ${r.status}`;

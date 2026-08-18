@@ -1871,7 +1871,7 @@ scenario_roster() {
 # Scenario: multipart upload through the proxy (the HTTP leg of
 # `cs upload` and the SPA's drag-drop upload). The proxy's
 # double-submit CSRF guard gates every mutation: a multipart POST to
-# `/api/files/upload` carrying only the session cookies must be
+# `/api/fs/upload` carrying only the session cookies must be
 # refused with the proxy's own 403 `forbidden` before it reaches the
 # tunnel, and the same POST with the `__Host-devserver_csrf` cookie mirrored
 # into `x-chan-csrf` (what the SPA's XHR helpers send) must cross
@@ -1929,7 +1929,7 @@ scenario_upload() {
     payload="$WORK/upload-payload.txt"
     printf 'tunneled upload payload\n' > "$payload"
     code="$(curl_node "$node" "$host" -o "$WORK/upload-noheader.txt" -w '%{http_code}' \
-        -X POST "https://$host:$PROXY_PORT/$prefix/api/files/upload" \
+        -X POST "https://$host:$PROXY_PORT/$prefix/api/fs/upload" \
         -H "Cookie: $cookies" \
         -F "file=@$payload" -F "dir=")"
     if [ "$code" = "403" ] && grep -q '^forbidden$' "$WORK/upload-noheader.txt"; then
@@ -1942,7 +1942,7 @@ scenario_upload() {
     # the devserver writes the file into the workspace root.
     local uploaded_path
     code="$(curl_node "$node" "$host" -o "$WORK/upload-ok.json" -w '%{http_code}' \
-        -X POST "https://$host:$PROXY_PORT/$prefix/api/files/upload" \
+        -X POST "https://$host:$PROXY_PORT/$prefix/api/fs/upload" \
         -H "Cookie: $cookies" -H "x-chan-csrf: $csrf" \
         -F "file=@$payload" -F "dir=")"
     uploaded_path="$(json_get path < "$WORK/upload-ok.json")"

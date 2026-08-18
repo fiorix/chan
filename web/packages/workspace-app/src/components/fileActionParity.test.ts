@@ -38,7 +38,7 @@ vi.mock("../api/client", () => ({
       throw new Error("no report");
     }),
     reportFileStream: vi.fn(async () => {}),
-    downloadUrl: (p: string) => `/api/files/${p}?download=1`,
+    downloadUrl: (p: string) => `/api/fs/${p}?download=1`,
   },
   withTokenQuery: (u: string) => u,
 }));

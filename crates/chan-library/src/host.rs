@@ -4625,13 +4625,12 @@ mod tests {
             .unwrap();
         assert_eq!(build_info.status(), StatusCode::OK);
 
-        // A workspace-content route is ABSENT (the slim router never
-        // mounted it), so it 404s rather than panicking on the missing
-        // workspace cell.
+        // A tenant with no standalone Files state refuses the filesystem
+        // surface with 404 rather than reaching for its missing workspace.
         let files = app
             .oneshot(
                 Request::builder()
-                    .uri("/terminal-x/api/files")
+                    .uri("/terminal-x/api/fs")
                     .body(Body::empty())
                     .unwrap(),
             )

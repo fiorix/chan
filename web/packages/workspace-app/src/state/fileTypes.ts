@@ -37,7 +37,7 @@
 const MARKDOWN_EXTENSIONS = new Set(["md", "txt"]);
 
 // Browser-native video containers the server streams with HTTP range
-// support (`/api/files` answers plain GETs on these with
+// support (`/api/fs` answers plain GETs on these with
 // `Accept-Ranges` + 206). No transcode: a container whose codec the
 // browser can't decode still classifies as video, `<video>` just
 // reports it can't play.

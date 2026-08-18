@@ -84,7 +84,7 @@ const PATH_LIMIT = 8;
 /// Build workspace-PATH completion candidates from the file tree.
 /// `[[` completes BOTH names (/api/link-targets) AND
 /// workspace paths. Paths are done CLIENT-SIDE here off the existing
-/// /api/files tree listing - no backend route change.
+/// /api/fs tree listing - no backend route change.
 ///
 /// A candidate is a FILE whose full rel_path either starts with the
 /// query (rank 1; discoverable from the first segment, e.g. `[[docs`
@@ -461,7 +461,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   }
 
   /// Lazily fetch + cache the workspace file tree (recursive listing via
-  /// GET /api/files, the same route the file browser uses). Resolves
+  /// GET /api/fs, the same route the file browser uses). Resolves
   /// immediately on a cache hit; dedupes concurrent loads. On failure we
   /// cache an empty tree so path completion is simply absent rather than
   /// retrying every keystroke.

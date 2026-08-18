@@ -64,7 +64,7 @@ export function encodeRelPath(path: string): string {
 /// file. A bare string with no `%` is returned unchanged; a malformed
 /// escape falls back to the input rather than throwing. The editor's
 /// link + image resolvers must decode because the on-disk form is
-/// percent-encoded but `normalizeHref` / `/api/files` expect the
+/// percent-encoded but `normalizeHref` / `/api/fs` expect the
 /// decoded path.
 export function decodePercent(s: string): string {
   if (!s.includes("%")) return s;

@@ -14,7 +14,7 @@ import { withTokenQuery } from "../api/transport";
 /// Open the fullscreen viewer.
 ///
 ///   path  Workspace-rooted path. The PDF bytes come from
-///         `/api/files/<path>`; the bearer token rides as a query
+///         `/api/fs/<path>`; the bearer token rides as a query
 ///         param via `withTokenQuery` because `<embed>` can't carry
 ///         a custom Authorization header. Same trick the inline
 ///         image preview uses.
@@ -23,7 +23,7 @@ import { withTokenQuery } from "../api/transport";
 export function openPdfViewer(path: string): void {
   if (!path) return;
   const src = withTokenQuery(
-    `/api/files/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
+    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
   );
 
   const backdrop = document.createElement("div");

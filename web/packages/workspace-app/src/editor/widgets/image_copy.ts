@@ -29,7 +29,7 @@ const EXT_MIME: Record<string, string> = {
 
 /// Whether a markdown-form image src points at an SVG file. The
 /// `#w=`/alignment fragment grammar is parsed off first; a query string
-/// (pre-resolved `/api/files/...?token=...` srcs) is ignored too.
+/// (pre-resolved `/api/fs/...?token=...` srcs) is ignored too.
 export function isSvgImageSrc(src: string): boolean {
   const { base } = parseImageSrc(src);
   const path = base.split("?")[0] ?? "";

@@ -346,7 +346,7 @@ describe("file read streaming", () => {
       },
     });
 
-    expect(fetchMock.mock.calls[0][0]).toContain("/api/files/CHANGELOG.md?stream=1");
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/fs/CHANGELOG.md?stream=1");
     expect(file.content).toBe("helloworld");
     expect(file.mtime_ns).toBe("100");
     expect(chunks).toEqual([
@@ -416,7 +416,7 @@ describe("raw file writes", () => {
 
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toContain(
-      "/api/files/notes/a%20b.md?expected_mtime_ns=100&authority_version=7",
+      "/api/fs/notes/a%20b.md?expected_mtime_ns=100&authority_version=7",
     );
     expect(init?.method).toBe("PUT");
     expect(init?.body).toBe("raw\ntext");

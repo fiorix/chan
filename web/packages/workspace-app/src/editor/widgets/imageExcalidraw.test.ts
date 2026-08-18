@@ -75,7 +75,7 @@ describe("excalidraw image embeds", () => {
         "320px",
       );
       expect(renderExcalidrawFile).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/board.excalidraw"),
+        expect.stringContaining("/api/fs/board.excalidraw"),
         true,
       );
     } finally {
@@ -171,7 +171,7 @@ describe("excalidraw image embeds", () => {
         );
       });
       expect(renderExcalidrawFile).toHaveBeenCalledWith(
-        expect.stringContaining("/api/files/board.excalidraw"),
+        expect.stringContaining("/api/fs/board.excalidraw"),
         false,
       );
     } finally {
@@ -306,7 +306,7 @@ describe("excalidraw embed copy", () => {
       // rasterizing, matching the View button's discipline.
       await vi.waitFor(() => {
         expect(renderExcalidrawFile).toHaveBeenCalledWith(
-          expect.stringContaining("/api/files/board.excalidraw"),
+          expect.stringContaining("/api/fs/board.excalidraw"),
           false,
         );
         expect(writeClipboardPayload).toHaveBeenCalledTimes(1);

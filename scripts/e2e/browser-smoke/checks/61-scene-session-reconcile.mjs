@@ -86,7 +86,7 @@ export default {
           new URLSearchParams(location.search).get("t") ??
           "";
         const response = await fetch(
-          `/api/files/${encodeURIComponent(path)}?t=${encodeURIComponent(token)}`,
+          `/api/fs/${encodeURIComponent(path)}?t=${encodeURIComponent(token)}`,
         );
         if (!response.ok) throw new Error(`GET scene: ${response.status}`);
         return response.json();

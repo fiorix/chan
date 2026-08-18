@@ -6,7 +6,7 @@
 // stays "write" (green) after chmod 400.
 //
 // Records: lamp label + fs-locked class + CM contenteditable, whether
-// a "changed on disk" banner appeared, what /api/files serves for
+// a "changed on disk" banner appeared, what /api/fs serves for
 // `writable`, and the same after a chmod back to 600.
 
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
@@ -69,7 +69,7 @@ export default {
       const apiWritable = () =>
         page.evaluate(
           async ({ tok, file }) => {
-            const r = await fetch(`/api/files/${file}`, {
+            const r = await fetch(`/api/fs/${file}`, {
               headers: { authorization: `Bearer ${tok}` },
             });
             if (!r.ok) return `HTTP ${r.status}`;

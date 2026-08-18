@@ -159,7 +159,7 @@ export default {
       await ctx.shot("after-second-cs-open", page);
 
       // 5. A fresh client distinguishes server-side staleness from a
-      // stale tab buffer: page2 loads the file through GET /api/files.
+      // stale tab buffer: page2 loads the file through GET /api/fs.
       const page2 = await browser.newPage();
       try {
         await page2.goto(`${serverUrl}&w=smoke-ext-w2`, {

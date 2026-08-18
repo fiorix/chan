@@ -831,7 +831,7 @@
                   <span class="path">{r.path}</span>
                   <span class="image-thumb">
                     <img
-                      src={withTokenQuery(`/api/files/${encodeURIComponent(r.path).replace(/%2F/g, "/")}`)}
+                      src={withTokenQuery(`/api/fs/${encodeURIComponent(r.path).replace(/%2F/g, "/")}`)}
                       alt={basename(r.path)}
                       loading="lazy"
                     />

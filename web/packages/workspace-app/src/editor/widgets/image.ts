@@ -6,7 +6,7 @@
 //
 // Behaviors:
 //   - Renders `<img>` with `src` resolved against the editing file's
-//     path (workspace-relative paths route through /api/files/{...} with
+//     path (workspace-relative paths route through /api/fs/{...} with
 //     the auth token).
 //   - Width fragment `#w=N` and alignment `#left` / `#right` parsed
 //     from the src and applied as inline style + dataset.

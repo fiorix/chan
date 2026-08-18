@@ -2,7 +2,7 @@
 #
 # Drives a real browser file upload against a running chan server to prove the
 # BROWSER path is not gated by chan-desktop's Tauri upload ACL (that ACL gates
-# the desktop client only; a browser POSTs /api/files/upload directly).
+# the desktop client only; a browser POSTs /api/fs/upload directly).
 #
 # Uses Debian's chromium package + puppeteer-core (no chromium download at npm
 # install time, and the system package pulls its own shared libs).

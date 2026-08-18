@@ -87,7 +87,7 @@ pub(crate) struct PeerCursor {
 pub(crate) enum ServerFrame {
     /// Full document state: answers an attach without a usable
     /// `?version=`, and any hard resync. `mtime_ns` is the
-    /// flushed-to-disk CAS token as a decimal string (the `/api/files`
+    /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
     /// convention: nanosecond epoch timestamps overflow JS number
     /// precision), null when the disk state is unknown. `conflicted`
     /// mirrors the retained disk-conflict state so a fresh attach can

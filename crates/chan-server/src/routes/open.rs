@@ -16,7 +16,7 @@
 //!
 //! Mounted on the OPEN workspace-tenant api block (tunnel-reachable)
 //! DELIBERATELY: a tunnel guest gains no new capability class here -- guests
-//! can already create and edit workspace files via `/api/files`, and an open
+//! can already create and edit workspace files via `/api/fs`, and an open
 //! frame only steers windows that themselves belong to the tenant's `/ws`.
 //! Standalone-terminal tenants never mount this block, so those surfaces have
 //! no `/api/open` at all (and the launcher hides the command there).

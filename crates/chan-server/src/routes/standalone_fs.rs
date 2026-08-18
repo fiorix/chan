@@ -171,7 +171,7 @@ pub async fn api_standalone_fs_context(State(state): State<Arc<AppState>>) -> Re
     .into_response()
 }
 
-/// `GET /api/files?dir=<wire>`: one-level listing. A missing `dir` is a
+/// `GET /api/fs?dir=<wire>`: one-level listing. A missing `dir` is a
 /// client error because the root is the whole machine: the workspace
 /// route's legacy recursive fallback must never walk `/`.
 pub async fn api_standalone_list_files(
@@ -235,7 +235,7 @@ fn standalone_list_sync(
     Ok(out)
 }
 
-/// `POST /api/files?w=<id>`: create a file or directory that must not
+/// `POST /api/fs?w=<id>`: create a file or directory that must not
 /// exist yet. 201 on success with an empty body, like the workspace route.
 pub async fn api_standalone_create_file(
     State(state): State<Arc<AppState>>,
@@ -282,7 +282,7 @@ pub async fn api_standalone_create_file(
     }
 }
 
-/// `DELETE /api/files/{*path}?w=<id>`: permanently remove a regular file
+/// `DELETE /api/fs/{*path}?w=<id>`: permanently remove a regular file
 /// or an empty directory. The structured 409 bodies are the contract that
 /// keeps the UI from offering a force or recursive retry.
 pub async fn api_standalone_delete_file(
@@ -567,7 +567,7 @@ pub struct StandaloneWriteQuery {
     expected_mtime_ns: Option<String>,
 }
 
-/// `PUT /api/files/{*path}?w=<id>`: raw streamed UTF-8 text write with the
+/// `PUT /api/fs/{*path}?w=<id>`: raw streamed UTF-8 text write with the
 /// workspace route's CAS precedence (exact nanoseconds, else legacy
 /// seconds, else unconditional).
 pub async fn api_standalone_write_file(
@@ -695,7 +695,7 @@ fn standalone_write_sync(
     fs.stat(path)
 }
 
-/// The Files-app branch of `POST /api/files/upload`, dispatched from the
+/// The Files-app branch of `POST /api/fs/upload`, dispatched from the
 /// transfer route on `?app=files`. Speaks the File Browser contract: a
 /// `dir` (create; collisions refuse) or `path` (replace an existing
 /// regular file) part must precede the streaming `file` part, and the
@@ -1435,7 +1435,7 @@ mod tests {
             body_json(response).await,
             json!({"error": "files application not served on this tenant"})
         );
-        let response = get(app, "/api/files?dir=").await;
+        let response = get(app, "/api/fs?dir=").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1446,14 +1446,14 @@ mod tests {
         std::fs::write(fx.root.join("note.md"), "hi").unwrap();
         std::fs::write(fx.root.join("home/user/deep.md"), "deep").unwrap();
 
-        let response = get(router(&fx), "/api/files").await;
+        let response = get(router(&fx), "/api/fs").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             body_json(response).await,
             json!({"error": "file listing requires ?dir=<directory>"})
         );
 
-        for uri in ["/api/files?dir=", "/api/files?dir=.", "/api/files?dir=/"] {
+        for uri in ["/api/fs?dir=", "/api/fs?dir=.", "/api/fs?dir=/"] {
             let response = get(router(&fx), uri).await;
             assert_eq!(response.status(), StatusCode::OK, "{uri}");
             let entries = body_json(response).await;
@@ -1471,7 +1471,7 @@ mod tests {
             );
         }
 
-        let response = get(router(&fx), "/api/files?dir=").await;
+        let response = get(router(&fx), "/api/fs?dir=").await;
         let entries = body_json(response).await;
         let note = entries
             .as_array()
@@ -1501,7 +1501,7 @@ mod tests {
         let fx = files_fixture();
         std::fs::write(fx.root.join("real.txt"), "content").unwrap();
         std::os::unix::fs::symlink(fx.root.join("real.txt"), fx.root.join("link.txt")).unwrap();
-        let response = get(router(&fx), "/api/files?dir=").await;
+        let response = get(router(&fx), "/api/fs?dir=").await;
         let entries = body_json(response).await;
         let link = entries
             .as_array()
@@ -1517,7 +1517,7 @@ mod tests {
     async fn bare_get_dispatches_to_the_files_read_path() {
         let fx = files_fixture();
         std::fs::write(fx.root.join("note.md"), "hello").unwrap();
-        let response = get(router(&fx), "/api/files/note.md").await;
+        let response = get(router(&fx), "/api/fs/note.md").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
         assert_eq!(body["path"], "note.md");
@@ -1536,7 +1536,7 @@ mod tests {
     async fn bare_get_without_standalone_state_keeps_the_refusal() {
         let state = crate::state::test_support::make_test_state(false);
         let app = crate::terminal_router(state);
-        let response = get(app, "/api/files/note.md").await;
+        let response = get(app, "/api/fs/note.md").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             body_json(response).await,
@@ -1555,7 +1555,7 @@ mod tests {
         std::fs::write(&file, b"download lane probe").unwrap();
         let response = get(
             router(&fx),
-            &format!("/api/files{}?download=1", file.display()),
+            &format!("/api/fs{}?download=1", file.display()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1574,7 +1574,7 @@ mod tests {
     async fn stream_read_emits_meta_chunk_done_frames() {
         let fx = files_fixture();
         std::fs::write(fx.root.join("note.md"), "hello").unwrap();
-        let response = get(router(&fx), "/api/files/note.md?stream=1").await;
+        let response = get(router(&fx), "/api/fs/note.md?stream=1").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
@@ -1610,7 +1610,7 @@ mod tests {
     async fn active_svg_content_gets_attachment_csp_and_nosniff() {
         let fx = files_fixture();
         std::fs::write(fx.root.join("img.svg"), "<svg xmlns='x'></svg>").unwrap();
-        let response = get(router(&fx), "/api/files/img.svg").await;
+        let response = get(router(&fx), "/api/fs/img.svg").await;
         assert_eq!(response.status(), StatusCode::OK);
         let header_str = |name: &str| {
             response
@@ -1644,7 +1644,7 @@ mod tests {
         let fx = files_fixture();
 
         // Unconditional create.
-        let response = raw_put(&fx, "/api/files/new.md", "v1").await;
+        let response = raw_put(&fx, "/api/fs/new.md", "v1").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
         assert_eq!(body["disk_conflicted"], false);
@@ -1655,12 +1655,7 @@ mod tests {
         let t1 = body["mtime_ns"].as_str().expect("fresh token").to_string();
 
         // Fresh-token CAS write succeeds.
-        let response = raw_put(
-            &fx,
-            &format!("/api/files/new.md?expected_mtime_ns={t1}"),
-            "v2",
-        )
-        .await;
+        let response = raw_put(&fx, &format!("/api/fs/new.md?expected_mtime_ns={t1}"), "v2").await;
         assert_eq!(response.status(), StatusCode::OK);
         let t2 = body_json(response).await["mtime_ns"]
             .as_str()
@@ -1668,12 +1663,7 @@ mod tests {
             .to_string();
 
         // The stale token conflicts and reports the CURRENT token.
-        let response = raw_put(
-            &fx,
-            &format!("/api/files/new.md?expected_mtime_ns={t1}"),
-            "v3",
-        )
-        .await;
+        let response = raw_put(&fx, &format!("/api/fs/new.md?expected_mtime_ns={t1}"), "v3").await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let t2_ns: i64 = t2.parse().unwrap();
         assert_eq!(
@@ -1691,7 +1681,7 @@ mod tests {
         );
 
         // A garbage token is a 400, not a treated-as-absent write.
-        let response = raw_put(&fx, "/api/files/new.md?expected_mtime_ns=nope", "v4").await;
+        let response = raw_put(&fx, "/api/fs/new.md?expected_mtime_ns=nope", "v4").await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             body_json(response).await,
@@ -1702,20 +1692,20 @@ mod tests {
     #[tokio::test]
     async fn stale_token_with_identical_bytes_adopts_instead_of_conflicting() {
         let fx = files_fixture();
-        let response = raw_put(&fx, "/api/files/same.md", "body").await;
+        let response = raw_put(&fx, "/api/fs/same.md", "body").await;
         let stale = body_json(response).await["mtime_ns"]
             .as_str()
             .expect("first token")
             .to_string();
         // A second write moves the token while leaving the same bytes.
-        raw_put(&fx, "/api/files/same.md", "body").await;
+        raw_put(&fx, "/api/fs/same.md", "body").await;
 
         // Equal bytes cannot lose an update, so the shared CAS matrix's
         // content-equal arm answers 200 rather than raising a conflict
         // modal over a save that changes nothing.
         let response = raw_put(
             &fx,
-            &format!("/api/files/same.md?expected_mtime_ns={stale}"),
+            &format!("/api/fs/same.md?expected_mtime_ns={stale}"),
             "body",
         )
         .await;
@@ -1732,7 +1722,7 @@ mod tests {
         let request = |body: Value| {
             Request::builder()
                 .method("POST")
-                .uri("/api/files")
+                .uri("/api/fs")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap()
@@ -1782,13 +1772,13 @@ mod tests {
     async fn delete_removes_files_and_refuses_nonempty_and_protected() {
         let fx = files_fixture();
         std::fs::write(fx.root.join("gone.txt"), "x").unwrap();
-        let response = delete(&fx, "/api/files/gone.txt").await;
+        let response = delete(&fx, "/api/fs/gone.txt").await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(!fx.root.join("gone.txt").exists());
 
         std::fs::create_dir(fx.root.join("full")).unwrap();
         std::fs::write(fx.root.join("full/inner.txt"), "x").unwrap();
-        let response = delete(&fx, "/api/files/full").await;
+        let response = delete(&fx, "/api/fs/full").await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
@@ -1796,7 +1786,7 @@ mod tests {
         );
         assert!(fx.root.join("full/inner.txt").exists(), "nothing mutated");
 
-        let response = delete(&fx, "/api/files/home/user").await;
+        let response = delete(&fx, "/api/fs/home/user").await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
@@ -1811,7 +1801,7 @@ mod tests {
         // Create into the root.
         let response = router(&fx)
             .oneshot(multipart_request(
-                "/api/files/upload?app=files",
+                "/api/fs/upload?app=files",
                 &[("dir", None, ""), ("file", Some("up.bin"), "data")],
             ))
             .await
@@ -1825,7 +1815,7 @@ mod tests {
         // A second create at the same name refuses instead of clobbering.
         let response = router(&fx)
             .oneshot(multipart_request(
-                "/api/files/upload?app=files",
+                "/api/fs/upload?app=files",
                 &[("dir", None, ""), ("file", Some("up.bin"), "other")],
             ))
             .await
@@ -1835,7 +1825,7 @@ mod tests {
         // The explicit replace flow rewrites the existing file.
         let response = router(&fx)
             .oneshot(multipart_request(
-                "/api/files/upload?app=files",
+                "/api/fs/upload?app=files",
                 &[
                     ("path", None, "up.bin"),
                     ("file", Some("ignored.bin"), "replaced"),
@@ -1860,7 +1850,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let response = router(&fx)
             .oneshot(multipart_request(
-                "/api/files/upload",
+                "/api/fs/upload",
                 &[
                     ("dir", None, &outside.path().display().to_string()),
                     ("file", Some("cs.bin"), "cs-upload"),
@@ -1887,7 +1877,7 @@ mod tests {
         let app = crate::terminal_router(state);
         let response = app
             .oneshot(multipart_request(
-                "/api/files/upload?app=files",
+                "/api/fs/upload?app=files",
                 &[("dir", None, ""), ("file", Some("up.bin"), "data")],
             ))
             .await
@@ -2061,7 +2051,7 @@ mod tests {
         let (id, mut rx) = fx.registry.register();
         fx.registry.subscribe(id, "");
 
-        let response = raw_put(&fx, "/api/files/attr.md?w=w-writer", "x").await;
+        let response = raw_put(&fx, "/api/fs/attr.md?w=w-writer", "x").await;
         assert_eq!(response.status(), StatusCode::OK);
         let frame: Value = serde_json::from_str(&rx.try_recv().expect("attributed frame")).unwrap();
         assert_eq!(frame["type"], "fs");
@@ -2070,7 +2060,7 @@ mod tests {
         assert_eq!(frame["event"]["path"], "attr.md");
 
         // Without w= the bus is skipped entirely: no synthetic frame.
-        let response = raw_put(&fx, "/api/files/plain.md", "x").await;
+        let response = raw_put(&fx, "/api/fs/plain.md", "x").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
             rx.try_recv().is_err(),

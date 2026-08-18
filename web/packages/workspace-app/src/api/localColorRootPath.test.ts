@@ -40,7 +40,7 @@ describe("local-color resolves to the ROOT path under a tenant prefix (C8)", () 
     bootUnderPrefix();
     const t = await import("./transport");
     // Sanity: the prefix IS active -- ordinary tenant paths get it prepended.
-    expect(t.apiPath("/api/files/x")).toBe(`${PREFIX}/api/files/x`);
+    expect(t.apiPath("/api/fs/x")).toBe(`${PREFIX}/api/fs/x`);
     // The fix: surface-level local-color resolves at ROOT, never prefixed.
     expect(t.rootPath("/api/library/local-color")).toBe("/api/library/local-color");
     const wsPath = t.rootTokenQuery("/api/library/local-color/watch");

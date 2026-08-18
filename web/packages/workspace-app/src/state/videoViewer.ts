@@ -2,7 +2,7 @@
 // media. A dedicated `<video controls>` surface rather than the
 // imageZoom overlay: video wants play/pause/scrub/fullscreen, not
 // pinch-zoom, and the browser's native controls provide all of it
-// with no JS bundle cost. Seeking works because `/api/files` serves
+// with no JS bundle cost. Seeking works because `/api/fs` serves
 // these paths with `Accept-Ranges` + 206.
 //
 // Styles are applied inline so the helper is self-contained
@@ -14,7 +14,7 @@ import { withTokenQuery } from "../api/transport";
 /// Open the fullscreen viewer.
 ///
 ///   path  Workspace-rooted path. The video bytes come from
-///         `/api/files/<path>`; the bearer token rides as a query
+///         `/api/fs/<path>`; the bearer token rides as a query
 ///         param via `withTokenQuery` because `<video>` can't carry
 ///         a custom Authorization header. Same trick the inline
 ///         image preview uses.
@@ -23,7 +23,7 @@ import { withTokenQuery } from "../api/transport";
 export function openVideoViewer(path: string): void {
   if (!path) return;
   const src = withTokenQuery(
-    `/api/files/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
+    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
   );
 
   const backdrop = document.createElement("div");

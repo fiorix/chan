@@ -7,16 +7,16 @@ import { decodePercent, encodeRelPath } from "../links";
 // writes (so `My Photo.png` lands on disk as `My%20Photo.png` and
 // pulldown-cmark produces a graph edge instead of truncating at the
 // space). resolveImageSrc must decode that on read before re-encoding
-// for `/api/files`, or a spaced name double-encodes to `%2520` and
+// for `/api/fs`, or a spaced name double-encodes to `%2520` and
 // 404s. These tests lock the encode (write) / decode (read) contract,
 // mirroring the `[[` wiki-link round-trip in wikilinkParse.test.ts.
 describe("image src encode/decode round-trip", () => {
-  test("a percent-encoded spaced src resolves to a singly-encoded /api/files URL", () => {
+  test("a percent-encoded spaced src resolves to a singly-encoded /api/fs URL", () => {
     const url = resolveImageSrc(
       "./Brazilian%20Rice.png#w=250",
       "Recipes/Pasta.md",
     );
-    expect(url).toContain("/api/files/Recipes/Brazilian%20Rice.png");
+    expect(url).toContain("/api/fs/Recipes/Brazilian%20Rice.png");
     // The decode-then-encode must not double-encode the space.
     expect(url).not.toContain("%2520");
   });
@@ -26,7 +26,7 @@ describe("image src encode/decode round-trip", () => {
     // disk. resolveImageSrc already encoded for the URL, and decodePercent
     // is a no-op on a string with no `%`, so they keep resolving.
     const url = resolveImageSrc("./Brazilian Rice.png#w=250", "Recipes/Pasta.md");
-    expect(url).toContain("/api/files/Recipes/Brazilian%20Rice.png");
+    expect(url).toContain("/api/fs/Recipes/Brazilian%20Rice.png");
   });
 
   test("encodeRelPath / decodePercent invert each other per segment", () => {

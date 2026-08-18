@@ -97,7 +97,7 @@ pub struct DraftPromotePayload {
 pub struct DraftCreateResponse {
     /// In-root path for the new draft.md: `<drafts_dir>/<name>/draft.md`.
     /// SPA `openInActivePane(path)` routes through
-    /// `/api/files/<drafts_dir>/<name>/draft.md`, a normal in-root read.
+    /// `/api/fs/<drafts_dir>/<name>/draft.md`, a normal in-root read.
     pub path: String,
     /// Bare draft name (e.g. `"untitled"` or `"untitled-3"`), in
     /// case the SPA wants to show it separately from the path.

@@ -385,7 +385,7 @@ export default {
       const apiTimeline = [];
       do {
         const [files, graph] = await Promise.all([
-          api(page, token, "/api/files?dir="),
+          api(page, token, "/api/fs?dir="),
           api(page, token, "/api/graph?scope=workspace&depth=10"),
         ]);
         apiTimeline.push({
@@ -537,7 +537,7 @@ export default {
       );
 
       const finalApi = {
-        files: await api(page, token, "/api/files?dir="),
+        files: await api(page, token, "/api/fs?dir="),
         graph: await api(page, token, "/api/graph?scope=workspace&depth=10"),
         fsGraph: await api(
           page,

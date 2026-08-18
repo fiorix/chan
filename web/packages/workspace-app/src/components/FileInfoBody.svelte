@@ -1018,7 +1018,7 @@
       </div>
     {/if}
     {#if image}
-      <!-- Inline preview. Bytes come from /api/files with the
+      <!-- Inline preview. Bytes come from /api/fs with the
            workspace bearer token appended as a query param so the
            browser's <img> can fetch without a custom Authorization
            header. Object-fit contains so portrait + landscape both
@@ -1033,7 +1033,7 @@
         onclick={() => openImageZoom(entry.path, null, dirImageSet(entry.path))}
       >
         <img
-          src={withTokenQuery(`/api/files/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
           alt={basename(entry.path)}
           loading="lazy"
         />
@@ -1048,7 +1048,7 @@
       <div class="video-preview">
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
-          src={withTokenQuery(`/api/files/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
           controls
           preload="metadata"
         ></video>
@@ -1056,7 +1056,7 @@
     {:else if audio}
       <div class="audio-preview">
         <audio
-          src={withTokenQuery(`/api/files/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
+          src={withTokenQuery(`/api/fs/${encodeURIComponent(entry.path).replace(/%2F/g, "/")}`)}
           controls
           preload="metadata"
           onerror={() => (audioError = true)}

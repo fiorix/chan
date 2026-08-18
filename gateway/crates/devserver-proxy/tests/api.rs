@@ -1214,7 +1214,7 @@ async fn transfer_route_admits_body_beyond_the_general_request_cap() {
     let cookie = session_and_csrf_cookie(&app, uid, "blog", &host, csrf);
 
     let res = client
-        .post(format!("http://{proxy_addr}/blog/api/files/upload"))
+        .post(format!("http://{proxy_addr}/blog/api/fs/upload"))
         .header(header::HOST, &host)
         .header(header::COOKIE, &cookie)
         .header("x-chan-csrf", csrf)
@@ -1262,7 +1262,7 @@ async fn transfer_route_serves_body_beyond_the_general_response_cap() {
 
     let res = client
         .get(format!(
-            "http://{proxy_addr}/blog/api/files/big.bin?download=1"
+            "http://{proxy_addr}/blog/api/fs/big.bin?download=1"
         ))
         .header(header::HOST, &host)
         .header(header::COOKIE, &cookie)

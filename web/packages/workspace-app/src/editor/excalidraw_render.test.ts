@@ -100,7 +100,7 @@ describe("renderExcalidraw", () => {
     vi.stubGlobal("fetch", fetchMock);
     // A user-authored .excalidraw scene keeps its own size (no exportScale).
     const scene = await renderExcalidrawFile(
-      "/api/files/board.excalidraw?t=tok",
+      "/api/fs/board.excalidraw?t=tok",
       true,
     );
     expect(scene.ok).toBe(true);
@@ -149,11 +149,11 @@ describe("renderExcalidraw", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await renderExcalidrawFile(
-      "/api/files/board.excalidraw?t=tok",
+      "/api/fs/board.excalidraw?t=tok",
       true,
     );
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/files/board.excalidraw?t=tok");
+    expect(fetchMock).toHaveBeenCalledWith("/api/fs/board.excalidraw?t=tok");
     expect(res.ok).toBe(true);
     expect(res.svg).toContain("<svg");
     expect(res.svg).toContain('data-dark="1"');

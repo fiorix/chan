@@ -731,7 +731,7 @@ export function __testSetStandalonePreferences(prefs: Preferences | null): void 
 /// Deliberately does NOT run `applyServerPreferences`. That mirror is for a
 /// workspace window: it would switch the docked file browsers back on from the
 /// persisted value, and this window has just forced them off because the slim
-/// tenant serves no `/api/files`, and it would fight the launcher's
+/// tenant serves no `/api/fs`, and it would fight the launcher's
 /// `local-theme` choice that a standalone terminal follows instead of the
 /// config theme. The terminal reads what it needs through `currentPreferences`.
 async function refreshStandalonePreferences(): Promise<void> {
@@ -2269,7 +2269,7 @@ async function bootstrapStandalone(): Promise<void> {
   ui.terminalOnly = !windowCaps.files;
   if (!windowCaps.files) {
     // Force the docked file browsers off: a user may have toggled one on,
-    // and it would fetch `/api/files`, which this tenant does not serve.
+    // and it would fetch `/api/fs`, which this tenant does not serve.
     browserSidePanes.left = false;
     browserSidePanes.right = false;
   }

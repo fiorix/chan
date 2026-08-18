@@ -448,7 +448,7 @@
       resumeTimer = setTimeout(() => {
         resumeTimer = null;
         reconnectWatcher();
-        // The tree refresh hits /api/files and the workspace refresh
+        // The tree refresh hits /api/fs and the workspace refresh
         // /api/workspace; a window gets each only where its tenant serves it,
         // so a terminals-only window takes the watcher reconnect alone.
         if (!windowCaps.files) return;
@@ -491,7 +491,7 @@
   }
   function spawnBrowserFromContext(): void {
     // A window whose tenant serves no filesystem has no browser surface
-    // (there is no /api/files to list); the spawn is a no-op.
+    // (there is no /api/fs to list); the spawn is a no-op.
     if (!windowCaps.files) return;
     const ctx = resolveSpawnContext();
     // With no context to open at, a workspace window lands on its root -- but
@@ -1567,7 +1567,7 @@
 <div class="app" class:pane-mode={paneMode.active}>
   <!-- The docked file browsers render wherever there is a filesystem to
        list: a workspace window's workspace, or a standalone window whose
-       tenant serves one. Without either there is no /api/files, and the pane
+       tenant serves one. Without either there is no /api/fs, and the pane
        layout (terminal splits + Hybrid Nav) is the only surface. -->
   {#if windowCaps.files && browserSidePanes.left}
     <FileBrowserSidePane side="left" />

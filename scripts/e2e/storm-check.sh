@@ -156,7 +156,7 @@ start_server() {
 }
 
 api_file_content() {
-  auth_get "/api/files/$1" | jq -r '.content'
+  auth_get "/api/fs/$1" | jq -r '.content'
 }
 
 start_authority_session() {
@@ -221,7 +221,7 @@ wait_authority_content() {
     fi
     kill -0 "$SESSION_PID" 2>/dev/null ||
       die "held document authority session exited"
-    response=$(auth_get "/api/files/src/authority.md" 2>/dev/null || true)
+    response=$(auth_get "/api/fs/src/authority.md" 2>/dev/null || true)
     if jq -e --arg expected "$expected" '
       .content == ($expected + "\n")
       and .authority_version != null
@@ -250,7 +250,7 @@ capture_expected_tree() {
 core_converged() {
   local report_bytes expected_report_files
   capture_expected_tree
-  auth_get "/api/files" >"$WORK/tree.json" 2>/dev/null || return 1
+  auth_get "/api/fs" >"$WORK/tree.json" 2>/dev/null || return 1
   jq -r '.[] | select(.is_dir == false) | .path' "$WORK/tree.json" |
     LC_ALL=C sort >"$WORK/actual-tree" || return 1
   cmp -s "$WORK/expected-tree" "$WORK/actual-tree" || return 1

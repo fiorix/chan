@@ -13,7 +13,7 @@ export const AUDIO_UNSUPPORTED_MESSAGE =
 export function openAudioViewer(path: string): void {
   if (!path) return;
   const src = withTokenQuery(
-    `/api/files/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
+    `/api/fs/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
   );
 
   const backdrop = document.createElement("div");

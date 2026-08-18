@@ -9,7 +9,7 @@
 //   D  invalid UTF-8 past the sniff window surfaces an error, never
 //      silent truncation
 //   E  a brand-new >2 MiB text PUT answers 413 (WriteTooLarge)
-//   F  GET /api/files JSON serves byte-identical content for the big
+//   F  GET /api/fs JSON serves byte-identical content for the big
 //      file
 //
 // These pin the hardening around read_text_with_stat_chunked, the
@@ -94,7 +94,7 @@ export default {
       const api = (path, init) =>
         page.evaluate(
           async ({ tok, path, init }) => {
-            const r = await fetch(`/api/files/${path}`, {
+            const r = await fetch(`/api/fs/${path}`, {
               ...init,
               headers: {
                 ...(init?.headers ?? {}),

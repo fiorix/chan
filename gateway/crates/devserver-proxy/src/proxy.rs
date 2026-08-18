@@ -1824,14 +1824,14 @@ mod tests {
         )));
         assert!(bulk(class(
             &Method::GET,
-            "/t/api/files/archive.tar?download=true"
+            "/t/api/fs/archive.tar?download=true"
         )));
         assert!(copy(class(&Method::POST, "/blog/api/fs/transfer")));
 
         // The same paths under the wrong method stay general.
         for method in [Method::GET, Method::PUT, Method::DELETE] {
             assert!(
-                class(&method, "/blog/api/files/upload").is_none(),
+                class(&method, "/blog/api/fs/upload").is_none(),
                 "{method}"
             );
             assert!(
@@ -1841,7 +1841,7 @@ mod tests {
         }
         for method in [Method::POST, Method::PUT, Method::DELETE] {
             assert!(
-                class(&method, "/blog/api/files/big.bin?download=1").is_none(),
+                class(&method, "/blog/api/fs/big.bin?download=1").is_none(),
                 "{method}"
             );
         }
@@ -1849,21 +1849,21 @@ mod tests {
         // GET on the file surface needs a truthy `download` flag.
         for path in [
             // Plain read.
-            "/blog/api/files/notes/x.md",
+            "/blog/api/fs/notes/x.md",
             // Streamed editor read.
-            "/blog/api/files/big.bin?stream=1",
+            "/blog/api/fs/big.bin?stream=1",
             // Falsy and bare flag values.
-            "/blog/api/files/big.bin?download=0",
-            "/blog/api/files/big.bin?download",
+            "/blog/api/fs/big.bin?download=0",
+            "/blog/api/fs/big.bin?download",
             // Flag on another key.
-            "/blog/api/files/big.bin?download2=1",
+            "/blog/api/fs/big.bin?download2=1",
         ] {
             assert!(class(&Method::GET, path).is_none(), "{path}");
         }
 
         // The server's full accepted truthy set qualifies.
         for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
-            let path = format!("/blog/api/files/big.bin?download={value}");
+            let path = format!("/blog/api/fs/big.bin?download={value}");
             assert!(bulk(class(&Method::GET, &path)), "{path}");
         }
 
@@ -1871,16 +1871,16 @@ mod tests {
         // reaches the classifier as the accepted value `1`.
         assert!(bulk(class(
             &Method::GET,
-            "/blog/api/files/big.bin?download=%31"
+            "/blog/api/fs/big.bin?download=%31"
         )));
 
         // Duplicate `download` fields keep the general policy because
         // the server extractor rejects duplicate struct fields, and an
         // encoded falsy value stays falsy.
         for path in [
-            "/blog/api/files/big.bin?download=1&download=1",
-            "/blog/api/files/big.bin?download=0&download=1",
-            "/blog/api/files/big.bin?download=%30",
+            "/blog/api/fs/big.bin?download=1&download=1",
+            "/blog/api/fs/big.bin?download=0&download=1",
+            "/blog/api/fs/big.bin?download=%30",
         ] {
             assert!(class(&Method::GET, path).is_none(), "{path}");
         }
@@ -1888,11 +1888,11 @@ mod tests {
         // Bare listing/create, other tenant APIs, and root-level paths
         // are never transfer routes.
         for (method, path) in [
-            (Method::GET, "/blog/api/files"),
-            (Method::GET, "/blog/api/files?dir=sub&download=1"),
-            (Method::POST, "/blog/api/files"),
-            (Method::POST, "/api/files/upload"),
-            (Method::GET, "/api/files/big.bin?download=1"),
+            (Method::GET, "/blog/api/fs"),
+            (Method::GET, "/blog/api/fs?dir=sub&download=1"),
+            (Method::POST, "/blog/api/fs"),
+            (Method::POST, "/api/fs/upload"),
+            (Method::GET, "/api/fs/big.bin?download=1"),
             (Method::POST, "/api/fs/transfer"),
             (Method::GET, "/blog/api/graph"),
             (Method::GET, "/blog/api/config"),
@@ -1911,7 +1911,7 @@ mod tests {
         cfg.max_response_bytes = Some(128);
         cfg.request_timeout = Some(std::time::Duration::from_secs(60));
 
-        let transfer = route_body_policy(&cfg, &Method::GET, "/blog/api/files/big.bin?download=1");
+        let transfer = route_body_policy(&cfg, &Method::GET, "/blog/api/fs/big.bin?download=1");
         assert_eq!(
             transfer.max_request_bytes,
             Some(crate::config::TRANSFER_ROUTE_MAX_BYTES)

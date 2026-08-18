@@ -58,7 +58,7 @@ describe("audio viewer", () => {
     openAudioViewer("media/my tone.WAV");
 
     expect(withTokenQueryMock).toHaveBeenCalledWith(
-      "/api/files/media/my%20tone.WAV",
+      "/api/fs/media/my%20tone.WAV",
     );
     const audio = viewer()!.querySelector("audio")!;
     expect(audio.controls).toBe(true);
@@ -66,7 +66,7 @@ describe("audio viewer", () => {
     expect(audio.preload).toBe("metadata");
     expect(audio.paused).toBe(true);
     expect(audio.getAttribute("src")).toBe(
-      "/api/files/media/my%20tone.WAV?t=test-token",
+      "/api/fs/media/my%20tone.WAV?t=test-token",
     );
   });
 

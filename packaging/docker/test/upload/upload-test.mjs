@@ -1,7 +1,7 @@
 // Browser-upload proof (D4).
 //
 // A real headless Chromium, from the chan page's own origin, POSTs a multipart
-// file to /api/files/upload exactly as the SPA's uploadFile() does (form fields
+// file to /api/fs/upload exactly as the SPA's uploadFile() does (form fields
 // `file` + `dir`). Success proves the browser client is NOT subject to
 // chan-desktop's Tauri upload ACL: that ACL gates the desktop client only.
 //
@@ -66,7 +66,7 @@ async function main() {
         form.append("dir", dir);
         const headers = {};
         if (token) headers["authorization"] = `Bearer ${token}`;
-        const r = await fetch(`${base}/api/files/upload`, {
+        const r = await fetch(`${base}/api/fs/upload`, {
           method: "POST",
           headers,
           body: form,

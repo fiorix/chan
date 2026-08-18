@@ -2,7 +2,7 @@
 #
 # Two containers share a network namespace (localhost) and a /workspace volume:
 #   - chan: serves an empty workspace on 127.0.0.1:8787 with the token gate off.
-#   - upload-tester: headless chromium POSTs a file to /api/files/upload from the
+#   - upload-tester: headless chromium POSTs a file to /api/fs/upload from the
 #     chan page's origin, then stat's the landed file on the shared volume.
 #
 # Run (privileged; see ../README.md):

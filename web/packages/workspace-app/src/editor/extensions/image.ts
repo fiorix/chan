@@ -2,7 +2,7 @@
 // image bubble. Pure functions; no editor framework dependency.
 //
 // Workspace-relative srcs (`foo.png`, `./foo.png`, `../foo.png`,
-// `/abs.png`) are resolved against `/api/files/<path>` so the browser
+// `/abs.png`) are resolved against `/api/fs/<path>` so the browser
 // can fetch the bytes via the chan-server token; absolute URLs
 // (http/data/blob) pass through unchanged.
 
@@ -86,11 +86,11 @@ function buildImageSrc(
 }
 
 /// Resolve a markdown image src to a URL the browser can load.
-/// Local workspace paths route through `/api/files/` with the launch
+/// Local workspace paths route through `/api/fs/` with the launch
 /// token; absolute URLs (http/data/blob) pass through. Workspace-rooted
 /// and parent-relative sources go through `normalizeHref` against
 /// `fromPath`'s directory so the resolver chan-workspace uses for graph
-/// edges produces the same canonical path that reaches `/api/files/`.
+/// edges produces the same canonical path that reaches `/api/fs/`.
 /// `#w=N` width fragments are stripped before the URL is built (the
 /// width is applied as inline style on the `<img>` instead).
 /// Empty input returns "" so callers can omit the attribute.
@@ -104,7 +104,7 @@ export function resolveImageSrc(src: string, fromPath?: string | null): string {
     : "";
   // Decode first: the on-disk src is percent-encoded (a spaced
   // filename is written `./My%20Image.png` so pulldown-cmark produces
-  // a graph edge). normalizeHref + the `/api/files` re-encode below
+  // a graph edge). normalizeHref + the `/api/fs` re-encode below
   // expect the real path; without the decode a spaced name would be
   // double-encoded (`%2520`) and 404.
   const decoded = decodePercent(base);
@@ -113,7 +113,7 @@ export function resolveImageSrc(src: string, fromPath?: string | null): string {
     .split("/")
     .map((s) => encodeURIComponent(s))
     .join("/");
-  return withTokenQuery(`/api/files/${encoded}`);
+  return withTokenQuery(`/api/fs/${encoded}`);
 }
 
 /// Build the new src string for an image after resizing. `width`

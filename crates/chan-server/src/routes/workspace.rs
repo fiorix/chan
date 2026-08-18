@@ -72,7 +72,7 @@ async fn workspace_info_response(state: Arc<AppState>, label: &'static str) -> R
 /// workspace root: immediate files + directories, each directory carrying
 /// its recursive subtree file count and byte total, plus the
 /// whole-workspace aggregate. Deeper levels load lazily via the existing
-/// `/api/files?dir=` path on File Browser expand / Graph depth.
+/// `/api/fs?dir=` path on File Browser expand / Graph depth.
 ///
 /// Runs on the blocking pool: the walk is synchronous filesystem I/O
 /// and must not block the async runtime (a large workspace is a non-

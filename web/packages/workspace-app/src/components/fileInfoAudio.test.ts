@@ -24,7 +24,7 @@ describe("FileInfoBody audio preview", () => {
     expect(block).toContain("<audio");
     expect(block).toContain("controls");
     expect(block).toContain('preload="metadata"');
-    expect(block).toContain("withTokenQuery(`/api/files/${encodeURIComponent(entry.path)");
+    expect(block).toContain("withTokenQuery(`/api/fs/${encodeURIComponent(entry.path)");
     expect(block).not.toContain("autoplay");
   });
 

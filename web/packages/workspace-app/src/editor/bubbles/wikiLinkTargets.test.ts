@@ -52,7 +52,7 @@ describe("wiki file completion uses graph link targets", () => {
 
   test("path candidates are synthesized CLIENT-SIDE off the file tree", () => {
     // No backend link-targets change: paths come from the existing
-    // /api/files listing (api.list), filtered + tagged "Path" here.
+    // /api/fs listing (api.list), filtered + tagged "Path" here.
     expect(wiki).toMatch(/function computePathHits\(/);
     // api.list() may be formatted as a method chain (api\n.list()).
     expect(wiki).toMatch(/api\s*\.list\(\)/);

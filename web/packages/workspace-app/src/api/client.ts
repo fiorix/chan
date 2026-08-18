@@ -357,7 +357,7 @@ interface UploadProgressOptions {
 }
 
 function transferSuffix(root: TransferRoot | undefined, includeFilesApp: boolean): string {
-  const standalone = filesMutationSuffix(false, { app: includeFilesApp && root !== "filesystem" });
+  const standalone = filesMutationSuffix(false, { app: includeFilesApp });
   if (root !== "filesystem") return standalone;
   return standalone ? `${standalone}&root=filesystem` : "?root=filesystem";
 }
@@ -619,7 +619,7 @@ async function readFileStream(
   opts: FileReadStreamOptions = {},
 ): Promise<FileResponse> {
   const headers = directAuthHeaders();
-  const res = await chanFetch(apiPath(`/api/files/${encPath(path)}?stream=1`), {
+  const res = await chanFetch(apiPath(`/api/fs/${encPath(path)}?stream=1`), {
     method: "GET",
     headers,
     signal: opts.signal,
@@ -873,9 +873,9 @@ export const api = {
     const qs = new URLSearchParams();
     if (dir !== undefined && dir !== null) qs.set("dir", dir);
     const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
-    return req<TreeEntry[]>("GET", `/api/files${suffix}`);
+    return req<TreeEntry[]>("GET", `/api/fs${suffix}`);
   },
-  read: (path: string) => req<FileResponse>("GET", `/api/files/${encPath(path)}`),
+  read: (path: string) => req<FileResponse>("GET", `/api/fs/${encPath(path)}`),
   readStream: readFileStream,
   resolveSessionConflict: (
     path: string,
@@ -910,7 +910,7 @@ export const api = {
       ...directAuthHeaders(),
       "content-type": "text/plain; charset=utf-8",
     };
-    const res = await chanFetch(apiPath(`/api/files/${encPath(path)}${suffix}`), {
+    const res = await chanFetch(apiPath(`/api/fs/${encPath(path)}${suffix}`), {
       method: "PUT",
       headers,
       body: content,
@@ -919,7 +919,7 @@ export const api = {
     return (await res.json()) as FileWriteResponse;
   },
   create: (path: string, isDir: boolean, content?: string) =>
-    req<void>("POST", `/api/files${filesMutationSuffix(false)}`, {
+    req<void>("POST", `/api/fs${filesMutationSuffix(false)}`, {
       path,
       is_dir: isDir,
       content,
@@ -948,7 +948,7 @@ export const api = {
   /// /api/drafts/new. Picks the next `untitled` / `untitled-N`
   /// name server-side. Returns the real in-workspace relpath
   /// `<draftsDir>/<name>/draft.md` which the SPA opens via
-  /// the existing /api/files/* GET path. An optional `kind` picks the
+  /// the existing /api/fs/* GET path. An optional `kind` picks the
   /// seed content: no body seeds the plain markdown draft, `"slides"`
   /// seeds the canonical slides frontmatter; the route 400s any other
   /// kind.
@@ -970,7 +970,7 @@ export const api = {
   promoteDraft: (path: string, target: string) =>
     req<DraftPromoteResponse>("POST", "/api/drafts/promote", { path, target }),
   remove: (path: string) =>
-    req<void>("DELETE", `/api/files/${encPath(path)}${filesMutationSuffix(false)}`),
+    req<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string, root?: TransferRoot) =>
     withTokenQuery(
       `/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`,

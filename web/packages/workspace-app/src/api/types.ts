@@ -568,7 +568,7 @@ export type LinkTarget = {
   /// a file (both from /api/link-targets). "Path" = matched by full
   /// workspace path so `[[dir/sub` style queries complete to paths;
   /// these are synthesized CLIENT-SIDE in the wiki bubble off the
-  /// existing /api/files tree listing (the backend link-targets route is
+  /// existing /api/fs tree listing (the backend link-targets route is
   /// unchanged) and merged in as additive candidates. A "Path" row
   /// carries `path` (+ optional `mtime`); the heading fields are null.
   kind: "File" | "Heading" | "Path";

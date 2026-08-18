@@ -61,7 +61,7 @@ async function fetchScene(page) {
       sessionStorage.getItem("chan.token") ??
       new URLSearchParams(location.search).get("t");
     const res = await fetch(
-      `/api/files/${path}?t=${encodeURIComponent(t ?? "")}`,
+      `/api/fs/${path}?t=${encodeURIComponent(t ?? "")}`,
     );
     if (!res.ok) throw new Error(`GET ${path}: ${res.status}`);
     const body = await res.json();
@@ -208,7 +208,7 @@ export default {
         const t =
           sessionStorage.getItem("chan.token") ??
           new URLSearchParams(location.search).get("t");
-        const url = `/api/files/${path}?t=${encodeURIComponent(t ?? "")}`;
+        const url = `/api/fs/${path}?t=${encodeURIComponent(t ?? "")}`;
         for (let attempt = 0; attempt < 5; attempt++) {
           const get = await fetch(url);
           if (!get.ok) throw new Error(`GET ${path}: ${get.status}`);

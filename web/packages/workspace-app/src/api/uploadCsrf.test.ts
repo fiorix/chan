@@ -153,6 +153,24 @@ describe("XHR multipart gateway CSRF mirror", () => {
     expect(created[0].url).toContain("/api/fs/upload?root=filesystem");
   });
 
+  test("filesystem-root upload keeps the Files contract on a standalone tenant", async () => {
+    window.history.replaceState(null, "", "/?kind=terminal&w=terminal-a");
+    const filesCapability = document.createElement("meta");
+    filesCapability.name = "chan-files";
+    document.head.appendChild(filesCapability);
+    const created = installFakeXhr();
+
+    try {
+      await api.uploadFile(new File(["x"], "a.txt"), "tmp", { root: "filesystem" });
+      expect(created[0].url).toContain(
+        "/api/fs/upload?app=files&w=terminal-a&root=filesystem",
+      );
+    } finally {
+      filesCapability.remove();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
   test("uploadFile sends no csrf header without the cookie (loopback)", async () => {
     const created = installFakeXhr();
 

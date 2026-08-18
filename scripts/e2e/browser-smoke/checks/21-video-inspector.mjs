@@ -1,5 +1,5 @@
 // Video inspector + HTTP range serving: the inspector renders an inline
-// <video> preview with a "View Video" main action, and /api/files
+// <video> preview with a "View Video" main action, and /api/fs
 // answers range requests on media paths with byte-exact 206 slices.
 //
 // Two stages. The range assertions use a deterministic byte pattern

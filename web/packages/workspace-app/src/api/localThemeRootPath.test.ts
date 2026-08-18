@@ -37,7 +37,7 @@ describe("local-theme resolves to the ROOT path under a tenant prefix", () => {
     bootUnderPrefix();
     const t = await import("./transport");
     // Sanity: the prefix IS active for ordinary tenant paths.
-    expect(t.apiPath("/api/files/x")).toBe(`${PREFIX}/api/files/x`);
+    expect(t.apiPath("/api/fs/x")).toBe(`${PREFIX}/api/fs/x`);
     const wsPath = t.rootTokenQuery("/api/library/local-theme/watch");
     expect(wsPath).not.toContain(PREFIX);
     expect(wsPath.startsWith("/api/library/local-theme/watch?t=tok")).toBe(true);

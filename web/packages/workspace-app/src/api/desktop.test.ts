@@ -306,7 +306,7 @@ describe("native streaming transfers", () => {
 
     await expect(
       runDesktopDownload(
-        "http://127.0.0.1:4000/api/files/a.bin?download=1&t=x",
+        "http://127.0.0.1:4000/api/fs/a.bin?download=1&t=x",
         "a.bin",
       ),
     ).resolves.toBe("/Downloads/a.bin");
@@ -314,7 +314,7 @@ describe("native streaming transfers", () => {
     expect(invokeSpy).toHaveBeenCalledWith(
       "download_file_native",
       expect.objectContaining({
-        url: "http://127.0.0.1:4000/api/files/a.bin?download=1&t=x",
+        url: "http://127.0.0.1:4000/api/fs/a.bin?download=1&t=x",
         filename: "a.bin",
         transferId: expect.stringMatching(/^native-/),
       }),

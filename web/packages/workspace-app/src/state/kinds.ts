@@ -9,7 +9,7 @@
 //   - ContainerKind: the lone "folder" kind for directory rows.
 //
 // The server projects a `kind` discriminator on every regular file in
-// `/api/files`. The path-only fallback below only runs for paths held
+// `/api/fs`. The path-only fallback below only runs for paths held
 // outside the tree listing (graph ghost rows, broken-link targets). It
 // mirrors chan-workspace's classifier via `classifyPath` so the editor
 // and the workspace agree on what counts as text.

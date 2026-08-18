@@ -121,7 +121,7 @@ export function createDemoFetch(
     }
 
     // --- files ---
-    if (path === "/api/files") {
+    if (path === "/api/fs") {
       if (method === "GET") return json(store.list(qs.get("dir") ?? ""));
       if (method === "POST") {
         const body = parseBody(init) as { path: string; is_dir: boolean; content?: string };
@@ -132,8 +132,22 @@ export function createDemoFetch(
         return empty();
       }
     }
-    if (path.startsWith("/api/files/")) {
-      const rel = decodePath(path.slice("/api/files/".length));
+    if (path === "/api/fs/transfer" && method === "POST") {
+      const body = parseBody(init) as { op: string; sources: string[]; dest_dir: string };
+      const renamed: Array<[string, string]> = [];
+      for (const src of body?.sources ?? []) {
+        const dest = `${body.dest_dir ? `${body.dest_dir}/` : ""}${src.slice(src.lastIndexOf("/") + 1)}`;
+        if (dest === src) continue;
+        if (body.op === "move") {
+          const moved = store.move(src, dest);
+          for (const [from, to] of moved.renamed) graph.renameFile(from, to);
+        }
+        renamed.push([src, dest]);
+      }
+      return json({ moved: renamed, copied: [], skipped: [], conflicts: [] });
+    }
+    if (path.startsWith("/api/fs/")) {
+      const rel = decodePath(path.slice("/api/fs/".length));
       if (method === "GET") {
         if (qs.has("stream")) return streamFile(store, rel);
         const file = store.read(rel);
@@ -186,21 +200,6 @@ export function createDemoFetch(
       const text = file instanceof Blob ? await file.text() : "";
       return json(importMetadata(store, graph, text, { rescan }));
     }
-    if (path === "/api/fs/transfer" && method === "POST") {
-      const body = parseBody(init) as { op: string; sources: string[]; dest_dir: string };
-      const renamed: Array<[string, string]> = [];
-      for (const src of body?.sources ?? []) {
-        const dest = `${body.dest_dir ? `${body.dest_dir}/` : ""}${src.slice(src.lastIndexOf("/") + 1)}`;
-        if (dest === src) continue;
-        if (body.op === "move") {
-          const moved = store.move(src, dest);
-          for (const [from, to] of moved.renamed) graph.renameFile(from, to);
-        }
-        renamed.push([src, dest]);
-      }
-      return json({ moved: renamed, copied: [], skipped: [], conflicts: [] });
-    }
-
     // --- drafts ---
     if (path === "/api/drafts/new" && method === "POST") {
       const name = `untitled-${++draftSeq}`;
@@ -472,7 +471,7 @@ function fsGraph(
   return json(body);
 }
 
-// GET /api/files/<path>?stream=1: emit the meta/chunk/done NDJSON the editor's
+// GET /api/fs/<path>?stream=1: emit the meta/chunk/done NDJSON the editor's
 // streaming reader expects, from the in-memory file.
 function streamFile(store: MockWorkspaceStore, rel: string): Response {
   const file = store.read(rel);

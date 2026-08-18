@@ -614,7 +614,7 @@ describe("workspace root loss", () => {
 
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (url.includes("/api/files")) {
+      if (url.includes("/api/fs")) {
         return new Response(
           JSON.stringify({ error: "workspace root does not exist: /tmp/gone" }),
           { status: 404, headers: { "content-type": "application/json" } },
@@ -654,7 +654,7 @@ describe("workspace root loss", () => {
     tree.loadedDirs = { "": true };
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (url.includes("/api/files")) {
+      if (url.includes("/api/fs")) {
         return new Response(JSON.stringify([]), {
           status: 200,
           headers: { "content-type": "application/json" },

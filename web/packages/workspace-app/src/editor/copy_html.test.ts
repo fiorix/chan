@@ -135,8 +135,8 @@ describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
     const html = buildBaselineHtml(md, "notes/foo.md", "/ws");
     expect(html).toContain('data-chan-ref="0"');
     expect(html).toContain('data-chan-ref="1"');
-    expect(html).toContain("http://localhost:3000/api/files/notes/a.png");
-    expect(html).toContain("http://localhost:3000/api/files/notes/b.png");
+    expect(html).toContain("http://localhost:3000/api/fs/notes/a.png");
+    expect(html).toContain("http://localhost:3000/api/fs/notes/b.png");
   });
 
   test("count guard: a reference-style image the regex misses skips tagging", () => {
@@ -146,7 +146,7 @@ describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
     const md = "![alt][id]\n\n[id]: ./a.png";
     const html = buildBaselineHtml(md, "notes/foo.md", "/ws");
     expect(html).not.toContain("data-chan-ref");
-    expect(html).toContain("/api/files/notes/a.png");
+    expect(html).toContain("/api/fs/notes/a.png");
   });
 });
 
@@ -167,7 +167,7 @@ describe("buildInlinedHtml (fetch + degrade + budget)", () => {
     const md = "![](./a.png)\n\n![](./missing.png)";
     const html = await buildInlinedHtml(md, "notes/foo.md", "/ws");
     expect(html).toContain("data:image/png;base64,");
-    expect(html).toContain("/api/files/notes/missing.png");
+    expect(html).toContain("/api/fs/notes/missing.png");
   });
 
   test("an over-budget image keeps its absolute URL", async () => {
@@ -177,7 +177,7 @@ describe("buildInlinedHtml (fetch + degrade + budget)", () => {
     );
     const html = await buildInlinedHtml("![](./big.png)", "notes/foo.md", "/ws");
     expect(html).not.toContain("data:");
-    expect(html).toContain("/api/files/notes/big.png");
+    expect(html).toContain("/api/fs/notes/big.png");
   });
 });
 

@@ -3,7 +3,7 @@
 // as any other external edit. The restore shape is what undo, revert,
 // `git checkout` and filesystem-editing agents all produce, so it
 // cannot be treated as a suspect echo of the session's own writes.
-// Convergence has to reach the editor, GET /api/files, and later
+// Convergence has to reach the editor, GET /api/fs, and later
 // `cs open` calls without another filesystem event.
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -85,7 +85,7 @@ export default {
       const apiRead = () =>
         page.evaluate(
           async ({ tok, file }) => {
-            const r = await fetch(`/api/files/${file}`, {
+            const r = await fetch(`/api/fs/${file}`, {
               headers: { authorization: `Bearer ${tok}` },
             });
             if (!r.ok) return `HTTP ${r.status}`;

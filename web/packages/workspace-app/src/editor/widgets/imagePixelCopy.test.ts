@@ -82,7 +82,7 @@ describe("image widget pixel copy", () => {
       );
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/api/files/b.jpg"),
+      expect.stringContaining("/api/fs/b.jpg"),
     );
     cleanup();
   });
@@ -122,7 +122,7 @@ describe("image widget pixel copy", () => {
       mime: "application/octet-stream",
     });
     await expect(
-      copyImagePixels("/api/files/mystery.bin", false),
+      copyImagePixels("/api/fs/mystery.bin", false),
     ).rejects.toThrow("unrecognized image type");
     expect(writeClipboardPayload).not.toHaveBeenCalled();
   });

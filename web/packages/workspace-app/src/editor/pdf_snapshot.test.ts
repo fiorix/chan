@@ -48,13 +48,13 @@ function page(html: string): HTMLElement {
 
 describe("inlinePageResources", () => {
   test("rewrites img srcs to data: URIs via fetch", async () => {
-    const root = page('<img src="/api/files/photo.png?t=tok">');
+    const root = page('<img src="/api/fs/photo.png?t=tok">');
     await inlinePageResources(root);
     expect(root.querySelector("img")?.getAttribute("src")).toMatch(
       /^data:image\/png;base64,/,
     );
     expect(fetch).toHaveBeenCalledWith(
-      "/api/files/photo.png?t=tok",
+      "/api/fs/photo.png?t=tok",
       expect.anything(),
     );
   });
@@ -79,10 +79,10 @@ describe("inlinePageResources", () => {
   });
 
   test("keeps unresolvable refs verbatim so the audit can name them", async () => {
-    const root = page('<img src="/api/files/missing.png">');
+    const root = page('<img src="/api/fs/missing.png">');
     await inlinePageResources(root);
     expect(root.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/files/missing.png",
+      "/api/fs/missing.png",
     );
     expect(() => auditSelfContained(root)).toThrow(SnapshotError);
   });
@@ -127,7 +127,7 @@ describe("auditSelfContained", () => {
   });
 
   test("throws on external url() in style attributes and style elements", () => {
-    const inline = page('<div style="background:url(/api/files/bg.png)">x</div>');
+    const inline = page('<div style="background:url(/api/fs/bg.png)">x</div>');
     expect(() => auditSelfContained(inline)).toThrow(/inline style url\(\)/);
 
     const styled = page("<style>.x { background: url(http://e.com/i.png); }</style>");
@@ -135,7 +135,7 @@ describe("auditSelfContained", () => {
   });
 
   test("throws on svg image hrefs and disallowed elements", () => {
-    const image = page('<svg><image href="/api/files/pic.png"></image></svg>');
+    const image = page('<svg><image href="/api/fs/pic.png"></image></svg>');
     expect(() => auditSelfContained(image)).toThrow(/image href/);
 
     const script = page("<script>1</script>");
