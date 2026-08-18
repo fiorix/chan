@@ -1293,7 +1293,8 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/fs/{*path}",
             get(crate::routes::transfer::api_terminal_read_file),
         )
-        // `/api/files` remains a compatibility alias through v0.93.0.
+        // `/api/files` remains a compatibility alias through v0.93.0 and is
+        // removed in v0.94.0.
         .route(
             "/api/files/upload",
             post(crate::routes::transfer::api_terminal_upload_file)
@@ -1874,7 +1875,8 @@ fn router_with_extensions(
             "/api/fs/upload",
             post(api_upload_file).layer(DefaultBodyLimit::disable()),
         )
-        // `/api/files` remains a compatibility alias through v0.93.0.
+        // `/api/files` remains a compatibility alias through v0.93.0 and is
+        // removed in v0.94.0.
         .route("/api/files", get(api_list_files).post(api_create_file))
         .route(
             "/api/files/upload",
