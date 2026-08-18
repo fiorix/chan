@@ -185,7 +185,7 @@ describe("createDemoFetch router", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(st.read("a.md")?.content).toBe("A");
+    expect(st.read("a.md")?.content).toBe(A_MD);
     expect(st.read("docs/a.md")).toBeNull();
   });
 

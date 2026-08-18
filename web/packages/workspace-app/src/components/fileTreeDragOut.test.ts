@@ -10,9 +10,9 @@ import store from "../state/store.svelte.ts?raw";
 // the app-internal tree-move drag and the transfer buttons stay.
 describe("FileTree browser drag-out removed", () => {
   test("api still exposes token-bearing download URLs (for the Download button)", () => {
-    expect(client).toMatch(/downloadUrl: \(path: string\) =>/);
-    expect(client).toMatch(
-      /withTokenQuery\(`\/api\/files\/\$\{encPath\(path\)\}\?download=1`\)/,
+    expect(client).toContain("downloadUrl: (path: string, root?: TransferRoot) =>");
+    expect(client).toContain(
+      '`/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`',
     );
   });
 
