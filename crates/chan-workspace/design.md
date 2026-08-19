@@ -155,6 +155,7 @@ Trash entries expose five stable fields: opaque monotone `id`, workspace-relativ
   - **Restore conflicts**: refused with `TrashOccupied`. The caller renames the live entry first, or `trash_purge` to give up. We never silently overwrite live content.
   - **Auto-expiration**: lazy GC. Workspace open and every `trash_*` call sweep entries older than `TRASH_RETENTION_SECS` (30 days, `30 * 24 * 60 * 60`). No background thread; matches the codebase's sync-only rule.
   - **Crash recovery**: a half-written entry has no metadata. Sweep treats metadata-less entries as junk and reclaims them.
+  - **Flat root, entries only**: a trash root contains only entry dirs. Never nest another store (or any non-entry file) inside a swept root; the sweep reads such a child as one meta-less junk entry and reclaims it wholesale. Draft discards are therefore first-class flat entries distinguished by their `.Drafts/<name>` origin label, and workspace open hoists any entries still sitting in the nested `drafts/` bucket an older release wrote before its sweep runs.
 
 Deliberately not included:
 
