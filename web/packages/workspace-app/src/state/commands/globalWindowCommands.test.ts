@@ -19,7 +19,7 @@ function ctx(): CommandContext {
     terminalControl: false,
     // Full caps keep the requirement gate open; these tests pin the
     // per-command availability predicates on their own.
-    caps: { workspace: true, files: true, terminal: true },
+    caps: { workspace: true, files: true, drafts: true, terminal: true },
     activeSurface: null,
     activeSide: null,
     activeTabId: null,

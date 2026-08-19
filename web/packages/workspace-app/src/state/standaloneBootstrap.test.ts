@@ -85,20 +85,22 @@ function openTabs(): { kind: string; selected?: string | null }[] {
   return out;
 }
 
-/// Declare (or withdraw) the tenant's filesystem surface exactly the way
-/// chan-server injects it into the served shell. Must run before the state
-/// modules are imported: the capability is read once at module load.
-function serveFiles(on: boolean): void {
-  document.head.querySelector('meta[name="chan-files"]')?.remove();
+/// Declare (or withdraw) one of the tenant's capability metas exactly the
+/// way chan-server injects them into the served shell. Must run before the
+/// state modules are imported: the capabilities are read once at module
+/// load.
+function serveMeta(name: string, on: boolean): void {
+  document.head.querySelector(`meta[name="${name}"]`)?.remove();
   if (!on) return;
   const meta = document.createElement("meta");
-  meta.setAttribute("name", "chan-files");
+  meta.setAttribute("name", name);
   meta.setAttribute("content", "1");
   document.head.appendChild(meta);
 }
 
-async function boot(withFiles: boolean): Promise<void> {
-  serveFiles(withFiles);
+async function boot(withFiles: boolean, withDrafts = false): Promise<void> {
+  serveMeta("chan-files", withFiles);
+  serveMeta("chan-drafts", withDrafts);
   store = await import("./store.svelte");
   tabs = await import("./tabs.svelte");
   await store.bootstrap();
@@ -114,6 +116,7 @@ beforeEach(async () => {
     root: "/",
     home: HOME,
     path_style: "posix",
+    drafts_dir: `${HOME}/.chan/Drafts`,
   });
   apiGetSession.mockResolvedValue(null);
   apiList.mockImplementation(async (dir?: string) => {
@@ -179,6 +182,32 @@ describe("a standalone terminal window whose tenant serves files", () => {
     // into the wire form the file routes take.
     expect(ctx && wirePathFromAbsolute(ctx, `/${HOME}/notes`)).toBe(`${HOME}/notes`);
     expect(ctx && wirePathFromAbsolute(ctx, "/")).toBe("");
+  });
+});
+
+describe("a standalone terminal window whose tenant serves drafts", () => {
+  test("the drafts wire dir lands in the choke point and classifies draft paths", async () => {
+    await boot(true, true);
+    // Imported AFTER boot: boot resets the module registry, and a handle
+    // captured before it would watch the stale generation's state.
+    const workspaceState = await import("./workspace.svelte");
+
+    expect(workspaceState.draftsDir()).toBe(`${HOME}/.chan/Drafts`);
+    expect(workspaceState.isDraftPath(`${HOME}/.chan/Drafts/untitled/draft.md`)).toBe(true);
+    expect(workspaceState.isDraftPath(`${HOME}/notes.md`)).toBe(false);
+  });
+
+  test("without the meta the context field alone enables nothing", async () => {
+    // The meta tag is the capability; a drafts_dir in the fs context of a
+    // tenant that did not advertise one must not half-enable the feature.
+    await boot(true, false);
+    const workspaceState = await import("./workspace.svelte");
+
+    expect(workspaceState.draftsDir()).toBe(null);
+    expect(workspaceState.isDraftPath(`${HOME}/.chan/Drafts/untitled/draft.md`)).toBe(false);
+    // In particular a real machine directory literally named `.Drafts`
+    // stays an ordinary directory in a files-only window.
+    expect(workspaceState.isDraftPath(".Drafts/untitled/draft.md")).toBe(false);
   });
 });
 

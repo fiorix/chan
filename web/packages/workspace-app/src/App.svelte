@@ -838,12 +838,12 @@
         return;
       case "n":
       case "N":
-        if (!windowCaps.workspace) return;
+        if (!windowCaps.drafts) return;
         paneModeStageDraftEditor();
         return;
       case "i":
       case "I":
-        if (!windowCaps.workspace) return;
+        if (!windowCaps.drafts) return;
         paneModeStageDiagramEditor();
         return;
       // `h` toggles the Hybrid Nav help cheatsheet without committing the draft;
@@ -906,8 +906,8 @@
           : e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey;
       if (richPromptChord) {
         e.preventDefault();
-        // Rich Prompt is workspace-only.
-        if (!windowCaps.workspace) return;
+        // Rich Prompt needs a drafts store behind it.
+        if (!windowCaps.drafts) return;
         const term = activeTerminalTab();
         if (term) toggleRichPromptForTab(term.id);
         return;

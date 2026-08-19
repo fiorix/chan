@@ -1,5 +1,12 @@
 <script lang="ts">
   import { draftCloseState, resolveDraftClose } from "../state/tabs.svelte";
+  import { windowCaps } from "../state/windowCaps";
+
+  // A standalone window has no workspace to save into; its promote
+  // targets are paths on the machine's disk. Workspace copy stays
+  // byte-identical through these derivations.
+  const destinationNoun = windowCaps.workspace ? "workspace" : "disk";
+  const destinationLabel = windowCaps.workspace ? "Workspace" : "Disk";
 
   let inputEl = $state<HTMLInputElement | null>(null);
 
@@ -37,14 +44,18 @@
 
       <p>
         {#if draftCloseState.hasAttachments}
-          Save this draft workspace as a workspace folder, or discard it.
+          Save this draft workspace as a {destinationNoun} folder, or discard it.
         {:else}
-          Save this draft as a workspace file, or discard it.
+          Save this draft as a {destinationNoun} file, or discard it.
         {/if}
       </p>
 
       <label>
-        <span>{draftCloseState.targetKind === "folder" ? "Workspace folder" : "Workspace file"}</span>
+        <span
+          >{draftCloseState.targetKind === "folder"
+            ? `${destinationLabel} folder`
+            : `${destinationLabel} file`}</span
+        >
         <input
           bind:this={inputEl}
           bind:value={draftCloseState.target}
@@ -63,7 +74,7 @@
         <div class="spacer"></div>
         <button type="button" onclick={() => resolveDraftClose("cancel")}>Cancel</button>
         <button type="button" class="primary" onclick={() => resolveDraftClose("save")}>
-          Save to Workspace
+          Save to {destinationLabel}
         </button>
       </footer>
     </div>

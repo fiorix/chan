@@ -1,10 +1,10 @@
 // New diagram command (Apps category): creates a seeded .excalidraw
 // board through the server's diagram endpoint and opens it in the active
 // pane, mirroring New draft (createDraftAndOpen). isExcalidraw(path)
-// routes it to canvas mode. Availability follows the workspace gate. See
-// state/commands.ts for the Command shape and the workspaceOnly helper.
+// routes it to canvas mode. Availability follows the drafts gate. See
+// state/commands.ts for the Command shape and the requirement table.
 
-import { registerCommands, workspaceOnly } from "../commands";
+import { allowedInWindow, registerCommands } from "../commands";
 import { api } from "../../api/client";
 import { noteDraftCreated, setTransientStatus } from "../store.svelte";
 import { openInActivePane } from "../tabs.svelte";
@@ -30,9 +30,9 @@ registerCommands([
     id: "app.diagram.new",
     title: "New diagram",
     category: "Apps",
-    requirement: "workspace",
+    requirement: "drafts",
     keywords: ["excalidraw", "draw", "whiteboard", "canvas", "board"],
-    available: (ctx) => workspaceOnly(ctx),
+    available: (ctx) => allowedInWindow("app.diagram.new", ctx),
     run: () => {
       void createDiagramAndOpen();
     },

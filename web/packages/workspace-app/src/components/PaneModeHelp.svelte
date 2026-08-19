@@ -30,7 +30,7 @@
   /// capability this window lacks is not rendered: every cap here is a
   /// clickable button, so an unfiltered row is an action the user can focus,
   /// hear announced, and press for nothing.
-  type Needs = "files" | "workspace";
+  type Needs = "files" | "drafts" | "workspace";
   type Row = {
     caps: Cap[];
     action: string;
@@ -85,8 +85,8 @@
         { caps: [{ label: "o", key: "o" }], action: "Stage File Browser", needs: "files" },
         { caps: [{ label: "g", key: "g" }], action: "Stage Graph", needs: "workspace" },
         { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", needs: "workspace" },
-        { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", needs: "workspace" },
-        { caps: [{ label: "i", key: "i" }], action: "Stage Diagram", needs: "workspace" },
+        { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", needs: "drafts" },
+        { caps: [{ label: "i", key: "i" }], action: "Stage Diagram", needs: "drafts" },
       ],
     },
     {
@@ -152,8 +152,16 @@
   /// Whether this window can run an action needing `needs`. Undefined means
   /// the action works anywhere (focus, splits, resize).
   function have(needs?: Needs): boolean {
-    if (needs === undefined) return true;
-    return needs === "files" ? windowCaps.files : windowCaps.workspace;
+    switch (needs) {
+      case undefined:
+        return true;
+      case "files":
+        return windowCaps.files;
+      case "drafts":
+        return windowCaps.drafts;
+      case "workspace":
+        return windowCaps.workspace;
+    }
   }
 
   // Each window sees the keys it can actually run. Pure derived - no $state

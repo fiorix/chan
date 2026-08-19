@@ -87,7 +87,7 @@ describe("RichPrompt.svelte component", () => {
     // The editor backing markdown stays draft-relative for preview, while the
     // prompt frame payload is rewritten to bare absolute on-disk image paths.
     expect(richPromptSrc).toMatch(
-      /const delivered = rewriteImagePathsForDelivery\(\s*text,\s*draftPath,\s*workspace\.info\?\.root/,
+      /const delivered = rewriteImagePathsForDelivery\(\s*text,\s*draftPath,[\s\S]{1,400}workspace\.info\?\.root \?\? filesContext\.current\?\.rootDisplay \?\? null,/,
     );
     expect(richPromptSrc).toMatch(
       /if \(!sendPromptToTerminal\(tab\.id, delivered, submitAgent\(\), id\)\) return true;/,

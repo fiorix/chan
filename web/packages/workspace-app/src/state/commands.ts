@@ -52,10 +52,18 @@ export type CommandSurface =
 /// The capability a command needs before it may appear or dispatch:
 /// `any` for window/pane/tab/settings plumbing that works everywhere,
 /// `terminal` for terminal lifecycle, `files` for the editor / File
-/// Browser / file-operation family, and `workspace` for graph, search,
-/// dashboard, and every other index-backed surface. One table drives both
-/// the catalog filter and the dispatch gate so they can never disagree.
-export type CommandRequirement = "any" | "terminal" | "files" | "workspace";
+/// Browser / file-operation family, `drafts` for the draft family
+/// (create/inspect/discard/promote, served by both the workspace tenant
+/// and a drafts-capable standalone tenant), and `workspace` for graph,
+/// search, dashboard, and every other index-backed surface. One table
+/// drives both the catalog filter and the dispatch gate so they can
+/// never disagree.
+export type CommandRequirement =
+  | "any"
+  | "terminal"
+  | "files"
+  | "drafts"
+  | "workspace";
 
 /// Whether a window with `caps` satisfies `requirement`.
 export function requirementAllows(
@@ -69,6 +77,8 @@ export function requirementAllows(
       return caps.terminal;
     case "files":
       return caps.files;
+    case "drafts":
+      return caps.drafts;
     case "workspace":
       return caps.workspace;
   }
