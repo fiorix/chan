@@ -3178,12 +3178,20 @@ mod write_tests {
     #[test]
     fn the_files_alias_is_not_mounted() {
         // `/api/files` was a compatibility alias for the `/api/fs` content and
-        // transfer routes; nothing may mount it again.
+        // transfer routes; nothing may mount it again. The refusal tests in
+        // lib.rs mention the alias in request URLs, so this pin matches the
+        // exact quoted mount literals rather than any occurrence.
         let route_table = include_str!("../lib.rs");
-        assert!(
-            !route_table.contains("/api/files"),
-            "the /api/files alias must not reappear in the route table"
-        );
+        for mount in [
+            r#""/api/files""#,
+            r#""/api/files/upload""#,
+            r#""/api/files/{*path}""#,
+        ] {
+            assert!(
+                !route_table.contains(mount),
+                "the {mount} alias mount must not reappear in the route table"
+            );
+        }
     }
 
     /// A multipart body naming a destination and one file part, so a test can
