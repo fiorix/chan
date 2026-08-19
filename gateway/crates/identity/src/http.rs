@@ -2983,7 +2983,8 @@ mod tests {
     #[tokio::test]
     async fn entry_handoff_preserves_origin_in_header_and_meta_policy() {
         let response =
-            entry_handoff_response("https://alice--aaaaaaaaaaaa.p1.proxy.chan.app", "entry").unwrap();
+            entry_handoff_response("https://alice--aaaaaaaaaaaa.p1.proxy.chan.app", "entry")
+                .unwrap();
         assert_eq!(
             response.headers().get(header::REFERRER_POLICY),
             Some(&HeaderValue::from_static("strict-origin"))

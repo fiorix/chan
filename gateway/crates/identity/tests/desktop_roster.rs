@@ -231,7 +231,13 @@ async fn mock_all_tunnels(app: &TestApp, pairs: &[(Uuid, &str, &str)]) {
     let rows: Vec<(Uuid, &str, &str, &str, &str)> = pairs
         .iter()
         .map(|(owner_user_id, user, id)| {
-            (*owner_user_id, *user, *id, "p1", "https://p1.proxy.chan.app")
+            (
+                *owner_user_id,
+                *user,
+                *id,
+                "p1",
+                "https://p1.proxy.chan.app",
+            )
         })
         .collect();
     mock_all_tunnels_on(app, &rows).await;

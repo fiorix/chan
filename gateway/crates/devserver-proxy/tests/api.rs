@@ -577,7 +577,14 @@ async fn unknown_host_is_404() {
 #[tokio::test]
 async fn wildcard_root_redirects_to_dashboard() {
     let app = TestApp::new().await;
-    let (s, hdrs, _) = send_host(&app.router, Method::GET, "alice.p1.proxy.chan.app", "/", &[]).await;
+    let (s, hdrs, _) = send_host(
+        &app.router,
+        Method::GET,
+        "alice.p1.proxy.chan.app",
+        "/",
+        &[],
+    )
+    .await;
     assert!(s.is_redirection(), "got {s}");
     let loc = hdrs.get(header::LOCATION).unwrap().to_str().unwrap();
     assert_eq!(loc, TEST_DASHBOARD_URL);

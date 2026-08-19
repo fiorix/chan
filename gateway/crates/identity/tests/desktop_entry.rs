@@ -859,7 +859,11 @@ async fn entry_origin_preserves_node_non_default_port() {
 
     let (s, body) = post_entry(&app, &pat).await;
     assert_eq!(s, StatusCode::OK, "got {body}");
-    let origin = format!("https://{}--{}.p1.proxy.chan.app:8443", username, &dsid[..12]);
+    let origin = format!(
+        "https://{}--{}.p1.proxy.chan.app:8443",
+        username,
+        &dsid[..12]
+    );
     assert_eq!(body["proxy_origin"], origin);
     assert_eq!(
         body["entry_exchange_url"],
@@ -891,7 +895,7 @@ async fn entry_node_base_outside_the_namespace_is_upstream_error() {
     // configured apex is a 502, never a mint against the shared apex.
     for bad_base in [
         "https://proxy.chan.app",             // the bare apex is not a node
-        "https://other.example.net",        // outside the namespace
+        "https://other.example.net",          // outside the namespace
         "https://p1.proxy.chan.app.evil.net", // suffix lookalike
         "https://p1.proxy.chan.app/path",     // not an origin
         "http://p1.proxy.chan.app",           // scheme mismatch
