@@ -114,7 +114,7 @@ Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence
 
 ### HelloAckOk.prefix
 
-Server-assigned public path prefix, shape `/{devserver_id}` -- one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.usr.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
+Server-assigned public path prefix, shape `/{devserver_id}` -- one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.proxy.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
 
 ### ProtocolVersion negotiation
 

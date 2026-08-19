@@ -32,7 +32,7 @@ flowchart TB
     end
 
     subgraph fleet["Gateway: proxy data plane"]
-        EDGE2["node TLS edge:<br/>{proxy}.usr.{domain} + *.{proxy}.usr.{domain}"]
+        EDGE2["node TLS edge:<br/>{proxy}.proxy.{domain} + *.{proxy}.proxy.{domain}"]
         P1["devserver-proxy p1"]
         PN["devserver-proxy pN"]
     end

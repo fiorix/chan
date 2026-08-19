@@ -12,12 +12,12 @@ Dev port layout (offset by `+10000` from the prod-shaped ports so the runner can
 | identity         | `17000` | https://gw.localtest.me:17000                  |
 | devserver-control | `17003` | http://127.0.0.1:17003 (aggregate admin)      |
 |                  | `17101` | h2c proxy control listener                     |
-| devserver-proxy.pN | `17002` | https://pN.usr.localtest.me:17002 (node) |
+| devserver-proxy.pN | `17002` | https://pN.proxy.localtest.me:17002 (node) |
 |                  | `17100` | 127.0.0.N:17100 (TLS tunnel; h2c behind edge)  |
 
 Every proxy node exposes the same two TLS ports on its own loopback alias (p1 on `127.0.0.1`, p2 on `127.0.0.2`, p3 on `127.0.0.3`) because the controller's origin template pins one shared port for the whole fleet. The proxy binaries themselves bind inner `16902`/`16910` loopback ports. A `chan devserver` client dials one node's verified TLS listener, e.g. `https://127.0.0.2:17100/v1/tunnel` for p2.
 
-Browsing a p1 tenant works out of the box because `*.localtest.me` resolves to `127.0.0.1`. Browsing a p2 or p3 tenant origin needs one `/etc/hosts` line per extra node (`127.0.0.2 p2.usr.localtest.me` plus one line per tenant host you open, or a local wildcard DNS such as dnsmasq), because public DNS resolves those hosts to `127.0.0.1`, where p1 answers and 404s them.
+Browsing a p1 tenant works out of the box because `*.localtest.me` resolves to `127.0.0.1`. Browsing a p2 or p3 tenant origin needs one `/etc/hosts` line per extra node (`127.0.0.2 p2.proxy.localtest.me` plus one line per tenant host you open, or a local wildcard DNS such as dnsmasq), because public DNS resolves those hosts to `127.0.0.1`, where p1 answers and 404s them.
 
 ## One-time setup
 
@@ -88,7 +88,7 @@ cargo run -p chan -- devserver run \
   --tunnel-devserver-name=blog
 ```
 
-One tunnel carries the devserver's whole library, so every workspace you add is reachable over the single registration. The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open on a workspace targets `https://<user>--<disc>.p1.usr.localtest.me:17002/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
+One tunnel carries the devserver's whole library, so every workspace you add is reachable over the single registration. The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open on a workspace targets `https://<user>--<disc>.p1.proxy.localtest.me:17002/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
 
 ## Notes
 

@@ -135,7 +135,7 @@ echo "    profile         127.0.0.1:17001"
 echo "    identity        https://gw.localtest.me:17000 (TLS) 127.0.0.1:17004 (internal)"
 echo "    devserver-control 127.0.0.1:17003 (admin) 127.0.0.1:17101 (h2c control)"
 for ((n = 1; n <= PROXIES; n++)); do
-    echo "    devserver-proxy.p$n https://p$n.usr.localtest.me:17002 (TLS node) 127.0.0.$n:17100 (TLS tunnel)"
+    echo "    devserver-proxy.p$n https://p$n.proxy.localtest.me:17002 (TLS node) 127.0.0.$n:17100 (TLS tunnel)"
 done
 echo
 echo "    (proxies: $PROXIES; set CHAN_DEV_PROXIES=3 for the full fleet)"

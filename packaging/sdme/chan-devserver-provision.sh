@@ -28,10 +28,10 @@
 #                      default: devserver)
 #   --token TOKEN      chan_pat_* PAT from gw.chan.app  (env CHAN_TUNNEL_TOKEN)
 #   --tunnel-url URL   override the gateway endpoint     (env CHAN_TUNNEL_URL;
-#                      default: chan's built-in https://usr.chan.app/v1/tunnel)
+#                      default: chan's built-in https://proxy.chan.app/v1/tunnel)
 #
 # The published host is resolved backend-side from the token, so it is keyed by
-# the token owner's handle -- {handle}--{disc}.{proxy}.usr.chan.app --
+# the token owner's handle -- {handle}--{disc}.{proxy}.proxy.chan.app --
 # independent of --user.
 
 set -euo pipefail
@@ -272,5 +272,5 @@ printf '  unit:  %s\n' "$UNIT"
 printf '  check: su - %s      # interactive login shell has the session env, then:\n' "$USER_NAME"
 printf '           systemctl --user status chan-devserver\n'
 printf '           journalctl --user -u chan-devserver -f\n'
-printf '\nMounted workspaces publish at https://<handle>--<disc>.<proxy>.usr.chan.app/<workspace>/\n'
+printf '\nMounted workspaces publish at https://<handle>--<disc>.<proxy>.proxy.chan.app/<workspace>/\n'
 printf '(<handle> is resolved from the token, not the Linux user name).\n'

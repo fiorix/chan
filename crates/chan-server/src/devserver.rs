@@ -7,7 +7,7 @@
 //!   namespace ([`crate::devserver_api`]): list, mount, forget workspaces
 //!   and open standalone terminals. Workspace tenants mount at their keyed
 //!   pathspec `/{slug}-{8hex}` (top-level), so the gateway forwards
-//!   `{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/` unchanged and the
+//!   `{owner}--{disc}.{proxy}.proxy.{domain}/{slug}-{8hex}/` unchanged and the
 //!   devserver routes the tenant by it; the explicit `/api/devserver/*` and `/api/library/*`
 //!   management routes match before the per-tenant fallback, and the only
 //!   reserved top-level slug is `api`.
@@ -73,7 +73,7 @@ pub struct DevserverConfig {
     /// Human label for the box (drives the client's grouping header).
     pub host_label: String,
     /// When set, the devserver also dials the gateway and publishes its
-    /// tenant content at `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/*`. `None`
+    /// tenant content at `{owner}--{disc}.{proxy}.proxy.{domain}/{workspace}/*`. `None`
     /// leaves it local-only (management API + discovery socket on `addr`).
     pub tunnel: Option<DevserverTunnel>,
     /// Bind the local TCP listener on `addr`. `false` in tunnel-only mode

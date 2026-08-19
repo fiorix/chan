@@ -660,7 +660,7 @@ mod tests {
             subject_user_id: Uuid::from_u128(subject),
             owner_user_id: Uuid::from_u128(owner),
             devserver_id: devserver_id.to_string(),
-            audience: format!("alice--{devserver_id}.p1.usr.chan.app"),
+            audience: format!("alice--{devserver_id}.p1.proxy.chan.app"),
         }
     }
 

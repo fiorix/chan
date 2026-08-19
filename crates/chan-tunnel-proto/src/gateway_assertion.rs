@@ -353,27 +353,27 @@ mod tests {
     fn canonical_audience_strips_only_the_schemes_actual_default_port() {
         assert_eq!(
             canonical_audience("https", "Alice--1a2b3c4d5e6f.P1.Usr.Chan.App"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app",
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app",
         );
         assert_eq!(
-            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.usr.chan.app:443"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app",
+            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.proxy.chan.app:443"),
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app",
         );
         assert_eq!(
-            canonical_audience("http", "alice--1a2b3c4d5e6f.p1.usr.chan.app:80"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app",
+            canonical_audience("http", "alice--1a2b3c4d5e6f.p1.proxy.chan.app:80"),
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app",
         );
         assert_eq!(
-            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.usr.chan.app:80"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app:80",
+            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.proxy.chan.app:80"),
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app:80",
         );
         assert_eq!(
-            canonical_audience("http", "alice--1a2b3c4d5e6f.p1.usr.chan.app:443"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app:443",
+            canonical_audience("http", "alice--1a2b3c4d5e6f.p1.proxy.chan.app:443"),
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app:443",
         );
         assert_eq!(
-            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.usr.chan.app:7002"),
-            "alice--1a2b3c4d5e6f.p1.usr.chan.app:7002",
+            canonical_audience("https", "alice--1a2b3c4d5e6f.p1.proxy.chan.app:7002"),
+            "alice--1a2b3c4d5e6f.p1.proxy.chan.app:7002",
         );
         assert_eq!(canonical_audience("wss", "[::1]:443"), "[::1]");
         assert_eq!(canonical_audience("ws", "[::1]:443"), "[::1]:443");

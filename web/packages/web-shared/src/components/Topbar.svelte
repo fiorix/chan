@@ -1,6 +1,6 @@
 <script lang="ts">
   // Brand row + signed-in identity badge + sign-out. Used by both
-  // gw.{domain} and usr.{domain} so the two surfaces share one
+  // gw.{domain} and proxy.{domain} so the two surfaces share one
   // header. Tab strip stays in each app since the items differ.
   import { initial } from "../initial";
 

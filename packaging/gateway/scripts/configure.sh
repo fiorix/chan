@@ -48,8 +48,8 @@ PG_DB=${PG_DB:-chan_gateway}
 
 read -rp "Gateway public origin [https://gw.chan.app]: " ID_URL
 ID_URL=${ID_URL:-https://gw.chan.app}
-read -rp "Proxy namespace origin [https://usr.chan.app]: " PROXY_ORIGIN
-PROXY_ORIGIN=${PROXY_ORIGIN:-https://usr.chan.app}
+read -rp "Proxy namespace origin [https://proxy.chan.app]: " PROXY_ORIGIN
+PROXY_ORIGIN=${PROXY_ORIGIN:-https://proxy.chan.app}
 read -rp "Tunnel ingress origin [$PROXY_ORIGIN]: " TUNNEL_ORIGIN
 TUNNEL_ORIGIN=${TUNNEL_ORIGIN:-$PROXY_ORIGIN}
 read -rp "This proxy node id [p1]: " PROXY_ID

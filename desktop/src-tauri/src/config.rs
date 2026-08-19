@@ -2584,7 +2584,7 @@ mod tests {
             identity_origin: "https://gw.chan.app".into(),
             desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
             desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://usr.chan.app".into(),
+            devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         }
@@ -2607,7 +2607,7 @@ mod tests {
             label: label.to_string(),
             online: true,
             shared,
-            proxy_origin: Some("https://p1.usr.chan.app".to_string()),
+            proxy_origin: Some("https://p1.proxy.chan.app".to_string()),
         }
     }
 
@@ -2783,7 +2783,7 @@ mod tests {
         conns.set(
             rows[0].id.clone(),
             crate::devserver::DevserverConn {
-                host: "alice--aaaaaaaaaaaa.p1.usr.chan.app".to_string(),
+                host: "alice--aaaaaaaaaaaa.p1.proxy.chan.app".to_string(),
                 port: 443,
                 token: String::new(),
                 name: "laptop".to_string(),

@@ -55,7 +55,7 @@ spec:
               path: /readyz
               port: 7002
               httpHeaders:
-                - { name: Host, value: "usr.localtest.me" }
+                - { name: Host, value: "proxy.localtest.me" }
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
@@ -63,7 +63,7 @@ spec:
               path: /healthz
               port: 7002
               httpHeaders:
-                - { name: Host, value: "usr.localtest.me" }
+                - { name: Host, value: "proxy.localtest.me" }
             initialDelaySeconds: 10
             periodSeconds: 10
 ---

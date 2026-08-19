@@ -370,7 +370,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "http://localhost:7000".parse().unwrap(),
-            devserver_proxy_origin: "https://usr.chan.app".parse().unwrap(),
+            devserver_proxy_origin: "https://proxy.chan.app".parse().unwrap(),
             devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
             database_url: "x".into(),
             cookie_secure: true,
@@ -429,7 +429,7 @@ mod tests {
     }
 
     fn tunnel(user: &str, id: &str) -> TunnelView {
-        tunnel_on(user, id, "p1", "https://p1.usr.chan.app")
+        tunnel_on(user, id, "p1", "https://p1.proxy.chan.app")
     }
 
     fn tunnel_on(user: &str, id: &str, proxy_id: &str, proxy_base_url: &str) -> TunnelView {
@@ -451,7 +451,7 @@ mod tests {
 
     /// The tenant origin identity builds for `(owner, id)` on `proxy`.
     fn tenant_origin(owner: &str, id: &str, proxy: &str) -> String {
-        format!("https://{owner}--{}.{proxy}.usr.chan.app", &id[..12])
+        format!("https://{owner}--{}.{proxy}.proxy.chan.app", &id[..12])
     }
 
     #[test]
@@ -497,8 +497,8 @@ mod tests {
             vec![owned(&a, "laptop"), owned(&b, "office")],
             vec![share("bob", &c, "bob-box")],
             vec![
-                tunnel_on("alice", &a, "p1", "https://p1.usr.chan.app"),
-                tunnel_on("bob", &c, "p2", "https://p2.usr.chan.app"),
+                tunnel_on("alice", &a, "p1", "https://p1.proxy.chan.app"),
+                tunnel_on("bob", &c, "p2", "https://p2.proxy.chan.app"),
             ],
         )
         .expect("roster");

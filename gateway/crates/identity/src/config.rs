@@ -18,7 +18,7 @@ pub struct Config {
     pub internal_bind_addr: SocketAddr,
     pub base_url: Url,
     /// Canonical proxy namespace origin (`DEVSERVER_PROXY_ORIGIN`),
-    /// e.g. `https://usr.chan.app`. Every controller-reported node
+    /// e.g. `https://proxy.chan.app`. Every controller-reported node
     /// base must sit exactly one DNS label below this apex with the
     /// same scheme and effective port before identity mints tenant
     /// origins from it.
@@ -241,8 +241,8 @@ impl Config {
     /// Build the tenant origin for one live devserver from its
     /// controller-reported node base: `{owner}--{disc}.` prefixed to
     /// the node base host with scheme and explicit port preserved,
-    /// e.g. `https://alice--0123456789ab.p1.usr.chan.app` out of
-    /// `https://p1.usr.chan.app`. `disc` is the first 12 chars of the
+    /// e.g. `https://alice--0123456789ab.p1.proxy.chan.app` out of
+    /// `https://p1.proxy.chan.app`. `disc` is the first 12 chars of the
     /// devserver id; owner and disc are lowercased explicitly because
     /// devserver-proxy lowercases the label on ingest and the minted
     /// host must equal the canonical `aud` the proxy verifies. Ids
@@ -319,7 +319,7 @@ impl Config {
             .expect("DEVSERVER_PROXY_ORIGIN requires a host");
         let node_host = url.host_str().expect("canonical origin requires a host");
         // The leading dot in the suffix keeps lookalikes like
-        // `evilusr.chan.app` from matching the `usr.chan.app` apex.
+        // `evilproxy.chan.app` from matching the `proxy.chan.app` apex.
         let suffix = format!(".{apex_host}");
         let child = node_host
             .strip_suffix(&suffix)
@@ -501,17 +501,17 @@ mod tests {
 
     #[test]
     fn tenant_origin_prefixes_owner_and_disc_to_the_node_host() {
-        let cfg = test_cfg("https://usr.chan.app");
+        let cfg = test_cfg("https://proxy.chan.app");
         let t = cfg
             .tenant_origin_for(
                 "alice",
                 "0123456789abcdef0123456789abcdef",
                 "p1",
-                "https://p1.usr.chan.app",
+                "https://p1.proxy.chan.app",
             )
             .expect("valid node base");
-        assert_eq!(t.origin, "https://alice--0123456789ab.p1.usr.chan.app");
-        assert_eq!(t.authority, "alice--0123456789ab.p1.usr.chan.app");
+        assert_eq!(t.origin, "https://alice--0123456789ab.p1.proxy.chan.app");
+        assert_eq!(t.authority, "alice--0123456789ab.p1.proxy.chan.app");
 
         // Lowercased explicitly on both parts: the proxy's host parse
         // and the canonical aud are lowercase.
@@ -520,16 +520,16 @@ mod tests {
                 "USER-1",
                 "ABCDEFABCDEFABCDEF",
                 "p1",
-                "https://p1.usr.chan.app",
+                "https://p1.proxy.chan.app",
             )
             .expect("valid node base");
-        assert_eq!(t.origin, "https://user-1--abcdefabcdef.p1.usr.chan.app");
+        assert_eq!(t.origin, "https://user-1--abcdefabcdef.p1.proxy.chan.app");
 
         // Short (test-fixture) ids are used whole.
         let t = cfg
-            .tenant_origin_for("alice", "abc123", "p1", "https://p1.usr.chan.app")
+            .tenant_origin_for("alice", "abc123", "p1", "https://p1.proxy.chan.app")
             .expect("valid node base");
-        assert_eq!(t.origin, "https://alice--abc123.p1.usr.chan.app");
+        assert_eq!(t.origin, "https://alice--abc123.p1.proxy.chan.app");
     }
 
     #[test]
@@ -537,36 +537,36 @@ mod tests {
         // A non-default port survives only when the apex itself carries
         // it (the effective ports must match); the tenant origin keeps
         // the explicit suffix.
-        let cfg = test_cfg("https://usr.chan.app:8443");
+        let cfg = test_cfg("https://proxy.chan.app:8443");
         let t = cfg
-            .tenant_origin_for("alice", "abc123", "p1", "https://p1.usr.chan.app:8443")
+            .tenant_origin_for("alice", "abc123", "p1", "https://p1.proxy.chan.app:8443")
             .expect("non-default port node base");
-        assert_eq!(t.origin, "https://alice--abc123.p1.usr.chan.app:8443");
-        assert_eq!(t.authority, "alice--abc123.p1.usr.chan.app:8443");
+        assert_eq!(t.origin, "https://alice--abc123.p1.proxy.chan.app:8443");
+        assert_eq!(t.authority, "alice--abc123.p1.proxy.chan.app:8443");
 
-        let cfg = test_cfg("http://usr.localtest.me:7002");
+        let cfg = test_cfg("http://proxy.localtest.me:7002");
         let t = cfg
-            .tenant_origin_for("alice", "abc123", "p1", "http://p1.usr.localtest.me:7002")
+            .tenant_origin_for("alice", "abc123", "p1", "http://p1.proxy.localtest.me:7002")
             .expect("http dev node base");
-        assert_eq!(t.origin, "http://alice--abc123.p1.usr.localtest.me:7002");
+        assert_eq!(t.origin, "http://alice--abc123.p1.proxy.localtest.me:7002");
     }
 
     #[test]
     fn tenant_origin_rejects_node_bases_outside_the_namespace() {
-        let cfg = test_cfg("https://usr.chan.app");
+        let cfg = test_cfg("https://proxy.chan.app");
         let id = "abc123";
         for bad in [
             // The bare apex is the shared ingress, not a node.
-            "https://usr.chan.app",
+            "https://proxy.chan.app",
             // Two labels below the apex is not a node base.
-            "https://deep.p1.usr.chan.app",
+            "https://deep.p1.proxy.chan.app",
             // A different namespace entirely.
             "https://p1.evil.example.net",
             // A suffix lookalike must not strip to a child label.
-            "https://p1.usr.chan.app.evil.net",
+            "https://p1.proxy.chan.app.evil.net",
             // Scheme and effective port must match the apex.
-            "http://p1.usr.chan.app",
-            "https://p1.usr.chan.app:8443",
+            "http://p1.proxy.chan.app",
+            "https://p1.proxy.chan.app:8443",
         ] {
             assert!(
                 cfg.tenant_origin_for("alice", id, "p1", bad).is_err(),
@@ -577,15 +577,15 @@ mod tests {
 
     #[test]
     fn tenant_origin_rejects_non_canonical_node_bases() {
-        let cfg = test_cfg("https://usr.chan.app");
+        let cfg = test_cfg("https://proxy.chan.app");
         let id = "abc123";
         for bad in [
             "not a url",
-            "ftp://p1.usr.chan.app",
-            "https://user@p1.usr.chan.app",
-            "https://p1.usr.chan.app/path",
-            "https://p1.usr.chan.app/?q=1",
-            "https://p1.usr.chan.app/#frag",
+            "ftp://p1.proxy.chan.app",
+            "https://user@p1.proxy.chan.app",
+            "https://p1.proxy.chan.app/path",
+            "https://p1.proxy.chan.app/?q=1",
+            "https://p1.proxy.chan.app/#frag",
         ] {
             assert!(
                 cfg.tenant_origin_for("alice", id, "p1", bad).is_err(),

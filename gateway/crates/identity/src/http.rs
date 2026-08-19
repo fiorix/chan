@@ -2983,7 +2983,7 @@ mod tests {
     #[tokio::test]
     async fn entry_handoff_preserves_origin_in_header_and_meta_policy() {
         let response =
-            entry_handoff_response("https://alice--aaaaaaaaaaaa.p1.usr.chan.app", "entry").unwrap();
+            entry_handoff_response("https://alice--aaaaaaaaaaaa.p1.proxy.chan.app", "entry").unwrap();
         assert_eq!(
             response.headers().get(header::REFERRER_POLICY),
             Some(&HeaderValue::from_static("strict-origin"))
@@ -3051,7 +3051,7 @@ mod tests {
     #[test]
     fn desktop_entry_response_pins_full_identity_and_exact_origin_fields() {
         let full_id = "a".repeat(64);
-        let proxy_origin = "https://alice--aaaaaaaaaaaa.p1.usr.chan.app";
+        let proxy_origin = "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app";
         let response = DesktopEntryResponse {
             owner_user_id: Uuid::nil(),
             username: "alice".to_string(),

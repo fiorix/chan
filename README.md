@@ -43,7 +43,7 @@ Gateway (separate Cargo workspace; the chan.app account, sign-in, and proxy surf
 
 - [gateway/crates/identity](gateway/crates/identity/design.md) - sign-in, PATs, discovery, desktop entry: the public account surface (gw.{domain}).
 - [gateway/crates/profile](gateway/crates/profile/design.md) - the authoritative user store.
-- [gateway/crates/devserver-proxy](gateway/crates/devserver-proxy/design.md) - the public data-plane edge for tunneled devservers ({proxy}.usr.{domain}).
+- [gateway/crates/devserver-proxy](gateway/crates/devserver-proxy/design.md) - the public data-plane edge for tunneled devservers ({proxy}.proxy.{domain}).
 - [gateway/crates/devserver-control](gateway/crates/devserver-control/design.md) - the fleet control plane: proxy directory, admission, kill routing.
 - [gateway/crates/gateway-common](gateway/crates/gateway-common/design.md) - the contracts the gateway services share.
 - [gateway/crates/admin](gateway/crates/admin/design.md) - the operator CLI.

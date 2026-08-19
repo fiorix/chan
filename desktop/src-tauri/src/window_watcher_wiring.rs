@@ -1074,20 +1074,20 @@ mod tests {
     #[test]
     fn native_gateway_websocket_uses_the_exact_proxy_origin() {
         let conn = DevserverConn {
-            host: "alice--0123456789ab.p1.usr.chan.app".into(),
+            host: "alice--0123456789ab.p1.proxy.chan.app".into(),
             port: 443,
             token: String::new(),
             name: "alice".into(),
             gateway: Some(Box::new(crate::devserver::GatewayConn::new(
                 "https://gw.chan.app".into(),
                 "https://gw.chan.app/desktop/v1/devserver/entry".into(),
-                "https://alice--0123456789ab.p1.usr.chan.app".into(),
+                "https://alice--0123456789ab.p1.proxy.chan.app".into(),
                 "pat".into(),
             ))),
         };
         assert_eq!(
             gateway_ws_origin(&conn).unwrap(),
-            "https://alice--0123456789ab.p1.usr.chan.app"
+            "https://alice--0123456789ab.p1.proxy.chan.app"
         );
     }
 

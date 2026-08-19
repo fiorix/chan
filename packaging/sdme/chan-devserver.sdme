@@ -1,6 +1,6 @@
 # chan-devserver: an Ubuntu rootfs that runs one chan devserver as a lingering
 # systemd --user service, publishing its mounted workspaces over the gateway
-# tunnel at {handle}--{disc}.{proxy}.usr.chan.app. One container is one externally shared
+# tunnel at {handle}--{disc}.{proxy}.proxy.chan.app. One container is one externally shared
 # trust domain: provisioning a second Unix user is refused, and the managed user
 # cannot be root/uid 0/gid 0, have supplemental groups, or retain the legacy
 # sudoers drop-in. First provision must create a fresh dedicated account; only

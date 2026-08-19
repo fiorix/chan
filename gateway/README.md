@@ -1,10 +1,10 @@
 # chan-gateway
 
-The self-hostable server side of chan's tunnel: the identity, profile, devserver-control, and devserver-proxy services that sit behind `gw.{domain}` and `usr.{domain}`.
+The self-hostable server side of chan's tunnel: the identity, profile, devserver-control, and devserver-proxy services that sit behind `gw.{domain}` and `proxy.{domain}`.
 
-A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.usr.{domain}/` (each workspace tenant mounted at `/{slug}-{8hex}/`), turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
+A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.proxy.{domain}/` (each workspace tenant mounted at `/{slug}-{8hex}/`), turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
 
-`chan devserver run --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `usr.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
+`chan devserver run --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `proxy.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
 
 ## What's here
 
@@ -14,7 +14,7 @@ Seven crates; see [`design.md`](design.md) for the system design and lifecycles,
 - `identity`: `gw.{domain}`. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, and composite account/fleet admin operations.
 - `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, signed-cap admission, aggregate tunnel and tenant-session inventory, and command routing.
 - `devserver-control-proto`: control protocol frames, validated ids/origins, and shared tunnel/proxy view types.
-- `devserver-proxy`: `{proxy}.usr.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
+- `devserver-proxy`: `{proxy}.proxy.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.proxy.{domain}/{slug}-{8hex}/*`, behind the always-on devserver-gate (an unauthenticated request 404s like an unknown workspace, so probes can't enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
 - `admin`: operator CLI against profile's, identity's, and devserver-control's admin trees.
 - `gateway-common`: shared library (HTTP clients, devserver-gate JWT, token bucket, static files, validators).
 

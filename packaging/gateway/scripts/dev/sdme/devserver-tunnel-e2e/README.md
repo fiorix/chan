@@ -1,6 +1,6 @@
 # devserver tunnel e2e (cross-container, sdme)
 
-An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver run --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes: the immutable owner reaches the desktop-bridge guard, while a grantee is rejected by `require_local_mutation`. The production chan-gateway run (`--tunnel-url` against the `usr.chan.app` tunnel ingress) is a separate follow-up.
+An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver run --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes: the immutable owner reaches the desktop-bridge guard, while a grantee is rejected by `require_local_mutation`. The production chan-gateway run (`--tunnel-url` against the `proxy.chan.app` tunnel ingress) is a separate follow-up.
 
 ## What it proves
 
@@ -79,11 +79,11 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 
 | name                    | value                                              |
 |-------------------------|----------------------------------------------------|
-| `APEX_HOST`             | `usr.localtest.me`                           |
-| `WILDCARD_SUFFIX`       | `.usr.localtest.me`                          |
+| `APEX_HOST`             | `proxy.localtest.me`                           |
+| `WILDCARD_SUFFIX`       | `.proxy.localtest.me`                          |
 | `FORWARDED_PROTO`       | `https`                                             |
 | proxy public / tunnel   | loopback `:7002` / `:7100`; TLS edge `:7443` / `:7444` |
 | `IDENTITY_URL`          | `http://127.0.0.1:7799` (loopback stub)            |
 | `CHAN_DEVSERVER_LISTEN` | `1` (bind mgmt API; host reads the mounted prefix) |
 | tenant                  | user `alice`, workspace `notes`                    |
-| desktop entry origins   | `alice--<id-prefix>.p1.usr.localtest.me:7443` |
+| desktop entry origins   | `alice--<id-prefix>.p1.proxy.localtest.me:7443` |

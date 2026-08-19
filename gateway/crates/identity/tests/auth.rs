@@ -142,7 +142,7 @@ impl TestApp {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url,
-            devserver_proxy_origin: "https://usr.chan.app".parse().unwrap(),
+            devserver_proxy_origin: "https://proxy.chan.app".parse().unwrap(),
             devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
             database_url: url.clone(),
             cookie_secure: true,
@@ -1487,7 +1487,7 @@ async fn mock_live_devservers(
                 "peer_addr": null,
                 "connected_at": now.to_rfc3339(),
                 "proxy_id": "p1",
-                "proxy_base_url": "https://p1.usr.chan.app",
+                "proxy_base_url": "https://p1.proxy.chan.app",
                 "admission_lease": lease,
                 "admission_lease_expires_at": (now + chrono::Duration::seconds(120)).to_rfc3339(),
             })

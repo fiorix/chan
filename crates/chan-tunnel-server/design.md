@@ -6,7 +6,7 @@ The tunnel is per-DEVSERVER and always authenticated:
 
 - The registry's second key is the token-resolved `devserver_id` (`Validated.devserver_id`, lowercase hex SHA-256 of the PAT), not the client's `Hello.workspace` (an ignored `"devserver"` placeholder). A devserver carries its whole library through one registration; the `{workspace}` path segment is tenant routing only. The code keeps the historical `workspace` name on the registry's inner key, exported types, and the `workspace_tunnel` task; the value it carries is the `devserver_id`.
 - There is no `public` bit anywhere: `Hello.public`, `TUNNEL_PUBLIC_SCOPE`, `ServerError::MissingPublicScope`, the `missing_public_scope` refusal, and the `public` field on `TunnelHandle` / `WorkspaceInfo` / `TunnelInfo` do not exist. A viewer is authorized by the gateway's one `devserver_access(owner, devserver, caller)` check (a grant is the whole library).
-- The gateway consumer is `devserver-proxy`; the public tenant origin is `{owner}--{disc}.{proxy}.usr.{domain}` (`disc` = the first 12 hex chars of the devserver id); it mounts its own segment-preserving reverse proxy. The forwarding, cap, and upgrade hygiene lives in that gateway layer; the public-side controls in section 6 document the contract it meets.
+- The gateway consumer is `devserver-proxy`; the public tenant origin is `{owner}--{disc}.{proxy}.proxy.{domain}` (`disc` = the first 12 hex chars of the devserver id); it mounts its own segment-preserving reverse proxy. The forwarding, cap, and upgrade hygiene lives in that gateway layer; the public-side controls in section 6 document the contract it meets.
 
 ## Cross-crate context
 
@@ -172,7 +172,7 @@ The lease expires independently of TCP/yamux liveness. Before expiry, the client
 
 ### Gateway forwarding path
 
-Public-side forwarding lives in the gateway; this crate exposes only `TunnelHandle::open`. The proxy parses `{owner}` and the optional `--{disc}` discriminator from the wildcard host (`{owner}--{disc}.{proxy}.usr.{domain}`), gates the viewer with the opaque per-devserver `__Host-devserver_gate` session cookie (minted by the Ed25519 entry exchange), and forwards the full segment-preserving `/{workspace}/...` path over the substream. The forwarding contract it meets:
+Public-side forwarding lives in the gateway; this crate exposes only `TunnelHandle::open`. The proxy parses `{owner}` and the optional `--{disc}` discriminator from the wildcard host (`{owner}--{disc}.{proxy}.proxy.{domain}`), gates the viewer with the opaque per-devserver `__Host-devserver_gate` session cookie (minted by the Ed25519 entry exchange), and forwards the full segment-preserving `/{workspace}/...` path over the substream. The forwarding contract it meets:
 
 - One outbound substream per public request, driven by `hyper::client::conn::http1` with `with_upgrades()`. h1 maps cleanly because the substream is already muxed (see "Why h1 over yamux").
 - A single deadline covers `handle.open()` (502 on `Disconnected`, 504 on timeout), the h1 handshake, and `send_request` up to response headers.

@@ -52,7 +52,7 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
-        Self::with_proxy_origin("https://usr.chan.app").await
+        Self::with_proxy_origin("https://proxy.chan.app").await
     }
 
     async fn with_proxy_origin(proxy_origin: &str) -> Self {
@@ -213,7 +213,7 @@ async fn mock_tunnels(app: &TestApp, owner_user_id: Uuid, username: &str, devser
         username,
         devserver_ids,
         "p1",
-        "https://p1.usr.chan.app",
+        "https://p1.proxy.chan.app",
     )
     .await;
 }
@@ -298,7 +298,7 @@ async fn post_entry_body(app: &TestApp, pat: &str, body: Value) -> (StatusCode, 
 /// The tenant host identity mints for `(username, dsid)` on `p1`,
 /// the node the default tunnel mock reports.
 fn disc_host(username: &str, dsid: &str) -> String {
-    format!("{username}--{}.p1.usr.chan.app", &dsid[..12])
+    format!("{username}--{}.p1.proxy.chan.app", &dsid[..12])
 }
 
 #[tokio::test]
@@ -836,7 +836,7 @@ async fn entry_404_reasons_unchanged_for_account_pat() {
 async fn entry_origin_preserves_node_non_default_port() {
     // The apex carries a non-default port, so the node base may too;
     // the minted aud, proxy_origin, and exchange URL all keep it.
-    let app = TestApp::with_proxy_origin("https://usr.chan.app:8443").await;
+    let app = TestApp::with_proxy_origin("https://proxy.chan.app:8443").await;
     let uid = app.insert_user().await;
     let username = placeholder_username(uid);
     let pat = app.desktop_pat(uid).await;
@@ -848,7 +848,7 @@ async fn entry_origin_preserves_node_non_default_port() {
         &username,
         &[&dsid],
         "p1",
-        "https://p1.usr.chan.app:8443",
+        "https://p1.proxy.chan.app:8443",
     )
     .await;
     Mock::given(method("GET"))
@@ -859,7 +859,7 @@ async fn entry_origin_preserves_node_non_default_port() {
 
     let (s, body) = post_entry(&app, &pat).await;
     assert_eq!(s, StatusCode::OK, "got {body}");
-    let origin = format!("https://{}--{}.p1.usr.chan.app:8443", username, &dsid[..12]);
+    let origin = format!("https://{}--{}.p1.proxy.chan.app:8443", username, &dsid[..12]);
     assert_eq!(body["proxy_origin"], origin);
     assert_eq!(
         body["entry_exchange_url"],
@@ -876,7 +876,7 @@ async fn entry_origin_preserves_node_non_default_port() {
         &ring,
         token,
         "p1",
-        &format!("{}--{}.p1.usr.chan.app:8443", username, &dsid[..12]),
+        &format!("{}--{}.p1.proxy.chan.app:8443", username, &dsid[..12]),
         &dsid,
         uid,
     )
@@ -890,11 +890,11 @@ async fn entry_node_base_outside_the_namespace_is_upstream_error() {
     // Fail-closed: a controller row identity cannot place under the
     // configured apex is a 502, never a mint against the shared apex.
     for bad_base in [
-        "https://usr.chan.app",             // the bare apex is not a node
+        "https://proxy.chan.app",             // the bare apex is not a node
         "https://other.example.net",        // outside the namespace
-        "https://p1.usr.chan.app.evil.net", // suffix lookalike
-        "https://p1.usr.chan.app/path",     // not an origin
-        "http://p1.usr.chan.app",           // scheme mismatch
+        "https://p1.proxy.chan.app.evil.net", // suffix lookalike
+        "https://p1.proxy.chan.app/path",     // not an origin
+        "http://p1.proxy.chan.app",           // scheme mismatch
     ] {
         let app = TestApp::new().await;
         let uid = app.insert_user().await;

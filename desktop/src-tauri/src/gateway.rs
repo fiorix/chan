@@ -1252,7 +1252,7 @@ mod tests {
             identity_origin: "https://gw.chan.app".into(),
             desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
             desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://usr.chan.app".into(),
+            devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         });
@@ -1334,8 +1334,8 @@ mod tests {
 
     #[test]
     fn diff_classifies_a_node_move_apart_from_online_flips() {
-        let p1 = "https://alice--a.p1.usr.chan.app";
-        let p2 = "https://alice--a.p2.usr.chan.app";
+        let p1 = "https://alice--a.p1.proxy.chan.app";
+        let p2 = "https://alice--a.p2.proxy.chan.app";
         let moved = vec![("alice".to_string(), "a".to_string())];
 
         // Online under one node, still online under another: a move, and
@@ -1389,14 +1389,14 @@ mod tests {
         state.devservers.set(
             id.clone(),
             devserver::DevserverConn {
-                host: "bob--d.p1.usr.chan.app".into(),
+                host: "bob--d.p1.proxy.chan.app".into(),
                 port: 443,
                 token: String::new(),
                 name: "old-node".into(),
                 gateway: Some(Box::new(devserver::GatewayConn::new(
                     "https://id.example.test".into(),
                     "https://id.example.test/desktop/v1/devserver/entry".into(),
-                    "https://bob--d.p1.usr.chan.app".into(),
+                    "https://bob--d.p1.proxy.chan.app".into(),
                     "pat".into(),
                 ))),
             },
@@ -1481,7 +1481,7 @@ mod tests {
         // The new roster origin never reached the capability mint: the
         // entry flow is the only mint path.
         assert!(!crate::runtime_capability::is_minted(
-            "https://bob--d.p1.usr.chan.app"
+            "https://bob--d.p1.proxy.chan.app"
         ));
     }
 
@@ -1747,7 +1747,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_parses_a_fresh_roster_and_derives_shared() {
         let body = r#"{"user_id":"11111111-1111-1111-1111-111111111111","username":"alice","devservers":[
-            {"owner_user_id":"11111111-1111-1111-1111-111111111111","owner":"alice","devserver_id":"a1","label":"laptop","online":true,"proxy_origin":"https://alice--a1.p1.usr.chan.app"},
+            {"owner_user_id":"11111111-1111-1111-1111-111111111111","owner":"alice","devserver_id":"a1","label":"laptop","online":true,"proxy_origin":"https://alice--a1.p1.proxy.chan.app"},
             {"owner_user_id":"22222222-2222-2222-2222-222222222222","owner":"bob","devserver_id":"b1","label":"","online":false,"proxy_origin":null}]}"#;
         let (url, server) = spawn_roster_stub(resp(200, Some("\"e1\""), body)).await;
         match fetch_roster(&url, "pat-secret", None).await {
@@ -1763,7 +1763,7 @@ mod tests {
                 assert!(rows[1].shared, "foreign owner derives shared");
                 assert_eq!(
                     rows[0].proxy_origin.as_deref(),
-                    Some("https://alice--a1.p1.usr.chan.app"),
+                    Some("https://alice--a1.p1.proxy.chan.app"),
                     "the online row carries its node origin"
                 );
                 assert_eq!(rows[1].proxy_origin, None, "the offline row is null");
@@ -1778,9 +1778,9 @@ mod tests {
     /// validated response reaches `mint_exact_origin_grant`.
     #[tokio::test]
     async fn roster_parsing_mints_no_origin_authority() {
-        const ROSTER_ORIGIN: &str = "https://carol--c9.p9.usr.chan.app";
+        const ROSTER_ORIGIN: &str = "https://carol--c9.p9.proxy.chan.app";
         let body = r#"{"user_id":"33333333-3333-3333-3333-333333333333","username":"carol","devservers":[
-            {"owner_user_id":"33333333-3333-3333-3333-333333333333","owner":"carol","devserver_id":"c9","label":"","online":true,"proxy_origin":"https://carol--c9.p9.usr.chan.app"}]}"#;
+            {"owner_user_id":"33333333-3333-3333-3333-333333333333","owner":"carol","devserver_id":"c9","label":"","online":true,"proxy_origin":"https://carol--c9.p9.proxy.chan.app"}]}"#;
         let (url, server) = spawn_roster_stub(resp(200, None, body)).await;
         match fetch_roster(&url, "s", None).await {
             RosterFetch::Fresh { rows, .. } => {
@@ -1841,7 +1841,7 @@ mod tests {
                             "identity_origin": o,
                             "desktop_authorize_url": format!("{o}/desktop/authorize"),
                             "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
-                            "devserver_proxy_origin": "https://usr.chan.app",
+                            "devserver_proxy_origin": "https://proxy.chan.app",
                             "devserver_proxy_host_depth": 2,
                             "roster_url": format!("{o}/desktop/v1/devservers"),
                         }))
@@ -1860,7 +1860,7 @@ mod tests {
                             "devserver_id": "a1",
                             "label": "laptop",
                             "online": true,
-                            "proxy_origin": "https://alice--a1.p1.usr.chan.app"
+                            "proxy_origin": "https://alice--a1.p1.proxy.chan.app"
                         }]
                     }))
                 }),
@@ -1905,7 +1905,7 @@ mod tests {
                 identity_origin: origin.clone(),
                 desktop_authorize_url: format!("{origin}/desktop/authorize"),
                 desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
-                devserver_proxy_origin: "https://usr.chan.app".into(),
+                devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
             });

@@ -43,7 +43,7 @@ C_PROXY="${C_PROXY:-gw-e2e-proxy}"
 C_DS="${C_DS:-gw-e2e-ds}"
 
 PROXY_ID="p1"
-APEX="usr.localtest.me"
+APEX="proxy.localtest.me"
 NODE_HOST="$PROXY_ID.$APEX"
 SUFFIX=".$NODE_HOST"
 TENANT_USER="alice"

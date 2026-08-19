@@ -3,7 +3,7 @@
 //! The entry point is `serve_tunnel_listener`, an h2c accept loop
 //! that runs `h2::server` directly on the TCP socket to serve
 //! `POST /v1/tunnel`; nginx (`grpc_pass`) forwards h2c from the
-//! tunnel ingress (`usr.chan.app/v1/tunnel`) to devserver-proxy,
+//! tunnel ingress (`proxy.chan.app/v1/tunnel`) to devserver-proxy,
 //! which runs this listener.
 //! After the Hello/HelloAck handshake the duplex is handed to
 //! yamux, the registered workspace is inserted into the shared
@@ -258,7 +258,7 @@ impl RegistrationAdmission for AllowAllAdmission {
 
 /// Public path prefix shape: `/{key}`, where `key` is the registration's
 /// second registry key (the token-resolved `devserver_id`). The fronting
-/// proxy uses wildcard hosts (`{owner}--{disc}.{proxy}.usr.{domain}`), so
+/// proxy uses wildcard hosts (`{owner}--{disc}.{proxy}.proxy.{domain}`), so
 /// the username lives in the host's `{owner}--{disc}` first label, not in
 /// the path. A devserver tenant
 /// already self-prefixes at its own public slug and the proxy forwards the
@@ -318,7 +318,7 @@ where
     // Defense-in-depth: the validator has already authenticated the
     // token, but the username it returns flows into the `{owner}--{disc}`
     // first label of the public host
-    // (`{owner}--{disc}.{proxy}.usr.{domain}`). If the upstream identity
+    // (`{owner}--{disc}.{proxy}.proxy.{domain}`). If the upstream identity
     // service ever emits a username with `/`, `..`, whitespace, or other
     // host-affecting bytes, the fronting proxy would mis-route or
     // leak it. Refuse here so the rest of the pipeline can

@@ -45,8 +45,8 @@ pub fn router(
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         // Single fallback that dispatches on the Host header. The node
-        // apex (p1.usr.chan.app) only carries health/readiness; everything
-        // else 404s. The node wildcard ({user}--{disc}.p1.usr.chan.app)
+        // apex (p1.proxy.chan.app) only carries health/readiness; everything
+        // else 404s. The node wildcard ({user}--{disc}.p1.proxy.chan.app)
         // hands off to the proxy module.
         .fallback(dispatch)
         .with_state(state)

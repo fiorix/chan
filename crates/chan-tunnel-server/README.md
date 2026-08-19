@@ -1,6 +1,6 @@
 # chan-tunnel-server
 
-Server-side library for chan-tunnel: terminates the long-lived h2c POSTs from `chan devserver` clients, runs Hello / HelloAck, registers each tunnel in a shared `Registry`, and opens fresh yamux substreams to forward requests (including WebSocket upgrades) into the registered peer. Designed to be embedded into a host process (the gateway's `devserver-proxy`) which provides the `Validator` impl, routes `{owner}--{disc}.{proxy}.usr.{domain}/{workspace}/...` to the registered peer, and lets nginx terminate TLS in front.
+Server-side library for chan-tunnel: terminates the long-lived h2c POSTs from `chan devserver` clients, runs Hello / HelloAck, registers each tunnel in a shared `Registry`, and opens fresh yamux substreams to forward requests (including WebSocket upgrades) into the registered peer. Designed to be embedded into a host process (the gateway's `devserver-proxy`) which provides the `Validator` impl, routes `{owner}--{disc}.{proxy}.proxy.{domain}/{workspace}/...` to the registered peer, and lets nginx terminate TLS in front.
 
 ```toml
 [dependencies]

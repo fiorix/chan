@@ -8846,7 +8846,7 @@ mod tests {
         assert!(looks_like_devserver_url("https://box.example.com:8787"));
         assert!(looks_like_devserver_url("http://127.0.0.1:8787"));
         assert!(looks_like_devserver_url(
-            "https://alice--1a2b3c4d5e6f.p1.usr.chan.app"
+            "https://alice--1a2b3c4d5e6f.p1.proxy.chan.app"
         ));
         // Everything else is a local path: bare host:port (no `//`), a
         // relative or absolute path, `.`, a Windows drive path, and an empty
@@ -11701,7 +11701,7 @@ mod tests {
     fn devserver_systemd_unit_tunnel_carries_token_and_url() {
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
@@ -11717,7 +11717,7 @@ mod tests {
         // (loopback, OS-assigned port), so no default can fossilize here.
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver run \
-             --tunnel-url=https://usr.chan.app/v1/tunnel\n"
+             --tunnel-url=https://proxy.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
         assert!(!unit.contains("--port="));
@@ -11725,7 +11725,7 @@ mod tests {
         // and the endpoint rides one too, so the terminals this service spawns
         // inherit it and can run their own `chan devserver` verbs.
         assert!(unit.contains("Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n"));
-        assert!(unit.contains("Environment=\"CHAN_TUNNEL_URL=https://usr.chan.app/v1/tunnel\"\n"));
+        assert!(unit.contains("Environment=\"CHAN_TUNNEL_URL=https://proxy.chan.app/v1/tunnel\"\n"));
         // The systemd fdstore scaffold is unchanged from the non-tunnel unit.
         assert!(unit.contains("Type=notify"));
         assert!(unit.contains("NotifyAccess=main"));
@@ -11738,7 +11738,7 @@ mod tests {
         // ExecStart, so the tunnel service binds exactly there.
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: Some("0.0.0.0".parse().unwrap()),
             pinned_port: Some(9000),
             pinned_name: None,
@@ -11751,13 +11751,13 @@ mod tests {
         );
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver run --bind=0.0.0.0 \
-             --port=9000 --tunnel-url=https://usr.chan.app/v1/tunnel\n"
+             --port=9000 --tunnel-url=https://proxy.chan.app/v1/tunnel\n"
         ));
         // Each field pins independently: a port-only pin keeps the bind
         // omitted (the service resolves the loopback default).
         let port_only = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: Some(9000),
             pinned_name: None,
@@ -11770,7 +11770,7 @@ mod tests {
         );
         assert!(unit.contains(
             "ExecStart=/home/dev/.local/bin/chan devserver run --port=9000 \
-             --tunnel-url=https://usr.chan.app/v1/tunnel\n"
+             --tunnel-url=https://proxy.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
     }
@@ -12010,7 +12010,7 @@ mod tests {
     fn devserver_systemd_unit_tunnel_renders_the_whole_unit() {
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
@@ -12033,9 +12033,9 @@ mod tests {
              FileDescriptorStoreMax=512\n\
              KillMode=process\n\
              Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n\
-             Environment=\"CHAN_TUNNEL_URL=https://usr.chan.app/v1/tunnel\"\n\
+             Environment=\"CHAN_TUNNEL_URL=https://proxy.chan.app/v1/tunnel\"\n\
              ExecStart=/home/dev/.local/bin/chan devserver run \
-             --tunnel-url=https://usr.chan.app/v1/tunnel\n\
+             --tunnel-url=https://proxy.chan.app/v1/tunnel\n\
              TimeoutStartSec=10min\n\
              Restart=on-failure\n\
              WatchdogSec=30\n\
@@ -12081,7 +12081,7 @@ mod tests {
         // back out of a rendered unit.
         let tunnel = SystemdTunnel {
             token: "chan_pat_round_trip".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: Some("0.0.0.0".parse().unwrap()),
             pinned_port: Some(9000),
             pinned_name: Some("office box".to_string()),
@@ -12098,7 +12098,7 @@ mod tests {
         );
         assert_eq!(
             persisted_tunnel_url(&unit),
-            Some("https://usr.chan.app/v1/tunnel".to_string())
+            Some("https://proxy.chan.app/v1/tunnel".to_string())
         );
         assert_eq!(
             persisted_tunnel_pins(&unit),
@@ -12246,7 +12246,7 @@ mod tests {
         // carry them raw.
         let tunnel = SystemdTunnel {
             token: "chan_pat_abc123".to_string(),
-            url: "https://usr.chan.app/v1/tunnel".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
             pinned_bind: None,
             pinned_port: None,
             pinned_name: Some("office \"box\"\\".to_string()),

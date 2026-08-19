@@ -8,7 +8,7 @@
 //!
 //! Scope is intentionally flat: a token authenticates a user. Workspace
 //! ownership is enforced at the tenant host
-//! (`{owner}--{disc}.{proxy}.usr.{domain}`) by chan-tunnel, not via
+//! (`{owner}--{disc}.{proxy}.proxy.{domain}`) by chan-tunnel, not via
 //! per-token bindings; the workspace is a path segment only.
 //!
 //! Every state change writes one row to `api_token_audit`. Actions:

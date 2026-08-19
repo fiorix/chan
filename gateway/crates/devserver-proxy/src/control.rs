@@ -1087,8 +1087,8 @@ mod tests {
         Arc::new(Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             tunnel_bind_addr: "127.0.0.1:0".parse().unwrap(),
-            apex_host: "p1.usr.chan.app".into(),
-            wildcard_suffix: ".p1.usr.chan.app".into(),
+            apex_host: "p1.proxy.chan.app".into(),
+            wildcard_suffix: ".p1.proxy.chan.app".into(),
             identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
             identity_auth_token: "identity-token".into(),
             dashboard_url: "https://gw.chan.app/workspaces".into(),
@@ -1115,7 +1115,7 @@ mod tests {
             proxy_token: TEST_PROXY_TOKEN.into(),
             proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
             proxy_base_url: devserver_control_proto::CanonicalOrigin::parse(
-                "https://p1.usr.chan.app",
+                "https://p1.proxy.chan.app",
             )
             .unwrap(),
             max_response_bytes: None,
@@ -1164,7 +1164,7 @@ mod tests {
         let (controller, actor_task) = spawn_controller_owned(100);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_addr = listener.local_addr().unwrap();
-        let template = ProxyOriginTemplate::parse("https://{proxy_id}.usr.chan.app").unwrap();
+        let template = ProxyOriginTemplate::parse("https://{proxy_id}.proxy.chan.app").unwrap();
         let (listener_shutdown, listener_shutdown_rx) = watch::channel(false);
         let signer =
             AdmissionLeaseSigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
@@ -2092,7 +2092,7 @@ mod tests {
             let _ = connection.await;
         });
         let request = Request::get(path)
-            .header(header::HOST, "alice.p1.usr.chan.app")
+            .header(header::HOST, "alice.p1.proxy.chan.app")
             .body(http_body_util::Empty::<bytes::Bytes>::new())
             .unwrap();
         let response = sender.send_request(request).await.expect("h1 response");
@@ -2211,7 +2211,7 @@ mod tests {
                 subject_user_id: Uuid::new_v4(),
                 owner_user_id: Uuid::new_v4(),
                 devserver_id: "ds-1".into(),
-                audience: "https://alice--0123456789ab.p1.usr.chan.app".into(),
+                audience: "https://alice--0123456789ab.p1.proxy.chan.app".into(),
             })
             .unwrap();
         assert_eq!(proxy.sessions.len(), 1);

@@ -44,7 +44,7 @@ type RefusalForm = "release" | "unreferenced" | "denied";
 function aclRefusal(cmd: string, form: RefusalForm): string {
   if (form === "release") return `Command ${cmd} not allowed by ACL`;
   if (form === "unreferenced") return `${cmd} not allowed. Command not found`;
-  return `${cmd} explicitly denied on origin https://a--b.c.usr.example\n\nreferenced by: capability: workspace-window, permission: allow-create-library-window`;
+  return `${cmd} explicitly denied on origin https://a--b.c.proxy.example\n\nreferenced by: capability: workspace-window, permission: allow-create-library-window`;
 }
 
 /// A webview whose app grants some commands and refuses others. Every other

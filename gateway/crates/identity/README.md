@@ -45,8 +45,8 @@ export BIND_ADDR=127.0.0.1:7000
 # INTERNAL_BIND_ADDR is 127.0.0.1:7001).
 export INTERNAL_BIND_ADDR=127.0.0.1:7004
 export BASE_URL=http://127.0.0.1:7000
-export DEVSERVER_PROXY_ORIGIN=http://usr.localtest.me:7002
-export DEVSERVER_TUNNEL_ORIGIN=http://usr.localtest.me:7002
+export DEVSERVER_PROXY_ORIGIN=http://proxy.localtest.me:7002
+export DEVSERVER_TUNNEL_ORIGIN=http://proxy.localtest.me:7002
 export PROFILE_SERVICE_URL=http://127.0.0.1:7001
 export PROFILE_AUTH_TOKEN=dev-service-token
 export PROFILE_ADMIN_TOKEN=dev-profile-admin-token

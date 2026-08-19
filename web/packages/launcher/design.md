@@ -32,7 +32,7 @@ flowchart TB
     subgraph surfaces["3 serving surfaces -- same bundle, per-surface install"]
         direction LR
         DEV["devserver (build_devserver_app)<br/>bearer=Some(devserver token) · serve_addr=Some(addr) full mutation<br/>tunnel requests carry TunnelOrigin: owner=full, else read-only"]
-        GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.usr.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
+        GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.proxy.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
         LOOP["desktop loopback<br/>bearer=Some(per-launch token) · serve_addr=Some(addr) full mutation"]
     end
     DEV --- GW
@@ -95,7 +95,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 1. **devserver** (`build_devserver_app`) -- served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
-3. **gateway-proxied** -- the devserver reached through `devserver-proxy` at `{owner}--{disc}.{proxy}.usr.{domain}/` (ex `{owner}--{disc}.{region}.usr.chan.app/`).
+3. **gateway-proxied** -- the devserver reached through `devserver-proxy` at `{owner}--{disc}.{proxy}.proxy.{domain}/` (ex `{owner}--{disc}.{region}.proxy.chan.app/`).
 
 ## Per-surface auth and the read-only / mutation split
 

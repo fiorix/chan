@@ -479,7 +479,7 @@ mod tests {
                 "peer_addr": "192.0.2.7:52011",
                 "connected_at": "2026-07-15T00:00:00Z",
                 "proxy_id": "p1",
-                "proxy_base_url": "https://p1.usr.chan.app",
+                "proxy_base_url": "https://p1.proxy.chan.app",
                 "max_connected_devservers": 3,
                 "admission_lease": "v1.payload.signature",
                 "admission_lease_expires_at": "2026-07-15T00:02:00Z"
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(v.devserver_id, "abc123");
         assert_eq!(v.peer_addr.as_deref(), Some("192.0.2.7:52011"));
         assert_eq!(v.proxy_id, "p1");
-        assert_eq!(v.proxy_base_url, "https://p1.usr.chan.app");
+        assert_eq!(v.proxy_base_url, "https://p1.proxy.chan.app");
         let debug = format!("{v:?}");
         assert!(!debug.contains("v1.payload.signature"));
         assert!(debug.contains("[REDACTED]"));
@@ -504,7 +504,7 @@ mod tests {
                 "peer_addr": null,
                 "connected_at": "2026-07-15T00:00:00Z",
                 "proxy_id": "p1",
-                "proxy_base_url": "https://p1.usr.chan.app",
+                "proxy_base_url": "https://p1.proxy.chan.app",
                 "admission_lease": "v1.payload.signature",
                 "admission_lease_expires_at": "2026-07-15T00:02:00Z"
             }"#,
@@ -533,7 +533,7 @@ mod tests {
         let v: ProxyView = serde_json::from_str(
             r#"{
                 "proxy_id": "p1",
-                "proxy_base_url": "https://p1.usr.chan.app",
+                "proxy_base_url": "https://p1.proxy.chan.app",
                 "package_version": "0.72.0",
                 "boot_id": "550e8400-e29b-41d4-a716-446655440000",
                 "connected_at": "2026-07-15T00:00:00Z",
@@ -552,7 +552,7 @@ mod tests {
         let joining: ProxyView = serde_json::from_str(
             r#"{
                 "proxy_id": "p2",
-                "proxy_base_url": "https://p2.usr.chan.app",
+                "proxy_base_url": "https://p2.proxy.chan.app",
                 "package_version": "0.72.0",
                 "boot_id": "550e8400-e29b-41d4-a716-446655440001",
                 "connected_at": "2026-07-15T00:00:00Z",

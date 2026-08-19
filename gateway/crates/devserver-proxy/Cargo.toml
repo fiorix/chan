@@ -68,7 +68,7 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Fleet data-plane service for the chan-gateway suite. The tunnel listener
 accepts controller-admitted registrations; wildcard
-*.p{n}.usr.<domain> hosts reverse-proxy tenant content into registered
+*.p{n}.proxy.<domain> hosts reverse-proxy tenant content into registered
 chan-serve peers. An authenticated controller session supplies fleet
 admission and liveness state. No SPA or local admin API lives in this
 binary; the dashboard lives at gw.<domain>."""

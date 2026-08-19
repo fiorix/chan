@@ -69,7 +69,7 @@ pub struct HelloAckOk {
     /// Public path prefix on the gateway's wildcard subdomain.
     /// Shape: `/{devserver_id}` (one leading slash, no trailing
     /// slash). The owner lives in the tenant host
-    /// (`{owner}--{disc}.{proxy}.usr.{domain}`), not in the path;
+    /// (`{owner}--{disc}.{proxy}.proxy.{domain}`), not in the path;
     /// the devserver client ignores this value (each tenant
     /// self-prefixes at its keyed pathspec).
     pub prefix: String,

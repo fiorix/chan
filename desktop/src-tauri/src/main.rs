@@ -9071,7 +9071,7 @@ mod tests {
                 identity_origin: origin.clone(),
                 desktop_authorize_url: format!("{origin}/desktop/authorize"),
                 desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
-                devserver_proxy_origin: "https://usr.chan.app".into(),
+                devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
             },

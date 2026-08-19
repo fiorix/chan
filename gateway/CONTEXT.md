@@ -14,7 +14,7 @@ The account, sign-in, and reverse-proxy surface for chan.app, a separate nested 
 
 ## Gate and identity
 
-**devserver-proxy**: The gateway reverse-proxy service at `{proxy}.usr.{domain}` (node apex) and `*.{proxy}.usr.{domain}` (wildcard), and the fleet data plane: many provisioned nodes can run it, each with a stable node id. _Avoid_: workspace-proxy, tenant-proxy
+**devserver-proxy**: The gateway reverse-proxy service at `{proxy}.proxy.{domain}` (node apex) and `*.{proxy}.proxy.{domain}` (wildcard), and the fleet data plane: many provisioned nodes can run it, each with a stable node id. _Avoid_: workspace-proxy, tenant-proxy
 
 **devserver-control**: The singleton, database-free control plane. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission, and command routing; serves `/admin/v1/*` to identity, profile, and the admin CLI. Every proxy node holds one authenticated h2 control session to it. _Avoid_: controller-service, fleet-db
 

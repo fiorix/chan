@@ -1,6 +1,6 @@
 # devserver-proxy
 
-Public-facing service at `{proxy}.usr.{domain}` (node apex) and `*.{proxy}.usr.{domain}` (wildcard). Reverse-proxies HTTP / WebSocket traffic into a user's running `chan devserver` instances. Embeds `chan-tunnel-server` to terminate registrations from those instances on a separate h2c listener; every registration is admitted by devserver-control before the client sees `HelloAck::Ok`. No SPA or database; proxy-local browser sessions and entry replay state are bounded in-memory state.
+Public-facing service at `{proxy}.proxy.{domain}` (node apex) and `*.{proxy}.proxy.{domain}` (wildcard). Reverse-proxies HTTP / WebSocket traffic into a user's running `chan devserver` instances. Embeds `chan-tunnel-server` to terminate registrations from those instances on a separate h2c listener; every registration is admitted by devserver-control before the client sees `HelloAck::Ok`. No SPA or database; proxy-local browser sessions and entry replay state are bounded in-memory state.
 
 ## Role in the system
 
@@ -35,8 +35,8 @@ cargo run -p devserver-proxy
 
 The recorded public origins use `https` because the config refuses a cleartext public origin whose host is not a loopback literal; the listeners themselves stay loopback cleartext in dev. For the full local stack (with identity + profile + Postgres), prefer `packaging/gateway/scripts/dev/setup.sh` + `packaging/gateway/scripts/dev/run.sh`. Two listeners come up:
 
-- `BIND_ADDR` (7002): public HTTP. `usr.{domain}` sits behind nginx + TLS in production; loopback in dev.
-- `TUNNEL_BIND_ADDR` (7100): h2c. nginx `grpc_pass`es the `usr.{domain}/v1/tunnel` ingress here; `chan devserver` instances dial it for the handshake.
+- `BIND_ADDR` (7002): public HTTP. `proxy.{domain}` sits behind nginx + TLS in production; loopback in dev.
+- `TUNNEL_BIND_ADDR` (7100): h2c. nginx `grpc_pass`es the `proxy.{domain}/v1/tunnel` ingress here; `chan devserver` instances dial it for the handshake.
 
 ## Env vars
 
@@ -76,8 +76,8 @@ The packaged env file and the dev-run example point `IDENTITY_URL` at identity's
 
 ## Routes
 
-- Apex (`{proxy}.usr.{domain}`): `POST /v1/tunnel` (raw h2c, on the tunnel listener), `/healthz`, and `/readyz`. `/readyz` is 200 only once the controller session reaches `FleetReady`; until then new tunnel admissions are refused with the `control_unavailable` code. Per-user devserver capacity is a fleet-wide decision made by the controller at admission and surfaces as `too_many_workspaces`. The aggregate `/admin/v1/*` tree lives on devserver-control, not on the proxy.
-- Wildcard (`{owner}--{disc}.{proxy}.usr.{domain}` addressing one devserver by the first 12 hex chars of its id): the per-devserver reverse proxy. `POST /_chan/entry` exchanges a body credential; ordinary paths require the opaque `__Host-devserver_gate` cookie. On pass the full `/{workspace}/...` path is forwarded into the tunnel (segment-preserving) and the devserver routes the tenant. `/api/devserver/*` (the local-only management API) is 404'd here.
+- Apex (`{proxy}.proxy.{domain}`): `POST /v1/tunnel` (raw h2c, on the tunnel listener), `/healthz`, and `/readyz`. `/readyz` is 200 only once the controller session reaches `FleetReady`; until then new tunnel admissions are refused with the `control_unavailable` code. Per-user devserver capacity is a fleet-wide decision made by the controller at admission and surfaces as `too_many_workspaces`. The aggregate `/admin/v1/*` tree lives on devserver-control, not on the proxy.
+- Wildcard (`{owner}--{disc}.{proxy}.proxy.{domain}` addressing one devserver by the first 12 hex chars of its id): the per-devserver reverse proxy. `POST /_chan/entry` exchanges a body credential; ordinary paths require the opaque `__Host-devserver_gate` cookie. On pass the full `/{workspace}/...` path is forwarded into the tunnel (segment-preserving) and the devserver routes the tenant. `/api/devserver/*` (the local-only management API) is 404'd here.
 
 Each opaque tenant session receives a separate random admin UUID plus wall-clock creation and expiry. The proxy publishes only that redacted record over control protocol v2. Cookie ids, entry replay ids, audiences, assertions, and transport internals stay local. Controller revocations support exact subject/owner/devserver, subject, admin UUID, owner, and all sessions, and acknowledgement waits for matching HTTP and WebSocket transports to drain.
 

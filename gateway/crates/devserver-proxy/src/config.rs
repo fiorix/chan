@@ -29,19 +29,19 @@ pub const TRANSFER_ROUTE_TIMEOUT: std::time::Duration =
 #[derive(Clone)]
 pub struct Config {
     /// Public listener (node apex + node wildcard, e.g.
-    /// `p1.usr.chan.app` + `*.p1.usr.chan.app`). Behind nginx + TLS.
+    /// `p1.proxy.chan.app` + `*.p1.proxy.chan.app`). Behind nginx + TLS.
     pub bind_addr: SocketAddr,
     /// Tunnel listener (apex `/v1/tunnel`). h2c behind nginx
     /// `grpc_pass`; `chan devserver` instances dial the tunnel ingress
-    /// (e.g. `https://usr.chan.app/v1/tunnel`) over h2/TLS, terminated
+    /// (e.g. `https://proxy.chan.app/v1/tunnel`) over h2/TLS, terminated
     /// at nginx and forwarded here cleartext.
     pub tunnel_bind_addr: SocketAddr,
-    /// Apex hostname (e.g. `p1.usr.chan.app`). Used to distinguish
+    /// Apex hostname (e.g. `p1.proxy.chan.app`). Used to distinguish
     /// the health/readiness surface from the wildcard reverse-proxy
     /// surface in the Host-keyed router.
     pub apex_host: String,
     /// Wildcard suffix including the leading dot (e.g.
-    /// `.p1.usr.chan.app`). The proxy router parses `{user}` out of
+    /// `.p1.proxy.chan.app`). The proxy router parses `{user}` out of
     /// every Host that ends with this suffix.
     pub wildcard_suffix: String,
     /// Base URL of identity-service. devserver-proxy POSTs to
@@ -52,7 +52,7 @@ pub struct Config {
     /// `/internal/v1/tokens/validate`. Sourced from
     /// `IDENTITY_INTERNAL_TOKEN`; required, no fallback.
     pub identity_auth_token: String,
-    /// Absolute URL the wildcard root (`{user}--{disc}.p1.usr.chan.app/`)
+    /// Absolute URL the wildcard root (`{user}--{disc}.p1.proxy.chan.app/`)
     /// 302s to: the gateway dashboard on the identity origin
     /// (e.g. `https://gw.chan.app/workspaces`; dev sets
     /// `http://id.localtest.me:17000/workspaces`). Required
@@ -308,7 +308,7 @@ impl Config {
     /// insensitive; devserver ids are stored lowercase). A label with
     /// more than one `--`, a disc tail that is not exactly 12
     /// lowercase hex chars, a multi-label prefix (e.g. `evil.alice`
-    /// against `*.p1.usr.chan.app`), and non-label characters are
+    /// against `*.p1.proxy.chan.app`), and non-label characters are
     /// all rejected so the resulting username matches the shape the
     /// downstream validators accept.
     pub fn parse_wildcard_host(&self, host: &str) -> Option<(String, Option<String>)> {
@@ -458,8 +458,8 @@ mod tests {
         Config {
             bind_addr: "127.0.0.1:7002".parse().unwrap(),
             tunnel_bind_addr: "127.0.0.1:7100".parse().unwrap(),
-            apex_host: "p1.usr.chan.app".into(),
-            wildcard_suffix: ".p1.usr.chan.app".into(),
+            apex_host: "p1.proxy.chan.app".into(),
+            wildcard_suffix: ".p1.proxy.chan.app".into(),
             identity_url: "http://127.0.0.1:7000/".parse().unwrap(),
             identity_auth_token: "x".into(),
             dashboard_url: "https://gw.chan.app/workspaces".into(),
@@ -484,7 +484,7 @@ mod tests {
             control_url: "http://127.0.0.1:7101/".parse().unwrap(),
             proxy_token: "x".into(),
             proxy_id: ProxyId::parse("p1").unwrap(),
-            proxy_base_url: CanonicalOrigin::parse("https://p1.usr.chan.app").unwrap(),
+            proxy_base_url: CanonicalOrigin::parse("https://p1.proxy.chan.app").unwrap(),
             max_response_bytes: None,
             max_request_bytes: None,
             request_timeout: None,
@@ -499,9 +499,9 @@ mod tests {
     #[test]
     fn apex_returns_none() {
         let c = cfg();
-        assert_eq!(c.parse_wildcard_host("p1.usr.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host("p1.proxy.chan.app"), None);
         assert_eq!(c.parse_wildcard_host("P1.USR.chan.app"), None);
-        assert_eq!(c.parse_wildcard_host("p1.usr.chan.app:7002"), None);
+        assert_eq!(c.parse_wildcard_host("p1.proxy.chan.app:7002"), None);
     }
 
     #[test]
@@ -556,7 +556,7 @@ mod tests {
     fn bare_wildcard_extracts_user_without_disc() {
         let c = cfg();
         assert_eq!(
-            c.parse_wildcard_host("alice.p1.usr.chan.app"),
+            c.parse_wildcard_host("alice.p1.proxy.chan.app"),
             Some(("alice".into(), None)),
         );
         assert_eq!(
@@ -564,12 +564,12 @@ mod tests {
             Some(("alice".into(), None)),
         );
         assert_eq!(
-            c.parse_wildcard_host("alice.p1.usr.chan.app:7002"),
+            c.parse_wildcard_host("alice.p1.proxy.chan.app:7002"),
             Some(("alice".into(), None)),
         );
         // Single interior hyphens stay part of the username.
         assert_eq!(
-            c.parse_wildcard_host("a-b-c.p1.usr.chan.app"),
+            c.parse_wildcard_host("a-b-c.p1.proxy.chan.app"),
             Some(("a-b-c".into(), None)),
         );
     }
@@ -578,16 +578,16 @@ mod tests {
     fn disc_wildcard_extracts_user_and_disc() {
         let c = cfg();
         assert_eq!(
-            c.parse_wildcard_host("alice--0123456789ab.p1.usr.chan.app"),
+            c.parse_wildcard_host("alice--0123456789ab.p1.proxy.chan.app"),
             Some(("alice".into(), Some("0123456789ab".into()))),
         );
         // The whole label is lowercased on ingest, disc included.
         assert_eq!(
-            c.parse_wildcard_host("Alice--0123456789AB.p1.usr.chan.app"),
+            c.parse_wildcard_host("Alice--0123456789AB.p1.proxy.chan.app"),
             Some(("alice".into(), Some("0123456789ab".into()))),
         );
         assert_eq!(
-            c.parse_wildcard_host("a-b--abcdefabcdef.p1.usr.chan.app:7002"),
+            c.parse_wildcard_host("a-b--abcdefabcdef.p1.proxy.chan.app:7002"),
             Some(("a-b".into(), Some("abcdefabcdef".into()))),
         );
     }
@@ -597,34 +597,34 @@ mod tests {
         let c = cfg();
         // Tail must be exactly 12 hex chars.
         assert_eq!(
-            c.parse_wildcard_host("alice--0123456789a.p1.usr.chan.app"),
+            c.parse_wildcard_host("alice--0123456789a.p1.proxy.chan.app"),
             None
         );
         assert_eq!(
-            c.parse_wildcard_host("alice--0123456789abc.p1.usr.chan.app"),
+            c.parse_wildcard_host("alice--0123456789abc.p1.proxy.chan.app"),
             None
         );
         assert_eq!(
-            c.parse_wildcard_host("alice--0123456789xy.p1.usr.chan.app"),
+            c.parse_wildcard_host("alice--0123456789xy.p1.proxy.chan.app"),
             None
         );
         // More than one `--` cannot come from a valid username.
         assert_eq!(
-            c.parse_wildcard_host("a--b--0123456789ab.p1.usr.chan.app"),
+            c.parse_wildcard_host("a--b--0123456789ab.p1.proxy.chan.app"),
             None
         );
         assert_eq!(
-            c.parse_wildcard_host("a----0123456789ab.p1.usr.chan.app"),
+            c.parse_wildcard_host("a----0123456789ab.p1.proxy.chan.app"),
             None
         );
         // A triple hyphen leaves a `-` in the disc tail.
         assert_eq!(
-            c.parse_wildcard_host("a---0123456789ab.p1.usr.chan.app"),
+            c.parse_wildcard_host("a---0123456789ab.p1.proxy.chan.app"),
             None
         );
         // Empty user before the separator.
         assert_eq!(
-            c.parse_wildcard_host("--0123456789ab.p1.usr.chan.app"),
+            c.parse_wildcard_host("--0123456789ab.p1.proxy.chan.app"),
             None
         );
     }
@@ -634,21 +634,21 @@ mod tests {
         let c = cfg();
         assert_eq!(c.parse_wildcard_host("example.com"), None);
         assert_eq!(c.parse_wildcard_host(""), None);
-        assert_eq!(c.parse_wildcard_host(".p1.usr.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host(".p1.proxy.chan.app"), None);
     }
 
     #[test]
     fn multi_label_prefix_rejected() {
-        // `evil.alice.p1.usr.chan.app` matches the wildcard suffix
+        // `evil.alice.p1.proxy.chan.app` matches the wildcard suffix
         // but must NOT resolve to username "evil.alice": the prefix
         // is required to be a single DNS label.
         let c = cfg();
-        assert_eq!(c.parse_wildcard_host("evil.alice.p1.usr.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host("evil.alice.p1.proxy.chan.app"), None);
         // Leading dot was already excluded by the substring length
         // check + emptiness guard, but tighten the boundary explicitly.
-        assert_eq!(c.parse_wildcard_host("..p1.usr.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host("..p1.proxy.chan.app"), None);
         // Underscores aren't legal DNS hostname chars and are not in
         // the username alphabet either.
-        assert_eq!(c.parse_wildcard_host("a_b.p1.usr.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host("a_b.p1.proxy.chan.app"), None);
     }
 }

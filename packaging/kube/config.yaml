@@ -21,15 +21,15 @@ data:
   # Exact Origin accepted by proxy entry-exchange POSTs.
   IDENTITY_PUBLIC_ORIGIN: "https://gw.localtest.me"
   # Proxy namespace origin advertised by discovery.
-  DEVSERVER_PROXY_ORIGIN: "https://usr.localtest.me"
+  DEVSERVER_PROXY_ORIGIN: "https://proxy.localtest.me"
   # Tunnel ingress origin (`chan devserver run --tunnel-url` dials its /v1/tunnel).
-  DEVSERVER_TUNNEL_ORIGIN: "https://usr.localtest.me"
+  DEVSERVER_TUNNEL_ORIGIN: "https://proxy.localtest.me"
   # This proxy node's stable id and exact base origin. The origin must match
   # the controller's template expansion for the id.
   DEVSERVER_PROXY_ID: "p1"
-  DEVSERVER_PROXY_BASE_URL: "https://p1.usr.localtest.me"
+  DEVSERVER_PROXY_BASE_URL: "https://p1.proxy.localtest.me"
   # Controller-side template with exactly one {proxy_id} placeholder.
-  DEVSERVER_PROXY_BASE_URL_TEMPLATE: "https://{proxy_id}.usr.localtest.me"
+  DEVSERVER_PROXY_BASE_URL_TEMPLATE: "https://{proxy_id}.proxy.localtest.me"
   # Where the proxy redirects a browser that opens a devserver root
   # without a gate credential.
   DASHBOARD_URL: "https://gw.localtest.me/workspaces"

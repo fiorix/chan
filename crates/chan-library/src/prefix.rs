@@ -6,7 +6,7 @@
 //! is deterministic -- the same root always maps to the same route across
 //! restarts, and an OFF workspace has a stable prefix without a live tenant.
 //! The prefix IS the public path the gateway forwards
-//! (`{owner}--{disc}.{proxy}.usr.{domain}/{slug}-{8hex}/`) unchanged, and the devserver
+//! (`{owner}--{disc}.{proxy}.proxy.{domain}/{slug}-{8hex}/`) unchanged, and the devserver
 //! routes the tenant by it. The hash suffix keys the prefix to the *root*, not
 //! just the basename, so two workspaces with the same basename under different
 //! parents (`foo/hello`, `bar/hello`) get DISTINCT prefixes and both mount:

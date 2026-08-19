@@ -1,5 +1,5 @@
 # Workspace manifest for chan-gateway: the services behind the identity
-# origin gw.{domain} and the tenant/tunnel namespace usr.{domain}.
+# origin gw.{domain} and the tenant/tunnel namespace proxy.{domain}.
 #
 # Crates:
 #
@@ -31,11 +31,11 @@
 #                  origin types, and the shared limits.
 #
 #   - devserver-proxy  public-facing fleet data plane. Node apex
-#                  (p{n}.usr.{domain}) serves /healthz + /readyz only;
-#                  the wildcard (*.p{n}.usr.{domain}) serves tenant
+#                  (p{n}.proxy.{domain}) serves /healthz + /readyz only;
+#                  the wildcard (*.p{n}.proxy.{domain}) serves tenant
 #                  content. A separate listener terminates `chan
 #                  devserver` h2c tunnel dials arriving at
-#                  usr.{domain}/v1/tunnel, admitted by
+#                  proxy.{domain}/v1/tunnel, admitted by
 #                  devserver-control, and reverse-proxies HTTP +
 #                  WebSocket traffic into them behind the
 #                  devserver-gate entry handoff. Ships no SPA and no

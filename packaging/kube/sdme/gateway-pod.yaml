@@ -129,8 +129,8 @@ spec:
         - name: GITHUB_CLIENT_SECRET
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: GITHUB_CLIENT_SECRET } }
         - { name: BASE_URL, value: "http://gw.localtest.me" }
-        - { name: DEVSERVER_PROXY_ORIGIN, value: "http://usr.localtest.me" }
-        - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://usr.localtest.me" }
+        - { name: DEVSERVER_PROXY_ORIGIN, value: "http://proxy.localtest.me" }
+        - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://proxy.localtest.me" }
         - { name: COOKIE_SECURE, value: "false" }
         - { name: PROFILE_SERVICE_URL, value: "http://127.0.0.1:7001" }
         - { name: DEVSERVER_ADMIN_URL, value: "http://127.0.0.1:7003" }
@@ -158,7 +158,7 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_PROXY_CREDENTIALS } }
         - name: DEVSERVER_ADMISSION_VERIFYING_KEYS
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ADMISSION_VERIFYING_KEYS } }
-        - { name: DEVSERVER_PROXY_BASE_URL_TEMPLATE, value: "http://{proxy_id}.usr.localtest.me" }
+        - { name: DEVSERVER_PROXY_BASE_URL_TEMPLATE, value: "http://{proxy_id}.proxy.localtest.me" }
         - { name: MAX_DEVSERVERS_PER_USER, value: "100" }
       readinessProbe:
         httpGet: { path: /readyz, port: 7003 }
@@ -181,8 +181,8 @@ spec:
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_ADMISSION_VERIFYING_KEYS } }
         - name: DEVSERVER_PROXY_TOKEN
           valueFrom: { secretKeyRef: { name: gateway-secrets, key: DEVSERVER_PROXY_TOKEN } }
-        - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://usr.localtest.me" }
-        - { name: DEVSERVER_PROXY_BASE_URL, value: "http://p1.usr.localtest.me" }
+        - { name: DEVSERVER_TUNNEL_ORIGIN, value: "http://proxy.localtest.me" }
+        - { name: DEVSERVER_PROXY_BASE_URL, value: "http://p1.proxy.localtest.me" }
         - { name: DASHBOARD_URL, value: "http://gw.localtest.me/workspaces" }
         - { name: IDENTITY_URL, value: "http://127.0.0.1:7004" }
         - { name: IDENTITY_PUBLIC_ORIGIN, value: "http://gw.localtest.me" }
@@ -195,7 +195,7 @@ spec:
           path: /readyz
           port: 7002
           httpHeaders:
-            - { name: Host, value: "usr.localtest.me" }
+            - { name: Host, value: "proxy.localtest.me" }
         initialDelaySeconds: 5
         periodSeconds: 5
   volumes:

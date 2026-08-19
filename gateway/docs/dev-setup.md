@@ -10,7 +10,7 @@ It mirrors the reference deployment in the sibling `chan-prod-setup` repo. Per "
 
 ## Why the prod-like stack
 
-The gateway's cross-tenant isolation is carried by two host-scoped cookies: `__Host-id_session` (host-only on the identity origin `gw.<domain>`) and `__Host-devserver_gate` (host-only on the tenant host `{owner}--{disc}.{proxy}.usr.<domain>`, scoped `Path=/` for the whole devserver). No parent-domain cookie exists, so a browser never auto-attaches an identity session to a fetch on another tenant's host. The whole-host devserver cookie is safe because the grant is whole-devserver; user-to-user isolation rides the host-only cookie plus the `aud` claim. That design, plus the reverse-proxy header hygiene (hop-by-hop stripping, dropped inbound Host/Cookie/Authorization, recomputed `X-Forwarded-*`), only fully exercises behind a real TLS terminator with real subdomains. Running the same services in the same two-plane shape as production is how you exercise it.
+The gateway's cross-tenant isolation is carried by two host-scoped cookies: `__Host-id_session` (host-only on the identity origin `gw.<domain>`) and `__Host-devserver_gate` (host-only on the tenant host `{owner}--{disc}.{proxy}.proxy.<domain>`, scoped `Path=/` for the whole devserver). No parent-domain cookie exists, so a browser never auto-attaches an identity session to a fetch on another tenant's host. The whole-host devserver cookie is safe because the grant is whole-devserver; user-to-user isolation rides the host-only cookie plus the `aud` claim. That design, plus the reverse-proxy header hygiene (hop-by-hop stripping, dropped inbound Host/Cookie/Authorization, recomputed `X-Forwarded-*`), only fully exercises behind a real TLS terminator with real subdomains. Running the same services in the same two-plane shape as production is how you exercise it.
 
 ## Topology: two planes
 
@@ -18,7 +18,7 @@ Production splits the gateway into an **account and control plane** and a **prox
 
 - **The gateway pod**: postgres, profile, identity, and devserver-control run as one pod sharing a network namespace, so they reach each other over loopback and no inter-service port is published. devserver-control rides inside the pod deliberately: identity and profile reach it on loopback instead of depending on cross-container name resolution. identity has two listeners: the public one behind the TLS edge, and an internal token-validate listener that is never routed publicly.
 - **A TLS edge for the identity origin**: an nginx terminator serving `gw.<domain>`; `:80` answers only ACME and a `301` (the OAuth flow never runs over cleartext), `:443` proxies to identity's public listener.
-- **The proxy plane**: each proxy node runs devserver-proxy behind its own TLS edge. That edge serves the `usr.<domain>` tunnel apex (`/v1/tunnel` is negotiated as h2 externally and `grpc_pass`ed as h2c into the proxy's tunnel listener) and the node's tenant wildcard `*.{proxy}.usr.<domain>` (ordinary HTTP plus WebSocket upgrade). The node connects back to the plane above over the authenticated overlay, and can reach exactly two things there: devserver-control's proxy-control listener and identity's internal token-validate listener. Nothing else (postgres, profile, identity's public listener) is reachable from a proxy node; production treats proxy nodes as compromisable, and `packaging/kube/network-policy.yaml` encodes the same reachability contract for clusters.
+- **The proxy plane**: each proxy node runs devserver-proxy behind its own TLS edge. That edge serves the `proxy.<domain>` tunnel apex (`/v1/tunnel` is negotiated as h2 externally and `grpc_pass`ed as h2c into the proxy's tunnel listener) and the node's tenant wildcard `*.{proxy}.proxy.<domain>` (ordinary HTTP plus WebSocket upgrade). The node connects back to the plane above over the authenticated overlay, and can reach exactly two things there: devserver-control's proxy-control listener and identity's internal token-validate listener. Nothing else (postgres, profile, identity's public listener) is reachable from a proxy node; production treats proxy nodes as compromisable, and `packaging/kube/network-policy.yaml` encodes the same reachability contract for clusters.
 
 ```mermaid
 flowchart TB
@@ -29,7 +29,7 @@ flowchart TB
         pod["gateway pod: postgres + profile + identity + control (loopback)"]
     end
     subgraph node["proxy node"]
-        pnginx["TLS edge: usr.<domain> apex + *.p1.usr.<domain>"]
+        pnginx["TLS edge: proxy.<domain> apex + *.p1.proxy.<domain>"]
         proxy["devserver-proxy"]
     end
     browser -->|"sign-in"| gwnginx --> pod
@@ -58,13 +58,13 @@ The sdme pod is a functional-validation shape: its containers share one network 
 
 ## The TLS edges
 
-nginx terminates TLS for both host families; locally one nginx container can wear both, while production gives each proxy node its own edge. The route map is the topology above: `gw.<domain>` to identity's public listener with `proxy_pass`; the `usr.<domain>` apex health surface and the `*.{proxy}.usr.<domain>` tenant wildcard to devserver-proxy's HTTP listener; `/v1/tunnel` to the proxy's tunnel listener with `grpc_pass` (h2c). The internal listeners (identity token-validate, control's admin tree and proxy-control port) are never routed by nginx.
+nginx terminates TLS for both host families; locally one nginx container can wear both, while production gives each proxy node its own edge. The route map is the topology above: `gw.<domain>` to identity's public listener with `proxy_pass`; the `proxy.<domain>` apex health surface and the `*.{proxy}.proxy.<domain>` tenant wildcard to devserver-proxy's HTTP listener; `/v1/tunnel` to the proxy's tunnel listener with `grpc_pass` (h2c). The internal listeners (identity token-validate, control's admin tree and proxy-control port) are never routed by nginx.
 
 The one dev difference is the certificate. Production uses certbot with a dns-01 plugin for the wildcard (http-01 cannot issue wildcards; any DNS provider with a certbot plugin works). Locally, issue a local-CA wildcard with [`mkcert`](https://github.com/FiloSottile/mkcert) and mount it into the nginx container:
 
 ```sh
 mkcert -install
-mkcert "*.localtest.me" "*.usr.localtest.me" "*.p1.usr.localtest.me" localtest.me
+mkcert "*.localtest.me" "*.proxy.localtest.me" "*.p1.proxy.localtest.me" localtest.me
 ```
 
 `*.localtest.me` resolves every subdomain, at any depth, to `127.0.0.1` via public DNS, so no `/etc/hosts` or dnsmasq is needed.
@@ -87,16 +87,16 @@ Publish a devserver from the sibling `chan` repo over the TLS tunnel apex. Regis
 ```sh
 cargo run -p chan -- workspace add <workspace-dir>
 export CHAN_TUNNEL_TOKEN=chan_pat_...     # mint under the dashboard Tokens tab
-cargo run -p chan -- devserver run --tunnel-url=https://usr.localtest.me/v1/tunnel
+cargo run -p chan -- devserver run --tunnel-url=https://proxy.localtest.me/v1/tunnel
 ```
 
-Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.usr.localtest.me/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
+Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.proxy.localtest.me/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).
 
 ## From local to a real host
 
 Because the local stack already has the prod shape, going to a real host changes only what is environment-specific, exactly as `chan-prod-setup` automates (`configure.sh`, then `make secrets` / `make all` / `make proxy-node`):
 
-- **DNS.** Real records for `gw.<domain>`, the `usr.<domain>` tunnel apex, and each node's `*.{proxy}.usr.<domain>` wildcard.
+- **DNS.** Real records for `gw.<domain>`, the `proxy.<domain>` tunnel apex, and each node's `*.{proxy}.proxy.<domain>` wildcard.
 - **Certificates.** Swap mkcert for certbot with your DNS provider's dns-01 plugin on each edge.
 - **Secrets.** Real per-service secrets from `/var/lib/chan/secrets` instead of the inlined dev values; `COOKIE_SECURE=true`.
 - **Lockstep.** Deploy every service and every proxy node on the same release tag; a version-mismatched node is rejected at the control handshake.

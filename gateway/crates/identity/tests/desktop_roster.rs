@@ -108,7 +108,7 @@ impl TestApp {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "http://localhost:7000/".parse().unwrap(),
-            devserver_proxy_origin: "https://usr.chan.app".parse().unwrap(),
+            devserver_proxy_origin: "https://proxy.chan.app".parse().unwrap(),
             devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
             database_url: url.clone(),
             cookie_secure: true,
@@ -231,7 +231,7 @@ async fn mock_all_tunnels(app: &TestApp, pairs: &[(Uuid, &str, &str)]) {
     let rows: Vec<(Uuid, &str, &str, &str, &str)> = pairs
         .iter()
         .map(|(owner_user_id, user, id)| {
-            (*owner_user_id, *user, *id, "p1", "https://p1.usr.chan.app")
+            (*owner_user_id, *user, *id, "p1", "https://p1.proxy.chan.app")
         })
         .collect();
     mock_all_tunnels_on(app, &rows).await;
@@ -438,7 +438,7 @@ async fn roster_merges_owned_shared_and_live_unrostered() {
     // registration; the offline row is null.
     let origins: Vec<Value> = rows.iter().map(|r| r["proxy_origin"].clone()).collect();
     let node_origin =
-        |owner: &str, id: &str| json!(format!("https://{owner}--{}.p1.usr.chan.app", &id[..12]));
+        |owner: &str, id: &str| json!(format!("https://{owner}--{}.p1.proxy.chan.app", &id[..12]));
     assert_eq!(
         origins,
         vec![
@@ -479,8 +479,8 @@ async fn roster_two_owners_on_different_nodes_get_their_own_origins() {
     mock_all_tunnels_on(
         &app,
         &[
-            (uid, &username, &a, "p1", "https://p1.usr.chan.app"),
-            (bob_uid, "bob-handle", &c, "p2", "https://p2.usr.chan.app"),
+            (uid, &username, &a, "p1", "https://p1.proxy.chan.app"),
+            (bob_uid, "bob-handle", &c, "p2", "https://p2.proxy.chan.app"),
         ],
     )
     .await;
@@ -502,8 +502,8 @@ async fn roster_two_owners_on_different_nodes_get_their_own_origins() {
     assert_eq!(
         origins,
         vec![
-            format!("https://{username}--{}.p1.usr.chan.app", &a[..12]),
-            format!("https://bob-handle--{}.p2.usr.chan.app", &c[..12]),
+            format!("https://{username}--{}.p1.proxy.chan.app", &a[..12]),
+            format!("https://bob-handle--{}.p2.proxy.chan.app", &c[..12]),
         ],
         "{rows}"
     );
@@ -559,7 +559,7 @@ async fn roster_signed_proxy_id_cannot_be_mixed_with_another_node_base() {
     // configured namespace, but it is not the node named in the signed claim.
     mock_all_tunnels_on(
         &app,
-        &[(uid, &username, &a, "p1", "https://p2.usr.chan.app")],
+        &[(uid, &username, &a, "p1", "https://p2.proxy.chan.app")],
     )
     .await;
 
@@ -618,7 +618,7 @@ async fn roster_etag_yields_304_until_the_roster_changes() {
                 &username,
                 &a,
                 "p1",
-                "https://p1.usr.chan.app"
+                "https://p1.proxy.chan.app"
             ),])),
         )
         .up_to_n_times(2)

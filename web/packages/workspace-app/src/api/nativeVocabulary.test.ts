@@ -28,7 +28,7 @@ describe("isAclRefusal", () => {
     expect(
       isAclRefusal(
         "create_library_window",
-        "create_library_window explicitly denied on origin https://a--b.c.usr.example",
+        "create_library_window explicitly denied on origin https://a--b.c.proxy.example",
       ),
     ).toBe(true);
   });

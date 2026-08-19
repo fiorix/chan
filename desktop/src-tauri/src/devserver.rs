@@ -394,7 +394,7 @@ pub fn conn_base_origin(conn: &DevserverConn) -> String {
 
 /// Parse a stored devserver URL into the `(host, port)` the raw-tunnel dial
 /// uses. The port defaults from the scheme when the URL omits it (`https`→443,
-/// `http`→80), so `https://p1.usr.chan.app` resolves without an explicit
+/// `http`→80), so `https://p1.proxy.chan.app` resolves without an explicit
 /// port. Bare `host:port` (no scheme) is rejected -- the launcher requires a
 /// `scheme://host` URL. Gateway discovery uses the original URL before this
 /// raw-origin fallback is used.
@@ -2200,7 +2200,7 @@ mod tests {
             identity_origin: "https://gw.chan.app".into(),
             desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
             desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
-            devserver_proxy_origin: "https://usr.chan.app".into(),
+            devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
         }
@@ -2235,7 +2235,7 @@ mod tests {
         d.identity_origin = "http://gw.chan.app".into();
         d.desktop_authorize_url = "http://gw.chan.app/desktop/authorize".into();
         d.desktop_entry_url = "http://gw.chan.app/desktop/v1/devserver/entry".into();
-        d.devserver_proxy_origin = "http://usr.chan.app".into();
+        d.devserver_proxy_origin = "http://proxy.chan.app".into();
         d.roster_url = Some("http://gw.chan.app/desktop/v1/devservers".into());
         let err = validate_gateway_discovery("http://gw.chan.app", d).unwrap_err();
         assert!(err.contains("must use https"), "{err}");
@@ -2306,14 +2306,14 @@ mod tests {
             owner_user_id: test_owner_id(),
             username: "alice".into(),
             devserver_id: "a".repeat(64),
-            proxy_origin: "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
-            entry_exchange_url: "https://alice--aaaaaaaaaaaa.p1.usr.chan.app/_chan/entry".into(),
+            proxy_origin: "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
+            entry_exchange_url: "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app/_chan/entry".into(),
             entry_credential: "sentinel-entry-credential".into(),
         };
         let gw = GatewayConn::new(
             "https://gw.chan.app".into(),
             "https://gw.chan.app/desktop/v1/devserver/entry".into(),
-            "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
+            "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
             "sentinel-gateway-pat".into(),
         );
         *gw.session.lock().unwrap() = Some(GatewaySession {
@@ -2972,14 +2972,14 @@ mod tests {
     #[tokio::test]
     async fn gateway_workspace_poll_row_does_not_mint_entry_url() {
         let conn = DevserverConn {
-            host: "alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
+            host: "alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
             port: 443,
             token: String::new(),
             name: "alice".into(),
             gateway: Some(Box::new(GatewayConn::new(
                 "https://gw.chan.app".into(),
                 "http://127.0.0.1:9/desktop/v1/devserver/entry".into(),
-                "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
+                "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
                 "pat".into(),
             ))),
         };
@@ -3001,7 +3001,7 @@ mod tests {
         .expect("row conversion should not call desktop_entry_url");
         assert_eq!(
             row.url,
-            "https://alice--aaaaaaaaaaaa.p1.usr.chan.app/notes/index.html"
+            "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app/notes/index.html"
         );
     }
 
@@ -3030,8 +3030,8 @@ mod tests {
                 )
             } else {
                 (
-                    "https://alice--aaaaaaaaaaaa.p1.usr.chan.app".into(),
-                    "https://usr.chan.app".into(),
+                    "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
+                    "https://proxy.chan.app".into(),
                 )
             };
         let mut gateway = GatewayConn::new(
@@ -3419,7 +3419,7 @@ mod tests {
             Ok("csrf-current")
         );
 
-        let foreign = url::Url::parse("https://bob--bbbbbbbbbbbb.p1.usr.chan.app/").unwrap();
+        let foreign = url::Url::parse("https://bob--bbbbbbbbbbbb.p1.proxy.chan.app/").unwrap();
         assert!(
             gateway_csrf_token_for_connection(&conn, "lib-1::w-1", &foreign)
                 .await

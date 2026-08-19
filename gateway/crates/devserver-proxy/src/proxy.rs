@@ -1,4 +1,4 @@
-//! Reverse proxy for the node wildcard (`{user}--{disc}.p1.usr.chan.app/{workspace}/...`)
+//! Reverse proxy for the node wildcard (`{user}--{disc}.p1.proxy.chan.app/{workspace}/...`)
 //! into the `chan devserver` peer behind the registered tunnel.
 //!
 //! `{user}` and the optional `{disc}` (first 12 hex chars of a
@@ -37,7 +37,7 @@
 //! mints entry tokens only after calling `profile.devserver_access(owner,
 //! devserver, caller)`, so a validly-signed entry with the right aud and drv
 //! proves the caller is authorized, owner or accepted grantee. The aud
-//! claim (= the tenant host, `{owner}--{disc}.p1.usr.chan.app`) is what enforces tenant isolation;
+//! claim (= the tenant host, `{owner}--{disc}.p1.proxy.chan.app`) is what enforces tenant isolation;
 //! comparing `sub` against the cached owner would lock out every grantee.
 //!
 //! 404 is preferred over 401 / 403 on the proxy path so an
@@ -175,7 +175,7 @@ impl http_body::Body for DeadlineBody {
 }
 
 /// Cookie name for the session-shape devserver-gate token. Host-only on
-/// the tenant host (`{user}--{disc}.p1.usr.chan.app`); `Path=/`; HttpOnly; Secure; SameSite=Lax;
+/// the tenant host (`{user}--{disc}.p1.proxy.chan.app`); `Path=/`; HttpOnly; Secure; SameSite=Lax;
 /// Absolute proxy-local session lifetime. The `__Host-` prefix makes the
 /// browser enforce exactly that shape (Secure, no `Domain`, `Path=/`), so
 /// a parent-domain cookie of the same name can never shadow it (A11).
@@ -1738,9 +1738,9 @@ mod tests {
             HeaderValue::from_static("theme=dark; Path=/; SameSite=Lax"),
         );
         for blocked in [
-            "wide=attacker; Domain=p1.usr.chan.app; Path=/",
-            "wide=attacker; dOmAiN = p1.usr.chan.app; Path=/",
-            "wide=attacker;  DOMAIN=p1.usr.chan.app",
+            "wide=attacker; Domain=p1.proxy.chan.app; Path=/",
+            "wide=attacker; dOmAiN = p1.proxy.chan.app; Path=/",
+            "wide=attacker;  DOMAIN=p1.proxy.chan.app",
             "__Host-devserver_gate=attacker; Path=/; Secure",
             "__Host-devserver_csrf=attacker; Path=/; Secure",
             "__host-DevServer_Gate=attacker; Path=/; Secure",
@@ -2007,7 +2007,7 @@ mod tests {
             proxy_token: String::new(),
             proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
             proxy_base_url: devserver_control_proto::CanonicalOrigin::parse(
-                "https://p1.usr.chan.app",
+                "https://p1.proxy.chan.app",
             )
             .unwrap(),
             max_response_bytes: None,
@@ -2192,7 +2192,7 @@ mod tests {
     fn tenant_request(path: &str) -> Request {
         Request::builder()
             .uri(path)
-            .header(header::HOST, "alice--0123456789ab.p1.usr.chan.app")
+            .header(header::HOST, "alice--0123456789ab.p1.proxy.chan.app")
             .header(header::ORIGIN, "null")
             .body(Body::empty())
             .unwrap()
@@ -2313,27 +2313,27 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.proxy.chan.app"),
         );
         assert!(websocket_origin_matches(
             &headers,
             "https",
-            "alice--0123456789ab.p1.usr.chan.app"
+            "alice--0123456789ab.p1.proxy.chan.app"
         ));
 
         for origin in [
             "null",
-            "http://alice--0123456789ab.p1.usr.chan.app",
-            "https://bob--0123456789ab.p1.usr.chan.app",
-            "https://alice--0123456789ab.p1.usr.chan.app:7002",
-            "https://alice--0123456789ab.p1.usr.chan.app/path",
-            "HTTPS://alice--0123456789ab.p1.usr.chan.app",
+            "http://alice--0123456789ab.p1.proxy.chan.app",
+            "https://bob--0123456789ab.p1.proxy.chan.app",
+            "https://alice--0123456789ab.p1.proxy.chan.app:7002",
+            "https://alice--0123456789ab.p1.proxy.chan.app/path",
+            "HTTPS://alice--0123456789ab.p1.proxy.chan.app",
         ] {
             headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
             assert!(!websocket_origin_matches(
                 &headers,
                 "https",
-                "alice--0123456789ab.p1.usr.chan.app"
+                "alice--0123456789ab.p1.proxy.chan.app"
             ));
         }
 
@@ -2341,20 +2341,20 @@ mod tests {
         assert!(!websocket_origin_matches(
             &headers,
             "https",
-            "alice--0123456789ab.p1.usr.chan.app"
+            "alice--0123456789ab.p1.proxy.chan.app"
         ));
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.proxy.chan.app"),
         );
         headers.append(
             header::ORIGIN,
-            HeaderValue::from_static("https://alice--0123456789ab.p1.usr.chan.app"),
+            HeaderValue::from_static("https://alice--0123456789ab.p1.proxy.chan.app"),
         );
         assert!(!websocket_origin_matches(
             &headers,
             "https",
-            "alice--0123456789ab.p1.usr.chan.app"
+            "alice--0123456789ab.p1.proxy.chan.app"
         ));
     }
 }

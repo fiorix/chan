@@ -109,7 +109,7 @@ sudo sdme exec chan-gateway --oci -- sh -c '
   for p in 7000 7001 7003; do
     printf "port %s: " "$p"; curl -fsS "http://127.0.0.1:$p/healthz" && echo;
   done
-  printf "port 7002: "; curl -fsS -H "Host: usr.localtest.me" "http://127.0.0.1:7002/healthz" && echo;'
+  printf "port 7002: "; curl -fsS -H "Host: proxy.localtest.me" "http://127.0.0.1:7002/healthz" && echo;'
 
 # Service-to-service proof: identity reaching profile is exercised by a sign-in;
 # for a non-interactive check, confirm devserver-proxy validates against identity

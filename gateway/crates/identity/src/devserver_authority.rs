@@ -70,7 +70,7 @@ mod tests {
                 peer_addr: None,
                 connected_at: now,
                 proxy_id: "p1".into(),
-                proxy_base_url: "https://p1.usr.chan.app".into(),
+                proxy_base_url: "https://p1.proxy.chan.app".into(),
                 admission_lease: lease.as_str().into(),
                 admission_lease_expires_at: now + Duration::seconds(120),
             },
