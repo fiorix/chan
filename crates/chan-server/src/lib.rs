@@ -2376,21 +2376,31 @@ mod terminal_router_tests {
 
         let state = crate::state::test_support::make_test_state(false);
         let app = terminal_router(state);
-        for namespace in ["fs", "files"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri(format!("/api/{namespace}{}?download=1", file.display()))
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), axum::http::StatusCode::OK);
-            let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
-            assert_eq!(&bytes[..], b"wildcard capture probe");
-        }
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/fs{}?download=1", file.display()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        assert_eq!(&bytes[..], b"wildcard capture probe");
+
+        // The removed `/api/files` alias answers 404 like any unknown path.
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/files{}?download=1", file.display()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[cfg(unix)]

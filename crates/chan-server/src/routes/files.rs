@@ -5229,7 +5229,7 @@ mod doc_divert_tests {
     }
 
     #[tokio::test]
-    async fn workspace_router_serves_the_fs_namespace_and_files_alias() {
+    async fn workspace_router_serves_the_fs_namespace_only() {
         let (_cfg, _root, state) = divert_app();
         state
             .try_workspace()
@@ -5238,20 +5238,30 @@ mod doc_divert_tests {
             .unwrap();
         let app = crate::router(state);
 
-        for namespace in ["fs", "files"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/api/{namespace}/alias.md"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(body_json(response).await["content"], "namespace probe");
-        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fs/alias.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["content"], "namespace probe");
+
+        // The removed `/api/files` alias answers 404 like any unknown path.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/files/alias.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     pub(super) async fn raw_put_body(
