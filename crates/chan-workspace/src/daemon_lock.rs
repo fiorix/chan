@@ -1,5 +1,5 @@
 //! Single-instance daemon lock + pidfile: the cross-OS supervisor primitive
-//! behind `chan devserver --service=chan`.
+//! behind the `chan devserver` `--service=chan` backend.
 //!
 //! A sibling of [`WorkspaceLock`](crate::lock::WorkspaceLock): the SAME fs4
 //! advisory flock + [`process_alive`](crate::lock::process_alive) stale-takeover,

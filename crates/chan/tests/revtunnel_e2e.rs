@@ -197,6 +197,7 @@ async fn start_devserver(sandbox: &Sandbox, port: u16) -> Startup {
     let mut child = sandbox
         .command()
         .arg("devserver")
+        .arg("run")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
         .spawn()

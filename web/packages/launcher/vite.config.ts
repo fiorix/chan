@@ -34,7 +34,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(here, "../../../web-launcher/dist");
 
 // The backend port the vite dev server proxies to. Defaults to 8787 (the local
-// loopback library / a default `chan devserver`); override with VITE_PROXY_PORT
+// loopback library / a default `chan devserver run`); override with VITE_PROXY_PORT
 // to point at a devserver on another port.
 const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 
@@ -91,7 +91,7 @@ export default defineConfig({
   server: {
     port: 5174,
     // While iterating, proxy the library HTTP surface to a running
-    // `chan devserver` (or the local loopback library) so the SPA talks
+    // `chan devserver run` (or the local loopback library) so the SPA talks
     // to the real backend without rebuilding the binary on every change.
     proxy: {
       "/api/library/windows/watch": { target: `ws://127.0.0.1:${proxyPort}`, ws: true },

@@ -1,6 +1,6 @@
 // API transport: HTTP+WebSocket against the local chan-server.
 //
-// `chan open` runs a real loopback server. The Tauri desktop and
+// `chan serve` runs a real loopback server. The Tauri desktop and
 // (eventual) iOS shells spawn the same server in-process and point
 // their WebView at it via the same loopback URL. One transport
 // implementation, one wire format, one auth model - there is no
@@ -66,7 +66,7 @@ function readBoolMeta(name: string): boolean {
   return m?.getAttribute("content")?.trim() === "1";
 }
 
-/// Server URL prefix when `chan open --prefix=/foo` mounts the
+/// Server URL prefix when `chan serve --prefix=/foo` mounts the
 /// API under a path. Read once at module load from the
 /// `<meta name="chan-prefix">` tag the server injects into the SPA
 /// shell. Empty string when no prefix.

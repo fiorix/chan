@@ -33,7 +33,7 @@ pub struct ServeConfig {
     /// indefinitely (today's default).
     pub idle_timeout: Option<Duration>,
     /// Open the launch URL in the user's default browser after the
-    /// listener binds. Set by the CLI for the default `chan open`
+    /// listener binds. Set by the CLI for the default `chan serve`
     /// flow; suppressed for tunnel mode (no local URL to open).
     pub open_browser: bool,
     /// Optional one-shot override for the search indexer's resource
@@ -85,7 +85,7 @@ impl ServeHandle {
 /// and no trailing slash. Each segment must match `[A-Za-z0-9-]+`.
 ///
 /// Strict on purpose: the whole point is that a reverse proxy in
-/// front of `chan open` can pin the location to a simple, unambiguous
+/// front of `chan serve` can pin the location to a simple, unambiguous
 /// path. Anything that needs URL encoding, `..` traversal, or
 /// non-ASCII gets rejected up front.
 pub fn sanitize_prefix(input: &str) -> Result<String, String> {

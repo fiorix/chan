@@ -1,6 +1,6 @@
 // Launcher machine-card collapse persists across a reload. The harness's
-// `chan open` server has no launcher surface at `/`, so this check spawns its
-// OWN isolated `chan devserver` (fresh CHAN_HOME, ephemeral port, no handoff)
+// `chan serve` server has no launcher surface at `/`, so this check spawns its
+// OWN isolated `chan devserver run` (fresh CHAN_HOME, ephemeral port, no handoff)
 // which serves the launcher SPA at `/`, drives it in a fresh page, collapses the
 // "This machine" card, reloads, and asserts it stays collapsed.
 //
@@ -16,7 +16,7 @@ import { join } from "node:path";
 /// Spawn an isolated devserver and resolve with its tokenized launcher URL. The
 /// URL is `http://127.0.0.1:<port>/?t=<token>`, printed on the listen line.
 function spawnDevserver(chanBin, chanHome) {
-  const child = spawn(chanBin, ["devserver", "--port", "0"], {
+  const child = spawn(chanBin, ["devserver", "run", "--port", "0"], {
     env: { ...process.env, CHAN_HOME: chanHome, CHAN_NO_DEVSERVER_HANDOFF: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -24,7 +24,7 @@ function spawnDevserver(chanBin, chanHome) {
   let resolved = false;
   const url = new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`chan devserver: no URL after 60s\n${lines.join("\n")}`)),
+      () => reject(new Error(`chan devserver run: no URL after 60s\n${lines.join("\n")}`)),
       60_000,
     );
     const scan = (chunk) => {
@@ -44,7 +44,7 @@ function spawnDevserver(chanBin, chanHome) {
     child.on("exit", (code) => {
       if (!resolved) {
         clearTimeout(timer);
-        reject(new Error(`chan devserver exited early (${code})\n${lines.join("\n")}`));
+        reject(new Error(`chan devserver run exited early (${code})\n${lines.join("\n")}`));
       }
     });
   });

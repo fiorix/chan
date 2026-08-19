@@ -1,4 +1,4 @@
-// Test-server lifecycle: seed a throwaway workspace, launch `chan open`
+// Test-server lifecycle: seed a throwaway workspace, launch `chan serve`
 // on it (devserver handoff disabled) under a throwaway CHAN_HOME, parse
 // the tokenized URL off stderr, and tear everything down (process,
 // registry entry, tempdirs) afterwards. The sandboxed CHAN_HOME keeps
@@ -31,7 +31,7 @@ export function seedWorkspace() {
   return dir;
 }
 
-/// Launch `chan open <dir>` and resolve with the tokenized URL. The
+/// Launch `chan serve <dir>` and resolve with the tokenized URL. The
 /// child is the server (no daemonize); its pid scopes the teardown and
 /// the control-socket glob.
 export function launchServer(chanBin, workspaceDir, log, options = {}) {
@@ -45,7 +45,7 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
   // fails the run.
   // The smoke fixture is deliberately the workspace boundary even when the
   // host's temporary directory sits below a synthetic or real VCS root.
-  const child = spawn(chanBin, ["open", "--here", "--port", "0", workspaceDir], {
+  const child = spawn(chanBin, ["serve", "--here", "--port", "0", workspaceDir], {
     env: {
       ...process.env,
       CHAN_NO_DEVSERVER_HANDOFF: "1",
@@ -58,7 +58,7 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
 
   const url = new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`chan open: no URL after 60s\n${stderrLines.join("\n")}`)),
+      () => reject(new Error(`chan serve: no URL after 60s\n${stderrLines.join("\n")}`)),
       60_000,
     );
     const scan = (chunk) => {
@@ -79,7 +79,7 @@ export function launchServer(chanBin, workspaceDir, log, options = {}) {
     child.on("exit", (code) => {
       if (!resolved) {
         clearTimeout(timer);
-        reject(new Error(`chan open exited early (${code})\n${stderrLines.join("\n")}`));
+        reject(new Error(`chan serve exited early (${code})\n${stderrLines.join("\n")}`));
       }
     });
   });
@@ -123,11 +123,11 @@ export async function teardownServer(chanBin, child, workspaceDir, chanHome, log
   try {
     // The registry entry lives under the sandboxed CHAN_HOME, so the
     // removal must run with the same home or it consults the host's.
-    await execFileP(chanBin, ["workspace", "rm", workspaceDir], {
+    await execFileP(chanBin, ["workspace", "forget", workspaceDir], {
       env: { ...process.env, CHAN_HOME: chanHome },
     });
   } catch (e) {
-    log?.(`[teardown] workspace rm failed: ${e.message}`);
+    log?.(`[teardown] workspace forget failed: ${e.message}`);
   }
   try {
     rmSync(workspaceDir, { recursive: true, force: true });

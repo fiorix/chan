@@ -6,7 +6,7 @@ import { ApiError } from "../api/errors";
 import { __testHealthInstanceWithRetry } from "./store.svelte";
 import storeSource from "./store.svelte.ts?raw";
 
-// A remote `chan devserver` bouncing (^C + re-run) used to leave its
+// A remote `chan devserver run` bouncing (^C + re-run) used to leave its
 // desktop window stale: the watch socket reconnected fine, but the new
 // process had none of the old PTYs, so terminals sat stuck until a
 // manual Cmd+R. The store now reads /api/health's `instance` (random

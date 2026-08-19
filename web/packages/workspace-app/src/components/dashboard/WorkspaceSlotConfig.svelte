@@ -4,7 +4,7 @@
   import type { GlobalConfig } from "../../api/types";
 
   // Recent workspaces: a read-only list from the global config endpoint.
-  // chan open takes an explicit workspace path, so there is no default-root
+  // chan serve takes an explicit workspace path, so there is no default-root
   // field to edit here; this section only surfaces recently-opened workspaces.
   let globalConfig = $state<GlobalConfig | null>(null);
 

@@ -3,10 +3,10 @@
 #
 # Proves the devserver terminal-survival contract end to end: shared-terminal
 # and workspace PTYs survive (1) a bare `systemctl --user restart`, including distinct live
-# and spawn metadata, (2) `chan devserver --restart`, (3) a watchdog kill
+# and spawn metadata, (2) `chan devserver restart`, (3) a watchdog kill
 # (SIGSTOP the main process), and (4) a kill -9 crash restart including a
-# session spawned after the previous boot; session close, `--stop`,
-# `--restart --force`, and a bare `systemctl --user stop` all end the shells
+# session spawned after the previous boot; session close, `stop`,
+# `restart --force`, and a bare `systemctl --user stop` all end the shells
 # and empty the store. The fd store count is asserted after every phase so
 # restart/adoption cycles can never grow it.
 #
@@ -410,7 +410,7 @@ EOF
 systemctl --user daemon-reload
 
 log "starting the devserver unit"
-"$CHAN" devserver --service=systemd --restart --bind=127.0.0.1 --port="$PORT"
+"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "first readiness" ready
 assert_store 0 "fresh boot, nothing parked"
 
@@ -458,9 +458,9 @@ printf '%s' "$METADATA1" | assert_probe_metadata \
     "$LIVE_NAME1" "$LIVE_GROUP1" "$SPAWN_NAME1" "$SPAWN_GROUP1"
 assert_store 2 "adoption after bare restart must not grow the store"
 
-# ---- case 2: chan devserver --restart ----
-log "case 2: chan devserver --restart"
-"$CHAN" devserver --service=systemd --restart --bind=127.0.0.1 --port="$PORT"
+# ---- case 2: chan devserver restart ----
+log "case 2: chan devserver restart"
+"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "readiness after CLI restart" ready
 child_alive "$PID1" || fail "child died across CLI restart"
 child_alive "$WS_PID1" || fail "workspace child died across CLI restart"
@@ -509,24 +509,24 @@ api DELETE "$TPREFIX/api/terminals/$SID2" "$TTOKEN" >/dev/null
 wait_until 15 "session2 child death" sh -c "! kill -0 $PID2 2>/dev/null"
 assert_store 2 "closed session left the shared and workspace entries"
 
-# ---- case 6: chan devserver --stop kills the child before the unit exits ----
-log "case 6: chan devserver --stop"
-"$CHAN" devserver --service=systemd --stop
-child_alive "$PID1" && fail "child survived --stop's explicit drain"
-child_alive "$WS_PID1" && fail "workspace child survived --stop's explicit drain"
-systemctl --user is-active --quiet "$UNIT_NAME" && fail "unit still active after --stop"
+# ---- case 6: chan devserver stop kills the child before the unit exits ----
+log "case 6: chan devserver stop"
+"$CHAN" devserver stop --service=systemd
+child_alive "$PID1" && fail "child survived stop's explicit drain"
+child_alive "$WS_PID1" && fail "workspace child survived stop's explicit drain"
+systemctl --user is-active --quiet "$UNIT_NAME" && fail "unit still active after stop"
 assert_store 0 "stop released the store"
 
-# ---- case 7: --restart --force kills sessions and restarts ----
-log "case 7: --restart --force"
-"$CHAN" devserver --service=systemd --restart --bind=127.0.0.1 --port="$PORT"
+# ---- case 7: restart --force kills sessions and restarts ----
+log "case 7: restart --force"
+"$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "readiness before force" ready
 read -r SID3 PID3 WID3 <<<"$(spawn_windowed_sleep 86313)"
 log "session3 $SID3 child $PID3 window $WID3"
 assert_store 1 "session parked before force"
-"$CHAN" devserver --service=systemd --restart --force --bind=127.0.0.1 --port="$PORT"
+"$CHAN" devserver restart --service=systemd --force --bind=127.0.0.1 --port="$PORT"
 wait_until 60 "readiness after force" ready
-child_alive "$PID3" && fail "child survived --restart --force"
+child_alive "$PID3" && fail "child survived restart --force"
 assert_store 0 "force restart cleared the store"
 
 # ---- case 8: bare systemctl stop HUPs the shells and empties the store ----

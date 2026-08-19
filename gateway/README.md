@@ -4,7 +4,7 @@ The self-hostable server side of chan's tunnel: the identity, profile, devserver
 
 A fleet of `chan devserver` instances dials in over the tunnel and this gateway reverse-proxies each one back out at `{owner}--{disc}.{proxy}.usr.{domain}/` (each workspace tenant mounted at `/{slug}-{8hex}/`), turning them into a portable, multi-device workspace service you run on your own infrastructure (your own "Google Drive / Docs" equivalent, with chan's editor on top).
 
-`chan devserver --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `usr.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
+`chan devserver run --tunnel-url` points at a gateway you stand up. `gw.chan.app` and `usr.chan.app` are the maintainer's own deployment of this code, which is experimental, ships with sign-in off by default, and is not a hosted product. Nobody can authenticate until an operator enrols them.
 
 ## What's here
 

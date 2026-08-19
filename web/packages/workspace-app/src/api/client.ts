@@ -1,6 +1,6 @@
 // API client. The typed surface lives here; wire mechanics
 // (token plumbing, fetch shape, WebSocket reconnect) live in
-// `./transport.ts`. Both `chan open` and the Tauri desktop shell
+// `./transport.ts`. Both `chan serve` and the Tauri desktop shell
 // reach the same in-process server over loopback HTTP+WS, so there
 // is one transport implementation rather than platform-specific clients.
 

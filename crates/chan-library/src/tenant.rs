@@ -97,7 +97,7 @@ pub trait HostControl: Send + Sync {
     /// Remove the workspace at `root` from this host: unmount it, UNREGISTER it
     /// from the host library, and forget it from the on/off overlay -- the
     /// over-the-control-socket equivalent of the launcher's `DELETE
-    /// /api/library/workspaces/{id}` (`chan close --remove` / `chan workspace
+    /// /api/library/workspaces/{id}` (`chan workspace forget` / `chan workspace
     /// rm` of a workspace this host serves). Runs IN the host process so the
     /// host's in-memory library + the persisted overlay both reflect it (a
     /// CLI-local `config.toml` edit would leave the host's caches stale and the
@@ -183,7 +183,7 @@ pub struct BrowserWindowTarget {
 /// embedder picks, and it rides in the control socket's context.
 #[derive(Clone)]
 pub enum UnserveScope {
-    /// A standalone `chan open <root>`: unserve of `root` fires the process
+    /// A standalone `chan serve <root>`: unserve of `root` fires the process
     /// graceful-shutdown signal, so the whole process exits and releases the
     /// flock. `root` guards against unserving a path this server does not serve.
     Standalone {
@@ -202,7 +202,7 @@ pub enum UnserveScope {
 }
 
 /// The embedder's choice of [`UnserveScope`] kind, passed to the tenant builder
-/// (which fills in the standalone shutdown handle). A standalone `chan open`
+/// (which fills in the standalone shutdown handle). A standalone `chan serve`
 /// passes [`UnserveMode::Standalone`]; a `WorkspaceHost` passes
 /// [`UnserveMode::Host`] once it registered its self-handle, else
 /// [`UnserveMode::Unsupported`].

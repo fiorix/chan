@@ -1,6 +1,6 @@
 // Cross-process advisory locks for per-workspace state.
 //
-// Two processes (e.g. `chan open` running on a workspace that the
+// Two processes (e.g. `chan serve` running on a workspace that the
 // native desktop app then opens) must not both try to write the
 // search index or graph DB at once. We use file-based advisory
 // locks via fs4 (Unix flock + Windows LockFileEx).
@@ -116,7 +116,7 @@ impl WorkspaceLock {
     /// racing chan's own in-flight mount must not read as a foreign lock.
     /// Otherwise we only **steal** when the recorded holder is **provably
     /// dead** (its pid no longer exists) and the record names this same
-    /// workspace -- the case where a dead `chan open`'s lock fd was
+    /// workspace -- the case where a dead `chan serve`'s lock fd was
     /// inherited by a still-living child and pins the flock with no real
     /// writer behind it. In every uncertain case -- record missing,
     /// unparseable, for a different path, a FOREIGN holder alive, or

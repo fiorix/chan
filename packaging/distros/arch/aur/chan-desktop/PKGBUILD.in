@@ -12,7 +12,7 @@ arch=('x86_64' 'aarch64')
 url='https://chan.app'
 license=('Apache-2.0')
 # The GTK/WebKit stack is soname-derived. systemd carries the packaged user
-# unit's runtime plus `chan devserver --service=systemd`, xdg-utils the
+# unit's runtime plus `chan devserver start --service=systemd`, xdg-utils the
 # `chan://` scheme handler, and gcc-libs the libgcc_s.so.1 the binary links;
 # namcap's soname-only analysis cannot see the first two.
 depends=(

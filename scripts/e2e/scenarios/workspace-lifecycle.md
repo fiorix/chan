@@ -33,7 +33,7 @@ Look up the area you changed and run the scenarios listed against it.
 | --- | --- | --- |
 | WL-01 | Cold startup stays observable | mixed |
 | WL-02 | `chan close PATH` during startup | automated |
-| WL-03 | `chan close --remove PATH` during startup | automated |
+| WL-03 | `chan workspace forget PATH` during startup | automated |
 | WL-04 | Shutdown flushes task-owned state | automated |
 | WL-05 | Terminal mouse preference | automated |
 | WL-06 | Deterministic pane and session state | automated |
@@ -63,7 +63,7 @@ Check `98` is destructive and must stay in the lexical tail slot, because the wo
 
 **Expectation.** `chan ps` answers within its bound while startup is still in progress, the JSON row carries the canonical path and a coherent serving state, and the launcher renders and accepts input during startup. Exactly one serve wins and the workspace reaches ready. No startup task, lock, or temporary file survives teardown.
 
-**Run.** Start `chan open PATH` with startup held at a deterministic in-progress barrier over a fixture with enough generated Markdown to exercise reports and indexing, plus a second variant with semantic indexing enabled. Query `chan ps` and `chan ps --json` while held, open the launcher, then release and wait for readiness.
+**Run.** Start `chan serve PATH` with startup held at a deterministic in-progress barrier over a fixture with enough generated Markdown to exercise reports and indexing, plus a second variant with semantic indexing enabled. Query `chan ps` and `chan ps --json` while held, open the launcher, then release and wait for readiness.
 
 **Backing.** Rust integration plus a launcher smoke. Not yet a single named case.
 
@@ -79,13 +79,13 @@ Check `98` is destructive and must stay in the lexical tail slot, because the wo
 
 **Evidence.** Exit status and elapsed time for close, the post-close JSON row, lock state, reopen result.
 
-### WL-03 - `chan close --remove PATH` during startup
+### WL-03 - `chan workspace forget PATH` during startup
 
-**Expectation.** Shutdown completes with no tenant or process resurrecting. The registry row and the launcher/API row are absent, `CHAN_HOME` workspace metadata including saved layouts is removed, and the source directory and its sentinel are untouched. A later `chan open PATH` starts with fresh metadata.
+**Expectation.** Shutdown completes with no tenant or process resurrecting. The registry row and the launcher/API row are absent, `CHAN_HOME` workspace metadata including saved layouts is removed, and the source directory and its sentinel are untouched. A later `chan serve PATH` starts with fresh metadata.
 
-The existing refusal contract also holds: a hosted workspace with live terminals refuses both close forms, and `--remove` must not remove the registry entry after that refusal.
+The existing refusal contract also holds: a hosted workspace with live terminals refuses both `chan close PATH` and `chan workspace forget PATH`, and forget must not remove the registry entry after that refusal.
 
-**Run.** Repeat WL-02 with a source-tree sentinel and a chan-metadata sentinel, run `chan close --remove PATH` while startup is held, release the stale startup, then poll the local registry and hosted library state.
+**Run.** Repeat WL-02 with a source-tree sentinel and a chan-metadata sentinel, run `chan workspace forget PATH` while startup is held, release the stale startup, then poll the local registry and hosted library state.
 
 **Backing.** `devserver::tests::chan_close_remove_during_startup_forgets_metadata_preserves_source_and_reopens_fresh`.
 
@@ -215,7 +215,7 @@ One asymmetry is deliberate and must survive. Content this session wrote to disk
 
 ### WL-16 - devserver restart preserves shared and workspace PTYs
 
-**Expectation.** A windowed PTY in the shared terminal tenant and one in a mounted workspace tenant keep the same session ids and live child processes across a bare systemd restart, `chan devserver --restart`, watchdog recovery, and kill-9 crash recovery. The fd store retains exactly one entry per live windowed session across every adoption. Session close removes only its entry; `chan devserver --stop`, `--restart --force`, and a bare stop end the relevant children and empty the store.
+**Expectation.** A windowed PTY in the shared terminal tenant and one in a mounted workspace tenant keep the same session ids and live child processes across a bare systemd restart, `chan devserver restart`, watchdog recovery, and kill-9 crash recovery. The fd store retains exactly one entry per live windowed session across every adoption. Session close removes only its entry; `chan devserver stop`, `restart --force`, and a bare stop end the relevant children and empty the store.
 
 During startup, root health and management routes remain responsive while persisted workspaces mount. Whether a request arrives on the direct listener or through the segment-preserving gateway tunnel, mounted tenant routes return 503 with a retry hint until workspace restoration, inherited-session adoption, and continuous parking finish. A shutdown before parking activates leaves the inherited manifest untouched.
 
@@ -229,7 +229,7 @@ During startup, root health and management routes remain responsive while persis
 
 Outside the automated set, and deliberately so: these need scale, a real host, or hardware that a deterministic fixture cannot stand in for.
 
-**Large repositories.** Use existing local checkouts. Record repository URL, exact commit, file count, disk use, enabled report and semantic modes, peak memory, and elapsed milestones. Observe launcher progress and responsiveness, `chan ps` while each workspace starts, early workspace-window availability, index and report progress to readiness, and one `chan close` plus one `chan close --remove` on disposable copies. Linux with reports enabled and BuckOS build sources with reports and semantic search enabled are the two useful targets. Neither belongs in an automated run.
+**Large repositories.** Use existing local checkouts. Record repository URL, exact commit, file count, disk use, enabled report and semantic modes, peak memory, and elapsed milestones. Observe launcher progress and responsiveness, `chan ps` while each workspace starts, early workspace-window availability, index and report progress to readiness, and one `chan close` plus one `chan workspace forget` on disposable copies. Linux with reports enabled and BuckOS build sources with reports and semantic search enabled are the two useful targets. Neither belongs in an automated run.
 
 **Fresh container or devserver.** In a fresh supported container: build the exact commit, repeat WL-01 through WL-04 and WL-13 through WL-14 with bounded fixtures, repeat document and scene collaboration with two clients, repeat the graph and file-browser checks, and verify one hosted leader with the expected follower and origin roles.
 

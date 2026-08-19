@@ -126,7 +126,7 @@
     <button onclick={() => (showCreate = true)}>New token</button>
   </div>
   <p class="muted">
-    Tokens authenticate <code>chan devserver --tunnel-token</code> and other
+    Tokens authenticate <code>chan devserver run --tunnel-token</code> and other
     CLI clients. Treat them like passwords: a token grants the same
     access as your account, scoped to your workspaces only.
   </p>

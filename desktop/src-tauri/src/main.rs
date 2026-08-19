@@ -1139,7 +1139,7 @@ fn spawn_devserver_workspace_poll(
 /// * `kind = "local"`: a chan-registry entry, backed by a
 ///   workspace mounted into the embedded server. Includes the canonical
 ///   filesystem path and live URL.
-/// * `kind = "outbound"`: a remote `chan open` explicitly attached
+/// * `kind = "outbound"`: a remote `chan serve` explicitly attached
 ///   by URL. No desktop-owned lifecycle; `id` points at the stored
 ///   attachment row.
 ///
@@ -1997,7 +1997,7 @@ fn control_run_is_current(state: &AppState, id: &str, generation: u64, prefix: &
 }
 
 /// Whether a control script's exit is CLEAN (status 0). A daemonizing connect
-/// script (for example `chan devserver --service=chan`) prints the token,
+/// script (for example `chan devserver join`) prints the token,
 /// detaches the server, and returns 0 on every healthy connect, so a clean
 /// exit means "the script finished its job", never "read what failed here".
 /// Anything else (a non-zero status, a signal, an unknown status) is a
@@ -2037,7 +2037,7 @@ fn ensure_control_run_live(
 
 /// Watch a scripted devserver's control-terminal PTY from the moment its prefix
 /// is registered. The script IS the connection for a persistent transport
-/// (`ssh -N`, `limactl shell ... chan devserver --join`), so what its exit
+/// (`ssh -N`, `limactl shell ... chan devserver join`), so what its exit
 /// means depends on how and when it ended:
 ///
 /// - CLEAN (status 0) while the connect flow is still in flight: healthy vs
@@ -3233,7 +3233,7 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         // A LOCAL devserver registers its workspaces over the well-known
         // discovery socket, which is the source of truth; the HTTP toggle is
         // best-effort, so a transport failure (e.g. a stale port after a restart)
-        // is non-fatal and must not toast on `chan open`. A remote devserver
+        // is non-fatal and must not toast on `chan serve`. A remote devserver
         // (which always has a connect script / ssh tunnel) still surfaces it.
         Err(devserver::SetWorkspaceOnError::Other { message }) => {
             if devserver_is_local(state, &id) {
@@ -3287,7 +3287,7 @@ fn open_local_workspace(state: State<Arc<AppState>>, path: String) -> Result<(),
     Ok(())
 }
 
-/// Register (and persist) a devserver from a `chan open {url}` CLI handoff.
+/// Register (and persist) a devserver from a `chan serve {url}` CLI handoff.
 /// Writes the `{url, name, script}` entry through the same
 /// [`DevserverConfigRegistry`](config::DevserverConfigRegistry) the launcher's
 /// `/api/library/devservers` routes use (the shared config handle), so the new
@@ -3302,6 +3302,132 @@ fn open_local_workspace(state: State<Arc<AppState>>, path: String) -> Result<(),
 /// picks the swap up over the library feed and the wire stays byte-
 /// identical for old and new CLIs alike.
 #[cfg(any(unix, windows))]
+/// Resolve a `chan devserver connect|disconnect|forget` TARGET -- a URL or
+/// a launcher label -- to one persisted registry row id. Gateway-roster rows
+/// are deliberately out of reach: they carry no local config, and the
+/// Gateways screen manages them. Ambiguity refuses with the candidates
+/// rather than guessing.
+fn resolve_devserver_target(state: &Arc<AppState>, target: &str) -> Result<String, String> {
+    let cfg = state
+        .store
+        .lock()
+        .unwrap()
+        .get()
+        .map_err(|e| e.to_string())?;
+    let trimmed = target.trim();
+    let matches: Vec<&config::Devserver> = if trimmed.contains("://") {
+        let key = config::endpoint_key(trimmed);
+        if key.is_none() {
+            return Err(format!("invalid devserver URL {trimmed:?}"));
+        }
+        cfg.devservers
+            .iter()
+            .filter(|d| config::endpoint_key(&d.url) == key)
+            .collect()
+    } else {
+        cfg.devservers
+            .iter()
+            .filter(|d| d.label.trim() == trimmed)
+            .collect()
+    };
+    match matches.len() {
+        0 => Err(format!(
+            "no registered devserver matches {trimmed:?}. `chan devserver ls` lists the \
+             registered rows; a gateway-managed devserver is managed on the Gateways screen."
+        )),
+        1 => Ok(matches[0].id.clone()),
+        _ => {
+            let listing = matches
+                .iter()
+                .map(|d| {
+                    let label = if d.label.trim().is_empty() {
+                        "-"
+                    } else {
+                        d.label.trim()
+                    };
+                    format!("  {label}  {}", d.url)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "{trimmed:?} matches more than one registered devserver:\n{listing}\n\
+                 Name the one you mean by URL, or remove the duplicate row in the launcher."
+            ))
+        }
+    }
+}
+
+/// The `chan devserver ls` projection: every registry row (gateway-roster
+/// rows included, marked) as a summary the CLI renders.
+fn list_devservers_from_handoff(
+    state: &Arc<AppState>,
+) -> Vec<chan_server::handoff::DevserverSummary> {
+    use chan_server::DevserverRegistry;
+    let registry = config::DevserverConfigRegistry::new(
+        Arc::clone(&state.store),
+        Arc::clone(&state.devserver_remove_hook),
+        Arc::clone(&state.devservers),
+        Arc::clone(&state.devserver_connecting),
+        Arc::clone(&state.devserver_feed),
+        Arc::clone(&state.gateway_manager),
+    );
+    registry
+        .list()
+        .into_iter()
+        .map(|e| chan_server::handoff::DevserverSummary {
+            url: e.url,
+            label: e.label,
+            status: match e.status {
+                chan_server::DevserverStatus::Disconnected => "disconnected",
+                chan_server::DevserverStatus::Connecting => "connecting",
+                chan_server::DevserverStatus::Connected => "connected",
+                chan_server::DevserverStatus::Unreachable => "unreachable",
+            }
+            .into(),
+            gateway: e.gateway_id.is_some(),
+        })
+        .collect()
+}
+
+/// The `chan devserver forget` handoff: remove one registration row. A live
+/// (connected or connecting) row refuses without `force`; with it, the
+/// registry's remove hook performs the disconnect-and-remove in one stroke.
+/// The remote devserver process keeps running either way.
+fn forget_devserver_from_handoff(
+    state: &Arc<AppState>,
+    target: &str,
+    force: bool,
+) -> Result<(), String> {
+    use chan_server::DevserverRegistry;
+    let id = resolve_devserver_target(state, target)?;
+    let live = state.devservers.is_connected(&id)
+        || state.devserver_connecting.lock().unwrap().contains(&id);
+    if live && !force {
+        return Err(format!(
+            "devserver {target:?} is connected; run `chan devserver disconnect {target}` \
+             first, or pass --force to disconnect and forget in one step."
+        ));
+    }
+    let registry = config::DevserverConfigRegistry::new(
+        Arc::clone(&state.store),
+        Arc::clone(&state.devserver_remove_hook),
+        Arc::clone(&state.devservers),
+        Arc::clone(&state.devserver_connecting),
+        Arc::clone(&state.devserver_feed),
+        Arc::clone(&state.gateway_manager),
+    );
+    // `remove` fires the remove hook, which reaps any live connection and
+    // windows; `Ok(false)` means the row vanished in a race, which is the
+    // goal state either way.
+    registry.remove(&id)?;
+    // Like the register handoff: a registry mutation with no window mints no
+    // feed push, so the launcher needs an explicit signal to re-list.
+    if let Some(embedded) = state.embedded() {
+        embedded.signal_library_change();
+    }
+    Ok(())
+}
+
 fn register_devserver_from_handoff(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -3334,7 +3460,7 @@ fn register_devserver_from_handoff(
     })?;
     // The launcher live-updates its devserver list from the window-watch feed
     // (`refreshDevserversLive`). A registry add mints no window, so this
-    // OUT-OF-BAND `chan open <url>` add fires no feed push and stays invisible
+    // OUT-OF-BAND `chan serve <url>` add fires no feed push and stays invisible
     // until a manual reload. The launcher's own add/edit form self-refreshes
     // (`saveDevserver` re-lists) and removal already pushes via its connection
     // teardown, so this handoff is the one path that needs an explicit signal.
@@ -3361,7 +3487,7 @@ fn register_devserver_from_handoff(
                     &gw.id,
                     &label,
                     "Gateway added",
-                    "chan open registered a gateway; connect it on the Gateways screen to see all its devservers",
+                    "chan serve registered a gateway; connect it on the Gateways screen to see all its devservers",
                 );
                 if let Some(embedded) = state.embedded() {
                     embedded.signal_library_change();
@@ -3378,7 +3504,7 @@ fn register_devserver_from_handoff(
 }
 
 /// Open a workspace in a native window in response to a CLI handoff
-/// request (`chan open <workspace>` while this desktop is running).
+/// request (`chan serve <workspace>` while this desktop is running).
 ///
 /// Mirrors the `add_workspace` flow: register + boot the workspace through the
 /// shared embedded Library, then `serve::start` (mount + mint the
@@ -3439,7 +3565,7 @@ fn open_workspace_from_handoff(
                 emit_system_notice(
                     &app,
                     "warning",
-                    format!("Could not open {key_for_block} from chan open: {e}"),
+                    format!("Could not open {key_for_block} from chan serve: {e}"),
                 );
                 return;
             }
@@ -3447,26 +3573,26 @@ fn open_workspace_from_handoff(
                 emit_system_notice(
                     &app,
                     "warning",
-                    format!("Opening {key_for_block} from chan open panicked: {e}"),
+                    format!("Opening {key_for_block} from chan serve panicked: {e}"),
                 );
                 return;
             }
         }
-        // `chan open <workspace>` handoff: the user explicitly opened it → mint a window.
+        // `chan serve <workspace>` handoff: the user explicitly opened it → mint a window.
         if let Err(e) =
             serve::start(app.clone(), Arc::clone(&state), key_for_block.clone(), true).await
         {
             emit_system_notice(
                 &app,
                 "warning",
-                format!("Could not open {key_for_block} from chan open: {e}"),
+                format!("Could not open {key_for_block} from chan serve: {e}"),
             );
         }
     });
     Ok(())
 }
 
-/// Tear down a local workspace handed off from `chan close` / `chan workspace rm`
+/// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
 async fn close_workspace_from_handoff(
@@ -4878,7 +5004,7 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
 /// CLI in-process with the Desktop personality and EXIT instead of launching
 /// the GUI. This is what makes a desktop install also provide `chan` with no
 /// separate download. Mirrors `run_as_cs_if_requested`: a pre-GUI argv probe
-/// that short-circuits `main`. The Desktop personality makes `chan open`
+/// that short-circuits `main`. The Desktop personality makes `chan serve`
 /// integrate with the running desktop (handoff / GUI launch) and `chan
 /// upgrade` drive the desktop updater rather than replacing a CLI tarball.
 /// Returns `Ok(true)` when it handled the invocation, `Ok(false)` for a
@@ -4891,7 +5017,7 @@ fn run_as_chan_if_requested() -> Result<bool, String> {
     if !chan_shell::invoked_as_chan(&chan_shell::invoked_arg0()) {
         return Ok(false);
     }
-    // `chan open` needs a multi-threaded runtime; everything else runs fine
+    // `chan serve` needs a multi-threaded runtime; everything else runs fine
     // on it too. shutdown_background() detaches chan-workspace's uncancellable
     // reindex pool on exit, matching the standalone `chan` binary's shim.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -5502,7 +5628,7 @@ fn main() {
 
             // CLI-to-desktop handoff listener (ratified Option B). Binds the
             // well-known per-user endpoint (a UDS on unix, a named pipe on
-            // Windows) so a `chan open <workspace>` in a terminal hands the
+            // Windows) so a `chan serve <workspace>` in a terminal hands the
             // workspace to this desktop window instead of failing on the
             // per-workspace flock. Leaked for the process lifetime (the registry
             // watcher above uses the same Box::leak pattern; the handle's Drop
@@ -5591,6 +5717,57 @@ fn main() {
                                     },
                                     Err(message) => Response::Error { message },
                                 },
+                                Request::ListDevservers { .. } => Response::Devservers {
+                                    desktop_version: CHAN_VERSION.into(),
+                                    devservers: list_devservers_from_handoff(&state),
+                                },
+                                Request::ConnectDevserver { target, .. } => {
+                                    match resolve_devserver_target(&state, &target) {
+                                        // Fire-and-return, like Upgrade: the dial can
+                                        // spend seconds in the control script and token
+                                        // scrape, while the handoff client reads one
+                                        // line on a short timeout. The launcher owns
+                                        // the progress and any sign-in / trust prompt.
+                                        Ok(id) => {
+                                            let app = app.clone();
+                                            let state = Arc::clone(&state);
+                                            tauri::async_runtime::spawn(async move {
+                                                if let Err(e) =
+                                                    connect_devserver_impl(app, state, id).await
+                                                {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        "handoff devserver connect failed"
+                                                    );
+                                                }
+                                            });
+                                            Response::DevserverConnectStarted {
+                                                desktop_version: CHAN_VERSION.into(),
+                                            }
+                                        }
+                                        Err(message) => Response::Error { message },
+                                    }
+                                }
+                                Request::DisconnectDevserver { target, .. } => {
+                                    match resolve_devserver_target(&state, &target) {
+                                        Ok(id) => {
+                                            teardown_devserver_connection(&app, &state, &id)
+                                                .await;
+                                            Response::DevserverDisconnected {
+                                                desktop_version: CHAN_VERSION.into(),
+                                            }
+                                        }
+                                        Err(message) => Response::Error { message },
+                                    }
+                                }
+                                Request::ForgetDevserver { target, force, .. } => {
+                                    match forget_devserver_from_handoff(&state, &target, force) {
+                                        Ok(()) => Response::DevserverForgotten {
+                                            desktop_version: CHAN_VERSION.into(),
+                                        },
+                                        Err(message) => Response::Error { message },
+                                    }
+                                }
                             }
                         }
                     })

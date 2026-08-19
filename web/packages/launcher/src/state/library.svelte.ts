@@ -94,7 +94,7 @@ function ensureWindowFeed(): void {
       // the feed (close handles for discarded records, flag orphans). Inert on
       // desktop (bridge-driven, no browser-origin records) and in the demo.
       if (selfManagedWindows) reconcileWindows(set);
-      // The feed also fires on workspace mount/unmount (chan open / on / off),
+      // The feed also fires on workspace mount/unmount (chan serve / on / off),
       // on a devserver connect/disconnect (its windows enter/leave + its
       // served-workspace rows merge in/out, and its `connected` flag flips),
       // and on every gateway mutation (the desktop signals the library change

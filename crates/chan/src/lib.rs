@@ -18,7 +18,7 @@
 //   chan workspace ls [--json]      list registered workspaces,
 //                                   most-recent first. --json emits
 //                                   a stable machine-readable shape.
-//   chan workspace rm <path>        drop a workspace from the registry
+//   chan workspace forget <path>        drop a workspace from the registry
 //                                   (filesystem contents untouched)
 //   chan workspace index <path>     rebuild the search index + graph
 //   chan workspace search <path> <query>
@@ -31,17 +31,18 @@
 //   chan workspace contacts import csv FILE --into DIR
 //                                   import a Google Contacts CSV as one
 //                                   markdown note per contact under DIR
-//   chan open {PATH} [-4|-6] [--host H --port N]
+//   chan serve {PATH} [-4|-6] [--host H --port N]
 //                                   register + serve a workspace. Defaults
 //                                   to 127.0.0.1 (loopback only); -6 picks
 //                                   ::1 instead. The embedded web editor
 //                                   talks to this. With chan-desktop running
 //                                   it hands the workspace to a native window.
-//   chan open {URL} [--name --script]
+//   chan close {PATH}               tear down a workspace's server.
+//   chan workspace forget {PATH}    tear down, then forget it from the
+//                                   registry (files untouched).
+//   chan devserver register {URL} [--name --script]
 //                                   register a devserver (scheme://host) with
-//                                   the desktop instead of serving a path.
-//   chan close {PATH} [--remove]    tear down a workspace's server; --remove
-//                                   also forgets it from the registry.
+//                                   the desktop launcher.
 //   chan config get [KEY]           print a preference value
 //   chan config set KEY=VALUE       update a preference
 //
@@ -83,16 +84,16 @@ mod skill;
 /// Long-form help for the `chan` commands, as consts.
 mod help;
 
-/// `chan open --help`, assembled at first use: the launcher catalog, then
+/// `chan serve --help`, assembled at first use: the launcher catalog, then
 /// the generated chord table, then the worked examples. Composed at
 /// runtime rather than with `concat!` because the pieces are consts, not
 /// literals, and the chord table has to stay a separate const for
 /// `make shortcuts-check` to diff it against the generator.
-static OPEN_AFTER_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+static SERVE_AFTER_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{OPEN_LAUNCHER}\nIN-APP KEYBINDINGS (Cmd = Ctrl on Linux / Windows):\n\n\
+        "{SERVE_LAUNCHER}\nIN-APP KEYBINDINGS (Cmd = Ctrl on Linux / Windows):\n\n\
          {KEYBINDINGS_TABLE}\n{}",
-        help::CHAN_OPEN_AFTER
+        help::CHAN_SERVE_AFTER
     )
 });
 
@@ -107,7 +108,7 @@ mod devserver_daemon;
 #[doc(hidden)]
 pub mod test_env;
 
-/// Default listen port shared by `chan open` (standalone serve) and
+/// Default listen port shared by `chan serve` (standalone serve) and
 /// `chan devserver`. Single-sourced so the two cannot drift: `cmd_serve` relies
 /// on them being equal to recognize the "a devserver already owns 8787" bind
 /// collision and print an actionable hint instead of a bare "address in use".
@@ -182,14 +183,14 @@ const KEYBINDINGS_TABLE: &str = "  App
   Find in terminal                             Cmd+F
 ";
 
-/// `chan open` long help: what serving a workspace actually does.
-const OPEN_LONG_ABOUT: &str = r#"Register a directory as a chan workspace and serve it.
+/// `chan serve` long help: what serving a workspace actually does.
+const SERVE_LONG_ABOUT: &str = r#"Register a directory as a chan workspace and serve it.
 
-chan open PATH creates the directory if it does not exist, registers it
+chan serve PATH creates the directory if it does not exist, registers it
 in the workspace registry, and serves it. Serving is load-bearing: a
 bare `chan workspace add` only registers, while serving mounts the
 workspace so the editor, terminal, search, graph, and a devserver can
-reach it. The path is always explicit -- a bare `chan open` is an error.
+reach it. The path is always explicit -- a bare `chan serve` is an error.
 
 Where it serves follows the shell's parentage and the live same-user
 instances on the box. A chan-desktop terminal stays with the desktop; a
@@ -209,21 +210,20 @@ system browser unless --no-browser. There is no TLS, only a
 bearer-token gate, so a non-loopback --host serves your workspace in
 plaintext and prints a warning saying so.
 
-Without --here, chan open refuses a path inside a Git, Mercurial, or
+Without --here, chan serve refuses a path inside a Git, Mercurial, or
 Subversion working tree: it exits 70 and prints a `chan-error:
 vcs-parent` marker on stderr, because the repository root is almost
 always the better workspace root. --here serves the subdirectory
 verbatim.
 
-chan open URL (any scheme://host[:port] value) does something else
-entirely: it registers a devserver with a running chan-desktop and
-returns, without serving or dialing it -- connecting is the launcher's
-Connect button. --name and --script apply only to that form.
+serve takes a PATH only. A remote devserver is registered with the
+desktop launcher by `chan devserver register URL`; a URL passed here is
+refused with that pointer rather than read as a relative directory.
 "#;
 
 /// The launcher catalog, which is the thing a user reaches for once the
 /// window is up. Kept next to the chord table it introduces.
-const OPEN_LAUNCHER: &str = r#"Inside the window, everything chan can do is one chord away. The command
+const SERVE_LAUNCHER: &str = r#"Inside the window, everything chan can do is one chord away. The command
 launcher is Cmd+K on the macOS desktop app and Ctrl+Alt+K everywhere
 else (web, Linux, Windows). Cmd+P is Team Work, not the launcher.
 
@@ -262,7 +262,7 @@ const CHAN_LONG_ABOUT: &str = "\
 An IDE in a single binary: a terminal emulator and multiplexer plus a
 workspace manager.
 
-`chan open PATH` registers a folder as a workspace and serves it. The
+`chan serve PATH` registers a folder as a workspace and serves it. The
 workspace indexes its content for search, builds a graph from the links,
 tags, and mentions in your documents, and hosts the editor, terminals,
 file browser, graph, dashboard, and Team Work over that one tree.
@@ -291,9 +291,9 @@ standalone terminal, and say so.
   A STANDALONE TERMINAL -- no workspace behind it. PTYs start in $HOME.
     Fully automatable: every `cs terminal` and `cs pane` command works,
     so scripting it is supported and expected. It is the right place to
-    manage the chan library -- `chan open`, `chan close`, `chan close
-    --remove`, `chan ps` -- and the wrong place for heavy work, because
-    none of the workspace surface exists there.
+    manage the chan library -- `chan serve`, `chan close`, `chan
+    workspace forget`, `chan ps` -- and the wrong place for heavy
+    work, because none of the workspace surface exists there.
 
 Run a workspace-only command in a standalone terminal and it says so:
   cs <cmd> is only available in a workspace window; this is a
@@ -311,7 +311,7 @@ TELLING WHERE YOU ARE:
 
 EXAMPLES:
 Serve a project and open it:
-  chan open ~/src/my-project
+  chan serve ~/src/my-project
 
 See what is being served, then tear one down:
   chan ps
@@ -411,6 +411,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Serve a workspace (same as `chan workspace serve`)
+    #[command(long_about = SERVE_LONG_ABOUT)]
+    #[command(after_long_help = &*SERVE_AFTER_HELP)]
+    Serve {
+        #[command(flatten)]
+        args: ServeCliArgs,
+    },
+    /// Stop serving a workspace (same as `chan workspace close`)
+    #[command(long_about = help::CHAN_CLOSE)]
+    #[command(after_long_help = help::CHAN_CLOSE_AFTER)]
+    Close {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        path: PathBuf,
+    },
+    /// Show which registered workspaces are served, and by what
+    #[command(long_about = help::CHAN_PS)]
+    #[command(after_long_help = help::CHAN_PS_AFTER)]
+    Ps {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage the workspace registry and a workspace's content
     ///
     /// Registers, lists, and forgets workspaces, and drives one
@@ -425,6 +447,13 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
+    },
+    /// Run this machine's devserver, or manage connections to remote ones
+    #[command(long_about = help::CHAN_DEVSERVER)]
+    #[command(after_long_help = help::CHAN_DEVSERVER_AFTER)]
+    Devserver {
+        #[command(subcommand)]
+        action: DevserverAction,
     },
     /// Drive the current chan window from its terminal (the `cs` alias).
     ///
@@ -446,6 +475,13 @@ enum Command {
         #[command(subcommand)]
         action: ShellAction,
     },
+    /// Read or write settings outside the workspace (editor.*, server.*)
+    #[command(long_about = help::CHAN_CONFIG)]
+    #[command(after_long_help = help::CHAN_CONFIG_AFTER)]
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Generate shell completion scripts.
     Completions {
         /// Shell to generate completions for.
@@ -463,245 +499,27 @@ enum Command {
         #[arg(long, value_name = "SLUG", verbatim_doc_comment)]
         topic: Option<String>,
     },
-    /// Stop serving a workspace; --remove also forgets it
-    #[command(long_about = help::CHAN_CLOSE)]
-    #[command(after_long_help = help::CHAN_CLOSE_AFTER)]
-    Close {
-        #[arg(value_hint = clap::ValueHint::AnyPath)]
-        path: PathBuf,
-        /// After tearing down the server, also forget the workspace from the
-        /// registry (filesystem contents untouched). Runs regardless of the
-        /// teardown outcome.
+    /// Upgrade chan in place
+    ///
+    /// Reads release metadata from chan.app, downloads the selected CLI
+    /// asset, verifies its SHA256, and atomically replaces the running
+    /// binary.
+    ///
+    /// Set `CHAN_UPDATE_CHECK=0` to silence the banner that fires on
+    /// `chan serve` startup.
+    #[command(verbatim_doc_comment)]
+    Upgrade {
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Only check + report; do not download or replace the
+        /// binary. Returns success in both directions.
         #[arg(long, verbatim_doc_comment)]
-        remove: bool,
-    },
-    /// Serve a workspace by PATH, or register a devserver by URL
-    #[command(long_about = OPEN_LONG_ABOUT)]
-    #[command(after_long_help = &*OPEN_AFTER_HELP)]
-    Open {
-        /// A local workspace PATH, or a devserver URL (scheme://host[:port]).
-        /// A value containing `://` is treated as a devserver URL; anything
-        /// else is a path.
-        #[arg(verbatim_doc_comment)]
-        target: Option<String>,
-        /// (URL form) Optional label for the devserver's launcher section.
-        #[arg(long)]
-        name: Option<String>,
-        /// (URL form) Optional connect script the desktop runs before it
-        /// dials the devserver.
+        check: bool,
+        /// Pin a specific version instead of querying latest metadata.
+        /// Pass a bare version, for example `0.14.0`.
         #[arg(long, verbatim_doc_comment)]
-        script: Option<String>,
-        /// (PATH form) Serve the given path verbatim instead of suggesting
-        /// the enclosing VCS repository root. Without this flag, `chan
-        /// open` refuses to start when the workspace path lives inside
-        /// a Git / Mercurial / Subversion working tree (exit 70 +
-        /// `chan-error: vcs-parent` marker on stderr) because the
-        /// repo root is almost always a better workspace root: it
-        /// keeps cross-file links, the graph, and search aligned
-        /// with the project boundary. Pass `--here` when you
-        /// genuinely want to scope the workspace to a subdir.
-        #[arg(long, verbatim_doc_comment)]
-        here: bool,
-        /// Host address to bind. Default 127.0.0.1 (or ::1 with -6).
-        /// Use 0.0.0.0 / :: to listen on all interfaces. chan has no
-        /// TLS and only a bearer-token gate, so any non-loopback host
-        /// exposes your workspace in plaintext on that network.
-        #[arg(long, verbatim_doc_comment)]
-        host: Option<IpAddr>,
-        /// Force IPv4-only listening. With no --host, binds 127.0.0.1.
-        /// Mutually exclusive with -6.
-        #[arg(
-            short = '4',
-            long = "ipv4",
-            conflicts_with = "ipv6",
-            verbatim_doc_comment
-        )]
-        ipv4: bool,
-        /// Force IPv6-only listening. With no --host, binds ::1.
-        /// Mutually exclusive with -4.
-        #[arg(short = '6', long = "ipv6", verbatim_doc_comment)]
-        ipv6: bool,
-        #[arg(long, default_value_t = DEFAULT_PORT)]
-        port: u16,
-        /// URL path prefix to mount the server under. Lets a reverse
-        /// proxy multiplex many `chan open` instances under one host
-        /// (e.g. `workspace.example.com/{user}/`). Canonicalized to
-        /// `/seg[/seg...]` with `[A-Za-z0-9-]+` segments; trailing
-        /// slashes and `//` runs are tolerated. Anything else is
-        /// rejected.
-        #[arg(long, verbatim_doc_comment)]
-        prefix: Option<String>,
-        /// Idle timeout before the server triggers a graceful
-        /// shutdown. Accepts `30s`, `5m`, `1h`. Useful for systemd
-        /// socket-activated deployments where many idle instances
-        /// stack on one host. Without this flag the server stays
-        /// resident indefinitely.
-        #[arg(long, value_parser = parse_idle_timeout, verbatim_doc_comment)]
-        timeout: Option<Duration>,
-        /// Skip the bearer-token gate. Local dev only;
-        /// never expose a no-token server on a shared machine.
-        #[arg(long, verbatim_doc_comment)]
-        no_token: bool,
-        /// Do not open the system default browser when the server is
-        /// ready. The URL is still printed; useful for shells that
-        /// host the UI in their own window (chan-desktop) or for
-        /// headless / scripted invocations.
-        #[arg(long, verbatim_doc_comment)]
-        no_browser: bool,
-        /// Search indexer resource profile. Overrides
-        /// `server.search.aggression` for this run.
-        #[arg(long, value_parser = parse_search_aggression, verbatim_doc_comment)]
-        search_aggression: Option<SearchAggression>,
-        /// Lock down the Settings panel: the SPA greys the cog and
-        /// the server refuses every settings-write route with 403
-        /// (PATCH /api/config, POST /api/storage/reset,
-        /// POST /api/index/rebuild). For
-        /// kiosk-style deployments (shared workstation, demo box) where
-        /// the workspace owner is not the operator at the keyboard.
-        #[arg(long, verbatim_doc_comment)]
-        no_settings: bool,
-        /// Force a standalone server: bind this workspace directly and skip
-        /// both the chan-desktop handoff and the local devserver
-        /// registration, even when one is running on this box. Overrides the
-        /// shell-parentage default. The escape hatch for automation and for
-        /// serving a workspace the local devserver / desktop should not take
-        /// over. Mutually exclusive with --desktop / --devserver.
-        #[arg(long, conflicts_with_all = ["desktop", "devserver"], verbatim_doc_comment)]
-        standalone: bool,
-        /// Force the chan-desktop handoff: hand this workspace to a running
-        /// same-user desktop to open in a native window, then exit. Overrides
-        /// the shell-parentage default. Falls through to a standalone server
-        /// when no desktop is reachable (skew, error, GUI absent, or
-        /// CHAN_NO_DESKTOP_HANDOFF). Mutually exclusive with --standalone /
-        /// --devserver.
-        #[arg(long, conflicts_with_all = ["standalone", "devserver"], verbatim_doc_comment)]
-        desktop: bool,
-        /// Force local-devserver registration. A bare --devserver selects the
-        /// only live same-user devserver, or the unique one whose library root
-        /// matches this CLI's CHAN_HOME. --devserver=<port|url> selects one
-        /// explicitly and refuses when it is not live. Refused from inside a
-        /// devserver shell -- nesting a devserver in a devserver is unsupported;
-        /// omit the flag to register with the current one. Mutually exclusive
-        /// with --standalone / --desktop.
-        #[arg(
-            long,
-            value_name = "PORT|URL",
-            num_args = 0..=1,
-            default_missing_value = "auto",
-            require_equals = true,
-            value_parser = parse_devserver_selector,
-            conflicts_with_all = ["standalone", "desktop"],
-            verbatim_doc_comment
-        )]
-        devserver: Option<DevserverSelector>,
-    },
-    /// Show which registered workspaces are served, and by what
-    #[command(long_about = help::CHAN_PS)]
-    #[command(after_long_help = help::CHAN_PS_AFTER)]
-    Ps {
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run a headless multi-workspace devserver on one address
-    #[command(long_about = help::CHAN_DEVSERVER)]
-    #[command(after_long_help = help::CHAN_DEVSERVER_AFTER)]
-    Devserver {
-        /// Host address to bind. Default 127.0.0.1 (loopback). Use
-        /// 0.0.0.0 / :: to listen on all interfaces; there is no TLS and
-        /// only a bearer-token gate, so reach a remote devserver over an
-        /// `ssh -L` tunnel rather than binding it on a public interface.
-        /// Omit on `--restart` to preserve the running service's bound
-        /// address instead of reverting to the default.
-        #[arg(long, verbatim_doc_comment)]
-        bind: Option<IpAddr>,
-        /// Port to bind. Default 8787, except a listening tunnel-mode
-        /// devserver (systemd / CHAN_DEVSERVER_LISTEN=1) which defaults to an
-        /// OS-assigned free port; preserved from the running service on
-        /// `--restart` when omitted.
-        #[arg(long, verbatim_doc_comment)]
-        port: Option<u16>,
-        /// Service backend. `auto` (the default, and what a bare `--service`
-        /// resolves to) picks per-OS at runtime: with an action verb it
-        /// supervises under `systemd` (Linux), `launchd` (macOS), or the
-        /// self-managed `chan` daemon (Windows); with no action verb it runs in
-        /// the FOREGROUND (Ctrl-C to stop). `none` forces that unsupervised
-        /// foreground server. `chan` is the cross-OS self-managed background
-        /// daemon (pidfile + flock). `systemd` (Linux) and `launchd` (macOS) are
-        /// OS-backed background services. `chan` may run bare or with an action
-        /// verb; `systemd` / `launchd` need an explicit action verb.
-        #[arg(long, value_enum, num_args = 0..=1, default_value = "auto", default_missing_value = "auto", verbatim_doc_comment)]
-        service: ServiceKind,
-        /// Start the background service (write/refresh its unit, enable it on
-        /// boot where the backend supports that, and start it), then return.
-        /// Idempotent when it is already running.
-        #[arg(long, group = "action", verbatim_doc_comment)]
-        start: bool,
-        /// Stop the service AND disable it, so it does not come back on the next
-        /// login or boot, then return. Idempotent. A foreground devserver
-        /// (`--service=none`) is stopped with Ctrl-C.
-        #[arg(long, group = "action", verbatim_doc_comment)]
-        stop: bool,
-        /// Restart the service, then return. Rewrites the unit / agent / pidfile
-        /// first, so it picks up the current binary; an explicit --bind/--port
-        /// rebinds, while omitting both preserves the running service's address.
-        /// Starts the service if it is not already running.
-        #[arg(long, group = "action", verbatim_doc_comment)]
-        restart: bool,
-        /// Report whether the service is running, then exit.
-        #[arg(long, group = "action")]
-        status: bool,
-        /// Ensure the service is running (start it if down, attach if up) and
-        /// stay attached, blocking on its health until Ctrl-C. This is the
-        /// "bring it up and watch it" form connect scripts use; on Ctrl-C it
-        /// detaches and the service keeps running.
-        #[arg(long, group = "action", verbatim_doc_comment)]
-        join: bool,
-        /// Rotate the devserver bearer token and print the new
-        /// CHAN_DEVSERVER_TOKEN= marker plus /?t= URL, then return. Reaches
-        /// the running devserver's management API so the old token stops
-        /// authorizing immediately; with no running server it rewrites the
-        /// persisted config instead (a devserver still running elsewhere
-        /// keeps its old token until restarted). The response to a
-        /// suspected token leak. Browser tabs on the old ?t= URL must be
-        /// reopened at the new one; every other client re-derives it.
-        #[arg(long, group = "action", verbatim_doc_comment)]
-        rotate_token: bool,
-        /// Take over a wedged `--service=chan` daemon, or make a
-        /// `--service=systemd --restart` destructive instead of preserving live
-        /// PTYs. Applies to `--service=chan` and `--restart`.
-        #[arg(long, verbatim_doc_comment)]
-        force: bool,
-        /// Tunnel endpoint URL. Required with --tunnel-token. Prefer the
-        /// CHAN_TUNNEL_URL env var for supervised or scripted deployments.
-        #[arg(long, env = "CHAN_TUNNEL_URL", verbatim_doc_comment)]
-        tunnel_url: Option<String>,
-        /// Personal access token (chan_pat_*) from the gateway identity
-        /// origin (gw.chan.app for the hosted gateway). Setting this
-        /// enables tunnel mode: the devserver dials the gateway and publishes
-        /// every mounted workspace behind one registration. The devserver
-        /// identity is resolved backend-side from the token; the display
-        /// name shown in the roster comes from --tunnel-devserver-name.
-        /// Prefer the CHAN_TUNNEL_TOKEN env var so the secret does not
-        /// appear in `ps`.
-        #[arg(long, env = "CHAN_TUNNEL_TOKEN", verbatim_doc_comment)]
-        tunnel_token: Option<String>,
-        /// Display name for this devserver in the gateway roster (tunnel
-        /// mode only). Defaults to this machine's hostname. Trimmed and
-        /// capped at 64 bytes; when another of your devservers already
-        /// holds the name, the gateway suffixes `-2`, `-3`, ...
-        #[arg(long, env = "CHAN_TUNNEL_DEVSERVER_NAME", verbatim_doc_comment)]
-        tunnel_devserver_name: Option<String>,
-        /// Run WITHOUT tunnel mode, ignoring any token in scope: the
-        /// --tunnel-token flag, CHAN_TUNNEL_TOKEN in the environment, and
-        /// (under --service=systemd) the PAT persisted in the installed
-        /// unit. This is how a supervised tunnel devserver is converted
-        /// back to a purely local one, and how a shell that inherited a
-        /// token still starts a local devserver. Omit it and a supervised
-        /// --start/--restart/--join keeps the tunnel registration the unit
-        /// already carries.
-        #[arg(long, verbatim_doc_comment)]
-        no_tunnel: bool,
+        version: Option<String>,
     },
     /// Internal: run the background `--service=chan` daemon child. The parent
     /// process detaches this command, redirects stdout/stderr to the devserver
@@ -723,35 +541,6 @@ enum Command {
         #[arg(long, verbatim_doc_comment)]
         tunnel_devserver_name: Option<String>,
     },
-    /// Read or write settings outside the workspace (editor.*, server.*)
-    #[command(long_about = help::CHAN_CONFIG)]
-    #[command(after_long_help = help::CHAN_CONFIG_AFTER)]
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-    /// Upgrade chan in place
-    ///
-    /// Reads release metadata from chan.app, downloads the selected CLI
-    /// asset, verifies its SHA256, and atomically replaces the running
-    /// binary.
-    ///
-    /// Set `CHAN_UPDATE_CHECK=0` to silence the banner that fires on
-    /// `chan open` startup.
-    #[command(verbatim_doc_comment)]
-    Upgrade {
-        /// Skip the confirmation prompt.
-        #[arg(short = 'y', long)]
-        yes: bool,
-        /// Only check + report; do not download or replace the
-        /// binary. Returns success in both directions.
-        #[arg(long, verbatim_doc_comment)]
-        check: bool,
-        /// Pin a specific version instead of querying latest metadata.
-        /// Pass a bare version, for example `0.14.0`.
-        #[arg(long, verbatim_doc_comment)]
-        version: Option<String>,
-    },
     /// Internal: run the chan-llm MCP server on stdio against a
     /// workspace. Spawned by MCP clients so file edits route through
     /// chan-workspace's gates instead of touching the workspace directly.
@@ -762,7 +551,7 @@ enum Command {
         path: PathBuf,
     },
     /// Internal: stdio bridge to the MCP server hosted in-process
-    /// by a running `chan open`. Connects to the per-server Unix-
+    /// by a running `chan serve`. Connects to the per-server Unix-
     /// domain socket and pipes stdin/stdout through it. Used by the
     /// external MCP clients so agent child processes can reach the
     /// live workspace without trying to reopen it (which would deadlock
@@ -784,6 +573,336 @@ enum Command {
 /// process-lifecycle and app-level commands (open, close, devserver,
 /// config, ...). Mirrors the `IndexAction` / `ReportsAction`
 /// sub-enum pattern.
+/// Subcommands for `chan devserver`. One noun, two faces, told apart by
+/// their argument shape. The server-side verbs (run / start / stop /
+/// restart / status / join / rotate-token) manage the devserver process on
+/// THIS machine: a per-CHAN_HOME singleton addressed by service identity,
+/// so they take no target. The client-side verbs (register, and the
+/// connection verbs that ride the desktop) operate on the desktop
+/// launcher's registry of REMOTE devservers, so they require a URL or
+/// label target and a running chan-desktop.
+#[derive(Subcommand, Debug)]
+enum DevserverAction {
+    /// Run the devserver in this terminal (foreground, Ctrl-C to stop)
+    Run {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Start the background service and return
+    ///
+    /// Writes/refreshes its unit, enables it on boot where the backend
+    /// supports that, and starts it. Idempotent when it is already
+    /// running.
+    #[command(verbatim_doc_comment)]
+    Start {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Stop the service AND disable it, then return
+    ///
+    /// The service does not come back on the next login or boot.
+    /// Idempotent. A foreground devserver (`chan devserver run`) is
+    /// stopped with Ctrl-C. Stops the devserver on THIS machine; to drop
+    /// a connection to a remote one, see the launcher's Disconnect.
+    #[command(verbatim_doc_comment)]
+    Stop {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Restart the service, then return
+    ///
+    /// Rewrites the unit / agent / pidfile first, so it picks up the
+    /// current binary; an explicit --bind/--port rebinds, while omitting
+    /// both preserves the running service's address. Starts the service
+    /// if it is not already running.
+    #[command(verbatim_doc_comment)]
+    Restart {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Report whether the service is running, then exit
+    Status {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Ensure the service is running and stay attached
+    ///
+    /// Starts it if down, attaches if up, and blocks on its health until
+    /// Ctrl-C. This is the "bring it up and watch it" form connect
+    /// scripts use; on Ctrl-C it detaches and the service keeps running.
+    #[command(verbatim_doc_comment)]
+    Join {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Rotate the devserver bearer token, then return
+    ///
+    /// Prints the new CHAN_DEVSERVER_TOKEN= marker plus /?t= URL. Reaches
+    /// the running devserver's management API so the old token stops
+    /// authorizing immediately; with no running server it rewrites the
+    /// persisted config instead (a devserver still running elsewhere
+    /// keeps its old token until restarted). The response to a suspected
+    /// token leak. Browser tabs on the old ?t= URL must be reopened at
+    /// the new one; every other client re-derives it.
+    #[command(verbatim_doc_comment)]
+    RotateToken {
+        #[command(flatten)]
+        args: DevserverServeArgs,
+    },
+    /// Register a remote devserver with the desktop launcher
+    ///
+    /// Adds the URL to chan-desktop's devserver registry and returns,
+    /// without serving or dialing it; connecting is the launcher's
+    /// Connect button. Needs the chan desktop app running on this
+    /// machine.
+    #[command(verbatim_doc_comment)]
+    Register {
+        /// The devserver URL (scheme://host[:port]).
+        url: String,
+        /// Optional label for the devserver's launcher section.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional connect script the desktop runs before it dials the
+        /// devserver.
+        #[arg(long, verbatim_doc_comment)]
+        script: Option<String>,
+    },
+    /// List the desktop launcher's registered devservers
+    ///
+    /// One row per registration with its live connection state. Rows
+    /// synthesized from a gateway roster are marked; register / connect /
+    /// disconnect / forget cannot touch those (the Gateways screen
+    /// manages them). Needs the chan desktop app running.
+    #[command(verbatim_doc_comment)]
+    Ls {
+        /// Emit machine-readable JSON:
+        /// `{"devservers":[{url,label,status,gateway},...]}`.
+        #[arg(long, verbatim_doc_comment)]
+        json: bool,
+    },
+    /// Dial a registered devserver from the desktop
+    ///
+    /// Resolves TARGET (a registered URL or launcher label) and starts
+    /// the desktop's connect: control script, token scrape, dial. Returns
+    /// as soon as the connect is underway; sign-in or trust prompts
+    /// surface in the launcher, which owns the progress. An unregistered
+    /// URL is refused: register first. Needs the chan desktop app
+    /// running.
+    #[command(verbatim_doc_comment)]
+    Connect {
+        /// A registered devserver URL or launcher label.
+        target: String,
+    },
+    /// Drop the desktop's connection to a devserver
+    ///
+    /// The registration row is kept and the remote devserver process
+    /// keeps running; reconnect any time. Disconnecting an already
+    /// disconnected row succeeds as a no-op. Needs the chan desktop app
+    /// running.
+    #[command(verbatim_doc_comment)]
+    Disconnect {
+        /// A registered devserver URL or launcher label.
+        target: String,
+    },
+    /// Remove a devserver registration from the desktop launcher
+    ///
+    /// The undo of `chan devserver register`: drops the row, discarding
+    /// its stored write-only token (re-registering needs the token
+    /// again). A connected row is refused; disconnect first, or pass
+    /// --force to disconnect and forget in one step. The remote devserver
+    /// process keeps running either way. Needs the chan desktop app
+    /// running.
+    #[command(verbatim_doc_comment)]
+    Forget {
+        /// A registered devserver URL or launcher label.
+        target: String,
+        /// Disconnect a live connection first instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// Flags shared by the server-side `chan devserver` verbs. One struct,
+/// flattened into each verb, so every verb accepts the same address,
+/// service, and tunnel flags.
+#[derive(Args, Debug)]
+struct DevserverServeArgs {
+    /// Host address to bind. Default 127.0.0.1 (loopback). Use
+    /// 0.0.0.0 / :: to listen on all interfaces; there is no TLS and
+    /// only a bearer-token gate, so reach a remote devserver over an
+    /// `ssh -L` tunnel rather than binding it on a public interface.
+    /// Omit on `restart` to preserve the running service's bound
+    /// address instead of reverting to the default.
+    #[arg(long, verbatim_doc_comment)]
+    bind: Option<IpAddr>,
+    /// Port to bind. Default 8787, except a listening tunnel-mode
+    /// devserver (systemd / CHAN_DEVSERVER_LISTEN=1) which defaults to an
+    /// OS-assigned free port; preserved from the running service on
+    /// `restart` when omitted.
+    #[arg(long, verbatim_doc_comment)]
+    port: Option<u16>,
+    /// Service backend. `auto` (the default, and what a bare `--service`
+    /// resolves to) picks per-OS at runtime: under start / stop / restart /
+    /// status / join it supervises via `systemd` (Linux), `launchd`
+    /// (macOS), or the self-managed `chan` daemon (Windows); under `run`
+    /// it runs in the FOREGROUND (Ctrl-C to stop). `none` forces that
+    /// unsupervised foreground server. `chan` is the cross-OS self-managed
+    /// background daemon (pidfile + flock). `systemd` (Linux) and `launchd`
+    /// (macOS) are OS-backed background services and need a management
+    /// verb.
+    #[arg(long, value_enum, num_args = 0..=1, default_value = "auto", default_missing_value = "auto", verbatim_doc_comment)]
+    service: ServiceKind,
+    /// Take over a wedged `--service=chan` daemon, or make a
+    /// `--service=systemd restart` destructive instead of preserving live
+    /// PTYs. Applies to `--service=chan` and `restart`.
+    #[arg(long, verbatim_doc_comment)]
+    force: bool,
+    /// Tunnel endpoint URL. Required with --tunnel-token. Prefer the
+    /// CHAN_TUNNEL_URL env var for supervised or scripted deployments.
+    #[arg(long, env = "CHAN_TUNNEL_URL", verbatim_doc_comment)]
+    tunnel_url: Option<String>,
+    /// Personal access token (chan_pat_*) from the gateway identity
+    /// origin (gw.chan.app for the hosted gateway). Setting this
+    /// enables tunnel mode: the devserver dials the gateway and publishes
+    /// every mounted workspace behind one registration. The devserver
+    /// identity is resolved backend-side from the token; the display
+    /// name shown in the roster comes from --tunnel-devserver-name.
+    /// Prefer the CHAN_TUNNEL_TOKEN env var so the secret does not
+    /// appear in `ps`.
+    #[arg(long, env = "CHAN_TUNNEL_TOKEN", verbatim_doc_comment)]
+    tunnel_token: Option<String>,
+    /// Display name for this devserver in the gateway roster (tunnel
+    /// mode only). Defaults to this machine's hostname. Trimmed and
+    /// capped at 64 bytes; when another of your devservers already
+    /// holds the name, the gateway suffixes `-2`, `-3`, ...
+    #[arg(long, env = "CHAN_TUNNEL_DEVSERVER_NAME", verbatim_doc_comment)]
+    tunnel_devserver_name: Option<String>,
+    /// Run WITHOUT tunnel mode, ignoring any token in scope: the
+    /// --tunnel-token flag, CHAN_TUNNEL_TOKEN in the environment, and
+    /// (under --service=systemd) the PAT persisted in the installed
+    /// unit. This is how a supervised tunnel devserver is converted
+    /// back to a purely local one, and how a shell that inherited a
+    /// token still starts a local devserver. Omit it and a supervised
+    /// start / restart / join keeps the tunnel registration the unit
+    /// already carries.
+    #[arg(long, verbatim_doc_comment)]
+    no_tunnel: bool,
+}
+
+/// The `chan serve` / `chan workspace serve` argument set. One struct,
+/// flattened into both spellings, so the elevated form and the family
+/// form parse and behave identically by construction.
+#[derive(Args, Debug)]
+struct ServeCliArgs {
+    /// A local workspace PATH. Required; a URL is refused with a
+    /// pointer at `chan devserver register`.
+    #[arg(value_hint = clap::ValueHint::AnyPath, verbatim_doc_comment)]
+    path: Option<String>,
+    /// Serve the given path verbatim instead of suggesting
+    /// the enclosing VCS repository root. Without this flag, `chan
+    /// serve` refuses to start when the workspace path lives inside
+    /// a Git / Mercurial / Subversion working tree (exit 70 +
+    /// `chan-error: vcs-parent` marker on stderr) because the
+    /// repo root is almost always a better workspace root: it
+    /// keeps cross-file links, the graph, and search aligned
+    /// with the project boundary. Pass `--here` when you
+    /// genuinely want to scope the workspace to a subdir.
+    #[arg(long, verbatim_doc_comment)]
+    here: bool,
+    /// Host address to bind. Default 127.0.0.1 (or ::1 with -6).
+    /// Use 0.0.0.0 / :: to listen on all interfaces. chan has no
+    /// TLS and only a bearer-token gate, so any non-loopback host
+    /// exposes your workspace in plaintext on that network.
+    #[arg(long, verbatim_doc_comment)]
+    host: Option<IpAddr>,
+    /// Force IPv4-only listening. With no --host, binds 127.0.0.1.
+    /// Mutually exclusive with -6.
+    #[arg(
+        short = '4',
+        long = "ipv4",
+        conflicts_with = "ipv6",
+        verbatim_doc_comment
+    )]
+    ipv4: bool,
+    /// Force IPv6-only listening. With no --host, binds ::1.
+    /// Mutually exclusive with -4.
+    #[arg(short = '6', long = "ipv6", verbatim_doc_comment)]
+    ipv6: bool,
+    #[arg(long, default_value_t = DEFAULT_PORT)]
+    port: u16,
+    /// URL path prefix to mount the server under. Lets a reverse
+    /// proxy multiplex many `chan serve` instances under one host
+    /// (e.g. `workspace.example.com/{user}/`). Canonicalized to
+    /// `/seg[/seg...]` with `[A-Za-z0-9-]+` segments; trailing
+    /// slashes and `//` runs are tolerated. Anything else is
+    /// rejected.
+    #[arg(long, verbatim_doc_comment)]
+    prefix: Option<String>,
+    /// Idle timeout before the server triggers a graceful
+    /// shutdown. Accepts `30s`, `5m`, `1h`. Useful for systemd
+    /// socket-activated deployments where many idle instances
+    /// stack on one host. Without this flag the server stays
+    /// resident indefinitely.
+    #[arg(long, value_parser = parse_idle_timeout, verbatim_doc_comment)]
+    timeout: Option<Duration>,
+    /// Skip the bearer-token gate. Local dev only;
+    /// never expose a no-token server on a shared machine.
+    #[arg(long, verbatim_doc_comment)]
+    no_token: bool,
+    /// Do not open the system default browser when the server is
+    /// ready. The URL is still printed; useful for shells that
+    /// host the UI in their own window (chan-desktop) or for
+    /// headless / scripted invocations.
+    #[arg(long, verbatim_doc_comment)]
+    no_browser: bool,
+    /// Search indexer resource profile. Overrides
+    /// `server.search.aggression` for this run.
+    #[arg(long, value_parser = parse_search_aggression, verbatim_doc_comment)]
+    search_aggression: Option<SearchAggression>,
+    /// Lock down the Settings panel: the SPA greys the cog and
+    /// the server refuses every settings-write route with 403
+    /// (PATCH /api/config, POST /api/storage/reset,
+    /// POST /api/index/rebuild). For
+    /// kiosk-style deployments (shared workstation, demo box) where
+    /// the workspace owner is not the operator at the keyboard.
+    #[arg(long, verbatim_doc_comment)]
+    no_settings: bool,
+    /// Force a standalone server: bind this workspace directly and skip
+    /// both the chan-desktop handoff and the local devserver
+    /// registration, even when one is running on this box. Overrides the
+    /// shell-parentage default. The escape hatch for automation and for
+    /// serving a workspace the local devserver / desktop should not take
+    /// over. Mutually exclusive with --desktop / --devserver.
+    #[arg(long, conflicts_with_all = ["desktop", "devserver"], verbatim_doc_comment)]
+    standalone: bool,
+    /// Force the chan-desktop handoff: hand this workspace to a running
+    /// same-user desktop to open in a native window, then exit. Overrides
+    /// the shell-parentage default. Falls through to a standalone server
+    /// when no desktop is reachable (skew, error, GUI absent, or
+    /// CHAN_NO_DESKTOP_HANDOFF). Mutually exclusive with --standalone /
+    /// --devserver.
+    #[arg(long, conflicts_with_all = ["standalone", "devserver"], verbatim_doc_comment)]
+    desktop: bool,
+    /// Force local-devserver registration. A bare --devserver selects the
+    /// only live same-user devserver, or the unique one whose library root
+    /// matches this CLI's CHAN_HOME. --devserver=<port|url> selects one
+    /// explicitly and refuses when it is not live. Refused from inside a
+    /// devserver shell -- nesting a devserver in a devserver is unsupported;
+    /// omit the flag to register with the current one. Mutually exclusive
+    /// with --standalone / --desktop.
+    #[arg(
+        long,
+        value_name = "PORT|URL",
+        num_args = 0..=1,
+        default_missing_value = "auto",
+        require_equals = true,
+        value_parser = parse_devserver_selector,
+        conflicts_with_all = ["standalone", "desktop"],
+        verbatim_doc_comment
+    )]
+    devserver: Option<DevserverSelector>,
+}
+
 #[derive(Args, Debug, Clone, Default)]
 struct WorkspaceTargets {
     /// Registered workspace selector: canonical path, metadata key, or unique
@@ -845,7 +964,7 @@ enum WorkspaceAction {
     /// reports are on by default for new workspaces; `chan workspace
     /// reports disable` turns them off.
     ///
-    /// Registering alone does not serve the workspace. `chan open PATH`
+    /// Registering alone does not serve the workspace. `chan serve PATH`
     /// registers and serves in one step, which is the usual way in.
     #[command(verbatim_doc_comment)]
     Add {
@@ -874,13 +993,24 @@ enum WorkspaceAction {
         #[arg(long, verbatim_doc_comment)]
         json: bool,
     },
-    /// Drop a workspace from the registry
-    ///
-    /// Does not delete the directory or its content; only forgets it on
-    /// this machine, so the same path can be registered again later with
-    /// `chan workspace add` or `chan open`.
-    #[command(verbatim_doc_comment)]
-    Rm {
+    /// Serve a workspace, registering it first if needed
+    #[command(long_about = SERVE_LONG_ABOUT)]
+    #[command(after_long_help = &*SERVE_AFTER_HELP)]
+    Serve {
+        #[command(flatten)]
+        args: ServeCliArgs,
+    },
+    /// Stop serving a workspace
+    #[command(long_about = help::CHAN_CLOSE)]
+    #[command(after_long_help = help::CHAN_CLOSE_AFTER)]
+    Close {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        path: PathBuf,
+    },
+    /// Stop serving a workspace, then forget it from the registry
+    #[command(long_about = help::CHAN_FORGET)]
+    #[command(after_long_help = help::CHAN_FORGET_AFTER)]
+    Forget {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: PathBuf,
     },
@@ -1231,11 +1361,11 @@ where
 ///
 /// - [`Personality::Standalone`] -- the `chan` binary from install.sh (and
 ///   the `cs -> chan` symlink). With both a desktop and devserver live,
-///   `chan open` prefers the devserver; with neither it runs its own server
+///   `chan serve` prefers the devserver; with neither it runs its own server
 ///   and opens the browser.
 ///   `chan upgrade` replaces the CLI tarball in place.
 /// - [`Personality::Desktop`] -- chan-desktop invoked as `chan` (via the
-///   `~/.local/bin/chan` shim). `chan open` integrates with the desktop:
+///   `~/.local/bin/chan` shim). `chan serve` integrates with the desktop:
 ///   it prefers a live devserver when no desktop is running, otherwise hands
 ///   the workspace to the desktop or launches the GUI.
 ///   `chan upgrade` drives the desktop's `tauri-plugin-updater`.
@@ -1321,8 +1451,9 @@ impl ServiceKind {
     }
 }
 
-/// One action verb from the mutually-exclusive `--start`/`--stop`/`--restart`/
-/// `--status`/`--join` group. clap enforces at most one is set.
+/// One management verb of the `chan devserver` family (start / stop /
+/// restart / status / join). The subcommand grammar admits exactly one;
+/// [`cmd_devserver_action`] adapts the selected verb onto this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevAction {
     Start,
@@ -1333,8 +1464,8 @@ enum DevAction {
 }
 
 impl DevAction {
-    /// The `--<flag>` this verb came from, for error messages.
-    fn flag(self) -> &'static str {
+    /// The verb's CLI spelling, for error messages.
+    fn verb(self) -> &'static str {
         match self {
             DevAction::Start => "start",
             DevAction::Stop => "stop",
@@ -1349,7 +1480,7 @@ impl DevAction {
 /// action)` pair is validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevPlan {
-    /// Run in the foreground: `--service=none` or the no-action `auto` default.
+    /// Run in the foreground: `--service=none` or the `run` form's `auto` default.
     Foreground(ServiceKind),
     /// A management verb on the `chan` background daemon.
     ChanVerb(DevAction),
@@ -1357,8 +1488,8 @@ enum DevPlan {
     Supervised(ServiceKind, DevAction),
 }
 
-/// The single action verb the user passed, if any. clap's `action` group makes
-/// at most one of the flags true, so the order here is immaterial.
+/// The single action verb the user passed, if any. The subcommand grammar
+/// admits at most one management verb, so the order here is immaterial.
 fn selected_devserver_action(
     start: bool,
     stop: bool,
@@ -1387,9 +1518,9 @@ fn selected_devserver_action(
 ///
 /// - `none` (foreground) takes no action verb.
 /// - `chan` starts the portable background daemon when run bare or with
-///   `--start`, and accepts `--stop`/`--restart`/`--status`/`--join`.
-/// - `systemd`/`launchd` (detached) require an explicit verb; a bare
-///   `--service=systemd` is ambiguous and rejected.
+///   `start`, and accepts `stop`/`restart`/`status`/`join`.
+/// - `systemd`/`launchd` (detached) require an explicit verb;
+///   `--service=systemd` with no verb is ambiguous and rejected.
 fn plan_devserver(service: ServiceKind, action: Option<DevAction>) -> Result<DevPlan, String> {
     match (service, action) {
         (ServiceKind::Auto, _) => {
@@ -1397,14 +1528,16 @@ fn plan_devserver(service: ServiceKind, action: Option<DevAction>) -> Result<Dev
         }
         (ServiceKind::None, None) => Ok(DevPlan::Foreground(ServiceKind::None)),
         (ServiceKind::None, Some(a)) => Err(format!(
-            "--service=none runs in the foreground (Ctrl-C to stop); --{} needs a managed \
+            "--service=none runs in the foreground (Ctrl-C to stop); `{}` needs a managed \
              backend (--service=chan/systemd/launchd)",
-            a.flag()
+            a.verb()
         )),
         (ServiceKind::Chan, None) => Ok(DevPlan::ChanVerb(DevAction::Start)),
         (ServiceKind::Chan, Some(a)) => Ok(DevPlan::ChanVerb(a)),
         (kind @ (ServiceKind::Systemd | ServiceKind::Launchd), None) => Err(format!(
-            "--service={} needs an action: one of --start/--stop/--status/--restart/--join",
+            "--service={} needs a management verb: one of start/stop/status/restart/join \
+             (e.g. `chan devserver start --service={}`)",
+            kind.cli_name(),
             kind.cli_name()
         )),
         (kind @ (ServiceKind::Systemd | ServiceKind::Launchd), Some(a)) => {
@@ -1495,7 +1628,9 @@ where
                 reports,
             } => cmd_add(path, semantic_search, reports),
             WorkspaceAction::Ls { json } => cmd_list(json),
-            WorkspaceAction::Rm { path } => cmd_remove(path, personality).await,
+            WorkspaceAction::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
+            WorkspaceAction::Close { path } => cmd_close(path, false, personality).await,
+            WorkspaceAction::Forget { path } => cmd_close(path, true, personality).await,
             WorkspaceAction::Index { action } => cmd_index(action),
             WorkspaceAction::Reports { action } => cmd_reports(action),
             WorkspaceAction::Search {
@@ -1530,97 +1665,10 @@ where
         Command::Shell { action } => chan_shell::dispatch(action).await,
         Command::Completions { shell } => cmd_completions(shell),
         Command::DumpSkill { list, topic } => cmd_dump_skill(list, topic.as_deref()),
-        Command::Close { path, remove } => cmd_close(path, remove, personality).await,
-        Command::Open {
-            target,
-            name,
-            script,
-            here,
-            host,
-            ipv4,
-            ipv6,
-            port,
-            prefix,
-            timeout,
-            no_token,
-            no_browser,
-            search_aggression,
-            no_settings,
-            standalone,
-            desktop,
-            devserver,
-        } => {
-            // Polymorphic dispatch: a `scheme://host` value registers a
-            // devserver via the desktop handoff; anything else is a local
-            // workspace path that gets registered + served.
-            match target {
-                Some(t) if looks_like_devserver_url(&t) => {
-                    cmd_open_devserver(t, name, script).await
-                }
-                _ => {
-                    let addr = resolve_listen_addr(host, ipv4, ipv6, port)?;
-                    let prefix = chan_server::sanitize_prefix(prefix.as_deref().unwrap_or(""))
-                        .map_err(|e| anyhow::anyhow!("invalid --prefix: {e}"))?;
-                    cmd_serve(
-                        ServeArgs {
-                            addr,
-                            prefix,
-                            idle_timeout: timeout,
-                            path: target.map(PathBuf::from),
-                            here,
-                            no_token,
-                            no_browser,
-                            search_aggression,
-                            no_settings,
-                            flags: OpenFlags {
-                                standalone,
-                                desktop,
-                                devserver,
-                            },
-                            verbose,
-                        },
-                        personality,
-                    )
-                    .await
-                }
-            }
-        }
+        Command::Close { path } => cmd_close(path, false, personality).await,
+        Command::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
         Command::Ps { json } => cmd_ps(json).await,
-        Command::Devserver {
-            bind,
-            port,
-            service,
-            start,
-            stop,
-            restart,
-            status,
-            join,
-            rotate_token,
-            force,
-            tunnel_url,
-            tunnel_token,
-            tunnel_devserver_name,
-            no_tunnel,
-        } => {
-            cmd_devserver(
-                bind,
-                port,
-                service,
-                start,
-                stop,
-                restart,
-                status,
-                join,
-                rotate_token,
-                force,
-                tunnel_url,
-                tunnel_token,
-                tunnel_devserver_name,
-                no_tunnel,
-                verbose,
-            )
-            .await
-        }
+        Command::Devserver { action } => cmd_devserver_action(action, verbose).await,
         Command::DevserverDaemon {
             bind,
             port,
@@ -1716,7 +1764,7 @@ fn ensure_workspace_registered(
 }
 
 fn cmd_add(path: PathBuf, semantic_search: bool, reports: bool) -> Result<()> {
-    // Mirror `chan open`'s behavior: create the directory if it
+    // Mirror `chan serve`'s behavior: create the directory if it
     // doesn't exist yet. Single verb covers both "register an
     // existing dir" and "make a fresh workspace here". A separate
     // `chan init` would be a synonym; not worth the mental
@@ -1809,7 +1857,7 @@ fn cmd_completions(shell: Shell) -> Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ServedBy {
-    /// A dedicated `chan open` bound to this one workspace.
+    /// A dedicated `chan serve` bound to this one workspace.
     Standalone,
     /// chan-desktop's embedded server.
     Desktop,
@@ -2196,23 +2244,11 @@ async fn serving_kind(holder_pid: u32) -> Option<ServedBy> {
     })
 }
 
-async fn cmd_remove(path: PathBuf, personality: Personality) -> Result<()> {
-    let lib = library()?;
-    // Tear down a running serve first: `reset_workspace` takes the writer
-    // flock and would otherwise fail `WorkspaceLocked` on a live serve.
-    // Best-effort -- if we can't reach the holder, fall through and let the
-    // reset surface the real error.
-    // `remove: true` so a devserver/desktop host also unregisters the
-    // workspace from its own library + overlay (not just the local config.toml).
-    let _ = unserve_running(&lib, &path, true, personality).await;
-    remove_from_registry(&lib, &path)
-}
-
 /// Forget `path` from the registry: drop the registry key and the whole
 /// `~/.chan/workspaces/<key>/` metadata dir (trash included), leaving the
-/// filesystem contents untouched. Shared by `chan workspace rm` and `chan
-/// close --remove`. The caller is responsible for tearing down any running
-/// serve first (`unregister_workspace` does not).
+/// filesystem contents untouched. Reached through `chan workspace forget`.
+/// The caller is responsible for tearing down any running serve first
+/// (`unregister_workspace` does not).
 fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
     // Capture the metadata root before `unregister_workspace` drops the
     // registry key (after which the path no longer resolves to it).
@@ -2239,7 +2275,7 @@ fn remove_from_registry(lib: &Library, path: &Path) -> Result<()> {
 /// its writer lock. Best-effort -- "not currently served" (and an unreachable
 /// holder) is treated as success, since the goal is "this workspace is not
 /// served". With `remove`, it then also forgets the workspace from the
-/// registry (`chan workspace rm`), INDEPENDENT of the teardown outcome.
+/// registry (`chan workspace forget`), INDEPENDENT of the teardown outcome.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
     // Pass `remove` through so a host (devserver/desktop) that serves this
@@ -2256,7 +2292,7 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
             );
         }
         // A reachable-but-failed teardown is still "best effort": report it,
-        // then (with --remove) forget the workspace anyway.
+        // then (on forget) drop the registry entry anyway.
         Err(e) => eprintln!(
             "chan: could not reach the server for {} ({e}); treating as closed.",
             path.display()
@@ -2289,7 +2325,7 @@ fn parse_live_terminals_refusal(message: &str) -> Option<usize> {
     (body.error == "live_terminals").then_some(body.active_terminals)
 }
 
-/// Shared by `chan close` and `chan workspace rm`. Discovers the process
+/// Shared by `chan close` and `chan workspace forget`. Discovers the process
 /// serving `path` from its `writer.lock` record, reaches it over its
 /// control socket, asks it to tear down (the server decides scope: a
 /// dedicated serve exits, a devserver/desktop unmounts just that tenant),
@@ -2299,7 +2335,7 @@ fn parse_live_terminals_refusal(message: &str) -> Option<usize> {
 /// from its library + overlay, so the removal is reflected in the host's own
 /// registry -- not just the caller's local `config.toml`. This is what keeps a
 /// devserver-served workspace from lingering in the launcher (and surviving a
-/// restart) after `chan close --remove` / `chan workspace rm`.
+/// restart) after `chan workspace forget`.
 async fn unserve_running(
     lib: &Library,
     path: &Path,
@@ -2312,7 +2348,7 @@ async fn unserve_running(
     // form the two sides would have to agree to strip.
     let canonical = chan_workspace::paths::canonicalize_normalized(path);
 
-    // Desktop close handoff, mirroring the `chan open` handoff. A running
+    // Desktop close handoff, mirroring the `chan serve` handoff. A running
     // same-user chan-desktop owns the workspace flock AND its own library +
     // overlay; the per-pid control socket reaches the embedded host (the window
     // closes) but never updates the desktop's runtime map, so the launcher shows
@@ -2330,7 +2366,7 @@ async fn unserve_running(
         match chan_server::handoff::try_close_workspace(&canonical, remove).await {
             chan_server::handoff::Outcome::HandedOff => {
                 // The desktop released its flock during teardown; wait it out so a
-                // `chan open` racing right behind doesn't see a transient
+                // `chan serve` racing right behind doesn't see a transient
                 // WorkspaceLocked. Only the locally-registered case resolves a lock
                 // dir to wait on.
                 if let Some(paths) = lib.workspace_paths_for(path) {
@@ -2385,7 +2421,7 @@ async fn unserve_running(
 /// alone; a devserver's are stable-named (`chan-control-s<hash>`, no pid,
 /// so `$CHAN_CONTROL_SOCKET` survives its restarts) and are matched
 /// by asking each candidate who it is (a bounded `Identify` round-trip whose
-/// reply carries the serving pid). A dedicated `chan open` serve has exactly
+/// reply carries the serving pid). A dedicated `chan serve` serve has exactly
 /// one socket; a multi-tenant devserver has one per tenant under the same
 /// pid. Either way every socket routes the `Close { path }` verb to the
 /// server, which acts by path -- so the first match is sufficient and we
@@ -2618,7 +2654,7 @@ fn control_socket_name_matches(name: &str, pid: u32, require_sock_ext: bool) -> 
 
 /// Block (bounded) until the writer lock for `lock_dir` is free after a
 /// serve was asked to unserve. The server drops the flock asynchronously
-/// during graceful shutdown, so a `chan open` racing right behind would
+/// during graceful shutdown, so a `chan serve` racing right behind would
 /// otherwise see a transient `WorkspaceLocked`.
 fn wait_for_lock_release(lock_dir: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2731,14 +2767,14 @@ fn print_vcs_parent_error(root: &Path, parent: &chan_workspace::VcsParent) {
         repo_abs.display(),
         root_abs.display(),
     );
-    eprintln!("hint: open repo root:    chan open {}", repo_abs.display());
+    eprintln!("hint: open repo root:    chan serve {}", repo_abs.display());
     eprintln!(
-        "hint: open only subdir:  chan open --here {}",
+        "hint: open only subdir:  chan serve --here {}",
         root_abs.display(),
     );
 }
 
-/// Resolved `chan open` invocation: every CLI input after listen-addr
+/// Resolved `chan serve` invocation: every CLI input after listen-addr
 /// and prefix resolution, grouped so the handler takes one argument
 /// instead of a 15-parameter tail.
 struct ServeArgs {
@@ -2755,7 +2791,7 @@ struct ServeArgs {
     verbose: bool,
 }
 
-/// Optional value accepted by `chan open --devserver[=<port|url>]`.
+/// Optional value accepted by `chan serve --devserver[=<port|url>]`.
 /// `Auto` is the bare flag; a URL is normalized to its effective port because
 /// local discovery identifies instances by their bound port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2810,7 +2846,7 @@ fn parse_devserver_selector(raw: &str) -> std::result::Result<DevserverSelector,
     Ok(DevserverSelector::Port(port))
 }
 
-/// The explicit, mutually exclusive `chan open` target flags. clap's
+/// The explicit, mutually exclusive `chan serve` target flags. clap's
 /// `conflicts_with_all` rejects more than one at parse time; the routing
 /// resolver ([`decide_open_route`]) guards the same invariant.
 #[derive(Debug, Clone, Copy)]
@@ -2820,7 +2856,7 @@ struct OpenFlags {
     devserver: Option<DevserverSelector>,
 }
 
-/// Where `chan open` routes a workspace: bind a standalone server here, hand
+/// Where `chan serve` routes a workspace: bind a standalone server here, hand
 /// it to chan-desktop, or register it with the local devserver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenTarget {
@@ -2829,7 +2865,7 @@ enum OpenTarget {
     Devserver,
 }
 
-/// The kind of chan instance that spawned the shell `chan open` runs in,
+/// The kind of chan instance that spawned the shell `chan serve` runs in,
 /// resolved from `$CHAN_CONTROL_SOCKET`. Drives the no-flag default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Parentage {
@@ -2864,7 +2900,7 @@ struct LiveInstances {
     devservers: usize,
 }
 
-/// Resolve a `chan open` routing decision from explicit flags, shell parentage,
+/// Resolve a `chan serve` routing decision from explicit flags, shell parentage,
 /// binary personality, chan-context presence, and a live-instance snapshot.
 /// PURE: every probe and the actual handoff/registration live in the caller.
 ///
@@ -3053,7 +3089,7 @@ fn chan_control_socket() -> Option<String> {
 }
 
 /// Overall bound on the parentage probe's `Identify` round-trip. A holder that
-/// accepts the connection but never replies must not hang `chan open` (which
+/// accepts the connection but never replies must not hang `chan serve` (which
 /// then goes on to run a resident server -- this is the only deadline, never a
 /// command-wide one). Sized to the connect+read budget the desktop / devserver
 /// handoffs use.
@@ -3076,7 +3112,7 @@ async fn detect_parentage() -> Parentage {
 /// Identify the serving kind behind `socket` with a `timeout`-bounded
 /// `Identify` round-trip. A wedged holder (accepts but never replies), a
 /// connect failure, a read error, or a non-desktop/devserver reply all resolve
-/// to [`Parentage::None`] so a stale / wedged socket cannot hang `chan open`.
+/// to [`Parentage::None`] so a stale / wedged socket cannot hang `chan serve`.
 /// `timeout` is injectable so the bound is unit-testable.
 async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
     let identify = chan_shell::send_control_request(socket, chan_shell::ControlRequest::Identify);
@@ -3101,7 +3137,7 @@ async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
 
 /// Make a serve root absolute against the process cwd. `canonicalize`
 /// resolves symlinks for an existing dir; `std::path::absolute` makes a
-/// not-yet-created path absolute lexically (so `chan open new-dir` still
+/// not-yet-created path absolute lexically (so `chan serve new-dir` still
 /// lands under the cwd); the final fallback returns the input unchanged
 /// (only reachable if both fail, e.g. an unreadable cwd). The result must
 /// be absolute so the desktop handoff -- which runs with cwd "/" -- and the
@@ -3109,7 +3145,7 @@ async fn probe_parentage(socket: &Path, timeout: Duration) -> Parentage {
 ///
 /// The Windows `\\?\` verbatim prefix is stripped from whichever branch wins.
 /// `std::fs::canonicalize` emits it, and this root is user-visible: it is
-/// printed by `chan open` and handed to chan-desktop, which titles the window
+/// printed by `chan serve` and handed to chan-desktop, which titles the window
 /// with it -- so leaving it in surfaces `\\?\C:\notes` in the window title.
 /// `strip_verbatim_prefix` is the same normalization the registry keys on, so
 /// this also keeps the displayed path identical to the keyed one.
@@ -3127,12 +3163,13 @@ fn missing_workspace_path(cmd: &str, hint: &str) -> anyhow::Error {
     anyhow::anyhow!("chan {cmd} requires a workspace path; e.g. `{hint}`")
 }
 
-/// Discriminate `chan open`'s polymorphic argument: a value shaped like
-/// `scheme://host…` is a devserver URL; everything else is a local workspace
-/// path. We don't pull a URL crate for the discriminator -- the desktop parses
-/// and validates the full URL when it dials. Requiring `://` with a non-empty
-/// scheme and authority keeps a Windows path (`C:\…`) or a bare `host:port`
-/// (no `//`) from misfiring as a URL, so the path/URL split is unambiguous.
+/// Recognize a devserver-URL-shaped value: `scheme://host…`. `chan serve`
+/// uses it to refuse a pasted URL (with a pointer at `chan devserver
+/// register`) instead of reading it as a relative directory; the register
+/// verb uses it in reverse. We don't pull a URL crate for the check -- the
+/// desktop parses and validates the full URL when it dials. Requiring `://`
+/// with a non-empty scheme and authority keeps a Windows path (`C:\…`) or a
+/// bare `host:port` (no `//`) from misfiring as a URL.
 fn looks_like_devserver_url(target: &str) -> bool {
     match target.split_once("://") {
         Some((scheme, rest)) => {
@@ -3146,13 +3183,13 @@ fn looks_like_devserver_url(target: &str) -> bool {
     }
 }
 
-/// `chan open {url}`: REGISTER a devserver by URL via the CLI→desktop handoff,
+/// `chan devserver register {url}`: add a devserver row via the CLI→desktop handoff,
 /// then return. It does NOT dial/connect -- connecting is the launcher's
 /// Connect button. The devserver entry lives in the desktop's config (the same
 /// registry the launcher reads), so this needs a running chan-desktop to land
 /// into; without one there is nowhere to persist it (no standalone fallback --
 /// a URL is never served locally).
-async fn cmd_open_devserver(
+async fn cmd_devserver_register(
     url: String,
     name: Option<String>,
     script: Option<String>,
@@ -3162,8 +3199,9 @@ async fn cmd_open_devserver(
     // multi-tenant server inside another is not a shape the registry models.
     if in_devserver_context().await {
         anyhow::bail!(
-            "cannot register a devserver from inside a devserver: `chan open {url}` writes \
-             into the desktop's devserver registry, which a devserver session cannot reach. \
+            "cannot register a devserver from inside a devserver: `chan devserver register \
+             {url}` writes into the desktop's devserver registry, which a devserver session \
+             cannot reach. \
              Run it from chan-desktop (or a plain shell on the box running chan-desktop)."
         );
     }
@@ -3193,13 +3231,13 @@ async fn cmd_open_devserver(
         // falls back to a standalone serve (mirrors the window-op "needs the
         // desktop" refusal).
         Outcome::NoDesktop => {
-            anyhow::bail!("chan open {url} needs the chan desktop app running.")
+            anyhow::bail!("chan devserver register {url} needs the chan desktop app running.")
         }
     }
 }
 
 /// True when this CLI runs inside a chan terminal that a `chan devserver`
-/// serves -- `chan open {url}` would otherwise register a devserver into a
+/// serves -- `chan devserver register {url}` would otherwise register a devserver into a
 /// devserver, which the registry (a desktop-config concept) does not nest.
 /// Shares [`detect_parentage`]'s `Identify` round-trip on
 /// `$CHAN_CONTROL_SOCKET`; an absent socket / unreachable holder / any other
@@ -3207,6 +3245,183 @@ async fn cmd_open_devserver(
 /// terminal proceeds to the handoff).
 async fn in_devserver_context() -> bool {
     matches!(detect_parentage().await, Parentage::Devserver { .. })
+}
+
+/// One devserver-control round-trip with uniform failure wording: an
+/// absent desktop names the requirement, a protocol skew names the
+/// restart, a desktop too old to know the verb says so, and any other
+/// `Error` surfaces verbatim.
+async fn devserver_control(
+    req: chan_server::handoff::Request,
+) -> Result<chan_server::handoff::Response> {
+    use chan_server::handoff::{DevserverControlOutcome, Response};
+    match chan_server::handoff::try_devserver_control(req).await {
+        DevserverControlOutcome::NoDesktop => {
+            anyhow::bail!("this command needs the chan desktop app running.")
+        }
+        DevserverControlOutcome::Reply(Response::VersionSkew {
+            desktop_version, ..
+        }) => anyhow::bail!(
+            "chan-desktop is version {desktop_version}, CLI is {}; restart chan-desktop \
+             to pick up the new version.",
+            chan_server::handoff::CHAN_VERSION,
+        ),
+        DevserverControlOutcome::Reply(Response::Error { message })
+            if message.contains("invalid handoff request") =>
+        {
+            anyhow::bail!(
+                "chan-desktop does not understand this command (it predates it); upgrade \
+                 and restart chan-desktop."
+            )
+        }
+        DevserverControlOutcome::Reply(Response::Error { message }) => {
+            anyhow::bail!("{message}")
+        }
+        DevserverControlOutcome::Reply(resp) => Ok(resp),
+    }
+}
+
+/// The protocol + version pair every handoff request carries.
+fn handoff_versions() -> (u32, String) {
+    (
+        chan_server::handoff::PROTOCOL_VERSION,
+        chan_server::handoff::CHAN_VERSION.to_string(),
+    )
+}
+
+/// `chan devserver ls`: the desktop's registry rows, as a table or JSON.
+async fn cmd_devserver_ls(json: bool) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::ListDevservers {
+        protocol,
+        cli_version,
+    })
+    .await?;
+    let Response::Devservers { devservers, .. } = resp else {
+        anyhow::bail!("unexpected reply from chan-desktop");
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "devservers": devservers }))?
+        );
+        return Ok(());
+    }
+    if devservers.is_empty() {
+        println!("(no devservers registered)");
+        return Ok(());
+    }
+    let label_w = devservers
+        .iter()
+        .map(|d| if d.label.is_empty() { 1 } else { d.label.len() })
+        .max()
+        .unwrap_or(5)
+        .max("LABEL".len());
+    println!("{:<12} {:<label_w$} URL", "STATUS", "LABEL");
+    for d in &devservers {
+        let label = if d.label.is_empty() { "-" } else { &d.label };
+        let gateway = if d.gateway { "  (gateway)" } else { "" };
+        println!("{:<12} {:<label_w$} {}{gateway}", d.status, label, d.url);
+    }
+    Ok(())
+}
+
+/// `chan devserver connect TARGET`: start the desktop's dial and return.
+async fn cmd_devserver_connect(target: String) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::ConnectDevserver {
+        protocol,
+        cli_version,
+        target: target.clone(),
+    })
+    .await?;
+    match resp {
+        Response::DevserverConnectStarted { .. } => {
+            println!("connecting {target}. Watch the launcher for sign-in or trust prompts.");
+            Ok(())
+        }
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
+/// `chan devserver disconnect TARGET`: drop the connection, keep the row.
+async fn cmd_devserver_disconnect(target: String) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::DisconnectDevserver {
+        protocol,
+        cli_version,
+        target: target.clone(),
+    })
+    .await?;
+    match resp {
+        Response::DevserverDisconnected { .. } => {
+            println!("disconnected: {target}. The remote devserver keeps running.");
+            Ok(())
+        }
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
+/// `chan devserver forget TARGET`: remove the registration row.
+async fn cmd_devserver_forget(target: String, force: bool) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::ForgetDevserver {
+        protocol,
+        cli_version,
+        target: target.clone(),
+        force,
+    })
+    .await?;
+    match resp {
+        Response::DevserverForgotten { .. } => {
+            println!("forgot: {target}. The remote devserver keeps running.");
+            Ok(())
+        }
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
+/// Translate the `chan serve` surface into [`ServeArgs`] and run it. A
+/// URL-shaped argument is refused with a pointer at `chan devserver
+/// register`: serve takes a workspace PATH only, and treating a pasted
+/// URL as a relative directory would "succeed" at serving nothing.
+async fn cmd_serve_cli(args: ServeCliArgs, personality: Personality, verbose: bool) -> Result<()> {
+    if let Some(target) = args.path.as_deref() {
+        if looks_like_devserver_url(target) {
+            anyhow::bail!(
+                "{target} is a URL; `chan serve` takes a workspace PATH. Register a \
+                 devserver with `chan devserver register {target}`."
+            );
+        }
+    }
+    let addr = resolve_listen_addr(args.host, args.ipv4, args.ipv6, args.port)?;
+    let prefix = chan_server::sanitize_prefix(args.prefix.as_deref().unwrap_or(""))
+        .map_err(|e| anyhow::anyhow!("invalid --prefix: {e}"))?;
+    cmd_serve(
+        ServeArgs {
+            addr,
+            prefix,
+            idle_timeout: args.timeout,
+            path: args.path.map(PathBuf::from),
+            here: args.here,
+            no_token: args.no_token,
+            no_browser: args.no_browser,
+            search_aggression: args.search_aggression,
+            no_settings: args.no_settings,
+            flags: OpenFlags {
+                standalone: args.standalone,
+                desktop: args.desktop,
+                devserver: args.devserver,
+            },
+            verbose,
+        },
+        personality,
+    )
+    .await
 }
 
 async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
@@ -3224,14 +3439,14 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         verbose,
     } = args;
     let lib = library()?;
-    // `chan open {path}` requires an explicit workspace root; with no path it
-    // is a clear error. An explicit path auto-registers, so `chan open
+    // `chan serve {path}` requires an explicit workspace root; with no path it
+    // is a clear error. An explicit path auto-registers, so `chan serve
     // /some/dir` works without a prior `chan workspace add`.
-    let root = path.ok_or_else(|| missing_workspace_path("open", "chan open ."))?;
+    let root = path.ok_or_else(|| missing_workspace_path("serve", "chan serve ."))?;
     // Resolve to an absolute path against the CLI's cwd before anything
     // downstream consumes it. The macOS desktop handoff opens the
     // workspace in a process whose cwd is "/", and the workspace registry
-    // is keyed by the canonical path, so a bare `chan open .` must not
+    // is keyed by the canonical path, so a bare `chan serve .` must not
     // leak a relative root (the desktop would resolve it against "/" and
     // open the filesystem root).
     let root = absolutize_serve_root(root);
@@ -3326,7 +3541,7 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         match select_devserver(&candidates, flags.devserver, parent_pid, &library_root) {
             Ok(instance) => instance.map(|instance| instance.instance_index),
             Err(DevserverSelectionError::NotFound { port }) => anyhow::bail!(
-                "no live local devserver matches --devserver={port}.{}\nUse `chan open \
+                "no live local devserver matches --devserver={port}.{}\nUse `chan serve \
                  --devserver` to select automatically, or start the requested instance.",
                 devserver_candidates_text(&candidates),
             ),
@@ -3449,7 +3664,7 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // possibility: we have not confirmed the holder IS a devserver.
         Err(chan_workspace::ChanError::WorkspaceLocked) => anyhow::bail!(
             "the workspace is held by another process; if a local devserver \
-             owns it, run `chan open --devserver` to register with it."
+             owns it, run `chan serve --devserver` to register with it."
         ),
         Err(e) => return Err(e.into()),
     };
@@ -3502,7 +3717,7 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // deployments where the operator is not the workspace owner.
         settings_disabled: no_settings,
     };
-    // A standalone `chan open` and a devserver share DEFAULT_PORT. On collision,
+    // A standalone `chan serve` and a devserver share DEFAULT_PORT. On collision,
     // use the discovery snapshot to distinguish one of this user's devservers
     // from an unrelated holder. Explicit standalone/desktop routes discover
     // lazily here so their healthy startup path pays no probe cost.
@@ -3523,7 +3738,7 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
 }
 
 /// Actionable hint for the one bind failure a user is most likely to hit and
-/// least likely to diagnose: `chan open` falling through to a standalone bind
+/// least likely to diagnose: `chan serve` falling through to a standalone bind
 /// on `DEFAULT_PORT`. Returns `Some` only for an `AddrInUse` on exactly that
 /// port; every other error keeps the generic server context. A discovered
 /// same-user devserver is named only when it reports the collided port.
@@ -3572,7 +3787,7 @@ fn devserver_bind_collision_hint(addr: SocketAddr, err: &anyhow::Error) -> Optio
         return None;
     }
     let squatter = if addr.port() == DEFAULT_PORT {
-        "most likely another `chan devserver` or a standalone `chan open` \
+        "most likely another `chan devserver` or a standalone `chan serve` \
          server (both default to it)"
     } else {
         "another process owns it"
@@ -3588,9 +3803,51 @@ fn devserver_bind_collision_hint(addr: SocketAddr, err: &anyhow::Error) -> Optio
 /// Run a headless multi-workspace devserver. The no-service default and
 /// `--service=none` run in the foreground on `bind:port`; `--service=chan` is
 /// the portable background daemon; `--service=systemd`/`launchd` are OS-backed
-/// services driven by explicit action verbs (`--start`/`--stop`/`--restart`/
-/// `--status`/`--join`). [`plan_devserver`] validates the `(service, action)`
+/// services driven by management verbs (`start`/`stop`/`restart`/
+/// `status`/`join`). [`plan_devserver`] validates the `(service, action)`
 /// pair before we touch any real service manager.
+/// Adapt a `chan devserver` verb onto [`cmd_devserver`], whose resolver
+/// still models the server-side verb as one-of-six booleans (`run` is the
+/// none-of-them foreground form). One code path for flag semantics and
+/// service resolution, whichever verb selected it.
+async fn cmd_devserver_action(action: DevserverAction, verbose: bool) -> Result<()> {
+    use DevserverAction as A;
+    let (args, start, stop, restart, status, join, rotate_token) = match action {
+        A::Run { args } => (args, false, false, false, false, false, false),
+        A::Start { args } => (args, true, false, false, false, false, false),
+        A::Stop { args } => (args, false, true, false, false, false, false),
+        A::Restart { args } => (args, false, false, true, false, false, false),
+        A::Status { args } => (args, false, false, false, true, false, false),
+        A::Join { args } => (args, false, false, false, false, true, false),
+        A::RotateToken { args } => (args, false, false, false, false, false, true),
+        A::Register { url, name, script } => {
+            return cmd_devserver_register(url, name, script).await;
+        }
+        A::Ls { json } => return cmd_devserver_ls(json).await,
+        A::Connect { target } => return cmd_devserver_connect(target).await,
+        A::Disconnect { target } => return cmd_devserver_disconnect(target).await,
+        A::Forget { target, force } => return cmd_devserver_forget(target, force).await,
+    };
+    cmd_devserver(
+        args.bind,
+        args.port,
+        args.service,
+        start,
+        stop,
+        restart,
+        status,
+        join,
+        rotate_token,
+        args.force,
+        args.tunnel_url,
+        args.tunnel_token,
+        args.tunnel_devserver_name,
+        args.no_tunnel,
+        verbose,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_devserver(
     bind: Option<IpAddr>,
@@ -3652,7 +3909,7 @@ async fn cmd_devserver(
                 build_devserver_tunnel(tunnel_token, tunnel_url, tunnel_devserver_name.as_deref())?;
             // Tunnel mode defaults to NOT binding the loopback port (the gateway
             // is the surface, and it 404s the management API anyway), but under
-            // systemd notify it does bind so `chan devserver --restart` fdstore
+            // systemd notify it does bind so `chan devserver restart` fdstore
             // parking can reach the local management API. `CHAN_DEVSERVER_LISTEN`
             // overrides either way.
             let under_systemd = std::env::var_os("NOTIFY_SOCKET").is_some();
@@ -4238,11 +4495,11 @@ fn unescape_plist_xml(s: &str) -> String {
 /// Whether the foreground devserver binds a local TCP listener. Non-tunnel always
 /// binds. Tunnel mode defaults to no-bind (the gateway is the surface) EXCEPT
 /// under systemd notify, where the loopback management API is needed so
-/// `chan devserver --stop` / `--restart --force` can drain the terminals
+/// `chan devserver stop` / `--restart --force` can drain the terminals
 /// explicitly (restart itself needs no call: the fd store preserves PTYs).
 /// `CHAN_DEVSERVER_LISTEN`
 /// forces either way. Tunnel-off + LISTEN=0 leaves nothing reachable (no local
-/// listener, no tunnel -- only the `chan open` discovery socket), so it is a
+/// listener, no tunnel -- only the `chan serve` discovery socket), so it is a
 /// hard error rather than a silently-unreachable devserver.
 fn resolve_devserver_listen(
     tunnel_mode: bool,
@@ -4286,7 +4543,7 @@ fn parse_listen_override(raw: &str) -> Option<bool> {
 /// read back from `local_addr()` and persisted -- while a fixed 8787 default
 /// collides with whatever else owns that port, and the systemd unit path
 /// restarts into the same collision forever. Everything else keeps
-/// [`DEFAULT_PORT`], whose equality with `chan open`'s default powers the
+/// [`DEFAULT_PORT`], whose equality with `chan serve`'s default powers the
 /// serve-path collision hint.
 fn resolve_devserver_port(explicit: Option<u16>, tunnel_mode: bool, listen: bool) -> u16 {
     match explicit {
@@ -4623,7 +4880,7 @@ async fn health_ok(client: &reqwest::Client, url: &str, timeout: Duration) -> bo
     }
 }
 
-/// `chan devserver --service=systemd --start`: ensure the unit is up (linger +
+/// `chan devserver start --service=systemd`: ensure the unit is up (linger +
 /// write/enable/start when it is not already running), then return. Enables the
 /// unit so it also comes back on boot. Idempotent: a no-op (beyond re-providing
 /// the token) when the service is already active.
@@ -4649,7 +4906,7 @@ async fn start_devserver_under_systemd(
     Ok(())
 }
 
-/// `chan devserver --service=systemd --join`: ensure the unit is running (start
+/// `chan devserver join --service=systemd`: ensure the unit is running (start
 /// it if down, re-attach if up), then stay attached and block on the health
 /// watchdog until Ctrl-C. This is the "bring it up and watch it" form connect
 /// scripts use; unlike `--start` it does not return until the service stops or
@@ -4814,7 +5071,7 @@ async fn bootstrap_systemd_unit(
     Ok(())
 }
 
-/// `chan devserver --service=systemd --restart`: rewrite the unit (current
+/// `chan devserver restart --service=systemd`: rewrite the unit (current
 /// binary + `addr`), bounce it (or start it if stopped), then return. Linger is
 /// ensured first, mirroring the start path. Continuous fdstore parking makes
 /// the bounce preserve live PTYs by itself; `--force` is the destructive
@@ -4913,7 +5170,7 @@ async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), 
     Ok(())
 }
 
-/// `chan devserver --service=systemd --stop`: stop the running unit AND disable
+/// `chan devserver stop --service=systemd`: stop the running unit AND disable
 /// it, so it does not come back on the next login or boot. Sessions are drained
 /// through the management API first (explicit kill, today's forcefulness for
 /// HUP-immune children); the stop itself then releases the fd store, so even a
@@ -4966,7 +5223,7 @@ async fn stop_devserver_under_systemd() -> Result<()> {
     Ok(())
 }
 
-/// `chan devserver --rotate-token`: re-mint the devserver bearer. Prefer
+/// `chan devserver rotate-token`: re-mint the devserver bearer. Prefer
 /// rotating THROUGH the running server's management API so the old bearer
 /// stops authorizing immediately (the suspected-leak response); fall back
 /// to rewriting the persisted config when nothing answers, which a
@@ -4977,7 +5234,7 @@ async fn stop_devserver_under_systemd() -> Result<()> {
 async fn cmd_rotate_devserver_token() -> Result<()> {
     let Some(current) = chan_server::persisted_devserver_token() else {
         anyhow::bail!(
-            "chan devserver --rotate-token: no devserver config with a token \
+            "chan devserver rotate-token: no devserver config with a token \
              found (~/.chan/devserver/config.json); start a devserver first"
         );
     };
@@ -5001,7 +5258,7 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
             }
             Ok(Ok(response)) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 anyhow::bail!(
-                    "chan devserver --rotate-token: the running devserver rejected the \
+                    "chan devserver rotate-token: the running devserver rejected the \
                      persisted token (401): its in-memory token and \
                      ~/.chan/devserver/config.json disagree. Restart the devserver, \
                      then rotate again."
@@ -5009,7 +5266,7 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
             }
             Ok(Ok(response)) => {
                 anyhow::bail!(
-                    "chan devserver --rotate-token: the running devserver answered HTTP {}",
+                    "chan devserver rotate-token: the running devserver answered HTTP {}",
                     response.status()
                 );
             }
@@ -5030,7 +5287,7 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
             Ok(())
         }
         None => anyhow::bail!(
-            "chan devserver --rotate-token: no devserver config with a token \
+            "chan devserver rotate-token: no devserver config with a token \
              found (~/.chan/devserver/config.json); start a devserver first"
         ),
     }
@@ -5123,7 +5380,7 @@ async fn ensure_systemd_linger() -> Result<()> {
     let output = run_tool("loginctl", &args).await?;
     if !output.status.success() {
         anyhow::bail!(
-            "chan devserver --service=systemd: linger is off (so the service would not \
+            "chan devserver (systemd): linger is off (so the service would not \
              survive logout) and `loginctl enable-linger` was denied:\n{}\n\
              enable it once, as root: sudo loginctl enable-linger {}",
             String::from_utf8_lossy(&output.stderr).trim(),
@@ -5440,7 +5697,7 @@ fn devserver_systemd_unit_spec(
             environment.push(format!("CHAN_TUNNEL_TOKEN={}", tunnel.token));
             // The endpoint rides the environment as well as the ExecStart flag.
             // The flag is what THIS service dials; the variable is what the
-            // terminals it spawns inherit, so a `chan devserver --restart` typed
+            // terminals it spawns inherit, so a `chan devserver restart` typed
             // inside the workspace resolves the same gateway the unit already
             // uses instead of refusing for want of an endpoint. Both are
             // written from one resolved value, so they cannot disagree.
@@ -5462,7 +5719,7 @@ fn devserver_systemd_unit_spec(
                     name.replace(['"', '\\'], "").replace('%', "%%")
                 ));
             }
-            let mut exec = format!("{exe} devserver", exe = exe.display());
+            let mut exec = format!("{exe} devserver run", exe = exe.display());
             if let Some(ip) = tunnel.pinned_bind {
                 exec.push_str(&format!(" --bind={ip}"));
             }
@@ -5473,7 +5730,7 @@ fn devserver_systemd_unit_spec(
             exec
         }
         None => format!(
-            "{exe} devserver --bind={ip} --port={port}",
+            "{exe} devserver run --bind={ip} --port={port}",
             exe = exe.display(),
             ip = addr.ip(),
             port = addr.port(),
@@ -5585,7 +5842,7 @@ async fn run_tool(program: &str, args: &[&str]) -> Result<std::process::Output> 
 /// bundle id (`app.chan.desktop`).
 const DEVSERVER_LAUNCHD_LABEL: &str = "app.chan.devserver";
 
-/// `chan devserver --service=launchd --start`: ensure the agent is up
+/// `chan devserver start --service=launchd`: ensure the agent is up
 /// (write/enable/bootstrap when it is not already running), then return. A
 /// LaunchAgent in the `gui/<uid>` domain outlives the launching shell and the
 /// GUI login session (it does NOT survive a full logout; that would need a root
@@ -5605,7 +5862,7 @@ async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// `chan devserver --service=launchd --join`: ensure the agent is running (start
+/// `chan devserver join --service=launchd`: ensure the agent is running (start
 /// it if down, re-attach if up), then stay attached and follow its log until
 /// Ctrl-C. Unlike `--start` it does not return until the agent stops or the user
 /// detaches.
@@ -5668,7 +5925,7 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// `chan devserver --service=launchd --restart`: rewrite + re-register the agent
+/// `chan devserver restart --service=launchd`: rewrite + re-register the agent
 /// (current binary + `addr`) so it bounces (or starts if stopped), then return.
 /// Use `--join` to stay attached.
 async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
@@ -5682,7 +5939,7 @@ async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-/// `chan devserver --service=launchd --stop`: bootout the agent AND disable it,
+/// `chan devserver stop --service=launchd`: bootout the agent AND disable it,
 /// so launchd does not re-bootstrap it at the next GUI login. Idempotent:
 /// `bootout` errors when nothing is loaded, which we report as already-stopped;
 /// `disable` is best-effort. The plist stays on disk, so `--status` can still
@@ -5809,6 +6066,7 @@ fn devserver_launch_agent_plist(
   <array>
     <string>{exe}</string>
     <string>devserver</string>
+    <string>run</string>
     <string>--bind={ip}</string>
     <string>--port={port}</string>
   </array>
@@ -5925,7 +6183,7 @@ async fn recent_launchd_log() -> String {
     }
 }
 
-/// Integrate a Desktop-personality `chan open` with the desktop app.
+/// Integrate a Desktop-personality `chan serve` with the desktop app.
 ///
 /// Returns:
 /// - `Some(Ok(()))` when the desktop opened the workspace window (either a
@@ -6013,7 +6271,7 @@ async fn maybe_handoff_to_desktop(
     }
 }
 
-/// Launch the desktop GUI for a `chan open` that found no running desktop,
+/// Launch the desktop GUI for a `chan serve` that found no running desktop,
 /// then hand it the workspace. Unix-only (the desktop + handoff socket are
 /// unix); off unix there's no GUI to launch, so fall back to standalone.
 #[cfg(unix)]
@@ -6068,7 +6326,7 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "timed out waiting for chan-desktop to start; run `chan open` again \
+                "timed out waiting for chan-desktop to start; run `chan serve` again \
                  once it is up, or set CHAN_NO_DESKTOP_HANDOFF=1 for a standalone server"
             );
         }
@@ -8433,7 +8691,7 @@ mod tests {
         let hint = devserver_bind_collision_hint(addr, &bind_err(ErrorKind::AddrInUse, "8787"))
             .expect("hint");
         assert!(hint.contains("chan devserver"), "{hint}");
-        assert!(hint.contains("chan open"), "{hint}");
+        assert!(hint.contains("chan serve"), "{hint}");
 
         // Any other failure keeps its generic context.
         assert!(devserver_bind_collision_hint(
@@ -8971,7 +9229,7 @@ mod tests {
         let sock = dir.path().join("hung.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         // Accept the connection but never reply: the probe must elapse to None
-        // rather than hang `chan open`.
+        // rather than hang `chan serve`.
         let _accept = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 // Hold the stream open without writing a response.
@@ -9002,41 +9260,45 @@ mod tests {
     }
 
     #[test]
-    fn open_target_flags_are_mutually_exclusive() {
+    fn serve_target_flags_are_mutually_exclusive() {
         // clap's `conflicts_with_all` rejects any two target flags at parse
-        // time; one alone parses.
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--standalone"]).is_ok());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--desktop"]).is_ok());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--devserver"]).is_ok());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--standalone", "--desktop"]).is_err());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--standalone", "--devserver"]).is_err());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--desktop", "--devserver"]).is_err());
+        // time; one alone parses. The family spelling flattens the same
+        // args struct, so it parses identically.
+        assert!(Cli::try_parse_from(["chan", "serve", ".", "--standalone"]).is_ok());
+        assert!(Cli::try_parse_from(["chan", "serve", ".", "--desktop"]).is_ok());
+        assert!(Cli::try_parse_from(["chan", "serve", ".", "--devserver"]).is_ok());
+        assert!(Cli::try_parse_from(["chan", "workspace", "serve", ".", "--standalone"]).is_ok());
+        assert!(Cli::try_parse_from(["chan", "serve", ".", "--standalone", "--desktop"]).is_err());
+        assert!(
+            Cli::try_parse_from(["chan", "serve", ".", "--standalone", "--devserver"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["chan", "serve", ".", "--desktop", "--devserver"]).is_err());
+        // The retired spelling is gone outright, not aliased.
+        assert!(Cli::try_parse_from(["chan", "open", "."]).is_err());
     }
 
     #[test]
-    fn open_devserver_selector_parses_bare_port_and_url() {
+    fn serve_devserver_selector_parses_bare_port_and_url() {
         let parse = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
-            Command::Open {
-                target, devserver, ..
-            } => (target, devserver),
-            other => panic!("expected open, got {other:?}"),
+            Command::Serve { args } => (args.path, args.devserver),
+            other => panic!("expected serve, got {other:?}"),
         };
 
-        assert_eq!(parse(&["chan", "open", "."]), (Some(".".into()), None));
+        assert_eq!(parse(&["chan", "serve", "."]), (Some(".".into()), None));
         // require_equals keeps the following positional path out of the
         // optional flag value.
         assert_eq!(
-            parse(&["chan", "open", "--devserver", "."]),
+            parse(&["chan", "serve", "--devserver", "."]),
             (Some(".".into()), Some(DevserverSelector::Auto))
         );
         assert_eq!(
-            parse(&["chan", "open", ".", "--devserver=9999"]),
+            parse(&["chan", "serve", ".", "--devserver=9999"]),
             (Some(".".into()), Some(DevserverSelector::Port(9999)))
         );
         assert_eq!(
             parse(&[
                 "chan",
-                "open",
+                "serve",
                 ".",
                 "--devserver=http://127.0.0.1:9000/?t=secret",
             ]),
@@ -9617,7 +9879,7 @@ mod tests {
         assert!(absolutize_serve_root(PathBuf::from("sub/dir")).starts_with(&cwd));
     }
 
-    /// This root is user-visible: `chan open` prints it and chan-desktop
+    /// This root is user-visible: `chan serve` prints it and chan-desktop
     /// titles the window with it. `std::fs::canonicalize` emits the Windows
     /// verbatim prefix, which leaked all the way to the window title as
     /// `\\?\C:\notes`. Windows-only in effect, but the assertion is a pure
@@ -9712,13 +9974,11 @@ mod tests {
     #[test]
     fn devserver_tunnel_url_has_no_domain_default() {
         let _env = test_env::ChanTestEnv::new();
-        let cli = Cli::parse_from(["chan", "devserver"]);
+        let cli = Cli::parse_from(["chan", "devserver", "run"]);
         match cli.command {
             Command::Devserver {
-                tunnel_url,
-                tunnel_token,
-                ..
-            } => assert_tunnel_defaults_off(&tunnel_url, &tunnel_token),
+                action: DevserverAction::Run { args },
+            } => assert_tunnel_defaults_off(&args.tunnel_url, &args.tunnel_token),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
     }
@@ -9808,7 +10068,7 @@ mod tests {
         // Tunnel without a listener: nothing binds; the addr keeps the shared
         // default for the discovery/window-record report, as before.
         assert_eq!(resolve_devserver_port(None, true, false), DEFAULT_PORT);
-        // Non-tunnel keeps the shared default the `chan open` handoff and the
+        // Non-tunnel keeps the shared default the `chan serve` handoff and the
         // serve-path collision hint rely on.
         assert_eq!(resolve_devserver_port(None, false, true), DEFAULT_PORT);
     }
@@ -9829,130 +10089,111 @@ mod tests {
         assert!(out.contains("CHAN_DEVSERVER_TOKEN=tok-2"), "{out}");
     }
 
-    /// `--rotate-token` parses and sits in the exclusive action group.
+    /// `rotate-token` parses as its own verb; the retired flag form does
+    /// not parse at all, so verb exclusivity is structural.
     #[test]
-    fn devserver_rotate_token_flag_parses() {
+    fn devserver_rotate_token_verb_parses() {
         let _env = test_env::ChanTestEnv::new();
-        let cli = Cli::parse_from(["chan", "devserver", "--rotate-token"]);
-        match cli.command {
-            Command::Devserver { rotate_token, .. } => assert!(rotate_token),
-            other => panic!("expected Command::Devserver, got {other:?}"),
-        }
-        assert!(
-            Cli::try_parse_from(["chan", "devserver", "--rotate-token", "--stop"]).is_err(),
-            "action verbs are mutually exclusive"
-        );
+        let cli = Cli::parse_from(["chan", "devserver", "rotate-token"]);
+        assert!(matches!(
+            cli.command,
+            Command::Devserver {
+                action: DevserverAction::RotateToken { .. }
+            }
+        ));
+        assert!(Cli::try_parse_from(["chan", "devserver", "--rotate-token"]).is_err());
+        assert!(Cli::try_parse_from(["chan", "devserver", "rotate-token", "--stop"]).is_err());
     }
 
-    /// The action verbs parse onto their flags, and clap's `action` group makes
-    /// them mutually exclusive.
+    /// The management verbs parse as subcommands, carrying the shared
+    /// server-side flags; the retired flag-verb spellings do not parse.
     #[test]
-    fn devserver_action_group_parse() {
+    fn devserver_management_verbs_parse() {
         let _env = test_env::ChanTestEnv::new();
-        let cli = Cli::parse_from(["chan", "devserver", "--service=systemd", "--stop"]);
+        let cli = Cli::parse_from(["chan", "devserver", "stop", "--service=systemd"]);
         match cli.command {
             Command::Devserver {
-                service,
-                stop,
-                restart,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::Systemd);
-                assert!(stop);
-                assert!(!restart);
-            }
+                action: DevserverAction::Stop { args },
+            } => assert_eq!(args.service, ServiceKind::Systemd),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
-        let cli = Cli::parse_from(["chan", "devserver", "--service=systemd", "--restart"]);
+        let cli = Cli::parse_from(["chan", "devserver", "restart", "--service=systemd"]);
         match cli.command {
             Command::Devserver {
-                service,
-                stop,
-                restart,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::Systemd);
-                assert!(restart);
-                assert!(!stop);
-            }
+                action: DevserverAction::Restart { args },
+            } => assert_eq!(args.service, ServiceKind::Systemd),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
-        // At most one action verb may be supplied (clap `group = "action"`).
-        assert!(Cli::try_parse_from([
-            "chan",
-            "devserver",
-            "--service=systemd",
-            "--stop",
-            "--restart"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "chan",
-            "devserver",
-            "--service=systemd",
-            "--start",
-            "--join"
-        ])
-        .is_err());
+        // A bare `chan devserver` no longer runs a foreground server; the
+        // verb is explicit, and the flag-verb spellings are gone.
+        assert!(Cli::try_parse_from(["chan", "devserver"]).is_err());
+        assert!(Cli::try_parse_from(["chan", "devserver", "--stop"]).is_err());
+        assert!(Cli::try_parse_from(["chan", "devserver", "--start"]).is_err());
+        assert!(Cli::try_parse_from(["chan", "devserver", "stop", "restart"]).is_err());
     }
 
     /// `--service` parses to an enum: absent OR a bare `--service` (no value)
     /// resolve to `Auto` (the per-OS default), `=auto`/`=none` and each explicit
-    /// backend parse by name. A bare `--service` immediately before an action
-    /// flag (`--service --join`) still resolves to `Auto` and parses the verb.
+    /// backend parse by name, on any of the server-side verbs.
     #[test]
     fn devserver_service_kind_parse() {
         let _env = test_env::ChanTestEnv::new();
         let kind = |args: &[&str]| match Cli::parse_from(args).command {
-            Command::Devserver { service, .. } => service,
-            other => panic!("expected Command::Devserver, got {other:?}"),
+            Command::Devserver {
+                action: DevserverAction::Run { args },
+            } => args.service,
+            other => panic!("expected Command::Devserver run, got {other:?}"),
         };
         // Absent, a bare `--service`, and `=auto` all resolve to the auto default.
-        assert_eq!(kind(&["chan", "devserver"]), ServiceKind::Auto);
-        assert_eq!(kind(&["chan", "devserver", "--service"]), ServiceKind::Auto);
+        assert_eq!(kind(&["chan", "devserver", "run"]), ServiceKind::Auto);
         assert_eq!(
-            kind(&["chan", "devserver", "--service", "auto"]),
+            kind(&["chan", "devserver", "run", "--service"]),
             ServiceKind::Auto
         );
         assert_eq!(
-            kind(&["chan", "devserver", "--service", "none"]),
+            kind(&["chan", "devserver", "run", "--service", "auto"]),
+            ServiceKind::Auto
+        );
+        assert_eq!(
+            kind(&["chan", "devserver", "run", "--service", "none"]),
             ServiceKind::None
         );
         assert_eq!(
-            kind(&["chan", "devserver", "--service", "chan"]),
+            kind(&["chan", "devserver", "run", "--service", "chan"]),
             ServiceKind::Chan
         );
         assert_eq!(
-            kind(&["chan", "devserver", "--service", "systemd"]),
+            kind(&["chan", "devserver", "run", "--service", "systemd"]),
             ServiceKind::Systemd
         );
         assert_eq!(
-            kind(&["chan", "devserver", "--service", "launchd"]),
+            kind(&["chan", "devserver", "run", "--service", "launchd"]),
             ServiceKind::Launchd
         );
-        // The space form `--service --join`: `--service` takes no value (the next
-        // token is a flag), so it resolves to Auto and `--join` still parses.
-        match Cli::parse_from(["chan", "devserver", "--service", "--join"]).command {
-            Command::Devserver { service, join, .. } => {
-                assert_eq!(service, ServiceKind::Auto);
-                assert!(join);
-            }
-            other => panic!("expected Command::Devserver, got {other:?}"),
+        // A bare `--service` at the end of the argv still resolves to Auto
+        // on a management verb.
+        match Cli::parse_from(["chan", "devserver", "join", "--service"]).command {
+            Command::Devserver {
+                action: DevserverAction::Join { args },
+            } => assert_eq!(args.service, ServiceKind::Auto),
+            other => panic!("expected Command::Devserver join, got {other:?}"),
         }
         match Cli::parse_from([
             "chan",
             "devserver",
+            "status",
             "--service=systemd",
-            "--status",
             "--force",
         ])
         .command
         {
-            Command::Devserver { status, force, .. } => {
-                assert!(status);
-                assert!(force);
+            Command::Devserver {
+                action: DevserverAction::Status { args },
+            } => {
+                assert_eq!(args.service, ServiceKind::Systemd);
+                assert!(args.force);
             }
-            other => panic!("expected Command::Devserver, got {other:?}"),
+            other => panic!("expected Command::Devserver status, got {other:?}"),
         }
     }
 
@@ -10099,6 +10340,7 @@ mod tests {
     /// the launchd plist `<string>` form, and fails closed when a flag is absent.
     #[test]
     fn devserver_addr_parses_from_persisted_forms() {
+        // Old-form ExecStart (no run verb): units installed by an older chan must still parse.
         assert_eq!(
             devserver_addr_from_persisted_args(
                 "/usr/bin/chan devserver --bind=0.0.0.0 --port=9000"
@@ -10121,15 +10363,15 @@ mod tests {
     /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
     #[test]
     fn status_command_extracts_per_backend() {
-        let unit = "[Service]\nExecStart=/usr/bin/chan devserver --bind=0.0.0.0 --port=9000\nRestart=on-failure\n";
+        let unit = "[Service]\nExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000\nRestart=on-failure\n";
         assert_eq!(
             systemd_execstart_line(unit).as_deref(),
-            Some("/usr/bin/chan devserver --bind=0.0.0.0 --port=9000")
+            Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
         );
-        let plist = "<array>\n  <string>/usr/bin/chan</string>\n  <string>devserver</string>\n  <string>--bind=0.0.0.0</string>\n  <string>--port=9000</string>\n</array>";
+        let plist = "<array>\n  <string>/usr/bin/chan</string>\n  <string>devserver</string>\n  <string>run</string>\n  <string>--bind=0.0.0.0</string>\n  <string>--port=9000</string>\n</array>";
         assert_eq!(
             launchd_program_arguments(plist).as_deref(),
-            Some("/usr/bin/chan devserver --bind=0.0.0.0 --port=9000")
+            Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
         );
         let escaped = "<array><string>/a&amp;b/chan</string><string>devserver</string></array>";
         assert_eq!(
@@ -10664,13 +10906,16 @@ mod tests {
         let cli = Cli::parse_from([
             "chan",
             "devserver",
+            "run",
             "--tunnel-url",
             "http://127.0.0.1:7777/v1/tunnel",
         ]);
         match cli.command {
-            Command::Devserver { tunnel_url, .. } => {
+            Command::Devserver {
+                action: DevserverAction::Run { args },
+            } => {
                 assert_eq!(
-                    tunnel_url.as_deref(),
+                    args.tunnel_url.as_deref(),
                     Some("http://127.0.0.1:7777/v1/tunnel")
                 );
             }
@@ -10817,7 +11062,7 @@ mod tests {
     #[test]
     fn workspace_group_uses_ls_and_rm() {
         // The registry verbs live under `chan workspace`, spelled `ls`
-        // and `rm`.
+        // and `forget` (rm is gone with the grammar move).
         let cli = Cli::try_parse_from(["chan", "workspace", "ls", "--json"]).unwrap();
         match cli.command {
             Command::Workspace {
@@ -10826,13 +11071,25 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let cli = Cli::try_parse_from(["chan", "workspace", "rm", "/tmp/workspace"]).unwrap();
+        let cli = Cli::try_parse_from(["chan", "workspace", "forget", "/tmp/workspace"]).unwrap();
         match cli.command {
             Command::Workspace {
-                action: WorkspaceAction::Rm { path },
+                action: WorkspaceAction::Forget { path },
             } => assert_eq!(path, PathBuf::from("/tmp/workspace")),
             other => panic!("unexpected command: {other:?}"),
         }
+        assert!(Cli::try_parse_from(["chan", "workspace", "rm", "/tmp/workspace"]).is_err());
+
+        // The lifecycle pair parses under the family as it does elevated.
+        let cli = Cli::try_parse_from(["chan", "workspace", "close", "/tmp/workspace"]).unwrap();
+        match cli.command {
+            Command::Workspace {
+                action: WorkspaceAction::Close { path },
+            } => assert_eq!(path, PathBuf::from("/tmp/workspace")),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["chan", "close", "/tmp/workspace"]).is_ok());
+        assert!(Cli::try_parse_from(["chan", "close", "/tmp/x", "--remove"]).is_err());
     }
 
     #[test]
@@ -10844,10 +11101,16 @@ mod tests {
             ["chan", "add"].as_slice(),
             ["chan", "list"].as_slice(),
             ["chan", "remove"].as_slice(),
+            ["chan", "forget"].as_slice(),
             ["chan", "index"].as_slice(),
             ["chan", "search"].as_slice(),
             ["chan", "metadata"].as_slice(),
             ["chan", "contacts"].as_slice(),
+            ["chan", "register"].as_slice(),
+            ["chan", "connect"].as_slice(),
+            ["chan", "disconnect"].as_slice(),
+            ["chan", "start"].as_slice(),
+            ["chan", "stop"].as_slice(),
         ] {
             assert!(
                 Cli::try_parse_from(argv).is_err(),
@@ -11412,9 +11675,8 @@ mod tests {
         assert!(unit.contains("NotifyAccess=main"));
         assert!(unit.contains("FileDescriptorStoreMax=512"));
         assert!(unit.contains("KillMode=process"));
-        assert!(
-            unit.contains("ExecStart=/usr/local/bin/chan devserver --bind=127.0.0.1 --port=8799")
-        );
+        assert!(unit
+            .contains("ExecStart=/usr/local/bin/chan devserver run --bind=127.0.0.1 --port=8799"));
         // Without CHAN_HOME the unit carries no Environment line (real ~/.chan).
         assert!(!unit.contains("Environment="));
     }
@@ -11454,7 +11716,7 @@ mod tests {
         // --bind/--port: the service resolves its tunnel-mode defaults
         // (loopback, OS-assigned port), so no default can fossilize here.
         assert!(unit.contains(
-            "ExecStart=/home/dev/.local/bin/chan devserver \
+            "ExecStart=/home/dev/.local/bin/chan devserver run \
              --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
@@ -11488,7 +11750,7 @@ mod tests {
             Some(&tunnel),
         );
         assert!(unit.contains(
-            "ExecStart=/home/dev/.local/bin/chan devserver --bind=0.0.0.0 \
+            "ExecStart=/home/dev/.local/bin/chan devserver run --bind=0.0.0.0 \
              --port=9000 --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         // Each field pins independently: a port-only pin keeps the bind
@@ -11507,7 +11769,7 @@ mod tests {
             Some(&port_only),
         );
         assert!(unit.contains(
-            "ExecStart=/home/dev/.local/bin/chan devserver --port=9000 \
+            "ExecStart=/home/dev/.local/bin/chan devserver run --port=9000 \
              --tunnel-url=https://usr.chan.app/v1/tunnel\n"
         ));
         assert!(!unit.contains("--bind="));
@@ -11565,7 +11827,7 @@ mod tests {
     /// dials, and one explicit port pin.
     const INSTALLED_TUNNEL_UNIT: &str = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_installed\"\n\
          Environment=\"CHAN_TUNNEL_URL=https://first-run.test/v1/tunnel\"\n\
-         ExecStart=/home/dev/.local/bin/chan devserver --port=9000 \
+         ExecStart=/home/dev/.local/bin/chan devserver run --port=9000 \
          --tunnel-url=https://first-run.test/v1/tunnel\n";
 
     #[test]
@@ -11708,7 +11970,7 @@ mod tests {
         .unwrap()
         .is_none());
         // A non-tunnel unit stays non-tunnel: there is no token to recover.
-        let local = "ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        let local = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert!(tunnel_spec_for(None, None, false, false, Some(local))
             .unwrap()
             .is_none());
@@ -11720,7 +11982,7 @@ mod tests {
         // fails -- loudly, because the alternative is rewriting the unit
         // without the PAT it is the only store for.
         let no_url = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_installed\"\n\
-                      ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+                      ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         // Matched rather than unwrap_err()'d: SystemdTunnel carries a PAT and
         // so implements no Debug, which is worth keeping.
         let Err(error) = tunnel_spec_for(None, None, false, false, Some(no_url)) else {
@@ -11772,7 +12034,7 @@ mod tests {
              KillMode=process\n\
              Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_abc123\"\n\
              Environment=\"CHAN_TUNNEL_URL=https://usr.chan.app/v1/tunnel\"\n\
-             ExecStart=/home/dev/.local/bin/chan devserver \
+             ExecStart=/home/dev/.local/bin/chan devserver run \
              --tunnel-url=https://usr.chan.app/v1/tunnel\n\
              TimeoutStartSec=10min\n\
              Restart=on-failure\n\
@@ -11869,6 +12131,7 @@ mod tests {
         // A unit provisioned with the endpoint only in the environment (no
         // ExecStart flag) is still a tunnel unit: its pins and name read, and
         // a flagless restart resolves the endpoint.
+        // Old-form ExecStart (no run verb): units installed by an older chan must still parse.
         let env_only = "Environment=\"CHAN_TUNNEL_TOKEN=chan_pat_a\"\n\
                         Environment=\"CHAN_TUNNEL_URL=https://env.test/v1/tunnel\"\n\
                         Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=env box\"\n\
@@ -11888,7 +12151,7 @@ mod tests {
             Some("https://exec.test/v1/tunnel".to_string())
         );
         // No endpoint anywhere: not a tunnel unit, so nothing pins.
-        let local = "ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        let local = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert_eq!(persisted_tunnel_url(local), None);
     }
 
@@ -11896,7 +12159,7 @@ mod tests {
     fn persisted_tunnel_pins_only_read_tunnel_units() {
         // A tunnel unit's persisted --bind/--port ARE the explicitness record,
         // each field independently.
-        let pinned = "ExecStart=/usr/bin/chan devserver --bind=0.0.0.0 --port=9000 \
+        let pinned = "ExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000 \
                       --tunnel-url=https://t.test/v1/tunnel\n";
         assert_eq!(
             persisted_tunnel_pins(pinned),
@@ -11909,7 +12172,7 @@ mod tests {
         assert_eq!(persisted_tunnel_pins(unpinned), (None, None));
         // A NON-tunnel unit always persists its address; converting it to
         // tunnel mode must not carry that address over as a pin.
-        let non_tunnel = "ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+        let non_tunnel = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert_eq!(persisted_tunnel_pins(non_tunnel), (None, None));
     }
 
@@ -11917,7 +12180,7 @@ mod tests {
     fn persisted_flag_value_reads_tunnel_url_from_execstart() {
         // The "reuse first-run URL" read: pull --tunnel-url back out of a unit's
         // ExecStart line the way a flagless --restart would.
-        let unit = "ExecStart=/home/dev/.local/bin/chan devserver \
+        let unit = "ExecStart=/home/dev/.local/bin/chan devserver run \
                     --tunnel-url=https://first-run.test/v1/tunnel\n";
         assert_eq!(
             persisted_flag_value(unit, "--tunnel-url="),
@@ -12039,7 +12302,7 @@ mod tests {
                         --tunnel-url=https://t.test/v1/tunnel\n";
         assert_eq!(persisted_tunnel_name(nameless), None);
         let non_tunnel = "Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=office box\"\n\
-                          ExecStart=/usr/bin/chan devserver --bind=127.0.0.1 --port=8787\n";
+                          ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787\n";
         assert_eq!(persisted_tunnel_name(non_tunnel), None);
     }
 
@@ -12091,12 +12354,17 @@ mod tests {
     #[test]
     fn devserver_name_flag_parses() {
         let _env = test_env::ChanTestEnv::new();
-        let cli = Cli::parse_from(["chan", "devserver", "--tunnel-devserver-name", "office box"]);
+        let cli = Cli::parse_from([
+            "chan",
+            "devserver",
+            "run",
+            "--tunnel-devserver-name",
+            "office box",
+        ]);
         match cli.command {
             Command::Devserver {
-                tunnel_devserver_name,
-                ..
-            } => assert_eq!(tunnel_devserver_name.as_deref(), Some("office box")),
+                action: DevserverAction::Run { args },
+            } => assert_eq!(args.tunnel_devserver_name.as_deref(), Some("office box")),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
     }
@@ -12112,6 +12380,7 @@ mod tests {
         assert!(plist.contains("<string>app.chan.devserver</string>"));
         assert!(plist.contains("<string>/usr/local/bin/chan</string>"));
         assert!(plist.contains("<string>devserver</string>"));
+        assert!(plist.contains("<string>run</string>"));
         assert!(plist.contains("<string>--bind=127.0.0.1</string>"));
         assert!(plist.contains("<string>--port=8799</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));

@@ -1,6 +1,6 @@
 //! chan-tunnel client library.
 //!
-//! Used by `chan devserver --tunnel-token ...`. The eventual
+//! Used by `chan devserver run --tunnel-token ...`. The eventual
 //! entry point dials the gateway's tunnel endpoint over
 //! h2/TLS, runs `handshake` over the resulting bidirectional
 //! stream, and serves every yamux substream with a user-supplied
@@ -94,7 +94,7 @@ pub struct ClientConfig {
     /// `/{user}/{workspace}/...`. Required.
     pub workspace: String,
     /// Display name sent in the Hello frame, for the gateway roster
-    /// (`chan devserver --tunnel-devserver-name`). Optional and
+    /// (`chan devserver run --tunnel-devserver-name`). Optional and
     /// routing-inert: servers that predate the field ignore it.
     pub name: Option<String>,
     /// `chan` version reported in the Hello frame; logs only.

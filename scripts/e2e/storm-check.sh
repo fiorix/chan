@@ -95,7 +95,7 @@ stop_server() {
 cleanup() {
   stop_session
   stop_server
-  CHAN_HOME="$HOME_DIR" "$CHAN_BIN" workspace rm "$WORK/ws" >/dev/null 2>&1 || true
+  CHAN_HOME="$HOME_DIR" "$CHAN_BIN" workspace forget "$WORK/ws" >/dev/null 2>&1 || true
   rm -rf "$WORK" "$HOME_DIR"
 }
 trap cleanup EXIT
@@ -138,7 +138,7 @@ start_server() {
   log_start=$(( $(wc -l <"$LOG" 2>/dev/null || printf '0') + 1 ))
   say "starting server (logs: $LOG)"
   CHAN_NO_DEVSERVER_HANDOFF=1 CHAN_HOME="$HOME_DIR" \
-    "$CHAN_BIN" open --port 0 --no-browser "$WORK/ws" >>"$LOG" 2>&1 &
+    "$CHAN_BIN" serve --port 0 --no-browser "$WORK/ws" >>"$LOG" 2>&1 &
   PID=$!
   url=""
   for ((attempt = 1; attempt <= 60; attempt++)); do

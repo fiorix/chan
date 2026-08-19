@@ -107,7 +107,7 @@ impl EmbeddedServer {
         // Install the launcher's devserver registry over the desktop config so
         // the `/api/library/devservers` CRUD persists to the SAME config the
         // desktop reads (the shared store handle) -- mirror of the workspace
-        // overlay above. The headless devserver / plain `chan open` install
+        // overlay above. The headless devserver / plain `chan serve` install
         // none (empty list, 404 mutation).
         host.install_devserver_registry(Arc::new(DevserverConfigRegistry::new(
             Arc::clone(&config_store),
@@ -654,7 +654,7 @@ impl Drop for EmbeddedServer {
 
 /// Map an embedded open error to a user-facing string. A workspace
 /// already held by another chan process (typically a standalone
-/// `chan open <workspace>` started before the desktop tried to mount
+/// `chan serve <workspace>` started before the desktop tried to mount
 /// it) surfaces as `WorkspaceLocked`; an in-process handle that hasn't
 /// dropped yet surfaces as `WorkspaceAlreadyOpen`. Both reach the SPA
 /// verbatim and revert the row's On toggle, so they must read as a

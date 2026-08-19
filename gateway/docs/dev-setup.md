@@ -87,7 +87,7 @@ Publish a devserver from the sibling `chan` repo over the TLS tunnel apex. Regis
 ```sh
 cargo run -p chan -- workspace add <workspace-dir>
 export CHAN_TUNNEL_TOKEN=chan_pat_...     # mint under the dashboard Tokens tab
-cargo run -p chan -- devserver --tunnel-url=https://usr.localtest.me/v1/tunnel
+cargo run -p chan -- devserver run --tunnel-url=https://usr.localtest.me/v1/tunnel
 ```
 
 Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<disc>.p1.usr.localtest.me/<slug>-<8hex>/` (the workspace's tenant mount inside the devserver).

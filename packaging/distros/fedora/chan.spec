@@ -31,7 +31,7 @@ BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  systemd-rpm-macros
 
-# The devserver's service mode (`chan devserver --service=systemd`) drives
+# The devserver's service mode (`chan devserver start --service=systemd`) drives
 # systemctl/loginctl; the binary itself needs only glibc.
 Requires:       systemd
 

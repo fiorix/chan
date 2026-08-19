@@ -14,7 +14,7 @@ license=('Apache-2.0')
 # namcap derives dependencies from linked sonames alone and calls both
 # gcc-libs and systemd possibly unneeded. They are needed: gcc-libs provides
 # the libgcc_s.so.1 the binary links, and systemd carries the packaged user
-# unit's runtime plus `chan devserver --service=systemd`.
+# unit's runtime plus `chan devserver start --service=systemd`.
 depends=('gcc-libs' 'glibc' 'systemd')
 makedepends=('cargo' 'nodejs' 'npm')
 conflicts=('chan-desktop')

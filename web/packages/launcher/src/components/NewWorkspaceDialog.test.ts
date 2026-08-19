@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe("New workspace dialog -- local", () => {
-  it("shows a folder-path input + the chan open tip, no chooser", () => {
+  it("shows a folder-path input + the chan serve tip, no chooser", () => {
     openNewDialog("local");
     const el = render();
     // No in-dialog chooser any more (the two entry points open it pre-anchored).
@@ -66,7 +66,7 @@ describe("New workspace dialog -- local", () => {
     expect(el.querySelector('input[type="text"]')).not.toBeNull();
     expect(el.textContent).toContain("Folder path");
     expect(el.textContent).toContain("New workspace");
-    expect(el.textContent).toContain("chan open <path>");
+    expect(el.textContent).toContain("chan serve <path>");
     expect(btn(el, "Create workspace")).toBeTruthy();
   });
 

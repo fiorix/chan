@@ -1977,7 +1977,7 @@ async fn handle_remove_devserver(
 
 /// `GET /api/library/gateways`: every configured gateway with its live
 /// connection state. A registry-less surface (headless devserver, plain
-/// `chan open`) returns the empty list.
+/// `chan serve`) returns the empty list.
 async fn handle_list_gateways(State(state): State<Arc<LauncherState>>) -> Json<Vec<GatewayEntry>> {
     Json(
         state

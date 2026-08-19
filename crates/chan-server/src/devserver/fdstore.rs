@@ -2,7 +2,7 @@
 //!
 //! Every windowed PTY parks its master fd in the systemd fd store at spawn
 //! and a maintained restart manifest describes the parked set, so ANY unit
-//! restart -- `systemctl --user restart`, `chan devserver --restart`, a
+//! restart -- `systemctl --user restart`, `chan devserver restart`, a
 //! watchdog kill, a crash under Restart=on-failure -- rebuilds the
 //! terminals on boot. `systemctl stop` releases the store instead, closing
 //! the masters and HUPping the shells: the stop/restart asymmetry lives

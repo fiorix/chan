@@ -22,7 +22,7 @@ data:
   IDENTITY_PUBLIC_ORIGIN: "https://gw.localtest.me"
   # Proxy namespace origin advertised by discovery.
   DEVSERVER_PROXY_ORIGIN: "https://usr.localtest.me"
-  # Tunnel ingress origin (`chan devserver --tunnel-url` dials its /v1/tunnel).
+  # Tunnel ingress origin (`chan devserver run --tunnel-url` dials its /v1/tunnel).
   DEVSERVER_TUNNEL_ORIGIN: "https://usr.localtest.me"
   # This proxy node's stable id and exact base origin. The origin must match
   # the controller's template expansion for the id.

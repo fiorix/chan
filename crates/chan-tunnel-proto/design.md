@@ -106,7 +106,7 @@ Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence
 
 ### Hello.name (display name, additive)
 
-`Hello` carries an optional `name` (`#[serde(default)] Option<String>`): the display name the devserver announces for the gateway roster (`chan devserver --tunnel-devserver-name`, defaulting to the client host's hostname). It is display-only metadata -- never part of routing or the registry key, which stay token-resolved -- and rides the additive-field rule with no `ProtocolVersion` bump: an old client omits the key and decodes as `None` on a new server; an old server ignores the unknown key from a new client. The terminator hands a non-empty name to its validator hook (`Validator::announce_devserver_name`); the production gateway persists it as the devserver's label, deduped per owner with `-2`/`-3` suffixes.
+`Hello` carries an optional `name` (`#[serde(default)] Option<String>`): the display name the devserver announces for the gateway roster (`chan devserver run --tunnel-devserver-name`, defaulting to the client host's hostname). It is display-only metadata -- never part of routing or the registry key, which stay token-resolved -- and rides the additive-field rule with no `ProtocolVersion` bump: an old client omits the key and decodes as `None` on a new server; an old server ignores the unknown key from a new client. The terminator hands a non-empty name to its validator hook (`Validator::announce_devserver_name`); the production gateway persists it as the devserver's label, deduped per owner with `-2`/`-3` suffixes.
 
 ### HelloAck: Ok or Refused
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # devserver-tunnel-e2e -- cross-CONTAINER end-to-end for the chan devserver tunnel.
 #
-# Stands up the REAL devserver-proxy-service and a REAL `chan devserver
+# Stands up the REAL devserver-proxy-service and a REAL `chan devserver run
 # --tunnel-url` in two SEPARATE sdme containers, then drives a request through
 # the proxy's PUBLIC surface, over the tunnel, into the devserver's mounted
 # workspace. An authenticated 200 from the mounted workspace's `/api/health`
@@ -11,7 +11,7 @@
 # Topology (see zone-isolation-probe.sh + README for WHY one zone):
 #   zone gw-e2e
 #     gw-e2e-proxy : devserver-proxy-service (real) + stub-identity (loopback)
-#     gw-e2e-ds    : chan devserver --tunnel-url + a mounted workspace
+#     gw-e2e-ds    : chan devserver run --tunnel-url + a mounted workspace
 #   The tunnel is gw-e2e-ds -> gw-e2e-proxy:7100 (same-zone container IP). On
 #   this host the kernel firewall drops container->host and cross-zone TCP
 #   (ICMP only), and `-p` does not bridge zones, so same-zone is the only path
@@ -243,7 +243,7 @@ $SDME exec "$C_DS" -- /usr/bin/systemd-run --unit=chands --collect \
   --setenv=RUST_LOG=info --setenv=HOME=/root --setenv=XDG_RUNTIME_DIR=/run/chan \
   --setenv=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   --setenv=CHAN_TUNNEL_TOKEN=$PAT --setenv=CHAN_DEVSERVER_LISTEN=1 \
-  /root/chan devserver --bind 0.0.0.0 --port $DS_PORT --tunnel-url="$TUNNEL_URL" \
+  /root/chan devserver run --bind 0.0.0.0 --port $DS_PORT --tunnel-url="$TUNNEL_URL" \
   || die "systemd-run chan devserver"
 
 say "wait for tunnel registration"
@@ -256,8 +256,8 @@ $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager 2>/dev/null | tai
 [ "$REG" = 1 ] || { $SDME exec "$C_PROXY" -- /usr/bin/journalctl -u dsp --no-pager | tail -20; die "tunnel did not connect"; }
 info "tunnel connected"
 
-say "mount workspace via chan open (local devserver handoff)"
-$SDME exec "$C_DS" -- /bin/sh -c "HOME=/root XDG_RUNTIME_DIR=/run/chan /root/chan open /root/$WS_NAME" 2>&1 | tail -6 || true
+say "mount workspace via chan serve (local devserver handoff)"
+$SDME exec "$C_DS" -- /bin/sh -c "HOME=/root XDG_RUNTIME_DIR=/run/chan /root/chan serve /root/$WS_NAME" 2>&1 | tail -6 || true
 sleep 2
 TOKEN="$($SDME exec "$C_DS" -- /bin/cat /root/.chan/devserver/config.json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("devserver_token",""))' 2>/dev/null || true)"
 WS_JSON="$(curl -fsS -H "Authorization: Bearer $TOKEN" "http://$DS_IP:$DS_PORT/api/devserver/workspaces" 2>/dev/null || true)"
@@ -269,7 +269,7 @@ except Exception: print("")')"
 [ -n "$PREFIX" ] || die "could not resolve mounted workspace prefix"
 info "mounted prefix = $PREFIX"
 
-# `chan open` registers through the live devserver handoff. Current lifecycle
+# `chan serve` registers through the live devserver handoff. Current lifecycle
 # semantics keep a newly registered workspace off until the management API
 # explicitly serves it, so activate it before asking the proxy for tenant HTML.
 ON_JSON="$(curl -fsS -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \

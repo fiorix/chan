@@ -246,7 +246,7 @@ pub enum ControlRequest {
     // Category 4 (desktop window lifecycle): drive the desktop's OS
     // windows from the terminal. These reach the Tauri app through the
     // in-process bridge the embedded server installs; a standalone
-    // `chan open` (standalone serve) has no desktop attached and refuses them. `new` is the
+    // `chan serve` (standalone serve) has no desktop attached and refuses them. `new` is the
     // only one without an id: the server derives the kind from the calling
     // tenant (a terminal tenant spawns a terminal window; a workspace
     // tenant spawns another window of that workspace) and returns the new
@@ -473,11 +473,11 @@ pub enum ControlRequest {
         tabs: bool,
     },
     // Category 5 (process teardown): tear down the server serving `path`,
-    // the transport behind `chan close <path>` (and `chan workspace rm`, which
+    // the transport behind `chan close <path>` (and `chan workspace forget`, which
     // closes before it forgets). `cmd_close` discovers the serving process
     // from the workspace's `writer.lock` and sends this over that process's
     // control socket; THE SERVER DECIDES SCOPE from `path`: a standalone
-    // `chan open <path>` of that root fires its own graceful shutdown (the
+    // `chan serve <path>` of that root fires its own graceful shutdown (the
     // process exits, releasing the flock), while a multi-tenant host (a
     // `chan devserver` / chan-desktop) unmounts just that tenant and keeps
     // running. The client carries no scope hint -- the server knows its own

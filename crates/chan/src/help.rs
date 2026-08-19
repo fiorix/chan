@@ -4,12 +4,12 @@
 //! doc comments, and why every line stops at 76 columns.
 
 /// `chan close` long help (manpage head).
-pub(crate) const CHAN_CLOSE: &str = r#"Tear down the server holding a workspace, the inverse of `chan open`.
+pub(crate) const CHAN_CLOSE: &str = r#"Tear down the server holding a workspace, the inverse of `chan serve`.
 
 Finds the process holding the workspace's writer lock (from its
 `writer.lock` record), reaches it over its control socket, asks it to
 tear down, and waits for the flock to release. The holder decides the
-scope: a dedicated `chan open` serve exits, while a chan-desktop or
+scope: a dedicated `chan serve` process exits, while a chan-desktop or
 `chan devserver` host unmounts just that tenant and keeps running.
 
 Closing is idempotent. A workspace nothing is serving prints "(not
@@ -17,12 +17,10 @@ served: PATH)" and succeeds, as does one whose recorded holder is gone
 or exposes no control socket. A holder that is reached but fails to
 tear down is reported on stderr and treated as closed.
 
-`--remove` then also forgets the workspace: the registry entry in
-`~/.chan/config.toml` and the whole `~/.chan/workspaces/<key>/`
-metadata directory, trash included. The workspace directory itself is
-never touched. On a devserver or desktop host the removal is also
-pushed into that host's own library, so the workspace stops coming back
-in the launcher after a restart.
+Closing keeps the workspace registered, so `chan serve` brings it back
+with its metadata intact. When you are done with a workspace on this
+machine, `chan workspace forget` runs this same teardown and then also
+drops the registry entry and chan's metadata for it.
 
 This is a library command, not a window command: it needs no chan
 terminal and no workspace window.
@@ -38,36 +36,74 @@ Close something nothing is serving -- still a success:
   chan close ~/archive
   # (not served: /home/you/archive)
 
-Serve it no more and forget it, leaving the files on disk:
-  chan close --remove ~/notes
-  # closed: /home/you/notes
-  # unregistered: /home/you/notes
-
 SIDE EFFECTS:
 Ends the dedicated serve process (or unmounts the tenant on a host) and
 releases the workspace's writer lock, so its terminals go away with it.
-With --remove, drops the registry entry and deletes
-`~/.chan/workspaces/<key>/`. Progress lines go to stdout; the
-"could not reach the server" warning goes to stderr.
-
-CAUTIONS:
---remove is not reversible. It deletes chan's metadata for the
-workspace -- search index, graph database, trash, saved layouts -- and
-a later `chan open` on the same path starts from empty metadata. Your
-files are untouched either way.
+Progress lines go to stdout; the "could not reach the server" warning
+goes to stderr.
 
 CAVEATS:
 A chan-desktop or devserver host REFUSES to close a workspace that
 still has live terminals: the command fails with "refusing to close
-PATH: N live terminal(s)" and exits nonzero, and with --remove the
-registry removal does not run either. There is no --force; close the
-terminals first. A dedicated standalone serve has no such guard and
+PATH: N live terminal(s)" and exits nonzero. There is no --force; close
+the terminals first. A dedicated standalone serve has no such guard and
 shuts down with its terminals.
 
 SEE ALSO:
-`chan open` to serve it again, `chan ps` to see what is served, `chan
-workspace rm`, which also tears the server down before forgetting the
-workspace.
+`chan serve` to serve it again, `chan ps` to see what is served, `chan
+workspace forget` to also drop it from the registry.
+"#;
+
+/// `chan workspace forget` long help (manpage head).
+pub(crate) const CHAN_FORGET: &str = r#"Stop serving a workspace, then forget it from the registry.
+
+Runs the same teardown as `chan close` (best-effort, idempotent), then
+drops the workspace's registry entry in `~/.chan/config.toml` and the
+whole `~/.chan/workspaces/<key>/` metadata directory, trash included.
+The workspace directory and its files are never touched. On a devserver
+or desktop host the removal is also pushed into that host's own
+library, so the workspace stops coming back in the launcher after a
+restart.
+
+A holder that refuses teardown because live terminals would die also
+stops the registry removal: close the terminals first. An unreachable
+holder is treated as closed and the removal proceeds.
+
+This is a library command, not a window command: it needs no chan
+terminal and no workspace window.
+"#;
+
+/// `chan workspace forget` examples, side effects, and caveats.
+pub(crate) const CHAN_FORGET_AFTER: &str = r#"EXAMPLES:
+Serve it no more and forget it, leaving the files on disk:
+  chan workspace forget ~/notes
+  # closed: /home/you/notes
+  # unregistered: /home/you/notes
+
+Forget something nothing is serving:
+  chan workspace forget ~/archive
+  # (not served: /home/you/archive)
+  # unregistered: /home/you/archive
+
+SIDE EFFECTS:
+Tears down the serve like `chan close`, then drops the registry entry
+and deletes `~/.chan/workspaces/<key>/`. Progress lines go to stdout;
+the "could not reach the server" warning goes to stderr.
+
+CAUTIONS:
+Forgetting is not reversible. It deletes chan's metadata for the
+workspace -- search index, graph database, trash, saved layouts -- and
+a later `chan serve` on the same path starts from empty metadata. Your
+files are untouched either way.
+
+CAVEATS:
+The live-terminal refusal stops the registry removal too: a host that
+refuses teardown leaves the workspace registered, and the command exits
+nonzero.
+
+SEE ALSO:
+`chan close` to stop serving without forgetting, `chan workspace add`
+to register without serving, `chan ps`.
 "#;
 
 /// `chan config` long help (manpage head).
@@ -142,8 +178,8 @@ editor.date_format is stored verbatim without validation; an id the
 editor does not know renders as `iso`.
 
 SEE ALSO:
-`chan open --search-aggression` to override the indexer profile for one
-run, `chan open --no-settings` to lock the in-app Settings panel.
+`chan serve --search-aggression` to override the indexer profile for one
+run, `chan serve --no-settings` to lock the in-app Settings panel.
 ";
 
 /// `chan devserver` long help (manpage head).
@@ -151,7 +187,7 @@ pub(crate) const CHAN_DEVSERVER: &str = r"Serve many workspaces from one process
 
 DESCRIPTION:
 A devserver aggregates workspaces behind a single port. Once it is
-running, `chan open PATH` on that same box registers the workspace
+running, `chan serve PATH` on that same box registers the workspace
 with the running same-user devserver and exits instead of binding
 its own server, so the devserver owns each workspace's
 single-writer flock and its terminal sessions. A desktop client
@@ -163,28 +199,36 @@ disconnect and reconnect while terminals and their agents keep
 running -- that is the point of running one on a remote box, a VM,
 or beside your desktop.
 
-Install chan on the target machine, then `chan devserver --start`.
-A bare `chan devserver` (no action verb) runs in the FOREGROUND on
-127.0.0.1:8787 until Ctrl-C. The action verbs -- --start, --stop,
---restart, --status, --join, --rotate-token -- drive a background
-service instead.
---join brings the service up (or re-attaches to a running one) and
+Install chan on the target machine, then `chan devserver start`.
+`chan devserver run` runs in the FOREGROUND on 127.0.0.1:8787 until
+Ctrl-C. The management verbs -- start, stop, restart, status, join,
+rotate-token -- drive a background service instead.
+join brings the service up (or re-attaches to a running one) and
 stays attached, blocking on its health until Ctrl-C or its non-TTY
 stdin closes, at which point it detaches and the service keeps
 running; that is the form connect scripts use.
---rotate-token re-mints the bearer token (the response to a
+rotate-token re-mints the bearer token (the response to a
 suspected leak) and prints the new CHAN_DEVSERVER_TOKEN= marker and
 /?t= URL. A running devserver drops the old token immediately;
 reopen any browser tab that used the old URL. Tokens also rotate on
 their own at the first cold start after they turn 30 days old.
 
 --service picks the backend. `auto` (the default) resolves per-OS
-at runtime: with an action verb it is systemd on Linux, launchd on
-macOS, and chan's own daemon on Windows; with no action verb it is
-the plain foreground server. `none` forces the foreground server
-and rejects action verbs. `chan` is the cross-OS self-managed
-background daemon (pidfile + flock) and may run bare or with a
-verb. `systemd` and `launchd` are OS-backed and REQUIRE a verb.
+at runtime: under a management verb it is systemd on Linux, launchd
+on macOS, and chan's own daemon on Windows; under `run` it is the
+plain foreground server. `none` forces the foreground server and
+only `run` accepts it. `chan` is the cross-OS self-managed
+background daemon (pidfile + flock) and works under `run` or a
+management verb. `systemd` and `launchd` are OS-backed and need a
+management verb.
+
+The same noun's client side manages the desktop launcher's registry
+of REMOTE devservers: `register URL` adds one to the launcher
+without dialing it, `ls` lists the rows with their connection state,
+`connect` / `disconnect` drive the dial from the CLI (sign-in and
+trust prompts stay in the launcher), and `forget` removes a row, the
+undo of register. These verbs need the chan desktop app running on
+this machine.
 
 The devserver speaks plain HTTP with a bearer token and no TLS, so
 keep the bind on loopback and reach a remote one over `ssh -L`. The
@@ -195,25 +239,25 @@ which the desktop's control terminal scrapes on every connect.
 
 /// `chan devserver` examples, side effects, and caveats.
 pub(crate) const CHAN_DEVSERVER_AFTER: &str = r"EXAMPLES:
-  chan devserver
+  chan devserver run
     Foreground server on 127.0.0.1:8787. Prints
     CHAN_DEVSERVER_TOKEN=<token> on stdout; Ctrl-C stops it.
 
-  chan devserver --start
+  chan devserver start
     Linux: ensures lingering, writes and enables
     ~/.config/systemd/user/chan-devserver.service, starts it,
     returns. macOS: writes and bootstraps
     ~/Library/LaunchAgents/app.chan.devserver.plist. Then
-    `chan open ~/src/proj` registers that workspace with it.
+    `chan serve ~/src/proj` registers that workspace with it.
 
-  ssh box -L 8787:localhost:8787 chan devserver --join
+  ssh box -L 8787:localhost:8787 chan devserver join
     The connect-script shape the desktop's Add-devserver dialog
     ships as its placeholder: brings the remote service up,
     forwards its port to local 127.0.0.1:8787, and stays in the
     foreground.
 
   CHAN_HOME=/tmp/iso XDG_RUNTIME_DIR=/tmp/iso-run \
-    chan devserver --port 8788
+    chan devserver run --port 8788
     A second, fully isolated instance beside your real one.
 
 PER PLATFORM:
@@ -228,34 +272,34 @@ PER PLATFORM:
 
   macOS: run the devserver inside a Lima VM and connect to it, so
   the workspace lives on Linux. Connect script:
-    limactl shell chan -- chan devserver --join
+    limactl shell chan -- chan devserver join
   Natively on the Mac, --service=launchd works too, but tunnel
   mode is refused there.
 
   Windows: --service=chan is the only backend (systemd is
-  Linux-only, launchd macOS-only), and `auto` with an action verb
-  resolves to it. To put the workspace on Linux, run the devserver
+  Linux-only, launchd macOS-only), and `auto` under a management
+  verb resolves to it. To put the workspace on Linux, run the devserver
   inside WSL2 and connect to it.
 
   Any remote box: do not bind a public interface. Tunnel:
-    ssh box.example.net -L 8787:localhost:8787 chan devserver --join
+    ssh box.example.net -L 8787:localhost:8787 chan devserver join
   Keep connect scripts in the foreground (e.g. `ssh -N`).
 
 SIDE EFFECTS:
   Writes ~/.chan/devserver/config.json (0600, bearer token +
-  its mint time; --rotate-token and the 30-day age check on a
+  its mint time; rotate-token and the 30-day age check on a
   cold start replace the token in place),
   workspaces.json (the mount list) and terminals/; --service=chan
   and launchd also write devserver.log (systemd logs to the
   journal instead). Under CHAN_HOME all of these move with it.
-  --start/--restart write and enable the systemd unit or the
+  start/restart write and enable the systemd unit or the
   launchd plist, recording this binary's resolved path and the
   bound address; --service=chan writes daemon.lock + daemon.json
   and detaches a daemon child.
-  --stop stops AND disables the systemd unit / launchd agent, so
+  stop stops AND disables the systemd unit / launchd agent, so
   it does not return on the next login or boot. The unit/plist
   file stays on disk.
-  The CHAN_DEVSERVER_TOKEN= marker and the --status report go to
+  The CHAN_DEVSERVER_TOKEN= marker and the status report go to
   stdout; progress lines and warnings go to stderr.
 
 CAUTIONS:
@@ -270,59 +314,56 @@ CAUTIONS:
   when it is denied. A launchd agent outlives the launching shell
   and the GUI login session but NOT a full logout.
   Under --service=systemd, live PTYs ride the systemd fd store
-  through EVERY restart: --restart, a bare `systemctl --user
-  restart`, a watchdog kill, or a crash. --restart --force tears
-  the sessions down first and restarts without them; --stop and
+  through EVERY restart: restart, a bare `systemctl --user
+  restart`, a watchdog kill, or a crash. restart --force tears
+  the sessions down first and restarts without them; stop and
   `systemctl --user stop` end the terminals.
-  --join exits 0 when you detach with Ctrl-C or its non-TTY stdin
+  join exits 0 when you detach with Ctrl-C or its non-TTY stdin
   closes, and non-zero when the backing service dies or stops
   answering /api/health.
   --tunnel-token is visible in `ps`; prefer CHAN_TUNNEL_TOKEN.
 
 CAVEATS:
-  --service=none rejects every action verb; --service=systemd and
-  --service=launchd refuse to run without one.
+  --service=none only runs under `run`; --service=systemd and
+  --service=launchd need a management verb.
   --service=systemd is Linux-only and --service=launchd is
   macOS-only; --service=chan is the portable fallback. On a Linux
   box with no systemd, `auto` errors and points at --service=chan.
   Tunnel mode (--tunnel-token) is refused under --service=launchd,
   because the plist would persist the token at 0644.
   A --service=systemd tunnel unit is the ONLY store for its PAT, so
-  --start/--restart/--join reuse the token, endpoint and name it
+  start/restart/join reuse the token, endpoint and name it
   already carries; supply a token to rotate it, or --no-tunnel to
   convert the service back to a local devserver. The unit also
   exports CHAN_TUNNEL_URL, so the terminals the devserver spawns
   can run these verbs without naming an endpoint.
-  Omitting --bind/--port on --restart/--join preserves the running
+  Omitting --bind/--port on restart/join preserves the running
   service's address instead of reverting to defaults.
-  `chan open <URL>` registers a devserver with chan-desktop and
-  needs a running desktop; `chan open --devserver` is refused from
-  inside a devserver shell, since nesting is unsupported.
+  `chan devserver register URL` registers a devserver with
+  chan-desktop and needs a running desktop; `chan serve --devserver`
+  is refused from inside a devserver shell, since nesting is
+  unsupported.
 
 SEE ALSO:
-  chan open, chan ps, chan close, chan config.
+  chan serve, chan ps, chan close, chan config.
 ";
 
-/// `chan open` examples, side effects, and caveats.
-pub(crate) const CHAN_OPEN_AFTER: &str = r#"EXAMPLES:
+/// `chan serve` examples, side effects, and caveats.
+pub(crate) const CHAN_SERVE_AFTER: &str = r#"EXAMPLES:
 Serve the current directory and open the browser on it:
-  chan open .
+  chan serve .
   -> "chan is ready:" plus the tokened URL on stderr; runs until Ctrl-C
 
 Serve a subdirectory of a repository, on another port, headless:
-  chan open --here --port 9000 --no-browser ~/src/proj/docs
+  chan serve --here --port 9000 --no-browser ~/src/proj/docs
 
 Hand a workspace to the local devserver from a plain shell:
-  chan open --devserver ~/notes
+  chan serve --devserver ~/notes
   -> selects the sole devserver or unique CHAN_HOME match, then exits
 
 Choose one of several local devservers explicitly:
-  chan open --devserver=9999 ~/notes
-  chan open --devserver=http://127.0.0.1:9999 ~/notes
-
-Register a remote devserver with the desktop app:
-  chan open --name lab https://lab.example.com:8787
-  -> registered "lab". Open it from the launcher.
+  chan serve --devserver=9999 ~/notes
+  chan serve --devserver=http://127.0.0.1:9999 ~/notes
 
 SIDE EFFECTS:
 Creates the workspace root when missing, and the standalone path
@@ -347,11 +388,12 @@ port. --no-token removes the only auth gate; --no-settings greys the
 Settings cog and makes every settings-write route answer 403.
 
 CAVEATS:
-The URL form needs a running chan-desktop and never falls back to a
-local serve -- a URL is never served locally. --devserver from inside a
-devserver shell is refused (no nesting); omit the flag to register with
-the current one. If another process already holds the workspace lock,
-the serve fails and points you at `chan open --devserver`.
+serve takes a PATH only; a devserver URL belongs to `chan devserver
+register` and is refused here with that pointer. --devserver from
+inside a devserver shell is refused (no nesting); omit the flag to
+register with the current one. If another process already holds the
+workspace lock, the serve fails and points you at `chan serve
+--devserver`.
 
 SEE ALSO:
 `chan close` to tear a server down, `chan ps` to see what is served, `chan
@@ -364,7 +406,7 @@ pub(crate) const CHAN_PS: &str = r"List every registered workspace and what, if 
 A workspace counts as served when its writer lock has a live holder;
 the holder's pid and lock-acquisition time come from the `writer.lock`
 record. The serving kind is resolved with an Identify round-trip to the
-holder's control socket: `standalone` (a dedicated `chan open`),
+holder's control socket: `standalone` (a dedicated `chan serve`),
 `desktop` (chan-desktop's embedded server), or `devserver` (a
 multi-workspace `chan devserver`). A holder that does not answer leaves
 the BY column as `-` while STATE still reads `served`.
@@ -412,7 +454,7 @@ and `since` as null, and `since` appears only in --json (the table
 carries STATE, BY, PID and WORKSPACE).
 
 SEE ALSO:
-`chan open` to serve a workspace, `chan close` to stop serving one, `chan
+`chan serve` to serve a workspace, `chan close` to stop serving one, `chan
 workspace ls` for the registry alone.
 "#;
 

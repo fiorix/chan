@@ -1,7 +1,7 @@
 //! Multi-workspace host runtime.
 //!
 //! `WorkspaceHost` is the in-process owner that chan-desktop can embed
-//! instead of spawning one `chan open` child per local workspace. Each
+//! instead of spawning one `chan serve` child per local workspace. Each
 //! mounted workspace still gets its own `AppState`, watcher, indexer,
 //! MCP bridge, control socket, terminal registry, and route prefix.
 
@@ -205,7 +205,7 @@ pub struct LauncherWorkspace {
 /// [`WorkspaceOverlay`]: the connection state lives in chan-desktop (invisible
 /// from chan-library), so the desktop installs an `Arc<dyn DevserverFeedSource>`
 /// and the host reads it at assembly time. A host that installs none (the
-/// headless devserver / plain `chan open`) merges nothing -- its launcher is
+/// headless devserver / plain `chan serve`) merges nothing -- its launcher is
 /// local-only. The desktop fires [`WorkspaceHost::signal_library_change`] when
 /// its feed changes so the watch feed re-pushes.
 pub trait DevserverFeedSource: Send + Sync {
@@ -232,7 +232,7 @@ pub trait DevserverFeedSource: Send + Sync {
 /// (`<chan_home>/desktop`, invisible from chan-library), so the desktop installs an
 /// `Arc<dyn LocalColorStore>` and the launcher's local-color routes read/write it
 /// through the host. A host that installs none (the headless devserver / plain
-/// `chan open`) reports `None` (the default accent) and ignores writes -- the
+/// `chan serve`) reports `None` (the default accent) and ignores writes -- the
 /// local colour belongs to the desktop's own library.
 ///
 /// The colour is a hex string (`#rrggbb`); `None` is the default accent. The
@@ -251,7 +251,7 @@ pub trait LocalColorStore: Send + Sync {
 /// library and is invisible from chan-library, so the desktop installs an
 /// `Arc<dyn LocalThemeStore>` and the launcher's local-theme routes read/write
 /// it through the host. A host that installs none (the headless devserver /
-/// plain `chan open`) reports `None` and ignores writes, so a devserver or
+/// plain `chan serve`) reports `None` and ignores writes, so a devserver or
 /// remote terminal window keeps following the OS.
 pub trait LocalThemeStore: Send + Sync {
     /// The launcher's chosen theme, or `None` to follow the OS.
@@ -266,7 +266,7 @@ pub trait LocalThemeStore: Send + Sync {
 /// desktop's own config and is invisible from chan-library, so the desktop
 /// installs an `Arc<dyn CollapsedMachinesStore>` and the launcher's
 /// `collapsed-machines` routes read/write it through the host. A host that
-/// installs none (the headless devserver / plain `chan open`) has no store, so
+/// installs none (the headless devserver / plain `chan serve`) has no store, so
 /// the launcher keeps its localStorage-only collapse and the route reports "no
 /// store". Unlike the theme there is no watch: the launcher owns the live UI
 /// state and only reconciles on boot.
@@ -326,14 +326,14 @@ pub struct WorkspaceHost {
     /// [`workspace_overlay`](Self::workspace_overlay): the devserver set lives in
     /// chan-desktop's config (invisible from chan-library), so the embedder
     /// installs an `Arc<dyn DevserverRegistry>` and the launcher routes read it at
-    /// request time. Empty on the headless devserver / plain `chan open` -- the
+    /// request time. Empty on the headless devserver / plain `chan serve` -- the
     /// routes then serve an empty devserver list and 404 mutation.
     devserver_registry: OnceLock<Arc<dyn DevserverRegistry>>,
     /// The launcher's gateway registry, inverted like
     /// [`devserver_registry`](Self::devserver_registry): the gateway set lives
     /// in chan-desktop's config, so the embedder installs an
     /// `Arc<dyn GatewayRegistry>` and the launcher's gateway routes read it at
-    /// request time. Empty on the headless devserver / plain `chan open` -- the
+    /// request time. Empty on the headless devserver / plain `chan serve` -- the
     /// routes then serve an empty gateway list and 404 mutation.
     gateway_registry: OnceLock<Arc<dyn GatewayRegistry>>,
     /// The launcher's connected-devserver feed, inverted like
@@ -341,27 +341,27 @@ pub struct WorkspaceHost {
     /// `Arc<dyn DevserverFeedSource>` over its live connections, and
     /// [`assemble_window_records`](Self::assemble_window_records) + the
     /// list-workspaces route merge its windows/workspaces into the local launcher
-    /// surface. Empty on the headless devserver / plain `chan open` -- the launcher
+    /// surface. Empty on the headless devserver / plain `chan serve` -- the launcher
     /// is then local-only.
     devserver_feed: OnceLock<Arc<dyn DevserverFeedSource>>,
     /// The local library's pane-highlight colour store, inverted like
     /// [`devserver_registry`](Self::devserver_registry): the value lives in
     /// chan-desktop's config, so the embedder installs an `Arc<dyn
     /// LocalColorStore>` and the launcher's local-color routes read/write it.
-    /// Empty on the headless devserver / plain `chan open` -- the local colour is
+    /// Empty on the headless devserver / plain `chan serve` -- the local colour is
     /// then the default accent and writes are ignored.
     local_color: OnceLock<Arc<dyn LocalColorStore>>,
     /// The local machine's launcher theme store, an analogue of
     /// [`local_color`](Self::local_color) for the light/dark choice. Backs the
     /// launcher's `local-theme` routes: the launcher toggle writes it, and local
     /// standalone terminal windows read + watch it. Empty on the headless
-    /// devserver / plain `chan open`, so those keep following the OS.
+    /// devserver / plain `chan serve`, so those keep following the OS.
     local_theme: OnceLock<Arc<dyn LocalThemeStore>>,
     /// The set of collapsed launcher machine cards, an analogue of
     /// [`local_theme`](Self::local_theme) for the launcher's per-machine collapse.
     /// Backs the launcher's `collapsed-machines` routes: the collapse toggle
     /// writes it and the launcher reconciles against it on boot. Empty on the
-    /// headless devserver / plain `chan open`, so those keep their localStorage
+    /// headless devserver / plain `chan serve`, so those keep their localStorage
     /// collapse only. No watch: the launcher owns the live UI state.
     collapsed_machines: OnceLock<Arc<dyn CollapsedMachinesStore>>,
     /// This library's identity: `"local"` for the baked-in local-disk library,
@@ -374,7 +374,7 @@ pub struct WorkspaceHost {
     /// set, every tenant this host mounts binds its control socket at a path
     /// derived from it (plus the tenant prefix) instead of the pid-scoped
     /// path, so `$CHAN_CONTROL_SOCKET` in already-open shells survives a
-    /// restart. Unset on window-spawned servers (desktop, `chan open`),
+    /// restart. Unset on window-spawned servers (desktop, `chan serve`),
     /// whose sockets SHOULD die with the process.
     control_identity: OnceLock<String>,
     /// Systemd fd-store parking hook, handed to every tenant terminal
@@ -642,7 +642,7 @@ impl WorkspaceHost {
     /// calls this once (next to [`install_workspace_overlay`](
     /// Self::install_workspace_overlay)) with an impl over its config. A host that
     /// never installs one answers [`devserver_registry`](Self::devserver_registry)
-    /// with `None` -- the headless devserver / plain `chan open`.
+    /// with `None` -- the headless devserver / plain `chan serve`.
     pub fn install_devserver_registry(&self, registry: Arc<dyn DevserverRegistry>) {
         let _ = self.devserver_registry.set(registry);
     }
@@ -659,7 +659,7 @@ impl WorkspaceHost {
     /// Self::install_devserver_registry)) with an impl over its config. A host
     /// that never installs one answers [`gateway_registry`](
     /// Self::gateway_registry) with `None` -- the headless devserver / plain
-    /// `chan open`.
+    /// `chan serve`.
     pub fn install_gateway_registry(&self, registry: Arc<dyn GatewayRegistry>) {
         let _ = self.gateway_registry.set(registry);
     }
@@ -674,7 +674,7 @@ impl WorkspaceHost {
     /// Install the launcher's connected-devserver feed. Idempotent set-once;
     /// chan-desktop calls this once with an impl over its live connections, so the
     /// launcher merges connected devservers' windows + workspaces. A host that
-    /// never installs one (headless devserver / plain `chan open`) merges nothing.
+    /// never installs one (headless devserver / plain `chan serve`) merges nothing.
     pub fn install_devserver_feed(&self, feed: Arc<dyn DevserverFeedSource>) {
         let _ = self.devserver_feed.set(feed);
     }
@@ -694,7 +694,7 @@ impl WorkspaceHost {
 
     /// The local library's pane-highlight colour store, once installed. `None` on
     /// a host whose embedder installed none (headless devserver / plain
-    /// `chan open`) -- the local colour is then the default accent.
+    /// `chan serve`) -- the local colour is then the default accent.
     pub fn local_color_store(&self) -> Option<&Arc<dyn LocalColorStore>> {
         self.local_color.get()
     }
@@ -707,7 +707,7 @@ impl WorkspaceHost {
     }
 
     /// The launcher-theme store, once installed. `None` on a host whose embedder
-    /// installed none (headless devserver / plain `chan open`); the theme then
+    /// installed none (headless devserver / plain `chan serve`); the theme then
     /// follows the OS.
     pub fn local_theme_store(&self) -> Option<&Arc<dyn LocalThemeStore>> {
         self.local_theme.get()
@@ -721,7 +721,7 @@ impl WorkspaceHost {
     }
 
     /// The collapsed-machines store, once installed. `None` on a host whose
-    /// embedder installed none (headless devserver / plain `chan open`); the
+    /// embedder installed none (headless devserver / plain `chan serve`); the
     /// launcher then persists collapse in localStorage only.
     pub fn collapsed_machines_store(&self) -> Option<&Arc<dyn CollapsedMachinesStore>> {
         self.collapsed_machines.get()
@@ -1354,7 +1354,7 @@ impl WorkspaceHost {
 
     /// Explicitly end every terminal session in every tenant and wait,
     /// bounded, until each child process is observably dead. Backs the
-    /// devserver drain endpoint (`chan devserver --stop` / `--restart
+    /// devserver drain endpoint (`chan devserver stop` / `--restart
     /// --force`): the response must not claim completion before the
     /// children are gone, HUP-immune ones included.
     pub async fn drain_terminal_sessions(&self) -> TerminalDrainOutcome {
@@ -2548,7 +2548,7 @@ impl WorkspaceHost {
     /// the host library, then forget it from the on/off overlay. The
     /// over-the-control-socket equivalent of the launcher's `DELETE
     /// /api/library/workspaces/{id}` (`handle_remove_workspace`), so `chan close
-    /// --remove` / `chan workspace rm` of a workspace this host serves removes
+    /// --remove` / `chan workspace forget` of a workspace this host serves removes
     /// it everywhere -- not just from the caller's local `config.toml`. Runs in
     /// the host process so the host's in-memory library + the persisted overlay
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them

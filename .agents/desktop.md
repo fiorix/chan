@@ -33,7 +33,7 @@ Local workspaces open through the embedded `WorkspaceHost` (owned by chan-librar
 
 Blocking chan-workspace calls (`register_workspace`, `unregister_workspace`, `open_workspace`, `boot`, the feature setters) run via `tokio::task::spawn_blocking` so a slow initial scan never blocks the async executor. `remove_workspace` runs `unregister_workspace` in a bounded retry loop: `serve::stop` drops the host's handle synchronously, but a background indexer or in-flight request may hold the workspace's flock for a moment, surfacing as `WorkspaceAlreadyOpen` / `WorkspaceLocked` until it releases.
 
-External `chan open` processes are still supported as explicit remote attachments, but they are a separate transport, not a local serving dependency. When a standalone `chan open` already holds a workspace's lock, opening that workspace in chan-desktop maps the `WorkspaceLocked` / `WorkspaceAlreadyOpen` error to a friendly "open in another chan process" message and reverts the row's On toggle rather than surfacing a raw error.
+External `chan serve` processes are still supported as explicit remote attachments, but they are a separate transport, not a local serving dependency. When a standalone `chan serve` already holds a workspace's lock, opening that workspace in chan-desktop maps the `WorkspaceLocked` / `WorkspaceAlreadyOpen` error to a friendly "open in another chan process" message and reverts the row's On toggle rather than surfacing a raw error.
 
 ### No bundled binary
 

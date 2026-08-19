@@ -53,7 +53,7 @@ PORT="$(choose_port)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chan-windows-cli.XXXXXX")"
 
 # Run hermetically. A chan terminal exports CHAN_CONTROL_SOCKET and friends
-# into its children, and `chan open` follows that parentage: inherited, they
+# into its children, and `chan serve` follows that parentage: inherited, they
 # aim this smoke at whatever devserver happens to be hosting the shell instead
 # of the daemon it just started. Clear the whole namespace before setting the
 # two vars the smoke owns.
@@ -71,7 +71,7 @@ mkdir -p "$CHAN_HOME"
 # shellcheck disable=SC2329
 cleanup() {
     local status=$?
-    "$BIN" devserver --service=chan --stop >/dev/null 2>&1 || true
+    "$BIN" devserver stop --service=chan >/dev/null 2>&1 || true
     # The daemon holds the workspace index and graph open; give its handles a
     # beat to close before removing the tree, and never fail the smoke on a
     # leftover temp file.
@@ -98,7 +98,7 @@ PIPES_BEFORE="$(control_pipes)"
 #    detached -- which is the syscall path under test. Redirect to a FILE, not
 #    a pipe: the detached child inherits these handles, so a pipe would never
 #    reach EOF and the smoke would hang here.
-"$BIN" devserver --service=chan --start --bind 127.0.0.1 --port "$PORT" >"$TMP_ROOT/start.log" 2>&1 || {
+"$BIN" devserver start --service=chan --bind 127.0.0.1 --port "$PORT" >"$TMP_ROOT/start.log" 2>&1 || {
     echo "error: detached devserver start failed" >&2
     cat "$TMP_ROOT/start.log" >&2
     exit 1
@@ -125,11 +125,11 @@ echo "windows cli smoke: DETACHED_PROCESS daemon serving on 127.0.0.1:$PORT"
 #    from the workspace lock record, enumerates the pipe namespace for that
 #    pid's socket, opens it, and completes an `Identify` round trip to fill the
 #    BY column. A `devserver` answer means every one of those steps ran.
-#    `devserver --status` would prove none of it -- it only reads a pidfile and
+#    `devserver status` would prove none of it -- it only reads a pidfile and
 #    never opens a socket.
 WS="$TMP_ROOT/workspace"
 mkdir -p "$WS"
-"$BIN" open --here --devserver="$PORT" --no-browser "$WS" >"$TMP_ROOT/open.log" 2>&1 || {
+"$BIN" serve --here --devserver="$PORT" --no-browser "$WS" >"$TMP_ROOT/open.log" 2>&1 || {
     echo "error: could not serve the smoke workspace on the detached daemon" >&2
     cat "$TMP_ROOT/open.log" >&2
     exit 1

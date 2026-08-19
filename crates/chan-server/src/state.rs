@@ -195,7 +195,7 @@ pub struct AppState {
     /// Random id minted when this tenant was built, exposed via
     /// `GET /api/health`. The SPA compares it across `/ws` reconnects:
     /// a CHANGED id means the process behind the window was restarted
-    /// (a remote `chan open` bounced) -- its PTYs and in-memory state
+    /// (a remote `chan serve` bounced) -- its PTYs and in-memory state
     /// are gone, so the SPA reloads itself instead of sitting on a
     /// stale view with stuck terminals until a manual Cmd+R.
     pub instance_id: String,

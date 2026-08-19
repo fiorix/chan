@@ -169,7 +169,7 @@ A devserver is a row in `devservers` keyed on `(owner_user_id, devserver_id)`, w
 
 A grant gives a collaborator the WHOLE devserver (the whole library), not a single workspace: under ADR-0001 the path `{workspace}` segment is tenant routing only and never gates. A user shares their devserver with another user by email. Grants live in `devserver_grants` keyed on `(owner_user_id, devserver_id, lower(grantee_email))`:
 
-- The owner pre-seeds grants from the gateway dashboard SPA on `gw.{domain}` *before* (or alongside) running `chan devserver --tunnel-token <pat>`. The grant row exists independently of any live tunnel.
+- The owner pre-seeds grants from the gateway dashboard SPA on `gw.{domain}` *before* (or alongside) running `chan devserver run --tunnel-token <pat>`. The grant row exists independently of any live tunnel.
 - `grantee_user_id` is `NULL` until a sign-in is observed with a verified email matching `grantee_email`. Two resolution paths: (a) at grant-create time, if `users` already has a row for the email; (b) at OAuth-callback time, via `POST /v1/users/{id}/grants/claim` which identity-service calls with the union of the user's verified emails.
 - Re-adding the same email on the same `(owner, devserver)` is idempotent: `INSERT ... ON CONFLICT DO UPDATE` preserves `grantee_user_id` and `accepted_at` via `COALESCE`, so a re-add never re-pends a claimed grant. There are no roles.
 

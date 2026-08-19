@@ -518,7 +518,7 @@ pub enum ShellAction {
 
 /// `cs window <action>`: read the window registry and drive the
 /// desktop's OS windows. The lifecycle verbs (`new`/`open`/`rm`/`hide`)
-/// need the chan desktop app; a standalone `chan open` refuses
+/// need the chan desktop app; a standalone `chan serve` refuses
 /// them. `new` derives its kind from the calling tenant; the id-bearing
 /// verbs act on any window by id. Titles are library-owned and
 /// auto-derived; there is no rename verb.
@@ -1206,7 +1206,7 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
 /// `cs window list`: fetch the library's authoritative window set (the same
 /// `WindowRecord` feed the desktop watcher and launcher reconcile to) and
 /// print it. Session-scoped like `cs terminal list`: needs only
-/// $CHAN_CONTROL_SOCKET, no window id. A standalone `chan open` has no
+/// $CHAN_CONTROL_SOCKET, no window id. A standalone `chan serve` has no
 /// library and lists no windows.
 async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
     let socket = control_socket_env()?;

@@ -84,11 +84,11 @@ static SPINE: &[Section] = &[
         path: &[],
     },
     Section {
-        slug: "open",
-        aliases: &["workspace", "launcher", "apps", "keybindings"],
-        title: "Open a workspace; the command launcher and the apps",
+        slug: "serve",
+        aliases: &["open", "workspace", "launcher", "apps", "keybindings"],
+        title: "Serve a workspace; the command launcher and the apps",
         root: Root::Chan,
-        path: &["open"],
+        path: &["serve"],
     },
     Section {
         slug: "close",
@@ -96,6 +96,13 @@ static SPINE: &[Section] = &[
         title: "Close a workspace; managing the chan library",
         root: Root::Chan,
         path: &["close"],
+    },
+    Section {
+        slug: "forget",
+        aliases: &["rm", "remove"],
+        title: "Forget a workspace from the registry",
+        root: Root::Chan,
+        path: &["workspace", "forget"],
     },
     Section {
         slug: "ps",
@@ -280,6 +287,13 @@ static SPINE: &[Section] = &[
         path: &["devserver"],
     },
     Section {
+        slug: "register",
+        aliases: &["devserver-register"],
+        title: "Register a remote devserver with the desktop",
+        root: Root::Chan,
+        path: &["devserver", "register"],
+    },
+    Section {
         slug: "config",
         aliases: &["settings"],
         title: "Read and write settings outside the workspace",
@@ -307,11 +321,14 @@ static UNDOCUMENTED: &[(Root, &[&str])] = &[
     // index already teach `--list` / `--topic`.
     (Root::Chan, &["dump-skill"]),
     // Registry and index maintenance. An agent reaches workspace content
-    // through `cs search`, and the registry through `chan open` / `close`.
+    // through `cs search`, and the registry through `chan serve` / `close`.
     (Root::Chan, &["workspace"]),
     (Root::Chan, &["workspace", "add"]),
     (Root::Chan, &["workspace", "ls"]),
-    (Root::Chan, &["workspace", "rm"]),
+    // The family spellings of the elevated serve/close pair; the `serve`
+    // and `close` sections carry the same help verbatim.
+    (Root::Chan, &["workspace", "serve"]),
+    (Root::Chan, &["workspace", "close"]),
     (Root::Chan, &["workspace", "index"]),
     (Root::Chan, &["workspace", "index", "rebuild"]),
     (Root::Chan, &["workspace", "index", "download-model"]),
@@ -333,6 +350,17 @@ static UNDOCUMENTED: &[(Root, &[&str])] = &[
     (Root::Chan, &["workspace", "contacts"]),
     (Root::Chan, &["workspace", "contacts", "import"]),
     // Leaves whose group page enumerates them with worked examples.
+    (Root::Chan, &["devserver", "run"]),
+    (Root::Chan, &["devserver", "start"]),
+    (Root::Chan, &["devserver", "stop"]),
+    (Root::Chan, &["devserver", "restart"]),
+    (Root::Chan, &["devserver", "status"]),
+    (Root::Chan, &["devserver", "join"]),
+    (Root::Chan, &["devserver", "rotate-token"]),
+    (Root::Chan, &["devserver", "ls"]),
+    (Root::Chan, &["devserver", "connect"]),
+    (Root::Chan, &["devserver", "disconnect"]),
+    (Root::Chan, &["devserver", "forget"]),
     (Root::Chan, &["config", "get"]),
     (Root::Chan, &["config", "set"]),
     (Root::Cs, &["terminal", "team", "new"]),
@@ -462,7 +490,7 @@ fn render_command(section: &Section) -> Result<String> {
 }
 
 /// The heading an agent sees, and the invocation it can copy: `cs terminal
-/// team`, `chan open`, or a bare root.
+/// team`, `chan serve`, or a bare root.
 fn section_heading(section: &Section) -> String {
     let mut parts = vec![section.root.prefix().to_string()];
     parts.extend(section.path.iter().map(|part| part.to_string()));
@@ -879,7 +907,7 @@ mod tests {
             let heading = format!("## {}", section_heading(section));
             assert!(skill.contains(&heading), "missing section {heading}");
         }
-        // The keybindings block in `chan open` carries generator markers
+        // The keybindings block in `chan serve` carries generator markers
         // for the contributor who resyncs it. They are noise to an agent.
         assert!(
             !skill.contains("BEGIN GENERATED"),

@@ -3484,7 +3484,7 @@ mod tests {
 
     #[test]
     fn scrape_token_takes_the_rotated_marker_over_the_pre_rotation_one() {
-        // A `chan devserver --rotate-token` re-emits the marker into the
+        // A `chan devserver rotate-token` re-emits the marker into the
         // same control-terminal scrollback the pre-rotation start wrote:
         // the scrape must hand every later connect the NEW bearer. Red
         // mutation: `rmatch_indices` -> `match_indices` in `scrape_token`.

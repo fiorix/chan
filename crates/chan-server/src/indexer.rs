@@ -4,7 +4,7 @@
 //
 //   1. On server start, kick off a full `Workspace::reindex` if the
 //      workspace's index is empty (cold workspace / fresh schema bump).
-//      Runs on the tokio blocking pool so the rest of `chan open`
+//      Runs on the tokio blocking pool so the rest of `chan serve`
 //      keeps responding.
 //   2. Subscribe to the watcher's `WatchEvent` broadcast and
 //      debounce per-path file changes into incremental

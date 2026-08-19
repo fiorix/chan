@@ -35,7 +35,7 @@ Bugs that bypass this contract -- letting a caller read, write, or otherwise acc
 Other in-scope areas:
 
 * The local HTTP server's per-launch bearer-token auth.
-* Tunnel mode (`chan devserver --tunnel-token ...`) and the `chan-tunnel-proto` wire format.
+* Tunnel mode (`chan devserver run --tunnel-token ...`) and the `chan-tunnel-proto` wire format.
 * The in-process MCP server exposed over a Unix-domain socket.
 * The chan-desktop bundle's signing, notarization, and updater paths.
 

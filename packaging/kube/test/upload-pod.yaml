@@ -29,7 +29,7 @@ spec:
       # ENTRYPOINT is `chan`; override only the args. --no-token drops the bearer
       # gate so the browser request needs no credential. --standalone/--here
       # serve the mounted dir verbatim without the desktop/devserver handoff.
-      args: ["open", "/workspace", "--host", "0.0.0.0", "--port", "8787",
+      args: ["serve", "/workspace", "--host", "0.0.0.0", "--port", "8787",
              "--no-browser", "--standalone", "--here", "--no-token"]
       # Test-only: run as root so the write into the shared volume (the actual
       # proof) always succeeds regardless of the emptyDir's owner. The shipped

@@ -301,11 +301,11 @@ Source: `desktop/src-tauri/src/config.rs`.
 * Per-user config dir: `~/.chan/` on desktop targets; co-located under the data dir on iOS / Android where the home dir isn't user-writable. Holds the global `config.toml` (workspace registry). The state and cache roots resolve to the same `~/.chan/`.
 * `CHAN_HOME=/path/to/chan-home` replaces `~/.chan` for the whole process. The override is the chan home directory itself, not a parent. It carries the workspace registry, devserver config, per-workspace metadata, locks, tokens, and the desktop-installed `chan`/`cs` shims under `CHAN_HOME/.local/bin`.
 
-Two Chan processes that share one chan home also share one workspace registry and one per-workspace writer lock. If `chan-desktop` is serving a registered workspace and a foreground `chan devserver` is started from the same `~/.chan`, the devserver launcher lists that workspace as locked rather than off. This is expected: the workspace is open in another Chan process and cannot be turned on by the devserver until the desktop releases it. Run the devserver with a separate `CHAN_HOME` when you want an independent library:
+Two Chan processes that share one chan home also share one workspace registry and one per-workspace writer lock. If `chan-desktop` is serving a registered workspace and a foreground `chan devserver run` is started from the same `~/.chan`, the devserver launcher lists that workspace as locked rather than off. This is expected: the workspace is open in another Chan process and cannot be turned on by the devserver until the desktop releases it. Run the devserver with a separate `CHAN_HOME` when you want an independent library:
 
 ```sh
 CHAN_HOME=/tmp/chan-devserver-home \
-  ./target/debug/chan devserver --service=none --bind 127.0.0.1 --port 8787
+  ./target/debug/chan devserver run --service=none --bind 127.0.0.1 --port 8787
 ```
 
 Per-workspace metadata lives under `~/.chan/workspaces/<metadata_key>/`, where `metadata_key` is a readable slug of the canonical workspace path plus an 8-hex hash suffix:

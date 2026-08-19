@@ -17,13 +17,13 @@ Source packaging for Fedora COPR, Ubuntu Launchpad (PPA), the Arch User Reposito
 
 ## Package shape
 
-- `chan`: `/usr/bin/chan` + `/usr/bin/cs` symlink (argv0 dispatch) + the devserver user unit. Runtime deps: glibc and systemd (the unit and `chan devserver --service=systemd`); everything native is statically linked (ring, bundled SQLite, zstd; rustls, no OpenSSL).
+- `chan`: `/usr/bin/chan` + `/usr/bin/cs` symlink (argv0 dispatch) + the devserver user unit. Runtime deps: glibc and systemd (the unit and `chan devserver start --service=systemd`); everything native is statically linked (ring, bundled SQLite, zstd; rustls, no OpenSSL).
 - `chan-desktop`: `/usr/bin/chan-desktop` + `chan`/`cs` symlinks to it (the desktop binary IS the CLI via argv0 dispatch), `.desktop` entry with the `chan://` scheme handler, hicolor icons, and the same devserver unit. It conflicts with and provides `chan`; RPM/deb retain their existing replacement metadata, while AUR deliberately does not replace an installed package. Runtime deps add the WebKitGTK 4.1/GTK3/libsoup3 stack (auto-derived from sonames).
 - All distro source builds export `CHAN_PACKAGED=rpm|deb|aur`, the Nix derivation exports `nix`, and the local `make linux-archpkg` QA package exports `pacman`. The marker bakes the self-update surface off (`crates/chan/src/update.rs`): the probe/banner stay silent and `chan upgrade` points at the package manager. The `/usr` desktop packages still write their self-healing `~/.local/bin/{chan,cs}` shims on boot; a Nix store install does not, because the profile exposes the output's own symlinks.
 - Nix: the default and only package is `chan-desktop` for `x86_64-linux` and `aarch64-linux`. It includes `chan`/`cs` symlinks but no systemd unit or module. See [`../nix/README.md`](../nix/README.md).
 - The `.deb`/`.rpm` release assets built by `make linux-deb`/`make linux-rpm` carry no marker, by design. No repository serves them: they are downloaded and installed by hand, so `sudo apt upgrade` would never update them and `chan upgrade` is the correct update path. The marker belongs only where a package manager genuinely owns updates.
 - The Homebrew tap repackages the unmarked GitHub Release artifacts, so the self-update surface stays on for both packages. For the cask that is by design: `auto_updates true`, the Tauri updater owns app upgrades, and `brew upgrade` skips it unless `--greedy`. For the formula it is a known drift: `chan upgrade` replaces the binary in place and Homebrew's recorded version lags, so the formula's caveats steer users to `brew upgrade chan`.
-- The packaged user unit lives in `/usr/lib/systemd/user/`; a unit written by `chan devserver --service=systemd` into `~/.config/systemd/user/` overrides it per the systemd user search order, so both flows coexist.
+- The packaged user unit lives in `/usr/lib/systemd/user/`; a unit written by `chan devserver start --service=systemd` into `~/.config/systemd/user/` overrides it per the systemd user search order, so both flows coexist.
 
 ## Service configuration
 
