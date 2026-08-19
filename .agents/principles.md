@@ -6,6 +6,8 @@ All filesystem operations route through a `chan_workspace` facade, and nothing i
 
 Which facade a window gets is decided by the tenant it was built with, never by the caller. That is the boundary now: not "everything is under a workspace root", but "everything goes through a facade, and the tenant decides which one".
 
+Drafts follow the same shape: one path-parameterized primitive layer (`chan_workspace::drafts` plus the trash), wrapped by `Workspace` for the in-tree `.Drafts/` and by `chan_workspace::DraftStore` for the standalone tenant's library-rooted `Drafts/`. `DraftStore` never resolves promotion targets; it takes targets resolved by `MiniWorkspace::resolve_write_target`, so path guards stay in the facades rather than growing a third copy.
+
 ## Single binary, no runtime deps
 
 No Node.js, no Python, no native daemons at runtime. Both frontend bundles (the workspace app from `web/dist` and the launcher from `web-launcher/dist`) embed via rust-embed: debug builds read them from disk per request, release builds bake them in. The Linux CLI tarball is statically linked (musl); distro packages link glibc and systemd. New dependencies must hold this line.

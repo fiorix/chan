@@ -451,6 +451,47 @@ impl MiniWorkspace {
         self.fs.resolve_free_name(dest_dir, name)
     }
 
+    /// Resolve a wire path as an externally supplied WRITE TARGET (draft
+    /// promotion): the full wire dialect applies (an absolute spelling is
+    /// refused rather than silently re-rooted, which matters because
+    /// `fs_ops::validate_rel` alone trims a leading `/`), the canonical
+    /// spelling is returned for downstream reports, and every EXISTING
+    /// component on the path is required to be a real file or directory.
+    /// The workspace lane's canonical-root check is vacuous over a `/`
+    /// root, so symlink inertness has to be enforced per component here;
+    /// this is deliberately stricter than the workspace promote lane. The
+    /// missing tail is fine (a promotion creates it), and an existing
+    /// leaf is left to the no-clobber and merge semantics to judge.
+    ///
+    /// The protected paths are untouched by design: the root spelling is
+    /// unreachable through the wire dialect, and the start directory as a
+    /// target means merging INTO the home directory, which mutates
+    /// nothing about the directory itself.
+    pub fn resolve_write_target(&self, rel: &str) -> Result<(String, PathBuf)> {
+        let rel = self.wire_rel(rel)?;
+        let (dir, rel_path) = self.fs.resolve_io(&rel)?;
+        let mut probe = PathBuf::new();
+        for component in rel_path.components() {
+            probe.push(component);
+            match dir.symlink_metadata(&probe) {
+                Ok(meta) => {
+                    let ft = meta.file_type();
+                    if ft.is_symlink() || !(ft.is_dir() || ft.is_file()) {
+                        return Err(ChanError::SpecialFile {
+                            kind: describe_cap_file_kind(&ft).to_string(),
+                            path: probe,
+                        });
+                    }
+                }
+                // Deepest existing ancestor passed; the rest is the
+                // missing tail the promotion will create.
+                Err(_) => break,
+            }
+        }
+        let abs = self.fs.canonical_root().join(&rel_path);
+        Ok((rel, abs))
+    }
+
     /// Resolve a wire directory to its real absolute path for a PTY start
     /// directory. Requires a real, non-symlink directory.
     pub fn resolve_directory(&self, rel: &str) -> Result<PathBuf> {
@@ -1078,6 +1119,62 @@ mod tests {
         assert!(fx.mini.list("proj").unwrap().len() == 2, "source intact");
         fx.mini.copy_plain("proj", "projector").unwrap();
         assert!(fx.root.join("projector/f.txt").exists());
+    }
+
+    #[test]
+    fn resolve_write_target_speaks_the_wire_dialect_and_allows_a_missing_tail() {
+        let fx = fixture();
+        for bad in ["/etc/hosts", "../up", "a/../../b", "a\0b", ""] {
+            assert!(
+                fx.mini.resolve_write_target(bad).is_err(),
+                "write target must refuse wire path {bad:?}"
+            );
+        }
+        // A missing tail is the normal promotion case: the leaf and any
+        // absent parents are created by the promotion itself.
+        let (rel, abs) = fx
+            .mini
+            .resolve_write_target("home/user/new-dir/note.md")
+            .unwrap();
+        assert_eq!(rel, "home/user/new-dir/note.md");
+        assert_eq!(
+            abs,
+            fx.root
+                .canonicalize()
+                .unwrap()
+                .join("home/user/new-dir/note.md")
+        );
+        // Alternate spellings resolve to the same canonical form.
+        let (respelled, _) = fx
+            .mini
+            .resolve_write_target("home//user/./new-dir/note.md")
+            .unwrap();
+        assert_eq!(respelled, "home/user/new-dir/note.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_write_target_refuses_symlink_components_anywhere() {
+        let fx = fixture();
+        std::os::unix::fs::symlink(fx.root.join("home"), fx.root.join("homelink")).unwrap();
+        stdfs::write(fx.root.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(fx.root.join("real.txt"), fx.root.join("link.txt")).unwrap();
+        // A symlinked ancestor is refused even though the workspace
+        // lane's canonical-root containment check would be vacuous over
+        // a `/` root.
+        assert!(matches!(
+            fx.mini.resolve_write_target("homelink/user/note.md"),
+            Err(ChanError::SpecialFile { .. })
+        ));
+        // A symlinked leaf is refused rather than judged by the
+        // no-clobber rule: writing through it would follow the alias.
+        assert!(matches!(
+            fx.mini.resolve_write_target("link.txt"),
+            Err(ChanError::SpecialFile { .. })
+        ));
+        // An existing REGULAR leaf resolves; the promotion's own
+        // no-clobber semantics decide what happens to it.
+        assert!(fx.mini.resolve_write_target("real.txt").is_ok());
     }
 
     #[test]

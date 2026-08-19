@@ -29,6 +29,7 @@ pub mod bootstrap;
 pub mod contacts;
 pub mod daemon_lock;
 pub mod dashboard;
+pub mod draft_store;
 pub mod drafts;
 pub mod error;
 pub(crate) mod fd_budget;
@@ -69,6 +70,7 @@ pub use contacts::{
     PhoneNumber, ProviderKind,
 };
 pub use dashboard::{DashboardConfig, ScreensaverTheme};
+pub use draft_store::DraftStore;
 pub use drafts::{DraftInspection, DraftPromoteMode, DraftPromoteReport, DraftRef};
 pub use error::{ChanError, Result};
 pub use fs_ops::{
