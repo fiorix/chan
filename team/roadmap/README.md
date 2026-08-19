@@ -19,7 +19,11 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.94.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [host-minted-gateway-pats-bypass-the-app-layer](v0.94.0/host-minted-gateway-pats-bypass-the-app-layer.md) | implemented and verified ahead of the round, on `fix/gateway-admin-mint` and chan-prod-setup `90f09d0`/`6b216be` | ship v0.94.0, `make admin-install` the wrapper on the prod host, rotate the two live devserver PATs onto expiring credentials, then optionally point the wrapper's `revoke` at identity's parity route for the immediate cut |
 
 ## Completed
 
