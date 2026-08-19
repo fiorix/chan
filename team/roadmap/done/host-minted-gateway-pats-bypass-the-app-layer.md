@@ -1,6 +1,6 @@
 # Host-minted gateway PATs bypass the app layer
 
-> Status: implemented and verified ahead of the round, on `fix/gateway-admin-mint` (this repo) and chan-prod-setup `main` (`90f09d0`, `6b216be`, `4512bd9`). What remains is release and deploy: ship v0.94.0, `make admin-install` the wrapper on the prod host, and rotate the two live devserver PATs onto expiring credentials.
+> Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). Implemented and verified ahead of the round on `fix/gateway-admin-mint` and chan-prod-setup `main` (`90f09d0`, `6b216be`, `4512bd9`), landed by merging the branch; the round reran the postgres-backed suites against the merged tree (all four `admin_revoke_*` tests green by name) and gateway-zone's ctrlplane scenario. The deploy half stays the host's post-GA actions: `make admin-install` the wrapper on the prod host and rotate the two live devserver PATs onto expiring credentials.
 
 Companion evidence: finding N3 of the 2026-08-18 security review (tracked in chan-prod-setup alongside the 2026-08-08 review).
 

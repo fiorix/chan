@@ -19,18 +19,22 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.94.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [a-standalone-window-cannot-create-drafts](v0.94.0/a-standalone-window-cannot-create-drafts.md) | registered after the fact; implemented and verified on the v0.93.0 GA base on `feat/mw-drafts` | land the branch: New draft, New diagram, New slide deck, and Rich Prompt in standalone windows over a per-library draft store (`~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver) with a working flat trash, including the companion repair that makes a discarded workspace draft a restorable trash entry instead of sweep fodder |
-| [host-minted-gateway-pats-bypass-the-app-layer](v0.94.0/host-minted-gateway-pats-bypass-the-app-layer.md) | implemented and verified ahead of the round, on `fix/gateway-admin-mint` and chan-prod-setup `90f09d0`/`6b216be` | ship v0.94.0, `make admin-install` the wrapper on the prod host, rotate the two live devserver PATs onto expiring credentials, then optionally point the wrapper's `revoke` at identity's parity route for the immediate cut |
-| [cli-grammar-noun-families](v0.94.0/cli-grammar-noun-families.md) | implemented and verified on `feat/cli-grammar` | land the branch; carry the deferred remote workspace arms (`--devserver TARGET` on workspace serve/close/forget) as follow-up scope once the flag-name collision with serve's local `--devserver` selector has an owner ruling |
-| [extensions-are-undiscoverable-and-have-no-authoring-guide](v0.94.0/extensions-are-undiscoverable-and-have-no-authoring-guide.md) | implemented in-round on the integration branch | ship v0.94.0: `docs/extensions.md` linked from a new README Guides section, the authoring walkthrough, and the codified `chan-ext-*` packaging convention |
-| [the-api-files-alias-outlives-its-documented-removal](v0.94.0/the-api-files-alias-outlives-its-documented-removal.md) | registered in-round; removal implemented on the integration branch | ship v0.94.0 with no `/api/files` route, classifier, or policy arm anywhere in the tree, and refusal pins in place |
-| [the-tunnel-namespace-says-usr-instead-of-proxy](v0.94.0/the-tunnel-namespace-says-usr-instead-of-proxy.md) | registered in-round; rename implemented on the integration branch | ship v0.94.0 speaking `proxy.{domain}` in every live doc, fixture, and shipped config; the operator rolls out chan-prod-setup separately and cuts both over together |
+No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
+
+### v0.94.0
+
+Shipped 2026-08-19; see [release-v0.94.0](../release/release-v0.94.0.md). Closed items in [`done/`](done/):
+
+- [cli-grammar-noun-families](done/cli-grammar-noun-families.md) - the CLI speaks noun families: `chan workspace serve|close|forget`, a pinned top-level serve/close elevation, and a devserver noun with server-side and new client-side verbs over the desktop handoff socket; no aliases and no deprecation cycle, with the remote workspace arms deferred pending an owner ruling.
+- [a-standalone-window-cannot-create-drafts](done/a-standalone-window-cannot-create-drafts.md) - drafts and Rich Prompt work in standalone windows over a per-library `DraftStore` with a working flat trash, including the companion repair that makes a discarded workspace draft a restorable trash entry; workspace windows byte-identical.
+- [host-minted-gateway-pats-bypass-the-app-layer](done/host-minted-gateway-pats-bypass-the-app-layer.md) - operator PAT mint and revoke ride the app layer with default expiry, audit-truthful `revoked_via_admin`, revoke parity with the owner's immediate cut, and the CLI 202 fix; the prod-host wrapper install and PAT rotation remain the host's deploy actions.
+- [extensions-are-undiscoverable-and-have-no-authoring-guide](done/extensions-are-undiscoverable-and-have-no-authoring-guide.md) - `docs/extensions.md` is the extensions front door (design, bridge table, authoring walkthrough, the codified `chan-ext-*` packaging convention), linked from a new README Guides section beside the previously orphaned config reference.
+- [the-api-files-alias-outlives-its-documented-removal](done/the-api-files-alias-outlives-its-documented-removal.md) - the alias is removed on the release its deprecation named, with live 404 refusal pins in both routers, refusal classifiers in the desktop and gateway, and a mount-literal source pin.
+- [the-tunnel-namespace-says-usr-instead-of-proxy](done/the-tunnel-namespace-says-usr-instead-of-proxy.md) - the proxy plane speaks `proxy.{domain}` in every live document, fixture, and shipped configuration; history keeps the names it shipped with, and the live cutover is the operator's chan-prod-setup rollout.
+
+Six items closed and none carried. Three arrived as pre-built branches taken through intake, three were raised and implemented in the round itself; the round's gate burned down five reds, two of them dynamically-built alias consumers invisible to a literal grep and three of them fallout the rename sweep could not see (mixed-case fixtures, rustfmt width).
 
 ### v0.93.0
 

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.94.0] - 2026-08-19
+
+The CLI grammar moves to noun families, a standalone window gains drafts and Rich Prompt, gateway operators mint and revoke PATs through the app layer, extensions get a front-door guide, the `/api/files` alias is removed on the release its deprecation named, and the gateway's tunnel namespace renames from `usr.{domain}` to `proxy.{domain}`.
+
+### Added
+
+- **Drafts and Rich Prompt work in a standalone window.** New draft, New diagram, New slide deck, and Rich Prompt are no longer workspace-only: a standalone terminal window creates, edits, discards, and promotes drafts backed by a per-library store the embedder places (`~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver), so a same-machine pair stays disjoint. Discarded drafts land in a working flat trash with the standard 30-day sweep, and a discarded workspace draft is now a restorable trash entry instead of being destroyed by the next sweep. Workspace windows are byte-identical throughout.
+- **Gateway operators mint and revoke PATs through the app layer.** Identity gains an operator revoke route (`POST /admin/v1/tokens/{token_id}/revoke`) with the same immediate tunnel and session cut as an owner's own revoke, operator revokes are audited as `revoked_via_admin` so an owner can tell them from their own, and the admin CLI's `token revoke` accepts the 202 the server actually answers. Host tooling no longer writes gateway tables: operator mints ride `POST /admin/v1/tokens` with a default expiry, so a permanent credential requires spelling `never` rather than happening silently.
+- **Extensions have a front-door guide.** [docs/extensions.md](docs/extensions.md) explains how Chan uses extensions (the declaration, the handshake, the capability-path proxy, the sandbox), walks through building one against the in-tree echo fixture, codifies the `chan-ext-*` packaging convention the published extensions converged on, and is linked from a new Guides section in the README together with the configuration reference.
+
+### Changed
+
+- **The CLI speaks noun families with a pinned serve/close elevation.** The polymorphic `chan open` is gone: `chan workspace serve|close|forget` own the workspace lifecycle, top-level `chan serve` and `chan close` are the only elevated family verbs, and `chan devserver` holds server-side verbs (`run`, `start`, `stop`, `restart`, `status`, `join`, `rotate-token`) beside new client-side verbs (`register URL`, `ls`, `connect`, `disconnect`, `forget`) over the desktop handoff socket, so a devserver registration can finally be listed, dialed, and dropped from the CLI. There are no aliases and no deprecation cycle. One operational skew: a systemd or launchd unit installed by a pre-rename chan invokes `chan devserver` with no verb, which the upgraded binary refuses to parse; `chan devserver start` (or `restart`) rewrites the unit.
+- **The gateway tunnel namespace is `proxy.{domain}`.** The tunnel ingress dials `proxy.{domain}/v1/tunnel` and a devserver's public tenant origin is `{owner}--{disc}.{proxy}.proxy.{domain}` (for example `uk.proxy.chan.app` instead of `uk.usr.chan.app`). The scheme is configuration-driven, so the rename moves documentation, fixtures, and the shipped deployment values; there is no compatibility alias for the old namespace.
+
+### Removed
+
+- **The `/api/files` compatibility alias.** File content and transfers moved to `/api/fs` in v0.93.0 with the alias documented as removed in v0.94.0, and it is: both tenant route tables, the desktop native-transfer classifier, and the gateway transfer policy now serve `/api/fs` only, with refusal pins keeping the alias out.
+
 ## [v0.93.0] - 2026-08-18
 
 File operations move to one `/api/fs` namespace reachable from every window kind, the Linux desktop AppImage follows its own driver decision when choosing the terminal renderer, and a long-standing intermittent test failure gets a named mechanism and a structural repair.

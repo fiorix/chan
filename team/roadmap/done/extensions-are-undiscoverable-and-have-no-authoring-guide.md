@@ -1,6 +1,6 @@
 # Extensions are undiscoverable and have no authoring guide
 
-Status: REGISTERED for v0.94.0. Implemented in-round on the integration branch.
+Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). `docs/extensions.md` and the README Guides section landed in-round; every stated fact was verified against the extension sources and both bridge directions were read from the SPA code before being written down.
 
 ## Problem
 

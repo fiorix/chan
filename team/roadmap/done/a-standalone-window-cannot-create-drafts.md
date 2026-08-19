@@ -1,6 +1,6 @@
 # A standalone window cannot create drafts
 
-Status: REGISTERED 2026-08-19, after the fact, following the precedent of [a-standalone-window-cannot-reach-the-files-it-is-about](../done/a-standalone-window-cannot-reach-the-files-it-is-about.md). The work was built and verified on branch `feat/mw-drafts` against the v0.93.0 GA base (`9e883bd9`) before an item existed for it; this records the accepted scope and the verification already carried out, targeting v0.94.0 as the release that ships it.
+Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). Registered 2026-08-19 after the fact, following the precedent of [a-standalone-window-cannot-reach-the-files-it-is-about](a-standalone-window-cannot-reach-the-files-it-is-about.md); built and verified on `feat/mw-drafts` against the v0.93.0 GA base and landed by merging the branch. The round's browser-smoke run proves the new mini-window-drafts check green on the merged tree, after the in-round fix that moved its spawn to the renamed `devserver run` verb.
 
 ## What
 

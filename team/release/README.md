@@ -118,6 +118,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.92.0](release-v0.92.0.md) - the gateway's canonical design written against the running code, workspace terminals surviving a devserver restart, and an intermittent stale read that closed as correct behaviour; a pre-registered threshold overturned the lead's own first conclusion about a flaky check.
 
 - [release-v0.93.0](release-v0.93.0.md) - one filesystem namespace reachable from every window, the Linux desktop AppImage following its own driver decision for the terminal renderer, and a fork-inheritance mechanism found for a load-sensitive test nobody had explained; a lane caught a shipping blocker inside its own change that the lead had already cleared, and the release pipeline caught a defect the local gate had been configured not to see.
+- [release-v0.94.0](release-v0.94.0.md) - an integration round: the CLI's noun-family grammar, drafts and Rich Prompt in standalone windows, gateway operator PAT mint/revoke through the app layer, the extensions front-door guide, the `/api/files` removal on its documented deadline, and the tunnel namespace renamed to `proxy.{domain}`; the gate burned down five reds the round's own sweeps could not see, and the expensive mistakes were all verdict-handling, not code.
 
 ## Conventions
 

@@ -1,6 +1,6 @@
 # The tunnel namespace says usr instead of proxy
 
-Status: REGISTERED for v0.94.0. Implemented in-round on the integration branch.
+Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). 71 files renamed across docs, comments, fixtures, and the shipped deployment values; the gate caught three mixed-case fixtures the lowercase sweep missed and rustfmt reflows from the longer name, and the case-insensitive residual grep is clean. The live cutover (chan-prod-setup nginx, DNS, certificates) is the operator's own rollout together with this release.
 
 ## Problem
 

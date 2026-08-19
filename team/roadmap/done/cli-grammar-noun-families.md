@@ -1,6 +1,6 @@
 # The CLI grammar moves to noun families with a pinned elevation list
 
-Status: REGISTERED for v0.94.0. Implemented on `feat/cli-grammar`; verification evidence below.
+Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). Landed by merging `feat/cli-grammar` (83f4cf27, own gate green in its container before push); the full gate and the round's validation ran on the merged tree, and the deferred remote workspace arms remain follow-up scope pending an owner ruling.
 
 ## Problem
 

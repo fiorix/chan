@@ -1,6 +1,6 @@
 # The /api/files alias outlives its documented removal
 
-Status: REGISTERED for v0.94.0. Implemented in-round on the integration branch.
+Status: SHIPPED in [v0.94.0](../../release/release-v0.94.0.md). The alias is out of both tenant route tables, the desktop classifier, and the gateway policy, with live 404 refusal pins in both routers and a mount-literal source pin; the gate caught two dynamically-built alias consumers the literal grep could not see, both converted to refusal pins.
 
 ## Problem
 
