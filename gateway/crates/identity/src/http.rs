@@ -205,6 +205,10 @@ pub fn routers(
     // routes accept either that operator token or IDENTITY_ACCOUNT_ADMIN_TOKEN.
     let operator_admin = Router::new()
         .route("/admin/v1/tokens", post(admin_tokens_create))
+        .route(
+            "/admin/v1/tokens/{token_id}/revoke",
+            post(admin_tokens_revoke),
+        )
         .route("/admin/v1/sessions", get(admin_list_oauth_sessions))
         .route(
             "/admin/v1/sessions/{admin_session_id}/revoke",
@@ -2749,6 +2753,43 @@ async fn admin_tokens_create(
             secret,
         }),
     ))
+}
+
+/// `POST /admin/v1/tokens/{token_id}/revoke` -- operator revoke by
+/// token id, without a browser session. Profile owns the durable side
+/// (soft-revoke, `revoked_via_admin` audit row, subject-revocation
+/// outbox); this route adds the same immediate first cut the SPA
+/// revoke performs, so the owner's live tunnels and browser sessions
+/// drop now instead of surviving until the next lease refresh and the
+/// outbox settlement. 202 like the SPA revoke; unknown token id 404s.
+async fn admin_tokens_revoke(
+    State(state): State<AppState>,
+    Path(token_id): Path<Uuid>,
+) -> Result<StatusCode> {
+    let uid = state
+        .api_tokens
+        .owner_of(token_id)
+        .await?
+        .ok_or(Error::NotFound)?;
+    state
+        .cfg
+        .profile_client
+        .admin_revoke_api_token(token_id)
+        .await?;
+    // Same best-effort posture as `tokens_revoke`: the durable revoke
+    // has landed, so a failed cut only delays the drop until the next
+    // validate; it must never fail the revoke.
+    let (kill, revoke) = tokio::join!(
+        state.cfg.workspace_admin.kill_owner_tunnels(uid),
+        state.cfg.workspace_admin.revoke_subject_sessions(uid),
+    );
+    if let Err(error) = kill {
+        tracing::warn!(error = ?error, user = %uid, "admin PAT first tunnel cut failed");
+    }
+    if let Err(error) = revoke {
+        tracing::warn!(error = ?error, user = %uid, "admin PAT first session cut failed");
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Debug, Deserialize)]

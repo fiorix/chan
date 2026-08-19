@@ -1172,8 +1172,12 @@ async fn admin_user_tokens(
     Ok(Json(rows))
 }
 
-/// Soft-revoke any non-revoked token. Already-revoked tokens are
-/// a no-op (NO_CONTENT) so a CLI retry doesn't error out; an
+/// Soft-revoke any non-revoked token, from the operator surface. The
+/// audit row says `revoked_via_admin` so the owner's token audit does
+/// not attribute an operator's action to them. Answers 202: the local
+/// denial is committed but the subject-revocation outbox still settles
+/// the data plane. An already-revoked token re-reserves that settlement
+/// without a duplicate audit row, so a CLI retry doesn't error out; an
 /// unknown token id 404s so the CLI flags the typo.
 async fn admin_revoke_token(
     State(state): State<AppState>,
@@ -1190,10 +1194,13 @@ async fn admin_revoke_token(
     .await?;
     let user_id = match revoked_user {
         Some(user_id) => {
-            sqlx::query("INSERT INTO api_token_audit (token_id, action) VALUES ($1, 'revoked')")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO api_token_audit (token_id, action) \
+                 VALUES ($1, 'revoked_via_admin')",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
             user_id
         }
         None => sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM api_tokens WHERE id = $1")

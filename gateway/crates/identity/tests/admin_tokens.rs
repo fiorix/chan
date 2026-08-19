@@ -9,7 +9,7 @@
 #[path = "../../../tests-shared/pg_reaper.rs"]
 mod pg_reaper;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -45,8 +45,16 @@ struct TestApp {
 
 impl TestApp {
     /// `admin_token` becomes IDENTITY_ADMIN_TOKEN; empty = surface
-    /// disabled.
+    /// disabled. Port 1 is never listening: the best-effort devserver
+    /// registration hop fails fast and the mint must survive it.
     async fn new(admin_token: &str) -> Self {
+        Self::with_profile(admin_token, "http://127.0.0.1:1/").await
+    }
+
+    /// Like [`Self::new`], but the ProfileClient points at
+    /// `profile_url`. The operator revoke's profile hop is not
+    /// best-effort, so its tests pass a live stub here.
+    async fn with_profile(admin_token: &str, profile_url: &str) -> Self {
         let url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
         pg_reaper::reap_idle(&url).await;
@@ -85,11 +93,8 @@ impl TestApp {
 
         let api_tokens = ApiTokenService::new(pool.clone());
 
-        // Port 1 is never listening: the best-effort devserver
-        // registration hop fails fast and the mint must survive it.
-        let profile_client =
-            ProfileClient::new("http://127.0.0.1:1/".parse().unwrap(), "unused".into())
-                .expect("profile client");
+        let profile_client = ProfileClient::new(profile_url.parse().unwrap(), "unused".into())
+            .expect("profile client");
 
         let cfg = Arc::new(Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -199,6 +204,42 @@ async fn post_tokens(
     let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
     let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, v)
+}
+
+/// Minimal live stand-in for profile's admin surface: records the
+/// token ids POSTed to `/v1/admin/tokens/{id}/revoke` and answers
+/// 202. Profile's real transaction is covered by profile's own suite;
+/// these tests assert the boundary call. Every other path 404s, which
+/// keeps the post-mint devserver registration hop best-effort.
+async fn spawn_profile_stub() -> (String, Arc<Mutex<Vec<Uuid>>>) {
+    let hits: Arc<Mutex<Vec<Uuid>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = hits.clone();
+    let app = Router::new().route(
+        "/v1/admin/tokens/{id}/revoke",
+        axum::routing::post(move |axum::extract::Path(id): axum::extract::Path<Uuid>| {
+            let recorded = recorded.clone();
+            async move {
+                recorded.lock().unwrap().push(id);
+                StatusCode::ACCEPTED
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/"), hits)
+}
+
+/// POST /admin/v1/tokens/{token_id}/revoke with an optional bearer.
+async fn post_revoke(app: &TestApp, bearer: Option<&str>, token_id: &str) -> StatusCode {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/admin/v1/tokens/{token_id}/revoke"));
+    if let Some(b) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {b}"));
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    app.router.clone().oneshot(req).await.unwrap().status()
 }
 
 #[tokio::test]
@@ -340,5 +381,67 @@ async fn admin_surface_disabled_when_token_empty() {
     let tokens = app.api_tokens.list(uid).await.expect("list");
     assert!(tokens.is_empty());
 
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_revoke_hits_profile_and_is_retry_safe() {
+    let (profile_url, hits) = spawn_profile_stub().await;
+    let app = TestApp::with_profile(ADMIN_TOKEN, &profile_url).await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "revoke@example.com").await;
+
+    let (status, body) = post_tokens(
+        &app,
+        Some(ADMIN_TOKEN),
+        json!({ "email": "revoke@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let token_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+    // The durable revoke is profile's; identity forwards exactly the
+    // requested id. The tunnel/session first cut points at a closed
+    // port here and must stay best-effort.
+    let status = post_revoke(&app, Some(ADMIN_TOKEN), &token_id.to_string()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(*hits.lock().unwrap(), vec![token_id]);
+
+    // A retry forwards again; profile owns the no-op semantics.
+    let status = post_revoke(&app, Some(ADMIN_TOKEN), &token_id.to_string()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(*hits.lock().unwrap(), vec![token_id, token_id]);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_revoke_unknown_token_is_404() {
+    let (profile_url, hits) = spawn_profile_stub().await;
+    let app = TestApp::with_profile(ADMIN_TOKEN, &profile_url).await;
+
+    let status = post_revoke(&app, Some(ADMIN_TOKEN), &Uuid::new_v4().to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // The owner lookup gates the forward: nothing reached profile.
+    assert!(hits.lock().unwrap().is_empty());
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_revoke_requires_the_exact_bearer() {
+    let app = TestApp::new(ADMIN_TOKEN).await;
+    for bearer in [None, Some("wrong-token")] {
+        let status = post_revoke(&app, bearer, &Uuid::new_v4().to_string()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{bearer:?}");
+    }
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn admin_revoke_disabled_surface_is_404() {
+    let app = TestApp::new("").await;
+    let status = post_revoke(&app, Some("anything"), &Uuid::new_v4().to_string()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     app.cleanup().await;
 }

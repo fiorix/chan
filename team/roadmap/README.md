@@ -21,9 +21,10 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ### v0.94.0
 
-- [a-standalone-window-cannot-create-drafts](v0.94.0/a-standalone-window-cannot-create-drafts.md) - New draft, New diagram, New slide deck, and Rich Prompt work in a standalone window, backed by a per-library draft store (`~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver) with a working flat trash; registered after the fact with the implementation and verification already carried out on the v0.93.0 GA base, including the companion repair that makes a discarded workspace draft a restorable trash entry instead of sweep fodder.
-
-An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [a-standalone-window-cannot-create-drafts](v0.94.0/a-standalone-window-cannot-create-drafts.md) | registered after the fact; implemented and verified on the v0.93.0 GA base on `feat/mw-drafts` | land the branch: New draft, New diagram, New slide deck, and Rich Prompt in standalone windows over a per-library draft store (`~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver) with a working flat trash, including the companion repair that makes a discarded workspace draft a restorable trash entry instead of sweep fodder |
+| [host-minted-gateway-pats-bypass-the-app-layer](v0.94.0/host-minted-gateway-pats-bypass-the-app-layer.md) | implemented and verified ahead of the round, on `fix/gateway-admin-mint` and chan-prod-setup `90f09d0`/`6b216be` | ship v0.94.0, `make admin-install` the wrapper on the prod host, rotate the two live devserver PATs onto expiring credentials, then optionally point the wrapper's `revoke` at identity's parity route for the immediate cut |
 
 ## Completed
 

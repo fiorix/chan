@@ -15,7 +15,8 @@
 //! `created` (SPA mint), `created_via_desktop` (desktop-authorize
 //! mint), `created_via_admin` (chan-gateway-admin mint),
 //! `desktop.redeem` (one-time desktop code cashed in), `used`
-//! (validate succeeded), `revoked`.
+//! (validate succeeded), `revoked` (owner self-revoke),
+//! `revoked_via_admin` (operator revoke; written by profile).
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -279,6 +280,17 @@ impl ApiTokenService {
     pub async fn user_id_by_email(&self, email: &str) -> Result<Option<Uuid>> {
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE lower(email) = lower($1)")
             .bind(email)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_db)
+    }
+
+    /// Token id -> owning user, revoked or not: the operator revoke
+    /// needs the owner for its data-plane first cut even when the
+    /// durable revoke is a retry. `None` for an unknown id.
+    pub async fn owner_of(&self, token_id: Uuid) -> Result<Option<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM api_tokens WHERE id = $1")
+            .bind(token_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_db)
