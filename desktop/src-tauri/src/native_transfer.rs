@@ -175,13 +175,12 @@ pub fn validated_endpoint(
     let expected = match kind {
         EndpointKind::Download => {
             path.strip_prefix("/api/fs/")
-                .or_else(|| path.strip_prefix("/api/files/"))
                 .is_some_and(|file_path| !file_path.is_empty())
                 && endpoint
                     .query_pairs()
                     .any(|(key, value)| key == "download" && matches!(value.as_ref(), "1" | "true"))
         }
-        EndpointKind::Upload => matches!(path, "/api/fs/upload" | "/api/files/upload"),
+        EndpointKind::Upload => matches!(path, "/api/fs/upload"),
     };
     if !expected {
         return Err("native transfer URL is not the expected file API route".into());
@@ -297,10 +296,8 @@ impl TransferCap {
 /// other query parameter is dropped.
 pub fn config_url_for_transfer(endpoint: &Url) -> Result<Url, String> {
     let path = endpoint.path();
-    let at = ["/api/fs", "/api/files"]
-        .into_iter()
-        .filter_map(|marker| path.rfind(marker))
-        .max()
+    let at = path
+        .rfind("/api/fs")
         .ok_or_else(|| "transfer endpoint is not a file API URL".to_string())?;
     let token = endpoint
         .query_pairs()
@@ -371,19 +368,19 @@ mod tests {
             EndpointKind::Upload,
         )
         .is_ok());
-        // Compatibility alias through v0.93.0.
+        // The former `/api/files` compatibility alias must stay refused.
         assert!(validated_endpoint(
             &current,
             "https://alice.example/prefix/api/files/a.md?download=1&t=x",
             EndpointKind::Download,
         )
-        .is_ok());
+        .is_err());
         assert!(validated_endpoint(
             &current,
             "https://alice.example/prefix/api/files/upload?t=x",
             EndpointKind::Upload,
         )
-        .is_ok());
+        .is_err());
         for invalid in [
             "https://bob.example/prefix/api/files/a.md?download=1",
             "https://alice.example/prefix/api/files/a.md",
@@ -462,11 +459,9 @@ mod tests {
             "https://alice.example/prefix/api/config"
         );
 
+        // The former `/api/files` compatibility alias must stay refused.
         let alias = Url::parse("https://alice.example/prefix/api/files/a.md?download=1").unwrap();
-        assert_eq!(
-            config_url_for_transfer(&alias).unwrap().as_str(),
-            "https://alice.example/prefix/api/config"
-        );
+        assert!(config_url_for_transfer(&alias).is_err());
 
         assert!(
             config_url_for_transfer(&Url::parse("https://alice.example/nope").unwrap()).is_err()

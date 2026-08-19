@@ -662,7 +662,7 @@ fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<Transfe
     let rest = path.strip_prefix('/')?;
     let tenant_path = rest.split_once('/').map(|(_, tail)| tail).unwrap_or("");
     if method == Method::POST {
-        if matches!(tenant_path, "api/fs/upload" | "api/files/upload") {
+        if tenant_path == "api/fs/upload" {
             return Some(TransferRoute::Bulk);
         }
         if tenant_path == "api/fs/transfer" {
@@ -671,7 +671,7 @@ fn transfer_route_class(method: &Method, path_and_query: &str) -> Option<Transfe
         return None;
     }
     if method == Method::GET
-        && (tenant_path.starts_with("api/fs/") || tenant_path.starts_with("api/files/"))
+        && tenant_path.starts_with("api/fs/")
         && query_flag_truthy(query, "download")
     {
         return Some(TransferRoute::Bulk);
@@ -1816,12 +1816,9 @@ mod tests {
         // The sanctioned bulk shapes.
         assert!(bulk(class(&Method::POST, "/blog/api/fs/upload")));
         assert!(bulk(class(&Method::GET, "/blog/api/fs/big.bin?download=1")));
-        // Compatibility alias through v0.93.0.
-        assert!(bulk(class(&Method::POST, "/blog/api/files/upload")));
-        assert!(bulk(class(
-            &Method::GET,
-            "/blog/api/files/big.bin?download=1"
-        )));
+        // The former `/api/files` compatibility alias keeps the general policy.
+        assert!(class(&Method::POST, "/blog/api/files/upload").is_none());
+        assert!(class(&Method::GET, "/blog/api/files/big.bin?download=1").is_none());
         assert!(bulk(class(
             &Method::GET,
             "/t/api/fs/archive.tar?download=true"

@@ -3128,20 +3128,12 @@ mod write_tests {
     #[test]
     fn route_table_delegates_streaming_limits_to_semantic_sinks() {
         let route_table = include_str!("../lib.rs");
-        // Four semantic sinks are mounted on both the primary namespace and its compatibility alias, so this enumeration keeps the global count tied to reviewed routes.
+        // Four semantic sinks own the streaming limit, so this enumeration keeps the global count tied to reviewed routes.
         let semantic_sink_mounts = [
             (
                 "terminal upload via /api/fs",
                 r#".route(
             "/api/fs/upload",
-            post(crate::routes::transfer::api_terminal_upload_file)
-                .layer(DefaultBodyLimit::disable()),
-        )"#,
-            ),
-            (
-                "terminal upload via /api/files",
-                r#".route(
-            "/api/files/upload",
             post(crate::routes::transfer::api_terminal_upload_file)
                 .layer(DefaultBodyLimit::disable()),
         )"#,
@@ -3155,14 +3147,6 @@ mod write_tests {
         )"#,
             ),
             (
-                "standalone write via /api/files",
-                r#".route(
-            "/api/files/{*path}",
-            put(crate::routes::standalone_fs::api_standalone_write_file)
-                .layer(DefaultBodyLimit::disable()),
-        )"#,
-            ),
-            (
                 "workspace upload via /api/fs",
                 r#".route(
             "/api/fs/upload",
@@ -3170,23 +3154,9 @@ mod write_tests {
         )"#,
             ),
             (
-                "workspace upload via /api/files",
-                r#".route(
-            "/api/files/upload",
-            post(api_upload_file).layer(DefaultBodyLimit::disable()),
-        )"#,
-            ),
-            (
                 "workspace write via /api/fs",
                 r#".route(
             "/api/fs/{*path}",
-            put(api_write_file).layer(DefaultBodyLimit::disable()),
-        )"#,
-            ),
-            (
-                "workspace write via /api/files",
-                r#".route(
-            "/api/files/{*path}",
             put(api_write_file).layer(DefaultBodyLimit::disable()),
         )"#,
             ),
@@ -3202,6 +3172,17 @@ mod write_tests {
             route_table.matches("DefaultBodyLimit::disable()").count(),
             semantic_sink_mounts.len(),
             "every body-limit disable must belong to an enumerated semantic sink"
+        );
+    }
+
+    #[test]
+    fn the_files_alias_is_not_mounted() {
+        // `/api/files` was a compatibility alias for the `/api/fs` content and
+        // transfer routes; nothing may mount it again.
+        let route_table = include_str!("../lib.rs");
+        assert!(
+            !route_table.contains("/api/files"),
+            "the /api/files alias must not reappear in the route table"
         );
     }
 

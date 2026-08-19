@@ -1324,17 +1324,6 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/fs/{*path}",
             get(crate::routes::transfer::api_terminal_read_file),
         )
-        // `/api/files` remains a compatibility alias through v0.93.0 and is
-        // removed in v0.94.0.
-        .route(
-            "/api/files/upload",
-            post(crate::routes::transfer::api_terminal_upload_file)
-                .layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/files/{*path}",
-            get(crate::routes::transfer::api_terminal_read_file),
-        )
         // Standalone Files application over `state.standalone_files`. Every
         // handler snapshots that bundle and answers 404 on a tenant that did
         // not construct it, so the unconditional mounts are safe on control
@@ -1362,20 +1351,6 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/fs/{*path}",
-            delete(crate::routes::standalone_fs::api_standalone_delete_file),
-        )
-        .route(
-            "/api/files",
-            get(crate::routes::standalone_fs::api_standalone_list_files)
-                .post(crate::routes::standalone_fs::api_standalone_create_file),
-        )
-        .route(
-            "/api/files/{*path}",
-            put(crate::routes::standalone_fs::api_standalone_write_file)
-                .layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/files/{*path}",
             delete(crate::routes::standalone_fs::api_standalone_delete_file),
         )
         .route(
@@ -1933,13 +1908,6 @@ fn router_with_extensions(
             "/api/fs/upload",
             post(api_upload_file).layer(DefaultBodyLimit::disable()),
         )
-        // `/api/files` remains a compatibility alias through v0.93.0 and is
-        // removed in v0.94.0.
-        .route("/api/files", get(api_list_files).post(api_create_file))
-        .route(
-            "/api/files/upload",
-            post(api_upload_file).layer(DefaultBodyLimit::disable()),
-        )
         // New Draft action. Creates `<drafts_dir>/<next-untitled>/draft.md`
         // in the in-root drafts dir (`.Drafts/` by default) as ordinary
         // workspace content; it indexes and graphs through the normal walk.
@@ -1993,14 +1961,6 @@ fn router_with_extensions(
         // that policy and its atomic cleanup path.
         .route(
             "/api/fs/{*path}",
-            put(api_write_file).layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/files/{*path}",
-            get(api_read_file).delete(api_delete_file),
-        )
-        .route(
-            "/api/files/{*path}",
             put(api_write_file).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/move", post(api_move))
