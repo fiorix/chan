@@ -125,14 +125,31 @@ jobs:
           cache-dependency-path: chan/web/package-lock.json
 
       - name: Install Linux Tauri build deps
+        # The amd64 runner pool's apt mirror intermittently hangs mid-fetch
+        # (three release-day stalls on this step class, each cleared only by
+        # a rerun on a fresh runner). Fetches carry a socket timeout and
+        # retries so a dead mirror errors instead of blocking, one failure
+        # re-points apt at archive.ubuntu.com for a single retry, and the
+        # step deadline turns any residual hang into a fast red that
+        # `gh run rerun --failed` can clear.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            patchelf
+          apt_fetch() {
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+          }
+          install_deps() {
+            apt_fetch update
+            apt_fetch install -y \
+              libwebkit2gtk-4.1-dev \
+              libayatana-appindicator3-dev \
+              librsvg2-dev \
+              libsoup-3.0-dev \
+              patchelf
+          }
+          if ! install_deps; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            install_deps
+          fi
 
       - run: make ci-linux
         working-directory: chan
@@ -319,17 +336,28 @@ jobs:
           cache-dependency-path: chan/web/package-lock.json
 
       - name: Install Linux Tauri build deps
+        # Same mirror-hang armor as the validation job's step above.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            patchelf \
-            xdg-utils \
-            desktop-file-utils \
-            file
+          apt_fetch() {
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+          }
+          install_deps() {
+            apt_fetch update
+            apt_fetch install -y \
+              libwebkit2gtk-4.1-dev \
+              libayatana-appindicator3-dev \
+              librsvg2-dev \
+              libsoup-3.0-dev \
+              patchelf \
+              xdg-utils \
+              desktop-file-utils \
+              file
+          }
+          if ! install_deps; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            install_deps
+          fi
 
       - name: Install tauri-cli
         uses: taiki-e/install-action@v2
