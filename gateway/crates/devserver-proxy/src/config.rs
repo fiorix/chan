@@ -500,7 +500,7 @@ mod tests {
     fn apex_returns_none() {
         let c = cfg();
         assert_eq!(c.parse_wildcard_host("p1.proxy.chan.app"), None);
-        assert_eq!(c.parse_wildcard_host("P1.USR.chan.app"), None);
+        assert_eq!(c.parse_wildcard_host("P1.PROXY.chan.app"), None);
         assert_eq!(c.parse_wildcard_host("p1.proxy.chan.app:7002"), None);
     }
 
@@ -560,7 +560,7 @@ mod tests {
             Some(("alice".into(), None)),
         );
         assert_eq!(
-            c.parse_wildcard_host("Alice.P1.Usr.Chan.App"),
+            c.parse_wildcard_host("Alice.P1.Proxy.Chan.App"),
             Some(("alice".into(), None)),
         );
         assert_eq!(

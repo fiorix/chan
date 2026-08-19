@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn canonical_audience_strips_only_the_schemes_actual_default_port() {
         assert_eq!(
-            canonical_audience("https", "Alice--1a2b3c4d5e6f.P1.Usr.Chan.App"),
+            canonical_audience("https", "Alice--1a2b3c4d5e6f.P1.Proxy.Chan.App"),
             "alice--1a2b3c4d5e6f.p1.proxy.chan.app",
         );
         assert_eq!(
