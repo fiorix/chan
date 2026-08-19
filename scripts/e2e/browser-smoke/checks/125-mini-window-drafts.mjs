@@ -46,7 +46,7 @@ export default {
   name: "mini-window-drafts",
   async run(ctx) {
     const chanHome = mkdtempSync(join(tmpdir(), "chan-mini-drafts-"));
-    const devserver = spawn(ctx.chanBin, ["devserver", "--bind", "127.0.0.1", "--port", String(PORT)], {
+    const devserver = spawn(ctx.chanBin, ["devserver", "run", "--bind", "127.0.0.1", "--port", String(PORT)], {
       env: { ...process.env, CHAN_HOME: chanHome },
       stdio: ["ignore", "pipe", "pipe"],
     });
