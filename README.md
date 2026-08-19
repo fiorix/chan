@@ -4,6 +4,11 @@ This is the source code of Chan, an IDE in a single binary: a terminal emulator 
 
 Contributors and agents: start at [.agents/README.md](.agents/README.md); the practical guide is [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Guides
+
+- [docs/extensions.md](docs/extensions.md) - how Chan uses extensions and how to build one.
+- [docs/config-reference.md](docs/config-reference.md) - every persisted configuration file and field.
+
 ## Design documents
 
 The architecture is documented next to the code it describes. [design.md](design.md) is the whole-system reference (crate boundaries, runtime topology, bind vs tunnel, the devserver); each crate or surface below carries its own design of record.
