@@ -2108,7 +2108,7 @@ function onWatchReady(): void {
   // reconnecting client would miss the last push until the next change.
   void seedTerminalRoster();
   // A reconnect may mean the server PROCESS was restarted (a remote
-  // `chan devserver` bounced); detect that and reload rather than go stale.
+  // `chan devserver run` bounced); detect that and reload rather than go stale.
   void checkServerInstance();
   // Independently of the reload decision (a tunnel can answer the socket
   // while /api/health still lags), re-resolve the extension catalog: a
@@ -2153,7 +2153,7 @@ async function healthInstanceWithRetry(): Promise<string | undefined> {
 /// and in-memory state are gone, and without a reload the window sits
 /// on a stale view with stuck terminals until a manual Cmd+R -- the
 /// reload is that Cmd+R, automated. Reported against outbound remotes
-/// (^C + re-run of `chan devserver`); health answers on every tenant
+/// (^C + re-run of `chan devserver run`); health answers on every tenant
 /// (terminal-only included), so the check applies everywhere.
 /// Best-effort: a read that still fails after the bounded retry waits
 /// for the next reconnect.

@@ -134,7 +134,7 @@
   }
 
   // Parse the polymorphic Address into host/port/token, mirroring what
-  // `chan open <url>` accepts so the form and the CLI stay consistent:
+  // `chan devserver register <url>` accepts so the form and the CLI stay consistent:
   //   - `http(s)://host:port?t=…`      → host + port (defaulted by scheme when
   //     absent) + the `t` query param (`?t=` clears on edit);
   //   - bare `host:port`               → host + port, no token.
@@ -289,7 +289,7 @@
     <div class="tip">
       <SquareTerminal size={16} />
       <span>
-        Tip: you can also run <code>chan open &lt;path&gt;</code> in any terminal to add a
+        Tip: you can also run <code>chan serve &lt;path&gt;</code> in any terminal to add a
         workspace.
       </span>
     </div>
@@ -361,7 +361,7 @@
         rows="3"
         class="mono"
         bind:value={script}
-        placeholder="ssh box -L 8787:localhost:8787 chan devserver --join"
+        placeholder="ssh box -L 8787:localhost:8787 chan devserver join"
         autocomplete="off"
         spellcheck="false"
         disabled={readOnlyEdit}></textarea>
@@ -482,7 +482,7 @@
   }
 
   /* The command-line tip box: a terminal-iconed hint that the same thing can be
-     done from a shell (chan open). */
+     done from a shell (chan serve). */
   .tip {
     display: flex;
     gap: 0.6rem;

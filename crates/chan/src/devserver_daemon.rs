@@ -33,7 +33,7 @@ fn daemon_record_path() -> PathBuf {
         .join("daemon.json")
 }
 
-/// `chan devserver --service=chan`: start the background daemon and return.
+/// `chan devserver start --service=chan`: start the background daemon and return.
 /// Idempotent when the same daemon is already running on the requested address.
 pub async fn run_devserver_as_chan(
     addr: SocketAddr,
@@ -199,7 +199,7 @@ pub fn status_devserver_chan(verbose: bool) -> Result<()> {
             );
             if let Ok(addr) = r.addr.parse::<SocketAddr>() {
                 println!(
-                    "  command: chan devserver --service=chan --bind={} --port={}",
+                    "  command: chan devserver start --service=chan --bind={} --port={}",
                     addr.ip(),
                     addr.port()
                 );

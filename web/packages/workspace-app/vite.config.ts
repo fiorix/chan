@@ -115,8 +115,8 @@ export default defineConfig({
     fs: {
       allow: [".", ".."],
     },
-    // While iterating, proxy API + WS to a running `chan open` /
-    // `chan devserver` backend so we get the real backend without
+    // While iterating, proxy API + WS to a running `chan serve` /
+    // `chan devserver run` backend so we get the real backend without
     // rebuilding the binary on every change.
     proxy: {
       "/api/terminal/ws": { target: "ws://127.0.0.1:8787", ws: true },

@@ -1,4 +1,4 @@
-//! Cross-process proof of `chan close`: a SEPARATE `chan open --standalone`
+//! Cross-process proof of `chan close`: a SEPARATE `chan serve --standalone`
 //! process holds a
 //! workspace's writer flock and its per-pid control socket; `chan close
 //! <path>` discovers that process from the on-disk `writer.lock` record
@@ -37,7 +37,7 @@ use tempfile::TempDir;
 /// The built `chan` binary under test (Cargo points this at the target dir).
 const CHAN: &str = env!("CARGO_BIN_EXE_chan");
 
-/// A `chan open` serve writes its lock record during open and force-exits well
+/// A `chan serve` serve writes its lock record during open and force-exits well
 /// inside this grace window on the close signal. Generous for a loaded CI box.
 const READY_BUDGET: Duration = Duration::from_secs(30);
 const EXIT_BUDGET: Duration = Duration::from_secs(15);
@@ -90,7 +90,7 @@ impl Sandbox {
     }
 }
 
-/// A spawned `chan open` serve child + a background-drained stderr transcript (so
+/// A spawned `chan serve` serve child + a background-drained stderr transcript (so
 /// the pipe never fills and wedges the child, and the test can wait for the
 /// "ready" marker). Dropping it always kills and reaps the child, so a
 /// panicking assertion never strands a server holding the flock.
@@ -103,7 +103,7 @@ impl Serve {
     fn spawn(sandbox: &Sandbox, ws: &Path) -> Self {
         let mut child = sandbox
             .command()
-            .arg("open")
+            .arg("serve")
             .arg(ws)
             // `--here` serves the path verbatim (sidesteps the enclosing-VCS
             // refusal if the temp dir ever lands inside a working tree);
@@ -119,7 +119,7 @@ impl Serve {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn chan open");
+            .expect("spawn chan serve");
         let stderr = Arc::new(Mutex::new(Vec::new()));
         if let Some(pipe) = child.stderr.take() {
             let sink = stderr.clone();
@@ -208,7 +208,7 @@ fn close_tears_down_the_separate_serve_process() {
     let sandbox = Sandbox::new();
     let ws = sandbox.workspace();
 
-    // Process A: a real `chan open` serve holds the workspace's writer flock, writes
+    // Process A: a real `chan serve` serve holds the workspace's writer flock, writes
     // its `{pid, …}` record (the discovery index), and opens its control socket.
     let mut serve = Serve::spawn(&sandbox, &ws);
     assert!(
@@ -264,13 +264,13 @@ fn close_tears_down_the_separate_serve_process() {
     );
 }
 
-/// `chan close --remove` on a registered-but-not-served workspace forgets it
+/// `chan workspace forget` on a registered-but-not-served workspace forgets it
 /// from the registry: the teardown is a no-op ("not served"), but --remove
 /// still unregisters -- proving the forget runs independent of the close
 /// outcome. (The teardown half of close is already proven above against a
 /// live serve; this covers the registry half without a process to tear down.)
 #[test]
-fn close_remove_forgets_an_unserved_workspace() {
+fn forget_forgets_an_unserved_workspace() {
     let sandbox = Sandbox::new();
     let ws = sandbox.workspace();
 
@@ -287,18 +287,17 @@ fn close_remove_forgets_an_unserved_workspace() {
         String::from_utf8_lossy(&add.stderr),
     );
 
-    // close --remove: nothing is serving (a no-op teardown), but the workspace
+    // workspace forget: nothing is serving (a no-op teardown), but the workspace
     // is still forgotten.
     let out = sandbox
         .command()
-        .arg("close")
-        .arg("--remove")
+        .args(["workspace", "forget"])
         .arg(&ws)
         .output()
-        .expect("run chan close --remove");
+        .expect("run chan workspace forget");
     assert!(
         out.status.success(),
-        "chan close --remove failed: status={:?}\nstdout={}\nstderr={}",
+        "chan workspace forget failed: status={:?}\nstdout={}\nstderr={}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),

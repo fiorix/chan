@@ -13,7 +13,7 @@
 //!   workspace instead of starting blank.
 //!
 //! Per-workspace serve URLs are intentionally NOT persisted: chan rotates
-//! the bearer token on every `chan open`, so a saved URL would
+//! the bearer token on every `chan serve`, so a saved URL would
 //! decay to garbage between launches. The URL lives in `AppState`
 //! in memory while a serve is running, and the desktop webview
 //! reloads it fresh on every On toggle.
@@ -837,6 +837,16 @@ fn entry_from_devserver(
     }
 }
 
+/// The identity devserver `add` dedupes on: scheme + dial host + port.
+/// Query and path are excluded on purpose: a stored URL may carry a `?t=`
+/// bearer that a later register of the same endpoint omits, and the two
+/// spellings still name one server.
+pub(crate) fn endpoint_key(url: &str) -> Option<(String, String, u16)> {
+    let (host, port) = crate::devserver::parse_devserver_url(url).ok()?;
+    let scheme = url.trim().split("://").next()?.to_ascii_lowercase();
+    Some((scheme, host, port))
+}
+
 impl DevserverRegistry for DevserverConfigRegistry {
     fn list(&self) -> Vec<DevserverEntry> {
         // Infallible by contract (mirrors the window feed): a read error
@@ -868,6 +878,38 @@ impl DevserverRegistry for DevserverConfigRegistry {
         let token = input.token.unwrap_or_default().trim().to_string();
         let mut store = self.store.lock().unwrap();
         let mut cfg = store.get().map_err(|e| e.to_string())?;
+        // Adding an endpoint that is already registered updates the row in
+        // place instead of growing a twin: label, script, and token land on
+        // the existing id, so `chan devserver register` is idempotent and a
+        // URL/label target stays resolvable. `auto_hide_control` is left
+        // alone on a merge -- it is a dialog choice about the stored row,
+        // and the register handoff never carries a meaningful value for it.
+        let key = endpoint_key(&url);
+        if key.is_some() {
+            if let Some(existing) = cfg
+                .devservers
+                .iter_mut()
+                .find(|d| endpoint_key(&d.url) == key)
+            {
+                if let Some(label) = input.label {
+                    existing.label = label;
+                }
+                if let Some(script) = input.script {
+                    existing.script = script;
+                }
+                if !token.is_empty() {
+                    existing.token = token;
+                }
+                let entry = existing.clone();
+                store.save(&cfg).map_err(|e| e.to_string())?;
+                return Ok(entry_from_devserver(
+                    &entry,
+                    &self.conns,
+                    &self.connecting,
+                    &self.feed,
+                ));
+            }
+        }
         let entry = Devserver {
             id: uuid::Uuid::new_v4().to_string(),
             url,
@@ -1203,7 +1245,7 @@ fn split_legacy_gateway_rows(cfg: &mut Config) -> GatewayMigration {
 /// Convert one persisted devserver row into a gateway entry: the row's
 /// URL origin becomes (or merges into, first non-empty label winning) a
 /// gateway, and the row is dropped - the gateway's roster supplies its
-/// devservers from here on. The `chan open` handoff probe calls this when
+/// devservers from here on. The `chan serve` handoff probe calls this when
 /// a just-registered URL answers as a gateway. `Ok(None)` when no row has
 /// `id` (removed meanwhile); an unparseable row URL is an error and the
 /// config stays untouched.

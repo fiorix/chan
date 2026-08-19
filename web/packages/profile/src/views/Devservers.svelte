@@ -221,9 +221,9 @@
   <div class="block">
     <h3>My devservers</h3>
     <p class="muted small">
-      A devserver is one of your access tokens running <code>chan devserver</code>;
+      A devserver is one of your access tokens running <code>chan devserver run</code>;
       it exposes your whole workspace library. Create one under the Tokens
-      tab, then run <code>chan devserver --tunnel-token=&lt;token&gt;</code>.
+      tab, then run <code>chan devserver run --tunnel-token=&lt;token&gt;</code>.
       Sharing grants shell-equivalent access to the whole devserver, including
       its terminals, processes, files, and every workspace it serves.
       A grantee can copy credentials or install persistence on the host.
@@ -236,7 +236,7 @@
         <p>No devservers yet.</p>
         <p class="muted small">
           Generate a token under the Tokens tab, then run
-          <code>chan devserver --tunnel-token=&lt;token&gt;</code> on the machine
+          <code>chan devserver run --tunnel-token=&lt;token&gt;</code> on the machine
           that holds your workspaces.
         </p>
       </div>
@@ -251,7 +251,7 @@
                   {#if d.online}
                     Online
                   {:else}
-                    Offline - run <code>chan devserver --tunnel-token=&lt;token&gt;</code>
+                    Offline - run <code>chan devserver run --tunnel-token=&lt;token&gt;</code>
                   {/if}
                   {#if d.grantCount > 0}
                     &middot; {d.grantCount} grant{d.grantCount === 1 ? "" : "s"}

@@ -1,6 +1,6 @@
 # browser-smoke
 
-Headless-Chrome smokes that drive a real chan test server end to end: build the SPA + binary, seed a throwaway workspace, launch `chan open`, run every check under `checks/`, and write structured results.
+Headless-Chrome smokes that drive a real chan test server end to end: build the SPA + binary, seed a throwaway workspace, launch `chan serve`, run every check under `checks/`, and write structured results.
 
 ## Run
 

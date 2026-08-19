@@ -1,8 +1,8 @@
 # chan devserver systemd user unit, shipped by the distro packages at
-# /usr/lib/systemd/user/. Mirrors the unit `chan devserver --service=systemd`
+# /usr/lib/systemd/user/. Mirrors the unit `chan devserver start --service=systemd`
 # writes to ~/.config/systemd/user/, which takes precedence per the systemd
 # user-unit search order, so the CLI-managed flow keeps working unchanged.
-# Bare `chan devserver` binds the same 127.0.0.1:8787 default the CLI uses;
+# Bare `chan devserver run` binds the same 127.0.0.1:8787 default the CLI uses;
 # the fdstore keeps live terminal PTYs across a service restart.
 
 [Unit]
@@ -14,7 +14,7 @@ Type=notify
 NotifyAccess=main
 FileDescriptorStoreMax=512
 KillMode=process
-ExecStart=/usr/bin/chan devserver
+ExecStart=/usr/bin/chan devserver run
 TimeoutStartSec=10min
 Restart=on-failure
 WatchdogSec=30

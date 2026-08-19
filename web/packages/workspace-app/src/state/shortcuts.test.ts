@@ -156,7 +156,7 @@ describe("shortcut table", () => {
     expect(native).toMatch(/^Split bottom\s+Cmd\+Shift\+\//m);
   });
 
-  // `chan open --help` prints this table verbatim (the Rust workspace pins
+  // `chan serve --help` prints this table verbatim (the Rust workspace pins
   // clap without `wrap_help`), so the capped form has a hard column budget.
   test("maxWidth moves an oversized note onto its own line", () => {
     const capped = renderTable("web", "mac", 74);

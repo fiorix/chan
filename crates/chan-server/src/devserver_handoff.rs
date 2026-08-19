@@ -1,7 +1,7 @@
 //! CLI-to-devserver workspace registration over per-instance discovery
 //! endpoints in a well-known per-user namespace.
 //!
-//! When a devserver is running on a box and the user types `chan open
+//! When a devserver is running on a box and the user types `chan serve
 //! ~/notes` in a terminal there, the natural intent is "add this workspace
 //! to the devserver," not "bind a second standalone server that fights the
 //! devserver for the workspace flock." This module is the same-user IPC
@@ -563,7 +563,7 @@ where
 ///
 /// Candidate names are sorted before probing. Probes run concurrently, and
 /// each complete round-trip has a fixed deadline, so one wedged endpoint does
-/// not delay healthy siblings or hang `chan open`.
+/// not delay healthy siblings or hang `chan serve`.
 #[cfg(any(unix, windows))]
 pub async fn discover_devservers() -> Vec<Instance> {
     let probes = devserver_candidates()

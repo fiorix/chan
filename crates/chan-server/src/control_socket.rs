@@ -399,7 +399,7 @@ pub fn pick_socket_path() -> PathBuf {
 /// unavailable".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlTenant {
-    /// A workspace mount (`chan open`, a desktop workspace tenant):
+    /// A workspace mount (`chan serve`, a desktop workspace tenant):
     /// the cell is None only transiently (storage reset window).
     Workspace,
     /// chan-desktop's workspace-less `/terminal` tenant: terminal /
@@ -487,12 +487,12 @@ fn session_refusal(what: &str) -> String {
 
 /// Friendly guidance for `cs open PATH` on a standalone terminal: it has no
 /// workspace to open the path INTO, and the user most likely wanted to load
-/// that path AS a workspace window, which is `chan open PATH`.
+/// that path AS a workspace window, which is `chan serve PATH`.
 fn chan_open_guidance(path: &Path) -> String {
     workspace_only_refusal(
         "open",
         Some(&format!(
-            "Run 'chan open {}' to load it as a workspace window.",
+            "Run 'chan serve {}' to load it as a workspace window.",
             path.display()
         )),
     )
@@ -615,7 +615,7 @@ mod tenant_gate_tests {
 
     #[test]
     fn cs_open_on_a_terminal_tenant_points_at_chan_open() {
-        // `cs open PATH` from a standalone terminal is guided to `chan open
+        // `cs open PATH` from a standalone terminal is guided to `chan serve
         // PATH`, echoing the path, and carries no em-dash (house style).
         let msg = terminal_tenant_refusal(
             &open_path("/home/u/notes"),
@@ -623,7 +623,7 @@ mod tenant_gate_tests {
             false,
         )
         .expect("cs open refuses on a terminal tenant");
-        assert!(msg.contains("chan open /home/u/notes"), "{msg}");
+        assert!(msg.contains("chan serve /home/u/notes"), "{msg}");
         assert!(!msg.contains('—'), "no em dash in guidance: {msg}");
     }
 
@@ -1166,7 +1166,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
     let terminal_registry = terminal_registry.get();
     let tenant = *tenant;
     // Single chokepoint for standalone-terminal gating: refuse the
-    // workspace-content commands here (with the friendly `chan open`
+    // workspace-content commands here (with the friendly `chan serve`
     // guidance for `cs open`) before any per-arm workspace resolution.
     if let Some(message) = terminal_tenant_refusal(&req, tenant, standalone_files.is_some()) {
         return ControlResponse::Error { message };
@@ -1493,7 +1493,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             // The library is the single authority for the window set: one
             // assembly (`assemble_window_records`) the desktop watcher, the
             // launcher, and `cs window list` all reconcile to, so they never
-            // disagree. A standalone `chan open` serve has no host and thus no
+            // disagree. A standalone `chan serve` serve has no host and thus no
             // library window set -- the honest answer is empty.
             let records = match unserve {
                 UnserveScope::Host(weak) => weak
@@ -1711,12 +1711,12 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
 
 /// Tear down whatever this process serves for `path`, the server side of
 /// `chan close`. The scope (built at mount time) decides: a standalone
-/// `chan open` serve of that root fires its graceful-shutdown signal so the
+/// `chan serve` serve of that root fires its graceful-shutdown signal so the
 /// process exits and the flock releases; a multi-tenant host unmounts just
 /// that tenant; an opt-out process refuses. The response still flushes before
 /// a standalone process drains and exits.
 ///
-/// `remove` carries `chan close --remove` (and `chan workspace rm`) through to
+/// `remove` carries `chan workspace forget` (and `chan workspace forget`) through to
 /// a HOST: it then also UNREGISTERS the workspace from its library + overlay
 /// (so a devserver-served workspace disappears from the launcher and does not
 /// survive a restart), not just unmounts it. A standalone serve ignores it --
@@ -3562,7 +3562,7 @@ async fn handle_tunnel<R, W>(
     };
 
     // The registry lives on the host, which is also what makes a tunnel
-    // possible at all: a standalone `chan open` has no window a desktop owns.
+    // possible at all: a standalone `chan serve` has no window a desktop owns.
     let host = match &ctx.unserve {
         UnserveScope::Host(weak) => weak.upgrade(),
         UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
@@ -4645,7 +4645,7 @@ pub(crate) fn open_path_standalone(
 ///
 /// The refusal survives where there is nothing to route to: a standalone `chan
 /// open` has no host at all, and a host whose terminal tenant mounted no
-/// filesystem has nowhere to put the path. Both keep pointing at `chan open
+/// filesystem has nowhere to put the path. Both keep pointing at `chan serve
 /// PATH`, which loads it AS a workspace -- the answer that was always right
 /// when no surface could show it.
 async fn route_open_outside_workspace(
@@ -4720,7 +4720,7 @@ fn describe_outside_open(ack: &chan_library::OpenOutsideAck) -> String {
 fn escape_guidance(path: &Path) -> String {
     format!(
         "path escapes workspace root, and this host serves no filesystem to open it in. \
-         Run 'chan open {}' to load it as a workspace window.",
+         Run 'chan serve {}' to load it as a workspace window.",
         path.display()
     )
 }
@@ -5609,7 +5609,7 @@ mod tests {
     async fn cs_open_on_a_terminal_tenant_guides_to_chan_open() {
         // `cs open PATH` from a standalone terminal has no workspace to open
         // into; instead of the generic refusal, handle_request surfaces the
-        // friendly `chan open PATH` guidance (the gate runs before any
+        // friendly `chan serve PATH` guidance (the gate runs before any
         // workspace resolution).
         let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
         let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
@@ -5626,7 +5626,7 @@ mod tests {
 
         match response {
             ControlResponse::Error { message } => {
-                assert!(message.contains("chan open /home/u/notes"), "{message}");
+                assert!(message.contains("chan serve /home/u/notes"), "{message}");
             }
             other => panic!("unexpected non-error response: {other:?}"),
         }
@@ -7060,12 +7060,12 @@ mod tests {
         // guidance that was always right when no surface could show the path.
         let message = route_escape(None).await;
         assert!(message.contains("path escapes workspace root"), "{message}");
-        assert!(message.contains("chan open /etc/hosts"), "{message}");
+        assert!(message.contains("chan serve /etc/hosts"), "{message}");
     }
 
     #[tokio::test]
     async fn a_standalone_serve_has_no_host_to_route_through() {
-        // `chan open ROOT` mounts one workspace and no library: there is no
+        // `chan serve ROOT` mounts one workspace and no library: there is no
         // host, so the answer is the same guidance rather than a panic.
         let session_registry = SessionRegistry::new();
         let (events_tx, _rx) = broadcast::channel(4);
@@ -7079,7 +7079,7 @@ mod tests {
         .await;
         match response {
             ControlResponse::Error { message } => {
-                assert!(message.contains("chan open /tmp/x"), "{message}")
+                assert!(message.contains("chan serve /tmp/x"), "{message}")
             }
             other => panic!("expected the guidance, got {other:?}"),
         }
@@ -8914,7 +8914,7 @@ position = { row = 0, col = 1 }
 
     #[tokio::test]
     async fn a_hostless_server_says_where_tunnels_live() {
-        // A standalone `chan open` owns no window a desktop could answer for.
+        // A standalone `chan serve` owns no window a desktop could answer for.
         let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
         let (task, mut client) =
             spawn_tunnel(ctx, tunnel_request("127.0.0.1", chan_revtunnel::Proto::Tcp));

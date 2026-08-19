@@ -61,7 +61,7 @@ const devservers: MockDevserver[] = [
     host: "box.example.com",
     port: 8787,
     label: "prod",
-    script: "ssh box.example.com -L 8787:localhost:8787 chan devserver --join",
+    script: "ssh box.example.com -L 8787:localhost:8787 chan devserver join",
     has_token: true,
     token: "tok_seeded_prod",
     library_id: DS_LIBRARY_ID,

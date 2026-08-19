@@ -127,7 +127,7 @@ Six things bite in practice, all found on the first real run:
 | `/repo/target/debug/chan: No such file or directory` | The suite resolves the binary through `CARGO_TARGET_DIR` when it is set. Point it at a writable guest-local path such as `/var/tmp/chan-target` when the source is read-only; otherwise leave it unset to use `$REPO/target`. |
 | `fatal: not a git repository: /repo/C:/...` | The Windows linked-worktree `.git` pointer; see the filesystem notes below. Use a WSL clone. |
 
-A passing run prints `PASS: all 8 cases at <sha>` and asserts the fd-store count after every phase -- restart, CLI restart, watchdog `SIGSTOP`, `kill -9` crash restore, session close, stop, `--restart --force`, and bare stop.
+A passing run prints `PASS: all 8 cases at <sha>` and asserts the fd-store count after every phase -- restart, CLI restart, watchdog `SIGSTOP`, `kill -9` crash restore, session close, stop, `restart --force`, and bare stop.
 
 ### Filesystem + performance notes
 

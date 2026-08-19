@@ -228,7 +228,7 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 700 "$UNIT_DIR"
 # verbs typed inside the workspace resolve the same gateway instead of asking
 # for an endpoint. Absent an endpoint neither appears, so the line carries its
 # own trailing newline and expands to nothing at all.
-EXEC="$CHAN_BIN devserver"
+EXEC="$CHAN_BIN devserver run"
 TUNNEL_URL_ENV=""
 if [ -n "$TUNNEL_URL" ]; then
   EXEC="$EXEC --tunnel-url=$TUNNEL_URL"

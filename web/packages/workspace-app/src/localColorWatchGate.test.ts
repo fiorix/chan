@@ -3,7 +3,7 @@ import app from "./App.svelte?raw";
 
 // The per-library focus-colour watch route lives only on the root launcher
 // router (desktop embedded host / headless devserver). A standalone
-// `chan open` server never mounts it, so an unconditional subscription
+// `chan serve` server never mounts it, so an unconditional subscription
 // 404s the WS handshake into an endless 500ms -> 8s reconnect loop. The
 // SPA must open the socket only on a launcher-hosted (desktop) surface.
 

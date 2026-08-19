@@ -1,7 +1,7 @@
 // VCS-parent detection: is the workspace path inside a Git / Mercurial /
 // Subversion working tree?
 //
-// Used by `chan open` to nudge users toward serving the repo root
+// Used by `chan serve` to nudge users toward serving the repo root
 // instead of an arbitrary subdir. If the workspace's notes live inside
 // `~/code/myproject/docs/notes`, the user almost always wants
 // `~/code/myproject` as the workspace root so cross-file links, graph,
@@ -97,7 +97,7 @@ pub(crate) fn detect_parent_vcs_with_home(path: &Path, home: Option<PathBuf>) ->
     let start_dev = dev_of(&start);
 
     // Skip the leaf: only inspect strict ancestors. If the leaf is
-    // itself a repo root, we want to return None so `chan open`
+    // itself a repo root, we want to return None so `chan serve`
     // proceeds without prompting the user.
     let mut iter = start.ancestors();
     let _leaf = iter.next();
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn handles_nonexistent_leaf() {
-        // `chan open` may pass a path that doesn't exist yet
+        // `chan serve` may pass a path that doesn't exist yet
         // (auto-creation happens later in cmd_serve). Detection
         // should still walk the existing ancestors.
         let tmp = TempDir::new().unwrap();

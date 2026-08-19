@@ -1,7 +1,7 @@
 //! Persisted bearer token + axum middleware that gates `/api/*` and `/ws`.
 //!
 //! Token persistence lives at `<paths.tokens>/token` (mode 0600 on Unix)
-//! so a `cargo build && chan open` cycle does not invalidate the
+//! so a `cargo build && chan serve` cycle does not invalidate the
 //! browser's cached sessionStorage token. Atomic write goes through
 //! chan-workspace's `fs_ops::atomic_write` so the parent-dir fsync invariant
 //! matches the rest of the app.
@@ -40,7 +40,7 @@ pub fn random_token() -> String {
 /// Load the persisted server token, generating one on first run.
 /// Lives at `<paths.tokens>/token` (mode 0600 on Unix). The token
 /// survives a binary rebuild so the browser's cached sessionStorage
-/// token stays valid across `cargo build && chan open` cycles.
+/// token stays valid across `cargo build && chan serve` cycles.
 pub fn load_or_create_token(paths: &WorkspacePaths) -> std::io::Result<String> {
     ensure_tokens_dir(&paths.tokens)?;
     let token_path = paths.tokens.join("token");

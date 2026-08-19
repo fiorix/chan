@@ -44,7 +44,7 @@ There are four workspace attachment modes:
 - **Gateway roster**: an account-level gateway connection whose authenticated devserver roster the desktop projects into the launcher (section 6.7).
 - **Outbound URL**: an already-running chan server opened by URL. A backend-only path (config, commands, connecting screen) with no launcher surface.
 
-There is no fallback serve mode. A terminal `chan open <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock.
+There is no fallback serve mode. A terminal `chan serve <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock.
 
 ## 3. Workspace lifecycle
 
@@ -114,7 +114,7 @@ The local runtime:
 - opens one workspace webview automatically, with additional Open clicks opening more windows for the same runtime (capped per workspace),
 - closes all of the workspace's windows when the runtime is toggled off.
 
-A workspace already open in another chan process (a standalone `chan open`, or a second desktop) surfaces as a clear "open in another chan process" error and the toggle reverts; a quick off-then-on retries briefly so the previous handle can release its lock.
+A workspace already open in another chan process (a standalone `chan serve`, or a second desktop) surfaces as a clear "open in another chan process" error and the toggle reverts; a quick off-then-on retries briefly so the previous handle can release its lock.
 
 ### 3.4 Toggle Off (stop)
 
@@ -126,9 +126,9 @@ Stops the serve (if running), then unregisters the workspace through `chan-works
 
 ### 3.6 External changes
 
-Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan workspace add` / `chan workspace rm` from a terminal, a second chan-desktop process, or hand-editing the TOML.
+Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan workspace add` / `chan workspace forget` from a terminal, a second chan-desktop process, or hand-editing the TOML.
 
-For an external `chan open` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. The desktop does not adopt that server; outbound URL attach is a backend-only path with no launcher surface (section 11.1).
+For an external `chan serve` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. The desktop does not adopt that server; outbound URL attach is a backend-only path with no launcher surface (section 11.1).
 
 ## 4. Validation
 
@@ -145,7 +145,7 @@ Local workspaces open through the embedded chan-server `WorkspaceHost`, which ow
 
 The embedded server also owns one process-wide local extension runtime shared by every mounted workspace. It starts declarations once when the server starts and shuts their process groups down after hosted tenants drain. Extension HTTP is reverse-proxied under each workspace tenant, so webviews remain on the embedded server's existing origin and no loopback-any-port frame source is required. Note the configured Tauri CSP governs only the custom protocol: workspace windows load the SPA via `WebviewUrl::External` over `http://127.0.0.1`, so no CSP applies to those windows today; `'self'` was added to the configured `frame-src` purely as insurance against a future switch to the asset protocol.
 
-The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan open` processes are supported as explicit remote attachments (section 11), not as a local serving dependency.
+The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan serve` processes are supported as explicit remote attachments (section 11), not as a local serving dependency.
 
 ## 6. Window model
 
@@ -214,7 +214,7 @@ Outbound windows do not load the remote URL directly: a down remote would paint 
 
 ### 6.5 Standalone terminal windows
 
-Standalone terminal windows host the SPA in terminal-only mode (`kind=terminal`: no workspace fetch, terminal panes only). All of them load the ONE shared `/terminal` tenant of the embedded server, mounted on first use and never torn down per window: PTYs live in a single registry, so a terminal tab moved between windows keeps its live PTY, and orphaned PTYs idle-prune. There is no registry entry and no On-toggle lifecycle. Sessions inherit chan-server's terminal contract, including the `cs` control socket, so `cs` works inside a desktop terminal exactly as under a standalone `chan open`. The close button buries the window while shells are live and really closes it when none are left.
+Standalone terminal windows host the SPA in terminal-only mode (`kind=terminal`: no workspace fetch, terminal panes only). All of them load the ONE shared `/terminal` tenant of the embedded server, mounted on first use and never torn down per window: PTYs live in a single registry, so a terminal tab moved between windows keeps its live PTY, and orphaned PTYs idle-prune. There is no registry entry and no On-toggle lifecycle. Sessions inherit chan-server's terminal contract, including the `cs` control socket, so `cs` works inside a desktop terminal exactly as under a standalone `chan serve`. The close button buries the window while shells are live and really closes it when none are left.
 
 ### 6.6 Remote windows
 
@@ -232,7 +232,7 @@ For an allowed row, the desktop asks the gateway entry endpoint for that explici
 
 Non-goal: chan-desktop installation should be "drag Chan.app to /Applications". No installer, no scripts.
 
-chan-desktop is also the `chan` / `cs` command line: on boot it owns `~/.local/bin/{chan,cs}` shims that resolve to the running desktop binary, so a desktop install gives you `chan open` and the shell-first workflows with nothing extra to download. A standalone `chan` (the `chan.app/install.sh` installer or a release tarball) is still available and independent; the two share the same `~/.chan` registry, so a workspace added by one shows up in the other.
+chan-desktop is also the `chan` / `cs` command line: on boot it owns `~/.local/bin/{chan,cs}` shims that resolve to the running desktop binary, so a desktop install gives you `chan serve` and the shell-first workflows with nothing extra to download. A standalone `chan` (the `chan.app/install.sh` installer or a release tarball) is still available and independent; the two share the same `~/.chan` registry, so a workspace added by one shows up in the other.
 
 The shims are installed on boot per package kind: a macOS `.app` or Linux deb/rpm gets real symlinks to the installed binary; a Linux AppImage gets tiny `exec -a` wrapper scripts, because `current_exe()` inside an AppImage is the ephemeral mount. Both names resolve to the same binary, and the argv[0] stem dispatch (`chan_shell::invoked_arg0`, which prefers `$ARGV0` over `argv[0]` so an AppImage that lost argv[0] to `AppRun` still reaches the inner CLI instead of the GUI) selects the CLI / control-client / GUI path. Best-effort, idempotent, and self-healing: a shim we wrote is re-pointed or rewritten on the next launch when it goes stale (the binary moved, the AppImage updated), and a `chan` / `cs` the user installed themselves is never clobbered.
 

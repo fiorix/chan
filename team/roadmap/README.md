@@ -19,7 +19,11 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.94.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [cli-grammar-noun-families](v0.94.0/cli-grammar-noun-families.md) | implemented and verified on `feat/cli-grammar` | land the branch; carry the deferred remote workspace arms (`--devserver TARGET` on workspace serve/close/forget) as follow-up scope once the flag-name collision with serve's local `--devserver` selector has an owner ruling |
 
 ## Completed
 

@@ -6,7 +6,7 @@
 //! `chan-workspace` and `chan-server` directly; there is no `chan`
 //! binary at runtime. Registry mutations and feature toggles run
 //! in-process against the embedded host's shared `Library`, and
-//! local serving never spawns `chan open`.
+//! local serving never spawns `chan serve`.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;

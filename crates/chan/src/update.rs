@@ -1,15 +1,15 @@
 // Self-upgrade for chan. Three pieces:
 //
-//   1. Banner. On `chan open` startup, [`maybe_print_banner`] reads
+//   1. Banner. On `chan serve` startup, [`maybe_print_banner`] reads
 //      the cached state file and prints a one-line stderr banner if a
 //      newer release is known. No network access; the probe is what
 //      populates the cache.
 //   2. Probe. [`run_probe`] is spawned as a tokio task at the start
-//      of `chan open`. It reads complete-release CLI metadata with
+//      of `chan serve`. It reads complete-release CLI metadata with
 //      a short timeout, writes the result to the state file,
 //      and prints the banner inline if the just-fetched version is
 //      newer than the running binary's. Throttled to once per
-//      [`PROBE_INTERVAL_HOURS`] across `chan open` restarts.
+//      [`PROBE_INTERVAL_HOURS`] across `chan serve` restarts.
 //   3. `chan upgrade`. [`run_upgrade`] resolves the running binary
 //      via [`std::env::current_exe`], reads complete-release CLI
 //      metadata, downloads the archive for the current target into a
@@ -24,7 +24,7 @@
 // upgrade path. Offline / proxy hosts:
 // reqwest honors HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
 // from the environment, and probe failures are swallowed (verbose
-// only) so an air-gapped `chan open` keeps working.
+// only) so an air-gapped `chan serve` keeps working.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -43,10 +43,10 @@ const CLI_LATEST_METADATA_URL: &str = "https://chan.app/dl/cli/latest.json";
 /// Disable the probe (banner still prints from cached state).
 const ENV_DISABLE: &str = "CHAN_UPDATE_CHECK";
 
-/// How often to re-probe across `chan open` restarts.
+/// How often to re-probe across `chan serve` restarts.
 const PROBE_INTERVAL_HOURS: u64 = 24;
 
-/// Probe timeouts. Short enough that a chan open in a sandbox /
+/// Probe timeouts. Short enough that a chan serve in a sandbox /
 /// no-network environment doesn't stall the banner path.
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -602,7 +602,7 @@ fn probe_due(state: Option<&State>) -> bool {
 }
 
 /// Background probe. Designed to be `tokio::spawn`'d from
-/// `chan open` startup. Swallows errors so an offline / proxied
+/// `chan serve` startup. Swallows errors so an offline / proxied
 /// host stays silent; failures are logged at `debug` so they're
 /// visible under `RUST_LOG=debug` / `chan -vv`.
 pub async fn run_probe() {
@@ -689,7 +689,7 @@ fn action_words(target: &str, current: &str) -> (&'static str, &'static str) {
 ///
 /// The running process is still the **old** binary; the replacement
 /// only takes effect on the next launch. If we stored the true
-/// latest version here, a subsequent `chan open` launched from the
+/// latest version here, a subsequent `chan serve` launched from the
 /// same shell session would not print the "update available"
 /// banner, but the running session would, since cached `latest >
 /// current` for the still-old in-memory version. We zero out

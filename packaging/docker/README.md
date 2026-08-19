@@ -79,13 +79,13 @@ For pre-tag validation, dispatch `publish-downstream` on the candidate branch wi
 docker run --rm -p 8787:8787 -v "$PWD:/workspace" chan:dev
 ```
 
-Serves the mounted folder on `0.0.0.0:8787`. The bearer-token gate stays on; the token is printed on stderr and persisted under the workspace data dir. The subcommands are `open` (one workspace) and `devserver` (many); there is no `chan serve`.
+Serves the mounted folder on `0.0.0.0:8787`. The bearer-token gate stays on; the token is printed on stderr and persisted under the workspace data dir. The subcommands are `serve` (one workspace) and `devserver run` (many).
 
 ### chan: devserver dialing a gateway tunnel
 
 ```sh
 docker run --rm -e CHAN_TUNNEL_TOKEN=chan_pat_... chan:dev \
-    devserver --bind 0.0.0.0 \
+    devserver run --bind 0.0.0.0 \
     --tunnel-url https://devserver.example.com/v1/tunnel
 ```
 

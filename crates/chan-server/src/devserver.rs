@@ -1,7 +1,7 @@
 //! Headless multi-workspace devserver.
 //!
 //! `run_devserver` binds a [`WorkspaceHost`] to a real address and adds two
-//! surfaces a desktop client and the `chan open` CLI drive over it:
+//! surfaces a desktop client and the `chan serve` CLI drive over it:
 //!
 //! - A management HTTP/JSON API under the reserved `/api/devserver/*`
 //!   namespace ([`crate::devserver_api`]): list, mount, forget workspaces
@@ -12,7 +12,7 @@
 //!   management routes match before the per-tenant fallback, and the only
 //!   reserved top-level slug is `api`.
 //! - A per-user discovery namespace ([`crate::devserver_handoff`]): each local
-//!   instance publishes a stable endpoint, and `chan open <path>` selects one,
+//!   instance publishes a stable endpoint, and `chan serve <path>` selects one,
 //!   registers the workspace there, then exits instead of binding a second
 //!   server, so the devserver owns the single-writer flock.
 //!
@@ -859,7 +859,7 @@ impl DevserverState {
         }
     }
 
-    /// Fold host-level `chan close` / `chan close --remove` intent into the
+    /// Fold host-level `chan close` / `chan workspace forget` intent into the
     /// devserver's pending record before it opens or publishes a tenant.
     ///
     /// Those commands reach [`WorkspaceHost`] directly through the control
@@ -1030,7 +1030,7 @@ impl DevserverState {
         prefix: &str,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        // Devserver Forget is destructive: it is `chan workspace rm`,
+        // Devserver Forget is destructive: it is `chan workspace forget`,
         // unmount-if-running, then UNREGISTER from the host
         // library (reset Everything + bin the trash). The host library is the
         // single registry, so the workspace then disappears everywhere
@@ -1260,7 +1260,7 @@ impl DevserverState {
         // while still mounted) must still surface so a live mount never
         // silently vanishes from the list. Once the host has also unmounted it,
         // the stale devserver map row is not a real workspace anymore; this is
-        // the control-socket `chan close --remove` path.
+        // the control-socket `chan workspace forget` path.
         for (root, entry) in &by_root {
             if !seen.contains(root) && entry.on {
                 entries.push(entry.clone());
@@ -1726,7 +1726,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         .map_err(anyhow::Error::msg)?;
 
     // A discovery bind failure is non-fatal: the management API still works,
-    // only `chan open` registration is disabled. Tunnel-only instances have no
+    // only `chan serve` registration is disabled. Tunnel-only instances have no
     // bound TCP address, so their configured port (possibly zero) is their
     // local selector identity.
     let discovery_port = local_addr.unwrap_or(config.addr).port();
@@ -2450,7 +2450,7 @@ async fn handle_set_workspace_on(
 }
 
 /// Explicitly end every terminal session and wait, bounded, until the child
-/// processes are observably dead. `chan devserver --stop` drains through
+/// processes are observably dead. `chan devserver stop` drains through
 /// here before `systemctl stop`, and `--restart --force` before its
 /// destructive bounce; the response never claims completion for a child
 /// that is still running (`lingering`).
@@ -3204,8 +3204,8 @@ mod tests {
                 .remove_workspace_for_root(workspace.path(), false),
         )
         .await
-        .expect("chan close --remove must be bounded")
-        .expect("chan close --remove");
+        .expect("chan workspace forget must be bounded")
+        .expect("chan workspace forget");
         assert!(removed.completed());
         assert!(
             !mount.is_finished(),
@@ -3415,8 +3415,8 @@ mod tests {
     #[tokio::test]
     async fn port_zero_bind_resolves_to_a_concrete_port() {
         // The ready line reports `listener.local_addr()`, not the requested
-        // addr, so `chan devserver --port 0` prints the OS-assigned port (the
-        // shape `chan open` reports) instead of `:0`.
+        // addr, so `chan devserver run --port 0` prints the OS-assigned port (the
+        // shape `chan serve` reports) instead of `:0`.
         let requested: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(requested).await.unwrap();
         let local_addr = listener.local_addr().unwrap_or(requested);
@@ -4432,7 +4432,7 @@ mod tests {
     #[tokio::test]
     async fn forget_is_destructive_and_removes_from_the_host_library() {
         let _env = chan_home_env_read();
-        // Devserver Forget is destructive: it is `chan workspace rm`
+        // Devserver Forget is destructive: it is `chan workspace forget`
         // (unmount-if-on + unregister from the host library
         // + bin the trash). The host library is the single registry, so the
         // workspace then disappears from the listing too. (`set_workspace_on
@@ -4613,7 +4613,7 @@ mod tests {
     #[tokio::test]
     async fn host_remove_is_not_resurrected_by_a_later_persist() {
         let _env = chan_home_env_read();
-        // `chan close --remove` routes through the HOST (remove_workspace_for_root),
+        // `chan workspace forget` routes through the HOST (remove_workspace_for_root),
         // which the devserver in-memory map never sees. A later persist_state (here,
         // a new registration) must NOT re-grow the removed workspace into the
         // overlay from that stale map -- persist reconciles against the library.
@@ -4758,7 +4758,7 @@ mod tests {
     #[tokio::test]
     async fn host_remove_drops_row_from_listing_immediately() {
         let _env = chan_home_env_read();
-        // `chan close --remove` reaches the host directly too. The host removes
+        // `chan workspace forget` reaches the host directly too. The host removes
         // the library row and unmounts the tenant, while DevserverState still
         // has its old map record. The management list must not surface that
         // stale record after removal.

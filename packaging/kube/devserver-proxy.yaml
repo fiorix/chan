@@ -4,7 +4,7 @@
 # The aggregate /admin/v1/* tree lives on devserver-control, not here.
 #
 # Two ports: 7002 carries HTTP (apex + wildcard, dispatched on Host); 7100 is the
-# h2c tunnel-registration listener that `chan devserver --tunnel-url` dials.
+# h2c tunnel-registration listener that `chan devserver run --tunnel-url` dials.
 # The pod admits no tunnel until its control session to devserver-control
 # (DEVSERVER_CONTROL_URL, DEVSERVER_PROXY_TOKEN, DEVSERVER_PROXY_ID from the
 # ConfigMap/Secret) is established.

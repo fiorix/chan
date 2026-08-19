@@ -83,7 +83,7 @@ export CHAN_TUNNEL_TOKEN=chan_pat_...
 export SSL_CERT_FILE="$PWD/packaging/gateway/scripts/dev/secrets/tls/ca.crt"
 
 cargo run -p chan -- workspace add <some-workspace-dir>
-cargo run -p chan -- devserver \
+cargo run -p chan -- devserver run \
   --tunnel-url=https://127.0.0.1:17100/v1/tunnel \
   --tunnel-devserver-name=blog
 ```

@@ -4,7 +4,7 @@
 //! closing, hiding, and renaming OS windows are desktop operations: they
 //! need the Tauri `AppHandle`, which only the desktop process owns. The
 //! embedded server runs in that same process but is handed no
-//! `AppHandle` (and chan-server must stay Tauri-free so `chan open`
+//! `AppHandle` (and chan-server must stay Tauri-free so `chan serve`
 //! builds standalone). So the desktop installs a [`DesktopBridge`]: an
 //! mpsc channel the control socket sends [`DesktopWindowOp`]s down, plus
 //! the shared title map (see [`crate::window_titles`]). Each op carries a
@@ -12,7 +12,7 @@
 //! result exactly like the existing window-bus round-trips -- but without
 //! bouncing through the SPA.
 //!
-//! In standalone `chan open` the channel is absent ([`DesktopBridge`]'s
+//! In standalone `chan serve` the channel is absent ([`DesktopBridge`]'s
 //! `window_ops` is `None`); every lifecycle op then refuses with
 //! [`NO_DESKTOP`]. The `None` *is* the "no desktop attached" invariant,
 //! encoded in the type rather than a runtime flag.

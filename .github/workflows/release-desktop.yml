@@ -189,7 +189,7 @@ jobs:
           # (its `web` target depends on `web-launcher`).
           (cd web && npm install && npm run build -w @chan/launcher && npm run build -w @chan/workspace-app)
           # Build the console-subsystem `chan.exe` CLI (a real terminal program:
-          # `chan devserver` then BLOCKS and takes Ctrl-C, unlike the
+          # `chan devserver run` then BLOCKS and takes Ctrl-C, unlike the
           # GUI-subsystem chan-desktop.exe, which detaches when launched from
           # PowerShell). The shims (cs_install.rs) re-point at it when present.
           cargo build --release -p chan
@@ -254,7 +254,7 @@ jobs:
           set -uo pipefail
           # The desktop binary dispatches the chan CLI when its arg0 stem is
           # `chan` (ARGV0 wins over argv[0] -- chan_shell::invoked_arg0). Off
-          # unix, `chan open <path>` has no desktop GUI to hand off to, so it
+          # unix, `chan serve <path>` has no desktop GUI to hand off to, so it
           # serves a normal standalone server -- the headless proof that the
           # Windows-built embedded server boots and answers. The interactive
           # GUI install is deferred to @@Alex on real hardware; there is no
@@ -262,7 +262,7 @@ jobs:
           exe="target/release/chan-desktop.exe"
           ws="$RUNNER_TEMP/chan-smoke-ws"   # outside the checkout: no VCS-parent refusal
           mkdir -p "$ws"
-          ARGV0=chan CHAN_NO_DESKTOP_HANDOFF=1 "$exe" open \
+          ARGV0=chan CHAN_NO_DESKTOP_HANDOFF=1 "$exe" serve \
             --no-browser --no-token --port 8799 "$ws" &
           srv=$!
           ok=

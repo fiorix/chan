@@ -7,7 +7,7 @@
 //!
 //! Auth: every `/api/*` route is gated by a bearer token. The
 //! token is persisted at `<state>/tokens/<workspace-key>` (mode 0600 on
-//! Unix) so a `cargo build && chan open` cycle does not invalidate
+//! Unix) so a `cargo build && chan serve` cycle does not invalidate
 //! the browser's cached sessionStorage token. Clients pass it as
 //! `?t=TOKEN` query string or `Authorization: Bearer TOKEN` header.
 //! Pass `--no-token` to disable; loopback bind is the only check
@@ -268,7 +268,7 @@ struct AppArtifacts {
 
 /// Fan one `ProgressEvent` out to several sinks. Used by `build_app`
 /// to tee the indexer's progress to both the WebSocket broadcast (the
-/// web UI's indexer pill) and stderr (so a foreground `chan open` on
+/// web UI's indexer pill) and stderr (so a foreground `chan serve` on
 /// a large tree isn't silent).
 struct TeeProgress(Vec<Arc<dyn ProgressCallback>>);
 
@@ -289,7 +289,7 @@ const STDERR_PROGRESS_MIN_ELAPSED: Duration = Duration::from_millis(800);
 /// fast index loop emits a readable trickle rather than a flood.
 const STDERR_PROGRESS_INTERVAL: Duration = Duration::from_millis(750);
 
-/// Concise indexing progress on stderr for a cold-start `chan open`.
+/// Concise indexing progress on stderr for a cold-start `chan serve`.
 /// The launch URL is printed immediately (the server is usable at
 /// once); these lines stream underneath it so the user can see what
 /// chan is doing on a large tree. Self-gates on elapsed time so fast
@@ -544,7 +544,7 @@ async fn build_app_with_extensions(
     let scope_registry = Arc::new(bus::ScopeRegistry::new());
     // Detect a cold (empty) index before the potentially slow pre-URL work
     // (the watcher registration on a large tree). On a cold start, print one
-    // heads-up line here so a foreground `chan open` on a large tree shows a
+    // heads-up line here so a foreground `chan serve` on a large tree shows a
     // sign of life instead of a silent gap before the URL. A warm restart
     // leaves the index non-empty and stays quiet. The same flag gates the
     // stderr progress tee below.
@@ -979,7 +979,7 @@ async fn build_terminal_app(
     // pane / survey / window commands work, and so do the cwd-scoped
     // upload / download; workspace-content commands (open / graph /
     // search / team) refuse with the terminal-only message, except
-    // `cs open` which points at `chan open {path}`. The buses are shared with AppState below
+    // `cs open` which points at `chan serve {path}`. The buses are shared with AppState below
     // so SPA replies (`/api/window/reply`, `/api/survey/reply`)
     // complete the blocked `cs pane` / `cs terminal survey` calls.
     // Socket paths are pid+random-suffixed (`/tmp/chan-control-<pid>-
@@ -1706,7 +1706,7 @@ pub async fn serve(
         "boot: listener bound"
     );
     let extension_runtime = ExtensionRuntime::start().await;
-    // Standalone `chan open`: no desktop attached, so no window-ops
+    // Standalone `chan serve`: no desktop attached, so no window-ops
     // bridge and an empty (unwritten) title map. No stable control
     // identity either -- a window-spawned serve's control socket dies
     // with the process by design.

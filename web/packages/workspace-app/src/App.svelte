@@ -374,7 +374,7 @@
     // Launcher-hosted surfaces only: the watch route lives on the root
     // launcher router, mounted by the desktop embedded host and the headless
     // devserver, the hosts every desktop window is served from. A standalone
-    // `chan open` server never mounts it, so subscribing there just 404s the
+    // `chan serve` server never mounts it, so subscribing there just 404s the
     // handshake into the endless reconnect backoff. Same gating idea as the
     // sibling theme watch below (whose terminal-only windows are also
     // desktop-minted).

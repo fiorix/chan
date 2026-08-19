@@ -478,7 +478,7 @@ mod windows_shim {
     /// makes `chan_shell::invoked_arg0()` report `<name>` so the CLI / control
     /// client dispatch fires before any GUI init. `set "CHAN_DESKTOP_HANDOFF=1"`
     /// opts the bundled console `chan.exe` (a `Standalone`-personality binary)
-    /// into the CLI-to-desktop handoff, so `chan open <ws>` hands off to the
+    /// into the CLI-to-desktop handoff, so `chan serve <ws>` hands off to the
     /// running desktop instead of binding its own port -- matching the
     /// macOS/Linux desktop shim (which re-execs the desktop binary directly).
     /// `%*` forwards the args; `exit /b` propagates the child's exit code. CRLF
@@ -500,7 +500,7 @@ mod windows_shim {
     /// `bash`/`sh`) runs for a bare `chan` / `cs`, since such shells do not
     /// consult `PATHEXT` and so will not run `chan.cmd` as `chan`. Exports
     /// `ARGV0=<name>` -- `chan_shell::invoked_arg0()` reads it ahead of
-    /// `argv[0]` -- and `CHAN_DESKTOP_HANDOFF=1` so `chan open` hands off to the
+    /// `argv[0]` -- and `CHAN_DESKTOP_HANDOFF=1` so `chan serve` hands off to the
     /// running desktop (see [`wrapper_script`]), then execs the target. Same
     /// ARGV0 mechanism as the Linux AppImage wrapper. Forward-slash target so
     /// MSYS parses the path (backslashes are sh escapes); LF endings.

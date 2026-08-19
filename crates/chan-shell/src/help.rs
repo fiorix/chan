@@ -415,7 +415,7 @@ CAVEATS:
   the file still opens on the machine surface, which can show any path.
 
   A host that serves no filesystem has nowhere to route to, so there
-  the command still refuses and points at 'chan open PATH', which loads
+  the command still refuses and points at 'chan serve PATH', which loads
   the path AS a workspace window. A path whose parent does not exist
   errors either way. --pane and --side default to the target's active
   pane and visible side at dequeue time, and are dropped on a routed
@@ -423,7 +423,7 @@ CAVEATS:
   file went to.
 
 SEE ALSO:
-  cs graph, cs search, cs terminal new, chan open; chan dump-skill --topic
+  cs graph, cs search, cs terminal new, chan serve; chan dump-skill --topic
   open.
 "#;
 
@@ -730,8 +730,8 @@ scrollback. `terminal new --path` works there too when the host serves
 a filesystem, resolving the path through the same root the window's
 file browser walks; `terminal team` refuses, for want of a workspace
 tree to write into. That makes a standalone terminal fully automatable
-and the right place to manage the chan library itself (`chan open`,
-`chan close`, `chan close --remove`, `chan ps`), while indexed work
+and the right place to manage the chan library itself (`chan serve`,
+`chan close`, `chan workspace forget`, `chan ps`), while indexed work
 belongs in a workspace window, where the graph, search, export and
 session commands exist.
 "#;
@@ -1756,7 +1756,7 @@ CAVEATS:
   desktop attached they refuse with "window management requires the
   chan desktop app". `rm` still works headless, because the server
   (not the desktop) owns the registry row.
-  A standalone `chan open` serve has no library window set, so
+  A standalone `chan serve` serve has no library window set, so
   `cs window list` is empty there.
   Subcommands infer (`cs w l`, `cs w n`, `cs w o`, `cs w r`), but
   `hide` needs at least `cs w hi`: a bare `h` is ambiguous with

@@ -1,7 +1,7 @@
 //! CLI-to-desktop workspace handoff over a well-known per-user endpoint:
 //! a Unix-domain socket on unix, a named pipe on Windows.
 //!
-//! When chan-desktop is running and the user types `chan open
+//! When chan-desktop is running and the user types `chan serve
 //! ~/notes` in a terminal, the natural intent is "show me this workspace
 //! in the app," not "fail because the desktop already holds the
 //! per-workspace flock." This module is the same-user IPC channel that
@@ -97,7 +97,7 @@ pub enum Request {
         cli_version: String,
         check_only: bool,
     },
-    /// Ask the desktop to register a devserver by URL -- the `chan open {url}`
+    /// Ask the desktop to register a devserver by URL -- the `chan devserver register {url}`
     /// handoff. The desktop writes the `{url, name, script}` entry into the same
     /// config its launcher devserver registry reads; the launcher's Connect
     /// button drives the dial (the CLI does not auto-connect). The CLI sends
@@ -115,7 +115,7 @@ pub enum Request {
         script: Option<String>,
     },
     /// Ask the running desktop to tear down the workspace it serves at
-    /// `workspace_path` -- the `chan close` / `chan workspace rm` handoff. The
+    /// `workspace_path` -- the `chan close` / `chan workspace forget` handoff. The
     /// desktop stops serving the tenant and, with `remove`, unregisters it from
     /// its own library + overlay. Like the open handoff, this goes through the
     /// well-known socket because the per-pid control socket reaches the embedded
@@ -129,10 +129,52 @@ pub enum Request {
         /// matches it the same way its own close path does. Sent as a string
         /// for stable JSON across platforms.
         workspace_path: String,
-        /// `chan workspace rm` / `chan close --remove`: also unregister the
-        /// workspace from the desktop's library + overlay, not just stop
-        /// serving it.
+        /// `chan workspace forget`: also unregister the workspace from the
+        /// desktop's library + overlay, not just stop serving it.
         remove: bool,
+    },
+    /// Ask the desktop for its devserver registry rows -- the
+    /// `chan devserver ls` handoff. Read-only; the reply carries one
+    /// summary per row, gateway-roster rows included (marked, since
+    /// register/forget cannot touch those).
+    ListDevservers { protocol: u32, cli_version: String },
+    /// Ask the desktop to dial a registered devserver -- the
+    /// `chan devserver connect` handoff. Fire-and-return like `Upgrade`:
+    /// the desktop starts the connect (control script, token scrape,
+    /// dial) and answers `DevserverConnectStarted` at once; sign-in or
+    /// trust prompts surface in the launcher, which owns the progress.
+    ConnectDevserver {
+        protocol: u32,
+        cli_version: String,
+        /// A registered URL or launcher label; the desktop resolves it
+        /// against its persisted rows and refuses ambiguity.
+        target: String,
+    },
+    /// Ask the desktop to drop its connection to a registered devserver --
+    /// the `chan devserver disconnect` handoff. The row is kept and the
+    /// remote process keeps running; an already-disconnected row is a
+    /// no-op success.
+    DisconnectDevserver {
+        protocol: u32,
+        cli_version: String,
+        /// A registered URL or launcher label, resolved like
+        /// `ConnectDevserver`'s.
+        target: String,
+    },
+    /// Ask the desktop to remove a devserver registration row -- the
+    /// `chan devserver forget` handoff, the undo of `OpenDevserver`. A
+    /// connected row is refused unless `force`, which disconnects and
+    /// removes in one stroke via the registry's remove hook. The remote
+    /// process keeps running either way; the row's write-only token is
+    /// discarded with it.
+    ForgetDevserver {
+        protocol: u32,
+        cli_version: String,
+        /// A registered URL or launcher label, resolved like
+        /// `ConnectDevserver`'s.
+        target: String,
+        /// Disconnect first when the row is live, instead of refusing.
+        force: bool,
     },
 }
 
@@ -143,7 +185,11 @@ impl Request {
             Request::OpenWorkspace { protocol, .. }
             | Request::Upgrade { protocol, .. }
             | Request::OpenDevserver { protocol, .. }
-            | Request::CloseWorkspace { protocol, .. } => *protocol,
+            | Request::CloseWorkspace { protocol, .. }
+            | Request::ListDevservers { protocol, .. }
+            | Request::ConnectDevserver { protocol, .. }
+            | Request::DisconnectDevserver { protocol, .. }
+            | Request::ForgetDevserver { protocol, .. } => *protocol,
         }
     }
 
@@ -153,7 +199,11 @@ impl Request {
             Request::OpenWorkspace { cli_version, .. }
             | Request::Upgrade { cli_version, .. }
             | Request::OpenDevserver { cli_version, .. }
-            | Request::CloseWorkspace { cli_version, .. } => cli_version,
+            | Request::CloseWorkspace { cli_version, .. }
+            | Request::ListDevservers { cli_version, .. }
+            | Request::ConnectDevserver { cli_version, .. }
+            | Request::DisconnectDevserver { cli_version, .. }
+            | Request::ForgetDevserver { cli_version, .. } => cli_version,
         }
     }
 }
@@ -206,6 +256,40 @@ pub enum Response {
         error: String,
         active_terminals: usize,
     },
+    /// The desktop's devserver registry rows, answering `ListDevservers`.
+    Devservers {
+        desktop_version: String,
+        devservers: Vec<DevserverSummary>,
+    },
+    /// The desktop accepted a `ConnectDevserver` and is dialing in the
+    /// background. The CLI prints a note and exits; the launcher owns
+    /// sign-in, trust prompts, and the connect outcome.
+    DevserverConnectStarted { desktop_version: String },
+    /// The desktop dropped the connection from a `DisconnectDevserver`
+    /// (or it was not connected). The row is kept.
+    DevserverDisconnected { desktop_version: String },
+    /// The desktop removed the registration row from a `ForgetDevserver`.
+    DevserverForgotten { desktop_version: String },
+}
+
+/// One devserver registry row as `chan devserver ls` renders it. A
+/// deliberate summary rather than the launcher's full wire entry, so the
+/// CLI surface does not inherit every launcher field as a contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevserverSummary {
+    /// The dial URL, scheme included, as stored.
+    pub url: String,
+    /// The launcher section label; empty when the row has none.
+    #[serde(default)]
+    pub label: String,
+    /// Live connection state as the launcher projects it:
+    /// disconnected | connecting | connected.
+    pub status: String,
+    /// A gateway-roster row: listed for completeness, but register /
+    /// connect / disconnect / forget cannot touch it (the Gateways
+    /// screen manages it).
+    #[serde(default)]
+    pub gateway: bool,
 }
 
 /// Resolve the well-known per-user socket path. Prefers
@@ -441,7 +525,7 @@ pub fn handoff_opt_out() -> bool {
 
 /// Force the CLI-to-desktop handoff ON for a `Standalone`-personality binary:
 /// `CHAN_DESKTOP_HANDOFF=1`. The desktop-installed Windows shim sets this so the
-/// bundled console `chan.exe` hands a `chan open` off to the running desktop
+/// bundled console `chan.exe` hands a `chan serve` off to the running desktop
 /// exactly like the macOS/Linux desktop shim does via `Personality::Desktop`
 /// (on those platforms the shim re-execs the desktop binary, so the personality
 /// already carries the intent; on Windows the shim re-execs a separate
@@ -899,13 +983,17 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
         | Ok(Response::CloseRefused { .. })
+        | Ok(Response::Devservers { .. })
+        | Ok(Response::DevserverConnectStarted { .. })
+        | Ok(Response::DevserverDisconnected { .. })
+        | Ok(Response::DevserverForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
 
 /// Windows: connect the well-known named pipe and round-trip one
 /// `OpenWorkspace`. A missing pipe (no desktop) maps to `NoDesktop` at once --
-/// it must NOT hang the common no-desktop `chan open`; a momentarily-busy pipe
+/// it must NOT hang the common no-desktop `chan serve`; a momentarily-busy pipe
 /// (the desktop mid accept-swap) gets a short bounded retry. Same request /
 /// timed response / parse as the unix arm.
 #[cfg(windows)]
@@ -975,6 +1063,10 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
         | Ok(Response::CloseRefused { .. })
+        | Ok(Response::Devservers { .. })
+        | Ok(Response::DevserverConnectStarted { .. })
+        | Ok(Response::DevserverDisconnected { .. })
+        | Ok(Response::DevserverForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -985,7 +1077,7 @@ pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
 }
 
 /// Try to make a running same-user desktop tear down the workspace it serves at
-/// `workspace_path` -- the `chan close` / `chan workspace rm` handoff. Connects
+/// `workspace_path` -- the `chan close` / `chan workspace forget` handoff. Connects
 /// the well-known socket, sends a `CloseWorkspace` request, and maps the reply
 /// via [`map_close_response`]. Any connect failure / stale socket / read error /
 /// malformed reply maps to `Outcome::NoDesktop` so the CLI falls back to the
@@ -1124,12 +1216,16 @@ fn map_close_response(line: &str) -> Outcome {
         | Ok(Response::UpgradeStarted { .. })
         | Ok(Response::UpgradeChecked { .. })
         | Ok(Response::DevserverRegistered { .. })
+        | Ok(Response::Devservers { .. })
+        | Ok(Response::DevserverConnectStarted { .. })
+        | Ok(Response::DevserverDisconnected { .. })
+        | Ok(Response::DevserverForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
 
 /// Try to register a devserver by `url` with a running same-user
-/// desktop -- the `chan open {url}` path. Connects the well-known socket, sends
+/// desktop -- the `chan devserver register {url}` path. Connects the well-known socket, sends
 /// an `OpenDevserver` request, and maps the reply: `DevserverRegistered` ->
 /// `HandedOff`; a protocol skew -> `VersionSkew`; an `Error` -> `DesktopError`;
 /// any other reply / connect failure / stale socket / malformed line ->
@@ -1248,6 +1344,122 @@ pub async fn try_open_devserver(_url: &str, _name: Option<&str>, _script: Option
     Outcome::NoDesktop
 }
 
+/// Outcome of a generic devserver-control round-trip: the desktop's
+/// reply verbatim, or no reachable desktop. Unlike the `Outcome`-mapped
+/// verbs, the caller matches [`Response`] itself -- these verbs never
+/// fall back to anything, so there is nothing to normalize.
+#[derive(Debug)]
+pub enum DevserverControlOutcome {
+    Reply(Response),
+    NoDesktop,
+}
+
+/// One request/one reply against the well-known desktop socket, for the
+/// devserver-control verbs (`ls` / `connect` / `disconnect` / `forget`).
+/// Mirrors `try_open_devserver`'s framing and timeouts; any connect
+/// failure, stale socket, or malformed line maps to `NoDesktop`.
+#[cfg(unix)]
+pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return DevserverControlOutcome::NoDesktop;
+    };
+    if !socket_path.exists() {
+        return DevserverControlOutcome::NoDesktop;
+    }
+
+    let connect = UnixStream::connect(&socket_path);
+    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) | Err(_) => return DevserverControlOutcome::NoDesktop,
+    };
+
+    let mut payload = match serde_json::to_vec(&req) {
+        Ok(v) => v,
+        Err(_) => return DevserverControlOutcome::NoDesktop,
+    };
+    payload.push(b'\n');
+
+    let (read, mut write) = stream.into_split();
+    let io = async {
+        write.write_all(&payload).await?;
+        write.flush().await?;
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    };
+    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
+        Ok(Ok(line)) if !line.trim().is_empty() => line,
+        _ => return DevserverControlOutcome::NoDesktop,
+    };
+
+    match serde_json::from_str::<Response>(line.trim()) {
+        Ok(resp) => DevserverControlOutcome::Reply(resp),
+        Err(_) => DevserverControlOutcome::NoDesktop,
+    }
+}
+
+/// Windows: the same round-trip over the well-known named pipe, with the
+/// bounded `ERROR_PIPE_BUSY` retry the other verbs use.
+#[cfg(windows)]
+pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return DevserverControlOutcome::NoDesktop;
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    let client = loop {
+        match ClientOptions::new().open(&socket_path) {
+            Ok(client) => break client,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if std::time::Instant::now() >= deadline {
+                    return DevserverControlOutcome::NoDesktop;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(_) => return DevserverControlOutcome::NoDesktop,
+        }
+    };
+
+    let mut payload = match serde_json::to_vec(&req) {
+        Ok(v) => v,
+        Err(_) => return DevserverControlOutcome::NoDesktop,
+    };
+    payload.push(b'\n');
+
+    let (read, mut write) = tokio::io::split(client);
+    let io = async {
+        write.write_all(&payload).await?;
+        write.flush().await?;
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    };
+    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
+        Ok(Ok(line)) if !line.trim().is_empty() => line,
+        _ => return DevserverControlOutcome::NoDesktop,
+    };
+
+    match serde_json::from_str::<Response>(line.trim()) {
+        Ok(resp) => DevserverControlOutcome::Reply(resp),
+        Err(_) => DevserverControlOutcome::NoDesktop,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_devserver_control(_req: Request) -> DevserverControlOutcome {
+    DevserverControlOutcome::NoDesktop
+}
+
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
 /// windows arms so the response handling stays in one place: only
 /// `DevserverRegistered` is a success; a workspace/upgrade reply to a
@@ -1270,6 +1482,10 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::UpgradeChecked { .. })
         | Ok(Response::Closed { .. })
         | Ok(Response::CloseRefused { .. })
+        | Ok(Response::Devservers { .. })
+        | Ok(Response::DevserverConnectStarted { .. })
+        | Ok(Response::DevserverDisconnected { .. })
+        | Ok(Response::DevserverForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1377,6 +1593,10 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
         | Ok(Response::CloseRefused { .. })
+        | Ok(Response::Devservers { .. })
+        | Ok(Response::DevserverConnectStarted { .. })
+        | Ok(Response::DevserverDisconnected { .. })
+        | Ok(Response::DevserverForgotten { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
 }
@@ -1437,6 +1657,48 @@ mod tests {
         assert_eq!(close, serde_json::from_str::<Request>(&json).unwrap());
         assert_eq!(close.protocol(), PROTOCOL_VERSION);
         assert_eq!(close.cli_version(), "9.9.9");
+
+        let ls = Request::ListDevservers {
+            protocol: PROTOCOL_VERSION,
+            cli_version: "9.9.9".into(),
+        };
+        let json = serde_json::to_string(&ls).unwrap();
+        assert!(json.contains("\"type\":\"list_devservers\""));
+        assert_eq!(ls, serde_json::from_str::<Request>(&json).unwrap());
+        assert_eq!(ls.protocol(), PROTOCOL_VERSION);
+        assert_eq!(ls.cli_version(), "9.9.9");
+
+        let connect = Request::ConnectDevserver {
+            protocol: PROTOCOL_VERSION,
+            cli_version: "9.9.9".into(),
+            target: "lab".into(),
+        };
+        let json = serde_json::to_string(&connect).unwrap();
+        assert!(json.contains("\"type\":\"connect_devserver\""));
+        assert!(json.contains("\"target\":\"lab\""));
+        assert_eq!(connect, serde_json::from_str::<Request>(&json).unwrap());
+
+        let disconnect = Request::DisconnectDevserver {
+            protocol: PROTOCOL_VERSION,
+            cli_version: "9.9.9".into(),
+            target: "https://box.example.com:8787".into(),
+        };
+        let json = serde_json::to_string(&disconnect).unwrap();
+        assert!(json.contains("\"type\":\"disconnect_devserver\""));
+        assert_eq!(disconnect, serde_json::from_str::<Request>(&json).unwrap());
+
+        let forget = Request::ForgetDevserver {
+            protocol: PROTOCOL_VERSION,
+            cli_version: "9.9.9".into(),
+            target: "lab".into(),
+            force: true,
+        };
+        let json = serde_json::to_string(&forget).unwrap();
+        assert!(json.contains("\"type\":\"forget_devserver\""));
+        assert!(json.contains("\"force\":true"));
+        assert_eq!(forget, serde_json::from_str::<Request>(&json).unwrap());
+        assert_eq!(forget.protocol(), PROTOCOL_VERSION);
+        assert_eq!(forget.cli_version(), "9.9.9");
     }
 
     #[test]
@@ -1982,6 +2244,12 @@ mod tests {
                     Request::CloseWorkspace { .. } => Response::Error {
                         message: "unexpected close".into(),
                     },
+                    Request::ListDevservers { .. }
+                    | Request::ConnectDevserver { .. }
+                    | Request::DisconnectDevserver { .. }
+                    | Request::ForgetDevserver { .. } => Response::Error {
+                        message: "unexpected devserver control".into(),
+                    },
                 }
             }
         })
@@ -2038,6 +2306,12 @@ mod tests {
                 Request::CloseWorkspace { .. } => Response::Error {
                     message: "unexpected close".into(),
                 },
+                Request::ListDevservers { .. }
+                | Request::ConnectDevserver { .. }
+                | Request::DisconnectDevserver { .. }
+                | Request::ForgetDevserver { .. } => Response::Error {
+                    message: "unexpected devserver control".into(),
+                },
             }
         })
         .unwrap();
@@ -2074,6 +2348,12 @@ mod tests {
                 },
                 Request::CloseWorkspace { .. } => Response::Error {
                     message: "unexpected close".into(),
+                },
+                Request::ListDevservers { .. }
+                | Request::ConnectDevserver { .. }
+                | Request::DisconnectDevserver { .. }
+                | Request::ForgetDevserver { .. } => Response::Error {
+                    message: "unexpected devserver control".into(),
                 },
             }
         })

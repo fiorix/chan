@@ -70,8 +70,8 @@ WORKDIR /home/chan
 # under the workspace data dir). For the gateway tunnel role, override the
 # command, e.g.:
 #   docker run -e CHAN_TUNNEL_TOKEN=chan_pat_... chan:dev \
-#       devserver --bind 0.0.0.0 --tunnel-url https://devserver.example.com/v1/tunnel
-# `chan serve` does not exist; the subcommands are `open` and `devserver`.
+#       devserver run --bind 0.0.0.0 --tunnel-url https://devserver.example.com/v1/tunnel
+# The subcommands are `serve` (one workspace) and `devserver run` (many).
 EXPOSE 8787
 ENTRYPOINT ["chan"]
-CMD ["open", "/workspace", "--host", "0.0.0.0", "--port", "8787", "--no-browser", "--standalone", "--here"]
+CMD ["serve", "/workspace", "--host", "0.0.0.0", "--port", "8787", "--no-browser", "--standalone", "--here"]

@@ -8,7 +8,7 @@
 //! at fresh tempdirs, so the entire chan library (workspace registry, devserver
 //! config, per-uid discovery directory) is isolated from the developer's real
 //! state and from other tests. `CHAN_NO_DESKTOP_HANDOFF` +
-//! `CHAN_NO_DEVSERVER_HANDOFF` keep ordinary `chan open` helpers standalone;
+//! `CHAN_NO_DEVSERVER_HANDOFF` keep ordinary `chan serve` helpers standalone;
 //! the multi-instance scenario removes the latter only inside its isolated
 //! runtime directory.
 //!
@@ -17,7 +17,7 @@
 //! `WorkspaceHost::close_terminal_tenant` in-process. There is no HTTP route
 //! for that synchronous reap, so the desktop's own teardown is verified by
 //! `chan-server`'s unit tests plus a manual smoke. What IS covered here: the
-//! spawned-process signal behavior (SIGINT/SIGTERM/SIGKILL of `chan open`
+//! spawned-process signal behavior (SIGINT/SIGTERM/SIGKILL of `chan serve`
 //! and `chan devserver`), advisory-flock release, persisted-config survival,
 //! and the host-side workspace-tenant PTY reap reachable over the management
 //! API.
@@ -181,12 +181,12 @@ impl Drop for Server {
     }
 }
 
-/// Spawn `chan open <root>` standalone on an OS-assigned port and return it
+/// Spawn `chan serve <root>` standalone on an OS-assigned port and return it
 /// once the ready URL is printed. The serve prints `chan is ready:\n<url>` to
 /// stderr with the real bound address (it binds `:0` then reads `local_addr`).
 async fn spawn_serve(sandbox: &Sandbox, root: &Path, no_token: bool) -> (Server, SocketAddr) {
     let mut cmd = sandbox.command();
-    cmd.arg("open")
+    cmd.arg("serve")
         .arg(root)
         // `--here` serves the path verbatim, sidestepping the enclosing-VCS
         // refusal in case the temp dir ever lands inside a working tree.
@@ -196,14 +196,14 @@ async fn spawn_serve(sandbox: &Sandbox, root: &Path, no_token: bool) -> (Server,
     if no_token {
         cmd.arg("--no-token");
     }
-    let mut child = cmd.spawn().expect("spawn chan open");
+    let mut child = cmd.spawn().expect("spawn chan serve");
     let out = Transcript::capture(&mut child);
     let server = Server { child, out };
     let line = server
         .out
         .wait_for("http://127.0.0.1:", Duration::from_secs(30))
         .await
-        .unwrap_or_else(|| panic!("chan open never became ready:\n{}", server.out.dump()));
+        .unwrap_or_else(|| panic!("chan serve never became ready:\n{}", server.out.dump()));
     (server, parse_addr(&line))
 }
 
@@ -252,6 +252,7 @@ async fn start_devserver_in(
     let mut child = sandbox
         .command_in(chan_home, runtime)
         .arg("devserver")
+        .arg("run")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
         .spawn()
@@ -354,7 +355,7 @@ async fn run_handoff_open(
 ) -> (ExitStatus, String) {
     let mut cmd = sandbox.command_in(chan_home, runtime);
     cmd.env_remove("CHAN_NO_DEVSERVER_HANDOFF")
-        .arg("open")
+        .arg("serve")
         .arg(root)
         .arg("--here")
         .args(["--port", "0", "--timeout", "1s", "--no-browser"]);
@@ -365,12 +366,12 @@ async fn run_handoff_open(
             cmd.arg(format!("--devserver={selector}"));
         }
     }
-    let mut child = cmd.spawn().expect("spawn chan open handoff");
+    let mut child = cmd.spawn().expect("spawn chan serve handoff");
     let out = Transcript::capture(&mut child);
     let mut command = Server { child, out };
     let (status, _) = wait_exit(&mut command, Duration::from_secs(15))
         .await
-        .unwrap_or_else(|| panic!("chan open handoff did not exit:\n{}", command.out.dump()));
+        .unwrap_or_else(|| panic!("chan serve handoff did not exit:\n{}", command.out.dump()));
     (status, command.out.dump())
 }
 
@@ -389,7 +390,7 @@ fn discovery_sockets(runtime: &Path) -> Vec<std::path::PathBuf> {
     sockets
 }
 
-/// Run a `chan devserver --service=chan` daemon action that has to bind, on a
+/// Run a `chan devserver <verb> --service=chan` daemon action that has to bind, on a
 /// port drawn the same way and redrawn on the same lost race. Returns the port
 /// that stuck plus the command output for the caller to assert on; any failure
 /// that is not a bind collision comes back untouched.
@@ -402,10 +403,8 @@ fn start_chan_service_on_free_port(
     for _ in 0..PORT_ATTEMPTS {
         let port = free_port();
         let mut cmd = sandbox.command();
-        cmd.arg("devserver").arg("--service=chan");
-        if let Some(verb) = verb {
-            cmd.arg(verb);
-        }
+        cmd.arg("devserver").arg(verb.unwrap_or("run"));
+        cmd.arg("--service=chan");
         let out = cmd
             .args(["--bind", "127.0.0.1"])
             .args(["--port", &port.to_string()])
@@ -693,7 +692,7 @@ async fn spawn_tenant_terminal(
 // Scenarios.
 // ---------------------------------------------------------------------------
 
-/// SIGINT a `chan open` whose cold index is still settling: it must exit
+/// SIGINT a `chan serve` whose cold index is still settling: it must exit
 /// inside the grace budget, and a second serve on the same root must then
 /// reacquire the writer flock (proving the first released it cleanly).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -924,12 +923,12 @@ async fn valued_devserver_selector_refuses_under_handoff_opt_out() {
     // bounds the mutated (fall-through) outcome so a regression exits with a
     // served-standalone transcript instead of wedging the test.
     let mut cmd = sandbox.command();
-    cmd.arg("open")
+    cmd.arg("serve")
         .arg(&root)
         .arg("--here")
         .args(["--port", "0", "--timeout", "1s", "--no-browser"])
         .arg("--devserver=9999");
-    let mut child = cmd.spawn().expect("spawn chan open");
+    let mut child = cmd.spawn().expect("spawn chan serve");
     let out = Transcript::capture(&mut child);
     let mut command = Server { child, out };
     let (status, _) = wait_exit(&mut command, EXIT_BUDGET)
@@ -1028,8 +1027,8 @@ async fn chan_service_start_status_join_restart_stop() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("status")
         .arg("--service=chan")
-        .arg("--status")
         .output()
         .expect("status chan service");
     let (stdout, _stderr) = assert_output_ok(out, "chan service status");
@@ -1042,8 +1041,8 @@ async fn chan_service_start_status_join_restart_stop() {
     let mut join_command = sandbox.command();
     join_command
         .arg("devserver")
+        .arg("join")
         .arg("--service=chan")
-        .arg("--join")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
         .stdin(Stdio::piped());
@@ -1076,7 +1075,7 @@ async fn chan_service_start_status_join_restart_stop() {
     );
 
     let (restart_port, out) =
-        start_chan_service_on_free_port(&sandbox, Some("--restart"), "restart chan service");
+        start_chan_service_on_free_port(&sandbox, Some("restart"), "restart chan service");
     let restart_addr: SocketAddr = format!("127.0.0.1:{restart_port}").parse().unwrap();
     let (_stdout, _stderr) = assert_output_ok(out, "chan service restart");
     assert!(
@@ -1093,8 +1092,8 @@ async fn chan_service_start_status_join_restart_stop() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("stop")
         .arg("--service=chan")
-        .arg("--stop")
         .output()
         .expect("stop chan service");
     let (_stdout, _stderr) = assert_output_ok(out, "chan service stop");
@@ -1106,8 +1105,8 @@ async fn chan_service_start_status_join_restart_stop() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("status")
         .arg("--service=chan")
-        .arg("--status")
         .output()
         .expect("status stopped chan service");
     let (stdout, _stderr) = assert_output_ok(out, "chan service stopped status");
@@ -1134,8 +1133,8 @@ async fn chan_service_join_survives_stall_and_restart() {
     let mut join_command = sandbox.command();
     join_command
         .arg("devserver")
+        .arg("join")
         .arg("--service=chan")
-        .arg("--join")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
         .stdin(Stdio::piped());
@@ -1183,8 +1182,8 @@ async fn chan_service_join_survives_stall_and_restart() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("restart")
         .arg("--service=chan")
-        .arg("--restart")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
         .output()
@@ -1228,8 +1227,8 @@ async fn chan_service_join_survives_stall_and_restart() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("stop")
         .arg("--service=chan")
-        .arg("--stop")
         .output()
         .expect("stop chan service");
     assert_output_ok(out, "chan service stop");
@@ -1250,6 +1249,7 @@ async fn chan_service_start_is_idempotent() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("start")
         .arg("--service=chan")
         .args(["--bind", "127.0.0.1"])
         .args(["--port", &port.to_string()])
@@ -1266,8 +1266,8 @@ async fn chan_service_start_is_idempotent() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("stop")
         .arg("--service=chan")
-        .arg("--stop")
         .output()
         .expect("stop chan service");
     let (_stdout, _stderr) = assert_output_ok(out, "stop chan service");
@@ -1295,8 +1295,8 @@ async fn chan_service_status_clears_stale_pidfile() {
     let out = sandbox
         .command()
         .arg("devserver")
+        .arg("status")
         .arg("--service=chan")
-        .arg("--status")
         .output()
         .expect("status stale chan service");
     let (stdout, _stderr) = assert_output_ok(out, "status stale chan service");
@@ -1373,7 +1373,7 @@ async fn devserver_shutdown_reaps_tenant_pty() {
 /// Token equality here is WITHIN-ROTATION-WINDOW stability, not
 /// mint-once-forever: the first boot stamps `token_minted_at`, and a restart
 /// keeps the token only until it outlives DEVSERVER_TOKEN_MAX_AGE_SECS (30
-/// days) or an operator runs `chan devserver --rotate-token` (see
+/// days) or an operator runs `chan devserver rotate-token` (see
 /// devserver_rotate_token_retires_the_old_bearer_and_survives_restart).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devserver_sigkill_releases_flock_and_survives_config() {
@@ -1656,11 +1656,11 @@ async fn chan_close_marks_devserver_workspace_off() {
     assert_eq!(after["token"], "");
 }
 
-/// A `chan close --remove <path>` reaches the same devserver control socket but
-/// asks the host to forget the workspace. The management API must drop the row
-/// immediately rather than retaining the devserver's stale in-memory record.
+/// A `chan workspace forget <path>` reaches the same devserver control socket
+/// but asks the host to forget the workspace. The management API must drop the
+/// row immediately rather than retaining the devserver's stale in-memory record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn chan_close_remove_drops_devserver_workspace() {
+async fn workspace_forget_drops_devserver_workspace() {
     let sandbox = Sandbox::new();
     let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
     let token = devserver_token(&server);
@@ -1678,14 +1678,13 @@ async fn chan_close_remove_drops_devserver_workspace() {
 
     let out = sandbox
         .command()
-        .arg("close")
-        .arg("--remove")
+        .args(["workspace", "forget"])
         .arg(&root)
         .output()
-        .expect("run chan close --remove");
+        .expect("run chan workspace forget");
     assert!(
         out.status.success(),
-        "chan close --remove failed: status={:?}\nstdout={}\nstderr={}",
+        "chan workspace forget failed: status={:?}\nstdout={}\nstderr={}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),

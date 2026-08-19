@@ -747,12 +747,12 @@ jobs:
         run: |
           set -uo pipefail
           # chan-desktop.exe dispatches the chan CLI when arg0 stem is `chan` (ARGV0
-          # wins). Off unix `chan open` has no GUI to hand off to, so it serves a
+          # wins). Off unix `chan serve` has no GUI to hand off to, so it serves a
           # standalone server -- the headless proof the Windows-built server boots.
           exe="target/release/chan-desktop.exe"
           ws="$RUNNER_TEMP/chan-smoke-ws"
           mkdir -p "$ws"
-          ARGV0=chan CHAN_NO_DESKTOP_HANDOFF=1 "$exe" open \
+          ARGV0=chan CHAN_NO_DESKTOP_HANDOFF=1 "$exe" serve \
             --no-browser --no-token --port 8799 "$ws" &
           srv=$!
           ok=

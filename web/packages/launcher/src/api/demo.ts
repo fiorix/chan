@@ -73,7 +73,7 @@ function seed(): Seed {
         host: "127.0.0.1",
         port: 9001,
         label: "lima-vm",
-        script: "limactl shell chan -- chan devserver --join",
+        script: "limactl shell chan -- chan devserver join",
         has_token: false,
         token: "",
         library_id: LIMA_LIBRARY_ID,
@@ -95,7 +95,7 @@ function seed(): Seed {
         host: "127.0.0.1",
         port: 9002,
         label: "windows-tunnel",
-        script: "ssh windows-tunnel -L 9002:localhost:8787 chan devserver --service=chan",
+        script: "ssh windows-tunnel -L 9002:localhost:8787 chan devserver join",
         has_token: false,
         token: "",
         library_id: WINDOWS_LIBRARY_ID,
@@ -115,7 +115,7 @@ function seed(): Seed {
         host: "127.0.0.1",
         port: 9003,
         label: "linux-tunnel",
-        script: "ssh linux-tunnel -L 9003:localhost:8787 chan devserver --join",
+        script: "ssh linux-tunnel -L 9003:localhost:8787 chan devserver join",
         has_token: false,
         token: "",
         library_id: LINUX_LIBRARY_ID,
@@ -575,7 +575,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       return tick(undefined);
     },
     // The empty variants' Browse... fills a path matching the manual's
-    // `chan open ./your-project` walkthrough.
+    // `chan serve ./your-project` walkthrough.
     pickFolder: () => tick(startsEmpty ? "/Users/you/dev/your-project" : "/Users/hacker/demo-reset"),
     listWindows: () => tick(windows.map((w) => ({ ...w }))),
     createWindow: (kind, opts) => {

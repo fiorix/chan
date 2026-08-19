@@ -419,7 +419,7 @@ fn l2_normalize(t: &Tensor) -> Result<Tensor, EmbedError> {
 ///
 /// WHY default to CPU: the candle Metal backend hangs indefinitely
 /// in `[_MTLCommandBuffer waitUntilCompleted]` on at least one Apple
-/// Silicon machine during BGE indexing, wedging `chan open` with no
+/// Silicon machine during BGE indexing, wedging `chan serve` with no
 /// progress and no error. Until that command-buffer usage is fixed
 /// (proper future work: a forward-pass timeout with CPU fallback, or
 /// correcting how we submit/await the Metal command buffer), the GPU

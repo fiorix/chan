@@ -106,11 +106,11 @@
     {{copyButton}}
   </div>
   <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan open ./your-project</b></code>
+    <code><span>$</span><b data-copy-value>chan serve ./your-project</b></code>
     {{copyButton}}
   </div>
-  <p class="minor"><code>chan open</code> expects the root of a repository. To open a subdirectory inside one, add <code>--here</code>.</p>
-  <p><code>chan open {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
+  <p class="minor"><code>chan serve</code> expects the root of a repository. To open a subdirectory inside one, add <code>--here</code>.</p>
+  <p><code>chan serve {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
   <p>Back on the Computers screen, the new workspace appears with its power toggle On: the workspace is alive, indexed, and keeping the state of your windows, panes, and tabs. Click <strong>New window of your-project</strong> and the real power of chan begins:</p>
   <ul>
     <li>The pane's hamburger menu lists the built-in apps: dashboard, diagram, draft, file browser, graph, slide deck, team, and terminal.</li>
@@ -150,7 +150,7 @@
   </div>
   <p>This installs <code>~/.local/bin/chan</code> and the symlink <code>cs -&gt; chan</code> in the same directory. Start the devserver:</p>
   <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>~/.local/bin/chan devserver --start</b></code>
+    <code><span>$</span><b data-copy-value>~/.local/bin/chan devserver start</b></code>
     {{copyButton}}
   </div>
   <p>This installs the devserver as a background service listening on <code>localhost:8787</code>, using the default service manager for your platform:</p>
@@ -158,8 +158,9 @@
     <li>On Linux it uses systemd: a user-scoped service that survives logout once linger is on (chan enables it, or asks you to run <code>sudo loginctl enable-linger</code>).</li>
     <li>On macOS it uses launchd: the service runs while you are logged in.</li>
     <li>On Windows it uses chan's own daemon mode, which works on all platforms.</li>
-    <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The action flags are <code>--start</code>, <code>--stop</code>, <code>--status</code>, <code>--restart</code>, and <code>--join</code>.</li>
-    <li>Without an action flag, <code>chan devserver</code> runs in the foreground.</li>
+    <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The actions are <code>start</code>, <code>stop</code>, <code>status</code>, <code>restart</code>, and <code>join</code>; <code>--service</code> goes after the action.</li>
+    <li><code>chan devserver run</code> runs in the foreground.</li>
+    <li><code>chan devserver ls</code>, <code>connect</code>, <code>disconnect</code>, and <code>forget</code> manage the desktop's connections to remote devservers.</li>
   </ul>
   <p>Now add the devserver to Chan Desktop:</p>
   <ol>
@@ -169,19 +170,19 @@
         <li>lima-vm from macOS:
           <ul>
             <li>Address: <code>localhost:8787</code></li>
-            <li>Script: <code>limactl shell default ~/.local/bin/chan devserver --join</code></li>
+            <li>Script: <code>limactl shell default ~/.local/bin/chan devserver join</code></li>
           </ul>
         </li>
         <li>WSL from Windows:
           <ul>
             <li>Address: <code>localhost:8787</code></li>
-            <li>Script: <code>wsl ~/.local/bin/chan devserver --join</code></li>
+            <li>Script: <code>wsl ~/.local/bin/chan devserver join</code></li>
           </ul>
         </li>
         <li>Remote machine via ssh:
           <ul>
             <li>Address: <code>localhost:9901</code></li>
-            <li>Script: <code>ssh user@host -L 9901:localhost:8787 ~/.local/bin/chan devserver --join</code></li>
+            <li>Script: <code>ssh user@host -L 9901:localhost:8787 ~/.local/bin/chan devserver join</code></li>
           </ul>
         </li>
       </ul>
@@ -193,7 +194,7 @@
     <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
     <figcaption>The Add devserver form. This is a live mock too: fill it in, add, and connect.</figcaption>
   </figure>
-  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan open {path}</code> in a devserver terminal to create a workspace on that machine. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
+  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan serve {path}</code> in a devserver terminal to create a workspace on that machine. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
   <p>The clipboard and file transfer work across the connection too: see <a href="#copy-paste">Copy and paste freely</a> and <a href="#download-upload">Download and upload freely</a> in the Terminals section.</p>
   <p>On Linux devservers you can even restart the devserver process without losing your shells: the PTY file descriptors are parked in the systemd fdstore while the devserver restarts, then loaded back up, so your agents continue working and your terminals are always alive.</p>
 </section>

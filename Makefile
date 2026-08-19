@@ -499,9 +499,9 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(WEB_BUILD_STAMP)"
 
 .PHONY: shortcuts-check
-shortcuts-check: ## Verify chan open's keybinding table matches shortcuts.ts.
+shortcuts-check: ## Verify chan serve's keybinding table matches shortcuts.ts.
 	# KEYBINDINGS_TABLE is generated from shortcuts.ts and pasted into the
-	# Rust const by hand, so a chord change in the TS silently leaves `chan open
+	# Rust const by hand, so a chord change in the TS silently leaves `chan serve
 	# --help` lying. Diff the generator's output against the const. Lives on
 	# the web side because the generator needs node, which the Rust jobs do
 	# not guarantee.
@@ -563,8 +563,8 @@ clean: ## Remove local build outputs (root workspace, web, gateway, desktop).
 	$(MAKE) -C desktop clean
 
 .PHONY: dev
-dev: chan ## Run chan open against /tmp/chan-dev with no token.
-	$(BIN) open /tmp/chan-dev --no-token
+dev: chan ## Run chan serve against /tmp/chan-dev with no token.
+	$(BIN) serve /tmp/chan-dev --no-token
 
 .PHONY: all build rpm
 all: chan

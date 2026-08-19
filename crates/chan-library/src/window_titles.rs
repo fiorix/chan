@@ -7,7 +7,7 @@
 //! here on build / rename and removes it on destroy, and the window-list
 //! join reads it back.
 //!
-//! The map is empty in standalone `chan open` / plain-browser mode (no
+//! The map is empty in standalone `chan serve` / plain-browser mode (no
 //! desktop writes to it), so the server stays Tauri-free and those rows
 //! simply carry no title -- the CLI renders a blank cell. Keeping it
 //! always-present (rather than `Option`) means every tenant shares one

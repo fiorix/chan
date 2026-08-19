@@ -59,7 +59,7 @@ case "$BIN" in
         CHAN_UPDATE_CHECK=0 \
         XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
         bash -c 'exec -a chan "$@"' _ "$BIN" \
-            devserver --service=none --bind=127.0.0.1 --port="$PORT" \
+            devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
             >"$LOG" 2>&1 &
         ;;
     *)
@@ -67,7 +67,7 @@ case "$BIN" in
         CHAN_HOME="$TMP_ROOT/chan-home" \
         CHAN_UPDATE_CHECK=0 \
         XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
-        "$BIN" devserver --service=none --bind=127.0.0.1 --port="$PORT" \
+        "$BIN" devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
             >"$LOG" 2>&1 &
         ;;
 esac

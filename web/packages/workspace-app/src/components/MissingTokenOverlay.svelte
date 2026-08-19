@@ -1,6 +1,6 @@
 <script lang="ts">
   // Full-page surface shown when bootstrap detects 401 + no token in
-  // the URL or sessionStorage. Standard flow is that `chan open`
+  // the URL or sessionStorage. Standard flow is that `chan serve`
   // prints a launch URL with a `?t=...` token; pasting just the
   // host:port into a fresh tab strips the token and every /api call
   // 401s. Users would otherwise see a blank UI with no obvious
@@ -23,7 +23,7 @@
   >
     <h1>access token missing</h1>
     <p>
-      this URL is missing the access token <code>chan open</code> printed
+      this URL is missing the access token <code>chan serve</code> printed
       on launch. open the original URL from the terminal where the
       server was started.
     </p>

@@ -5,7 +5,7 @@
 //   2. chan-desktop's KEY_BRIDGE_JS (native keymap; rebroadcasts as
 //      `chan:command` events that chan handles).
 //   3. crates/chan/src/lib.rs KEYBINDINGS_TABLE (the chord table in
-//      the `chan open --help` text). Resync via `node
+//      the `chan serve --help` text). Resync via `node
 //      web/packages/workspace-app/scripts/shortcuts-table.mjs
 //      --serve-long-about`.
 //
@@ -836,14 +836,14 @@ const NOTE_CONTINUATION_INDENT = "    ";
 /// from the longest label. No box-drawing, no Unicode - matches the
 /// project's writing rules.
 ///
-/// Output feeds the empty-pane background AND the `chan open --help`
+/// Output feeds the empty-pane background AND the `chan serve --help`
 /// text; resync the latter via `node
 /// web/packages/workspace-app/scripts/shortcuts-table.mjs
 /// --serve-long-about`.
 ///
 /// `maxWidth` caps the column budget: a row whose trailing `(note)` would
 /// push it past the cap moves that note to its own indented line. The
-/// `chan open` help passes a cap because clap prints help verbatim (the
+/// `chan serve` help passes a cap because clap prints help verbatim (the
 /// workspace pins clap without `wrap_help`), so an over-long row is an
 /// over-long row in the user's terminal. Callers with no column limit omit
 /// it and keep every note inline.

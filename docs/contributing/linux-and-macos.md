@@ -114,7 +114,7 @@ On Apple Silicon the bundles are aarch64 Linux; CI's `ubuntu-latest` owns the ca
 chan-desktop runs as both `chan` and `cs` -- the same binary re-execing itself with `argv[0]` set to the name (the `chan_shell::invoked_as_chan` / `invoked_as_cs` argv0 detection), so the CLI / control client runs instead of the GUI. On boot it owns the `~/.local/bin/{chan,cs}` shims (`desktop/src-tauri/src/cs_install.rs`): real symlinks to the installed binary for a `.app` or deb/rpm install, `exec -a` wrapper scripts for an AppImage (whose `current_exe()` is an ephemeral mount). The shims self-heal on a move or self-upgrade, are idempotent, and never clobber a `chan` / `cs` you installed yourself. To check the client path on a built artifact, point the inner binary at a running server's control socket and confirm it runs the client, not the GUI:
 
 ```sh
-# in the container, with a `chan open` running and $CHAN_CONTROL_SOCKET
+# in the container, with a `chan serve` running and $CHAN_CONTROL_SOCKET
 # pointed at its socket:
 exec -a cs ./squashfs-root/usr/bin/chan-desktop terminal list   # rc=0, no GUI
 ```
@@ -146,7 +146,7 @@ CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/set
 
 ## Devserver: the `--service=systemd` user-service path
 
-`chan devserver` supervision is per-OS, and `--service` defaults to `auto`, which resolves to systemd on a systemd Linux host (so a bare `chan devserver --join` and the explicit `--service=systemd --join` below are equivalent there; the examples name the backend explicitly to make clear which path they exercise). `chan devserver --service=systemd --join` runs the server under a `chan-devserver.service` systemd **user** service (it ensures linger, starts the unit, re-attaches to an already-running one, and stays attached blocking on the health watchdog), and the `chan open PATH` discovery socket that registers workspaces with it is Unix-only. `--service=systemd --start` does the same setup but returns instead of attaching, `--service=systemd --stop` stops and disables the unit, and `--service=systemd --restart` bounces it. On macOS `--service=systemd` errors (systemd is Linux-only; use `--service=launchd` or `--service=chan` there), so to develop and exercise the systemd path on a Mac you run it inside lima/sdme, the same Linux flow as everyone else. The supervision shape and its token-delivery contract are in [`design.md`](../../design.md) ("Devserver and the multi-workspace host").
+`chan devserver` supervision is per-OS, and `--service` defaults to `auto`, which resolves to systemd on a systemd Linux host (so a bare `chan devserver join` and the explicit `join --service=systemd` below are equivalent there; the examples name the backend explicitly to make clear which path they exercise). `chan devserver join --service=systemd` runs the server under a `chan-devserver.service` systemd **user** service (it ensures linger, starts the unit, re-attaches to an already-running one, and stays attached blocking on the health watchdog), and the `chan serve PATH` discovery socket that registers workspaces with it is Unix-only. `start --service=systemd` does the same setup but returns instead of attaching, `stop --service=systemd` stops and disables the unit, and `restart --service=systemd` bounces it. On macOS `--service=systemd` errors (systemd is Linux-only; use `--service=launchd` or `--service=chan` there), so to develop and exercise the systemd path on a Mac you run it inside lima/sdme, the same Linux flow as everyone else. The supervision shape and its token-delivery contract are in [`design.md`](../../design.md) ("Devserver and the multi-workspace host").
 
 The one thing this needs beyond the core gate's container is a **systemd user manager**: `--service=systemd` drives `loginctl enable-linger` and `systemctl --user`, which require a regular (non-root), lingering user with a live user session -- not the root shell `sdme join` drops you into. Stand one up once:
 
@@ -172,12 +172,12 @@ limactl shell default sudo sdme exec chan-devserver-dev /bin/bash -c '
   sudo -u dev -H env \
     XDG_RUNTIME_DIR=/run/user/$U \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$U/bus \
-    chan devserver --service=systemd --join --bind 127.0.0.1 --port 7777'
+    chan devserver join --service=systemd --bind 127.0.0.1 --port 7777'
 ```
 
-Expect the locked `CHAN_DEVSERVER_TOKEN=<token>` marker on **stdout** (the contract the desktop control terminal scrapes), the unit at `~dev/.config/systemd/user/chan-devserver.service`, and `systemctl --user status chan-devserver.service` reporting active; a second `--join` re-attaches to the running unit and re-emits the marker. This container is also where you reproduce the journal-readability edge the supervisor is hardened against -- the token still reaches stdout when the user cannot read the unit journal (a uid below `SYS_UID_MAX`, or a user outside the `systemd-journal`/`adm` groups), because the supervisor reads the persisted token and emits the marker itself rather than relying on the journal follow. `--service=systemd` is not reachable from CI (the runner has no systemd user manager), so this local flow is how you exercise it.
+Expect the locked `CHAN_DEVSERVER_TOKEN=<token>` marker on **stdout** (the contract the desktop control terminal scrapes), the unit at `~dev/.config/systemd/user/chan-devserver.service`, and `systemctl --user status chan-devserver.service` reporting active; a second `join` re-attaches to the running unit and re-emits the marker. This container is also where you reproduce the journal-readability edge the supervisor is hardened against -- the token still reaches stdout when the user cannot read the unit journal (a uid below `SYS_UID_MAX`, or a user outside the `systemd-journal`/`adm` groups), because the supervisor reads the persisted token and emits the marker itself rather than relying on the journal follow. `--service=systemd` is not reachable from CI (the runner has no systemd user manager), so this local flow is how you exercise it.
 
-The macOS counterpart, `--service=launchd`, runs **natively** on your Mac -- no container needed. `chan devserver --service=launchd --join` writes `~/Library/LaunchAgents/app.chan.devserver.plist`, bootstraps it into your `gui/$(id -u)` session, and emits the same `CHAN_DEVSERVER_TOKEN=` marker on stdout; inspect it with `launchctl print gui/$(id -u)/app.chan.devserver` and tear it down with `chan devserver --service=launchd --stop` (which boots it out and disables it). Like `--service=systemd`, it is not reachable from CI (the runner has no GUI launchd domain), so exercise it locally.
+The macOS counterpart, `--service=launchd`, runs **natively** on your Mac -- no container needed. `chan devserver join --service=launchd` writes `~/Library/LaunchAgents/app.chan.devserver.plist`, bootstraps it into your `gui/$(id -u)` session, and emits the same `CHAN_DEVSERVER_TOKEN=` marker on stdout; inspect it with `launchctl print gui/$(id -u)/app.chan.devserver` and tear it down with `chan devserver stop --service=launchd` (which boots it out and disables it). Like `--service=systemd`, it is not reachable from CI (the runner has no GUI launchd domain), so exercise it locally.
 
 ### Running a local devserver beside chan-desktop
 
@@ -188,7 +188,7 @@ Use a separate `CHAN_HOME` when you want the devserver to have an independent li
 ```sh
 rm -rf /tmp/chan-devserver-home && mkdir -p /tmp/chan-devserver-home
 CHAN_HOME=/tmp/chan-devserver-home \
-  ./target/debug/chan devserver --service=none --bind 127.0.0.1 --port 8787
+  ./target/debug/chan devserver run --service=none --bind 127.0.0.1 --port 8787
 ```
 
 `CHAN_HOME` replaces `~/.chan` for that process: registry, devserver config, per-workspace metadata, locks, tokens, and `CHAN_HOME/.local/bin/{chan,cs}` shims. The override also propagates into the systemd and launchd devserver service definitions when those backends are started from an environment carrying `CHAN_HOME`.
@@ -232,7 +232,7 @@ chan-desktop resolves your real login-shell `$PATH` at startup (it runs your log
 
 ### End-to-end: connect the isolated desktop to a lima devserver
 
-Run a devserver in lima/sdme as in the Devserver section above -- a smoke does not need `--service=systemd`; a foreground `chan devserver --bind 127.0.0.1 --port 7777` in the container is enough, and it prints the `CHAN_DEVSERVER_TOKEN=<token>` marker on stdout (the same marker the desktop control terminal scrapes). sdme containers use host networking and lima forwards the VM's loopback ports, so the devserver is reachable at `localhost:7777` from macOS (the reachability the Prerequisites note above describes). In the isolated chan-desktop, add a devserver pointed at `http://localhost:7777` with that token; the desktop connects directly over the bearer, no scraping. If you instead expose the container with a published port (`sdme … -p`, which is DNAT rather than host networking), lima does not observe the mapping -- bridge it with `ssh -F ~/.lima/default/ssh.config -N -L 7777:127.0.0.1:7777 lima-default` and point the desktop at the forwarded `localhost:7777`.
+Run a devserver in lima/sdme as in the Devserver section above -- a smoke does not need `--service=systemd`; a foreground `chan devserver run --bind 127.0.0.1 --port 7777` in the container is enough, and it prints the `CHAN_DEVSERVER_TOKEN=<token>` marker on stdout (the same marker the desktop control terminal scrapes). sdme containers use host networking and lima forwards the VM's loopback ports, so the devserver is reachable at `localhost:7777` from macOS (the reachability the Prerequisites note above describes). In the isolated chan-desktop, add a devserver pointed at `http://localhost:7777` with that token; the desktop connects directly over the bearer, no scraping. If you instead expose the container with a published port (`sdme … -p`, which is DNAT rather than host networking), lima does not observe the mapping -- bridge it with `ssh -F ~/.lima/default/ssh.config -N -L 7777:127.0.0.1:7777 lima-default` and point the desktop at the forwarded `localhost:7777`.
 
 ## Gateway: Postgres-backed tests
 

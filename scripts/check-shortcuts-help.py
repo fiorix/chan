@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Check that `chan open --help` still matches the chord table in shortcuts.ts.
+"""Check that `chan serve --help` still matches the chord table in shortcuts.ts.
 
 KEYBINDINGS_TABLE in crates/chan/src/lib.rs is generated from
 web/packages/workspace-app/src/state/shortcuts.ts and pasted into the Rust
 const by hand. Nothing else notices when a chord changes on the TS side, so
-`chan open --help` (and the skill that renders it) can go on advertising a
+`chan serve --help` (and the skill that renders it) can go on advertising a
 keybinding the app no longer has. This regenerates the table and diffs it
 against the const.
 
@@ -64,7 +64,7 @@ def main() -> int:
     )
     print("\n".join(diff))
     print()
-    print("chan open --help advertises stale keybindings. Refresh with:")
+    print("chan serve --help advertises stale keybindings. Refresh with:")
     print("  node web/packages/workspace-app/scripts/shortcuts-table.mjs \\")
     print("    --serve-long-about")
     print("and paste the output into KEYBINDINGS_TABLE in crates/chan/src/lib.rs.")

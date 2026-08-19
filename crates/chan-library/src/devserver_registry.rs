@@ -7,7 +7,7 @@
 //! [`WorkspaceHost`](crate::WorkspaceHost) holds an optional
 //! `Arc<dyn DevserverRegistry>` the embedder installs; the launcher routes read
 //! it at request time. chan-desktop implements the trait over its config vec;
-//! the headless devserver and plain `chan open` install none, so the accessor
+//! the headless devserver and plain `chan serve` install none, so the accessor
 //! returns `None` and the routes serve an empty list and 404 mutation.
 //!
 //! The trait lives in chan-library because `WorkspaceHost` -- which holds the

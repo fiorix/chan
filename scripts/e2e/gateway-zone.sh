@@ -4,7 +4,7 @@
 # p1-p3), multi-devserver routing, entry mints, fleet-wide cap
 # enforcement, tunnel reconnect, and controller/proxy failure
 # scenarios against the REAL identity + profile + devserver-control +
-# devserver-proxy services and REAL `chan devserver` processes.
+# devserver-proxy services and REAL `chan devserver run` processes.
 #
 # Topology: everything on host loopback, one process per service.
 # Identity, profile, the OAuth stub, and the controller bind
@@ -781,7 +781,7 @@ spawn_devserver() { # spawn_devserver <name> <port> <pat> <tunnel-url>
         CHAN_HOME="$WORK/home-$name" \
         CHAN_TUNNEL_TOKEN="$pat" \
         SSL_CERT_FILE="$TLS_DIR/ca.crt" \
-        "$CHAN_BIN" devserver --service=none \
+        "$CHAN_BIN" devserver run --service=none \
         --bind 127.0.0.1 --port "$port" \
         --tunnel-url="$turl" \
         --tunnel-devserver-name="$DS_DISPLAY_NAME"
@@ -3287,7 +3287,7 @@ TOML
     # (the same order the gateway dev-setup doc prescribes), and the
     # roster overlay is pre-written so the boot mounts it. The
     # directory lives outside the repo: `chan` refuses a workspace
-    # nested in a foreign git checkout, and `chan open`'s handoff is
+    # nested in a foreign git checkout, and `chan serve`'s handoff is
     # user-global (it would find a REAL devserver on a dev host), so
     # neither is usable here.
     local ws_dir="$HOME/.cache/chan-gateway-zone-e2e/ext-ws"
