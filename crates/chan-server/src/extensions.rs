@@ -827,12 +827,20 @@ mod tests {
         )
         .expect("valid handshake");
         let view = entry.view();
-        assert!(view
+        // The only thing between the id segment and the upstream path is the
+        // random 64-hex capability, so the upstream authority (host, port)
+        // cannot appear in the browser-visible path. A substring check on the
+        // port would race the random capability itself containing the digits.
+        let capability = view
             .entry_path
-            .starts_with(&format!("{EXTENSION_PROXY_PREFIX}/echo/")));
-        assert!(view.entry_path.ends_with("/echo?mode=test#app"));
+            .strip_prefix(&format!("{EXTENSION_PROXY_PREFIX}/echo/"))
+            .and_then(|rest| rest.strip_suffix("/echo?mode=test#app"))
+            .expect("entry path is prefix/id/capability/upstream-path");
+        assert_eq!(capability.len(), 64);
+        assert!(capability
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
         assert!(!view.entry_path.contains("a%20token"));
-        assert!(!view.entry_path.contains("4567"));
         assert_eq!(view.capabilities, [ExtensionCapability::Presentation]);
         assert!(view.singleton);
         assert_eq!(view.commands[0].id, "say-hello");
