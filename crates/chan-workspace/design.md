@@ -4,7 +4,7 @@ Canonical design reference for `chan-workspace`. Update in the same commit as an
 
 ## 1. Problem and scope
 
-`chan-workspace` is the local-first filesystem, search, graph, and workspace-state core for chan. It owns the per-machine registry of known workspaces and the per-workspace search index, link graph, and code/SLOC report. Its `Workspace` facade provides sandboxed filesystem access rooted at a registered directory; its metadata-free `MiniWorkspace` facade provides the standalone Files surface without a registry row, writer lock, index, or graph. Both share the same crate-private filesystem-capability core. The crate backs the `chan` CLI, chan-server, and the desktop app, and its API is shaped to survive a uniffi boundary for native iOS / Android shells.
+`chan-workspace` is the local-first filesystem, search, graph, and workspace-state core for chan. It owns the per-machine registry of known workspaces and the per-workspace search index, link graph, and code/SLOC report. Its `Workspace` facade provides sandboxed filesystem access rooted at a registered directory; its metadata-free `MiniWorkspace` facade provides the standalone Files surface without a registry row, writer lock, index, or graph. Both share the same crate-private filesystem-capability core. `DraftStore` sits beside them as the per-library drafts lifecycle for standalone windows (see "Drafts"). The crate backs the `chan` CLI, chan-server, and the desktop app, and its API is shaped to survive a uniffi boundary for native iOS / Android shells.
 
 In scope:
 
@@ -144,6 +144,8 @@ Drafts are ordinary relpaths, so search, graph, watcher, and the MCP tools see t
 
 The `drafts` module is the filesystem primitive layer; `Workspace` wraps it as `create_draft_dir`, `list_drafts`, `inspect_draft`, `promote_draft`, `discard_draft`, `draft_preflight`, and `next_untitled_draft_name`. Promotion moves the draft's contents to a destination in the main tree and reports the mode (`File` for a lone `draft.md`, `DirectoryCreated` / `DirectoryMerged` when companions exist). Discard routes through the Trash, with the trash entry's origin label prefixed `.Drafts` so a trashed draft is distinguishable from a trashed workspace file. `draft_preflight` reports broken drafts (e.g. a draft dir missing its `draft.md`) without failing the listing.
 
+`DraftStore` is the second wrapper over the same primitives, for windows with no workspace behind them: drafts for the standalone Files surface live under an embedder-injected state root as `<root>/Drafts/<name>/...`, with discards in a dedicated flat `<root>/drafts-trash/` (entries directly under it, the shape every `trash::*` consumer handles; labels are `Drafts/<name>` so restore resolves against the store root). The embedder injects the root because only it knows the host identity (the desktop's chan home vs a devserver's `devserver/` state dir), the same way the terminal session store is injected. The store owns lifecycle only; draft content is served as ordinary wire paths over the standalone capability root, and promotion targets are resolved by `MiniWorkspace::resolve_write_target` (wire dialect, per-component symlink refusal), never by the store, so target-resolution guards live in exactly one place per facade. An internal mutex serializes the mutating operations: the store has no writer lock, and two windows on one shared tenant are the common case.
+
 ### Trash
 
 The Trash gives the editor and the LLM tool sandbox a safe delete: every `remove` is reversible until either the user explicitly purges or the retention window elapses.
@@ -155,6 +157,7 @@ Trash entries expose five stable fields: opaque monotone `id`, workspace-relativ
   - **Restore conflicts**: refused with `TrashOccupied`. The caller renames the live entry first, or `trash_purge` to give up. We never silently overwrite live content.
   - **Auto-expiration**: lazy GC. Workspace open and every `trash_*` call sweep entries older than `TRASH_RETENTION_SECS` (30 days, `30 * 24 * 60 * 60`). No background thread; matches the codebase's sync-only rule.
   - **Crash recovery**: a half-written entry has no metadata. Sweep treats metadata-less entries as junk and reclaims them.
+  - **Flat root, entries only**: a trash root contains only entry dirs. Never nest another store (or any non-entry file) inside a swept root; the sweep reads such a child as one meta-less junk entry and reclaims it wholesale. Draft discards are therefore first-class flat entries distinguished by their `.Drafts/<name>` origin label, and workspace open hoists any entries still sitting in the nested `drafts/` bucket an older release wrote before its sweep runs.
 
 Deliberately not included:
 

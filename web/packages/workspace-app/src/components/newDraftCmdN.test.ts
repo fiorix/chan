@@ -13,7 +13,7 @@ describe("api.createDraft helper", () => {
     // slide deck); the plain call sends no body at all, keeping the
     // original markdown-draft contract.
     expect(client).toMatch(
-      /createDraft: \(kind\?: "slides"\) =>[\s\S]*?req<\{ path: string; name: string \}>\([\s\S]*?"POST",[\s\S]*?"\/api\/drafts\/new",[\s\S]*?kind \? \{ kind \} : undefined,/,
+      /createDraft: \(kind\?: "slides"\) =>[\s\S]*?req<\{ path: string; name: string \}>\([\s\S]*?"POST",[\s\S]*?`\/api\/drafts\/new\$\{filesMutationSuffix\(false\)\}`,[\s\S]*?kind \? \{ kind \} : undefined,/,
     );
   });
 });

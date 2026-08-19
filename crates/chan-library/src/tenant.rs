@@ -418,7 +418,13 @@ pub trait TenantBuilder: Send + Sync {
 
     /// Build a workspace-less terminal tenant, optionally running `command` on
     /// its PTYs, with an optional persisted per-window session dir.
-    /// `control_identity` as in [`build_workspace`](Self::build_workspace).
+    /// `drafts_store_root` is the embedder-chosen state root for the tenant's
+    /// per-library draft store (the desktop's chan home, a devserver's
+    /// `devserver/` state dir); `None` serves no drafts, the posture control
+    /// and command-carrying tenants keep. The embedder decides the path
+    /// because only it knows which host identity it is, exactly like
+    /// `session_dir`. `control_identity` as in
+    /// [`build_workspace`](Self::build_workspace).
     #[allow(clippy::too_many_arguments)]
     async fn build_terminal(
         &self,
@@ -428,6 +434,7 @@ pub trait TenantBuilder: Send + Sync {
         unserve: UnserveMode,
         command: Option<String>,
         session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
         control_identity: Option<String>,
     ) -> Result<TenantArtifacts, Error>;
 }

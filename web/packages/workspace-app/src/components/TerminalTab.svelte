@@ -2464,10 +2464,11 @@
             <span class="mbtn-label">Copy Scrollback</span>
             <span class="mbtn-chord"></span>
           </button>
-          <!-- Rich Prompt drafts into the workspace drafts dir, so it needs
-               one: this row calls the toggle directly, past the command gates,
-               and a standalone window's tenant serves no drafts route. -->
-          {#if windowCaps.workspace}
+          <!-- Rich Prompt drafts into the tenant's drafts store, so it
+               needs one: this row calls the toggle directly, past the
+               command gates, and a tenant without the store serves no
+               drafts route. -->
+          {#if windowCaps.drafts}
             <button class="mbtn" onclick={toggleRichPromptFromMenu}>
               <span class="mbtn-icon">
                 <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />

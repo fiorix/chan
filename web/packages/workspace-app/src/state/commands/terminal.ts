@@ -163,8 +163,8 @@ registerCommands([
     id: "terminal.richPrompt",
     title: "Show/Hide Rich Prompt",
     category: "Terminal",
-    // Rich Prompt drafts into the workspace drafts directory.
-    requirement: "workspace",
+    // Rich Prompt drafts into the tenant's drafts store.
+    requirement: "drafts",
     keywords: ["rich prompt", "prompt", "composer"],
     available: onWorkspaceTerminal,
     run: () => dispatchChanCommand("terminal.richPrompt"),

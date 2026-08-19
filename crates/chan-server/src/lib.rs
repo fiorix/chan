@@ -899,12 +899,14 @@ async fn build_app_with_extensions(
 /// terminal, optional Files, and window-session routes, so a workspace-only
 /// request (`/api/graph`, `/api/index/status`, ...) 404s instead of panicking on the
 /// missing `workspace_cell`.
+#[allow(clippy::too_many_arguments)]
 async fn build_terminal_app(
     library: Library,
     config: &ServeConfig,
     desktop: crate::desktop_window_ops::DesktopBridge,
     unserve: chan_library::UnserveMode,
     session_dir: Option<std::path::PathBuf>,
+    drafts_store_root: Option<std::path::PathBuf>,
     control_identity: Option<String>,
     bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
 ) -> Result<AppArtifacts, Error> {
@@ -951,7 +953,7 @@ async fn build_terminal_app(
     // serve: the capability advertisement and the mint validation both
     // read the constructed state, so nothing downstream can assume it.
     let standalone_files = if session_dir.is_some() {
-        construct_standalone_files(&library, &scope_registry)
+        construct_standalone_files(&library, &scope_registry, drafts_store_root.as_deref())
     } else {
         None
     };
@@ -1194,12 +1196,15 @@ pub fn standalone_files_supported() -> bool {
 
 /// Construct the standalone Files bundle for a shared terminal tenant:
 /// the `/`-rooted capability with canonical `$HOME` as the start
-/// directory, the mutation-attribution bus, and the scoped watch manager
-/// producing this tenant's `fs` frames. `None` on unsupported platforms
-/// or any construction failure; the tenant then serves terminals only.
+/// directory, the mutation-attribution bus, the scoped watch manager
+/// producing this tenant's `fs` frames, and (when the embedder injected a
+/// store root) the per-library draft store. `None` on unsupported
+/// platforms or any construction failure; the tenant then serves
+/// terminals only. A DRAFTS failure disables drafts alone, never Files.
 fn construct_standalone_files(
     library: &Library,
     scope_registry: &Arc<bus::ScopeRegistry>,
+    drafts_store_root: Option<&std::path::Path>,
 ) -> Option<Arc<crate::state::StandaloneFilesState>> {
     if !standalone_files_supported() {
         return None;
@@ -1230,10 +1235,36 @@ fn construct_standalone_files(
             return None;
         }
     };
+    let drafts = drafts_store_root.and_then(|root| {
+        let store = match chan_workspace::DraftStore::open(root) {
+            Ok(store) => store,
+            Err(error) => {
+                tracing::warn!(%error, "draft store unavailable; serving files without drafts");
+                return None;
+            }
+        };
+        // The wire prefix is how the SPA reads and edits draft content
+        // over the existing /api/fs lanes. A store the capability root
+        // cannot express (a symlinked CHAN_HOME, say) must degrade to
+        // no-drafts rather than serve paths the symlink-inert facade
+        // will refuse.
+        let Some(wire_root) = fs.wire_path_from_absolute(store.drafts_dir()) else {
+            tracing::warn!(
+                store = %store.drafts_dir().display(),
+                "draft store is not expressible as a wire path; serving files without drafts"
+            );
+            return None;
+        };
+        Some(Arc::new(crate::state::StandaloneDrafts {
+            store,
+            wire_root,
+        }))
+    });
     Some(Arc::new(crate::state::StandaloneFilesState {
         fs,
         watcher,
         mutations,
+        drafts,
     }))
 }
 
@@ -1361,6 +1392,31 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/attachments",
             post(crate::routes::standalone_fs::api_standalone_post_attachment)
                 .layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        // Per-library drafts over `state.standalone_files.drafts`. Same
+        // wire shapes as the workspace draft routes; paths are mini wire
+        // paths, so draft content rides the `/api/fs` lanes above. Each
+        // handler answers 404 on a tenant that serves no drafts, so the
+        // unconditional mounts are safe on control terminals too.
+        .route(
+            "/api/drafts/new",
+            post(crate::routes::standalone_drafts::api_standalone_create_draft),
+        )
+        .route(
+            "/api/diagrams/new",
+            post(crate::routes::standalone_drafts::api_standalone_create_diagram),
+        )
+        .route(
+            "/api/drafts/inspect",
+            post(crate::routes::standalone_drafts::api_standalone_inspect_draft),
+        )
+        .route(
+            "/api/drafts/discard",
+            post(crate::routes::standalone_drafts::api_standalone_discard_draft),
+        )
+        .route(
+            "/api/drafts/promote",
+            post(crate::routes::standalone_drafts::api_standalone_promote_draft),
         )
         .route("/api/build-info", get(api_build_info))
         .route("/api/health", get(api_health))
@@ -1558,6 +1614,7 @@ impl chan_library::TenantBuilder for RouteLayer {
         unserve: chan_library::UnserveMode,
         command: Option<String>,
         session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
         let artifacts = build_terminal_app(
@@ -1566,6 +1623,7 @@ impl chan_library::TenantBuilder for RouteLayer {
             desktop,
             unserve,
             session_dir,
+            drafts_store_root,
             control_identity,
             self.bulk_transfer.clone(),
         )
@@ -2239,6 +2297,7 @@ mod terminal_router_tests {
             &config,
             DesktopBridge::default(),
             chan_library::UnserveMode::Unsupported,
+            None,
             None,
             None,
             crate::bulk_transfer::BulkTransferLane::new(),

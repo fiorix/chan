@@ -816,6 +816,11 @@ impl Workspace {
         let paths = ensure_workspace_metadata_dirs_in(chan_home, &entry.metadata_key)
             .map_err(|e| ChanError::Io(format!("ensure workspace metadata dirs: {e}")))?;
         let lock = WorkspaceLock::acquire(&paths.lock, fs.canonical_root())?;
+        // Rescue draft discards an older release nested under a
+        // `drafts/` bucket before the sweep below reads that bucket as
+        // one meta-less junk entry and reclaims it wholesale. Must run
+        // before the first sweep of this open.
+        let _ = trash::hoist_nested_entries(&paths.trash, "drafts");
         // Lazy GC: reclaim expired trash entries on every open. No
         // background thread, matches the codebase's sync-only rule.
         // Errors are swallowed: a corrupt trash dir must never block
@@ -1909,9 +1914,12 @@ impl Workspace {
         drafts::inspect(&self.drafts_root, name)
     }
 
-    /// Move a draft to metadata trash.
+    /// Move a draft to metadata trash. The draft becomes a first-class
+    /// trash entry (flat under the trash root, labeled `.Drafts/<name>`),
+    /// so it lists, restores, and expires like any other soft delete.
     pub fn discard_draft(&self, name: &str) -> Result<()> {
-        drafts::discard(&self.drafts_root, &self.paths.trash.join("drafts"), name)
+        let _ = trash::sweep_expired(&self.paths.trash, TRASH_RETENTION_SECS);
+        drafts::discard(&self.drafts_root, &self.paths.trash, name)
     }
 
     /// Promote a draft into the workspace root with no-clobber
@@ -7099,6 +7107,79 @@ mod tests {
         assert!(
             workspace.drafts_dir().is_dir(),
             "drafts dir should materialize after the first draft"
+        );
+    }
+
+    #[test]
+    fn discarded_draft_is_a_restorable_trash_entry() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.create_draft_dir("untitled-1").unwrap();
+        workspace
+            .write_text(".Drafts/untitled-1/draft.md", "# keep me\n")
+            .unwrap();
+
+        workspace.discard_draft("untitled-1").unwrap();
+
+        // First-class entry: flat under the trash root, visible to the
+        // lister, labeled with the drafts origin.
+        let entries = workspace.trash_list().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].original_path, ".Drafts/untitled-1");
+        assert!(entries[0].is_dir);
+        // And restorable through the normal lane, back into the tree.
+        workspace.trash_restore(&entries[0].id).unwrap();
+        assert_eq!(
+            workspace.read_text(".Drafts/untitled-1/draft.md").unwrap(),
+            "# keep me\n"
+        );
+    }
+
+    #[test]
+    fn discarded_draft_survives_reopen_and_nested_legacy_discards_are_hoisted() {
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(workspace_dir.path()).unwrap();
+        let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+
+        workspace.create_draft_dir("untitled-1").unwrap();
+        workspace
+            .write_text(".Drafts/untitled-1/draft.md", "# fresh\n")
+            .unwrap();
+        workspace.discard_draft("untitled-1").unwrap();
+
+        // Plant an entry in the nested `drafts/` bucket older releases
+        // wrote, so the reopen exercises the hoist ahead of its sweep.
+        let paths =
+            crate::paths::workspace_paths_for_metadata_key_in(cfg.path(), workspace.metadata_key());
+        let legacy_src = cfg.path().join("legacy-draft");
+        std::fs::create_dir_all(&legacy_src).unwrap();
+        std::fs::write(legacy_src.join("draft.md"), b"# legacy\n").unwrap();
+        trash::move_into(
+            &paths.trash.join("drafts"),
+            &legacy_src,
+            ".Drafts/untitled-2",
+            true,
+        )
+        .unwrap();
+
+        drop(workspace);
+        let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+
+        let mut labels: Vec<String> = workspace
+            .trash_list()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.original_path)
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                ".Drafts/untitled-1".to_string(),
+                ".Drafts/untitled-2".to_string()
+            ],
+            "the open's sweep must keep the fresh discard and hoist the nested one"
         );
     }
 

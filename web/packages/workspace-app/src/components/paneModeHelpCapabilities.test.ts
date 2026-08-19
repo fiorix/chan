@@ -9,8 +9,9 @@
 // which cannot tell whether the tags and the handler guards still agree.
 //
 // `windowCaps` is read once at module load, so each shape sets its `?kind=`
-// and its `<meta name="chan-files">` BEFORE importing the component (same
-// discipline as state/standaloneBootstrap.test.ts).
+// and its `<meta name="chan-files">` / `<meta name="chan-drafts">` BEFORE
+// importing the component (same discipline as
+// state/standaloneBootstrap.test.ts).
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -21,21 +22,26 @@ let app: Record<string, unknown> | null = null;
 /// mounting it with the previous one crashes inside Svelte's internals.
 let svelte: typeof import("svelte") | null = null;
 
-function serveFiles(on: boolean): void {
-  document.head.querySelector('meta[name="chan-files"]')?.remove();
+function serveMeta(name: string, on: boolean): void {
+  document.head.querySelector(`meta[name="${name}"]`)?.remove();
   if (!on) return;
   const meta = document.createElement("meta");
-  meta.setAttribute("name", "chan-files");
+  meta.setAttribute("name", name);
   meta.setAttribute("content", "1");
   document.head.appendChild(meta);
 }
 
 /// Mount the cheatsheet in a window of the given shape and return every
 /// action label it renders.
-async function actionsFor(kind: string, tenantFiles: boolean): Promise<string[]> {
+async function actionsFor(
+  kind: string,
+  tenantFiles: boolean,
+  tenantDrafts = false,
+): Promise<string[]> {
   vi.resetModules();
   window.history.replaceState({}, "", `/?kind=${kind}&w=w-1`);
-  serveFiles(tenantFiles);
+  serveMeta("chan-files", tenantFiles);
+  serveMeta("chan-drafts", tenantDrafts);
   svelte = await import("svelte");
   const PaneModeHelp = (await import("./PaneModeHelp.svelte")).default;
   host = document.createElement("div");
@@ -50,7 +56,8 @@ afterEach(() => {
   host = null;
   app = null;
   svelte = null;
-  serveFiles(false);
+  serveMeta("chan-files", false);
+  serveMeta("chan-drafts", false);
 });
 
 describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => {
@@ -88,6 +95,22 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     // Everything capability-free stays.
     expect(actions).toContain("Stage Terminal");
     expect(actions).toContain("Move focus");
+  });
+
+  test("a standalone window with a draft store adds the draft rows, not the workspace ones", async () => {
+    const actions = await actionsFor("terminal", true, true);
+    for (const action of [
+      "Stage File Browser",
+      "Stage New Draft",
+      "Stage Diagram",
+      "Stage Terminal",
+    ]) {
+      expect(actions, action).toContain(action);
+    }
+    // Graph and Dashboard stay workspace surfaces.
+    for (const action of ["Stage Graph", "Stage Dashboard"]) {
+      expect(actions, action).not.toContain(action);
+    }
   });
 
   test("a terminals-only window lists neither, and drops the empty Dock group", async () => {

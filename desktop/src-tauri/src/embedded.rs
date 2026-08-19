@@ -380,7 +380,15 @@ impl EmbeddedServer {
         let session_dir = local_terminal_session_dir().await;
         let hosted = self
             .host
-            .open_terminal_session(serve_config(self.addr, PREFIX), session_dir)
+            .open_terminal_session(
+                serve_config(self.addr, PREFIX),
+                session_dir,
+                // The desktop host's per-library draft store roots at the
+                // chan home itself (`~/.chan/Drafts`); a same-machine
+                // devserver keeps a disjoint store under its own
+                // `~/.chan/devserver/` state dir.
+                Some(chan_workspace::paths::config_dir()),
+            )
             .await
             .map_err(|e| format!("opening the shared embedded terminal tenant: {e}"))?;
         let url = hosted.handle.launch_url();

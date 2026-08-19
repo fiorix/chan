@@ -4,10 +4,10 @@
 // `chan: kind: slides` frontmatter routes the editor straight into the
 // slides layout, and the caret lands at the end of the seed's "# Slide 1"
 // heading so the deck is ready to type. Availability follows the
-// workspace gate. See state/commands.ts for the Command shape and the
-// workspaceOnly helper.
+// drafts gate. See state/commands.ts for the Command shape and the
+// requirement table.
 
-import { registerCommands, onSurface, workspaceOnly } from "../commands";
+import { allowedInWindow, registerCommands, onSurface } from "../commands";
 import { api } from "../../api/client";
 import { firstSlideHeadingCaret } from "../../editor/slides";
 import { editorCommandsFor } from "../mountedEditors";
@@ -61,10 +61,11 @@ registerCommands([
     id: "app.slides.new",
     title: "New slide deck",
     category: "Apps",
-    // Deck creation drafts through the workspace tenant, like New draft.
-    requirement: "workspace",
+    // Deck creation drafts through the tenant's drafts store, like New
+    // draft.
+    requirement: "drafts",
     keywords: ["slides", "presentation", "deck", "present"],
-    available: (ctx) => workspaceOnly(ctx),
+    available: (ctx) => allowedInWindow("app.slides.new", ctx),
     run: () => {
       void createSlidesAndOpen();
     },

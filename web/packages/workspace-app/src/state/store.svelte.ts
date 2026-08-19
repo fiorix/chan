@@ -166,7 +166,12 @@ export {
   draftsDir,
   isDraftPath,
 } from "./workspace.svelte";
-import { workspace, draftsDir, isDraftPath } from "./workspace.svelte";
+import {
+  workspace,
+  draftsDir,
+  isDraftPath,
+  standaloneDrafts,
+} from "./workspace.svelte";
 import { clearCaretsUnder } from "./caretIndex";
 import { windowCaps, windowMode } from "./windowCaps";
 import { filesContext, filesContextFrom } from "./fileContext.svelte";
@@ -2283,6 +2288,12 @@ async function bootstrapStandalone(): Promise<void> {
     try {
       const context = await api.fsContext();
       filesContext.current = filesContextFrom(context.home);
+      // The drafts wire dir lands BEFORE the layout/session restore below
+      // so restored draft tabs and rich-prompt `rpd` bindings classify as
+      // drafts from their first render. ANDed with the frozen capability:
+      // the meta tag is what gates commands, so a context field without
+      // the tag must not half-enable the feature.
+      standaloneDrafts.dir = windowCaps.drafts ? (context.drafts_dir ?? null) : null;
     } catch (e) {
       if (e instanceof ApiError && e.status === 401 && authToken() === null) {
         ui.authMissing = true;
@@ -2772,15 +2783,19 @@ export async function handleDraftPromoted(path: string): Promise<void> {
   await refreshTreeForPath(path);
   revealAndSelect(path);
   scheduleWorkspaceRefresh();
-  invalidateGraph();
-  if (hasBrowserTab() || hasGraphTab()) {
-    void ensureGraphLoaded();
-  }
-  if (hasGraphTab()) {
-    // A promoted draft becomes a real file at `path`; reload any graph
-    // whose scope covers it (GraphPanel path-filters the signal).
-    graphReloadSignal.paths = [path];
-    graphReloadSignal.nonce += 1;
+  // The graph is a workspace surface; a standalone window has no
+  // /api/graph to invalidate or load and must not fetch a 404.
+  if (windowCaps.workspace) {
+    invalidateGraph();
+    if (hasBrowserTab() || hasGraphTab()) {
+      void ensureGraphLoaded();
+    }
+    if (hasGraphTab()) {
+      // A promoted draft becomes a real file at `path`; reload any graph
+      // whose scope covers it (GraphPanel path-filters the signal).
+      graphReloadSignal.paths = [path];
+      graphReloadSignal.nonce += 1;
+    }
   }
 }
 
@@ -2813,15 +2828,19 @@ function nearestLoadedParentDir(path: string): string | null {
 export async function noteDraftCreated(path: string): Promise<void> {
   await surfaceDraftInTree(path);
   scheduleWorkspaceRefresh();
-  invalidateGraph();
-  if (hasBrowserTab() || hasGraphTab()) {
-    void ensureGraphLoaded();
-  }
-  if (hasGraphTab()) {
-    // New draft at `path`; reload any graph whose scope covers it
-    // (GraphPanel path-filters the signal).
-    graphReloadSignal.paths = [path];
-    graphReloadSignal.nonce += 1;
+  // The graph is a workspace surface; a standalone window has no
+  // /api/graph to invalidate or load and must not fetch a 404.
+  if (windowCaps.workspace) {
+    invalidateGraph();
+    if (hasBrowserTab() || hasGraphTab()) {
+      void ensureGraphLoaded();
+    }
+    if (hasGraphTab()) {
+      // New draft at `path`; reload any graph whose scope covers it
+      // (GraphPanel path-filters the signal).
+      graphReloadSignal.paths = [path];
+      graphReloadSignal.nonce += 1;
+    }
   }
 }
 

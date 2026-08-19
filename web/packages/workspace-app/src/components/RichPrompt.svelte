@@ -15,6 +15,7 @@
   import { indentListItem, outdentListItem } from "../editor/commands/list";
   import { rewriteImagePathsForDelivery } from "../editor/deliver_images";
   import { workspace } from "../state/store.svelte";
+  import { filesContext } from "../state/fileContext.svelte";
   import { currentOS } from "../state/shortcuts";
   import { hideRichPromptForTab } from "../state/richPrompt.svelte";
   import {
@@ -321,7 +322,10 @@
     const delivered = rewriteImagePathsForDelivery(
       text,
       draftPath,
-      workspace.info?.root ?? null,
+      // The display root the delivered absolute paths hang off: the
+      // workspace root in a workspace window, "/" in a standalone one
+      // (whose draft paths are wire paths over the machine root).
+      workspace.info?.root ?? filesContext.current?.rootDisplay ?? null,
     );
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) return true;
     content = text;

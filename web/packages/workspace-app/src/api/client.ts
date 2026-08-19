@@ -955,20 +955,33 @@ export const api = {
   createDraft: (kind?: "slides") =>
     req<{ path: string; name: string }>(
       "POST",
-      "/api/drafts/new",
+      // Mutating draft calls carry `?w=` in a standalone window so the
+      // tenant's mutation bus attributes the fs frames to this window;
+      // the suffix is "" in a workspace window, leaving its request
+      // lines byte-identical.
+      `/api/drafts/new${filesMutationSuffix(false)}`,
       kind ? { kind } : undefined,
     ),
   /// Create a new diagram draft with a seeded `<name>.excalidraw` scene
   /// via /api/diagrams/new. Same response shape as createDraft; the SPA
   /// opens the returned path in canvas mode via isExcalidraw.
   createDiagram: () =>
-    req<{ path: string; name: string }>("POST", "/api/diagrams/new"),
+    req<{ path: string; name: string }>(
+      "POST",
+      `/api/diagrams/new${filesMutationSuffix(false)}`,
+    ),
   inspectDraft: (path: string) =>
     req<DraftInspectResponse>("POST", "/api/drafts/inspect", { path }),
   discardDraft: (path: string) =>
-    req<void>("POST", "/api/drafts/discard", { path }),
+    req<void>("POST", `/api/drafts/discard${filesMutationSuffix(false)}`, {
+      path,
+    }),
   promoteDraft: (path: string, target: string) =>
-    req<DraftPromoteResponse>("POST", "/api/drafts/promote", { path, target }),
+    req<DraftPromoteResponse>(
+      "POST",
+      `/api/drafts/promote${filesMutationSuffix(false)}`,
+      { path, target },
+    ),
   remove: (path: string) =>
     req<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string, root?: TransferRoot) =>

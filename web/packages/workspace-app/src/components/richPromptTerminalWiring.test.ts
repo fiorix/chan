@@ -141,15 +141,15 @@ describe("TerminalTab Rich Prompt wiring", () => {
     );
   });
 
-  test("the menu entry needs a workspace, like every other door to Rich Prompt", () => {
-    // The draft lands in the workspace drafts dir, so the chord
-    // (App.svelte), the catalog entry (requirement: "workspace") and this menu
+  test("the menu entry needs a drafts store, like every other door to Rich Prompt", () => {
+    // The draft lands in the tenant's drafts store, so the chord
+    // (App.svelte), the catalog entry (requirement: "drafts") and this menu
     // row must agree. The row calls toggleRichPromptForTab directly, past both
     // command gates, so its own guard is the only thing standing between a
-    // standalone window and a createDraft against a tenant with no drafts
+    // draftless window and a createDraft against a tenant with no drafts
     // route.
     expect(terminal).toMatch(
-      /\{#if windowCaps\.workspace\}[\s\S]{1,120}onclick=\{toggleRichPromptFromMenu\}/,
+      /\{#if windowCaps\.drafts\}[\s\S]{1,160}onclick=\{toggleRichPromptFromMenu\}/,
     );
     expect(terminal).toMatch(
       /import \{ windowCaps \} from "\.\.\/state\/windowCaps"/,

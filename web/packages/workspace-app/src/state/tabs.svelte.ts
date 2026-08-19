@@ -27,6 +27,7 @@ import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
 import { uiConfirm } from "./confirm.svelte";
 import { windowCaps } from "./windowCaps";
+import { filesContext } from "./fileContext.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
 import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
@@ -2638,6 +2639,23 @@ function isDraftTab(t: Tab): t is FileTab {
   return t.kind === "file" && isDraftPath(t.path);
 }
 
+/// Directory prefix for promote-target defaults: "" in a workspace window
+/// (targets resolve at the workspace root, as they always have) and the
+/// home dir in a standalone window, whose targets are wire paths over the
+/// machine root where "" would mean `/`.
+function promoteDefaultPrefix(): string {
+  if (windowCaps.workspace) return "";
+  const home = filesContext.current?.homeWire ?? "";
+  return home ? `${home}/` : "";
+}
+
+/// User-facing name of the place a promoted draft lands: the workspace in
+/// a workspace window, the plain disk in a standalone one. Workspace copy
+/// must stay byte-identical.
+function promoteDestinationNoun(): string {
+  return windowCaps.workspace ? "workspace" : "disk";
+}
+
 function draftDefaultTarget(
   info: { name: string; has_attachments: boolean },
   sourcePath: string,
@@ -3340,7 +3358,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     const decision = await uiDraftClose({
       path: tab.path,
       name: info.name,
-      target: draftDefaultTarget(info, tab.path),
+      target: promoteDefaultPrefix() + draftDefaultTarget(info, tab.path),
       targetKind: info.has_attachments ? "folder" : "file",
       hasAttachments: info.has_attachments,
     });
@@ -3428,8 +3446,10 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     //     plus a notice explaining the whole directory is saved.
     const target = info.has_attachments
       ? await uiPathPrompt({
-          title: "save draft to workspace (directory)",
-          defaultValue: info.name ? `${info.name}/` : "",
+          title: `save draft to ${promoteDestinationNoun()} (directory)`,
+          defaultValue: info.name
+            ? `${promoteDefaultPrefix()}${info.name}/`
+            : promoteDefaultPrefix(),
           kind: "folder",
           mode: "create",
           notice:
@@ -3437,8 +3457,8 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
             "is saved as a directory at the path below.",
         })
       : await uiPathPrompt({
-          title: "save draft to workspace (.md added if no extension)",
-          defaultValue: draftDefaultTarget(info, tab.path),
+          title: `save draft to ${promoteDestinationNoun()} (.md added if no extension)`,
+          defaultValue: promoteDefaultPrefix() + draftDefaultTarget(info, tab.path),
           kind: "file",
           mode: "create",
           // Same editable-text gate as `fileOps.createFile`: reject

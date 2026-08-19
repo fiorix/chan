@@ -96,10 +96,10 @@ describe("Hybrid Nav transactional staging", () => {
 
   test("n / i stage draft and diagram editors without committing", () => {
     expect(app).toMatch(
-      /case "n":\s*\n\s*case "N":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeStageDraftEditor\(\);\s*\n\s*return;/,
+      /case "n":\s*\n\s*case "N":\s*\n\s*if \(!windowCaps\.drafts\) return;\s*\n\s*paneModeStageDraftEditor\(\);\s*\n\s*return;/,
     );
     expect(app).toMatch(
-      /case "i":\s*\n\s*case "I":\s*\n\s*if \(!windowCaps\.workspace\) return;\s*\n\s*paneModeStageDiagramEditor\(\);\s*\n\s*return;/,
+      /case "i":\s*\n\s*case "I":\s*\n\s*if \(!windowCaps\.drafts\) return;\s*\n\s*paneModeStageDiagramEditor\(\);\s*\n\s*return;/,
     );
   });
 

@@ -211,12 +211,30 @@ pub struct AppState {
 
 /// Everything the standalone filesystem surface owns beyond the plain
 /// terminal tenant: the `/`-rooted capability filesystem, the scoped
-/// non-recursive watch manager producing this tenant's `fs` frames, and the
-/// mutation bus attributing its own writes.
+/// non-recursive watch manager producing this tenant's `fs` frames, the
+/// mutation bus attributing its own writes, and optionally the
+/// per-library draft store. Drafts nest here rather than beside it on
+/// `AppState` because they are meaningless without the file surface:
+/// draft paths are wire paths over this capability root, and the draft
+/// routes attribute their mutations through this same bus.
 pub struct StandaloneFilesState {
     pub fs: Arc<chan_workspace::MiniWorkspace>,
     pub watcher: Arc<crate::standalone_watch::ScopedWatchManager>,
     pub mutations: Arc<crate::standalone_mutations::StandaloneMutationBus>,
+    /// `Some` only when the embedder injected a store root AND the store
+    /// both constructed and mapped onto the capability root as a wire
+    /// path. Its presence is the drafts capability the served shell
+    /// advertises; `None` serves files without drafts.
+    pub drafts: Option<Arc<StandaloneDrafts>>,
+}
+
+/// The per-library draft store plus the wire-path prefix its drafts are
+/// served under (e.g. `home/user/.chan/Drafts`), precomputed once at
+/// construction because every route response and name-extraction path
+/// needs it.
+pub struct StandaloneDrafts {
+    pub store: chan_workspace::DraftStore,
+    pub wire_root: String,
 }
 
 /// Workspace + its notify watcher. Replaced wholesale by /api/storage/

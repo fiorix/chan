@@ -882,6 +882,10 @@ export type FsContext = {
   root: string;
   home: string;
   path_style: "posix";
+  /// Wire-relative drafts directory (e.g. `home/user/.chan/Drafts`)
+  /// when the tenant serves the per-library draft store; absent or null
+  /// when it serves files without drafts. Additive field, protocol 1.
+  drafts_dir?: string | null;
 };
 
 export type WatchEventWire = {

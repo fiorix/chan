@@ -70,7 +70,7 @@ pub struct DraftIssue {
 }
 
 #[derive(Debug, Clone)]
-struct DraftScan {
+pub(crate) struct DraftScan {
     inspection: DraftInspection,
     src: PathBuf,
     /// The root-level file the draft tab opens: a note's `draft.md` or
@@ -227,6 +227,20 @@ pub fn inspect(drafts_dir: &Path, name: &str) -> Result<DraftInspection> {
 
 /// Move a draft into metadata trash.
 pub fn discard(drafts_dir: &Path, draft_trash_dir: &Path, name: &str) -> Result<()> {
+    discard_labeled(drafts_dir, draft_trash_dir, name, DRAFTS_TRASH_LABEL)
+}
+
+/// `discard` with the trash origin-label prefix chosen by the caller.
+/// The label doubles as the restore destination relative to the trash's
+/// owning root, so each caller names its own drafts directory: the
+/// workspace lane's in-tree `.Drafts`, the library draft store's
+/// `Drafts`.
+pub(crate) fn discard_labeled(
+    drafts_dir: &Path,
+    draft_trash_dir: &Path,
+    name: &str,
+    label_prefix: &str,
+) -> Result<()> {
     validate_name(name)?;
     let src = drafts_dir.join(name);
     let meta = fs::symlink_metadata(&src).map_err(|e| {
@@ -242,7 +256,7 @@ pub fn discard(drafts_dir: &Path, draft_trash_dir: &Path, name: &str) -> Result<
     trash::move_into(
         draft_trash_dir,
         &src,
-        &format!("{DRAFTS_TRASH_LABEL}/{name}"),
+        &format!("{label_prefix}/{name}"),
         true,
     )
 }
@@ -261,19 +275,31 @@ pub fn promote(
     let target_rel_str = posix_path(&target_rel_path);
     let target_abs =
         fs_ops::resolve_safe_strict_canon(workspace_root, workspace_root_canon, target_rel)?;
+    promote_scanned(scan, &target_abs, &target_rel_str)
+}
 
-    if !fs_ops::is_editable_text(&target_rel_str) && !scan.inspection.has_attachments {
-        return Err(ChanError::NotEditableText(target_rel_str));
+/// The post-resolution half of `promote`: the editable-text gate and the
+/// single-file vs directory dispatch over an already-resolved target.
+/// The library draft store calls this with a facade-resolved target so
+/// target resolution lives in exactly one place per facade instead of a
+/// second copy here.
+pub(crate) fn promote_scanned(
+    scan: DraftScan,
+    target_abs: &Path,
+    target_rel: &str,
+) -> Result<DraftPromoteReport> {
+    if !fs_ops::is_editable_text(target_rel) && !scan.inspection.has_attachments {
+        return Err(ChanError::NotEditableText(target_rel.to_string()));
     }
 
     if scan.inspection.has_attachments {
-        promote_draft(scan, &target_abs, &target_rel_str)
+        promote_draft(scan, target_abs, target_rel)
     } else {
-        promote_single_file(scan, &target_abs, &target_rel_str)
+        promote_single_file(scan, target_abs, target_rel)
     }
 }
 
-fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
+pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
     validate_name(name)?;
     let src = drafts_dir.join(name);
     let meta = fs::symlink_metadata(&src).map_err(|e| {

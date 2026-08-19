@@ -17,6 +17,12 @@
 // `<id>` is `unix_nanos`, with a `-N` suffix retry on the rare
 // same-nanosecond collision. Opaque to callers.
 //
+// A trash root contains ONLY entry dirs. Never nest another store (or
+// any non-entry file) inside a swept root: the sweep classifies any
+// child without a parsable meta.json as a half-written entry and
+// reclaims it wholesale, so a nested bucket is destroyed on the next
+// sweep no matter what it holds.
+//
 // Cross-filesystem note: state_dir and the workspace root may be on
 // different mounts (external disk, network workspace). We try
 // `fs::rename` first (atomic on the same fs); on failure we fall
@@ -307,6 +313,52 @@ pub fn sweep_expired(trash_dir: &Path, retention_secs: i64) -> Result<()> {
     Ok(())
 }
 
+/// Hoist complete entries out of a nested bucket (`trash_dir/<bucket>/<id>`)
+/// up into `trash_dir` itself, where the flat contract puts them.
+///
+/// Older releases discarded drafts into a `drafts/` bucket nested inside
+/// the workspace trash root. The sweep reads such a bucket as one
+/// meta-less junk entry and reclaims it wholesale (see the layout note
+/// above), so any complete entries still inside are rescued here BEFORE
+/// the first sweep runs. Entries move under their existing id (suffixed
+/// on collision); children without a parsable meta.json stay behind and
+/// are reclaimed with the bucket by the next sweep, exactly as junk
+/// always is.
+pub(crate) fn hoist_nested_entries(trash_dir: &Path, bucket: &str) -> Result<()> {
+    let bucket_dir = trash_dir.join(bucket);
+    let rd = match fs::read_dir(&bucket_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in rd.flatten() {
+        let entry_dir = entry.path();
+        let complete = fs::read(entry_dir.join("meta.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Meta>(&b).ok())
+            .is_some();
+        if !complete {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let mut dest = trash_dir.join(&id);
+        let mut n = 1u32;
+        while fs::symlink_metadata(&dest).is_ok() {
+            dest = trash_dir.join(format!("{id}-{n}"));
+            n += 1;
+        }
+        if let Err(error) = fs::rename(&entry_dir, &dest) {
+            tracing::warn!(entry = %entry_dir.display(), %error, "failed to hoist nested trash entry");
+        }
+    }
+    // An emptied bucket disappears now; one still holding junk is left
+    // for the sweep, which reclaims it as the meta-less entry it is.
+    let _ = fs::remove_dir(&bucket_dir);
+    Ok(())
+}
+
 fn write_meta(entry_dir: &Path, original_rel: &str, size: u64, is_dir: bool) -> Result<()> {
     let meta = Meta {
         original_path: original_rel.to_string(),
@@ -537,6 +589,92 @@ mod tests {
         std::fs::write(trash.join("orphan/payload"), b"junk").unwrap();
         sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
         assert!(!trash.join("orphan").exists());
+    }
+
+    #[test]
+    fn hoist_rescues_nested_entries_before_the_sweep_reads_them_as_junk() {
+        let workspace = TempDir::new().unwrap();
+        let (_t, trash) = ts();
+        // A complete entry inside a nested `drafts/` bucket, the layout
+        // older releases wrote for discarded drafts.
+        let src = workspace.path().join("untitled-1");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("draft.md"), b"# hello\n").unwrap();
+        move_into(&trash.join("drafts"), &src, ".Drafts/untitled-1", true).unwrap();
+        // Invisible to the flat lister while nested.
+        assert!(list(&trash).unwrap().is_empty());
+
+        hoist_nested_entries(&trash, "drafts").unwrap();
+
+        let entries = list(&trash).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].original_path, ".Drafts/untitled-1");
+        assert!(entries[0].is_dir);
+        assert!(!trash.join("drafts").exists(), "emptied bucket removed");
+        // The hoisted entry is a first-class citizen: the sweep keeps it.
+        sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
+        assert_eq!(list(&trash).unwrap().len(), 1);
+        // And it restores through the normal lane.
+        let restored = restore(
+            &trash,
+            workspace.path(),
+            &workspace.path().canonicalize().unwrap(),
+            &entries[0].id,
+        )
+        .unwrap();
+        assert_eq!(restored.rel_path, ".Drafts/untitled-1");
+        assert_eq!(
+            std::fs::read(workspace.path().join(".Drafts/untitled-1/draft.md")).unwrap(),
+            b"# hello\n"
+        );
+    }
+
+    #[test]
+    fn hoist_suffixes_on_id_collision_and_leaves_junk_for_the_sweep() {
+        let workspace = TempDir::new().unwrap();
+        let (_t, trash) = ts();
+        let src = workspace.path().join("a.md");
+        std::fs::write(&src, b"flat").unwrap();
+        move_into(&trash, &src, "a.md", false).unwrap();
+        let flat_id = list(&trash).unwrap()[0].id.clone();
+        // A nested entry whose id collides with the flat one, plus a
+        // meta-less junk sibling.
+        let nested = trash.join("drafts").join(&flat_id);
+        std::fs::create_dir_all(nested.join("payload")).unwrap();
+        std::fs::write(
+            nested.join("meta.json"),
+            serde_json::to_vec_pretty(&Meta {
+                original_path: ".Drafts/untitled-1".into(),
+                deleted_at: now_secs(),
+                is_dir: true,
+                size: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(trash.join("drafts/half-written")).unwrap();
+
+        hoist_nested_entries(&trash, "drafts").unwrap();
+
+        let mut paths: Vec<String> = list(&trash)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.original_path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![".Drafts/untitled-1".to_string(), "a.md".to_string()]
+        );
+        assert!(
+            trash.join(format!("{flat_id}-1")).is_dir(),
+            "collision suffixed"
+        );
+        // Junk stays behind for the sweep, which reclaims bucket and all.
+        assert!(trash.join("drafts/half-written").is_dir());
+        sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
+        assert!(!trash.join("drafts").exists());
+        assert_eq!(list(&trash).unwrap().len(), 2);
     }
 
     #[test]

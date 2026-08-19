@@ -28,7 +28,7 @@ describe("menu-top Name input", () => {
   test("Draft tabs replace the Name row with Save to Workspace", () => {
     expect(editor).toMatch(/const isDraftEditorTab = \$derived/);
     expect(editor).toMatch(
-      /\{#if isDraftEditorTab\}[\s\S]{1,500}onclick=\{doSaveDraftToWorkspace\}[\s\S]{1,300}<span class="mbtn-label">Save to Workspace<\/span>/,
+      /\{#if isDraftEditorTab\}[\s\S]{1,500}onclick=\{doSaveDraftToWorkspace\}[\s\S]{1,300}\{windowCaps\.workspace \? "Save to Workspace" : "Save to Disk"\}/,
     );
     expect(editor).toMatch(/saveDraftTabToWorkspace\(tab\)/);
   });

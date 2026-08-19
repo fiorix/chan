@@ -19,7 +19,11 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.94.0
+
+- [a-standalone-window-cannot-create-drafts](v0.94.0/a-standalone-window-cannot-create-drafts.md) - New draft, New diagram, New slide deck, and Rich Prompt work in a standalone window, backed by a per-library draft store (`~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver) with a working flat trash; registered after the fact with the implementation and verification already carried out on the v0.93.0 GA base, including the companion repair that makes a discarded workspace draft a restorable trash entry instead of sweep fodder.
+
+An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
 

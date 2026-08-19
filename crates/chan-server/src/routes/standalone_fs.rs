@@ -99,7 +99,7 @@ fn structured_conflict(error: &'static str, path: &str) -> Response {
 /// Open a mutation ticket when the caller identified its window. An absent
 /// `w` skips the bus entirely: shell-equivalent callers get plain watcher
 /// echoes delivered as external changes.
-fn begin_mutation(
+pub(crate) fn begin_mutation(
     files: &StandaloneFilesState,
     w: Option<&str>,
     expected_paths: &[String],
@@ -108,7 +108,7 @@ fn begin_mutation(
     Some(files.mutations.begin(w, expected_paths))
 }
 
-fn commit_mutation(
+pub(crate) fn commit_mutation(
     files: &StandaloneFilesState,
     ticket: Option<MutationTicket>,
     changes: Vec<WatchEvent>,
@@ -118,13 +118,13 @@ fn commit_mutation(
     }
 }
 
-fn cancel_mutation(files: &StandaloneFilesState, ticket: Option<MutationTicket>) {
+pub(crate) fn cancel_mutation(files: &StandaloneFilesState, ticket: Option<MutationTicket>) {
     if let Some(ticket) = ticket {
         files.mutations.cancel(ticket);
     }
 }
 
-fn generation() -> WorkspaceGeneration {
+pub(crate) fn generation() -> WorkspaceGeneration {
     // Synthetic frames have no generated-workspace scope behind them; the
     // default generation is the constructors' documented value for that.
     WorkspaceGeneration::default()
@@ -144,7 +144,7 @@ fn standalone_path_class(fs: &MiniWorkspace, rel: &str) -> Option<chan_workspace
 #[derive(Default, Deserialize)]
 pub struct StandaloneMutationQuery {
     #[serde(default)]
-    w: Option<String>,
+    pub(crate) w: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -153,6 +153,10 @@ struct FsContextResponse {
     root: String,
     home: String,
     path_style: &'static str,
+    /// Wire-relative drafts directory (e.g. `home/user/.chan/Drafts`)
+    /// when this tenant serves the per-library draft store; `None` when
+    /// it serves files without drafts. Additive: `protocol` stays 1.
+    drafts_dir: Option<String>,
 }
 
 /// `GET /api/fs/context`: the Files frontend's bootstrap facts. `root` is
@@ -167,6 +171,7 @@ pub async fn api_standalone_fs_context(State(state): State<Arc<AppState>>) -> Re
         root: files.fs.root().display().to_string(),
         home: files.fs.start_rel().to_string(),
         path_style: "posix",
+        drafts_dir: files.drafts.as_ref().map(|d| d.wire_root.clone()),
     })
     .into_response()
 }
@@ -560,7 +565,7 @@ async fn standalone_stream_read_response(fs: Arc<MiniWorkspace>, path: String) -
 #[derive(Default, Deserialize)]
 pub struct StandaloneWriteQuery {
     #[serde(default)]
-    w: Option<String>,
+    pub(crate) w: Option<String>,
     #[serde(default)]
     expected_mtime: Option<i64>,
     #[serde(default)]
@@ -1254,42 +1259,43 @@ fn standalone_transfer_batch_sync(
     Ok(resp)
 }
 
+/// The slim-tenant test fixture, shared with the standalone drafts route
+/// tests so both surfaces exercise one `AppState` shape.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_fixture {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex, RwLock};
 
-    use axum::body::{to_bytes, Body};
-    use axum::http::{header, Request, StatusCode};
-    use serde_json::{json, Value};
     use tempfile::TempDir;
     use tokio::sync::{broadcast, watch};
-    use tower::ServiceExt;
 
     use crate::bus::ScopeRegistry;
     use crate::self_writes::SelfWrites;
     use crate::standalone_mutations::StandaloneMutationBus;
     use crate::standalone_watch::ScopedWatchManager;
-    use crate::state::{AppState, StandaloneFilesState};
+    use crate::state::{AppState, StandaloneDrafts, StandaloneFilesState};
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
 
-    struct Fixture {
-        _cfg: TempDir,
-        _root: TempDir,
-        root: PathBuf,
-        registry: Arc<ScopeRegistry>,
-        state: Arc<AppState>,
+    pub(crate) struct Fixture {
+        pub(crate) _cfg: TempDir,
+        pub(crate) _root: TempDir,
+        pub(crate) root: PathBuf,
+        pub(crate) registry: Arc<ScopeRegistry>,
+        pub(crate) state: Arc<AppState>,
     }
 
     /// A slim-tenant `AppState` whose Files bundle is rooted at a temp
     /// directory with `home/user` as the protected start, standing in for
     /// the production `/` + canonical `$HOME`. The scope registry is
     /// shared between the state and the mutation bus exactly like the
-    /// production constructor, so attributed frames are observable.
-    fn files_fixture() -> Fixture {
+    /// production constructor, so attributed frames are observable. The
+    /// draft store roots at `home/user/.chan` under the same capability
+    /// root, mirroring the production injection, so drafts serve wire
+    /// paths like `home/user/.chan/Drafts/untitled/draft.md`.
+    pub(crate) fn files_fixture() -> Fixture {
         let cfg = TempDir::new().unwrap();
         let root_dir = TempDir::new().unwrap();
         let root = root_dir.path().to_path_buf();
@@ -1306,10 +1312,17 @@ mod tests {
             mutations.clone(),
         )
         .expect("spawn watch manager");
+        let store = chan_workspace::DraftStore::open(&root.join("home/user/.chan"))
+            .expect("open draft store");
+        let wire_root = fs
+            .wire_path_from_absolute(store.drafts_dir())
+            .expect("wire-map draft store");
+        let drafts = Some(Arc::new(StandaloneDrafts { store, wire_root }));
         let standalone = Arc::new(StandaloneFilesState {
             fs,
             watcher,
             mutations,
+            drafts,
         });
 
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -1365,6 +1378,17 @@ mod tests {
             state,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use super::test_fixture::{files_fixture, Fixture};
 
     fn router(fixture: &Fixture) -> axum::Router {
         crate::terminal_router(fixture.state.clone())
@@ -1421,6 +1445,7 @@ mod tests {
                 "root": fx.root.display().to_string(),
                 "home": "home/user",
                 "path_style": "posix",
+                "drafts_dir": "home/user/.chan/Drafts",
             })
         );
     }

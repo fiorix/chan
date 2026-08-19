@@ -1161,7 +1161,9 @@
             <span class="mbtn-icon">
               <Save size={18} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Save to Workspace</span>
+            <span class="mbtn-label"
+              >{windowCaps.workspace ? "Save to Workspace" : "Save to Disk"}</span
+            >
           </button>
         {:else}
           <!-- Editable Name input, like the Terminal tab's. Commits

@@ -72,7 +72,7 @@ registerCommands([
     "team work",
     "agents",
   ]),
-  reuse("app.draft.new", "New draft", "Apps", "workspace", [
+  reuse("app.draft.new", "New draft", "Apps", "drafts", [
     "markdown",
     "note",
   ]),
