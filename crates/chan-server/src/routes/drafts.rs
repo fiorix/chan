@@ -24,13 +24,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
 
-const NEW_DRAFT_CONTENT: &str = "# Draft\n";
+pub(crate) const NEW_DRAFT_CONTENT: &str = "# Draft\n";
 
 /// Seed for a brand-new slide deck: the canonical `chan: kind: slides`
 /// frontmatter block the SPA's `parseSlidesSpec` recognizes (16:9 default
 /// aspect) plus a first slide heading, so the draft opens straight into the
 /// slides layout. The primary file is still `draft.md`: a deck is markdown.
-const NEW_SLIDES_CONTENT: &str = r#"---
+pub(crate) const NEW_SLIDES_CONTENT: &str = r#"---
 chan:
   kind: slides
   slides:
@@ -46,7 +46,7 @@ chan:
 /// auto-discards on close. `ExcalidrawCanvas` parses it as an empty
 /// board. The frontend mirrors this exact string as its diagram seed so
 /// a never-drawn board still discards silently on close.
-const NEW_DIAGRAM_CONTENT: &str =
+pub(crate) const NEW_DIAGRAM_CONTENT: &str =
     r#"{"type":"excalidraw","version":2,"source":"chan","elements":[],"appState":{},"files":{}}"#;
 
 /// Extract the draft leaf name from a draft public path.
@@ -134,7 +134,7 @@ pub struct DraftCreatePayload {
 /// body or an omitted `kind` seeds the markdown draft; `{"kind":"slides"}`
 /// seeds the slide deck. Anything else is a client error, refused before
 /// touching the workspace.
-fn draft_seed_for_body(body: &[u8]) -> Result<&'static str, String> {
+pub(crate) fn draft_seed_for_body(body: &[u8]) -> Result<&'static str, String> {
     if body.is_empty() {
         return Ok(NEW_DRAFT_CONTENT);
     }
@@ -367,7 +367,7 @@ fn promote_draft_sync(
     })
 }
 
-fn promote_mode_label(mode: chan_workspace::DraftPromoteMode) -> &'static str {
+pub(crate) fn promote_mode_label(mode: chan_workspace::DraftPromoteMode) -> &'static str {
     match mode {
         chan_workspace::DraftPromoteMode::File => "file",
         chan_workspace::DraftPromoteMode::DirectoryCreated => "directory_created",

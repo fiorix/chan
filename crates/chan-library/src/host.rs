@@ -1039,6 +1039,7 @@ impl WorkspaceHost {
         &self,
         config: ServeConfig,
         session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
     ) -> Result<HostedWorkspace, Error> {
         // This is THE library's shared terminal tenant (every standalone
         // terminal window attaches here, sharing its prefix+token). Record its
@@ -1047,12 +1048,13 @@ impl WorkspaceHost {
         // `session_dir = Some(dir)` the tenant persists each window's pane
         // layout on disk, so a standalone terminal window restores its layout on
         // relaunch (with fresh shells -- the PTYs don't survive); `None` keeps
-        // layout in-memory (`ephemeral_sessions`). Either way the terminal
-        // WINDOWS persist as registry rows. Set-once: the shared tenant mounts
-        // once per library.
+        // layout in-memory (`ephemeral_sessions`). `drafts_store_root` places
+        // the tenant's per-library draft store the same embedder-decided way;
+        // `None` serves no drafts. Either way the terminal WINDOWS persist as
+        // registry rows. Set-once: the shared tenant mounts once per library.
         let prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
         let hosted = self
-            .open_terminal_session_with_command(config, None, session_dir)
+            .open_terminal_tenant(config, None, session_dir, drafts_store_root)
             .await?;
         let _ = self.terminal_tenant_prefix.set(prefix);
         Ok(hosted)
@@ -1085,9 +1087,25 @@ impl WorkspaceHost {
     /// workspace mount.
     pub async fn open_terminal_session_with_command(
         &self,
+        config: ServeConfig,
+        command: Option<String>,
+        session_dir: Option<PathBuf>,
+    ) -> Result<HostedWorkspace, Error> {
+        // Command-carrying and control tenants never serve drafts, so the
+        // narrower signature encodes that instead of asking every caller
+        // to spell `None`.
+        self.open_terminal_tenant(config, command, session_dir, None)
+            .await
+    }
+
+    /// The shared implementation behind both terminal-tenant fronts;
+    /// `drafts_store_root` as documented on `TenantBuilder::build_terminal`.
+    async fn open_terminal_tenant(
+        &self,
         mut config: ServeConfig,
         command: Option<String>,
         session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
     ) -> Result<HostedWorkspace, Error> {
         config.prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
         let prefix = config.prefix.clone();
@@ -1126,6 +1144,7 @@ impl WorkspaceHost {
                 self.unserve_mode(),
                 command,
                 session_dir,
+                drafts_store_root,
                 self.control_identity(),
             )
             .await?;
@@ -3435,6 +3454,7 @@ mod tests {
             _unserve: UnserveMode,
             command: Option<String>,
             _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
             _control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             let inner = Router::new().route(
@@ -3486,6 +3506,7 @@ mod tests {
             unserve: UnserveMode,
             command: Option<String>,
             session_dir: Option<PathBuf>,
+            drafts_store_root: Option<PathBuf>,
             control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             FakeBuilder
@@ -3496,6 +3517,7 @@ mod tests {
                     unserve,
                     command,
                     session_dir,
+                    drafts_store_root,
                     control_identity,
                 )
                 .await
@@ -4602,7 +4624,7 @@ mod tests {
 
         // No workspace path, no registration: a terminal tenant is
         // backed by nothing but the embedded host.
-        host.open_terminal_session(serve_config("/terminal-x"), None)
+        host.open_terminal_session(serve_config("/terminal-x"), None, None)
             .await
             .expect("open terminal session");
 
@@ -4645,12 +4667,12 @@ mod tests {
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
 
-        host.open_terminal_session(serve_config("/terminal-1"), None)
+        host.open_terminal_session(serve_config("/terminal-1"), None, None)
             .await
             .expect("open first terminal");
         // Same prefix is refused by the shared duplicate-prefix guard.
         let err = host
-            .open_terminal_session(serve_config("/terminal-1"), None)
+            .open_terminal_session(serve_config("/terminal-1"), None, None)
             .await
             .expect_err("duplicate prefix must be rejected");
         assert!(matches!(err, Error::Config(_)));
@@ -4698,7 +4720,7 @@ mod tests {
         // A mounted terminal tenant with no session opened yet -> empty.
         // (The actual byte capture is covered by the registry's
         // `all_scrollback` test, which drives a session.)
-        host.open_terminal_session(serve_config("/term-sb"), None)
+        host.open_terminal_session(serve_config("/term-sb"), None, None)
             .await
             .expect("open terminal tenant");
         assert!(host.terminal_tenant_scrollback("/term-sb").is_empty());
@@ -4710,7 +4732,7 @@ mod tests {
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
 
-        host.open_terminal_session(serve_config("/control"), None)
+        host.open_terminal_session(serve_config("/control"), None, None)
             .await
             .expect("open terminal tenant");
 
@@ -4756,7 +4778,7 @@ mod tests {
         assert_eq!(registry.len(), 0, "PTY reaped on tenant close");
 
         // The prefix tore down cleanly and can be re-mounted at once.
-        host.open_terminal_session(serve_config("/control"), None)
+        host.open_terminal_session(serve_config("/control"), None, None)
             .await
             .expect("remount after close");
 
@@ -4773,7 +4795,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-        host.open_terminal_session(serve_config("/count"), None)
+        host.open_terminal_session(serve_config("/count"), None, None)
             .await
             .expect("open terminal tenant");
 
@@ -4944,7 +4966,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-        host.open_terminal_session(serve_config("/ctl"), None)
+        host.open_terminal_session(serve_config("/ctl"), None, None)
             .await
             .expect("open terminal tenant");
 
@@ -5027,7 +5049,7 @@ mod tests {
             .expect("open b");
         // A terminal tenant has no workspace cell; cancelling must skip it
         // without panicking.
-        host.open_terminal_session(serve_config("/term"), None)
+        host.open_terminal_session(serve_config("/term"), None, None)
             .await
             .expect("open terminal tenant");
 
@@ -5177,7 +5199,7 @@ mod tests {
 
         // Mount the shared terminal tenant (records its prefix), install a
         // registry, then mint a terminal window.
-        host.open_terminal_session(serve_config("/terminal"), None)
+        host.open_terminal_session(serve_config("/terminal"), None, None)
             .await
             .expect("open terminal session");
         let store = tempfile::tempdir().expect("store dir");
@@ -5424,7 +5446,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-        host.open_terminal_session(serve_config("/api/terminal"), None)
+        host.open_terminal_session(serve_config("/api/terminal"), None, None)
             .await
             .expect("mount shared terminal tenant");
         // Record what the blob reaper is asked to delete (chan-server installs the
@@ -5466,7 +5488,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-        host.open_terminal_session(serve_config("/api/terminal"), None)
+        host.open_terminal_session(serve_config("/api/terminal"), None, None)
             .await
             .expect("mount shared terminal tenant");
         let store = tempfile::tempdir().expect("store dir");
@@ -5498,7 +5520,7 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-        host.open_terminal_session(serve_config("/api/terminal"), None)
+        host.open_terminal_session(serve_config("/api/terminal"), None, None)
             .await
             .expect("mount shared terminal tenant");
 
@@ -5576,7 +5598,7 @@ mod tests {
             let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
             // Mount the shared terminal tenant (records terminal_tenant_prefix),
             // matching the devserver startup path.
-            host.open_terminal_session(serve_config("/api/terminal"), None)
+            host.open_terminal_session(serve_config("/api/terminal"), None, None)
                 .await
                 .expect("mount shared terminal tenant");
             let store = tempfile::tempdir().expect("store dir");

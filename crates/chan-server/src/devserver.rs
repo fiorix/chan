@@ -212,20 +212,22 @@ fn serialize_persisted_config(cfg: &PersistedConfig) -> std::io::Result<Vec<u8>>
 /// devserver restart (with fresh PTYs). `None` when there is no home dir (the
 /// tenant then falls back to the in-memory `ephemeral_sessions`).
 fn devserver_terminals_dir() -> Option<PathBuf> {
+    Some(devserver_state_dir().join("terminals"))
+}
+
+/// The devserver's state root (`~/.chan/devserver/`), the subtree every
+/// devserver sibling lives under so the host identity is discovered and
+/// deleted as one unit. The per-library draft store roots here, which is
+/// what keeps a devserver's drafts disjoint from a same-machine desktop's
+/// even though both share `~/.chan/config.toml`.
+fn devserver_state_dir() -> PathBuf {
     // Routed through the single chan-home authority so `CHAN_HOME` relocates it.
-    Some(
-        chan_workspace::paths::config_dir()
-            .join("devserver")
-            .join("terminals"),
-    )
+    chan_workspace::paths::config_dir().join("devserver")
 }
 
 fn devserver_config_path() -> std::io::Result<PathBuf> {
-    // Routed through the single chan-home authority (`config_dir`) so `CHAN_HOME`
-    // relocates it; `config_dir` is infallible, so this never errors.
-    Ok(chan_workspace::paths::config_dir()
-        .join("devserver")
-        .join("config.json"))
+    // `config_dir` is infallible, so this never errors.
+    Ok(devserver_state_dir().join("config.json"))
 }
 
 /// Machine-readable marker the desktop control terminal scrapes from the
@@ -1390,6 +1392,9 @@ impl DevserverState {
             .open_terminal_session(
                 tenant_config(self.addr, DEVSERVER_SHARED_TERMINAL_PREFIX),
                 devserver_terminals_dir(),
+                // Drafts root under the devserver state dir, NOT the shared
+                // chan home: a same-machine desktop host has its own store.
+                Some(devserver_state_dir()),
             )
             .await?;
         Ok(())
@@ -2629,6 +2634,7 @@ mod tests {
             _unserve: chan_library::UnserveMode,
             _command: Option<String>,
             _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
             Err(Error::Config(

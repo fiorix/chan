@@ -91,8 +91,13 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     let settings_disabled = state.settings_disabled;
     // A workspace tenant's file surface rides its workspace; the shared
     // standalone terminal tenant carries this one, and only when the host
-    // could construct it.
+    // could construct it. Drafts likewise: constructed state IS the
+    // capability.
     let files = state.standalone_files.is_some();
+    let drafts = state
+        .standalone_files
+        .as_ref()
+        .is_some_and(|f| f.drafts.is_some());
     if let Some(file) = WebAssets::get(candidate) {
         let body = if is_index {
             inject_chan_meta(
@@ -100,6 +105,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
                 &prefix,
                 settings_disabled,
                 files,
+                drafts,
                 webgl_renderer,
             )
         } else {
@@ -117,6 +123,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
             &prefix,
             settings_disabled,
             files,
+            drafts,
             webgl_renderer,
         );
         return with_static_cache_headers(
@@ -276,6 +283,13 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool) -> Respons
 ///     the authority because it is the thing that either mounted that
 ///     surface or did not, and the SPA needs the answer before its
 ///     first render.
+///   - `<meta name="chan-drafts" content="1">` when this tenant also
+///     serves the per-library draft store. A separate tag rather than a
+///     rider on `chan-files` because the store can fail to construct
+///     (an unwritable state root, a store the capability root cannot
+///     express as a wire path) while the file surface works, and an
+///     advertised-but-dead capability would leave visible commands
+///     404ing. Same authority and same before-first-render need.
 ///   - `<meta name="chan-webgl-renderer" content="1|0">` when a native
 ///     desktop supplied its WebKit renderer result. The explicit false value
 ///     keeps affected hosts on xterm.js's DOM renderer, while true enables the
@@ -288,9 +302,10 @@ pub fn inject_chan_meta(
     prefix: &str,
     settings_disabled: bool,
     files: bool,
+    drafts: bool,
     webgl_renderer: Option<bool>,
 ) -> Vec<u8> {
-    if prefix.is_empty() && !settings_disabled && !files && webgl_renderer.is_none() {
+    if prefix.is_empty() && !settings_disabled && !files && !drafts && webgl_renderer.is_none() {
         return html.to_vec();
     }
     let needle = b"<head>";
@@ -308,6 +323,9 @@ pub fn inject_chan_meta(
     }
     if files {
         insert.push_str("<meta name=\"chan-files\" content=\"1\">");
+    }
+    if drafts {
+        insert.push_str("<meta name=\"chan-drafts\" content=\"1\">");
     }
     if let Some(enabled) = webgl_renderer {
         insert.push_str(&format!(
@@ -407,7 +425,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_prefix_after_head() {
         let html = b"<!doctype html><html><head><title>x</title></head></html>";
-        let out = inject_chan_meta(html, "/foo", false, false, None);
+        let out = inject_chan_meta(html, "/foo", false, false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-prefix\" content=\"/foo\"><title>"));
         assert!(!s.contains("chan-settings-disabled"));
@@ -416,7 +434,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_settings_disabled_after_head() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", true, false, None);
+        let out = inject_chan_meta(html, "", true, false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-settings-disabled\" content=\"1\"><title>"));
         assert!(!s.contains("chan-prefix"));
@@ -425,7 +443,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_combines_both_tags() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "/foo", true, false, None);
+        let out = inject_chan_meta(html, "/foo", true, false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         // Prefix is injected first, settings-disabled second; both
         // sit immediately after the opening <head>.
@@ -441,24 +459,41 @@ mod tests {
         // reads it before its first render to decide whether a standalone
         // terminal window offers the file browser and the editor.
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", false, true, None);
+        let out = inject_chan_meta(html, "", false, true, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-files\" content=\"1\"><title>"));
         // A tenant without it stays silent, which is what a host with no
         // usable home directory serves.
-        let out = inject_chan_meta(html, "", false, false, None);
+        let out = inject_chan_meta(html, "", false, false, false, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains("chan-files"));
     }
 
     #[test]
+    fn inject_chan_meta_advertises_the_draft_store_beside_the_file_surface() {
+        // Drafts carry their own tag: the store can fail to construct
+        // while the file surface works, and the SPA gates the draft
+        // commands on this answer before its first render.
+        let html = b"<head><title>x</title></head>";
+        let out = inject_chan_meta(html, "", false, true, true, None);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("<meta name=\"chan-files\" content=\"1\">"));
+        assert!(s.contains("<meta name=\"chan-drafts\" content=\"1\">"));
+        // Files without drafts: the degraded-store posture.
+        let out = inject_chan_meta(html, "", false, true, false, None);
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(s.contains("chan-files"));
+        assert!(!s.contains("chan-drafts"));
+    }
+
+    #[test]
     fn inject_chan_meta_carries_both_renderer_signal_values() {
         let html = b"<head><title>x</title></head>";
-        let webgl = inject_chan_meta(html, "", false, false, Some(true));
+        let webgl = inject_chan_meta(html, "", false, false, false, Some(true));
         let webgl = std::str::from_utf8(&webgl).unwrap();
         assert!(webgl.contains("<head><meta name=\"chan-webgl-renderer\" content=\"1\"><title>"));
 
-        let dom = inject_chan_meta(html, "", false, false, Some(false));
+        let dom = inject_chan_meta(html, "", false, false, false, Some(false));
         let dom = std::str::from_utf8(&dom).unwrap();
         assert!(dom.contains("<head><meta name=\"chan-webgl-renderer\" content=\"0\"><title>"));
     }
@@ -514,14 +549,14 @@ mod tests {
     #[test]
     fn inject_chan_meta_noop_when_nothing_set() {
         let html = b"<head></head>";
-        let out = inject_chan_meta(html, "", false, false, None);
+        let out = inject_chan_meta(html, "", false, false, false, None);
         assert_eq!(out, html);
     }
 
     #[test]
     fn inject_chan_meta_noop_when_head_missing() {
         let html = b"<html></html>";
-        let out = inject_chan_meta(html, "/foo", true, false, None);
+        let out = inject_chan_meta(html, "/foo", true, false, false, None);
         assert_eq!(out, html);
     }
 

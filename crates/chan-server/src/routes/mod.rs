@@ -45,6 +45,7 @@ mod sessions;
 // pub(crate) so the terminal router (`crate::lib`) mounts the standalone
 // Files handlers and the transfer lane dispatches its shared-path GET and
 // upload branches into them.
+pub(crate) mod standalone_drafts;
 pub(crate) mod standalone_fs;
 mod storage;
 mod survey;
