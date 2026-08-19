@@ -202,6 +202,7 @@ Admin (internal listener):
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/admin/v1/tokens` | mint a PAT |
+| POST | `/admin/v1/tokens/{id}/revoke` | revoke a PAT by id (202; cuts the owner's tunnels and sessions) |
 | GET | `/admin/v1/sessions` | list OAuth sessions |
 | POST | `/admin/v1/sessions/{id}/revoke` | revoke one OAuth session |
 | POST | `/admin/v1/users/{id}/sessions/revoke` | revoke a user's OAuth sessions |

@@ -811,7 +811,7 @@ async fn admin_token_revoke_and_audit() {
     assert_eq!(s, StatusCode::OK);
     let arr = audit.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["action"], "revoked");
+    assert_eq!(arr[0]["action"], "revoked_via_admin");
 
     // Second revoke is a clean no-op (no audit duplicate).
     let (s, _) = app

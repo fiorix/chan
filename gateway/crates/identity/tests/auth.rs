@@ -917,6 +917,10 @@ async fn identity_credentials_are_route_scoped_and_optional_scopes_hide() {
 
     for (method, path) in [
         (Method::POST, "/admin/v1/tokens"),
+        (
+            Method::POST,
+            "/admin/v1/tokens/00000000-0000-0000-0000-000000000000/revoke",
+        ),
         (Method::GET, "/admin/v1/sessions"),
         (Method::GET, "/admin/v1/fleet"),
     ] {

@@ -612,6 +612,25 @@ impl ProfileClient {
         }
     }
 
+    /// Operator-tier revoke by token id, no owner required: profile
+    /// soft-revokes, writes the `revoked_via_admin` audit row, and
+    /// reserves durable subject revocation. Retry-safe on an
+    /// already-revoked token; an unknown id is `NotFound`.
+    pub async fn admin_revoke_api_token(&self, token_id: Uuid) -> ProfileResult<()> {
+        let res = self
+            .req(
+                reqwest::Method::POST,
+                &format!("/v1/admin/tokens/{token_id}/revoke"),
+            )
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::ACCEPTED => Ok(()),
+            StatusCode::NOT_FOUND => Err(ProfileError::NotFound),
+            s => Err(upstream(s, res).await),
+        }
+    }
+
     /// Resolved flag map for one user. Identity reads this on every
     /// /api/me so the SPA can gate UI affordances, and on OAuth
     /// callback to enforce the `oauth_login` allowlist.

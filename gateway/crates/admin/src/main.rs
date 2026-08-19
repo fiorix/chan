@@ -1438,13 +1438,15 @@ impl AdminClient {
         }
     }
 
+    /// Revoke by id on profile's admin surface. Profile answers 202:
+    /// the denial is committed, the data plane settles via the outbox.
     async fn revoke_token(&self, id: Uuid) -> anyhow::Result<()> {
         let res = self
             .req(Method::POST, &format!("/v1/admin/tokens/{id}/revoke"))
             .send()
             .await?;
         match res.status() {
-            StatusCode::NO_CONTENT => Ok(()),
+            StatusCode::ACCEPTED => Ok(()),
             StatusCode::NOT_FOUND => Err(ClientError::NotFound.into()),
             s => Err(upstream(s, res).await.into()),
         }

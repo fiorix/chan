@@ -107,6 +107,7 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 - Revoke (`DELETE /api/tokens/{id}`):
   - Profile atomically verifies ownership, marks the row revoked, writes its audit row, and reserves a durable subject-revocation generation.
   - Identity makes a best-effort immediate owner-tunnel/session cut and returns `202`; profile's worker confirms a post-commit first cut and a second fleet cut after the full entry-credential quiet window. Per-PAT tunnel eviction is not possible because registrations do not retain a token id, so the conservative scope is the subject.
+- Operator revoke (`POST /admin/v1/tokens/{id}/revoke`): the same composition without a session. Identity resolves the owner by token id (404 unknown), profile's admin surface soft-revokes and writes `revoked_via_admin` so the owner's audit does not attribute the action to them, then the same best-effort first cut runs and the route answers `202`. Retry-safe: an already-revoked token re-reserves settlement without a duplicate audit row.
 
 PAT minting uses the same policy projection. The insert locks the canonical user and fleet singleton, so concurrent block, suspend, or pause has a linear serialization point. Public mint returns 403 `devserver_access_disabled`; admin mint returns 409 with the same stable reason. Listing and revoking existing PATs remain available.
 

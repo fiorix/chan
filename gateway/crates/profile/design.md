@@ -195,7 +195,7 @@ Column lists are constants `format!`'d into queries; user input always rides thr
 - `identities` has `UNIQUE (provider, provider_subject)`.
 - `users.username_edits` only increases; never reset.
 - `users.blocked_at` is `NULL` or a timestamp; `NULL` means active.
-- `api_token_audit.action` is one of `created`, `created_via_desktop`, `created_via_admin`, `desktop.redeem`, `used`, `revoked`.
+- `api_token_audit.action` is one of `created`, `created_via_desktop`, `created_via_admin`, `desktop.redeem`, `used`, `revoked` (owner self-revoke), `revoked_via_admin` (operator revoke).
 - Block always: revokes every active PAT, appends one `auth_audit` row, and reserves durable fleet revocation in the same transaction.
 - User-policy writes serialize with PAT mint and block on the canonical user row.
 - The fleet policy singleton always exists after migration; an unreadable row is never interpreted as enabled.
