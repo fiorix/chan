@@ -24,6 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli](v0.95.0/a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli.md) | accepted with the owner's `--on TARGET` ruling; carried from the v0.94.0 CLI grammar item's deferred scope | implement the three remote arms over the desktop handoff, pin `--on` and `--devserver` as distinct grammars, and validate end to end against a registered remote devserver |
+| [the-chan-tree-does-not-speak-the-cs-prefix-grammar](v0.95.0/the-chan-tree-does-not-speak-the-cs-prefix-grammar.md) | implemented on main, gate green; awaiting GA to close into `done/` | nothing; rides v0.95.0 and moves to `done/` at GA |
 
 ## Completed
 
