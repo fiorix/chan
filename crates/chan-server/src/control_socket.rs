@@ -4109,6 +4109,17 @@ fn upload_path_standalone(
             .map(Path::to_path_buf)
             .unwrap_or_else(|| requested.to_path_buf())
     };
+    // The CLI absolutizes lexically, so `cs upload .` arrives with a literal
+    // trailing `.` component (and `..` inputs keep theirs). The desktop's
+    // native-transfer validator refuses any `.` / `..` part, so resolve to
+    // the canonical directory before signalling the window. The lexical form
+    // survives only when the directory cannot be resolved (a vanished dir, a
+    // missing parent); the transfer route's writability pre-flight owns that
+    // failure.
+    let dir = dir
+        .canonicalize()
+        .map(|c| chan_workspace::paths::strip_verbatim_prefix(&c))
+        .unwrap_or(dir);
     send_window_command(
         window_id,
         WindowCommand::Upload {
@@ -4132,10 +4143,18 @@ fn download_path_standalone(
 ) -> Result<String, String> {
     let meta = std::fs::metadata(requested)
         .map_err(|e| format!("cannot access {}: {e}", requested.display()))?;
+    // Same lexical-`.` hazard as `upload_path_standalone`: the SPA hands this
+    // value to the desktop's native-transfer validator, which refuses any
+    // `.` / `..` part. The stat above proved the path exists, so resolution
+    // only fails on a race; the lexical form is the fallback.
+    let requested = requested
+        .canonicalize()
+        .map(|c| chan_workspace::paths::strip_verbatim_prefix(&c))
+        .unwrap_or_else(|_| requested.to_path_buf());
     send_window_command(
         window_id,
         WindowCommand::Download {
-            path: strip_leading_slash(requested),
+            path: strip_leading_slash(&requested),
             is_dir: meta.is_dir(),
             root: TransferRoot::Filesystem,
         },
@@ -5700,6 +5719,63 @@ mod tests {
         assert!(frame.contains("upload"), "frame: {frame}");
         assert!(frame.contains("\"root\":\"filesystem\""), "frame: {frame}");
         assert!(frame.contains(&stripped_dir), "frame: {frame}");
+    }
+
+    #[tokio::test]
+    async fn standalone_transfers_normalize_a_lexical_dot_component() {
+        // `cs upload .` / `cs download .` absolutize lexically to `<cwd>/.`.
+        // The desktop's native-transfer validator refuses any `.` / `..`
+        // part, so a forwarded literal dot fails the whole transfer; the
+        // standalone leg must signal the window with the resolved directory.
+        let dir = tempfile::tempdir().unwrap();
+        let dotted = dir.path().join(".");
+        let canonical = dir.path().canonicalize().unwrap();
+        let canonical_str = canonical.to_string_lossy().to_string();
+        let stripped = canonical_str.trim_start_matches('/').to_string();
+
+        let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
+        let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
+        let _window = ctx
+            .session_registry
+            .join("terminal-win-0", true, None)
+            .guard;
+        let mut rx = ctx.events_tx.subscribe();
+
+        let response = handle_request(
+            ControlRequest::Upload {
+                window_id: "terminal-win-0".into(),
+                path: dotted.clone(),
+            },
+            &ctx,
+        )
+        .await;
+        match response {
+            ControlResponse::Ok { message } => {
+                assert!(message.contains(&canonical_str), "{message}")
+            }
+            other => panic!("unexpected non-ok response: {other:?}"),
+        }
+        let frame = rx.try_recv().expect("upload window command broadcast");
+        assert!(frame.contains(&stripped), "frame: {frame}");
+        assert!(!frame.contains("/.\""), "dot component survived: {frame}");
+
+        let response = handle_request(
+            ControlRequest::Download {
+                window_id: "terminal-win-0".into(),
+                path: dotted,
+            },
+            &ctx,
+        )
+        .await;
+        match response {
+            ControlResponse::Ok { message } => {
+                assert!(message.contains("download request queued"), "{message}")
+            }
+            other => panic!("unexpected non-ok response: {other:?}"),
+        }
+        let frame = rx.try_recv().expect("download window command broadcast");
+        assert!(frame.contains(&stripped), "frame: {frame}");
+        assert!(!frame.contains("/.\""), "dot component survived: {frame}");
     }
 
     #[tokio::test]
