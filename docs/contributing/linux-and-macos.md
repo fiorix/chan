@@ -121,6 +121,8 @@ exec -a cs ./squashfs-root/usr/bin/chan-desktop terminal list   # rc=0, no GUI
 
 Packaged-AppImage dispatch: invoking the AppImage through its `cs` / `chan` wrapper (`exec -a cs "$APPIMAGE"`) DOES reach the inner binary as the right name. linuxdeploy's `AppRun` re-execs `AppRun.wrapped` without preserving argv[0], but the type-2 AppImage runtime exports the `exec -a` name as `$ARGV0`, and the `cs` / `chan` stem probes read `$ARGV0` before `argv[0]` (`chan_shell::invoked_arg0`), so the CLI / control client runs instead of the GUI. Off an AppImage `$ARGV0` is unset and behavior is unchanged.
 
+Packaged-AppImage working directory: `AppRun.wrapped` is not the app binary but the legacy AppImageKit `AppRun`, which chdirs into the mounted `<AppDir>/usr` before exec'ing `usr/bin/chan-desktop` and exports no `OWD`. The wrapper shims therefore export `$CHAN_CALLER_PWD`, and `cs_install::restore_caller_cwd` chdirs back at boot so relative CLI paths resolve against the invoking shell's directory. When testing the AppImage by hand (without a shim), a relative `chan serve .` still resolves inside the mount; pass an absolute path or set `CHAN_CALLER_PWD` yourself.
+
 ## CLI: build the static musl `chan` tarball
 
 The standalone `chan` CLI tarball (what `install.sh` and the self-upgrade download) is built fully static against musl, so a too-new build glibc does not gate older Linux machines. The locally built `.deb`/`.rpm` bundles and the chan-desktop AppImage stay gnu: the distro provides glibc, and webkit cannot be static.

@@ -16,7 +16,12 @@
 //!   not symlinks. `std::env::current_exe()` inside an AppImage points into the
 //!   ephemeral `/tmp/.mount_*` squashfs that vanishes on exit, and the `AppRun`
 //!   shim can reset argv[0]; `exec -a <name> "$APPIMAGE"` pins both the stable
-//!   path and the argv[0] the detection keys on.
+//!   path and the argv[0] the detection keys on. The wrapper also records the
+//!   caller's working directory in `$CHAN_CALLER_PWD`: the AppImage's inner
+//!   `AppRun` chdirs into the mounted `<AppDir>/usr` (and exports no `OWD`)
+//!   before the binary runs, so without the record a relative CLI path
+//!   (`chan serve .`, `cs upload .`) resolves inside the ephemeral mount.
+//!   [`restore_caller_cwd`] undoes that chdir at boot, before any dispatch.
 //! - **Nix store / dev build / `cargo run` / anything else**: no-op. Nix
 //!   installs the `chan` and `cs` output symlinks itself; unrecognized builds
 //!   never pollute `~/.local/bin`.
@@ -57,6 +62,13 @@ const WRAPPER_MARKER: &str = "# chan-desktop bin shim";
 #[cfg(unix)]
 const WRAPPER_OWNS: &str = "# chan-desktop";
 
+/// Environment variable the AppImage wrapper shims set to the caller's working
+/// directory. The AppImage's inner `AppRun` chdirs into the mounted
+/// `<AppDir>/usr` before exec'ing this binary and exports no `OWD`, so this
+/// record is the only way back to the directory the user actually ran in.
+#[cfg(unix)]
+pub const CALLER_PWD_ENV: &str = "CHAN_CALLER_PWD";
+
 /// The AppImage path from `$APPIMAGE`, or `None` when not running from an
 /// AppImage (macOS, `cargo run`, a deb/rpm install). Also consumed by
 /// `linux_gui_stack` to gate the bundle-first loader fixups. Unix-only: the
@@ -66,6 +78,38 @@ pub fn appimage_path() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Undo the AppImage `AppRun` chdir: move back to the working directory the
+/// wrapper shim recorded in `$CHAN_CALLER_PWD`, so a relative CLI path
+/// resolves against the invoking shell's directory instead of the ephemeral
+/// `/tmp/.mount_*` squashfs. Runs before any dispatch and consumes the
+/// variable either way, so terminals spawned by the desktop never inherit a
+/// stale caller directory. Best-effort, like the shim install itself: a
+/// missing or unusable directory leaves the cwd alone. The pure decision is
+/// [`caller_cwd_to_restore`].
+#[cfg(unix)]
+pub fn restore_caller_cwd() {
+    let recorded = std::env::var_os(CALLER_PWD_ENV);
+    std::env::remove_var(CALLER_PWD_ENV);
+    if let Some(dir) = caller_cwd_to_restore(appimage_path(), recorded) {
+        let _ = std::env::set_current_dir(dir);
+    }
+}
+
+/// The directory [`restore_caller_cwd`] should move to, if any. Gated on the
+/// AppImage env because only the AppImage `AppRun` moves the process; acting
+/// on a leaked `$CHAN_CALLER_PWD` in any other install would chdir a process
+/// nothing displaced. Relative values are refused: they could only resolve
+/// against the very mount directory the record exists to escape.
+#[cfg(unix)]
+fn caller_cwd_to_restore(
+    appimage: Option<PathBuf>,
+    recorded: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    appimage?;
+    let dir = PathBuf::from(recorded?);
+    dir.is_absolute().then_some(dir)
 }
 
 /// How this chan-desktop was installed, which decides how the shims are made.
@@ -130,6 +174,10 @@ fn wrapper_script(name: &str, target: &Path) -> String {
          # Re-exec the chan-desktop AppImage as `{name}` so the right argv[0]\n\
          # dispatch fires (CLI / control client) instead of the GUI. Rewritten\n\
          # on launch if the AppImage path changes; delete this file to opt out.\n\
+         # The AppImage's AppRun chdirs into the mounted AppDir before the\n\
+         # binary runs, so record the caller's directory for the CLI to\n\
+         # restore; relative paths would otherwise resolve inside the mount.\n\
+         export {CALLER_PWD_ENV}=\"$PWD\"\n\
          exec -a {name} {} \"$@\"\n",
         shell_single_quote(target),
     )
@@ -979,10 +1027,38 @@ mod tests {
         assert!(s.contains(WRAPPER_MARKER));
         // argv[0] forced to the name, AppImage path single-quoted (space-safe).
         assert!(s.contains("exec -a chan '/home/u/Apps/Chan x86_64.AppImage' \"$@\""));
+        // The caller's directory is recorded before the exec: the AppImage's
+        // AppRun chdirs the process into the mount, and this record is what
+        // `restore_caller_cwd` moves back to.
+        assert!(s.contains(&format!("export {CALLER_PWD_ENV}=\"$PWD\"\n")));
         // The same target produces a distinct script per name.
         let cs = wrapper_script("cs", Path::new("/home/u/Apps/Chan x86_64.AppImage"));
         assert!(cs.contains("exec -a cs '/home/u/Apps/Chan x86_64.AppImage' \"$@\""));
         assert_ne!(s, cs);
+    }
+
+    #[test]
+    fn caller_cwd_restores_only_absolute_records_inside_an_appimage() {
+        let appimage = Some(PathBuf::from("/home/u/Chan.AppImage"));
+        // The normal case: shim recorded an absolute caller directory.
+        assert_eq!(
+            caller_cwd_to_restore(appimage.clone(), Some("/home/u/project".into())),
+            Some(PathBuf::from("/home/u/project"))
+        );
+        // Outside an AppImage nothing displaced the process; a leaked record
+        // (e.g. inherited through a desktop-spawned terminal on a deb/rpm
+        // install) must not chdir anything.
+        assert_eq!(
+            caller_cwd_to_restore(None, Some("/home/u/project".into())),
+            None
+        );
+        // No record: the AppImage was launched directly, not through a shim.
+        assert_eq!(caller_cwd_to_restore(appimage.clone(), None), None);
+        // A relative record could only re-resolve against the mount.
+        assert_eq!(
+            caller_cwd_to_restore(appimage, Some("project".into())),
+            None
+        );
     }
 
     #[test]

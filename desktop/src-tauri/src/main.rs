@@ -5251,6 +5251,14 @@ fn main() {
     #[cfg(windows)]
     attach_parent_console_for_cli();
 
+    // Linux AppImage: the inner AppRun chdir'd this process into the mounted
+    // AppDir's usr/. Move back to the directory the wrapper shim recorded
+    // BEFORE any dispatch, so `chan serve .` / `cs upload .` resolve against
+    // the invoking shell's directory instead of the ephemeral mount. No-op
+    // off AppImage or when launched without a shim.
+    #[cfg(unix)]
+    cs_install::restore_caller_cwd();
+
     match run_hidden_mcp_proxy_if_requested() {
         Ok(true) => return,
         Ok(false) => {}
