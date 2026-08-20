@@ -273,7 +273,13 @@ registry of known workspaces lives in `~/.chan/config.toml`, or under
 Inside any chan terminal, `cs` drives the window that spawned it. It is
 this same binary under a second name, picked by argv[0], so `cs open
 notes/plan.md` and `chan shell open notes/plan.md` are the same
-command.";
+command.
+
+Commands disambiguate on their first letters, iproute2 style, at every
+level, so `chan w ls`, `chan de status`, and `chan du` resolve to
+workspace ls, devserver status, and dump-skill. The prefix has to be
+unambiguous: `s` matches both serve and shell, and `c` matches close,
+config, and completions, so each is rejected rather than guessed.";
 
 /// The rest of the orientation. Split from the long_about because clap
 /// prints `after_long_help` below OPTIONS, which is where the two-modes
@@ -400,6 +406,12 @@ const CHAN_VERSION: &str = concat!(
 // one line of `chan --help`.
 #[command(version = CHAN_VERSION, about = CHAN_ABOUT, long_about = CHAN_LONG_ABOUT)]
 #[command(after_long_help = CHAN_AFTER_HELP)]
+// The `cs` tree resolves every action from an unambiguous prefix
+// (iproute2 style); this tree speaks the same grammar so `chan w ls` /
+// `chan de status` work like `cs te l`. clap does not propagate the
+// setting to children, so every noun family below carries its own copy;
+// `subcommand_prefixes_resolve_iproute2_style` pins the contract.
+#[command(infer_subcommands = true)]
 struct Cli {
     /// Increase logging. -v = info, -vv = debug, -vvv = trace.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -444,6 +456,7 @@ enum Command {
     /// special-file refusal, and the cross-process writer lock apply
     /// uniformly.
     #[command(verbatim_doc_comment)]
+    #[command(infer_subcommands = true)]
     Workspace {
         #[command(subcommand)]
         action: WorkspaceAction,
@@ -451,6 +464,7 @@ enum Command {
     /// Run this machine's devserver, or manage connections to remote ones
     #[command(long_about = help::CHAN_DEVSERVER)]
     #[command(after_long_help = help::CHAN_DEVSERVER_AFTER)]
+    #[command(infer_subcommands = true)]
     Devserver {
         #[command(subcommand)]
         action: DevserverAction,
@@ -478,6 +492,7 @@ enum Command {
     /// Read or write settings outside the workspace (editor.*, server.*)
     #[command(long_about = help::CHAN_CONFIG)]
     #[command(after_long_help = help::CHAN_CONFIG_AFTER)]
+    #[command(infer_subcommands = true)]
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -1020,6 +1035,7 @@ enum WorkspaceAction {
     /// so the embedding-model and semantic-toggle controls live next to
     /// the rebuild action, mirroring `chan config`.
     #[command(verbatim_doc_comment)]
+    #[command(infer_subcommands = true)]
     Index {
         #[command(subcommand)]
         action: IndexAction,
@@ -1030,6 +1046,7 @@ enum WorkspaceAction {
     /// default for new workspaces; toggle them here, in the pre-flight
     /// dialog, or in Settings.
     #[command(verbatim_doc_comment)]
+    #[command(infer_subcommands = true)]
     Reports {
         #[command(subcommand)]
         action: ReportsAction,
@@ -1065,6 +1082,7 @@ enum WorkspaceAction {
         json: bool,
     },
     /// Import and export chan metadata for a registered workspace.
+    #[command(infer_subcommands = true)]
     Metadata {
         #[command(subcommand)]
         action: MetadataAction,
@@ -1075,6 +1093,7 @@ enum WorkspaceAction {
     /// contact, carrying `chan.kind: contact` frontmatter so the editor
     /// and the graph classify them automatically.
     #[command(verbatim_doc_comment)]
+    #[command(infer_subcommands = true)]
     Contacts {
         #[command(subcommand)]
         action: ContactsAction,
@@ -1087,6 +1106,7 @@ enum ContactsAction {
     ///
     /// Pick the source format with a sub-subcommand.
     #[command(verbatim_doc_comment)]
+    #[command(infer_subcommands = true)]
     Import {
         #[command(subcommand)]
         source: ImportSource,
@@ -11116,6 +11136,98 @@ mod tests {
                 Cli::try_parse_from(argv).is_err(),
                 "flat `{}` must not parse as a top-level command",
                 argv[1],
+            );
+        }
+    }
+
+    #[test]
+    fn subcommand_prefixes_resolve_iproute2_style() {
+        // The chan tree speaks the same prefix grammar as `cs`: every
+        // level sets `infer_subcommands`, so an unambiguous prefix
+        // resolves at the top level, inside a noun family, and inside a
+        // family's own subcommands. A regression here is a runtime break
+        // clap won't flag at compile time.
+        let cli = Cli::try_parse_from(["chan", "w", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::Ls { .. }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["chan", "se", "/tmp/workspace"]).unwrap();
+        assert!(matches!(cli.command, Command::Serve { .. }));
+
+        let cli = Cli::try_parse_from(["chan", "p", "--json"]).unwrap();
+        assert!(matches!(cli.command, Command::Ps { json: true }));
+
+        let cli = Cli::try_parse_from(["chan", "u", "--check"]).unwrap();
+        assert!(matches!(cli.command, Command::Upgrade { check: true, .. }));
+
+        let cli = Cli::try_parse_from(["chan", "du", "--list"]).unwrap();
+        assert!(matches!(cli.command, Command::DumpSkill { list: true, .. }));
+
+        let cli = Cli::try_parse_from(["chan", "de", "reg", "http://dev.example:8787"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Devserver {
+                action: DevserverAction::Register { .. }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["chan", "con", "s", "editor.theme=dark"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Config {
+                action: ConfigAction::Set { .. }
+            }
+        ));
+
+        // Three levels deep: workspace -> index -> rebuild.
+        let cli = Cli::try_parse_from(["chan", "w", "i", "r", "/tmp/workspace"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::Index {
+                    action: IndexAction::Rebuild { .. }
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn ambiguous_subcommand_prefixes_are_rejected() {
+        // Refuse-over-guess, pinned per level: each prefix here matches
+        // two or more sibling commands (the auto-generated `help`
+        // counts as a sibling) and must error rather than resolve. The
+        // trailing args are valid for one of the candidates, so a
+        // silent guess toward it would turn the case green.
+        for argv in [
+            // serve / shell
+            ["chan", "s", "/tmp/workspace"].as_slice(),
+            // close / config / completions
+            ["chan", "c", "/tmp/workspace"].as_slice(),
+            // config / completions
+            ["chan", "co", "get"].as_slice(),
+            // devserver / dump-skill
+            ["chan", "d", "status"].as_slice(),
+            // workspace serve / search
+            ["chan", "workspace", "se", "/tmp/workspace"].as_slice(),
+            // workspace close / contacts
+            ["chan", "workspace", "c", "/tmp/workspace"].as_slice(),
+            // devserver start / stop / status
+            ["chan", "devserver", "st"].as_slice(),
+            // devserver restart / register
+            ["chan", "devserver", "re"].as_slice(),
+            // index set-model / status
+            ["chan", "workspace", "index", "s"].as_slice(),
+            // index download-model / disable-semantic
+            ["chan", "workspace", "index", "d"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "ambiguous prefix `{}` must be rejected, not guessed",
+                argv.join(" "),
             );
         }
     }
