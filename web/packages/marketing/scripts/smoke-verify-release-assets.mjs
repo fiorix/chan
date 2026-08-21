@@ -46,6 +46,18 @@ try {
     `error names the missing Windows zip (stderr: ${missing.stderr})`,
   );
 
+  // A release missing one updater signature is rejected, naming it: the
+  // `.sig` requirement is what keeps a GA from shipping a payload the
+  // updater cannot verify.
+  const windowsSig = "Chan_9.9.9_x64-setup.exe.sig";
+  const withoutSig = requiredAssets(version).filter((name) => name !== windowsSig);
+  const missingSig = runVerify("missing-sig", withoutSig);
+  assertEqual(missingSig.status, 1, "missing updater signature exits non-zero");
+  assert(
+    missingSig.stderr.includes(`missing release asset: ${windowsSig}`),
+    `error names the missing signature (stderr: ${missingSig.stderr})`,
+  );
+
   // 2. Workflow-coverage lint.
   lintWorkflowCoverage();
 

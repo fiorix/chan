@@ -297,6 +297,15 @@ async function collectManifest(release, options) {
       !payload.required &&
       (!releaseAssets.has(payload.asset) || !releaseAssets.has(signatureName))
     ) {
+      // A payload that shipped without its signature silently loses its
+      // updater platform in the history walk (the Pages rebuild runs this
+      // without the verifier), so say so; an absent payload is the normal
+      // shape of a release that predates the channel.
+      if (releaseAssets.has(payload.asset)) {
+        console.warn(
+          `warning: ${tag}: ${payload.asset} has no ${signatureName}; ${payload.platform} updater entry omitted`,
+        );
+      }
       continue;
     }
     const signature = await collectSignature(signatureName, releaseAssets, options);
