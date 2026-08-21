@@ -3700,8 +3700,9 @@ fn windows_updater_refusal(installed: bool) -> Option<String> {
         return None;
     }
     Some(
-        "desktop self-upgrade on windows is available only for an installed chan-desktop; \
-         this build does not run from an install"
+        "desktop self-upgrade on windows is available only for an installed chan-desktop (the \
+         NSIS install's own directory, under %LOCALAPPDATA% or Program Files by default); this \
+         build does not run from an install"
             .to_string(),
     )
 }
@@ -8284,6 +8285,38 @@ mod tests {
     /// derivation and carry the same value, so that substitution is invisible
     /// in the output and would go green on exactly the half-fix the packaging
     /// item exists to prevent.
+    #[test]
+    fn caller_cwd_restore_runs_before_every_dispatch() {
+        // The AppImage's AppRun chdirs into the mount; the restore must run
+        // ahead of every dispatch (MCP proxy, cs, chan, --version, the GUI)
+        // or a relative CLI path resolves inside the mount again.
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let main_body = source_region(
+            production,
+            "\nfn main() {",
+            "linux_gui_stack::prefer_system_gui_stack();",
+        );
+        let restore = main_body
+            .find("cs_install::restore_caller_cwd()")
+            .expect("main restores the caller's cwd");
+        for probe in [
+            "run_hidden_mcp_proxy_if_requested()",
+            "run_as_cs_if_requested()",
+            "run_as_chan_if_requested()",
+            "print_version_if_requested()",
+        ] {
+            let at = main_body
+                .find(probe)
+                .unwrap_or_else(|| panic!("main dispatches {probe}"));
+            assert!(
+                restore < at,
+                "the caller-cwd restore must run before {probe}"
+            );
+        }
+    }
+
     #[test]
     fn desktop_version_probe_runs_after_the_cli_stem_probes() {
         const MAIN_RS: &str = include_str!("main.rs");

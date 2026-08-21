@@ -173,7 +173,8 @@ fn wrapper_script(name: &str, target: &Path) -> String {
          {WRAPPER_MARKER}\n\
          # Re-exec the chan-desktop AppImage as `{name}` so the right argv[0]\n\
          # dispatch fires (CLI / control client) instead of the GUI. Rewritten\n\
-         # on launch if the AppImage path changes; delete this file to opt out.\n\
+         # on launch when the AppImage path or this template changes; delete\n\
+         # this file to opt out.\n\
          # The AppImage's AppRun chdirs into the mounted AppDir before the\n\
          # binary runs, so record the caller's directory for the CLI to\n\
          # restore; relative paths would otherwise resolve inside the mount.\n\
@@ -473,9 +474,17 @@ mod windows_shim {
     }
 
     /// Roots a packaged chan-desktop.exe can legitimately live under: the NSIS
-    /// `currentUser` install lands beneath `%LOCALAPPDATA%`; a `perMachine`
-    /// install lands beneath one of the Program Files dirs.
+    /// `currentUser` install lands beneath `%LOCALAPPDATA%` by default, a
+    /// `perMachine` install beneath one of the Program Files dirs, and an
+    /// install the user pointed elsewhere on the directory page lives where
+    /// the installer recorded it.
     pub(super) fn install_roots() -> Vec<PathBuf> {
+        install_roots_with(nsis_install_location())
+    }
+
+    /// The known roots plus the installer-recorded directory, when it has
+    /// one. Pure for testing.
+    pub(super) fn install_roots_with(recorded: Option<PathBuf>) -> Vec<PathBuf> {
         let mut roots = Vec::new();
         if let Some(d) = dirs::data_local_dir() {
             roots.push(d);
@@ -485,7 +494,38 @@ mod windows_shim {
                 roots.push(PathBuf::from(v));
             }
         }
+        if let Some(dir) = recorded {
+            roots.push(dir);
+        }
         roots
+    }
+
+    /// The directory the NSIS installer recorded for this product: the
+    /// `InstallLocation` value it writes under its Uninstall key (quoted),
+    /// HKCU for the current-user install and HKLM for a per-machine one.
+    /// `None` when neither hive answers (a dev build, or an install that
+    /// predates the value).
+    fn nsis_install_location() -> Option<PathBuf> {
+        use std::process::Command;
+        for hive in ["HKCU", "HKLM"] {
+            let key = format!(r"{hive}\Software\Microsoft\Windows\CurrentVersion\Uninstall\Chan");
+            let Ok(out) = Command::new("reg")
+                .args(["query", &key, "/v", "InstallLocation"])
+                .output()
+            else {
+                continue;
+            };
+            if !out.status.success() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some((dir, _)) = parse_reg_query_value(&text, "InstallLocation") {
+                if !dir.is_empty() {
+                    return Some(PathBuf::from(dir));
+                }
+            }
+        }
+        None
     }
 
     /// Resolve the binary the `chan` / `cs` shims should re-exec. Prefer a
@@ -743,12 +783,20 @@ mod windows_shim {
     /// The data line is `    Path    REG_EXPAND_SZ    <value>` (value may
     /// contain spaces and `;`). Pure for testing.
     fn parse_reg_query_path(text: &str) -> Option<(String, String)> {
+        parse_reg_query_value(text, "Path")
+    }
+
+    /// Parse `reg query <key> /v <name>` output into (value, type) for any
+    /// value name. The NSIS `InstallLocation` is written with surrounding
+    /// double quotes; those are stripped so the value is a bare path. Pure
+    /// for testing.
+    fn parse_reg_query_value(text: &str, name: &str) -> Option<(String, String)> {
         for line in text.lines() {
             let trimmed = line.trim_start();
-            // The data line is `Path    REG_TYPE    <value>`; skip every other
-            // line (header, blank). The char after the name must be whitespace
-            // so we don't match a different value like `PathExt`.
-            let Some(rest) = trimmed.strip_prefix("Path") else {
+            // The data line is `<name>    REG_TYPE    <value>`; skip every
+            // other line (header, blank). The char after the name must be
+            // whitespace so `Path` does not match `PathExt`.
+            let Some(rest) = trimmed.strip_prefix(name) else {
                 continue;
             };
             if !rest.starts_with(char::is_whitespace) {
@@ -762,7 +810,12 @@ mod windows_shim {
             if !kind.starts_with("REG_") {
                 continue;
             }
-            let value = it.next().unwrap_or("").trim().to_string();
+            let value = it.next().unwrap_or("").trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value)
+                .to_string();
             return Some((value, kind.to_string()));
         }
         None
@@ -822,6 +875,39 @@ mod windows_shim {
                 Path::new("C:\\Users\\me\\AppData\\Local\\chan\\notepad.exe"),
                 &roots,
             ));
+        }
+
+        #[test]
+        fn installed_exe_accepts_the_installer_recorded_directory() {
+            // An install the user pointed at `D:\Apps\Chan` is an install:
+            // the recorded directory joins the roots, and the classification
+            // is still boundary-aware and stem-checked there.
+            let roots = install_roots_with(Some(PathBuf::from("D:\\Apps\\Chan")));
+            assert!(roots.iter().any(|r| r == Path::new("D:\\Apps\\Chan")));
+            assert!(is_installed_exe(
+                Path::new("D:\\Apps\\Chan\\chan-desktop.exe"),
+                &roots,
+            ));
+            assert!(!is_installed_exe(
+                Path::new("D:\\Apps\\Chanx\\chan-desktop.exe"),
+                &roots,
+            ));
+            // Without a recorded directory the known roots are unchanged.
+            let plain = install_roots_with(None);
+            assert!(!plain.iter().any(|r| r == Path::new("D:\\Apps\\Chan")));
+        }
+
+        #[test]
+        fn reg_query_value_parses_the_quoted_install_location() {
+            let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Chan\r\n    \
+                       DisplayName    REG_SZ    Chan\r\n    \
+                       InstallLocation    REG_SZ    \"D:\\Apps\\Chan\"\r\n\r\n";
+            assert_eq!(
+                parse_reg_query_value(out, "InstallLocation"),
+                Some(("D:\\Apps\\Chan".to_string(), "REG_SZ".to_string()))
+            );
+            // A different value on the same key is not mistaken for it.
+            assert_eq!(parse_reg_query_value(out, "Publisher"), None);
         }
 
         #[test]
@@ -1041,6 +1127,11 @@ mod tests {
         // AppRun chdirs the process into the mount, and this record is what
         // `restore_caller_cwd` moves back to.
         assert!(s.contains(&format!("export {CALLER_PWD_ENV}=\"$PWD\"\n")));
+        // And before the exec, or it never runs.
+        assert!(
+            s.find("export CHAN_CALLER_PWD").unwrap() < s.find("exec -a").unwrap(),
+            "the export must precede the exec"
+        );
         // The same target produces a distinct script per name.
         let cs = wrapper_script("cs", Path::new("/home/u/Apps/Chan x86_64.AppImage"));
         assert!(cs.contains("exec -a cs '/home/u/Apps/Chan x86_64.AppImage' \"$@\""));
@@ -1107,6 +1198,16 @@ mod tests {
         let stale = wrapper_script("cs", Path::new("/old/Chan.AppImage"));
         assert!(matches!(
             plan_wrapper("cs", appimage, Some(&stale)),
+            WrapperPlan::Write(_)
+        ));
+        // Our wrapper at the SAME path, but an older template without the
+        // caller-cwd export -> rewrite, so an existing install picks the
+        // export up on the next launch.
+        let older_template = format!(
+            "#!/usr/bin/env bash\n{WRAPPER_MARKER}\n# Re-exec the chan-desktop AppImage as `cs`.\nexec -a cs '/home/u/Chan.AppImage' \"$@\"\n"
+        );
+        assert!(matches!(
+            plan_wrapper("cs", appimage, Some(&older_template)),
             WrapperPlan::Write(_)
         ));
     }

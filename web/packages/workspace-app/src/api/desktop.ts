@@ -597,7 +597,7 @@ export async function runDesktopUpload(
     const uploaded = await tauriInvoke<NativeUploadedFile[]>("upload_files_native", {
       transferId: nativeId,
       url,
-      target,
+      target: root === "filesystem" ? { ...target, root } : target,
     });
     if (uploaded.length === 0) {
       cancelTransfer(xferId);

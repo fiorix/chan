@@ -27,11 +27,20 @@ pub struct NativeUploadTarget {
     path: Option<String>,
     #[serde(default)]
     multiple: bool,
+    /// `"filesystem"` for a standalone window's uid-scoped transfer lane,
+    /// where the destination is an absolute path (leading `/` stripped on
+    /// unix, a drive-qualified `C:\...` on Windows); absent for the
+    /// workspace lane, where it is workspace-relative.
+    #[serde(default)]
+    root: Option<String>,
 }
 
 impl NativeUploadTarget {
     fn validate(&self) -> Result<(), String> {
+        let filesystem = self.root.as_deref() == Some("filesystem");
         match (&self.dir, &self.path) {
+            (Some(dir), None) if filesystem => validate_filesystem_target(dir, true),
+            (None, Some(path)) if filesystem => validate_filesystem_target(path, false),
             (Some(dir), None) => validate_workspace_rel(dir, true),
             (None, Some(path)) => validate_workspace_rel(path, false),
             _ => Err("native upload requires exactly one destination dir or path".into()),
@@ -248,6 +257,27 @@ async fn pick_upload_paths(app: AppHandle, multiple: bool) -> Result<Vec<PathBuf
         .map_err(|error| format!("native upload picker was dropped: {error}"))
 }
 
+/// The filesystem-root lane: the control socket already normalized `.` and
+/// `..` away, so any that remain are a forged target, as is a control
+/// character. Backslashes and a drive prefix are what a Windows path is made
+/// of and are accepted here, where the workspace rule would refuse them.
+fn validate_filesystem_target(path: &str, allow_empty: bool) -> Result<(), String> {
+    if path.is_empty() {
+        return if allow_empty {
+            Ok(())
+        } else {
+            Err("native upload target path is empty".into())
+        };
+    }
+    if path
+        .split(['/', '\\'])
+        .any(|part| matches!(part, "." | "..") || part.chars().any(char::is_control))
+    {
+        return Err("native upload target must be a normalized filesystem path".into());
+    }
+    Ok(())
+}
+
 fn validate_workspace_rel(path: &str, allow_empty: bool) -> Result<(), String> {
     if path.is_empty() {
         return if allow_empty {
@@ -308,6 +338,40 @@ mod tests {
         assert!(!production.contains("std::fs::read(&path)"));
         assert!(!production.contains("PickedUploadFile"));
         assert!(!web.contains("new Uint8Array(f.bytes)"));
+        // The SPA tells the desktop which lane a target belongs to, or the
+        // filesystem lane's absolute Windows paths fail the workspace rule.
+        assert!(web.contains(r#"target: root === "filesystem" ? { ...target, root } : target,"#));
+    }
+
+    #[test]
+    fn filesystem_targets_accept_absolute_paths_and_refuse_dot_components() {
+        for accepted in [
+            "",
+            "home/u/proj",
+            r"C:\Users\me\proj",
+            r"C:\",
+            r"\\server\share\dir",
+        ] {
+            assert!(
+                validate_filesystem_target(accepted, true).is_ok(),
+                "{accepted}"
+            );
+        }
+        for rejected in ["a/../b", r"C:\x\.\y", "home/u/\u{7}bell"] {
+            assert!(
+                validate_filesystem_target(rejected, true).is_err(),
+                "{rejected}"
+            );
+        }
+        assert!(validate_filesystem_target("", false).is_err());
+        // The lane is chosen by the target's root, and the workspace rule
+        // still refuses a backslash.
+        let fs_target: NativeUploadTarget =
+            serde_json::from_str(r#"{"dir":"C:\\Users\\me\\proj","root":"filesystem"}"#).unwrap();
+        assert!(fs_target.validate().is_ok());
+        let ws_target: NativeUploadTarget =
+            serde_json::from_str(r#"{"dir":"C:\\Users\\me\\proj"}"#).unwrap();
+        assert!(ws_target.validate().is_err());
     }
 
     #[test]

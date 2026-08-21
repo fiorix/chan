@@ -340,7 +340,9 @@ describe("native streaming transfers", () => {
       "upload_files_native",
       expect.objectContaining({
         url: expect.stringContaining("/api/fs/upload?root=filesystem"),
-        target: { dir: "docs", multiple: true },
+        // The lane travels in the target too, so the desktop's validator
+        // accepts an absolute filesystem path (a `C:\...` on Windows).
+        target: { dir: "docs", multiple: true, root: "filesystem" },
         transferId: expect.stringMatching(/^native-/),
       }),
     );
