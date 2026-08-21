@@ -1,6 +1,6 @@
 # A workspace on a remote devserver cannot be managed from the CLI
 
-Status: REGISTERED for v0.95.0. Carried from the v0.94.0 CLI grammar item's deferred scope, unblocked by the owner ruling recorded below.
+Status: SHIPPED in [v0.95.0](../../release/release-v0.95.0.md). Implemented in the round on main (95251732 desktop + handoff, f4feb42a CLI): `--on TARGET` on `chan workspace serve|close|forget` and the elevated spellings, three additive handoff variants with per-variant reply budgets, desktop-side resolution with refusal over guessing, and the devserver's own live-terminal refusal; pinned by parse, wire, resolver, and fake-desktop integration tests and proven against real processes by `scripts/e2e/workspace-on-remote.sh` under Xvfb in the build container. Not proven by that run: an ssh control-terminal connect, the gateway arm of the desktop's add-workspace call, and Windows named pipes beyond the wine-run handoff tests.
 
 ## Problem
 

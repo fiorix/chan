@@ -19,16 +19,21 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.95.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli](v0.95.0/a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli.md) | accepted with the owner's `--on TARGET` ruling; the three arms are implemented on main over the desktop handoff with the grammar pins and a fake-desktop integration test | run the real-processes e2e (`scripts/e2e/workspace-on-remote.sh`) against a built desktop in the build container and record it; close into `done/` at GA |
-| [the-chan-tree-does-not-speak-the-cs-prefix-grammar](v0.95.0/the-chan-tree-does-not-speak-the-cs-prefix-grammar.md) | implemented on main, gate green; awaiting GA to close into `done/` | nothing; rides v0.95.0 and moves to `done/` at GA |
-| [the-linux-appimage-does-not-self-upgrade](v0.95.0/the-linux-appimage-does-not-self-upgrade.md) | implemented on `feat/appimage-self-upgrade` (87d8c3ed) and folded into main; four-scenario AppImage e2e and full gate green on the branch | close into `done/` at GA with the macOS-compile and runner-signing dry-run caveats named |
-| [the-windows-install-does-not-self-upgrade](v0.95.0/the-windows-install-does-not-self-upgrade.md) | implemented on `feat/windows-self-upgrade` (2e607db7, 02c0070d) and folded into main; windows-gnu cross-check and full gate green on the branch | close into `done/` at GA with the NSIS passive-reinstall acceptance gap named (unproven on real Windows 11) |
+No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
+
+### v0.95.0
+
+Shipped 2026-08-21; see [release-v0.95.0](../release/release-v0.95.0.md). Closed items in [`done/`](done/):
+
+- [a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli](done/a-workspace-on-a-remote-devserver-cannot-be-managed-from-the-cli.md) - `chan workspace serve|close|forget WS --on TARGET` (and the elevated spellings) manage a workspace on a registered, connected devserver through the desktop handoff, with refusal over guessing at every step and `--on` distinct from `--devserver`; proven against real processes under Xvfb, with the ssh control-terminal connect, the gateway arm, and real Windows pipes named as unproven.
+- [the-linux-appimage-does-not-self-upgrade](done/the-linux-appimage-does-not-self-upgrade.md) - the AppImage self-upgrades on launch and from `chan upgrade`, with both drivers serialized; every release signs both AppImages and the `/dl` manifest carries the Linux updater entries.
+- [the-windows-install-does-not-self-upgrade](done/the-windows-install-does-not-self-upgrade.md) - the NSIS install stages a verified installer on launch and installs it on restart or from `chan upgrade` through the companion `chan.exe`, with the passive reinstall unproven on real Windows 11 (the named gap).
+- [the-chan-tree-does-not-speak-the-cs-prefix-grammar](done/the-chan-tree-does-not-speak-the-cs-prefix-grammar.md) - every level of `chan` resolves an unambiguous prefix and refuses an ambiguous one, pinned structurally.
+- [the-appimage-cli-resolves-relative-paths-inside-the-mount](done/the-appimage-cli-resolves-relative-paths-inside-the-mount.md) - the AppImage shims restore the caller's directory, and the standalone transfer leg signals a lexically clean path that keeps a symlinked name.
+
+Five items closed and none carried. Two arrived as pre-built branches taken through intake and three were raised or finished in the round; the round's close review over every commit since v0.94.0 landed its findings as fixes before the cut, and the Windows verbatim-prefix leak the owner remembered was found and fixed in the same pass.
 
 ### v0.94.0
 

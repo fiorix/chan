@@ -1,6 +1,6 @@
 # The Linux AppImage does not self-upgrade
 
-Status: REGISTERED for v0.95.0 and implemented on `feat/appimage-self-upgrade` (87d8c3ed) in the same round, folded into main; the item closes into `done/` at GA.
+Status: SHIPPED in [v0.95.0](../../release/release-v0.95.0.md). Landed from `feat/appimage-self-upgrade` (87d8c3ed) through intake; the close review serialized the two update drivers and made a handoff that finds the on-launch install done relaunch instead of downloading again (f2e51b86). The macOS compile of the widened arms and the runner-side signing are proven by the release `publish=false` dry run only.
 
 ## Problem
 

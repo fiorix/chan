@@ -1,6 +1,6 @@
 # The Windows install does not self-upgrade
 
-Status: REGISTERED for v0.95.0 and implemented on `feat/windows-self-upgrade` (2e607db7, plus the launcher follow-up 02c0070d) in the same round, folded into main; the item closes into `done/` at GA with its acceptance gap named.
+Status: SHIPPED in [v0.95.0](../../release/release-v0.95.0.md) with its acceptance gap open. Landed from `feat/windows-self-upgrade` (2e607db7, 02c0070d) through intake; the close review made a refused restart keep the staged installer, captured geometry and logged before the install exit, refused while a self-managed devserver holds the install's chan.exe, and taught the install-root classification the installer-recorded directory (f2e51b86, e8e1ce05). The NSIS passive reinstall and relaunch remain unproven on a real Windows 11 machine; the GA installer is the first real run.
 
 ## Problem
 

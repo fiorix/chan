@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.95.0] - 2026-08-21
 
 The Linux AppImage and the Windows install self-upgrade the way the macOS app does, a workspace on a registered remote devserver is managed from the CLI, and the chan tree speaks the cs prefix grammar.
 

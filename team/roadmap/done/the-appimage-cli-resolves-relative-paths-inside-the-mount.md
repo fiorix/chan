@@ -1,6 +1,6 @@
 # The AppImage CLI resolves relative paths inside the mount
 
-Status: fixed on main, verified against the released 0.94.0 AppImage's own `AppRun.wrapped`; release assignment (v0.94.1 or v0.95.0) is the owner's pending call, so no release report records it yet.
+Status: SHIPPED in [v0.95.0](../../release/release-v0.95.0.md). Fixed on main (c77203f0, 3759cd8b) and verified against the released 0.94.0 AppImage's own `AppRun.wrapped`; the close review replaced the standalone transfer leg's `canonicalize` with a lexical normalization that keeps a symlinked name and lets a trailing `.` name the directory itself (e5364e59), and the desktop's native upload accepts the filesystem lane's absolute Windows target (e8e1ce05).
 
 ## Problem
 

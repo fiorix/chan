@@ -1,6 +1,6 @@
 # The chan tree does not speak the cs prefix grammar
 
-Status: REGISTERED for v0.95.0 and implemented on main in the same round; the item closes into `done/` at GA.
+Status: SHIPPED in [v0.95.0](../../release/release-v0.95.0.md). Implemented on main (bfdcaa13) ahead of the round; the close review strengthened its pins (ambiguity refusals assert the clap kind, and a behavioural walk over the whole tree checks every subcommand-bearing node infers prefixes).
 
 ## Problem
 
