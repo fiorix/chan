@@ -87,3 +87,27 @@ describe("Enter mid-item splits the item, then Tab nests the new item", () => {
     expect(view.state.doc.toString()).toBe("\n- hello");
   });
 });
+
+describe("Enter on a list-shaped line inside a fenced code block", () => {
+  test("mid-line Enter inside a YAML fence wraps the line without inventing a bullet", async () => {
+    const { content, view } = await mountWysiwyg("```yaml\n- name: build the thing\n```");
+    await tick();
+    view.dispatch({ selection: { anchor: 21 } }); // right after "build"
+    expect(press(content, "Enter")).toBe(true);
+    await tick();
+    const doc = view.state.doc.toString();
+    expect(doc.startsWith("```yaml\n- name: build\n")).toBe(true);
+    expect(doc).not.toContain("\n- the thing");
+    // The fence's own renumber/continuation never fires: one leading marker only.
+    expect(doc.match(/^- /gm)?.length ?? 0).toBe(1);
+  });
+
+  test("end-of-line Enter inside a fence is a plain newline, not a new bullet", async () => {
+    const { content, view } = await mountWysiwyg("```\n- item\n```");
+    await tick();
+    view.dispatch({ selection: { anchor: 10 } }); // end of "- item"
+    expect(press(content, "Enter")).toBe(true);
+    await tick();
+    expect(view.state.doc.toString()).toBe("```\n- item\n\n```");
+  });
+});

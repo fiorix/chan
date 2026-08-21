@@ -385,8 +385,10 @@ function isFenceNodeClosed(
 /// node. Tries side=-1 first (preferred for end-of-doc carets) and
 /// falls back to side=1 so a caret sitting just before an opener
 /// fence still resolves into it. Centralizes the boundary handling
-/// so callers don't need to repeat the side trick.
-function enclosingFence(
+/// so callers don't need to repeat the side trick. Exported for the
+/// list keymap, whose regex cannot tell a bullet from a YAML line in
+/// a code block.
+export function enclosingFence(
   state: import("@codemirror/state").EditorState,
   pos: number,
 ): import("@lezer/common").SyntaxNode | null {

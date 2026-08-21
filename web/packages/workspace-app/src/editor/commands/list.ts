@@ -13,6 +13,7 @@
 
 import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { enclosingFence } from "./format";
 
 /// Anchored at line start. Captures:
 ///   1: leading whitespace (indent)
@@ -88,6 +89,10 @@ export function continueListOnEnter(view: EditorView): boolean {
   const line = view.state.doc.lineAt(sel.head);
   const prefix = parseListPrefix(line.text);
   if (!prefix) return false;
+  // A list-shaped line inside a fenced code block (`- name:` in YAML, a
+  // numbered shell snippet) is code, not a list: leave Enter to the default
+  // newline so the block never grows bullets or renumbers itself.
+  if (enclosingFence(view.state, sel.head)) return false;
   const content = line.text.slice(prefix.length);
   if (content.length === 0) {
     // Blank bullet - exit the list. Replace the whole line with
