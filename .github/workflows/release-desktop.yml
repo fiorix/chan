@@ -154,9 +154,49 @@ jobs:
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - if: matrix.os == 'ubuntu-latest'
+        name: Verify updater signing secret present
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -e
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Missing signing secret: TAURI_SIGNING_PRIVATE_KEY"
+            echo "::error::Populate the updater key secret per .agents/desktop.md."
+            exit 1
+          fi
+
+      - if: matrix.os == 'ubuntu-latest'
         name: Build Linux desktop package
         working-directory: chan
         run: make chan-desktop
+
+      - if: matrix.os == 'ubuntu-latest'
+        name: Sign the AppImage updater payload
+        working-directory: chan
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          # Same step as release.yml's linux-desktop-artifacts: the dry run
+          # is the only off-workstation exercise of the updater signing key.
+          payload=$(find target/release/bundle/appimage -name '*.AppImage' -type f | head -1)
+          if [ -z "$payload" ]; then
+            echo "::error::missing desktop artifact: target/release/bundle/appimage/*.AppImage"
+            find target/release/bundle -type f || true
+            exit 1
+          fi
+          output=$(cd desktop/src-tauri && cargo tauri signer sign "../../$payload")
+          printf '%s\n' "$output"
+          signature=$(printf '%s\n' "$output" | sed -n 's/^Signature: //p' | tail -1)
+          if [ -z "$signature" ] && [ -f "$payload.sig" ]; then
+            signature=$(cat "$payload.sig")
+          fi
+          if [ -z "$signature" ]; then
+            echo "::error::cargo tauri signer did not produce a signature"
+            exit 1
+          fi
+          printf '%s\n' "$signature" > "$payload.sig"
 
       - if: matrix.os == 'macos-latest'
         name: Build signed and notarized macOS desktop package

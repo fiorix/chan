@@ -53,11 +53,31 @@ export function windowsAssets(version) {
   return [`Chan_${version}_x64-setup.exe`, "chan-x86_64-pc-windows-msvc.zip"];
 }
 
-// The signed macOS updater payload and its detached signature.
+// The signed desktop updater payloads by Tauri target key, single-sourced for
+// the collector and the updater asset list. The macOS payload is a dedicated
+// asset (the DMG is the public download); each AppImage is the public download
+// itself, since tauri-plugin-updater rewrites the running `$APPIMAGE` in
+// place. `required` is the collector's contract for the retained older
+// releases: every one carries the macOS payload, but the AppImage signatures
+// arrived later, so an archived release may lack them. The release being cut
+// is held to every signature by the verifier (requiredAssets).
+export function updaterPayloads(version) {
+  return [
+    { platform: "darwin-aarch64", asset: `Chan_${version}_aarch64.app.tar.gz`, required: true },
+    { platform: "linux-x86_64", asset: `Chan_${version}_amd64.AppImage`, required: false },
+    { platform: "linux-aarch64", asset: `Chan_${version}_aarch64.AppImage`, required: false },
+  ];
+}
+
+// The updater assets a GA release carries beyond the public downloads: the
+// macOS payload plus every payload's detached signature. The AppImage payloads
+// themselves are already listed in desktopAssets.
 export function updaterAssets(version) {
   return [
     `Chan_${version}_aarch64.app.tar.gz`,
     `Chan_${version}_aarch64.app.tar.gz.sig`,
+    `Chan_${version}_amd64.AppImage.sig`,
+    `Chan_${version}_aarch64.AppImage.sig`,
   ];
 }
 

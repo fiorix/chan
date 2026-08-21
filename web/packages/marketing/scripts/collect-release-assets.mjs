@@ -9,7 +9,7 @@ import {
   cliAssets,
   desktopAssets,
   gatewayDebAssets,
-  updaterAssets as updaterAssetNames,
+  updaterPayloads,
   windowsAssets,
 } from "./release-assets.mjs";
 import {
@@ -24,13 +24,6 @@ const defaultRepo = "fiorix/chan";
 // single-sourced in release-assets.mjs and must stay in sync with the download
 // lists in generate-release-metadata.mjs. Here they get a SHA256 + browser URL
 // in the manifest.
-
-// The macOS updater payload's platform mapping; the payload name and its
-// detached signature name are single-sourced in release-assets.mjs.
-function updaterEntries(version) {
-  const [payload] = updaterAssetNames(version);
-  return [{ name: payload, platform: "darwin-aarch64" }];
-}
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -287,13 +280,29 @@ async function collectManifest(release, options) {
     if (!releaseAssets.has(name)) continue;
     assets.push(await collectAsset(name, releaseAssets, options));
   }
-  for (const updater of updaterEntries(version)) {
-    const payload = await collectAsset(updater.name, releaseAssets, options);
-    const signature = await collectSignature(`${updater.name}.sig`, releaseAssets, options);
+  // Updater payloads carry a Tauri platform key and their detached minisign
+  // signature. The macOS payload is its own asset (the DMG is the public
+  // download) and is collected here; each AppImage was already collected as a
+  // public download above, so its record is decorated in place, because the
+  // generator rejects a duplicate asset name. The AppImage signatures stay
+  // OPTIONAL for the archived releases --latest-count walks (they predate the
+  // signatures, and the first GA that adds them must not fail the whole /dl
+  // history); the release being cut is held to every signature by the
+  // verifier, which release.yml runs before this script.
+  for (const payload of updaterPayloads(version)) {
+    const signatureName = `${payload.asset}.sig`;
+    if (!payload.required && !releaseAssets.has(signatureName)) continue;
+    const signature = await collectSignature(signatureName, releaseAssets, options);
+    const collected = assets.find((asset) => asset.name === payload.asset);
+    if (collected) {
+      collected.signature = signature;
+      collected.updater_platform = payload.platform;
+      continue;
+    }
     assets.push({
-      ...payload,
+      ...(await collectAsset(payload.asset, releaseAssets, options)),
       signature,
-      updater_platform: updater.platform,
+      updater_platform: payload.platform,
     });
   }
 

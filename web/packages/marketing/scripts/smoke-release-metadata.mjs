@@ -53,6 +53,18 @@ async function main() {
       desktopLatest.platforms["darwin-aarch64"]?.signature === "fixture-signature-darwin-aarch64",
       "desktop updater signature",
     );
+    // The AppImages double as the Linux updater payloads: their platform
+    // entries point at the public download itself.
+    for (const [platform, arch] of [["linux-x86_64", "amd64"], ["linux-aarch64", "aarch64"]]) {
+      assert(
+        desktopLatest.platforms[platform]?.signature === `fixture-signature-${platform}`,
+        `desktop ${platform} updater signature`,
+      );
+      assert(
+        desktopLatest.platforms[platform]?.url.endsWith(`/Chan_0.15.4_${arch}.AppImage`),
+        `desktop ${platform} updater url is the AppImage`,
+      );
+    }
     // The fixture ships no Windows assets, so the optional Windows downloads
     // stay out of the manifest (the install-page buttons fall back).
     assert(!downloadIds.has("desktop-windows-nsis"), "windows installer absent without asset");

@@ -294,9 +294,12 @@ jobs:
     name: linux desktop packages (${{ matrix.package_arch }})
     # GitHub-hosted runners are ubuntu-only, so CI ships the UNIVERSAL
     # AppImage that Tauri targets:"all" already emits, on amd64 AND arm64
-    # (matching the CLI + gateway matrix jobs). Tauri also emits a .deb and
-    # .rpm alongside it, but those ship through COPR/PPA/AUR instead of as
-    # GitHub Release artifacts. The per-distro sdme rootfs templates under
+    # (matching the CLI + gateway matrix jobs). The AppImage is also the
+    # Linux desktop updater payload, so each one is minisign-signed here
+    # with the same key as the macOS payload and its detached .sig ships
+    # beside it. Tauri also emits a .deb and .rpm alongside it, but those
+    # ship through COPR/PPA/AUR instead of as GitHub Release artifacts.
+    # The per-distro sdme rootfs templates under
     # packaging/sdme/chan-desktop-{ubuntu,fedora,arch}.sdme own the LOCAL
     # multi-distro dev/QA build path (build from macOS via lima); they are
     # not consumable by GH Actions, so CI leans on the universal AppImage
@@ -364,8 +367,47 @@ jobs:
         with:
           tool: tauri-cli@2
 
+      - name: Verify updater signing secret present
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -e
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Missing signing secret: TAURI_SIGNING_PRIVATE_KEY"
+            echo "::error::Populate the updater key secret per .agents/desktop.md."
+            exit 1
+          fi
+
       - run: make chan-desktop
         working-directory: chan
+
+      - name: Sign the AppImage updater payload
+        working-directory: chan
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          # The AppImage is the updater payload itself (tauri-plugin-updater
+          # rewrites the file named by $APPIMAGE in place), so the detached
+          # minisign signature rides next to it as <name>.AppImage.sig.
+          payload=$(find target/release/bundle/appimage -name '*.AppImage' -type f | head -1)
+          if [ -z "$payload" ]; then
+            echo "::error::missing desktop artifact: target/release/bundle/appimage/*.AppImage"
+            find target/release/bundle -type f || true
+            exit 1
+          fi
+          output=$(cd desktop/src-tauri && cargo tauri signer sign "../../$payload")
+          printf '%s\n' "$output"
+          signature=$(printf '%s\n' "$output" | sed -n 's/^Signature: //p' | tail -1)
+          if [ -z "$signature" ] && [ -f "$payload.sig" ]; then
+            signature=$(cat "$payload.sig")
+          fi
+          if [ -z "$signature" ]; then
+            echo "::error::cargo tauri signer did not produce a signature"
+            exit 1
+          fi
+          printf '%s\n' "$signature" > "$payload.sig"
 
       - name: Stage Linux desktop artifacts
         working-directory: chan
@@ -373,15 +415,15 @@ jobs:
           set -e
           mkdir -p release-artifacts
           # Tauri targets:"all" also emits a .deb and .rpm per arch, but CI
-          # stages only the AppImage as a GitHub Release artifact; the
-          # deb/rpm channel is COPR/PPA/AUR instead. Glob the format dir so
-          # the arch-specific filename skew (AppImage amd64/aarch64) needs
-          # no per-arch bookkeeping. Kept as a loop over one entry (not
-          # inlined) so a future format re-add is a one-line change and the
-          # missing-artifact error path stays shared.
-          # shellcheck disable=SC2066  # single-item on purpose, see above
+          # stages only the AppImage (plus its detached updater signature)
+          # as GitHub Release artifacts; the deb/rpm channel is COPR/PPA/AUR
+          # instead. Glob the format dir so the arch-specific filename skew
+          # (AppImage amd64/aarch64) needs no per-arch bookkeeping, and keep
+          # the entries in one loop so a future format re-add is a one-line
+          # change and the missing-artifact error path stays shared.
           for dir_glob in \
-            "target/release/bundle/appimage/*.AppImage"; do
+            "target/release/bundle/appimage/*.AppImage" \
+            "target/release/bundle/appimage/*.AppImage.sig"; do
             file=$(find "$(dirname "$dir_glob")" -name "$(basename "$dir_glob")" -type f | head -1)
             if [ -z "$file" ]; then
               echo "::error::missing desktop artifact: $dir_glob"

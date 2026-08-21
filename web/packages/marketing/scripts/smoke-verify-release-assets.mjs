@@ -83,8 +83,8 @@ function runVerify(label, names) {
 // token. Names produced by matrix interpolation or glob upload never appear
 // literally and are exempt by construction:
 //   - the musl CLI tarballs are `chan-${MUSL_TARGET}.tar.gz` (matrix var);
-//   - the Linux desktop AppImage uploads from the tauri bundle dir by
-//     `*.AppImage` glob;
+//   - the Linux desktop AppImage and its detached updater signature upload
+//     from the tauri bundle dir by `*.AppImage` / `*.AppImage.sig` glob;
 //   - the gateway .debs are cargo-deb output uploaded by `*.deb` glob.
 function lintWorkflowCoverage() {
   const workflow = readFileSync(
@@ -118,7 +118,7 @@ function lintWorkflowCoverage() {
 function isGlobUploaded(name) {
   return (
     /-unknown-linux-musl\.tar\.gz$/.test(name) || // matrix ${MUSL_TARGET}
-    /\.AppImage$/.test(name) || // tauri bundle glob
+    /\.AppImage(\.sig)?$/.test(name) || // tauri bundle glob, payload + signature
     /^chan-gateway-.*\.deb$/.test(name) // cargo-deb glob
   );
 }

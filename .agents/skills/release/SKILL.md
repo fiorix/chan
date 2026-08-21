@@ -93,7 +93,7 @@ make nix-sdme-check NIX_PACKAGE=chan-desktop
 
 ## Self-upgrade is data-driven
 
-Self-upgrade reads the latest manifest from `/dl` on chan.app. Cutting a release moves `latest` to the new version; the `/dl` generator also retains the last 5 GA versions as per-version manifests, so `chan upgrade --version X.Y.Z` resolves older releases. No `update.rs` edit is required. The desktop updater probes the static manifest at `https://chan.app/dl/desktop/latest.json`, generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs`. Package-manager builds, including `CHAN_PACKAGED=nix`, suppress those probes and refuse self-upgrade; their package manager owns the update path.
+Self-upgrade reads the latest manifest from `/dl` on chan.app. Cutting a release moves `latest` to the new version; the `/dl` generator also retains the last 5 GA versions as per-version manifests, so `chan upgrade --version X.Y.Z` resolves older releases. No `update.rs` edit is required. The desktop updater probes the static manifest at `https://chan.app/dl/desktop/latest.json`, generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs`; it carries the macOS payload and both Linux AppImages, which the macOS and Linux desktop jobs sign with the same `TAURI_SIGNING_PRIVATE_KEY` (both jobs fail fast when it is absent). Package-manager builds, including `CHAN_PACKAGED=nix`, suppress those probes and refuse self-upgrade; their package manager owns the update path.
 
 ## Signing notes
 

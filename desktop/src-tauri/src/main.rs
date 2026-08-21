@@ -53,10 +53,10 @@ const SYSTEM_NOTICE: &str = "system-notice";
 /// Shown in About, logged at startup, and advertised by
 /// [`native_vocabulary`], the surfaces an acceptance run looks at.
 const CHAN_DESKTOP_BUILD_ID: &str = env!("CHAN_DESKTOP_BUILD_ID");
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const DESKTOP_UPDATE_READY_EVENT: &str = "desktop-update-ready";
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Debug, Clone, Serialize)]
 struct DesktopUpdateReadyPayload {
     version: String,
@@ -3632,6 +3632,38 @@ async fn close_workspace_from_handoff(
     Ok(outcome)
 }
 
+/// The reason this desktop cannot drive `tauri-plugin-updater` for itself,
+/// or `None` when it can. macOS always can: the `.app` is the payload. On
+/// Linux only the AppImage can: the plugin overwrites the file named by
+/// `$APPIMAGE` in place, and any other Linux binary (a `cargo run` build,
+/// the Tauri deb/rpm that CI never publishes) would have it rewrite
+/// `current_exe()` with AppImage bytes. The distro-packaged refusal
+/// (`CHAN_PACKAGED`) sits upstream in the CLI, so a COPR/PPA/AUR/Nix
+/// desktop never reaches this.
+#[cfg(target_os = "macos")]
+fn desktop_updater_refusal() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_updater_refusal() -> Option<String> {
+    linux_updater_refusal(cs_install::appimage_path().as_deref())
+}
+
+/// The Linux half of [`desktop_updater_refusal`], keyed on the AppImage path
+/// so a test can flip it.
+#[cfg(any(target_os = "linux", test))]
+fn linux_updater_refusal(appimage: Option<&std::path::Path>) -> Option<String> {
+    if appimage.is_some() {
+        return None;
+    }
+    Some(
+        "desktop self-upgrade on linux is available only when chan-desktop runs from its \
+         AppImage; this build was not started from one"
+            .to_string(),
+    )
+}
+
 /// Drive `tauri-plugin-updater` in response to a `chan upgrade` from the
 /// desktop-dispatched `chan` binary (handoff `Upgrade` request).
 ///
@@ -3641,9 +3673,10 @@ async fn close_workspace_from_handoff(
 /// the multi-MB download can't be awaited from the CLI socket round-trip);
 /// when it finishes we re-affirm the `~/.local/bin/{chan,cs}` shims and
 /// relaunch into the new version.
-/// Desktop updater payloads are currently signed and published only for macOS.
-/// Windows and Linux return a clear error rather than pretending to upgrade.
-#[cfg(not(target_os = "macos"))]
+/// Desktop updater payloads are signed and published for the macOS `.app`
+/// and the Linux AppImage. Windows, and a Linux build that is not running
+/// from an AppImage, return a clear error rather than pretending to upgrade.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 async fn desktop_handle_upgrade(
     _app: tauri::AppHandle,
     _check_only: bool,
@@ -3656,13 +3689,17 @@ async fn desktop_handle_upgrade(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn desktop_handle_upgrade(
     app: tauri::AppHandle,
     check_only: bool,
 ) -> chan_server::handoff::Response {
     use chan_server::handoff::{Response, CHAN_VERSION};
     use tauri_plugin_updater::UpdaterExt;
+
+    if let Some(message) = desktop_updater_refusal() {
+        return Response::Error { message };
+    }
 
     let updater = match app.updater() {
         Ok(u) => u,
@@ -3736,15 +3773,20 @@ async fn desktop_handle_upgrade(
 /// Opt-out mirrors the CLI's `CHAN_UPDATE_CHECK=0` (`chan::update` `ENV_DISABLE`)
 /// so one env silences both the CLI banner probe and this desktop check. The new
 /// bundle is downloaded + installed in the background, then the launcher is
-/// notified to show its update-ready dialog. Only macOS has a signed desktop
-/// updater payload/feed today; non-macOS platforms are explicit no-ops.
-#[cfg(target_os = "macos")]
+/// notified to show its update-ready dialog. The macOS `.app` and the Linux
+/// AppImage have a signed desktop updater payload/feed; a Linux build that is
+/// not an AppImage skips the check, and other platforms are explicit no-ops.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn spawn_launch_update_check(app: tauri::AppHandle) {
     use tauri_plugin_updater::UpdaterExt;
 
     // Mirror the CLI opt-out exactly: only the literal "0" disables it.
     if matches!(std::env::var("CHAN_UPDATE_CHECK"), Ok(v) if v == "0") {
         tracing::info!("on-launch update check disabled by CHAN_UPDATE_CHECK=0");
+        return;
+    }
+    if let Some(reason) = desktop_updater_refusal() {
+        tracing::info!(%reason, "on-launch update check skipped");
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -3789,7 +3831,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn spawn_launch_update_check(_app: tauri::AppHandle) {
     // No signed desktop updater feed for this platform; nothing to check.
 }
@@ -3798,7 +3840,7 @@ fn spawn_launch_update_check(_app: tauri::AppHandle) {
 /// in-window update dialog ask whether to relaunch now. The new bundle is
 /// already on disk, so dismissing the dialog simply applies it on the next
 /// launch.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str) {
     let _ = show_window(app, "main");
     let payload = DesktopUpdateReadyPayload {
@@ -3820,13 +3862,13 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str) {
 }
 
 #[tauri::command]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn restart_desktop_after_update(app: tauri::AppHandle) {
     begin_normal_shutdown(app, ShutdownAction::Restart);
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn restart_desktop_after_update() -> Result<(), String> {
     Err(format!(
         "desktop self-upgrade is not supported on {}",
@@ -7325,7 +7367,7 @@ const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"
 
 enum ShutdownAction {
     Exit(i32),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Restart,
 }
 
@@ -7346,7 +7388,7 @@ fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
         serve::stop_all(&state).await;
         match action {
             ShutdownAction::Exit(code) => app.exit(code),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             ShutdownAction::Restart => app.restart(),
         }
     });
@@ -8338,6 +8380,17 @@ mod tests {
             serde_json::to_value(payload).expect("payload serializes"),
             serde_json::json!({ "version": "0.66.0" }),
         );
+    }
+
+    #[test]
+    fn linux_updater_refuses_outside_an_appimage() {
+        assert_eq!(
+            linux_updater_refusal(Some(std::path::Path::new("/home/u/Chan.AppImage"))),
+            None,
+        );
+        let reason = linux_updater_refusal(None).expect("a non-AppImage build refuses");
+        assert!(reason.contains("AppImage"), "{reason}");
+        assert!(!reason.contains("chan upgrade"), "{reason}");
     }
 
     #[test]

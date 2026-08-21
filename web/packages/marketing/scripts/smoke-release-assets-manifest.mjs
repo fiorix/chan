@@ -20,8 +20,10 @@ const version = "0.15.4";
 const tag = `v${version}`;
 const firstCliAsset = cliAssets()[0];
 // The manifest holds one entry per required asset except the updater's detached
-// .sig, which is folded into its payload entry: cli + desktop + gateway debs +
-// one updater entry. Derived so a gateway-service change can't drift the count.
+// .sig files, which are folded into their payload entries: cli + desktop +
+// gateway debs + the one updater payload that is not already a public download
+// (the macOS tarball; the AppImages are desktop downloads decorated in place).
+// Derived so a gateway-service change can't drift the count.
 const baseAssetCount =
   cliAssets().length + desktopAssets(version).length + gatewayDebAssets(version).length + 1;
 const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
@@ -63,6 +65,20 @@ try {
   const updater = base.assets.find((asset) => asset.updater_platform === "darwin-aarch64");
   assert(updater, "missing updater asset");
   assertEqual(updater.signature, "fixture-updater-signature", "updater signature");
+
+  // The AppImages are the Linux updater payloads: each public download record
+  // is decorated with its platform key and signature, not duplicated.
+  for (const [platform, arch] of [["linux-x86_64", "amd64"], ["linux-aarch64", "aarch64"]]) {
+    const appimage = base.assets.find((asset) => asset.updater_platform === platform);
+    assert(appimage, `missing ${platform} updater decoration`);
+    assertEqual(appimage.name, `Chan_${version}_${arch}.AppImage`, `${platform} payload`);
+    assertEqual(appimage.signature, "fixture-updater-signature", `${platform} signature`);
+  }
+  assertEqual(
+    base.assets.filter((asset) => asset.name.endsWith(".AppImage")).length,
+    2,
+    "AppImages decorated in place, not duplicated",
+  );
 
   // Windows assets present: the optional entries are collected.
   const windowsNames = optionalNames(version);
@@ -165,6 +181,55 @@ try {
     "the gateway services the archived release did ship are still collected",
   );
 
+  // An archived release that predates the AppImage updater signatures ships
+  // no .AppImage.sig, so the collector must keep it (with no Linux updater
+  // platform) rather than fail the whole /dl history on the first GA that
+  // adds them; the release that does ship them is decorated as usual.
+  const appimageSigs = (v) => updaterAssets(v).filter((name) => name.endsWith(".AppImage.sig"));
+  const unsigned = runFixtureCollect(
+    "unsigned-appimage",
+    [{ releaseVersion: "0.95.0" }, { releaseVersion: "0.94.0", omit: appimageSigs("0.94.0") }],
+    { latestCount: 5 },
+  );
+  const unsignedOlder = unsigned.manifests.find((manifest) => manifest.tag === "v0.94.0");
+  assert(unsignedOlder, "archived release without AppImage signatures is still collected");
+  assert(
+    !unsignedOlder.assets.some((asset) => asset.updater_platform?.startsWith("linux-")),
+    "archived release without AppImage signatures has no Linux updater platform",
+  );
+  assert(
+    unsignedOlder.assets.some((asset) => asset.updater_platform === "darwin-aarch64"),
+    "archived release keeps its macOS updater platform",
+  );
+  const unsignedNewer = unsigned.manifests.find((manifest) => manifest.tag === "v0.95.0");
+  assert(
+    unsignedNewer.assets.some((asset) => asset.updater_platform === "linux-x86_64"),
+    "the release that ships AppImage signatures is decorated",
+  );
+  const unsignedDl = path.join(root, "unsigned-appimage", "dl");
+  execFileSync("node", [
+    "scripts/generate-release-metadata.mjs",
+    "--manifest",
+    unsigned.manifestPath,
+    "--out",
+    unsignedDl,
+  ], { cwd: siteRoot });
+  const unsignedOlderDesktop = JSON.parse(
+    readFileSync(path.join(unsignedDl, "desktop", "v0.94.0.json"), "utf8"),
+  );
+  assertEqual(
+    JSON.stringify(Object.keys(unsignedOlderDesktop.platforms)),
+    JSON.stringify(["darwin-aarch64"]),
+    "archived desktop manifest carries only the platforms it signed",
+  );
+  const unsignedNewerDesktop = JSON.parse(
+    readFileSync(path.join(unsignedDl, "desktop", "latest.json"), "utf8"),
+  );
+  assert(
+    unsignedNewerDesktop.platforms["linux-x86_64"]?.url.endsWith("/Chan_0.95.0_amd64.AppImage"),
+    "latest desktop manifest points the Linux platform at the AppImage itself",
+  );
+
   // A GA forced tag that leads the history keeps its place at the front.
   const forced = runFixtureCollect("forced", history, { latestCount: 2, tag: "v0.15.9" });
   assertEqual(
@@ -260,6 +325,17 @@ try {
       desktopJson.platforms["darwin-aarch64"]?.url.includes(`/${retained}/`),
       `desktop ${retained} updater url`,
     );
+    for (const platform of ["linux-x86_64", "linux-aarch64"]) {
+      assertEqual(
+        desktopJson.platforms[platform]?.signature,
+        "fixture-updater-signature",
+        `desktop ${retained} ${platform} updater signature`,
+      );
+      assert(
+        desktopJson.platforms[platform]?.url.endsWith(".AppImage"),
+        `desktop ${retained} ${platform} updater url is the AppImage`,
+      );
+    }
   }
   assert(!existsSync(path.join(dlOut, "cli", "v0.16.0-rc1.json")), "rc tag filtered out of /dl");
   assert(!existsSync(path.join(dlOut, "cli", "v0.15.7.json")), "prerelease filtered out of /dl");

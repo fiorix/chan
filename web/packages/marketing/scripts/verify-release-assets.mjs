@@ -60,10 +60,11 @@ async function main() {
       warnings.push("SHA256SUMS asset absent; /dl metadata carries SHA256 values");
     }
 
-    if (assets.has(updater[1])) {
-      const signature = (await fetchAssetText(assets.get(updater[1]))).trim();
+    for (const name of updater.filter((asset) => asset.endsWith(".sig"))) {
+      if (!assets.has(name)) continue;
+      const signature = (await fetchAssetText(assets.get(name))).trim();
       if (!signature) {
-        errors.push(`${updater[1]} is empty`);
+        errors.push(`${name} is empty`);
       }
     }
   }

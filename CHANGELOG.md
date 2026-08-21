@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+The Linux AppImage self-upgrades the way the macOS app does.
+
+### Added
+
+- **The Linux AppImage self-upgrades.** chan-desktop run from its AppImage checks `https://chan.app/dl/desktop/latest.json` on launch and installs a newer release in the background, and `chan upgrade` (and `chan upgrade --check`) from the AppImage's `chan` shim drives the same updater through the running desktop: the `.AppImage` file is replaced in place and relaunched, so the `~/.local/bin/{chan,cs}` shims keep pointing at it. Every release now signs both AppImages with the same minisign key as the macOS payload, publishes their detached `.sig` assets, and adds `linux-x86_64` and `linux-aarch64` entries to the desktop updater manifest. An AppImage from an earlier release has no Linux updater arm and must be downloaded by hand once; after that it updates itself. A Linux build that is not running from an AppImage answers `chan upgrade` with a clear not-supported message instead of launching a window first, and distro packages (COPR, PPA, AUR, Nix) keep refusing in favour of the package manager. Windows is unchanged.
+
 ## [v0.94.0] - 2026-08-19
 
 The CLI grammar moves to noun families, a standalone window gains drafts and Rich Prompt, gateway operators mint and revoke PATs through the app layer, extensions get a front-door guide, the `/api/files` alias is removed on the release its deprecation named, and the gateway's tunnel namespace renames from `usr.{domain}` to `proxy.{domain}`.

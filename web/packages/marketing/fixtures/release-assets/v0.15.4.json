@@ -27,12 +27,16 @@
     {
       "name": "Chan_0.15.4_amd64.AppImage",
       "url": "https://github.com/fiorix/chan/releases/download/v0.15.4/Chan_0.15.4_amd64.AppImage",
-      "sha256": "8b50930539ca2797e9908a2ad38d2053883a1ffe930b02fd91fd4fea9b734f60"
+      "sha256": "8b50930539ca2797e9908a2ad38d2053883a1ffe930b02fd91fd4fea9b734f60",
+      "updater_platform": "linux-x86_64",
+      "signature": "fixture-signature-linux-x86_64"
     },
     {
       "name": "Chan_0.15.4_aarch64.AppImage",
       "url": "https://github.com/fiorix/chan/releases/download/v0.15.4/Chan_0.15.4_aarch64.AppImage",
-      "sha256": "1724be0e5096c39052f11ed6dbc1d8572ab2d1bdf576dbd9996d09a0ec7ea3bb"
+      "sha256": "1724be0e5096c39052f11ed6dbc1d8572ab2d1bdf576dbd9996d09a0ec7ea3bb",
+      "updater_platform": "linux-aarch64",
+      "signature": "fixture-signature-linux-aarch64"
     },
     {
       "name": "Chan_0.15.4_amd64.deb",
