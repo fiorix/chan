@@ -660,11 +660,12 @@
             { key: "Enter", run: (view) => expandDateMacro(view) },
             { key: "Enter", run: (view) => expandPageBreakMacro(view) },
             { key: "Enter", run: (view) => stripUnusedInlineImageSpaceOnEnter(view) },
-            // List continuation: at end of a `- ` / `1. ` / `- [ ] `
-            // line, Enter inserts a fresh marker on the next line;
-            // on an empty bullet, Enter strips the prefix to exit
-            // the list. Returns false on non-list lines so the
-            // default Enter (newline) still fires.
+            // List continuation: on a `- ` / `1. ` / `- [ ] ` line,
+            // Enter starts the next item, carrying any text after the
+            // caret down into it (so a long item splits in place); on
+            // an empty bullet, Enter strips the prefix to exit the
+            // list. Returns false on non-list lines so the default
+            // Enter (newline) still fires.
             { key: "Enter", run: (view) => continueListOnEnter(view) },
             // Chat-style send chord. Only active when the host wires
             // an `onSubmit`; plain file editors leave `onSubmit` unset

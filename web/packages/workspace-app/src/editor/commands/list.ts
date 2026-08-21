@@ -73,11 +73,15 @@ function nextPrefix(prev: ListPrefix): string {
 ///   - Empty item (no content after the prefix) at any caret position
 ///     on that line → strip the prefix entirely. This is how the user
 ///     exits the list: hit Enter on a blank bullet.
-///   - Non-empty item, caret at end of line → split: insert newline
-///     plus the next marker, drop caret after it.
-///   - Non-empty item, caret elsewhere → fall through (default
-///     newline). Auto-continuing mid-line is more annoying than
-///     useful - it splits a sentence with a stray bullet.
+///   - Non-empty item, caret at or past the end of the prefix → split:
+///     the text after the caret becomes the next item (a fresh marker
+///     on the next line, caret after it). At end of line that is a
+///     plain new item; mid-item it is how a long item is broken into
+///     several (caret after a word, Enter), and the split swallows the
+///     whitespace around the caret so neither half keeps a stray gap.
+///   - Caret inside the prefix (the indent, the marker, a task box) →
+///     fall through (default newline), so Enter ahead of an item still
+///     just moves the item down a line.
 export function continueListOnEnter(view: EditorView): boolean {
   const sel = view.state.selection.main;
   if (!sel.empty) return false;
@@ -94,17 +98,25 @@ export function continueListOnEnter(view: EditorView): boolean {
     });
     return true;
   }
-  if (sel.head !== line.to) return false;
+  const prefixEnd = line.from + prefix.length;
+  if (sel.head < prefixEnd) return false;
+  let from = sel.head;
+  let to = sel.head;
+  if (sel.head < line.to) {
+    // Mid-item split: the gap around the caret belongs to neither half.
+    // Never eat into the prefix itself (a caret right after `- ` leaves
+    // an empty item above and moves the whole content down).
+    while (from > prefixEnd && /[ \t]/.test(line.text[from - 1 - line.from])) from--;
+    while (to < line.to && /[ \t]/.test(line.text[to - line.from])) to++;
+  }
   const insert = `\n${nextPrefix(prefix)}`;
-  const changes: { from: number; to: number; insert: string }[] = [
-    { from: sel.head, to: sel.head, insert },
-  ];
+  const changes: { from: number; to: number; insert: string }[] = [{ from, to, insert }];
   if (prefix.ordered && prefix.number !== null) {
     appendOrderedRenumber(view.state, line.number, prefix, changes);
   }
   view.dispatch({
     changes,
-    selection: { anchor: sel.head + insert.length },
+    selection: { anchor: from + insert.length },
   });
   return true;
 }

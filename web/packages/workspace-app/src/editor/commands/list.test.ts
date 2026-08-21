@@ -165,10 +165,74 @@ describe("continueListOnEnter", () => {
     expect(snapshot().doc).toBe("hello"); // untouched
   });
 
-  test("falls through when caret is mid-line on a non-empty item", () => {
+  test("mid-item caret splits the item: the rest of the line becomes the next item", () => {
+    // The long-item flow: caret after a word, Enter, and the tail is its
+    // own bullet with the caret after the fresh marker.
+    mount("- the quick brown fox", 17); // caret right after "brown"
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- the quick brown\n- fox", head: 20 });
+  });
+
+  test("the split swallows the whitespace on both sides of the caret", () => {
+    // Caret after the separating space: no trailing space on the old item.
+    mount("- hello world", 8);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- hello\n- world", head: 10 });
+    view.destroy();
+    host.remove();
+    // Caret inside a run of spaces: neither half keeps any of them.
+    mount("- hello   world", 9);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- hello\n- world", head: 10 });
+  });
+
+  test("mid-word caret splits the word across the two items", () => {
     mount("- hello", 4); // caret between '- h' and 'ello'
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- he\n- llo", head: 7 });
+  });
+
+  test("mid-item split of an ordered item numbers the tail and renumbers below", () => {
+    mount("1. one two\n2. three", 6); // caret right after "one"
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "1. one\n2. two\n3. three", head: 10 });
+  });
+
+  test("mid-item split of a task item gives the moved text a fresh unchecked box", () => {
+    mount("- [x] done more", 10);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- [x] done\n- [ ] more", head: 17 });
+  });
+
+  test("mid-item split of a nested item keeps the indent", () => {
+    mount("  - a b", 5);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "  - a\n  - b", head: 10 });
+  });
+
+  test("caret right after the marker leaves an empty item above and moves the content down", () => {
+    mount("- hello", 2);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- \n- hello", head: 5 });
+  });
+
+  test("a whitespace-only remainder behaves like end of line", () => {
+    mount("- hello   ", 7);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "- hello\n- ", head: 10 });
+  });
+
+  test("falls through when the caret is inside the prefix", () => {
+    // In the marker ("-|"), and in the indent ahead of it: the default
+    // newline just moves the item down, it does not manufacture a bullet.
+    mount("- hello", 1);
     expect(continueListOnEnter(view)).toBe(false);
     expect(snapshot().doc).toBe("- hello");
+    view.destroy();
+    host.remove();
+    mount("  - hello", 1);
+    expect(continueListOnEnter(view)).toBe(false);
+    expect(snapshot().doc).toBe("  - hello");
   });
 
   test("falls through when selection is non-empty", () => {
