@@ -57,27 +57,32 @@ export function windowsAssets(version) {
 // the collector and the updater asset list. The macOS payload is a dedicated
 // asset (the DMG is the public download); each AppImage is the public download
 // itself, since tauri-plugin-updater rewrites the running `$APPIMAGE` in
-// place. `required` is the collector's contract for the retained older
-// releases: every one carries the macOS payload, but the AppImage signatures
-// arrived later, so an archived release may lack them. The release being cut
-// is held to every signature by the verifier (requiredAssets).
+// place; the Windows payload is the NSIS installer itself, which the plugin
+// runs passively over the install. `required` is the collector's contract for
+// the retained older releases: every one carries the macOS payload, but the
+// AppImage and installer signatures arrived later, so an archived release may
+// lack them. The release being cut is held to every signature by the verifier
+// (requiredAssets).
 export function updaterPayloads(version) {
   return [
     { platform: "darwin-aarch64", asset: `Chan_${version}_aarch64.app.tar.gz`, required: true },
     { platform: "linux-x86_64", asset: `Chan_${version}_amd64.AppImage`, required: false },
     { platform: "linux-aarch64", asset: `Chan_${version}_aarch64.AppImage`, required: false },
+    { platform: "windows-x86_64", asset: `Chan_${version}_x64-setup.exe`, required: false },
   ];
 }
 
 // The updater assets a GA release carries beyond the public downloads: the
-// macOS payload plus every payload's detached signature. The AppImage payloads
-// themselves are already listed in desktopAssets.
+// macOS payload plus every payload's detached signature. The AppImage and
+// installer payloads themselves are already listed in desktopAssets and
+// windowsAssets.
 export function updaterAssets(version) {
   return [
     `Chan_${version}_aarch64.app.tar.gz`,
     `Chan_${version}_aarch64.app.tar.gz.sig`,
     `Chan_${version}_amd64.AppImage.sig`,
     `Chan_${version}_aarch64.AppImage.sig`,
+    `Chan_${version}_x64-setup.exe.sig`,
   ];
 }
 

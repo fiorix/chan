@@ -282,16 +282,23 @@ async function collectManifest(release, options) {
   }
   // Updater payloads carry a Tauri platform key and their detached minisign
   // signature. The macOS payload is its own asset (the DMG is the public
-  // download) and is collected here; each AppImage was already collected as a
-  // public download above, so its record is decorated in place, because the
-  // generator rejects a duplicate asset name. The AppImage signatures stay
-  // OPTIONAL for the archived releases --latest-count walks (they predate the
-  // signatures, and the first GA that adds them must not fail the whole /dl
-  // history); the release being cut is held to every signature by the
-  // verifier, which release.yml runs before this script.
+  // download) and is collected here; each AppImage and the NSIS installer
+  // were already collected as public downloads above, so their records are
+  // decorated in place, because the generator rejects a duplicate asset name.
+  // The AppImage and installer signatures stay OPTIONAL for the archived
+  // releases --latest-count walks (they predate the signatures, and the
+  // Windows artifacts themselves are optional there; the first GA that adds
+  // them must not fail the whole /dl history); the release being cut is held
+  // to every signature by the verifier, which release.yml runs before this
+  // script.
   for (const payload of updaterPayloads(version)) {
     const signatureName = `${payload.asset}.sig`;
-    if (!payload.required && !releaseAssets.has(signatureName)) continue;
+    if (
+      !payload.required &&
+      (!releaseAssets.has(payload.asset) || !releaseAssets.has(signatureName))
+    ) {
+      continue;
+    }
     const signature = await collectSignature(signatureName, releaseAssets, options);
     const collected = assets.find((asset) => asset.name === payload.asset);
     if (collected) {

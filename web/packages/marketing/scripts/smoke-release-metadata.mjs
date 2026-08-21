@@ -74,11 +74,17 @@ async function main() {
     const withWindows = JSON.parse(await fs.readFile(fixture, "utf8"));
     const windowsNames = ["Chan_0.15.4_x64-setup.exe", "chan-x86_64-pc-windows-msvc.zip"];
     for (const name of windowsNames) {
-      withWindows.assets.push({
+      const asset = {
         name,
         url: `https://github.com/fiorix/chan/releases/download/v0.15.4/${name}`,
         sha256: createHash("sha256").update(name).digest("hex"),
-      });
+      };
+      // The NSIS installer doubles as the Windows updater payload.
+      if (name.endsWith("-setup.exe")) {
+        asset.updater_platform = "windows-x86_64";
+        asset.signature = "fixture-signature-windows-x86_64";
+      }
+      withWindows.assets.push(asset);
     }
     const winManifest = path.join(out, "with-windows.json");
     await fs.writeFile(winManifest, `${JSON.stringify(withWindows)}\n`);
@@ -101,6 +107,15 @@ async function main() {
     assert(
       /^[a-f0-9]{64}$/.test(winById.get("cli-windows-x64").sha256),
       "windows cli sha256",
+    );
+    const winDesktopLatest = await readJson(path.join(winOut, "desktop", "latest.json"));
+    assert(
+      winDesktopLatest.platforms["windows-x86_64"]?.signature === "fixture-signature-windows-x86_64",
+      "desktop windows-x86_64 updater signature",
+    );
+    assert(
+      winDesktopLatest.platforms["windows-x86_64"]?.url.endsWith("/Chan_0.15.4_x64-setup.exe"),
+      "desktop windows-x86_64 updater url is the installer",
     );
 
     const prerelease = rewriteFixtureVersion(

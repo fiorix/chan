@@ -53,12 +53,28 @@ const SYSTEM_NOTICE: &str = "system-notice";
 /// Shown in About, logged at startup, and advertised by
 /// [`native_vocabulary`], the surfaces an acceptance run looks at.
 const CHAN_DESKTOP_BUILD_ID: &str = env!("CHAN_DESKTOP_BUILD_ID");
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 const DESKTOP_UPDATE_READY_EVENT: &str = "desktop-update-ready";
 
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+/// What the launcher's update-ready dialog needs: the version, and whether
+/// the bytes are already installed on disk (macOS and the Linux AppImage
+/// swap the bundle in place, so dismissing the dialog still applies it on
+/// the next launch) or only downloaded and staged (Windows, where the NSIS
+/// installer is the process exit and runs only when the user restarts from
+/// the dialog).
 #[derive(Debug, Clone, Serialize)]
 struct DesktopUpdateReadyPayload {
+    version: String,
+    installed: bool,
+}
+
+/// Windows: an update the on-launch check downloaded and verified, parked
+/// until the user restarts from the launcher's dialog. The installer is the
+/// exit, so it never runs unasked; a dismissed dialog keeps nothing across
+/// launches (the next launch downloads and asks again).
+#[cfg(windows)]
+pub struct PendingUpdate {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
     version: String,
 }
 
@@ -249,6 +265,10 @@ pub struct AppState {
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
+    /// Windows: the downloaded, verified update waiting for the user to
+    /// restart from the launcher's dialog (see [`PendingUpdate`]).
+    #[cfg(windows)]
+    pub pending_update: Mutex<Option<PendingUpdate>>,
 }
 
 impl AppState {
@@ -290,6 +310,8 @@ impl AppState {
             quit_confirmed: std::sync::atomic::AtomicBool::new(false),
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(windows)]
+            pending_update: Mutex::new(None),
         }
     }
 
@@ -3637,8 +3659,11 @@ async fn close_workspace_from_handoff(
 /// Linux only the AppImage can: the plugin overwrites the file named by
 /// `$APPIMAGE` in place, and any other Linux binary (a `cargo run` build,
 /// the Tauri deb/rpm that CI never publishes) would have it rewrite
-/// `current_exe()` with AppImage bytes. The distro-packaged refusal
-/// (`CHAN_PACKAGED`) sits upstream in the CLI, so a COPR/PPA/AUR/Nix
+/// `current_exe()` with AppImage bytes. On Windows only an NSIS-installed
+/// `chan-desktop.exe` can: the payload is the installer, which reinstalls
+/// over the install it was started from, and a `cargo run` binary would
+/// install a second copy under `%LOCALAPPDATA%`. The distro-packaged
+/// refusal (`CHAN_PACKAGED`) sits upstream in the CLI, so a COPR/PPA/AUR/Nix
 /// desktop never reaches this.
 #[cfg(target_os = "macos")]
 fn desktop_updater_refusal() -> Option<String> {
@@ -3648,6 +3673,25 @@ fn desktop_updater_refusal() -> Option<String> {
 #[cfg(target_os = "linux")]
 fn desktop_updater_refusal() -> Option<String> {
     linux_updater_refusal(cs_install::appimage_path().as_deref())
+}
+
+#[cfg(windows)]
+fn desktop_updater_refusal() -> Option<String> {
+    windows_updater_refusal(cs_install::is_installed_desktop_exe())
+}
+
+/// The Windows half of [`desktop_updater_refusal`], keyed on the installed
+/// classification so a test can flip it.
+#[cfg(any(windows, test))]
+fn windows_updater_refusal(installed: bool) -> Option<String> {
+    if installed {
+        return None;
+    }
+    Some(
+        "desktop self-upgrade on windows is available only for an installed chan-desktop; \
+         this build does not run from an install"
+            .to_string(),
+    )
 }
 
 /// The Linux half of [`desktop_updater_refusal`], keyed on the AppImage path
@@ -3673,10 +3717,11 @@ fn linux_updater_refusal(appimage: Option<&std::path::Path>) -> Option<String> {
 /// the multi-MB download can't be awaited from the CLI socket round-trip);
 /// when it finishes we re-affirm the `~/.local/bin/{chan,cs}` shims and
 /// relaunch into the new version.
-/// Desktop updater payloads are signed and published for the macOS `.app`
-/// and the Linux AppImage. Windows, and a Linux build that is not running
-/// from an AppImage, return a clear error rather than pretending to upgrade.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Desktop updater payloads are signed and published for the macOS `.app`,
+/// the Linux AppImage, and the Windows NSIS installer. A Linux build that is
+/// not running from an AppImage and a Windows build that is not an install
+/// return a clear error rather than pretending to upgrade.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 async fn desktop_handle_upgrade(
     _app: tauri::AppHandle,
     _check_only: bool,
@@ -3742,6 +3787,78 @@ async fn desktop_handle_upgrade(
                         begin_normal_shutdown(app_bg, ShutdownAction::Restart);
                     }
                     Err(e) => {
+                        tracing::warn!(error = %e, "chan-desktop update failed");
+                        emit_system_notice(
+                            &app_bg,
+                            "warning",
+                            format!("chan-desktop update failed: {e}"),
+                        );
+                    }
+                }
+            });
+            Response::UpgradeStarted {
+                desktop_version: CHAN_VERSION.into(),
+            }
+        }
+        Ok(None) => Response::UpgradeChecked {
+            desktop_version: CHAN_VERSION.into(),
+            available: None,
+        },
+        Err(e) => Response::Error {
+            message: format!("update check failed: {e}"),
+        },
+    }
+}
+
+/// The Windows arm of the handoff upgrade. The install IS the exit here:
+/// `tauri-plugin-updater` launches the NSIS installer (passive, `/R` so it
+/// relaunches the app) and exits the process itself, so the bytes are
+/// downloaded and verified first, then the embedded tenants are drained
+/// through `begin_normal_shutdown`, and only then is the installer handed
+/// the bytes. Fire-and-return like the unix arm: the CLI already has its
+/// `UpgradeStarted` ack and its "it will relaunch when done" stays true.
+#[cfg(windows)]
+async fn desktop_handle_upgrade(
+    app: tauri::AppHandle,
+    check_only: bool,
+) -> chan_server::handoff::Response {
+    use chan_server::handoff::{Response, CHAN_VERSION};
+    use tauri_plugin_updater::UpdaterExt;
+
+    if let Some(message) = desktop_updater_refusal() {
+        return Response::Error { message };
+    }
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            return Response::Error {
+                message: format!("updater unavailable: {e}"),
+            }
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            if check_only {
+                return Response::UpgradeChecked {
+                    desktop_version: CHAN_VERSION.into(),
+                    available: Some(version),
+                };
+            }
+            let app_bg = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match update.download(|_chunk, _total| {}, || {}).await {
+                    Ok(bytes) => {
+                        tracing::info!(%version, "chan-desktop update downloaded; installing and relaunching");
+                        begin_normal_shutdown(
+                            app_bg,
+                            ShutdownAction::InstallUpdate { update, bytes },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "chan-desktop update failed");
                         emit_system_notice(
                             &app_bg,
                             "warning",
@@ -3818,7 +3935,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
                             }
                         }
                         tracing::info!(%version, "on-launch update installed; notifying launcher");
-                        notify_desktop_update_ready(&app, &version);
+                        notify_desktop_update_ready(&app, &version, true);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "on-launch update download/install failed");
@@ -3831,20 +3948,74 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
     });
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// The Windows arm of the on-launch check: download and verify in the
+/// background, then stage the bytes and ask through the launcher's dialog.
+/// Nothing is installed here, because on Windows the install is the exit
+/// (the NSIS installer runs and relaunches the app); it runs only when the
+/// user restarts from the dialog (`restart_desktop_after_update`).
+#[cfg(windows)]
+fn spawn_launch_update_check(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // Mirror the CLI opt-out exactly: only the literal "0" disables it.
+    if matches!(std::env::var("CHAN_UPDATE_CHECK"), Ok(v) if v == "0") {
+        tracing::info!("on-launch update check disabled by CHAN_UPDATE_CHECK=0");
+        return;
+    }
+    if let Some(reason) = desktop_updater_refusal() {
+        tracing::info!(%reason, "on-launch update check skipped");
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let updater = match app.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "on-launch update check: updater unavailable");
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                tracing::info!(%version, "on-launch update available; downloading");
+                match update.download(|_chunk, _total| {}, || {}).await {
+                    Ok(bytes) => {
+                        let state = app.state::<Arc<AppState>>();
+                        *state.pending_update.lock().unwrap() = Some(PendingUpdate {
+                            update,
+                            bytes,
+                            version: version.clone(),
+                        });
+                        tracing::info!(%version, "on-launch update downloaded; notifying launcher");
+                        notify_desktop_update_ready(&app, &version, false);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "on-launch update download failed");
+                    }
+                }
+            }
+            Ok(None) => tracing::info!("on-launch update check: already up to date"),
+            Err(e) => tracing::warn!(error = %e, "on-launch update check failed"),
+        }
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn spawn_launch_update_check(_app: tauri::AppHandle) {
     // No signed desktop updater feed for this platform; nothing to check.
 }
 
-/// After an on-launch update installs, bring the launcher forward and let its
-/// in-window update dialog ask whether to relaunch now. The new bundle is
-/// already on disk, so dismissing the dialog simply applies it on the next
-/// launch.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str) {
+/// After an on-launch update lands, bring the launcher forward and let its
+/// in-window update dialog ask whether to relaunch now. `installed` says
+/// whether the new bundle is already on disk (macOS, the Linux AppImage:
+/// dismissing the dialog simply applies it on the next launch) or staged
+/// for the installer that runs on restart (Windows).
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed: bool) {
     let _ = show_window(app, "main");
     let payload = DesktopUpdateReadyPayload {
         version: version.to_string(),
+        installed,
     };
     let labels: Vec<String> = app
         .webview_windows()
@@ -3867,8 +4038,34 @@ fn restart_desktop_after_update(app: tauri::AppHandle) {
     begin_normal_shutdown(app, ShutdownAction::Restart);
 }
 
+/// Windows: the dialog's restart installs the staged update. The drain runs
+/// first, then the installer takes the bytes and relaunches the app.
 #[tauri::command]
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
+    let pending = app
+        .state::<Arc<AppState>>()
+        .pending_update
+        .lock()
+        .unwrap()
+        .take();
+    let Some(PendingUpdate {
+        update,
+        bytes,
+        version,
+    }) = pending
+    else {
+        return Err(
+            "no downloaded update is staged; relaunch chan-desktop to check again".to_string(),
+        );
+    };
+    tracing::info!(%version, "installing the staged update and relaunching");
+    begin_normal_shutdown(app, ShutdownAction::InstallUpdate { update, bytes });
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn restart_desktop_after_update() -> Result<(), String> {
     Err(format!(
         "desktop self-upgrade is not supported on {}",
@@ -7369,6 +7566,15 @@ enum ShutdownAction {
     Exit(i32),
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Restart,
+    /// Windows: hand the downloaded, verified installer bytes to
+    /// `tauri-plugin-updater` after the drain. The plugin launches the NSIS
+    /// installer (passive, `/R`) and exits this process; the installer
+    /// relaunches the app.
+    #[cfg(windows)]
+    InstallUpdate {
+        update: tauri_plugin_updater::Update,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Start the one normal-exit drain. Snapshot the mounted overlay before any
@@ -7390,6 +7596,20 @@ fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
             ShutdownAction::Exit(code) => app.exit(code),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             ShutdownAction::Restart => app.restart(),
+            #[cfg(windows)]
+            ShutdownAction::InstallUpdate { update, bytes } => {
+                if let Err(e) = update.install(bytes) {
+                    // The tenants are already drained, so the current version
+                    // is relaunched rather than left half-stopped.
+                    tracing::error!(
+                        error = %e,
+                        "installing the downloaded update failed; relaunching the current version"
+                    );
+                    app.restart();
+                }
+                // On success the plugin has already exited the process.
+                app.exit(0);
+            }
         }
     });
 }
@@ -8372,14 +8592,31 @@ mod tests {
     }
 
     #[test]
-    fn desktop_update_ready_payload_serializes_version() {
+    fn desktop_update_ready_payload_serializes_version_and_installed() {
         let payload = DesktopUpdateReadyPayload {
             version: "0.66.0".to_string(),
+            installed: true,
         };
         assert_eq!(
             serde_json::to_value(payload).expect("payload serializes"),
-            serde_json::json!({ "version": "0.66.0" }),
+            serde_json::json!({ "version": "0.66.0", "installed": true }),
         );
+        let staged = DesktopUpdateReadyPayload {
+            version: "0.66.0".to_string(),
+            installed: false,
+        };
+        assert_eq!(
+            serde_json::to_value(staged).expect("payload serializes"),
+            serde_json::json!({ "version": "0.66.0", "installed": false }),
+        );
+    }
+
+    #[test]
+    fn windows_updater_refuses_a_build_outside_an_install() {
+        assert_eq!(windows_updater_refusal(true), None);
+        let reason = windows_updater_refusal(false).expect("a dev build refuses");
+        assert!(reason.contains("installed chan-desktop"), "{reason}");
+        assert!(!reason.contains("chan upgrade"), "{reason}");
     }
 
     #[test]

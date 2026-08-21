@@ -1568,7 +1568,80 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
         _ => return UpgradeOutcome::NoDesktop,
     };
 
-    match serde_json::from_str::<Response>(&line) {
+    map_upgrade_response(&line)
+}
+
+/// The Windows named-pipe arm of [`try_upgrade`]: the same request and
+/// reply contract over the well-known per-user pipe, with the busy-pipe
+/// retry the other Windows client verbs use.
+#[cfg(windows)]
+pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return UpgradeOutcome::NoDesktop;
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    let client = loop {
+        match ClientOptions::new().open(&socket_path) {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if std::time::Instant::now() >= deadline {
+                    return UpgradeOutcome::NoDesktop;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // NotFound (no desktop listening) / refused / other: no desktop.
+            Err(_) => return UpgradeOutcome::NoDesktop,
+        }
+    };
+
+    let req = Request::Upgrade {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        check_only,
+    };
+    let mut payload = match serde_json::to_vec(&req) {
+        Ok(v) => v,
+        Err(_) => return UpgradeOutcome::NoDesktop,
+    };
+    payload.push(b'\n');
+
+    let (read, mut write) = tokio::io::split(client);
+    let io = async {
+        write.write_all(&payload).await?;
+        write.flush().await?;
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    };
+    // Same read window as the unix arm: `check_only` hits the network on the
+    // desktop side.
+    let line = match tokio::time::timeout(Duration::from_secs(15), io).await {
+        Ok(Ok(line)) if !line.trim().is_empty() => line,
+        _ => return UpgradeOutcome::NoDesktop,
+    };
+
+    map_upgrade_response(&line)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_upgrade(_check_only: bool) -> UpgradeOutcome {
+    UpgradeOutcome::NoDesktop
+}
+
+/// Map the desktop's one-line reply to an `Upgrade` request. Shared by the
+/// unix and Windows client arms so the two transports cannot drift on what
+/// a reply means.
+#[cfg(any(unix, windows))]
+fn map_upgrade_response(line: &str) -> UpgradeOutcome {
+    match serde_json::from_str::<Response>(line) {
         Ok(Response::UpgradeStarted { desktop_version }) => {
             UpgradeOutcome::Started { desktop_version }
         }
@@ -1599,11 +1672,6 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
         | Ok(Response::DevserverForgotten { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
-}
-
-#[cfg(not(unix))]
-pub async fn try_upgrade(_check_only: bool) -> UpgradeOutcome {
-    UpgradeOutcome::NoDesktop
 }
 
 #[cfg(test)]

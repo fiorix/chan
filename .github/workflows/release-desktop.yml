@@ -25,8 +25,8 @@ jobs:
           - os: macos-latest
             artifact_name: macos-aarch64
           # Windows desktop dry-run: build chan-desktop, sign the CLI, app, and
-          # NSIS installer through SSL.com eSigner, then run a headless boot
-          # smoke. Windows updater feed work stays out of this lane.
+          # NSIS installer through SSL.com eSigner, minisign the installer as
+          # the updater payload, then run a headless boot smoke.
           - os: windows-latest
             artifact_name: windows-x86_64
     runs-on: ${{ matrix.os }}
@@ -81,10 +81,11 @@ jobs:
           ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
           CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
           ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
           $missing = @()
-          foreach ($name in @("ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET")) {
+          foreach ($name in @("ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET", "TAURI_SIGNING_PRIVATE_KEY")) {
             $value = [Environment]::GetEnvironmentVariable($name)
             if ([string]::IsNullOrWhiteSpace($value)) {
               $missing += $name
@@ -94,7 +95,7 @@ jobs:
           }
           if ($missing.Count -gt 0) {
             Write-Output "::error::Missing Windows signing secrets: $($missing -join ', ')"
-            Write-Output "::error::Populate ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, and ES_TOTP_SECRET before running the signed Windows dry-run."
+            Write-Output "::error::Populate ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, ES_TOTP_SECRET, and the updater key TAURI_SIGNING_PRIVATE_KEY before running the signed Windows dry-run."
             exit 1
           }
 
@@ -245,6 +246,34 @@ jobs:
           # signCommand in tauri.windows.conf.json signs the NSIS installer.
           (cd desktop/src-tauri && cargo tauri build --bundles nsis --config tauri.windows.conf.json)
           powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/scripts/windows/sign.ps1 target/release/chan-desktop.exe
+
+      - if: matrix.os == 'windows-latest'
+        name: Sign the NSIS installer updater payload
+        working-directory: chan
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Same step as release.yml's windows-artifacts, over the bundle dir:
+          # the dry run is the only off-workstation exercise of the key.
+          payload=$(find target/release/bundle/nsis -name 'Chan_*_x64-setup.exe' -type f | head -1)
+          if [ -z "$payload" ]; then
+            echo "::error::missing desktop artifact: target/release/bundle/nsis/Chan_*_x64-setup.exe"
+            exit 1
+          fi
+          output=$(cd desktop/src-tauri && cargo tauri signer sign "../../$payload")
+          printf '%s\n' "$output"
+          signature=$(printf '%s\n' "$output" | sed -n 's/^Signature: //p' | tail -1)
+          if [ -z "$signature" ] && [ -f "$payload.sig" ]; then
+            signature=$(cat "$payload.sig")
+          fi
+          if [ -z "$signature" ]; then
+            echo "::error::cargo tauri signer did not produce a signature"
+            exit 1
+          fi
+          printf '%s\n' "$signature" > "$payload.sig"
 
       - if: matrix.os == 'windows-latest'
         name: Verify Windows Authenticode signatures

@@ -692,10 +692,11 @@ jobs:
           ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
           CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
           ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
           $missing = @()
-          foreach ($name in @("ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET")) {
+          foreach ($name in @("ES_USERNAME", "ES_PASSWORD", "CREDENTIAL_ID", "ES_TOTP_SECRET", "TAURI_SIGNING_PRIVATE_KEY")) {
             $value = [Environment]::GetEnvironmentVariable($name)
             if ([string]::IsNullOrWhiteSpace($value)) {
               $missing += $name
@@ -705,7 +706,7 @@ jobs:
           }
           if ($missing.Count -gt 0) {
             Write-Output "::error::Missing Windows signing secrets: $($missing -join ', ')"
-            Write-Output "::error::Populate ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, and ES_TOTP_SECRET before running the release workflow."
+            Write-Output "::error::Populate ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, ES_TOTP_SECRET, and the updater key TAURI_SIGNING_PRIVATE_KEY (per .agents/desktop.md) before running the release workflow."
             exit 1
           }
 
@@ -769,6 +770,33 @@ jobs:
           (cd desktop/src-tauri && cargo tauri build --bundles nsis --config tauri.windows.conf.json)
           powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/scripts/windows/sign.ps1 target/release/chan-desktop.exe
           cp "target/release/bundle/nsis/Chan_${VERSION}_x64-setup.exe" release-artifacts/
+          ls -la release-artifacts
+
+      - name: Sign the NSIS installer updater payload
+        working-directory: chan
+        shell: bash
+        env:
+          VERSION: ${{ needs.context.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The NSIS installer is the Windows updater payload: tauri-plugin-updater
+          # downloads it, verifies this minisign signature, and runs it passively
+          # over the install. Sign AFTER Authenticode (the signCommand ran during
+          # bundling) so the signature covers the exact bytes the release ships.
+          payload="release-artifacts/Chan_${VERSION}_x64-setup.exe"
+          output=$(cd desktop/src-tauri && cargo tauri signer sign "../../$payload")
+          printf '%s\n' "$output"
+          signature=$(printf '%s\n' "$output" | sed -n 's/^Signature: //p' | tail -1)
+          if [ -z "$signature" ] && [ -f "$payload.sig" ]; then
+            signature=$(cat "$payload.sig")
+          fi
+          if [ -z "$signature" ]; then
+            echo "::error::cargo tauri signer did not produce a signature"
+            exit 1
+          fi
+          printf '%s\n' "$signature" > "release-artifacts/Chan_${VERSION}_x64-setup.exe.sig"
           ls -la release-artifacts
 
       - name: Verify Windows Authenticode signatures

@@ -32,15 +32,21 @@
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
 
   let updateReadyVersion: string | null = $state(null);
+  // Whether the update is already on disk (macOS, the Linux AppImage: it
+  // applies on the next launch whatever the user picks) or only downloaded
+  // and staged (Windows: the installer runs when the user restarts from here).
+  let updateInstalled = $state(true);
   let updateRestarting = $state(false);
   let updateError: string | null = $state(null);
 
   type DesktopUpdateReadyPayload = {
     version: string;
+    installed?: boolean;
   };
 
   function onDesktopUpdateReady(payload: DesktopUpdateReadyPayload): void {
     updateReadyVersion = payload.version;
+    updateInstalled = payload.installed ?? true;
     updateRestarting = false;
     updateError = null;
   }
@@ -177,7 +183,11 @@
 {#if updateReadyVersion}
   <Modal title="Update ready" onclose={() => (updateReadyVersion = null)}>
     <p class="update-copy">
-      chan-desktop {updateReadyVersion} has been downloaded and will apply on the next launch.
+      {#if updateInstalled}
+        chan-desktop {updateReadyVersion} has been downloaded and will apply on the next launch.
+      {:else}
+        chan-desktop {updateReadyVersion} has been downloaded. Restart now to install it.
+      {/if}
     </p>
     {#if updateError}
       <p class="update-error" role="alert">{updateError}</p>

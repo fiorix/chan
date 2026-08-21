@@ -1422,9 +1422,26 @@ enum UpgradeRoute {
 /// `packaged` is [`update::packaged_via`] threaded in as an argument because
 /// it is a compile-time `option_env!`: passing it is what keeps both the
 /// packaged and the unpackaged decision testable from one build.
-fn decide_upgrade_route(personality: Personality, packaged: Option<&str>) -> UpgradeRoute {
+///
+/// `desktop_companion` is the Windows case where the binary is the console
+/// `chan.exe` the NSIS install ships beside `chan-desktop.exe`: it runs as
+/// `Personality::Standalone` (it is the same binary as the standalone
+/// Windows CLI zip), but the desktop's shim marks it with
+/// `CHAN_DESKTOP_HANDOFF=1`, and a `chan upgrade` from it upgrades the
+/// desktop it belongs to, never a CLI tarball that Windows does not publish.
+/// The caller computes it as `cfg!(windows) && handoff_forced()`: on unix
+/// that env only forces the `chan serve` handoff, and a standalone
+/// install.sh `chan` keeps replacing its own tarball.
+fn decide_upgrade_route(
+    personality: Personality,
+    packaged: Option<&str>,
+    desktop_companion: bool,
+) -> UpgradeRoute {
     if let Some(message) = update::packaged_upgrade_refusal(packaged) {
         return UpgradeRoute::Refuse(message);
+    }
+    if desktop_companion {
+        return UpgradeRoute::Desktop;
     }
     match personality {
         Personality::Standalone => UpgradeRoute::Cli,
@@ -1704,7 +1721,11 @@ where
             yes,
             check,
             version,
-        } => match decide_upgrade_route(personality, update::packaged_via()) {
+        } => match decide_upgrade_route(
+            personality,
+            update::packaged_via(),
+            cfg!(windows) && chan_server::handoff::handoff_forced(),
+        ) {
             // A distro-packaged build: the package manager owns the files.
             UpgradeRoute::Refuse(message) => anyhow::bail!(message),
             // Standalone (install.sh) replaces the CLI tarball in place.
@@ -6405,6 +6426,63 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// Launch the chan-desktop GUI as a detached process.
+///
+/// On Windows the CLI is usually the console `chan.exe` the NSIS install
+/// ships beside `chan-desktop.exe` (the desktop's shim runs it with
+/// `CHAN_DESKTOP_HANDOFF=1`), so the desktop is resolved relative to
+/// `current_exe()`; a `chan-desktop.exe` invoked as `chan` launches itself.
+/// `ARGV0` and `CHAN_DESKTOP_HANDOFF` are dropped from the child's
+/// environment: the shim exported them to steer THIS process into the CLI,
+/// and the child must boot the GUI.
+#[cfg(windows)]
+fn spawn_desktop_gui() -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()?;
+    let target = windows_desktop_exe_for(&exe).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no chan-desktop.exe beside {}", exe.display()),
+        )
+    })?;
+    // Same detachment as the devserver daemon spawn: no console of ours, and
+    // Ctrl-C in the launching terminal must not reach the desktop.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    Command::new(&target)
+        .env_remove("ARGV0")
+        .env_remove("CHAN_DESKTOP_HANDOFF")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(|_| ())
+}
+
+/// The desktop binary for a Windows CLI process: `exe` itself when it is
+/// `chan-desktop.exe`, else a `chan-desktop.exe` in the same directory or
+/// one level up (the bundled `chan.exe` may live in `resources\`). `None`
+/// for a loose `chan.exe` with no desktop beside it.
+#[cfg(any(windows, test))]
+fn windows_desktop_exe_for(exe: &Path) -> Option<PathBuf> {
+    const DESKTOP_EXE: &str = "chan-desktop.exe";
+    if exe
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(DESKTOP_EXE))
+    {
+        return Some(exe.to_path_buf());
+    }
+    let dir = exe.parent()?;
+    let mut candidates = vec![dir.join(DESKTOP_EXE)];
+    if let Some(parent) = dir.parent() {
+        candidates.push(parent.join(DESKTOP_EXE));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
 /// Climb `…/<Name>.app/Contents/MacOS/<bin>` to the `.app` bundle dir, if
 /// `exe` is laid out that way. Returns None for a loose dev binary.
 #[cfg(target_os = "macos")]
@@ -6429,7 +6507,7 @@ fn macos_app_bundle(exe: &Path) -> Option<PathBuf> {
 /// the desktop and trigger the install (fire-and-return: the desktop owns the
 /// download/install/relaunch). `--version` pinning is unsupported (the desktop
 /// updater always installs the latest published release).
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn cmd_upgrade_desktop(check_only: bool, version_override: Option<String>) -> Result<()> {
     use chan_server::handoff::UpgradeOutcome;
 
@@ -6484,7 +6562,7 @@ async fn cmd_upgrade_desktop(check_only: bool, version_override: Option<String>)
 
 /// Launch the desktop GUI (none was running) and trigger its updater once it
 /// is up. Mirrors `launch_desktop_and_handoff` but for the upgrade trigger.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn launch_desktop_then_upgrade() -> Result<()> {
     use chan_server::handoff::UpgradeOutcome;
 
@@ -6518,9 +6596,9 @@ async fn launch_desktop_then_upgrade() -> Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn cmd_upgrade_desktop(_check_only: bool, _version_override: Option<String>) -> Result<()> {
-    anyhow::bail!("desktop `chan upgrade` is only supported on unix")
+    anyhow::bail!("desktop `chan upgrade` is not supported on this platform")
 }
 
 /// Dispatch the `chan workspace reports {enable,disable}`
@@ -8622,15 +8700,17 @@ mod tests {
         // --check is read, so a packaged build refuses that too.
         for manager in ["aur", "nix"] {
             for personality in [Personality::Standalone, Personality::Desktop] {
-                let route = decide_upgrade_route(personality, Some(manager));
-                let UpgradeRoute::Refuse(message) = route else {
-                    panic!("{personality:?} must refuse on a {manager} build, got {route:?}");
-                };
-                assert!(message.contains(&format!("({manager})")), "{message}");
-                assert!(message.contains("self-upgrade is disabled"), "{message}");
-                // The refusal points at the package manager, never back at a
-                // chan command that would fail the same way.
-                assert!(!message.contains("chan upgrade"), "{message}");
+                for companion in [false, true] {
+                    let route = decide_upgrade_route(personality, Some(manager), companion);
+                    let UpgradeRoute::Refuse(message) = route else {
+                        panic!("{personality:?} must refuse on a {manager} build, got {route:?}");
+                    };
+                    assert!(message.contains(&format!("({manager})")), "{message}");
+                    assert!(message.contains("self-upgrade is disabled"), "{message}");
+                    // The refusal points at the package manager, never back at a
+                    // chan command that would fail the same way.
+                    assert!(!message.contains("chan upgrade"), "{message}");
+                }
             }
         }
     }
@@ -8638,11 +8718,57 @@ mod tests {
     #[test]
     fn upgrade_route_installs_on_an_unpackaged_build() {
         assert_eq!(
-            decide_upgrade_route(Personality::Standalone, None),
+            decide_upgrade_route(Personality::Standalone, None, false),
             UpgradeRoute::Cli
         );
         assert_eq!(
-            decide_upgrade_route(Personality::Desktop, None),
+            decide_upgrade_route(Personality::Desktop, None, false),
+            UpgradeRoute::Desktop
+        );
+    }
+
+    #[test]
+    fn windows_desktop_exe_resolves_self_sibling_or_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let desktop = root.join("chan-desktop.exe");
+        std::fs::write(&desktop, b"").expect("fake desktop exe");
+        std::fs::create_dir(root.join("resources")).expect("resources dir");
+
+        // The desktop binary itself, however it is cased.
+        assert_eq!(
+            windows_desktop_exe_for(&root.join("Chan-Desktop.EXE")),
+            Some(root.join("Chan-Desktop.EXE"))
+        );
+        // The bundled console chan.exe beside it.
+        assert_eq!(
+            windows_desktop_exe_for(&root.join("chan.exe")),
+            Some(desktop.clone())
+        );
+        // A chan.exe one level down, under resources\.
+        assert_eq!(
+            windows_desktop_exe_for(&root.join("resources").join("chan.exe")),
+            Some(desktop)
+        );
+        // A loose chan.exe with no desktop anywhere near it.
+        let loose = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            windows_desktop_exe_for(&loose.path().join("chan.exe")),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrade_route_sends_the_desktop_companion_cli_to_the_desktop() {
+        // The desktop's Windows shim runs the console chan.exe (a Standalone
+        // binary) with CHAN_DESKTOP_HANDOFF=1: that binary upgrades the
+        // desktop it ships with, never a CLI tarball Windows does not publish.
+        assert_eq!(
+            decide_upgrade_route(Personality::Standalone, None, true),
+            UpgradeRoute::Desktop
+        );
+        assert_eq!(
+            decide_upgrade_route(Personality::Desktop, None, true),
             UpgradeRoute::Desktop
         );
     }

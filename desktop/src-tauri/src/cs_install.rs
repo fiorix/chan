@@ -423,6 +423,16 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
     Ok(changed)
 }
 
+/// Whether this process is an installed chan-desktop.exe (an NSIS install
+/// under a known root) rather than a `cargo run` binary. The desktop updater
+/// is gated on it: a dev build must never run the installer over itself.
+#[cfg(windows)]
+pub fn is_installed_desktop_exe() -> bool {
+    std::env::current_exe()
+        .map(|exe| windows_shim::is_installed_exe(&exe, &windows_shim::install_roots()))
+        .unwrap_or(false)
+}
+
 /// Windows shim mechanics: `.cmd` wrappers (no `exec -a` / symlinks on Windows),
 /// plus a best-effort per-user `Path` registration. Split into pure helpers so
 /// the wrapper text, the install-vs-dev classification, and the PATH-append

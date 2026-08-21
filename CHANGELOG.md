@@ -6,10 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-The Linux AppImage self-upgrades the way the macOS app does.
+The Linux AppImage and the Windows install self-upgrade the way the macOS app does.
 
 ### Added
 
+- **The Windows install self-upgrades.** chan-desktop installed by the NSIS installer checks `https://chan.app/dl/desktop/latest.json` on launch, downloads and verifies a newer installer in the background, and asks in the launcher whether to restart now; restarting drains the desktop, runs the installer passively, and relaunches the app. `chan upgrade` (and `--check`) from the install's `chan` shim drives the same updater through the running desktop (the shim's console `chan.exe` now routes its upgrade to the desktop it ships with instead of looking for a Windows CLI tarball that does not exist), launching `chan-desktop.exe` first when none is running. Every release now minisigns the installer with the updater key and publishes its `.sig`, and the desktop updater manifest gains a `windows-x86_64` entry. An install from an earlier release must be updated by running the new installer by hand once. The standalone Windows CLI zip is unchanged and has no self-upgrade.
 - **The Linux AppImage self-upgrades.** chan-desktop run from its AppImage checks `https://chan.app/dl/desktop/latest.json` on launch and installs a newer release in the background, and `chan upgrade` (and `chan upgrade --check`) from the AppImage's `chan` shim drives the same updater through the running desktop: the `.AppImage` file is replaced in place and relaunched, so the `~/.local/bin/{chan,cs}` shims keep pointing at it. Every release now signs both AppImages with the same minisign key as the macOS payload, publishes their detached `.sig` assets, and adds `linux-x86_64` and `linux-aarch64` entries to the desktop updater manifest. An AppImage from an earlier release has no Linux updater arm and must be downloaded by hand once; after that it updates itself. A Linux build that is not running from an AppImage answers `chan upgrade` with a clear not-supported message instead of launching a window first, and distro packages (COPR, PPA, AUR, Nix) keep refusing in favour of the package manager. Windows is unchanged.
 
 ## [v0.94.0] - 2026-08-19

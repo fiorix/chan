@@ -2,7 +2,7 @@
 
 The updater key is separate from Apple Developer ID signing and notarization. Apple signing controls whether macOS trusts the app bundle. The updater minisign key controls whether an installed Chan app accepts a downloaded update payload.
 
-Two updater keypairs have existed: an early DEV key, and the production key whose pubkey is embedded in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey` (rotated in commit `3c1435b`; a one-time bridge release signed with the old key carried existing installs across). Every updater payload, the macOS `.app.tar.gz` and each Linux `.AppImage`, is signed with the production key.
+Two updater keypairs have existed: an early DEV key, and the production key whose pubkey is embedded in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey` (rotated in commit `3c1435b`; a one-time bridge release signed with the old key carried existing installs across). Every updater payload, the macOS `.app.tar.gz`, each Linux `.AppImage`, and the Windows `-setup.exe`, is signed with the production key.
 
 ## Key And Secret Rules
 
@@ -67,6 +67,6 @@ If the updater manifest stores the signature inline, copy only that signature st
 
 ## Failure Modes
 
-An install old enough to still trust the DEV pubkey (pre-`3c1435b`, never bridged) rejects production-signed updater payloads. There is no auto-update path for it; update it with a manual DMG install (macOS) or a manual AppImage download (Linux).
+An install old enough to still trust the DEV pubkey (pre-`3c1435b`, never bridged) rejects production-signed updater payloads. There is no auto-update path for it; update it with a manual DMG install (macOS), a manual AppImage download (Linux), or by running the current installer by hand (Windows).
 
 If update-feed generation or publishing needs GitHub Actions changes, stop and coordinate with the release owner: workflow files are shared repo infrastructure, not desktop-local.

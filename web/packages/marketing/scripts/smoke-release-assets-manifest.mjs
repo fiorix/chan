@@ -79,8 +79,15 @@ try {
     2,
     "AppImages decorated in place, not duplicated",
   );
+  // The installer signature is in the fixture but the installer is not: an
+  // optional payload is skipped whole, never collected from its signature.
+  assert(
+    !base.assets.some((asset) => asset.updater_platform === "windows-x86_64"),
+    "windows updater platform absent when the installer is not in the release",
+  );
 
-  // Windows assets present: the optional entries are collected.
+  // Windows assets present: the optional entries are collected, and the NSIS
+  // installer is decorated in place as the Windows updater payload.
   const windowsNames = optionalNames(version);
   const win = runCollect("windows", version, windowsNames);
   assertEqual(win.assets.length, windowsAssetCount, "windows assets collected when present");
@@ -92,6 +99,10 @@ try {
     win.assets.some((asset) => asset.name === windowsNames[1]),
     "windows cli collected",
   );
+  const winInstaller = win.assets.find((asset) => asset.updater_platform === "windows-x86_64");
+  assert(winInstaller, "missing windows-x86_64 updater decoration");
+  assertEqual(winInstaller.name, windowsNames[0], "windows-x86_64 payload is the installer");
+  assertEqual(winInstaller.signature, "fixture-updater-signature", "windows-x86_64 signature");
 
   // Prerelease assets keep the Cargo version in desktop names but gateway
   // debs use cargo-deb's package-version spelling.
