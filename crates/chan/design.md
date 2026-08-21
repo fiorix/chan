@@ -34,6 +34,7 @@ flowchart TB
   Dispatch --> ServeCmd["serve"]
   Dispatch --> Dev["devserver: run/start/stop/restart/status/join/rotate-token + register/ls/connect/disconnect/forget"]
   Dispatch --> Ws["workspace: add/ls/serve/close/forget/index/reports/search/graph/status/metadata/contacts"]
+  Ws -->|"serve/close/forget --on TARGET"| Remote["remote workspace arms (desktop handoff to a registered devserver)"]
   Dispatch --> Sh["shell (cs)"]
   Dispatch --> Up["upgrade"]
   Dispatch --> Mcp["__mcp / __mcp-proxy"]
@@ -60,8 +61,8 @@ The CLI entry point parses arguments, sets up tracing from `-v` count, and dispa
 
 The real top-level set:
 
-  - `serve {PATH}` -- register a workspace and serve it, the elevated spelling of `chan workspace serve` (one flattened args struct, so the two spellings cannot drift). A URL-shaped value (`://` with a non-empty scheme and authority -- a small string check, not a URL crate) is refused with a pointer at `chan devserver register` rather than read as a relative path.
-  - `close {PATH}` -- stop serving, the elevated spelling of `chan workspace close`.
+  - `serve {PATH}` -- register a workspace and serve it, the elevated spelling of `chan workspace serve` (one flattened args struct, so the two spellings cannot drift). With `--on TARGET` it mounts PATH on a registered remote devserver through the desktop handoff instead of serving here; `--on` and `--devserver=<port|url>` are distinct flags, each refusing the other's value shape. A URL-shaped value (`://` with a non-empty scheme and authority -- a small string check, not a URL crate) is refused with a pointer at `chan devserver register` rather than read as a relative path.
+  - `close {PATH}` -- stop serving, the elevated spelling of `chan workspace close` (one flattened args struct). With `--on TARGET` both unmount a workspace on a registered remote devserver through the desktop handoff, keeping it registered there; `chan workspace forget --on TARGET` drops it, and the devserver's own live-terminal refusal applies to both.
   - `devserver` -- one noun, two faces, told apart by argument shape. The server-side verbs (`run`, `start`, `stop`, `restart`, `status`, `join`, `rotate-token`) manage this machine's headless multi-workspace server -- dispatched to `chan_server::run_devserver`, with the `--service` supervision and the tunnel options -- and take no target, because the process is a per-CHAN_HOME singleton. The client-side verbs (`register`, `ls`, `connect`, `disconnect`, `forget`) manage the desktop launcher's registry of remote devservers over the CLI-to-desktop handoff socket; each requires a URL or label target and a running desktop.
   - `workspace {add,ls,serve,close,forget,index,reports,search,graph,status,metadata,contacts}` -- the registry, lifecycle, and content operations, every one routed through `chan_workspace::Library` / `Workspace` so the sandbox, atomic writes, special-file refusal, and the cross-process writer lock apply uniformly. `forget` is the teardown-then-drop verb (the registry entry and chan's metadata go; the files never do).
   - `shell` -- the `cs` control surface (`infer_subcommands`, so `cs o` / `cs g` resolve by first letter), dispatched to `chan_shell::dispatch`.

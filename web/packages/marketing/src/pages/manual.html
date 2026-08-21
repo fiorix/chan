@@ -160,7 +160,7 @@
     <li>On Windows it uses chan's own daemon mode, which works on all platforms.</li>
     <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The actions are <code>start</code>, <code>stop</code>, <code>status</code>, <code>restart</code>, and <code>join</code>; <code>--service</code> goes after the action.</li>
     <li><code>chan devserver run</code> runs in the foreground.</li>
-    <li><code>chan devserver ls</code>, <code>connect</code>, <code>disconnect</code>, and <code>forget</code> manage the desktop's connections to remote devservers.</li>
+    <li><code>chan devserver ls</code>, <code>connect</code>, <code>disconnect</code>, and <code>forget</code> manage the desktop's connections to remote devservers. A connected devserver's workspaces are managed from a terminal on your desktop too: <code>chan workspace serve /path --on NAME</code>, <code>chan close /path --on NAME</code>, and <code>chan workspace forget /path --on NAME</code>, where NAME is the devserver's label or URL as <code>chan devserver ls</code> shows it and the path is on that machine.</li>
   </ul>
   <p>Now add the devserver to Chan Desktop:</p>
   <ol>
@@ -194,7 +194,7 @@
     <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
     <figcaption>The Add devserver form. This is a live mock too: fill it in, add, and connect.</figcaption>
   </figure>
-  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan serve {path}</code> in a devserver terminal to create a workspace on that machine. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
+  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan serve {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
   <p>The clipboard and file transfer work across the connection too: see <a href="#copy-paste">Copy and paste freely</a> and <a href="#download-upload">Download and upload freely</a> in the Terminals section.</p>
   <p>On Linux devservers you can even restart the devserver process without losing your shells: the PTY file descriptors are parked in the systemd fdstore while the devserver restarts, then loaded back up, so your agents continue working and your terminals are always alive.</p>
 </section>

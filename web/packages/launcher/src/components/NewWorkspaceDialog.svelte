@@ -290,7 +290,8 @@
       <SquareTerminal size={16} />
       <span>
         Tip: you can also run <code>chan serve &lt;path&gt;</code> in any terminal to add a
-        workspace.
+        workspace, or <code>chan workspace serve &lt;path&gt; --on &lt;devserver&gt;</code> to add
+        one on a connected devserver.
       </span>
     </div>
   {:else if showGateway}

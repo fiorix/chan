@@ -1,0 +1,22 @@
+# The Windows install does not self-upgrade
+
+Status: REGISTERED for v0.95.0 and implemented on `feat/windows-self-upgrade` (2e607db7, plus the launcher follow-up 02c0070d) in the same round, folded into main; the item closes into `done/` at GA with its acceptance gap named.
+
+## Problem
+
+The NSIS install of chan-desktop never upgraded itself. The install puts the GUI `chan-desktop.exe` and the console `chan.exe` side by side and writes `%LOCALAPPDATA%\chan\bin\{chan,cs}` shims that re-exec `chan.exe` with the handoff hint, but `chan.exe` runs the standalone personality, so `chan upgrade` from the desktop's own shim took the CLI tarball path and failed with "no published standalone chan CLI release for windows/x86_64"; the desktop's own arms were macOS-only stubs, the handoff client had no Windows `try_upgrade` arm (the other client verbs had named-pipe arms to mirror), launching the desktop from the CLI was unix-only, and the release job signed no installer. The updater plugin on Windows downloads the `-setup.exe` itself, verifies it, runs it passively (`/P /R /UPDATE`, current-user install, no elevation) and then exits the process itself, with NSIS relaunching the app: on Windows the install IS the process exit, so chan's orderly drain has to run before the install, not after.
+
+## Direction
+
+- Routing: `decide_upgrade_route` takes a third input, `desktop_companion`, computed at the call site as `cfg!(windows) && handoff_forced()`; a companion `chan.exe` routes `chan upgrade` to the desktop over the named pipe after the packaged refusal. On unix the handoff hint keeps its meaning (a standalone install.sh `chan` with that env still replaces its own tarball); the standalone Windows CLI zip (no shim, no env) keeps today's refusal.
+- Handoff upgrade on Windows: download and verify first, then drain through `begin_normal_shutdown` with `ShutdownAction::InstallUpdate { update, bytes }`, whose arm installs after `serve::stop_all` and `persist_workspaces`; the plugin launches the installer and exits, NSIS `/R` relaunches. The CLI message "updating in the background; it will relaunch when done" stays true.
+- On-launch on Windows: check, download, stage the verified bytes in `AppState.pending_update`, emit `desktop-update-ready` with `installed: false`; the launcher dialog reads "downloaded; restart now to install it" and its button (`restart_desktop_after_update`, Windows arm) drains and installs; "Later" keeps nothing across launches. macOS and Linux send `installed: true` and keep their copy. A Tauri command's `Err(String)` rejects with the bare string, so the dialog renders `String(e)` rather than `.message`.
+- Refusal: a `chan-desktop.exe` not under an install root (`windows_shim::is_installed_exe`) refuses like the non-AppImage Linux build, so a dev binary never runs the installer.
+- `chan upgrade` with no running desktop on Windows launches the sibling `chan-desktop.exe` detached (shim steering dropped from its environment), then polls the pipe and sends `Upgrade`, mirroring unix.
+- Release plumbing: the Windows job signs the final (Authenticode-signed) installer with `cargo tauri signer sign` and stages `Chan_<v>_x64-setup.exe.sig` by literal name; the dry run mirrors it; `updaterPayloads` gains `windows-x86_64` (optional for archived releases, payload and signature both required to decorate), the verifier requires the `.sig` for the release being cut, and the `/dl` manifest carries `windows-x86_64`.
+
+## Acceptance
+
+- Unit tests pin the pure pieces: `upgrade_route_sends_the_desktop_companion_cli_to_the_desktop`, `windows_desktop_exe_resolves_self_sibling_or_parent`, `windows_updater_refuses_a_build_outside_an_install`, `desktop_update_ready_payload_serializes_version_and_installed`; the launcher `svelte-check` and vitest cover the dialog.
+- `cargo check --all-targets --target x86_64-pc-windows-gnu` with `-D warnings` for `chan`, `chan-server`, and `chan-desktop` is green in the build container (an empty placeholder `target/release/chan.exe` stands in for the installer resource), so every new `cfg(windows)` arm compiles; `make web-marketing-check` and `make workflow-check` are green; the full gate is green on the branch.
+- Acceptance gap, named: the NSIS passive reinstall and `/R` relaunch are unproven on a real Windows 11 machine; the `publish=false` dry run proves the build and the signing step only, and no Windows round-trip test drives the named-pipe `try_upgrade` (the other Windows client verbs have none either). The first real run is the GA installer.

@@ -350,6 +350,12 @@
           <code>chan serve /path/to/project</code> in a terminal.
         </p>
       {/if}
+    {:else if machineIsEmpty(node) && node.devserver !== null && connected(node.devserver) && !readOnly}
+      <p class="empty-hint">
+        No workspaces on this devserver yet. Add one with the buttons above, or run
+        <code>chan workspace serve /path/on/that/machine --on {node.devserver.label || hostOf(node.devserver.url)}</code>
+        in a terminal here.
+      </p>
     {/if}
   </div>
 {/snippet}

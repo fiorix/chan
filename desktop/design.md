@@ -44,7 +44,7 @@ There are four workspace attachment modes:
 - **Gateway roster**: an account-level gateway connection whose authenticated devserver roster the desktop projects into the launcher (section 6.7).
 - **Outbound URL**: an already-running chan server opened by URL. A backend-only path (config, commands, connecting screen) with no launcher surface.
 
-There is no fallback serve mode. A terminal `chan serve <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock.
+There is no fallback serve mode. A terminal `chan serve <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock. The same socket carries the remote workspace arms: `chan workspace serve|close|forget WS --on TARGET` resolve TARGET against the registry rows (`remote_workspace.rs` holds the pure resolvers) and act on a connected devserver's management API (mount, unmount, forget) with the devserver's own live-terminal refusal; a registered but disconnected row refuses with a pointer at `chan devserver connect`.
 
 ## 3. Workspace lifecycle
 

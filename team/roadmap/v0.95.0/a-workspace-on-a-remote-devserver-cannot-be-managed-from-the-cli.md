@@ -25,3 +25,10 @@ The remote arm is a new flag, `--on TARGET`, on all three workspace lifecycle ve
 - Ambiguous `TARGET` resolution is a refusal naming the candidates.
 - Documentation, dump-skill coverage, and the launcher demo data speak the new arms in the same change.
 - `make pre-push` green on the branch in a build container.
+
+## Evidence
+
+- Implemented on main (95251732 desktop + handoff, f4feb42a CLI, plus the docs commit): `--on TARGET` on `chan workspace serve|close|forget` and the elevated `chan serve`/`chan close` through the flattened args structs; three additive handoff variants with per-variant reply budgets; desktop-side resolution in `desktop/src-tauri/src/remote_workspace.rs` (pure, unit-tested) and `devserver::add_workspace`; the devserver's own live-terminal guard answers close and forget.
+- Pins: parse refusals (`--on 8787` names `--devserver`, `--devserver=lab` names `--on`), `--on` exclusive with every local serve flag, both spellings identical, relative remote paths refused, wire round-trips and a listener round-trip, the resolver unit tests, and `crates/chan/tests/remote_workspace_handoff.rs` (a fake desktop listener on a throwaway runtime dir; every rendering a user sees from a plain shell).
+- End to end against real processes (`scripts/e2e/workspace-on-remote.sh`, run 2026-08-21 in the build container at f4feb42a against a release-built chan-desktop under Xvfb and a `chan devserver run` on a loopback port): serve mounted the workspace (`/ws-<hash>`) and a second serve was idempotent; one live terminal made `forget` and `close` refuse with "1 live terminal(s)" and left the row on; after the terminal ended, `close` unmounted and kept the row registered, `serve` remounted, and `forget` dropped the row; `--on 8787`, `--devserver=lab`, `--on nope`, and a duplicate `lab` label refused as designed, the last listing both candidates. PASS.
+- Not proven by that run, named: an ssh control-terminal connect (the run used a scriptless loopback row), the gateway arm of the desktop's add-workspace call, and Windows named pipes (the pipe client arm runs the same code path and is covered by the wine-run handoff tests).
