@@ -135,7 +135,9 @@ pub(crate) fn detect(allow: bool) -> Option<CsLink> {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
-    let exe = exe.canonicalize().unwrap_or(exe);
+    // Resolved for a truthful `points_to`, minus the Windows `\\?\` prefix
+    // (this string ends up in the manual `ln -s` hint).
+    let exe = chan_workspace::paths::canonicalize_normalized(&exe);
     let dir = exe.parent()?.to_path_buf();
     let target = dir.join("cs");
 

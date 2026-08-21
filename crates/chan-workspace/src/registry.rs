@@ -261,8 +261,12 @@ impl Registry {
         // Prime the canonical-path cache once at load. Comparisons
         // are then pure and don't re-canonicalize per call. Failure
         // here is non-fatal: an entry whose workspace root is missing or
-        // asleep stays comparable lexically.
+        // asleep stays comparable lexically. A root an older Windows build
+        // stored with the `\\?\` verbatim prefix is normalized here, since
+        // `touch` rewrites `root_path` only on insert and every consumer
+        // prints it as stored.
         for d in &mut reg.workspaces {
+            d.root_path = paths::strip_verbatim_prefix(&d.root_path);
             d.canonical_path = Some(paths::canonicalize_normalized(&d.root_path));
         }
         Ok(reg)
@@ -442,6 +446,32 @@ mod tests {
             .any(|name| name == "node_modules"));
         assert_eq!(loaded.workspaces.len(), 1);
         assert_eq!(loaded.workspaces[0].metadata_key, key);
+    }
+
+    #[test]
+    fn load_strips_a_verbatim_prefix_an_older_build_stored() {
+        // A Windows row written as `\\?\C:\notes` loads as `C:\notes`: the
+        // stored form is what `chan ps` and the launcher print.
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let mut reg = Registry::default();
+        reg.touch(tmp.path());
+        reg.save_to(&cfg_path).unwrap();
+        let raw = std::fs::read_to_string(&cfg_path).unwrap();
+        let rewritten: String = raw
+            .lines()
+            .map(|line| {
+                if line.starts_with("root_path = ") {
+                    r"root_path = '\\?\C:\notes'".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&cfg_path, rewritten).unwrap();
+        let loaded = Registry::load_from(&cfg_path).unwrap();
+        assert_eq!(loaded.workspaces[0].root_path, PathBuf::from(r"C:\notes"));
     }
 
     #[test]

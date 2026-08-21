@@ -379,8 +379,9 @@ fn read_record_at(path: &Path) -> Option<LockRecord> {
 }
 
 fn canonical_string(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
+    // Key the record the way the registry keys its roots, so the two never
+    // differ by a Windows `\\?\` prefix.
+    crate::paths::canonicalize_normalized(root)
         .to_string_lossy()
         .into_owned()
 }

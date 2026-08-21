@@ -2424,9 +2424,10 @@ fn resolve_team_dir_in(dir: &str, workspace: Option<&str>, cwd: &Path) -> Result
 
 /// Canonicalize `path`, falling back to the path verbatim when it cannot be
 /// resolved (e.g. it does not exist). Used on the cwd + workspace root, which
-/// normally exist, so the fallback is just defensive.
+/// normally exist, so the fallback is just defensive. Strips the Windows
+/// `\\?\` prefix so the outside-the-workspace refusal prints a plain path.
 fn canonical_or(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    chan_workspace::paths::canonicalize_normalized(path)
 }
 
 /// Resolve `.` and `..` components lexically, without touching the

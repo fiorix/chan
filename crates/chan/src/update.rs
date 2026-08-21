@@ -777,7 +777,7 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
     let (gerund, participle) = action_words(&target_version, &current);
     println!(
         "chan: {gerund} from {current} to {target_version} ({target}) at {}",
-        exe_path.display()
+        chan_workspace::paths::strip_verbatim_prefix(&exe_path).display()
     );
 
     if !opts.assume_yes {

@@ -2559,9 +2559,11 @@ fn workspace_label(root: &Path) -> String {
 /// Canonical form of a workspace root for cross-store comparison (the library
 /// registers canonical roots; the overlay/map store them as written). Falls
 /// back to the path as-is when it no longer resolves on disk so a vanished
-/// root still compares equal to its own stored form.
+/// root still compares equal to its own stored form. The same normalization
+/// the registry keys on, so a Windows root never carries the `\\?\` verbatim
+/// prefix into the workspace listing, the persisted overlay, or a message.
 fn canonical_root(root: &Path) -> PathBuf {
-    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    chan_workspace::paths::canonicalize_normalized(root)
 }
 
 #[cfg(test)]

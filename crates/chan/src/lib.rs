@@ -2794,11 +2794,11 @@ fn resolve_listen_addr(
 /// shells fail closed instead of silently misparsing.
 fn print_vcs_parent_error(root: &Path, parent: &chan_workspace::VcsParent) {
     // Canonicalize both paths for the marker so wrappers get
-    // absolute, symlink-resolved forms. Fall back to the input
-    // when canonicalize fails (root may not yet exist on disk).
-    let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let repo_abs =
-        std::fs::canonicalize(&parent.repo_root).unwrap_or_else(|_| parent.repo_root.clone());
+    // absolute, symlink-resolved forms, minus the Windows `\\?\` prefix
+    // (the registry's normalization). Falls back to the input when the
+    // root does not yet exist on disk.
+    let root_abs = chan_workspace::paths::canonicalize_normalized(root);
+    let repo_abs = chan_workspace::paths::canonicalize_normalized(&parent.repo_root);
     let kind_human = match parent.kind {
         chan_workspace::VcsKind::Git => "Git",
         chan_workspace::VcsKind::Mercurial => "Mercurial",
@@ -7209,7 +7209,7 @@ fn select_workspace_targets(
         return Ok((known, Vec::new()));
     }
     if targets.workspaces.is_empty() {
-        let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
+        let cwd = chan_workspace::paths::canonicalize_normalized(&std::env::current_dir()?);
         let selected = known
             .into_iter()
             .filter(|workspace| cwd.starts_with(&workspace.root_path))

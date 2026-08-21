@@ -5199,8 +5199,9 @@ fn zoom_reset(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Resu
 /// error so we still produce a stable key for not-yet-existing or
 /// asleep paths.
 fn canonical_key(p: &Path) -> String {
-    p.canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(p))
+    // The registry's own normalization: a Windows key never carries the
+    // `\\?\` verbatim prefix into the SPA list, a window title, or a log.
+    chan_workspace::paths::canonicalize_normalized(p)
         .display()
         .to_string()
 }
