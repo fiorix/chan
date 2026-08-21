@@ -6,13 +6,16 @@
 // SPA's single-access web read -> /api/window/reply -> raw bytes on the
 // CLI's stdout (mime on stderr), exit 0.
 //
-// Deny path: permissions reset, headless Chrome auto-denies the unprompted
-// read FAST (no floating button, so the SPA's 800ms paste-card threshold
-// never trips): the CLI must exit nonzero QUICKLY with the hinted
-// "clipboard access denied" message - never sit out the server's 30s
-// reply window (exit 124), which is the wedged-look this item fixes. The
-// paste card + Cancel proof is vitest's (state/pasteRequest.test.ts);
-// headless deny never shows the card by construction.
+// Deny path: clipboard-read is set to "denied" explicitly (CDP
+// Browser.setPermission), so the browser rejects the unprompted read FAST
+// (no floating button, so the SPA's 800ms paste-card threshold never
+// trips): the CLI must exit nonzero QUICKLY with the hinted "clipboard
+// access denied" message - never sit out the server's 30s reply window
+// (exit 124), which is the wedged-look this item fixes. The paste card +
+// Cancel proof is vitest's (state/pasteRequest.test.ts). Do not rely on a
+// permissions reset here: Chrome 138 headless leaves the read PENDING at
+// "prompt" (the paste-card path a user answers), which is not a denial and
+// only proves the 30s bound.
 
 const SEEDED_TEXT = "chan smoke clipboard payload 70";
 
@@ -67,7 +70,11 @@ export default {
     await ctx.shot("granted");
 
     // ---- deny path ----
-    await cdp.send("Browser.resetPermissions");
+    await cdp.send("Browser.setPermission", {
+      origin,
+      permission: { name: "clipboard-read" },
+      setting: "denied",
+    });
     const t0 = Date.now();
     let denied = null;
     try {
