@@ -12,6 +12,7 @@ mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
 mod registry;
+mod remote_workspace;
 mod revtunnel;
 mod runtime_capability;
 mod serve;
@@ -3321,26 +3322,13 @@ fn open_local_workspace(state: State<Arc<AppState>>, path: String) -> Result<(),
     Ok(())
 }
 
-/// Register (and persist) a devserver from a `chan serve {url}` CLI handoff.
-/// Writes the `{url, name, script}` entry through the same
-/// [`DevserverConfigRegistry`](config::DevserverConfigRegistry) the launcher's
-/// `/api/library/devservers` routes use (the shared config handle), so the new
-/// row shows up in the launcher. A `?t=` URL carries the write-only devserver
-/// bearer; otherwise the user can provide a connect script that prints
-/// `CHAN_DEVSERVER_TOKEN=...` and connect it from the launcher row.
-///
-/// This fn stays SYNC and never dials the URL: the CLI blocks ~3s on the
-/// `DevserverRegistered` response, so the is-this-really-a-gateway probe
-/// rides a detached task spawned here. A gateway-positive answer converts
-/// the just-registered row into a gateway entry out-of-band; the launcher
-/// picks the swap up over the library feed and the wire stays byte-
-/// identical for old and new CLIs alike.
+/// Resolve a `chan devserver connect|disconnect|forget` TARGET (or the
+/// `--on TARGET` of the workspace lifecycle verbs) -- a URL or a launcher
+/// label -- to one persisted registry row id. Gateway-roster rows are
+/// deliberately out of reach: they carry no local config, and the Gateways
+/// screen manages them. Ambiguity refuses with the candidates rather than
+/// guessing; the pure resolution lives in [`remote_workspace`].
 #[cfg(any(unix, windows))]
-/// Resolve a `chan devserver connect|disconnect|forget` TARGET -- a URL or
-/// a launcher label -- to one persisted registry row id. Gateway-roster rows
-/// are deliberately out of reach: they carry no local config, and the
-/// Gateways screen manages them. Ambiguity refuses with the candidates
-/// rather than guessing.
 fn resolve_devserver_target(state: &Arc<AppState>, target: &str) -> Result<String, String> {
     let cfg = state
         .store
@@ -3348,47 +3336,7 @@ fn resolve_devserver_target(state: &Arc<AppState>, target: &str) -> Result<Strin
         .unwrap()
         .get()
         .map_err(|e| e.to_string())?;
-    let trimmed = target.trim();
-    let matches: Vec<&config::Devserver> = if trimmed.contains("://") {
-        let key = config::endpoint_key(trimmed);
-        if key.is_none() {
-            return Err(format!("invalid devserver URL {trimmed:?}"));
-        }
-        cfg.devservers
-            .iter()
-            .filter(|d| config::endpoint_key(&d.url) == key)
-            .collect()
-    } else {
-        cfg.devservers
-            .iter()
-            .filter(|d| d.label.trim() == trimmed)
-            .collect()
-    };
-    match matches.len() {
-        0 => Err(format!(
-            "no registered devserver matches {trimmed:?}. `chan devserver ls` lists the \
-             registered rows; a gateway-managed devserver is managed on the Gateways screen."
-        )),
-        1 => Ok(matches[0].id.clone()),
-        _ => {
-            let listing = matches
-                .iter()
-                .map(|d| {
-                    let label = if d.label.trim().is_empty() {
-                        "-"
-                    } else {
-                        d.label.trim()
-                    };
-                    format!("  {label}  {}", d.url)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(format!(
-                "{trimmed:?} matches more than one registered devserver:\n{listing}\n\
-                 Name the one you mean by URL, or remove the duplicate row in the launcher."
-            ))
-        }
-    }
+    remote_workspace::resolve_devserver_target_in(&cfg.devservers, target)
 }
 
 /// The `chan devserver ls` projection: every registry row (gateway-roster
@@ -3462,6 +3410,87 @@ fn forget_devserver_from_handoff(
     Ok(())
 }
 
+/// The `chan workspace serve WS --on TARGET` handoff: mount WS on a registered,
+/// connected devserver through the connection the desktop holds, then refresh
+/// the launcher's cache so the new row shows at once. Synchronous by design
+/// (the CLI's reply budget covers the server's mount timeout): the CLI reports
+/// the prefix or the refusal, never a guess. A registered but disconnected
+/// row refuses with a pointer at `chan devserver connect`, since dialing on
+/// the CLI's behalf would skip the sign-in and trust prompts the launcher
+/// owns.
+#[cfg(any(unix, windows))]
+async fn serve_remote_workspace_from_handoff(
+    state: &Arc<AppState>,
+    target: &str,
+    workspace_path: &str,
+) -> Result<String, String> {
+    let id = resolve_devserver_target(state, target)?;
+    let connecting = state.devserver_connecting.lock().unwrap().contains(&id);
+    let conn =
+        remote_workspace::refuse_unless_connected(state.devservers.get(&id), target, connecting)?;
+    let prefix = devserver::add_workspace(&conn, workspace_path).await?;
+    if let Err(e) = refresh_devserver_workspace_cache(state, &id, &conn).await {
+        tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after a remote serve failed");
+    }
+    Ok(prefix)
+}
+
+/// The `chan close WS --on TARGET` (`remove: false`) and `chan workspace forget
+/// WS --on TARGET` (`remove: true`) handoffs: resolve WS to one row on the
+/// connected devserver (refusing over guessing, listing the rows), then
+/// unmount or forget through the devserver's own routes with `force` unset,
+/// so its live-terminal guard answers as [`chan_server::SetWorkspaceOnOutcome::NeedsForce`].
+/// These call the devserver directly rather than through the launcher's
+/// toggle, whose local-devserver leniency reports a failed transport as done.
+#[cfg(any(unix, windows))]
+async fn close_remote_workspace_from_handoff(
+    state: &Arc<AppState>,
+    target: &str,
+    workspace_path: &str,
+    remove: bool,
+) -> Result<(chan_server::SetWorkspaceOnOutcome, bool), String> {
+    let id = resolve_devserver_target(state, target)?;
+    let connecting = state.devserver_connecting.lock().unwrap().contains(&id);
+    let conn =
+        remote_workspace::refuse_unless_connected(state.devservers.get(&id), target, connecting)?;
+    let rows = devserver::fetch_workspaces(&conn).await?;
+    let row = remote_workspace::resolve_remote_workspace(&rows, workspace_path, target)?;
+    let was_served = row.on;
+    let prefix = devserver_route_prefix(&row.prefix);
+    let result = if remove {
+        devserver::forget_workspace(&conn, &prefix, false).await
+    } else {
+        devserver::set_workspace_on(&conn, &prefix, false, false).await
+    };
+    match result {
+        Ok(()) => {
+            if let Err(e) = refresh_devserver_workspace_cache(state, &id, &conn).await {
+                tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after a remote close failed");
+            }
+            Ok((chan_server::SetWorkspaceOnOutcome::Done, was_served))
+        }
+        Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => Ok((
+            chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals },
+            was_served,
+        )),
+        Err(devserver::SetWorkspaceOnError::Other { message }) => Err(message),
+    }
+}
+
+/// Register (and persist) a devserver from a `chan serve {url}` CLI handoff.
+/// Writes the `{url, name, script}` entry through the same
+/// [`DevserverConfigRegistry`](config::DevserverConfigRegistry) the launcher's
+/// `/api/library/devservers` routes use (the shared config handle), so the new
+/// row shows up in the launcher. A `?t=` URL carries the write-only devserver
+/// bearer; otherwise the user can provide a connect script that prints
+/// `CHAN_DEVSERVER_TOKEN=...` and connect it from the launcher row.
+///
+/// This fn stays SYNC and never dials the URL: the CLI blocks ~3s on the
+/// `DevserverRegistered` response, so the is-this-really-a-gateway probe
+/// rides a detached task spawned here. A gateway-positive answer converts
+/// the just-registered row into a gateway entry out-of-band; the launcher
+/// picks the swap up over the library feed and the wire stays byte-
+/// identical for old and new CLIs alike.
 fn register_devserver_from_handoff(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -6106,6 +6135,80 @@ fn main() {
                                         Err(message) => Response::Error { message },
                                     }
                                 }
+                                Request::ServeRemoteWorkspace {
+                                    target,
+                                    workspace_path,
+                                    ..
+                                } => match serve_remote_workspace_from_handoff(
+                                    &state,
+                                    &target,
+                                    &workspace_path,
+                                )
+                                .await
+                                {
+                                    Ok(prefix) => Response::RemoteWorkspaceServed {
+                                        desktop_version: CHAN_VERSION.into(),
+                                        prefix,
+                                    },
+                                    Err(message) => Response::Error { message },
+                                },
+                                Request::CloseRemoteWorkspace {
+                                    target,
+                                    workspace_path,
+                                    ..
+                                } => match close_remote_workspace_from_handoff(
+                                    &state,
+                                    &target,
+                                    &workspace_path,
+                                    false,
+                                )
+                                .await
+                                {
+                                    Ok((chan_server::SetWorkspaceOnOutcome::Done, was_served)) => {
+                                        Response::RemoteWorkspaceClosed {
+                                            desktop_version: CHAN_VERSION.into(),
+                                            was_served,
+                                        }
+                                    }
+                                    Ok((
+                                        chan_server::SetWorkspaceOnOutcome::NeedsForce {
+                                            active_terminals,
+                                        },
+                                        _,
+                                    )) => Response::CloseRefused {
+                                        error: "live_terminals".into(),
+                                        active_terminals,
+                                    },
+                                    Err(message) => Response::Error { message },
+                                },
+                                Request::ForgetRemoteWorkspace {
+                                    target,
+                                    workspace_path,
+                                    ..
+                                } => match close_remote_workspace_from_handoff(
+                                    &state,
+                                    &target,
+                                    &workspace_path,
+                                    true,
+                                )
+                                .await
+                                {
+                                    Ok((chan_server::SetWorkspaceOnOutcome::Done, _)) => {
+                                        Response::RemoteWorkspaceForgotten {
+                                            desktop_version: CHAN_VERSION.into(),
+                                        }
+                                    }
+                                    Ok((
+                                        chan_server::SetWorkspaceOnOutcome::NeedsForce {
+                                            active_terminals,
+                                        },
+                                        _,
+                                    )) => Response::CloseRefused {
+                                        error: "live_terminals".into(),
+                                        active_terminals,
+                                    },
+                                    Err(message) => Response::Error { message },
+                                },
                             }
                         }
                     })

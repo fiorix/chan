@@ -2083,6 +2083,80 @@ pub async fn set_window_label(
     Ok(())
 }
 
+/// How long the desktop waits for the devserver to confirm a mount it asked
+/// for on the CLI's behalf. Above the server's own 60 s mount timeout, so the
+/// server's error, not a desktop deadline, is what a slow mount reports; below
+/// the CLI's 75 s reply budget, so the CLI always gets an answer.
+const REMOTE_SERVE_HTTP_BUDGET: Duration = Duration::from_secs(70);
+
+/// `POST /api/devserver/workspaces {path}`: mount the workspace rooted at
+/// `path` on that machine (registering it when new; idempotent, an already
+/// mounted root answers its existing prefix). The CLI's `chan workspace serve
+/// WS --on TARGET` arm; the launcher's own add path rides the bridge instead.
+/// Answers the prefix the tenant is mounted at. The gateway arm goes through
+/// the library add route and reads the prefix off the launcher workspace it
+/// returns.
+pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, String> {
+    let request = async {
+        if let Some(gw) = &conn.gateway {
+            let resp = gateway_request_json(
+                gw,
+                reqwest::Method::POST,
+                "/api/library/workspaces",
+                &serde_json::json!({ "path": path }),
+            )
+            .await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!(
+                    "gateway workspace add returned HTTP {status}: {}",
+                    body.trim()
+                ));
+            }
+            let entry = resp
+                .json::<chan_server::LauncherWorkspace>()
+                .await
+                .map_err(|e| format!("decoding gateway workspace add: {e}"))?;
+            return Ok(entry.prefix);
+        }
+        let url = format!(
+            "{}/api/devserver/workspaces",
+            base_origin(&conn.host, conn.port)
+        );
+        let resp = http_client()?
+            .post(&url)
+            .bearer_auth(&conn.token)
+            .json(&chan_server::devserver_api::OpenWorkspaceRequest {
+                path: path.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("mounting devserver workspace: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "devserver workspace mount returned HTTP {status}: {}",
+                body.trim()
+            ));
+        }
+        let mounted = resp
+            .json::<chan_server::devserver_api::MountedPrefix>()
+            .await
+            .map_err(|e| format!("decoding devserver workspace mount: {e}"))?;
+        Ok(mounted.prefix)
+    };
+    match tokio::time::timeout(REMOTE_SERVE_HTTP_BUDGET, request).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "the devserver did not confirm the mount within {}s; it may still be mounting \
+             (see the launcher)",
+            REMOTE_SERVE_HTTP_BUDGET.as_secs()
+        )),
+    }
+}
+
 /// The on/off-toggle URL for a registered workspace: the collection path + the
 /// prefix (an absolute route path) + `/on`. Distinct from the DELETE URL
 /// (= Forget); on/off keeps the registration.

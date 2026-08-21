@@ -176,6 +176,37 @@ pub enum Request {
         /// Disconnect first when the row is live, instead of refusing.
         force: bool,
     },
+    /// `chan workspace serve WS --on TARGET`: mount `workspace_path` (a path
+    /// on that machine, passed verbatim) on a registered, connected devserver.
+    /// Synchronous: the desktop answers once the devserver reports the mount,
+    /// which is why this variant carries a longer reply budget than the
+    /// devserver-registry verbs.
+    ServeRemoteWorkspace {
+        protocol: u32,
+        cli_version: String,
+        /// A registered URL or launcher label, resolved like
+        /// `ConnectDevserver`'s.
+        target: String,
+        /// The workspace root on the devserver's machine.
+        workspace_path: String,
+    },
+    /// `chan workspace close WS --on TARGET`: unmount the workspace on that
+    /// devserver and keep it registered there. Live terminals refuse, as the
+    /// devserver's own guard does; the reply is `CloseRefused`.
+    CloseRemoteWorkspace {
+        protocol: u32,
+        cli_version: String,
+        target: String,
+        workspace_path: String,
+    },
+    /// `chan workspace forget WS --on TARGET`: unmount and drop the
+    /// registration on that devserver. Same live-terminal refusal.
+    ForgetRemoteWorkspace {
+        protocol: u32,
+        cli_version: String,
+        target: String,
+        workspace_path: String,
+    },
 }
 
 impl Request {
@@ -189,7 +220,10 @@ impl Request {
             | Request::ListDevservers { protocol, .. }
             | Request::ConnectDevserver { protocol, .. }
             | Request::DisconnectDevserver { protocol, .. }
-            | Request::ForgetDevserver { protocol, .. } => *protocol,
+            | Request::ForgetDevserver { protocol, .. }
+            | Request::ServeRemoteWorkspace { protocol, .. }
+            | Request::CloseRemoteWorkspace { protocol, .. }
+            | Request::ForgetRemoteWorkspace { protocol, .. } => *protocol,
         }
     }
 
@@ -203,7 +237,28 @@ impl Request {
             | Request::ListDevservers { cli_version, .. }
             | Request::ConnectDevserver { cli_version, .. }
             | Request::DisconnectDevserver { cli_version, .. }
-            | Request::ForgetDevserver { cli_version, .. } => cli_version,
+            | Request::ForgetDevserver { cli_version, .. }
+            | Request::ServeRemoteWorkspace { cli_version, .. }
+            | Request::CloseRemoteWorkspace { cli_version, .. }
+            | Request::ForgetRemoteWorkspace { cli_version, .. } => cli_version,
+        }
+    }
+
+    /// How long a one-shot client waits for this request's reply once the
+    /// connection is up. The devserver-registry verbs answer from memory and
+    /// keep the 3 s window; the remote workspace arms wait on a devserver
+    /// round-trip (a mount can take up to the server's own 60 s mount timeout,
+    /// an unmount drains terminals with a bounded wait), so their budget sits
+    /// above those timeouts and the server's error, not the client's
+    /// deadline, is what the user sees.
+    #[cfg(any(unix, windows))]
+    pub fn reply_budget(&self) -> Duration {
+        match self {
+            Request::ServeRemoteWorkspace { .. } => Duration::from_secs(75),
+            Request::CloseRemoteWorkspace { .. } | Request::ForgetRemoteWorkspace { .. } => {
+                Duration::from_secs(30)
+            }
+            _ => Duration::from_millis(3000),
         }
     }
 }
@@ -250,8 +305,10 @@ pub enum Response {
     /// a note and exits. A skew / error / absent desktop instead falls back to
     /// the per-pid control-socket teardown.
     Closed { desktop_version: String },
-    /// The desktop refused a `CloseWorkspace` request because unmount/remove
-    /// would kill live terminal sessions.
+    /// The desktop refused a `CloseWorkspace`, `CloseRemoteWorkspace`, or
+    /// `ForgetRemoteWorkspace` request because unmount/remove would kill live
+    /// terminal sessions. `error` is the devserver's own `live_terminals`
+    /// literal.
     CloseRefused {
         error: String,
         active_terminals: usize,
@@ -270,6 +327,20 @@ pub enum Response {
     DevserverDisconnected { desktop_version: String },
     /// The desktop removed the registration row from a `ForgetDevserver`.
     DevserverForgotten { desktop_version: String },
+    /// The devserver mounted the workspace from a `ServeRemoteWorkspace`
+    /// (or already had it mounted); `prefix` is the route it serves at.
+    RemoteWorkspaceServed {
+        desktop_version: String,
+        prefix: String,
+    },
+    /// The devserver unmounted the workspace from a `CloseRemoteWorkspace`
+    /// and keeps it registered; `was_served` says whether it was mounted.
+    RemoteWorkspaceClosed {
+        desktop_version: String,
+        was_served: bool,
+    },
+    /// The devserver dropped the workspace from a `ForgetRemoteWorkspace`.
+    RemoteWorkspaceForgotten { desktop_version: String },
 }
 
 /// One devserver registry row as `chan devserver ls` renders it. A
@@ -987,6 +1058,9 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::DevserverConnectStarted { .. })
         | Ok(Response::DevserverDisconnected { .. })
         | Ok(Response::DevserverForgotten { .. })
+        | Ok(Response::RemoteWorkspaceServed { .. })
+        | Ok(Response::RemoteWorkspaceClosed { .. })
+        | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1067,6 +1141,9 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
         | Ok(Response::DevserverConnectStarted { .. })
         | Ok(Response::DevserverDisconnected { .. })
         | Ok(Response::DevserverForgotten { .. })
+        | Ok(Response::RemoteWorkspaceServed { .. })
+        | Ok(Response::RemoteWorkspaceClosed { .. })
+        | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1220,6 +1297,9 @@ fn map_close_response(line: &str) -> Outcome {
         | Ok(Response::DevserverConnectStarted { .. })
         | Ok(Response::DevserverDisconnected { .. })
         | Ok(Response::DevserverForgotten { .. })
+        | Ok(Response::RemoteWorkspaceServed { .. })
+        | Ok(Response::RemoteWorkspaceClosed { .. })
+        | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1352,6 +1432,12 @@ pub async fn try_open_devserver(_url: &str, _name: Option<&str>, _script: Option
 pub enum DevserverControlOutcome {
     Reply(Response),
     NoDesktop,
+    /// The desktop accepted the connection but no reply arrived within the
+    /// request's budget: the operation may still be running there, which is
+    /// a different message from "no desktop".
+    NoReply {
+        budget: Duration,
+    },
 }
 
 /// One request/one reply against the well-known desktop socket, for the
@@ -1376,6 +1462,7 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
         Ok(Err(_)) | Err(_) => return DevserverControlOutcome::NoDesktop,
     };
 
+    let budget = req.reply_budget();
     let mut payload = match serde_json::to_vec(&req) {
         Ok(v) => v,
         Err(_) => return DevserverControlOutcome::NoDesktop,
@@ -1391,9 +1478,10 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
         reader.read_line(&mut line).await?;
         Ok::<String, std::io::Error>(line)
     };
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
+    let line = match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return DevserverControlOutcome::NoDesktop,
+        Ok(_) => return DevserverControlOutcome::NoDesktop,
+        Err(_) => return DevserverControlOutcome::NoReply { budget },
     };
 
     match serde_json::from_str::<Response>(line.trim()) {
@@ -1429,6 +1517,7 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
         }
     };
 
+    let budget = req.reply_budget();
     let mut payload = match serde_json::to_vec(&req) {
         Ok(v) => v,
         Err(_) => return DevserverControlOutcome::NoDesktop,
@@ -1444,9 +1533,10 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
         reader.read_line(&mut line).await?;
         Ok::<String, std::io::Error>(line)
     };
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
+    let line = match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return DevserverControlOutcome::NoDesktop,
+        Ok(_) => return DevserverControlOutcome::NoDesktop,
+        Err(_) => return DevserverControlOutcome::NoReply { budget },
     };
 
     match serde_json::from_str::<Response>(line.trim()) {
@@ -1486,6 +1576,9 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::DevserverConnectStarted { .. })
         | Ok(Response::DevserverDisconnected { .. })
         | Ok(Response::DevserverForgotten { .. })
+        | Ok(Response::RemoteWorkspaceServed { .. })
+        | Ok(Response::RemoteWorkspaceClosed { .. })
+        | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1676,6 +1769,9 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
         | Ok(Response::DevserverConnectStarted { .. })
         | Ok(Response::DevserverDisconnected { .. })
         | Ok(Response::DevserverForgotten { .. })
+        | Ok(Response::RemoteWorkspaceServed { .. })
+        | Ok(Response::RemoteWorkspaceClosed { .. })
+        | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
 }
@@ -2321,7 +2417,10 @@ mod tests {
                     Request::ListDevservers { .. }
                     | Request::ConnectDevserver { .. }
                     | Request::DisconnectDevserver { .. }
-                    | Request::ForgetDevserver { .. } => Response::Error {
+                    | Request::ForgetDevserver { .. }
+                    | Request::ServeRemoteWorkspace { .. }
+                    | Request::CloseRemoteWorkspace { .. }
+                    | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                         message: "unexpected devserver control".into(),
                     },
                 }
@@ -2357,6 +2456,144 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remote_workspace_requests_and_replies_round_trip() {
+        // The three additive arms and their replies, by wire tag: an old
+        // desktop answers an unknown tag with "invalid handoff request", which
+        // is what keeps PROTOCOL_VERSION at 1.
+        for (req, tag) in [
+            (
+                Request::ServeRemoteWorkspace {
+                    protocol: PROTOCOL_VERSION,
+                    cli_version: "9.9.9".into(),
+                    target: "lab".into(),
+                    workspace_path: "/srv/notes".into(),
+                },
+                "serve_remote_workspace",
+            ),
+            (
+                Request::CloseRemoteWorkspace {
+                    protocol: PROTOCOL_VERSION,
+                    cli_version: "9.9.9".into(),
+                    target: "lab".into(),
+                    workspace_path: "/srv/notes".into(),
+                },
+                "close_remote_workspace",
+            ),
+            (
+                Request::ForgetRemoteWorkspace {
+                    protocol: PROTOCOL_VERSION,
+                    cli_version: "9.9.9".into(),
+                    target: "lab".into(),
+                    workspace_path: "/srv/notes".into(),
+                },
+                "forget_remote_workspace",
+            ),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(json.contains(&format!("\"type\":\"{tag}\"")), "{json}");
+            assert!(json.contains("\"target\":\"lab\""), "{json}");
+            assert!(json.contains("\"workspace_path\":\"/srv/notes\""), "{json}");
+            assert_eq!(req, serde_json::from_str::<Request>(&json).unwrap());
+            assert_eq!(req.protocol(), PROTOCOL_VERSION);
+            assert_eq!(req.cli_version(), "9.9.9");
+        }
+        for (resp, tag) in [
+            (
+                Response::RemoteWorkspaceServed {
+                    desktop_version: "9.9.9".into(),
+                    prefix: "/notes-1a2b3c".into(),
+                },
+                "remote_workspace_served",
+            ),
+            (
+                Response::RemoteWorkspaceClosed {
+                    desktop_version: "9.9.9".into(),
+                    was_served: true,
+                },
+                "remote_workspace_closed",
+            ),
+            (
+                Response::RemoteWorkspaceForgotten {
+                    desktop_version: "9.9.9".into(),
+                },
+                "remote_workspace_forgotten",
+            ),
+        ] {
+            let json = serde_json::to_string(&resp).unwrap();
+            assert!(json.contains(&format!("\"status\":\"{tag}\"")), "{json}");
+            assert_eq!(resp, serde_json::from_str::<Response>(&json).unwrap());
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn reply_budget_is_three_seconds_for_registry_verbs_and_longer_for_remote_arms() {
+        let base = |target: &str| Request::ConnectDevserver {
+            protocol: PROTOCOL_VERSION,
+            cli_version: "9.9.9".into(),
+            target: target.into(),
+        };
+        assert_eq!(base("lab").reply_budget(), Duration::from_millis(3000));
+        assert_eq!(
+            Request::ServeRemoteWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: "9.9.9".into(),
+                target: "lab".into(),
+                workspace_path: "/srv/notes".into(),
+            }
+            .reply_budget(),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            Request::ForgetRemoteWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: "9.9.9".into(),
+                target: "lab".into(),
+                workspace_path: "/srv/notes".into(),
+            }
+            .reply_budget(),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_round_trip_remote_workspace_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let _handle = start_listener(sock.clone(), move |req| async move {
+            match req {
+                Request::ServeRemoteWorkspace {
+                    target,
+                    workspace_path,
+                    ..
+                } => {
+                    assert_eq!(target, "lab");
+                    assert_eq!(workspace_path, "/srv/notes");
+                    Response::RemoteWorkspaceServed {
+                        desktop_version: CHAN_VERSION.into(),
+                        prefix: "/notes-1a2b3c".into(),
+                    }
+                }
+                _ => Response::Error {
+                    message: "unexpected request".into(),
+                },
+            }
+        })
+        .unwrap();
+        let req = Request::ServeRemoteWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            target: "lab".into(),
+            workspace_path: "/srv/notes".into(),
+        };
+        match round_trip(&sock, &req).await {
+            Response::RemoteWorkspaceServed { prefix, .. } => assert_eq!(prefix, "/notes-1a2b3c"),
+            other => panic!("expected RemoteWorkspaceServed, got {other:?}"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_round_trip_upgrade_checked() {
@@ -2383,7 +2620,10 @@ mod tests {
                 Request::ListDevservers { .. }
                 | Request::ConnectDevserver { .. }
                 | Request::DisconnectDevserver { .. }
-                | Request::ForgetDevserver { .. } => Response::Error {
+                | Request::ForgetDevserver { .. }
+                | Request::ServeRemoteWorkspace { .. }
+                | Request::CloseRemoteWorkspace { .. }
+                | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                     message: "unexpected devserver control".into(),
                 },
             }
@@ -2474,7 +2714,10 @@ mod tests {
                 Request::ListDevservers { .. }
                 | Request::ConnectDevserver { .. }
                 | Request::DisconnectDevserver { .. }
-                | Request::ForgetDevserver { .. } => Response::Error {
+                | Request::ForgetDevserver { .. }
+                | Request::ServeRemoteWorkspace { .. }
+                | Request::CloseRemoteWorkspace { .. }
+                | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                     message: "unexpected devserver control".into(),
                 },
             }
