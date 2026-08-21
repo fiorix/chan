@@ -1576,15 +1576,21 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
 /// retry the other Windows client verbs use.
 #[cfg(windows)]
 pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return UpgradeOutcome::NoDesktop;
+    };
+    try_upgrade_at(&socket_path, check_only).await
+}
+
+/// The post-resolution half of the Windows [`try_upgrade`], on an explicit
+/// pipe name so a test can drive it against its own listener.
+#[cfg(windows)]
+async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
     const ERROR_PIPE_BUSY: i32 = 231;
-
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return UpgradeOutcome::NoDesktop;
-    };
 
     let deadline = std::time::Instant::now() + Duration::from_millis(1500);
     let client = loop {
@@ -2389,6 +2395,54 @@ mod tests {
             }
             other => panic!("expected UpgradeChecked, got {other:?}"),
         }
+    }
+
+    /// The Windows twin of `listener_round_trip_upgrade_checked`: the named-pipe
+    /// client arm against this process's own pipe listener, so the busy-retry
+    /// open, the one-line framing, and the shared reply mapping are exercised
+    /// where they run, not only compiled.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listener_round_trip_upgrade_checked_pipe() {
+        let pipe = PathBuf::from(format!(
+            r"\\.\pipe\chan-test-upgrade-{}",
+            std::process::id()
+        ));
+        let _handle = start_listener(pipe.clone(), move |req| async move {
+            match req {
+                Request::Upgrade { check_only, .. } => {
+                    assert!(check_only, "test sends check_only=true");
+                    Response::UpgradeChecked {
+                        desktop_version: CHAN_VERSION.into(),
+                        available: Some("9.9.9".into()),
+                    }
+                }
+                _ => Response::Error {
+                    message: "unexpected request".into(),
+                },
+            }
+        })
+        .unwrap();
+        match try_upgrade_at(&pipe, true).await {
+            UpgradeOutcome::Checked { available, .. } => {
+                assert_eq!(available, Some("9.9.9".to_string()))
+            }
+            other => panic!("expected Checked, got {other:?}"),
+        }
+    }
+
+    /// A pipe nobody serves is the no-desktop case, never a hang or a guess.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unserved_pipe_is_no_desktop() {
+        let pipe = PathBuf::from(format!(
+            r"\\.\pipe\chan-test-upgrade-absent-{}",
+            std::process::id()
+        ));
+        assert!(matches!(
+            try_upgrade_at(&pipe, true).await,
+            UpgradeOutcome::NoDesktop
+        ));
     }
 
     #[cfg(unix)]
