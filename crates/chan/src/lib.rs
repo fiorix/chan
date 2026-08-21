@@ -101,6 +101,7 @@ static SERVE_AFTER_HELP: std::sync::LazyLock<String> = std::sync::LazyLock::new(
 /// guarded by a single-instance pidfile + flock (the systemd/launchd analog
 /// where there is no OS supervisor, and the portable choice everywhere).
 mod devserver_daemon;
+pub use devserver_daemon::self_managed_devserver_pid;
 
 /// Serialized ambient-`CHAN_*` isolation for env-reading tests and spawned
 /// test children. Not `cfg(test)` because integration tests link this crate
@@ -1449,6 +1450,15 @@ fn decide_upgrade_route(
     }
 }
 
+/// The `desktop_companion` input of [`decide_upgrade_route`]: true only for a
+/// Windows process carrying the desktop shim's `CHAN_DESKTOP_HANDOFF=1`. The
+/// Windows half is a parameter rather than a `cfg!` inside so the guard is
+/// pinned on every host: on unix the hint steers `chan serve` only, and a
+/// standalone install.sh `chan` keeps replacing its own tarball.
+fn desktop_companion(is_windows: bool, handoff_forced: bool) -> bool {
+    is_windows && handoff_forced
+}
+
 /// Which backend backs `chan devserver --service`. `Auto` (the CLI value
 /// `auto`, the default) resolves per-OS at runtime: with an action verb it
 /// supervises under systemd (Linux), launchd (macOS), or the self-managed `chan`
@@ -1724,7 +1734,7 @@ where
         } => match decide_upgrade_route(
             personality,
             update::packaged_via(),
-            cfg!(windows) && chan_server::handoff::handoff_forced(),
+            desktop_companion(cfg!(windows), chan_server::handoff::handoff_forced()),
         ) {
             // A distro-packaged build: the package manager owns the files.
             UpgradeRoute::Refuse(message) => anyhow::bail!(message),
@@ -6313,8 +6323,10 @@ async fn maybe_handoff_to_desktop(
 }
 
 /// Launch the desktop GUI for a `chan serve` that found no running desktop,
-/// then hand it the workspace. Unix-only (the desktop + handoff socket are
-/// unix); off unix there's no GUI to launch, so fall back to standalone.
+/// then hand it the workspace. Unix-only: the Windows companion `chan.exe`
+/// can launch `chan-desktop.exe` for `chan upgrade` (`spawn_desktop_gui`),
+/// but the serve handoff to a desktop it launched is not wired there, so
+/// off unix `chan serve` falls back to a standalone server.
 #[cfg(unix)]
 async fn maybe_launch_desktop(root: &Path) -> Option<Result<()>> {
     Some(launch_desktop_and_handoff(root).await)
@@ -6578,8 +6590,13 @@ async fn launch_desktop_then_upgrade() -> Result<()> {
             }
             // Not up yet (socket absent / connect refused): keep waiting.
             UpgradeOutcome::NoDesktop => {}
-            // check_only=false never returns Checked, but be exhaustive.
-            UpgradeOutcome::Checked { .. } => return Ok(()),
+            // The launched desktop answered the install request with a check:
+            // it found nothing newer (it may have updated itself on launch),
+            // so say so instead of exiting silently.
+            UpgradeOutcome::Checked { .. } => {
+                println!("chan: launched chan-desktop; it is already up to date.");
+                return Ok(());
+            }
             UpgradeOutcome::VersionSkew {
                 desktop_version, ..
             } => anyhow::bail!(
@@ -8771,6 +8788,18 @@ mod tests {
             decide_upgrade_route(Personality::Desktop, None, true),
             UpgradeRoute::Desktop
         );
+    }
+
+    #[test]
+    fn desktop_companion_needs_windows_and_the_handoff_hint() {
+        // The hint alone is not a companion: a unix install.sh `chan` run
+        // with CHAN_DESKTOP_HANDOFF=1 (the serve-handoff steer) keeps
+        // replacing its own tarball, and a Windows process without the hint
+        // is the standalone zip.
+        assert!(desktop_companion(true, true));
+        assert!(!desktop_companion(false, true));
+        assert!(!desktop_companion(true, false));
+        assert!(!desktop_companion(false, false));
     }
 
     #[test]

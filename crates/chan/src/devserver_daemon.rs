@@ -218,6 +218,16 @@ pub fn status_devserver_chan(verbose: bool) -> Result<()> {
     Ok(())
 }
 
+/// The pid of a live self-managed devserver daemon under this `CHAN_HOME`,
+/// or `None`. A stale record (dead pid or a released lock) counts as not
+/// running and is left for `stop`/`status` to clear. The desktop asks this
+/// before a Windows self-update: the daemon runs from the install's own
+/// `chan.exe`, which the installer cannot overwrite while it is mapped.
+pub fn self_managed_devserver_pid() -> Option<u32> {
+    let record = read_daemon_record(&daemon_record_path())?;
+    live_record(&daemon_lock_path(), &record).then_some(record.pid)
+}
+
 /// The address the running (or last crashed) self-managed daemon recorded.
 pub fn persisted_devserver_addr_chan() -> Option<SocketAddr> {
     read_daemon_record(&daemon_record_path())?.addr.parse().ok()
