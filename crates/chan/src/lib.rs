@@ -40,6 +40,10 @@
 //   chan close {PATH}               tear down a workspace's server.
 //   chan workspace forget {PATH}    tear down, then forget it from the
 //                                   registry (files untouched).
+//   chan workspace serve|close|forget {PATH} --on {TARGET}
+//                                   the same three verbs against a workspace
+//                                   on a registered remote devserver (URL or
+//                                   launcher label, resolved by the desktop).
 //   chan devserver register {URL} [--name --script]
 //                                   register a devserver (scheme://host) with
 //                                   the desktop launcher.
@@ -204,6 +208,13 @@ and --devserver force one target. --devserver=<port|url> names one local
 devserver explicitly. A missing explicit devserver or an ambiguous set is
 refused rather than guessed; other failed handoffs fall through to a
 standalone server.
+
+--on TARGET serves PATH on a REGISTERED remote devserver instead: TARGET
+is the devserver's URL or launcher label as `chan devserver ls` shows
+it, PATH is a path on that machine, and the desktop resolves both and
+refuses ambiguity. It is a different flag from --devserver by design
+(one flag, one object kind): a port-shaped --on and a label-shaped
+--devserver are both refused with a pointer at the other.
 
 The standalone server binds 127.0.0.1:8787 by default (::1 with -6),
 prints "chan is ready:" and the tokened URL on stderr, and opens the
@@ -435,8 +446,8 @@ enum Command {
     #[command(long_about = help::CHAN_CLOSE)]
     #[command(after_long_help = help::CHAN_CLOSE_AFTER)]
     Close {
-        #[arg(value_hint = clap::ValueHint::AnyPath)]
-        path: PathBuf,
+        #[command(flatten)]
+        args: CloseCliArgs,
     },
     /// Show which registered workspaces are served, and by what
     #[command(long_about = help::CHAN_PS)]
@@ -889,7 +900,7 @@ struct ServeCliArgs {
     /// shell-parentage default. The escape hatch for automation and for
     /// serving a workspace the local devserver / desktop should not take
     /// over. Mutually exclusive with --desktop / --devserver.
-    #[arg(long, conflicts_with_all = ["desktop", "devserver"], verbatim_doc_comment)]
+    #[arg(long, conflicts_with_all = ["desktop", "devserver", "on"], verbatim_doc_comment)]
     standalone: bool,
     /// Force the chan-desktop handoff: hand this workspace to a running
     /// same-user desktop to open in a native window, then exit. Overrides
@@ -897,7 +908,7 @@ struct ServeCliArgs {
     /// when no desktop is reachable (skew, error, GUI absent, or
     /// CHAN_NO_DESKTOP_HANDOFF). Mutually exclusive with --standalone /
     /// --devserver.
-    #[arg(long, conflicts_with_all = ["standalone", "devserver"], verbatim_doc_comment)]
+    #[arg(long, conflicts_with_all = ["standalone", "devserver", "on"], verbatim_doc_comment)]
     desktop: bool,
     /// Force local-devserver registration. A bare --devserver selects the
     /// only live same-user devserver, or the unique one whose library root
@@ -913,10 +924,57 @@ struct ServeCliArgs {
         default_missing_value = "auto",
         require_equals = true,
         value_parser = parse_devserver_selector,
-        conflicts_with_all = ["standalone", "desktop"],
+        conflicts_with_all = ["standalone", "desktop", "on"],
         verbatim_doc_comment
     )]
     devserver: Option<DevserverSelector>,
+    /// Serve PATH on a REGISTERED remote devserver instead of here. TARGET
+    /// is that devserver's URL or launcher label as `chan devserver ls`
+    /// shows it, resolved by the desktop; ambiguity refuses. PATH is a path
+    /// on that machine, passed verbatim (absolute). A local devserver PORT
+    /// belongs to --devserver=<port|url>, not here. Needs the chan desktop
+    /// app running and the devserver connected; takes no local serve flag.
+    #[arg(
+        long,
+        value_name = "TARGET",
+        value_parser = parse_on_target,
+        conflicts_with_all = [
+            "standalone", "desktop", "devserver", "here", "host", "ipv4", "ipv6",
+            "port", "prefix", "timeout", "no_token", "no_browser",
+            "search_aggression", "no_settings",
+        ],
+        verbatim_doc_comment
+    )]
+    on: Option<String>,
+}
+
+/// The `chan close` / `chan workspace close` argument set. One struct,
+/// flattened into both spellings, so the elevated form and the family form
+/// cannot drift.
+#[derive(Args, Debug)]
+struct CloseCliArgs {
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: PathBuf,
+    /// Close PATH on a REGISTERED remote devserver instead of here: TARGET
+    /// is its URL or launcher label as `chan devserver ls` shows it, PATH
+    /// is the workspace's path on that machine. The devserver's own
+    /// live-terminal guard applies; the workspace stays registered there.
+    #[arg(long, value_name = "TARGET", value_parser = parse_on_target, verbatim_doc_comment)]
+    on: Option<String>,
+}
+
+/// The `chan workspace forget` argument set.
+#[derive(Args, Debug)]
+struct ForgetCliArgs {
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: PathBuf,
+    /// Forget PATH on a REGISTERED remote devserver instead of here: TARGET
+    /// is its URL or launcher label as `chan devserver ls` shows it, PATH
+    /// is the workspace's path on that machine. The devserver unmounts and
+    /// drops the registration (files on that machine untouched); its
+    /// live-terminal guard applies.
+    #[arg(long, value_name = "TARGET", value_parser = parse_on_target, verbatim_doc_comment)]
+    on: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -1020,15 +1078,15 @@ enum WorkspaceAction {
     #[command(long_about = help::CHAN_CLOSE)]
     #[command(after_long_help = help::CHAN_CLOSE_AFTER)]
     Close {
-        #[arg(value_hint = clap::ValueHint::AnyPath)]
-        path: PathBuf,
+        #[command(flatten)]
+        args: CloseCliArgs,
     },
     /// Stop serving a workspace, then forget it from the registry
     #[command(long_about = help::CHAN_FORGET)]
     #[command(after_long_help = help::CHAN_FORGET_AFTER)]
     Forget {
-        #[arg(value_hint = clap::ValueHint::AnyPath)]
-        path: PathBuf,
+        #[command(flatten)]
+        args: ForgetCliArgs,
     },
     /// Rebuild the search index and graph, and manage semantic search
     ///
@@ -1676,8 +1734,12 @@ where
             } => cmd_add(path, semantic_search, reports),
             WorkspaceAction::Ls { json } => cmd_list(json),
             WorkspaceAction::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
-            WorkspaceAction::Close { path } => cmd_close(path, false, personality).await,
-            WorkspaceAction::Forget { path } => cmd_close(path, true, personality).await,
+            WorkspaceAction::Close { args } => {
+                cmd_close_cli(args.path, args.on, false, personality).await
+            }
+            WorkspaceAction::Forget { args } => {
+                cmd_close_cli(args.path, args.on, true, personality).await
+            }
             WorkspaceAction::Index { action } => cmd_index(action),
             WorkspaceAction::Reports { action } => cmd_reports(action),
             WorkspaceAction::Search {
@@ -1712,7 +1774,7 @@ where
         Command::Shell { action } => chan_shell::dispatch(action).await,
         Command::Completions { shell } => cmd_completions(shell),
         Command::DumpSkill { list, topic } => cmd_dump_skill(list, topic.as_deref()),
-        Command::Close { path } => cmd_close(path, false, personality).await,
+        Command::Close { args } => cmd_close_cli(args.path, args.on, false, personality).await,
         Command::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
         Command::Ps { json } => cmd_ps(json).await,
         Command::Devserver { action } => cmd_devserver_action(action, verbose).await,
@@ -2867,7 +2929,8 @@ fn parse_devserver_selector(raw: &str) -> std::result::Result<DevserverSelector,
     }
     if !raw.contains("://") {
         return Err(format!(
-            "invalid devserver selector {raw:?}: expected a port or URL"
+            "invalid devserver selector {raw:?}: expected a local port or loopback URL; a \
+             registered devserver label belongs to --on {raw}"
         ));
     }
     let url =
@@ -2895,6 +2958,49 @@ fn parse_devserver_selector(raw: &str) -> std::result::Result<DevserverSelector,
         return Err("invalid devserver port 0: expected 1..=65535".into());
     }
     Ok(DevserverSelector::Port(port))
+}
+
+/// `--on TARGET`: a registered devserver's URL or launcher label, resolved by
+/// the desktop. Only the shape is checked here: an all-digit value is a
+/// local devserver port, which belongs to `--devserver`, and is refused with
+/// that pointer so the two flags never guess at each other's grammar.
+fn parse_on_target(raw: &str) -> std::result::Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("--on needs a registered devserver URL or launcher label".into());
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "--on {trimmed} is port-shaped: --on names a REGISTERED devserver by URL or \
+             launcher label (see `chan devserver ls`); a live local devserver port belongs to \
+             --devserver={trimmed}"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Whether a workspace path named for a remote devserver is absolute on that
+/// machine's terms: a unix root, a drive-qualified Windows path, or a UNC
+/// share. A relative path would resolve against this shell, not that box,
+/// so the arms refuse it.
+fn remote_path_is_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
+}
+
+fn refuse_relative_remote_path(path: &str, target: &str) -> Result<()> {
+    if remote_path_is_absolute(path) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`--on {target}` names a path on that machine; give {path:?} as an absolute path there \
+         (starting with `/`, a drive letter, or a UNC share), not relative to this shell"
+    )
 }
 
 /// The explicit, mutually exclusive `chan serve` target flags. clap's
@@ -3310,6 +3416,11 @@ async fn devserver_control(
         DevserverControlOutcome::NoDesktop => {
             anyhow::bail!("this command needs the chan desktop app running.")
         }
+        DevserverControlOutcome::NoReply { budget } => anyhow::bail!(
+            "chan-desktop accepted the request but did not answer within {}s; the operation may \
+             still be running. Check `chan devserver ls` and the launcher.",
+            budget.as_secs()
+        ),
         DevserverControlOutcome::Reply(Response::VersionSkew {
             desktop_version, ..
         }) => anyhow::bail!(
@@ -3436,6 +3547,118 @@ async fn cmd_devserver_forget(target: String, force: bool) -> Result<()> {
     }
 }
 
+/// `chan close` / `chan workspace close` / `chan workspace forget`: the
+/// remote arm when `--on` is given, else the local teardown, unchanged.
+async fn cmd_close_cli(
+    path: PathBuf,
+    on: Option<String>,
+    remove: bool,
+    personality: Personality,
+) -> Result<()> {
+    match on {
+        Some(target) => {
+            let path = path.to_string_lossy().into_owned();
+            if remove {
+                cmd_workspace_forget_remote(&path, &target).await
+            } else {
+                cmd_workspace_close_remote(&path, &target).await
+            }
+        }
+        None => cmd_close(path, remove, personality).await,
+    }
+}
+
+/// `chan workspace serve PATH --on TARGET`: mount PATH (a path on that
+/// machine) on a registered, connected devserver through the desktop, and
+/// report the prefix it serves at. Mirrors `cmd_devserver_connect`.
+async fn cmd_workspace_serve_remote(path: Option<String>, target: &str) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    let Some(path) = path else {
+        anyhow::bail!(
+            "`--on {target}` needs the workspace PATH on that machine, e.g. `chan serve \
+             /srv/notes --on {target}`"
+        );
+    };
+    refuse_relative_remote_path(&path, target)?;
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::ServeRemoteWorkspace {
+        protocol,
+        cli_version,
+        target: target.to_string(),
+        workspace_path: path.clone(),
+    })
+    .await?;
+    match resp {
+        Response::RemoteWorkspaceServed { prefix, .. } => {
+            println!(
+                "served {path} on devserver {target} (mounted at {prefix}). Open it from the \
+                 launcher."
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
+/// `chan close PATH --on TARGET`: unmount PATH on that devserver, keeping it
+/// registered there. The devserver's live-terminal guard is the refusal.
+async fn cmd_workspace_close_remote(path: &str, target: &str) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    refuse_relative_remote_path(path, target)?;
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::CloseRemoteWorkspace {
+        protocol,
+        cli_version,
+        target: target.to_string(),
+        workspace_path: path.to_string(),
+    })
+    .await?;
+    match resp {
+        Response::RemoteWorkspaceClosed { was_served, .. } => {
+            if was_served {
+                println!("closed: {path} (on {target})");
+            } else {
+                println!("(not served on {target}: {path})");
+            }
+            Ok(())
+        }
+        Response::CloseRefused {
+            active_terminals, ..
+        } => anyhow::bail!(
+            "refusing to close {path} on {target}: {active_terminals} live terminal(s)"
+        ),
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
+/// `chan workspace forget PATH --on TARGET`: unmount and drop PATH on that
+/// devserver; the files on that machine are untouched.
+async fn cmd_workspace_forget_remote(path: &str, target: &str) -> Result<()> {
+    use chan_server::handoff::{Request, Response};
+    refuse_relative_remote_path(path, target)?;
+    let (protocol, cli_version) = handoff_versions();
+    let resp = devserver_control(Request::ForgetRemoteWorkspace {
+        protocol,
+        cli_version,
+        target: target.to_string(),
+        workspace_path: path.to_string(),
+    })
+    .await?;
+    match resp {
+        Response::RemoteWorkspaceForgotten { .. } => {
+            println!("forgot: {path} on {target}. The files on that machine are untouched.");
+            Ok(())
+        }
+        Response::CloseRefused {
+            active_terminals, ..
+        } => anyhow::bail!(
+            "refusing to forget {path} on {target}: {active_terminals} live terminal(s); close \
+             the terminals first"
+        ),
+        _ => anyhow::bail!("unexpected reply from chan-desktop"),
+    }
+}
+
 /// Translate the `chan serve` surface into [`ServeArgs`] and run it. A
 /// URL-shaped argument is refused with a pointer at `chan devserver
 /// register`: serve takes a workspace PATH only, and treating a pasted
@@ -3448,6 +3671,11 @@ async fn cmd_serve_cli(args: ServeCliArgs, personality: Personality, verbose: bo
                  devserver with `chan devserver register {target}`."
             );
         }
+    }
+    // The remote arm branches before any local route logic, so without
+    // `--on` the serve path below is untouched.
+    if let Some(target) = args.on.as_deref() {
+        return cmd_workspace_serve_remote(args.path, target).await;
     }
     let addr = resolve_listen_addr(args.host, args.ipv4, args.ipv6, args.port)?;
     let prefix = chan_server::sanitize_prefix(args.prefix.as_deref().unwrap_or(""))
@@ -9453,6 +9681,115 @@ mod tests {
     }
 
     #[test]
+    fn on_target_refuses_port_shaped_values_and_points_at_devserver() {
+        // A port belongs to --devserver; the refusal says so. A label and a
+        // URL are accepted as given (the desktop resolves them).
+        for argv in [
+            ["chan", "serve", "/srv/notes", "--on", "8787"],
+            ["chan", "serve", "/srv/notes", "--on", "0"],
+        ] {
+            let err = Cli::try_parse_from(argv).unwrap_err().to_string();
+            assert!(err.contains("--devserver"), "{err}");
+        }
+        assert!(Cli::try_parse_from(["chan", "serve", "/srv/notes", "--on", "lab"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "chan",
+            "serve",
+            "/srv/notes",
+            "--on",
+            "http://127.0.0.1:8787"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn devserver_selector_refuses_labels_and_points_at_on() {
+        let err = Cli::try_parse_from(["chan", "serve", "/srv/notes", "--devserver=lab"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--on"), "{err}");
+    }
+
+    #[test]
+    fn on_is_exclusive_with_every_local_serve_flag() {
+        for extra in [
+            &["--devserver"][..],
+            &["--standalone"],
+            &["--desktop"],
+            &["--port", "9000"],
+            &["--here"],
+            &["--no-browser"],
+        ] {
+            let mut argv = vec!["chan", "serve", "/srv/notes", "--on", "lab"];
+            argv.extend_from_slice(extra);
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "--on with {extra:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn close_and_forget_take_on_in_both_spellings() {
+        let top = Cli::try_parse_from(["chan", "close", "/srv/notes", "--on", "lab"]).unwrap();
+        let Command::Close { args } = top.command else {
+            panic!("expected close");
+        };
+        assert_eq!(args.path, PathBuf::from("/srv/notes"));
+        assert_eq!(args.on.as_deref(), Some("lab"));
+        let fam = Cli::try_parse_from(["chan", "workspace", "close", "/srv/notes", "--on", "lab"])
+            .unwrap();
+        let Command::Workspace {
+            action: WorkspaceAction::Close { args },
+        } = fam.command
+        else {
+            panic!("expected workspace close");
+        };
+        assert_eq!(args.on.as_deref(), Some("lab"));
+        let forget =
+            Cli::try_parse_from(["chan", "workspace", "forget", "/srv/notes", "--on", "lab"])
+                .unwrap();
+        let Command::Workspace {
+            action: WorkspaceAction::Forget { args },
+        } = forget.command
+        else {
+            panic!("expected workspace forget");
+        };
+        assert_eq!(args.on.as_deref(), Some("lab"));
+        for argv in [
+            &["chan", "serve", "/srv/notes", "--on", "lab"][..],
+            &["chan", "workspace", "serve", "/srv/notes", "--on", "lab"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let on = match cli.command {
+                Command::Serve { args } => args.on,
+                Command::Workspace {
+                    action: WorkspaceAction::Serve { args },
+                } => args.on,
+                other => panic!("expected serve, got {other:?}"),
+            };
+            assert_eq!(on.as_deref(), Some("lab"));
+        }
+        // `--on` adds no verb and no `--remove`: the pinned elevation holds.
+        assert!(Cli::try_parse_from(["chan", "close", "/tmp/x", "--remove"]).is_err());
+    }
+
+    #[test]
+    fn remote_workspace_paths_must_be_absolute_on_that_machine() {
+        assert!(remote_path_is_absolute("/srv/notes"));
+        assert!(remote_path_is_absolute(r"C:\Users\me\proj"));
+        assert!(remote_path_is_absolute("C:/Users/me/proj"));
+        assert!(remote_path_is_absolute(r"\\server\share\proj"));
+        assert!(!remote_path_is_absolute("notes"));
+        assert!(!remote_path_is_absolute("./notes"));
+        assert!(!remote_path_is_absolute("C:notes"));
+        let err = refuse_relative_remote_path("notes", "lab")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
     fn serve_devserver_selector_parses_bare_port_and_url() {
         let parse = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
             Command::Serve { args } => (args.path, args.devserver),
@@ -11249,8 +11586,8 @@ mod tests {
         let cli = Cli::try_parse_from(["chan", "workspace", "forget", "/tmp/workspace"]).unwrap();
         match cli.command {
             Command::Workspace {
-                action: WorkspaceAction::Forget { path },
-            } => assert_eq!(path, PathBuf::from("/tmp/workspace")),
+                action: WorkspaceAction::Forget { args },
+            } => assert_eq!(args.path, PathBuf::from("/tmp/workspace")),
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(Cli::try_parse_from(["chan", "workspace", "rm", "/tmp/workspace"]).is_err());
@@ -11259,8 +11596,8 @@ mod tests {
         let cli = Cli::try_parse_from(["chan", "workspace", "close", "/tmp/workspace"]).unwrap();
         match cli.command {
             Command::Workspace {
-                action: WorkspaceAction::Close { path },
-            } => assert_eq!(path, PathBuf::from("/tmp/workspace")),
+                action: WorkspaceAction::Close { args },
+            } => assert_eq!(args.path, PathBuf::from("/tmp/workspace")),
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(Cli::try_parse_from(["chan", "close", "/tmp/workspace"]).is_ok());

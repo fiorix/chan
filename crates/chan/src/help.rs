@@ -22,6 +22,14 @@ with its metadata intact. When you are done with a workspace on this
 machine, `chan workspace forget` runs this same teardown and then also
 drops the registry entry and chan's metadata for it.
 
+With --on TARGET the same verb reaches a workspace on a REGISTERED
+remote devserver through the desktop app: TARGET is the devserver's
+URL or launcher label as `chan devserver ls` shows it, PATH is the
+workspace's path on that machine, and the devserver unmounts it and
+keeps it registered there. The desktop resolves both and refuses
+ambiguity; a devserver that is registered but not connected points at
+`chan devserver connect`.
+
 This is a library command, not a window command: it needs no chan
 terminal and no workspace window.
 "#;
@@ -36,6 +44,10 @@ Close something nothing is serving -- still a success:
   chan close ~/archive
   # (not served: /home/you/archive)
 
+Unmount a workspace on a registered remote devserver (label `lab`):
+  chan close /srv/notes --on lab
+  # closed: /srv/notes (on lab)
+
 SIDE EFFECTS:
 Ends the dedicated serve process (or unmounts the tenant on a host) and
 releases the workspace's writer lock, so its terminals go away with it.
@@ -47,7 +59,9 @@ A chan-desktop or devserver host REFUSES to close a workspace that
 still has live terminals: the command fails with "refusing to close
 PATH: N live terminal(s)" and exits nonzero. There is no --force; close
 the terminals first. A dedicated standalone serve has no such guard and
-shuts down with its terminals.
+shuts down with its terminals. The --on arm carries the same refusal,
+coming from the remote devserver's own guard; it needs the chan desktop
+app running and the devserver connected.
 
 SEE ALSO:
 `chan serve` to serve it again, `chan ps` to see what is served, `chan
@@ -69,6 +83,13 @@ A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. An unreachable
 holder is treated as closed and the removal proceeds.
 
+With --on TARGET the verb reaches a workspace on a REGISTERED remote
+devserver through the desktop app: TARGET is the devserver's URL or
+launcher label as `chan devserver ls` shows it, PATH is the workspace's
+path on that machine, and the devserver unmounts it and drops its own
+registration; your local registry is untouched, and so are the files on
+that machine. The live-terminal refusal is the devserver's own.
+
 This is a library command, not a window command: it needs no chan
 terminal and no workspace window.
 "#;
@@ -84,6 +105,10 @@ Forget something nothing is serving:
   chan workspace forget ~/archive
   # (not served: /home/you/archive)
   # unregistered: /home/you/archive
+
+Forget a workspace on a registered remote devserver (label `lab`):
+  chan workspace forget /srv/notes --on lab
+  # forgot: /srv/notes on lab. The files on that machine are untouched.
 
 SIDE EFFECTS:
 Tears down the serve like `chan close`, then drops the registry entry
@@ -228,7 +253,10 @@ without dialing it, `ls` lists the rows with their connection state,
 `connect` / `disconnect` drive the dial from the CLI (sign-in and
 trust prompts stay in the launcher), and `forget` removes a row, the
 undo of register. These verbs need the chan desktop app running on
-this machine.
+this machine. A connected devserver's WORKSPACES are managed by the
+workspace lifecycle verbs with --on TARGET (`chan workspace serve`,
+`chan close`, `chan workspace forget`), where TARGET is the URL or
+label `ls` shows.
 
 The devserver speaks plain HTTP with a bearer token and no TLS, so
 keep the bind on loopback and reach a remote one over `ssh -L`. The
@@ -365,6 +393,10 @@ Choose one of several local devservers explicitly:
   chan serve --devserver=9999 ~/notes
   chan serve --devserver=http://127.0.0.1:9999 ~/notes
 
+Mount a workspace on a registered, connected remote devserver:
+  chan serve /srv/notes --on lab
+  # served /srv/notes on devserver lab (mounted at /notes-1a2b3c).
+
 SIDE EFFECTS:
 Creates the workspace root when missing, and the standalone path
 registers it in the workspace library. The directory is created only
@@ -393,7 +425,11 @@ register` and is refused here with that pointer. --devserver from
 inside a devserver shell is refused (no nesting); omit the flag to
 register with the current one. If another process already holds the
 workspace lock, the serve fails and points you at `chan serve
---devserver`.
+--devserver`. --on and --devserver are distinct flags by design: a
+port-shaped --on value and a label-shaped --devserver value are both
+refused with a pointer at the other. --on takes no local serve flag,
+needs the chan desktop app running with that devserver connected, and
+its PATH is a path on that machine (absolute).
 
 SEE ALSO:
 `chan close` to tear a server down, `chan ps` to see what is served, `chan
