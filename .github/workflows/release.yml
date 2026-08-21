@@ -129,9 +129,11 @@ jobs:
         # (three release-day stalls on this step class, each cleared only by
         # a rerun on a fresh runner). Fetches carry a socket timeout and
         # retries so a dead mirror errors instead of blocking, one failure
-        # re-points apt at archive.ubuntu.com for a single retry, and the
-        # step deadline turns any residual hang into a fast red that
-        # `gh run rerun --failed` can clear.
+        # drops the runner image's azure mirror (the apt-mirrors.txt file
+        # current images use, or the sources lists older images wrote) for a
+        # single retry against archive.ubuntu.com, and the step deadline
+        # turns any residual hang into a fast red that `gh run rerun
+        # --failed` can clear.
         timeout-minutes: 15
         run: |
           apt_fetch() {
@@ -147,7 +149,16 @@ jobs:
               patchelf
           }
           if ! install_deps; then
-            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            # Current runner images route apt through
+            # mirror+file:/etc/apt/apt-mirrors.txt with azure.archive first;
+            # drop that line so apt falls to archive.ubuntu.com. Older images
+            # named the azure mirror in the sources lists themselves.
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            fi
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] && sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
+            done
             install_deps
           fi
 
@@ -358,7 +369,16 @@ jobs:
               file
           }
           if ! install_deps; then
-            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            # Current runner images route apt through
+            # mirror+file:/etc/apt/apt-mirrors.txt with azure.archive first;
+            # drop that line so apt falls to archive.ubuntu.com. Older images
+            # named the azure mirror in the sources lists themselves.
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            fi
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] && sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
+            done
             install_deps
           fi
 
