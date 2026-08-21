@@ -58,7 +58,9 @@
       await restartDesktopAfterUpdate();
     } catch (e) {
       updateRestarting = false;
-      updateError = (e as Error).message;
+      // A Tauri command's Err(String) rejects with the bare string, not an
+      // Error (the Windows arm answers "no downloaded update is staged").
+      updateError = e instanceof Error ? e.message : String(e);
     }
   }
 
