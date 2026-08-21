@@ -204,3 +204,81 @@ describe("launcher root", () => {
     expect(controlAttention.libs[libId]).toBe(true);
   });
 });
+
+// The update-ready dialog is the only surface a user sees for the desktop
+// updater, so both copy branches and the restart outcome are pinned through
+// a stubbed Tauri bridge: `installed:false` (the Windows staged download) and
+// the bare-string rejection a Tauri `Err(String)` produces.
+describe("launcher update dialog", () => {
+  type Handler = (event: { payload: unknown }) => void;
+  let target: HTMLElement | null = null;
+  let app: Record<string, unknown> | null = null;
+  let handlers: Record<string, Handler> = {};
+
+  function stubTauri(invoke: (cmd: string) => Promise<unknown>): void {
+    handlers = {};
+    Object.defineProperty(window, "__TAURI__", {
+      configurable: true,
+      value: {
+        event: {
+          listen: (name: string, cb: Handler) => {
+            handlers[name] = cb;
+            return Promise.resolve(() => {});
+          },
+        },
+        core: { invoke: (cmd: string) => invoke(cmd) },
+      },
+    });
+  }
+
+  afterEach(() => {
+    if (app) unmount(app);
+    target?.remove();
+    target = null;
+    app = null;
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    clearNotices();
+  });
+
+  async function mountWithUpdate(payload: { version: string; installed?: boolean }) {
+    target = document.createElement("div");
+    document.body.appendChild(target);
+    app = mount(App, { target });
+    await settle();
+    flushSync();
+    const ready = handlers["desktop-update-ready"];
+    expect(ready, "the launcher subscribes desktop-update-ready").toBeTruthy();
+    ready!({ payload });
+    flushSync();
+  }
+
+  it("installed:false shows the staged copy and surfaces a bare-string rejection", async () => {
+    stubTauri(() =>
+      Promise.reject("no downloaded update is staged; relaunch chan-desktop to check again"),
+    );
+    await mountWithUpdate({ version: "0.95.0", installed: false });
+    const copy = target!.querySelector(".update-copy")?.textContent ?? "";
+    expect(copy).toContain("Restart now to install it.");
+    expect(copy).not.toContain("apply on the next launch");
+    const restart = target!.querySelector(".update-actions button.primary") as HTMLButtonElement;
+    restart.click();
+    await settle();
+    flushSync();
+    const alert = target!.querySelector(".update-error[role=\"alert\"]")?.textContent ?? "";
+    expect(alert).toContain("no downloaded update is staged");
+    expect(restart.disabled).toBe(false);
+  });
+
+  it("a payload without `installed` keeps the installed copy and restarts", async () => {
+    stubTauri(() => Promise.resolve(undefined));
+    await mountWithUpdate({ version: "0.95.0" });
+    const copy = target!.querySelector(".update-copy")?.textContent ?? "";
+    expect(copy).toContain("will apply on the next launch.");
+    const restart = target!.querySelector(".update-actions button.primary") as HTMLButtonElement;
+    restart.click();
+    await settle();
+    flushSync();
+    expect(target!.querySelector(".update-error")).toBeNull();
+    expect(restart.disabled).toBe(true);
+  });
+});
