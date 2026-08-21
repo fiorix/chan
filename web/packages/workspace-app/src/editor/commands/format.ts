@@ -10,6 +10,7 @@
 // component.
 
 import { syntaxTree } from "@codemirror/language";
+import { enclosingFence } from "./fence";
 import type { EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
@@ -379,29 +380,6 @@ function isFenceNodeClosed(
   // closer.
   if (fenceEndLine.from <= fence.from) return false;
   return CLOSER_FENCE_RE.test(fenceEndLine.text);
-}
-
-/// Walk syntax-tree ancestors at `pos` looking for a FencedCode
-/// node. Tries side=-1 first (preferred for end-of-doc carets) and
-/// falls back to side=1 so a caret sitting just before an opener
-/// fence still resolves into it. Centralizes the boundary handling
-/// so callers don't need to repeat the side trick. Exported for the
-/// list keymap, whose regex cannot tell a bullet from a YAML line in
-/// a code block.
-export function enclosingFence(
-  state: import("@codemirror/state").EditorState,
-  pos: number,
-): import("@lezer/common").SyntaxNode | null {
-  for (const side of [-1, 1] as const) {
-    let n: import("@lezer/common").SyntaxNode | null = syntaxTree(
-      state,
-    ).resolveInner(pos, side);
-    while (n) {
-      if (n.name === "FencedCode") return n;
-      n = n.parent;
-    }
-  }
-  return null;
 }
 
 /// Tab inside a fenced code block: insert a literal `\t` at the

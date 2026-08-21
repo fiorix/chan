@@ -894,7 +894,7 @@ describe("window commands", () => {
           "upload_files_native",
           expect.objectContaining({
             url: expect.stringContaining("/api/fs/upload?root=filesystem"),
-            target: { dir: "notes", multiple: true },
+            target: { dir: "notes", multiple: true, root: "filesystem" },
           }),
         ),
       );

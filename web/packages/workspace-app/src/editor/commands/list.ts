@@ -13,7 +13,7 @@
 
 import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { enclosingFence } from "./format";
+import { enclosingFence } from "./fence";
 
 /// Anchored at line start. Captures:
 ///   1: leading whitespace (indent)
