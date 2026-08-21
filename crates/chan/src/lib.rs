@@ -11379,12 +11379,70 @@ mod tests {
             // index download-model / disable-semantic
             ["chan", "workspace", "index", "d"].as_slice(),
         ] {
-            assert!(
-                Cli::try_parse_from(argv).is_err(),
+            // An ambiguity is refused as an unknown subcommand (clap never
+            // guesses among several matches). The kind assertion tells a
+            // refusal from a wrong guess, which `is_err()` could not: a
+            // guess toward the arg-less candidate is an error too.
+            let err = Cli::try_parse_from(argv).expect_err(&format!(
                 "ambiguous prefix `{}` must be rejected, not guessed",
+                argv.join(" "),
+            ));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "ambiguous prefix `{}`: {err}",
                 argv.join(" "),
             );
         }
+    }
+
+    #[test]
+    fn every_subcommand_node_infers_prefixes() {
+        // clap does not propagate `infer_subcommands` to children, so the
+        // grammar holds only while every subcommand-bearing node sets it
+        // itself. The setting is not readable from the built tree, so this
+        // walk proves it behaviourally: at every node, the shortest prefix
+        // that singles out each visible child (the auto `help` counts as a
+        // sibling) must resolve, which it cannot on a node without
+        // inference. A child whose every prefix is shared with a sibling
+        // resolves only by its exact name and proves nothing; it is skipped.
+        fn unique_prefix(name: &str, siblings: &[String]) -> Option<String> {
+            (1..name.len()).find_map(|n| {
+                let prefix = &name[..n];
+                (siblings.iter().filter(|s| s.starts_with(prefix)).count() == 1)
+                    .then(|| prefix.to_string())
+            })
+        }
+        fn walk(cmd: &clap::Command, path: &[String]) {
+            let names: Vec<String> = cmd
+                .get_subcommands()
+                .map(|s| s.get_name().to_string())
+                .chain(std::iter::once("help".to_string()))
+                .collect();
+            for sub in cmd.get_subcommands() {
+                if sub.is_hide_set() {
+                    continue;
+                }
+                if let Some(prefix) = unique_prefix(sub.get_name(), &names) {
+                    let mut argv: Vec<String> = vec!["chan".into()];
+                    argv.extend(path.iter().cloned());
+                    argv.push(prefix.clone());
+                    if let Err(err) = Cli::try_parse_from(&argv) {
+                        assert_ne!(
+                            err.kind(),
+                            clap::error::ErrorKind::InvalidSubcommand,
+                            "`{}` does not resolve the prefix `{prefix}` of `{}`: {err}",
+                            argv.join(" "),
+                            sub.get_name()
+                        );
+                    }
+                }
+                let mut sub_path = path.to_vec();
+                sub_path.push(sub.get_name().to_string());
+                walk(sub, &sub_path);
+            }
+        }
+        walk(&Cli::command(), &[]);
     }
 
     #[test]
