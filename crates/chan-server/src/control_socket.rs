@@ -4098,28 +4098,31 @@ fn upload_path_standalone(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let dir = if std::fs::metadata(requested)
-        .map(|m| m.is_dir())
-        .unwrap_or(false)
-    {
-        requested.to_path_buf()
-    } else {
-        requested
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| requested.to_path_buf())
-    };
     // The CLI absolutizes lexically, so `cs upload .` arrives with a literal
     // trailing `.` component (and `..` inputs keep theirs). The desktop's
-    // native-transfer validator refuses any `.` / `..` part, so resolve to
-    // the canonical directory before signalling the window. The lexical form
-    // survives only when the directory cannot be resolved (a vanished dir, a
-    // missing parent); the transfer route's writability pre-flight owns that
-    // failure.
-    let dir = dir
-        .canonicalize()
-        .map(|c| chan_workspace::paths::strip_verbatim_prefix(&c))
-        .unwrap_or(dir);
+    // native-transfer validator refuses any `.` / `..` part, so normalize
+    // them away lexically before anything else. Lexically, not via
+    // canonicalize: a symlinked destination keeps the name the user typed
+    // (the transfer lane follows directory symlinks as any write would), and
+    // a not-yet-existing directory still yields a clean path for the
+    // transfer route's writability pre-flight to refuse. A trailing `.` or
+    // separator says "this is the directory" even when it does not exist yet
+    // (`Path::parent` would otherwise quietly aim at its parent).
+    let raw = requested.as_os_str().to_string_lossy();
+    let names_a_dir = raw.ends_with(['/', '\\'])
+        || raw.ends_with("/.")
+        || raw.ends_with("\\.")
+        || raw.as_ref() == ".";
+    let target = chan_workspace::paths::lexical_normalize(requested);
+    let dir = if names_a_dir
+        || std::fs::metadata(&target)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+    {
+        target
+    } else {
+        target.parent().map(Path::to_path_buf).unwrap_or(target)
+    };
     send_window_command(
         window_id,
         WindowCommand::Upload {
@@ -4143,14 +4146,12 @@ fn download_path_standalone(
 ) -> Result<String, String> {
     let meta = std::fs::metadata(requested)
         .map_err(|e| format!("cannot access {}: {e}", requested.display()))?;
-    // Same lexical-`.` hazard as `upload_path_standalone`: the SPA hands this
-    // value to the desktop's native-transfer validator, which refuses any
-    // `.` / `..` part. The stat above proved the path exists, so resolution
-    // only fails on a race; the lexical form is the fallback.
-    let requested = requested
-        .canonicalize()
-        .map(|c| chan_workspace::paths::strip_verbatim_prefix(&c))
-        .unwrap_or_else(|_| requested.to_path_buf());
+    // Same lexical-`.` hazard as `upload_path_standalone`, with one more
+    // reason to stay lexical: the SPA names the saved download after the
+    // path's last segment, so resolving a symlink would rename the file the
+    // user asked for (`~/latest.log` -> `2026-08-21.log`) and turn `<dir>/.`
+    // into a hidden `..tar`; the normalized form keeps the typed name.
+    let requested = chan_workspace::paths::lexical_normalize(requested);
     send_window_command(
         window_id,
         WindowCommand::Download {
@@ -5729,8 +5730,8 @@ mod tests {
         // standalone leg must signal the window with the resolved directory.
         let dir = tempfile::tempdir().unwrap();
         let dotted = dir.path().join(".");
-        let canonical = dir.path().canonicalize().unwrap();
-        let canonical_str = canonical.to_string_lossy().to_string();
+        // Lexical, not canonical: the typed directory minus the dot.
+        let canonical_str = dir.path().to_string_lossy().to_string();
         let stripped = canonical_str.trim_start_matches('/').to_string();
 
         let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
@@ -5775,6 +5776,97 @@ mod tests {
         }
         let frame = rx.try_recv().expect("download window command broadcast");
         assert!(frame.contains(&stripped), "frame: {frame}");
+        assert!(!frame.contains("/.\""), "dot component survived: {frame}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_transfers_keep_a_symlinked_name_and_normalize_parent_dots() {
+        // A symlinked destination is signalled under the name the user typed
+        // (the download is saved by that name), `..` components are resolved
+        // lexically, and a missing parent still yields a clean path for the
+        // transfer route to refuse on its own terms.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("f.txt"), b"x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
+        let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
+        let _window = ctx
+            .session_registry
+            .join("terminal-win-0", true, None)
+            .guard;
+        let mut rx = ctx.events_tx.subscribe();
+
+        let link_str = link.to_string_lossy().to_string();
+        let real_str = real.to_string_lossy().to_string();
+        let response = handle_request(
+            ControlRequest::Download {
+                window_id: "terminal-win-0".into(),
+                path: link.join("f.txt"),
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(response, ControlResponse::Ok { .. }),
+            "{response:?}"
+        );
+        let frame = rx.try_recv().expect("download window command broadcast");
+        assert!(
+            frame.contains(&format!("{}/f.txt", link_str.trim_start_matches('/'))),
+            "frame: {frame}"
+        );
+        assert!(
+            !frame.contains(&format!("{}/f.txt", real_str.trim_start_matches('/'))),
+            "frame: {frame}"
+        );
+
+        let response = handle_request(
+            ControlRequest::Upload {
+                window_id: "terminal-win-0".into(),
+                path: dir.path().join("real").join("sub").join(".."),
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(response, ControlResponse::Ok { .. }),
+            "{response:?}"
+        );
+        let frame = rx.try_recv().expect("upload window command broadcast");
+        assert!(
+            frame.contains(&real_str.trim_start_matches('/').to_string()),
+            "frame: {frame}"
+        );
+        assert!(
+            !frame.contains("/..\""),
+            "parent component survived: {frame}"
+        );
+
+        let response = handle_request(
+            ControlRequest::Upload {
+                window_id: "terminal-win-0".into(),
+                path: dir.path().join("nope").join("."),
+            },
+            &ctx,
+        )
+        .await;
+        assert!(
+            matches!(response, ControlResponse::Ok { .. }),
+            "{response:?}"
+        );
+        let frame = rx.try_recv().expect("upload window command broadcast");
+        assert!(
+            frame.contains(&format!(
+                "{}/nope",
+                dir.path().to_string_lossy().trim_start_matches('/')
+            )),
+            "frame: {frame}"
+        );
         assert!(!frame.contains("/.\""), "dot component survived: {frame}");
     }
 

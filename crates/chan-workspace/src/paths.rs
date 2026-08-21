@@ -190,6 +190,26 @@ pub fn strip_verbatim_prefix(p: &Path) -> PathBuf {
     }
 }
 
+/// Resolve `.` and `..` components lexically, without touching the
+/// filesystem: a not-yet-existing path still normalizes, and a symlink keeps
+/// the name the user typed (the filesystem is consulted only where a
+/// canonical identity is wanted, see [`canonicalize_normalized`]). A `..`
+/// that would climb above the accumulated path pops nothing more than the
+/// root, so `/..` stays `/`. Prefix and root components pass through.
+pub fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// sha256 of an already-canonicalized path string → its first 8 hex chars.
 /// Single-sourced so the metadata key and the mount prefix derive the suffix
 /// identically.
@@ -428,6 +448,27 @@ pub fn detected_cloud_drives() -> Vec<DetectedCloud> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lexical_normalize_resolves_dots_without_the_filesystem() {
+        use super::lexical_normalize;
+        use std::path::{Path, PathBuf};
+        assert_eq!(
+            lexical_normalize(Path::new("/a/./b/../c/.")),
+            PathBuf::from("/a/c")
+        );
+        assert_eq!(lexical_normalize(Path::new("/a/b/..")), PathBuf::from("/a"));
+        assert_eq!(lexical_normalize(Path::new("/..")), PathBuf::from("/"));
+        assert_eq!(
+            lexical_normalize(Path::new("/a/nope/.")),
+            PathBuf::from("/a/nope")
+        );
+        assert_eq!(lexical_normalize(Path::new("a/../b")), PathBuf::from("b"));
+        assert_eq!(
+            lexical_normalize(Path::new("/plain")),
+            PathBuf::from("/plain")
+        );
+    }
+
     use super::*;
 
     #[cfg(windows)]

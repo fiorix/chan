@@ -2408,7 +2408,7 @@ fn resolve_team_dir_in(dir: &str, workspace: Option<&str>, cwd: &Path) -> Result
     } else {
         canonical_or(cwd).join(input)
     };
-    let normalized = lexical_normalize(&abs);
+    let normalized = chan_workspace::paths::lexical_normalize(&abs);
     let rel = normalized.strip_prefix(&ws_root).map_err(|_| {
         anyhow::anyhow!(
             "team directory {trimmed:?} is outside the workspace ({})",
@@ -2428,23 +2428,6 @@ fn resolve_team_dir_in(dir: &str, workspace: Option<&str>, cwd: &Path) -> Result
 /// `\\?\` prefix so the outside-the-workspace refusal prints a plain path.
 fn canonical_or(path: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(path)
-}
-
-/// Resolve `.` and `..` components lexically, without touching the
-/// filesystem, so a not-yet-existing `team new` dir still normalizes. A `..`
-/// that would climb above the accumulated path just pops the last component.
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Join a relative path's `Normal` components with `/` for the workspace-
