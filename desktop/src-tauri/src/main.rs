@@ -269,6 +269,16 @@ pub struct AppState {
     /// restart from the launcher's dialog (see [`PendingUpdate`]).
     #[cfg(windows)]
     pub pending_update: Mutex<Option<PendingUpdate>>,
+    /// Serializes the updater's download/install across its two drivers, the
+    /// on-launch check and a handoff `chan upgrade`. Both can run against the
+    /// same image at once (a `chan upgrade` that launched the desktop arrives
+    /// while the on-launch check is already downloading), and the plugin's
+    /// in-place replace of the AppImage / staged installer must not race.
+    pub update_gate: tokio::sync::Mutex<()>,
+    /// The version the on-launch check already installed on disk (macOS, the
+    /// AppImage), so a handoff `chan upgrade` that arrives afterwards relaunches
+    /// into it instead of downloading the same payload again.
+    pub update_installed_version: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -312,6 +322,8 @@ impl AppState {
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
+            update_gate: tokio::sync::Mutex::new(()),
+            update_installed_version: Mutex::new(None),
         }
     }
 
@@ -3694,6 +3706,20 @@ fn windows_updater_refusal(installed: bool) -> Option<String> {
     )
 }
 
+/// Windows: a live self-managed devserver daemon (`chan devserver start
+/// --service=chan`) runs from the install's own `chan.exe`, which the NSIS
+/// installer cannot overwrite while that image is mapped, so both update
+/// drivers refuse until it is stopped. Keyed on the pid so a test can flip it.
+#[cfg(any(windows, test))]
+fn windows_devserver_daemon_refusal(daemon_pid: Option<u32>) -> Option<String> {
+    daemon_pid.map(|pid| {
+        format!(
+            "a self-managed devserver (pid {pid}) is running from this install and holds its \
+             chan.exe; stop it with `chan devserver stop`, then retry the update"
+        )
+    })
+}
+
 /// The Linux half of [`desktop_updater_refusal`], keyed on the AppImage path
 /// so a test can flip it.
 #[cfg(any(target_os = "linux", test))]
@@ -3768,6 +3794,17 @@ async fn desktop_handle_upgrade(
             // its `UpgradeStarted` ack.
             let app_bg = app.clone();
             tauri::async_runtime::spawn(async move {
+                let state = Arc::clone(&app_bg.state::<Arc<AppState>>());
+                // Serialize with the on-launch check; when it already installed
+                // this version, relaunching is all that is left to do.
+                let _gate = state.update_gate.lock().await;
+                if state.update_installed_version.lock().unwrap().as_deref()
+                    == Some(version.as_str())
+                {
+                    tracing::info!(%version, "update already installed by the on-launch check; relaunching");
+                    let _ = begin_normal_shutdown(app_bg, ShutdownAction::Restart);
+                    return;
+                }
                 match update
                     .download_and_install(|_chunk, _total| {}, || {})
                     .await
@@ -3783,8 +3820,9 @@ async fn desktop_handle_upgrade(
                                 tracing::warn!(error = %e, "re-affirming bin shims after update failed")
                             }
                         }
+                        *state.update_installed_version.lock().unwrap() = Some(version.clone());
                         tracing::info!(%version, "chan-desktop update installed; relaunching");
-                        begin_normal_shutdown(app_bg, ShutdownAction::Restart);
+                        let _ = begin_normal_shutdown(app_bg, ShutdownAction::Restart);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "chan-desktop update failed");
@@ -3828,6 +3866,9 @@ async fn desktop_handle_upgrade(
     if let Some(message) = desktop_updater_refusal() {
         return Response::Error { message };
     }
+    if let Some(message) = windows_devserver_daemon_refusal(chan::self_managed_devserver_pid()) {
+        return Response::Error { message };
+    }
 
     let updater = match app.updater() {
         Ok(u) => u,
@@ -3849,13 +3890,38 @@ async fn desktop_handle_upgrade(
             }
             let app_bg = app.clone();
             tauri::async_runtime::spawn(async move {
-                match update.download(|_chunk, _total| {}, || {}).await {
+                let state = Arc::clone(&app_bg.state::<Arc<AppState>>());
+                // Serialize with the on-launch check, and reuse the bytes it
+                // staged for this same version instead of downloading twice.
+                let _gate = state.update_gate.lock().await;
+                let staged = state
+                    .pending_update
+                    .lock()
+                    .unwrap()
+                    .take_if(|p| p.version == version)
+                    .map(|p| p.bytes);
+                let bytes = match staged {
+                    Some(bytes) => {
+                        tracing::info!(%version, "installing the update staged by the on-launch check");
+                        Ok(bytes)
+                    }
+                    None => update.download(|_chunk, _total| {}, || {}).await,
+                };
+                match bytes {
                     Ok(bytes) => {
                         tracing::info!(%version, "chan-desktop update downloaded; installing and relaunching");
-                        begin_normal_shutdown(
-                            app_bg,
+                        if begin_normal_shutdown(
+                            app_bg.clone(),
                             ShutdownAction::InstallUpdate { update, bytes },
-                        );
+                        )
+                        .is_err()
+                        {
+                            emit_system_notice(
+                                &app_bg,
+                                "warning",
+                                "chan-desktop update not installed: a shutdown was already in progress; relaunch and run `chan upgrade` again",
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "chan-desktop update failed");
@@ -3918,6 +3984,10 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
             Ok(Some(update)) => {
                 let version = update.version.clone();
                 tracing::info!(%version, "on-launch update available; downloading");
+                let state = Arc::clone(&app.state::<Arc<AppState>>());
+                // Serialize with a handoff `chan upgrade` (see
+                // `AppState::update_gate`): only one driver replaces the image.
+                let _gate = state.update_gate.lock().await;
                 match update
                     .download_and_install(|_chunk, _total| {}, || {})
                     .await
@@ -3934,6 +4004,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
                                 tracing::warn!(error = %e, "re-affirming bin shims after update failed")
                             }
                         }
+                        *state.update_installed_version.lock().unwrap() = Some(version.clone());
                         tracing::info!(%version, "on-launch update installed; notifying launcher");
                         notify_desktop_update_ready(&app, &version, true);
                     }
@@ -3978,9 +4049,12 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
             Ok(Some(update)) => {
                 let version = update.version.clone();
                 tracing::info!(%version, "on-launch update available; downloading");
+                let state = Arc::clone(&app.state::<Arc<AppState>>());
+                // Serialize with a handoff `chan upgrade` (see
+                // `AppState::update_gate`): one driver stages or installs.
+                let _gate = state.update_gate.lock().await;
                 match update.download(|_chunk, _total| {}, || {}).await {
                     Ok(bytes) => {
-                        let state = app.state::<Arc<AppState>>();
                         *state.pending_update.lock().unwrap() = Some(PendingUpdate {
                             update,
                             bytes,
@@ -4035,7 +4109,7 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed:
 #[tauri::command]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn restart_desktop_after_update(app: tauri::AppHandle) {
-    begin_normal_shutdown(app, ShutdownAction::Restart);
+    let _ = begin_normal_shutdown(app, ShutdownAction::Restart);
 }
 
 /// Windows: the dialog's restart installs the staged update. The drain runs
@@ -4043,12 +4117,11 @@ fn restart_desktop_after_update(app: tauri::AppHandle) {
 #[tauri::command]
 #[cfg(windows)]
 fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
-    let pending = app
-        .state::<Arc<AppState>>()
-        .pending_update
-        .lock()
-        .unwrap()
-        .take();
+    if let Some(message) = windows_devserver_daemon_refusal(chan::self_managed_devserver_pid()) {
+        return Err(message);
+    }
+    let state = Arc::clone(&app.state::<Arc<AppState>>());
+    let pending = state.pending_update.lock().unwrap().take();
     let Some(PendingUpdate {
         update,
         bytes,
@@ -4060,8 +4133,24 @@ fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
         );
     };
     tracing::info!(%version, "installing the staged update and relaunching");
-    begin_normal_shutdown(app, ShutdownAction::InstallUpdate { update, bytes });
-    Ok(())
+    match begin_normal_shutdown(app, ShutdownAction::InstallUpdate { update, bytes }) {
+        Ok(()) => Ok(()),
+        // A quit or an earlier install is already draining: keep the staged
+        // bytes so the dialog can retry once it settles, and say so.
+        Err(ShutdownAction::InstallUpdate { update, bytes }) => {
+            *state.pending_update.lock().unwrap() = Some(PendingUpdate {
+                update,
+                bytes,
+                version,
+            });
+            Err(
+                "chan-desktop is already shutting down; the staged update was not installed, \
+                 relaunch and restart again"
+                    .to_string(),
+            )
+        }
+        Err(_) => Err("chan-desktop is already shutting down".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -6194,7 +6283,7 @@ fn main() {
                     .count();
                 if open == 0 {
                     api.prevent_exit();
-                    begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0));
+                    let _ = begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0));
                     return;
                 }
                 api.prevent_exit();
@@ -7580,13 +7669,19 @@ enum ShutdownAction {
 /// Start the one normal-exit drain. Snapshot the mounted overlay before any
 /// tenant is removed, await every embedded tenant, then perform the process
 /// action. Synchronous Tauri hooks call this and return; the async task owns the
-/// remaining state.
-fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
+/// remaining state. A second request while a drain is in flight is refused and
+/// handed back, so a caller holding something valuable (the Windows staged
+/// installer) can keep it rather than lose it silently.
+fn begin_normal_shutdown(
+    app: tauri::AppHandle,
+    action: ShutdownAction,
+) -> Result<(), ShutdownAction> {
     use std::sync::atomic::Ordering;
 
     let state = Arc::clone(&app.state::<Arc<AppState>>());
     if state.shutdown_started.swap(true, Ordering::SeqCst) {
-        return;
+        tracing::warn!("shutdown already in progress; a second shutdown request was not applied");
+        return Err(action);
     }
     state.quit_confirmed.store(true, Ordering::SeqCst);
     persist_workspaces(&state);
@@ -7598,6 +7693,14 @@ fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
             ShutdownAction::Restart => app.restart(),
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
+                // The plugin exits the process itself on success, so the
+                // `RunEvent::Exit` geometry capture never runs: take it here.
+                capture_launcher_geometry(&app);
+                tracing::info!(
+                    "handing the verified installer to the updater; it runs passively and relaunches \
+                     chan-desktop. If nothing relaunches, the staged installer is under %TEMP% in \
+                     the updater's Chan-<version> directory; run it by hand"
+                );
                 if let Err(e) = update.install(bytes) {
                     // The tenants are already drained, so the current version
                     // is relaunched rather than left half-stopped.
@@ -7612,6 +7715,7 @@ fn begin_normal_shutdown(app: tauri::AppHandle, action: ShutdownAction) {
             }
         }
     });
+    Ok(())
 }
 
 /// Quit, asking first while ANY SPA window is alive -- visible or
@@ -7636,7 +7740,7 @@ fn request_quit(app: &tauri::AppHandle) {
         .count();
     if open == 0 {
         capture_launcher_geometry(app);
-        begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
+        let _ = begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
         return;
     }
     // One dialog at a time: a second Cmd+Q while the ask is up must
@@ -7659,7 +7763,7 @@ fn request_quit(app: &tauri::AppHandle) {
         state.quit_prompt_open.store(false, Ordering::SeqCst);
         if quit {
             capture_launcher_geometry(&app_for_reply);
-            begin_normal_shutdown(app_for_reply, ShutdownAction::Exit(0));
+            let _ = begin_normal_shutdown(app_for_reply, ShutdownAction::Exit(0));
         }
     });
 }
@@ -8617,6 +8721,17 @@ mod tests {
         let reason = windows_updater_refusal(false).expect("a dev build refuses");
         assert!(reason.contains("installed chan-desktop"), "{reason}");
         assert!(!reason.contains("chan upgrade"), "{reason}");
+    }
+
+    #[test]
+    fn windows_update_refuses_while_a_self_managed_devserver_runs() {
+        // The daemon runs from the install's own chan.exe; the installer
+        // cannot overwrite a mapped image, so both drivers refuse with the
+        // pid and the command that clears it. No daemon: no refusal.
+        assert_eq!(windows_devserver_daemon_refusal(None), None);
+        let reason = windows_devserver_daemon_refusal(Some(4242)).expect("a live daemon refuses");
+        assert!(reason.contains("4242"), "{reason}");
+        assert!(reason.contains("chan devserver stop"), "{reason}");
     }
 
     #[test]
