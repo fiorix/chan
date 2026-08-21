@@ -44,7 +44,7 @@ pub(crate) fn resolve_devserver_target_in(
                     } else {
                         d.label.trim()
                     };
-                    format!("  {label}  {}", d.url)
+                    format!("  {label}  {}", config::display_devserver_url(&d.url))
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -189,6 +189,14 @@ mod tests {
         assert!(err.contains("more than one"), "{err}");
         assert!(err.contains("http://127.0.0.1:9000"), "{err}");
         assert!(err.contains("http://10.0.0.5:8787"), "{err}");
+        // A row an older desktop stored with its bearer never echoes it.
+        let rows = vec![
+            devserver("a", "http://127.0.0.1:8787/?t=secret", "box"),
+            devserver("b", "http://10.0.0.5:8787", "box"),
+        ];
+        let err = resolve_devserver_target_in(&rows, "box").unwrap_err();
+        assert!(!err.contains("secret"), "{err}");
+        assert!(err.contains("http://127.0.0.1:8787/"), "{err}");
         let err = resolve_devserver_target_in(&rows, "nope").unwrap_err();
         assert!(
             err.contains("no registered devserver matches \"nope\""),

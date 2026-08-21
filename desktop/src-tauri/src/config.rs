@@ -837,6 +837,36 @@ fn entry_from_devserver(
     }
 }
 
+/// A devserver URL without its `?t=` bearer, for storage and for every
+/// CLI-facing listing: the bearer rides the registry's write-only `token`
+/// field, and a URL the CLI registered as `http://host:port/?t=...` must
+/// not echo that token back through `chan devserver ls` or a refusal that
+/// lists candidates. Other query parameters and the path are kept.
+pub(crate) fn display_devserver_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Some((base, query)) = trimmed.split_once('?') else {
+        return trimmed.to_string();
+    };
+    let (query, fragment) = match query.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (query, None),
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("t=") && *pair != "t")
+        .collect();
+    let mut out = base.to_string();
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
 /// The identity devserver `add` dedupes on: scheme + dial host + port.
 /// Query and path are excluded on purpose: a stored URL may carry a `?t=`
 /// bearer that a later register of the same endpoint omits, and the two
@@ -1531,6 +1561,27 @@ fn config_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_devserver_url_drops_only_the_bearer() {
+        use super::display_devserver_url;
+        assert_eq!(
+            display_devserver_url("http://127.0.0.1:8787/?t=tok_abc"),
+            "http://127.0.0.1:8787/"
+        );
+        assert_eq!(
+            display_devserver_url("https://box.example.com:8787/?t=tok&x=1#f"),
+            "https://box.example.com:8787/?x=1#f"
+        );
+        assert_eq!(
+            display_devserver_url("http://127.0.0.1:8787"),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            display_devserver_url(" http://127.0.0.1:8787/?token=keep "),
+            "http://127.0.0.1:8787/?token=keep"
+        );
+    }
+
     use super::*;
     use chan_server::GatewayStatus;
 

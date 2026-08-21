@@ -3357,7 +3357,8 @@ fn list_devservers_from_handoff(
         .list()
         .into_iter()
         .map(|e| chan_server::handoff::DevserverSummary {
-            url: e.url,
+            // Rows registered by an older desktop may still carry `?t=`.
+            url: config::display_devserver_url(&e.url),
             label: e.label,
             status: match e.status {
                 chan_server::DevserverStatus::Disconnected => "disconnected",
@@ -3511,8 +3512,10 @@ fn register_devserver_from_handoff(
         Arc::clone(&state.devserver_feed),
         Arc::clone(&state.gateway_manager),
     );
+    // The bearer rides the write-only `token` field; the stored URL never
+    // carries it, so listings and the launcher header show the endpoint only.
     let entry = registry.add(DevserverInput {
-        url: Some(url),
+        url: Some(config::display_devserver_url(&url)),
         host,
         port,
         label: name,
