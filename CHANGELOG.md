@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Turning a workspace off on a gateway-registered devserver works from the launcher again.** The desktop's gateway arm sent both toggles to the devserver's launcher `/on` route, carrying the direct arm's `{on, force}` body that the route ignores, so an off re-mounted the workspace as a no-op: the launcher reported success, the row stayed on, and nothing surfaced as an error. The arm now posts the launcher's `/off` route with the `{force}` body its live-terminal guard reads, the same request the browser launcher sends, so the off lands and an unforced off of a workspace with live terminals still confirms and can be forced. `chan workspace close WS --on TARGET` against a gateway-registered devserver took the same arm and is fixed by the same change. Direct and ssh devservers were not affected.
+
 ## [v0.95.0] - 2026-08-21
 
 The Linux AppImage and the Windows install self-upgrade the way the macOS app does, a workspace on a registered remote devserver is managed from the CLI, and the chan tree speaks the cs prefix grammar.

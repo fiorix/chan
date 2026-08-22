@@ -2168,12 +2168,37 @@ fn workspace_on_url(host: &str, port: u16, prefix: &str) -> String {
     )
 }
 
+/// The launcher-route request the gateway arm sends to toggle a workspace. Over
+/// the gateway the desktop reaches the devserver's launcher API, where on and
+/// off are distinct routes: `/on` takes no body, and `/off` carries the `{force}`
+/// its live-terminal guard reads. Posting the direct arm's `{on, force}` shape
+/// to the launcher's `/on` re-mounts instead of unmounting, so the split is the
+/// contract, not a convenience. Returns the route path and the JSON body, `None`
+/// for the body-less on.
+fn launcher_workspace_toggle_request(
+    prefix: &str,
+    on: bool,
+    force: bool,
+) -> (String, Option<serde_json::Value>) {
+    let clean = prefix.trim_start_matches('/');
+    if on {
+        (format!("/api/library/workspaces/{clean}/on"), None)
+    } else {
+        (
+            format!("/api/library/workspaces/{clean}/off"),
+            Some(serde_json::json!({ "force": force })),
+        )
+    }
+}
+
 /// `POST /api/devserver/workspaces/{prefix}/on` `{on, force}`: mount (`on:true`)
 /// or unmount (`on:false`) a registered workspace WITHOUT forgetting it. Turning
 /// on mints a fresh tenant token; turning off clears it. Idempotent server-side.
 /// An unforced off is rejected with 409 + a live-terminal count when the tenant
 /// has open terminals -- surfaced as [`SetWorkspaceOnError::ActiveTerminals`] so
-/// the SPA can confirm-then-force; `force: true` overrides the guard.
+/// the SPA can confirm-then-force; `force: true` overrides the guard. The gateway
+/// arm speaks the devserver's launcher routes instead (see
+/// [`launcher_workspace_toggle_request`]); its `/off` answers the same 409 body.
 pub async fn set_workspace_on(
     conn: &DevserverConn,
     prefix: &str,
@@ -2181,14 +2206,11 @@ pub async fn set_workspace_on(
     force: bool,
 ) -> Result<(), SetWorkspaceOnError> {
     if let Some(gw) = &conn.gateway {
-        let clean = prefix.trim_start_matches('/');
-        let resp = gateway_request_json(
-            gw,
-            reqwest::Method::POST,
-            &format!("/api/library/workspaces/{clean}/on"),
-            &SetWorkspaceOnRequest { on, force },
-        )
-        .await
+        let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
+        let resp = match &body {
+            Some(body) => gateway_request_json(gw, reqwest::Method::POST, &path, body).await,
+            None => gateway_request(gw, reqwest::Method::POST, &path).await,
+        }
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             let active_terminals = resp
@@ -3004,6 +3026,21 @@ mod tests {
     }
 
     #[test]
+    fn launcher_workspace_toggle_request_splits_on_and_off_routes() {
+        let (path, body) = launcher_workspace_toggle_request("/diary-4ead05be", true, false);
+        assert_eq!(path, "/api/library/workspaces/diary-4ead05be/on");
+        assert!(body.is_none(), "the launcher's on route takes no body");
+        let (path, body) = launcher_workspace_toggle_request("/diary-4ead05be", false, false);
+        assert_eq!(path, "/api/library/workspaces/diary-4ead05be/off");
+        assert_eq!(body, Some(serde_json::json!({ "force": false })));
+        // A prefix without its leading slash (the launcher row's `prefix` field)
+        // lands on the same route; force rides the body.
+        let (path, body) = launcher_workspace_toggle_request("diary-4ead05be", false, true);
+        assert_eq!(path, "/api/library/workspaces/diary-4ead05be/off");
+        assert_eq!(body, Some(serde_json::json!({ "force": true })));
+    }
+
+    #[test]
     fn row_from_entry_off_row_has_no_url_on_row_has_one() {
         let conn = DevserverConn {
             host: "127.0.0.1".into(),
@@ -3233,6 +3270,129 @@ mod tests {
                 format!("{}/{}/index.html", gw.proxy_origin, &prefix[1..])
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_workspace_toggle_round_trips_the_launcher_routes() {
+        use axum::body::Bytes;
+        use axum::extract::Path;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+
+        // A proxy origin standing in for the devserver's launcher API: it records
+        // each toggle it receives and answers the launcher's own codes, 204 for
+        // on and a forced off, the shared live_terminals 409 for an unforced off.
+        type Seen = Arc<Mutex<Vec<(String, Option<String>, Bytes)>>>;
+        fn record(seen: &Seen, path: String, headers: &HeaderMap, body: Bytes) {
+            let csrf = headers
+                .get("x-chan-csrf")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            seen.lock().unwrap().push((path, csrf, body));
+        }
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_on = Arc::clone(&seen);
+        let seen_off = Arc::clone(&seen);
+        let app = axum::Router::new()
+            .route(
+                "/api/library/workspaces/{id}/on",
+                axum::routing::post(
+                    move |Path(id): Path<String>, headers: HeaderMap, body: Bytes| {
+                        let seen = Arc::clone(&seen_on);
+                        async move {
+                            record(
+                                &seen,
+                                format!("/api/library/workspaces/{id}/on"),
+                                &headers,
+                                body,
+                            );
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/library/workspaces/{id}/off",
+                axum::routing::post(
+                    move |Path(id): Path<String>, headers: HeaderMap, body: Bytes| {
+                        let seen = Arc::clone(&seen_off);
+                        async move {
+                            let forced = serde_json::from_slice::<serde_json::Value>(&body)
+                                .ok()
+                                .and_then(|v| v["force"].as_bool())
+                                .unwrap_or(false);
+                            record(
+                                &seen,
+                                format!("/api/library/workspaces/{id}/off"),
+                                &headers,
+                                body,
+                            );
+                            if forced {
+                                StatusCode::NO_CONTENT.into_response()
+                            } else {
+                                (
+                                    StatusCode::CONFLICT,
+                                    axum::Json(serde_json::json!({
+                                        "error": "live_terminals",
+                                        "active_terminals": 2,
+                                    })),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    },
+                ),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let conn = gateway_test_conn(format!("http://{addr}/desktop/v1/devserver/entry"));
+        let gw = conn.gateway.as_ref().unwrap();
+        *gw.session.lock().unwrap() = Some(GatewaySession {
+            gate: "opaque".into(),
+            cookie_header: "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1".into(),
+            csrf: "csrf-1".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+
+        // An unforced off reaches the launcher's /off route, and its 409 maps to
+        // the confirmable outcome carrying the count.
+        match set_workspace_on(&conn, "/diary-4ead05be", false, false).await {
+            Err(SetWorkspaceOnError::ActiveTerminals { active_terminals }) => {
+                assert_eq!(active_terminals, 2)
+            }
+            other => panic!("unforced off should surface the live-terminal 409: {other:?}"),
+        }
+        set_workspace_on(&conn, "/diary-4ead05be", false, true)
+            .await
+            .expect("forced off");
+        set_workspace_on(&conn, "/diary-4ead05be", true, false)
+            .await
+            .expect("on");
+
+        let seen = seen.lock().unwrap().clone();
+        let paths: Vec<&str> = seen.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/api/library/workspaces/diary-4ead05be/off",
+                "/api/library/workspaces/diary-4ead05be/off",
+                "/api/library/workspaces/diary-4ead05be/on",
+            ]
+        );
+        let body = |i: usize| serde_json::from_slice::<serde_json::Value>(&seen[i].2).ok();
+        assert_eq!(body(0), Some(serde_json::json!({ "force": false })));
+        assert_eq!(body(1), Some(serde_json::json!({ "force": true })));
+        assert!(
+            seen[2].2.is_empty(),
+            "the launcher's on route takes no body"
+        );
+        assert!(
+            seen.iter()
+                .all(|(_, csrf, _)| csrf.as_deref() == Some("csrf-1")),
+            "every toggle is an unsafe-method proxy write and carries the CSRF header"
+        );
     }
 
     #[test]
