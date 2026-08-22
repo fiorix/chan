@@ -1,4 +1,4 @@
-# profile-service: design
+# profile-service design
 
 This document owns profile-service's component boundaries, invariants, rationale, and failure behavior. The route and environment-variable catalogs live in [`README.md`](README.md) and are not repeated here.
 

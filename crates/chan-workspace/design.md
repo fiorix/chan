@@ -37,10 +37,10 @@ Out of scope:
 flowchart TB
   Lib["Library: registry and sidecars under one chan home"] --> WS["Workspace (writer-locked handle)"]
   subgraph Subsystems
-    FS["Filesystem -- cap-std, CAS, trash, drafts"]
-    Search["Search -- tantivy BM25 (+ optional candle embeddings)"]
-    Graph["Graph -- sqlite: links, tags, mentions, headings"]
-    Watch["Watch -- notify -> debounced incremental index"]
+    FS["Filesystem: cap-std, CAS, trash, drafts"]
+    Search["Search: tantivy BM25 (+ optional candle embeddings)"]
+    Graph["Graph: sqlite: links, tags, mentions, headings"]
+    Watch["Watch: notify -> debounced incremental index"]
   end
   WS --> FS
   WS --> Search
@@ -237,9 +237,9 @@ Each per-file shard under `embeddings/` carries its own `FORMAT_VERSION` (curren
 
 #### Embed batch cadence and the CPU backend
 
-`build_all` accumulates parsed chunks across files and flushes them to the embedder in `EMBED_BATCH_CHUNKS`-sized groups (the value comes from `SearchAggression::budget()`: 64 / 128 / 256 chunks for Conservative / Balanced / Aggressive). Each flush first commits the BM25 writer, then runs one blocking forward pass over the batch and writes the resulting per-file vector shards. Committing per flush is what makes `indexed_vectors`, the `reindex_with` progress events, and the BM25->hybrid search upgrade advance incrementally as a long cold build runs, instead of landing only when the whole pass returns: a large cold reindex would otherwise report zero vectors and a frozen progress chip for the minutes the embed takes. The cadence is deliberately kept below a typical workspace's chunk count (chunks-per-file is usually ~10), so a cold build commits in several visible steps rather than one tail flush. The batch size is a flush/commit cadence only -- the embedder always runs `INFER_BATCH`-sized forward passes internally -- so it carries no embedding-throughput cost.
+`build_all` accumulates parsed chunks across files and flushes them to the embedder in `EMBED_BATCH_CHUNKS`-sized groups (the value comes from `SearchAggression::budget()`: 64 / 128 / 256 chunks for Conservative / Balanced / Aggressive). Each flush first commits the BM25 writer, then runs one blocking forward pass over the batch and writes the resulting per-file vector shards. Committing per flush is what makes `indexed_vectors`, the `reindex_with` progress events, and the BM25->hybrid search upgrade advance incrementally as a long cold build runs, instead of landing only when the whole pass returns: a large cold reindex would otherwise report zero vectors and a frozen progress chip for the minutes the embed takes. The cadence is deliberately kept below a typical workspace's chunk count (chunks-per-file is usually ~10), so a cold build commits in several visible steps rather than one tail flush. The batch size is a flush/commit cadence only (the embedder always runs `INFER_BATCH`-sized forward passes internally), so it carries no embedding-throughput cost.
 
-Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend -- the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")` -- routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5-2x cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
+Embedding runs on CPU by default: the candle Metal backend exhausts GPU memory and stalls on large workspaces, so the GPU path is opt-in via `CHAN_ENABLE_GPU=1`. On macOS the CPU path links Apple's Accelerate framework as candle's BLAS backend (the target-gated `accelerate` feature, wired alongside `metal` under `cfg(target_os = "macos")`), routing bge-small's matmuls through Accelerate's `sgemm` for a measured ~1.5-2x cold-reindex speedup over candle's default SIMD-threaded `gemm` (modest because the default is already vectorized, and the forward pass also spends time in non-matmul ops). The feature pulls the Apple-only `accelerate-src`, so the static-musl Linux release binary structurally cannot pull it in.
 
 #### Generated index scope
 
@@ -323,9 +323,9 @@ When the report subsystem is active, the same watcher fan-outs each event into t
 ```mermaid
 flowchart TD
   Notify["notify event on watcher thread"] --> Filter{"IndexScopePolicy::decision(rel)"}
-  Filter -->|"VCS control file -- force-forwarded"| Send
-  Filter -->|".chan internal -- always dropped"| Drop["event dropped"]
-  Filter -->|"excluded dir component -- dropped"| Drop
+  Filter -->|"VCS control file: force-forwarded"| Send
+  Filter -->|".chan internal: always dropped"| Drop["event dropped"]
+  Filter -->|"excluded dir component: dropped"| Drop
   Filter -->|"ordinary path"| Send["mpsc channel to indexer worker"]
   Send --> Apply{"apply_event by WatchKind"}
   Apply -->|"Modified / Created with path"| Sched["schedule_pending: now + debounce"]
@@ -334,7 +334,7 @@ flowchart TD
   Apply -->|"ProviderError or path-less"| Recon["clear pending + Workspace::reconcile"]
   Sched --> Deadline{"deadline matured?"}
   Rename --> Deadline
-  Deadline -->|"newer event -- push deadline forward"| Sched
+  Deadline -->|"newer event: push deadline forward"| Sched
   Deadline -->|"matured"| Index["index_file"]
 ```
 
@@ -346,7 +346,7 @@ flowchart TD
 
 ### Report
 
-The per-workspace code/SLOC/COCOMO report wraps `chan-report`'s incremental `Index`. chan-workspace owns the persisted JSONL, the load-else-rescan open path (any load error -- missing file, schema mismatch, partial write -- falls back to a full scan that replaces the bad file on the next flush), and a dedicated writer thread that debounces flush signals (500 ms window) and atomic-writes the JSONL. Watch events fan into the in-memory index before the user's callback runs, so a handler that immediately calls `Workspace::report()` sees the change; `Unchanged` outcomes do not schedule a write. The walk applies the same excluded-dirs policy as the index walk so a source-tree workspace doesn't roll up its dependency trees.
+The per-workspace code/SLOC/COCOMO report wraps `chan-report`'s incremental `Index`. chan-workspace owns the persisted JSONL, the load-else-rescan open path (any load error, including a missing file, schema mismatch, or partial write, falls back to a full scan that replaces the bad file on the next flush), and a dedicated writer thread that debounces flush signals (500 ms window) and atomic-writes the JSONL. Watch events fan into the in-memory index before the user's callback runs, so a handler that immediately calls `Workspace::report()` sees the change; `Unchanged` outcomes do not schedule a write. The walk applies the same excluded-dirs policy as the index walk so a source-tree workspace doesn't roll up its dependency trees.
 
 The report read side supports whole-tree, prefix, explicit-file, and O(1) directory summaries; untracked directories return `None` so HTTP callers can distinguish "empty/untracked" from "tracked zero." The subsystem is gated by the per-workspace `reports_enabled` flag and activated by `Workspace::boot()`, which consumers call after open to kick off optional layers.
 

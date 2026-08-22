@@ -1,4 +1,4 @@
-# devserver-control: design
+# devserver-control design
 
 ## Problem
 

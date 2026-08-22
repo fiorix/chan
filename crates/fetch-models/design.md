@@ -1,4 +1,4 @@
-# fetch-models: design
+# fetch-models design
 
 ## Cross-crate context
 
@@ -71,4 +71,4 @@ The download and the embed are deliberately pried apart from the normal build gr
 
 It is a separate binary crate, not a build-script step inside chan-server, because a build script runs on every `cargo build` of its package. Folding the fetch into chan-server's build script would drag the ~130 MB download into every contributor's first compile and every CI lane, which is exactly the cost the design exists to avoid. A standalone crate runs only when something names it: `cargo run -p fetch-models`, wrapped as `make models`.
 
-The embed is a separate cargo feature, `embed-model`, default-off, because even with the bundle present on disk the dev binary should not carry it. Default `cargo build` produces the lean ~26 MB binary with BM25-only search until the model is downloaded explicitly; `make build-release` runs `models` then builds `chan` with `--features embed-model` for the ~89 MB search-ready release. Two independent off switches -- the crate is not in the default build graph, and the embed is not in the default feature set -- enforce one invariant: a contributor who never asks for the model never pays for it, in download bytes, build time, or binary size.
+The embed is a separate cargo feature, `embed-model`, default-off, because even with the bundle present on disk the dev binary should not carry it. Default `cargo build` produces the lean ~26 MB binary with BM25-only search until the model is downloaded explicitly; `make build-release` runs `models` then builds `chan` with `--features embed-model` for the ~89 MB search-ready release. Two independent off switches (the crate is not in the default build graph, and the embed is not in the default feature set) enforce one invariant: a contributor who never asks for the model never pays for it, in download bytes, build time, or binary size.

@@ -41,6 +41,7 @@ Tunnel:
 
 Gateway (separate Cargo workspace; the chan.app account, sign-in, and proxy surface):
 
+- [gateway](gateway/design.md) - the whole-gateway reference: publication, account and desktop lifecycles, control and data planes, entry, and isolation.
 - [gateway/crates/identity](gateway/crates/identity/design.md) - sign-in, PATs, discovery, desktop entry: the public account surface (gw.{domain}).
 - [gateway/crates/profile](gateway/crates/profile/design.md) - the authoritative user store.
 - [gateway/crates/devserver-proxy](gateway/crates/devserver-proxy/design.md) - the public data-plane edge for tunneled devservers ({proxy}.proxy.{domain}).

@@ -1,4 +1,4 @@
-# chan-systemd -- design
+# chan-systemd design
 
 The systemd boundary crate: chan's only fd-adoption seam and the single owner of the canonical `chan-devserver.service` unit text. Everything systemd-shaped (readiness, watchdog, fdstore, inherited descriptors, unit rendering and classification) goes through here; no other crate talks to `NOTIFY_SOCKET` or `LISTEN_*`.
 
@@ -25,7 +25,7 @@ flowchart TB
   Man --> Stop["systemctl stop: store released, masters close, shells HUP"]
 ```
 
-Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediately; graceful shutdown seals the manifest with one final replay-fresh write and detaches the parked set without killing children. The stop/restart asymmetry lives entirely in systemd's default `FileDescriptorStorePreserve=restart` semantics -- the devserver never guesses stop-vs-restart at SIGTERM.
+Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediately; graceful shutdown seals the manifest with one final replay-fresh write and detaches the parked set without killing children. The stop/restart asymmetry lives entirely in systemd's default `FileDescriptorStorePreserve=restart` semantics; the devserver never guesses stop-vs-restart at SIGTERM.
 
 ## Platform split
 
@@ -33,7 +33,7 @@ Session end (exit, close, restart-in-place, reap) sends `FDSTOREREMOVE` immediat
 
 ## Consumers
 
-- `crates/chan-server/src/devserver/fdstore.rs`: the parking flow above. The devserver installs a store parker (only under `NOTIFY_SOCKET`) whose phases are one-way Disabled -> Active -> Sealed: a park checks the `$FDSTORE` cap (fallback 512; the over-cap rejection guard), stores the fd, barriers so the manager provably picked the submission up, and durably commits the v2 manifest (`version`, `library_id`, `sessions`; no nonce, no TTL) before the spawn reports success; removals and placement changes coalesce through a debounced rewrite whose staleness is safe in exactly one direction (manifest entry without a stored fd). On the next boot `StartupRestore` adopts inherited fds before any route is exposed -- validating each `fd_name` against its session metadata, the library id, and slave liveness -- keeps their retained store entries instead of re-storing, cleans orphan and skipped fds plus a bare-stop manifest's recorded children and window rows, and the activation rewrite republishes the live adopted set. READY and the watchdog ping loop ride the same module.
+- `crates/chan-server/src/devserver/fdstore.rs`: the parking flow above. The devserver installs a store parker (only under `NOTIFY_SOCKET`) whose phases are one-way Disabled -> Active -> Sealed: a park checks the `$FDSTORE` cap (fallback 512; the over-cap rejection guard), stores the fd, barriers so the manager provably picked the submission up, and durably commits the v2 manifest (`version`, `library_id`, `sessions`; no nonce, no TTL) before the spawn reports success; removals and placement changes coalesce through a debounced rewrite whose staleness is safe in exactly one direction (manifest entry without a stored fd). On the next boot `StartupRestore` adopts inherited fds before any route is exposed, validates each `fd_name` against its session metadata, the library id, and slave liveness, keeps their retained store entries instead of re-storing, cleans orphan and skipped fds plus a bare-stop manifest's recorded children and window rows, and the activation rewrite republishes the live adopted set. READY and the watchdog ping loop ride the same module.
 - `crates/chan/src/lib.rs`: writes `~/.config/systemd/user/chan-devserver.service` via `DevserverUnit`, classifies before overwriting (Foreign refused with an actionable error, KnownLegacy migrated with rollback on failure). `--service=systemd --restart` is a plain preserved bounce; `--restart --force` drains every session through `POST /api/devserver/terminal-sessions/drain` and falls back to stop-then-start when the drain cannot be confirmed, so it stays destructive; `--stop` drains best-effort and always stops (the released store HUPs whatever a drain could not reach).
 - `crates/chan-library/src/terminal_sessions.rs`: drives parking from session lifecycle (park at windowed spawn/adopt at restore, take-once unpark on every close/exit path, detach sweep for graceful shutdown) through the installed `FdStoreParker` hook, and scrubs the supervision env from every spawned terminal child so PTY children cannot feed the watchdog or touch the fdstore.
 

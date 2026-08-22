@@ -1,4 +1,4 @@
-# web-launcher: the launcher SPA and its three-surface serving
+# web-launcher design
 
 How the launcher is built and reached. The [`README`](README.md) covers the stack and the dev loop; this file is the design of record for *where* the launcher is served and *how* its `/api/library/*` surface is authorized. Ground every change here against the launcher client wire, the server library API, the static bundle embed, and the `WorkspaceHost` root-fallback hook. Those four boundaries are the contract; individual source-file ownership belongs in code review, not in this design doc.
 
@@ -7,7 +7,7 @@ How the launcher is built and reached. The [`README`](README.md) covers the stac
 ```mermaid
 flowchart TB
     subgraph spa["web-launcher SPA (one bundle)"]
-        LIB["launcher API client -- pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
+        LIB["launcher API client: pure /api/library/* HTTP<br/>workspaces · windows · devservers · gateways<br/>bearer via ?t= (Authorization header; ?t= query for the watch WS)"]
         UI["TopBar · ScreenFlip (Library | Gateways) · shared Command deck · SelectionBar · NewWorkspaceDialog<br/>reads &lt;meta chan-launcher-surface&gt; -> gates capabilities"]
     end
 
@@ -17,8 +17,8 @@ flowchart TB
         IRF["install_launcher_root_fallback(host, bearer, serve_addr)"]
     end
 
-    subgraph lib["chan-library (lower layer -- no frontend bundle)"]
-        HOST["WorkspaceHost · host_dispatch<br/>root_fallback: OnceLock&lt;Router&gt; -- served when no tenant prefix matches /"]
+    subgraph lib["chan-library (lower layer: no frontend bundle)"]
+        HOST["WorkspaceHost · host_dispatch<br/>root_fallback: OnceLock&lt;Router&gt;, served when no tenant prefix matches /"]
         REG["Library registry · WorkspaceOverlay (on/off) · WindowRegistry"]
     end
 
@@ -29,7 +29,7 @@ flowchart TB
     LR -->|host pub API| REG
     HOST -->|"/ + /api/library/* (no tenant match)"| LR
 
-    subgraph surfaces["3 serving surfaces -- same bundle, per-surface install"]
+    subgraph surfaces["3 serving surfaces: same bundle, per-surface install"]
         direction LR
         DEV["devserver (build_devserver_app)<br/>bearer=Some(devserver token) · serve_addr=Some(addr) full mutation<br/>tunnel requests carry TunnelOrigin: owner=full, else read-only"]
         GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.proxy.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
@@ -42,7 +42,7 @@ flowchart TB
 
 ## What the launcher is
 
-In its ordinary launcher-window role, the SPA is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes -- the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
+In its ordinary launcher-window role, the SPA is a pure `/api/library/*` HTTP client: it never opens native windows, never dials a devserver, and never parses an opaque window or workspace id. Every type mirrors a struct the library serializes; the field names *are* the wire, pinned by server byte-tests. It is served at the devserver/library root `/`, and the bundle uses a relative asset base so assets resolve under any mount. It renders four registries: workspaces, windows, devservers, and gateways.
 
 ## One command deck, two authority hosts
 
@@ -69,11 +69,11 @@ In this bundle the deck's Computers scope rides the same `/api/library/*` feed t
 
 ## The `/api/library/*` surface
 
-- **workspaces** -- `GET` list (`{workspace_id, path, label, on, status, error?, library_id, devserver_id, prefix}`; a local row's `prefix` equals its `workspace_id`, a devserver row carries its remote mount prefix), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
-- **windows** -- `GET` list, `POST {kind, workspace_path?, origin?, acting_window_id?}` mint, `GET .../windows/watch` (a WebSocket that pushes the full window set plus per-tenant leaders on every change), `DELETE /{id}` discard, `POST /{id}/{open|hide|close}` (desktop-bridge ops), `POST /{id}/visibility`, and `PUT /{id}/label {label, acting_window_id?}`. `label` is separately persisted optional user text (at most 64 characters) for any non-control terminal or workspace window; it never mutates or gets parsed from the library-owned title/ordinal.
-- **command capabilities** -- `POST /command-capabilities` mints from the invoking tenant token and live window; capability-authenticated `GET /{capability}` returns a token-redacted local snapshot, `POST /{capability}/actions` executes the approved owner subset, and `GET /{capability}/windows/{id}/launch` revalidates then redirects into the target tenant.
-- **devservers** -- full CRUD plus desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget); a registry-less surface returns an empty list, and bridge ops answer `NO_DESKTOP`/409 with no desktop attached.
-- **gateways** -- CRUD plus connect/disconnect; roster rows synthesize read-only devserver entries.
+- **workspaces**: `GET` list (`{workspace_id, path, label, on, status, error?, library_id, devserver_id, prefix}`; a local row's `prefix` equals its `workspace_id`, a devserver row carries its remote mount prefix), `POST {path}` add, `POST /{id}/{on|off}` toggle, `DELETE /{id}` remove.
+- **windows**: `GET` list, `POST {kind, workspace_path?, origin?, acting_window_id?}` mint, `GET .../windows/watch` (a WebSocket that pushes the full window set plus per-tenant leaders on every change), `DELETE /{id}` discard, `POST /{id}/{open|hide|close}` (desktop-bridge ops), `POST /{id}/visibility`, and `PUT /{id}/label {label, acting_window_id?}`. `label` is separately persisted optional user text (at most 64 characters) for any non-control terminal or workspace window; it never mutates or gets parsed from the library-owned title/ordinal.
+- **command capabilities**: `POST /command-capabilities` mints from the invoking tenant token and live window; capability-authenticated `GET /{capability}` returns a token-redacted local snapshot, `POST /{capability}/actions` executes the approved owner subset, and `GET /{capability}/windows/{id}/launch` revalidates then redirects into the target tenant.
+- **devservers**: full CRUD plus desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget); a registry-less surface returns an empty list, and bridge ops answer `NO_DESKTOP`/409 with no desktop attached.
+- **gateways**: CRUD plus connect/disconnect; roster rows synthesize read-only devserver entries.
 
 The Computers tree carries machine health on the machine glyph itself: green is
 connected/local, orange is a pending connection, red is lost/unreachable, and
@@ -91,11 +91,11 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ## Three-surface serving via the `WorkspaceHost` root fallback
 
-`host_dispatch` matches only workspace-tenant prefixes, so the root `/` returned 404. `WorkspaceHost` carries an install-once `root_fallback: OnceLock<Router>` that `host_dispatch` serves when no tenant prefix matches a request. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes) through `install_launcher_root_fallback`. The direction matters: chan-server depends on chan-library, so the launcher bundle -- a frontend artifact -- lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
+`host_dispatch` matches only workspace-tenant prefixes, so the root `/` returned 404. `WorkspaceHost` carries an install-once `root_fallback: OnceLock<Router>` that `host_dispatch` serves when no tenant prefix matches a request. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes) through `install_launcher_root_fallback`. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
 
-1. **devserver** (`build_devserver_app`) -- served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
+1. **devserver** (`build_devserver_app`): served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
-3. **gateway-proxied** -- the devserver reached through `devserver-proxy` at `{owner}--{disc}.{proxy}.proxy.{domain}/` (ex `{owner}--{disc}.{region}.proxy.chan.app/`).
+3. **gateway-proxied**: the devserver reached through `devserver-proxy` at `{owner}--{disc}.{proxy}.proxy.{domain}/` (ex `{owner}--{disc}.{region}.proxy.chan.app/`).
 
 ## Per-surface auth and the read-only / mutation split
 
@@ -105,13 +105,13 @@ flowchart TB
     RTR["launcher_router(host, bearer, serve_addr)<br/>auth-agnostic handlers"]
     INST --> RTR
 
-    subgraph authx["bearer -- who may call /api/library/*"]
+    subgraph authx["bearer: who may call /api/library/*"]
         BTOK["Some(token): require Authorization: Bearer<br/>watch WS also accepts ?t= (constant-time)"]
         BNONE["None: tunnel-trust, data surface public<br/>(proxy gates at the edge)"]
         SHELL["static SPA shell ALWAYS public<br/>(loads before it holds the token)"]
     end
 
-    subgraph mutx["serve_addr -- read-only vs full mutation"]
+    subgraph mutx["serve_addr: read-only vs full mutation"]
         AFULL["Some(cell): full workspace mutation<br/>addr read from the cell at request time"]
         ARO["None: read-only<br/>mutation handlers answer 403<br/>&lt;meta chan-launcher-surface=readonly&gt; hides controls"]
     end
@@ -138,7 +138,7 @@ flowchart TB
 `launcher_router(host, bearer, serve_addr)` is auth-agnostic in its handlers; the installer sets the policy per surface:
 
 - **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` is tunnel-trust. The static SPA shell is always public so it loads before it holds the token.
-- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only -- the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`; tunnel non-owners are downgraded to `readonly` per request, and on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
+- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only: the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`; tunnel non-owners are downgraded to `readonly` per request, and on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
 
 On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion; owner assertions mutate over the tunnel, missing/non-owner assertions may read but not mutate (403). Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. A collaborator holding a `__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces. Window mint/discard follow the same split (per-view state, low-risk): owners on every surface, 403 for tunnel non-owners. Owners manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 

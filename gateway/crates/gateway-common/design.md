@@ -1,4 +1,4 @@
-# gateway-common: design
+# gateway-common design
 
 ## Problem
 

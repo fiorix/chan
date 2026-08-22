@@ -1,4 +1,4 @@
-# devserver-proxy: design
+# devserver-proxy design
 
 ## Responsibility
 

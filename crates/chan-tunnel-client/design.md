@@ -1,4 +1,4 @@
-# chan-tunnel-client: design
+# chan-tunnel-client design
 
 ## Cross-crate context
 
@@ -91,7 +91,7 @@ Exponential, doubled per attempt, capped at `max_backoff`. Reset to `initial_bac
 
 ### Outbound HTTP proxy (CONNECT)
 
-When `ClientConfig::proxy` is set, `open_tcp` connects to the proxy and issues an HTTP/1.1 `CONNECT host:port`, with `Proxy-Authorization: Basic ...` derived from the proxy URL's userinfo when present. The response headers are read byte-by-byte up to the `\r\n\r\n` terminator (hard-capped at 16 KiB) so no bytes belonging to the tunnelled upstream -- the TLS ClientHello or h2 preface -- are over-read by a buffered reader. Only 2xx CONNECT responses proceed. Only `http://` proxies are supported (plain CONNECT); HTTPS-to-proxy and SOCKS are out of scope. `HTTP_PROXY` / `NO_PROXY` env vars are not honoured automatically so embedders get a deterministic surface.
+When `ClientConfig::proxy` is set, `open_tcp` connects to the proxy and issues an HTTP/1.1 `CONNECT host:port`, with `Proxy-Authorization: Basic ...` derived from the proxy URL's userinfo when present. The response headers are read byte-by-byte up to the `\r\n\r\n` terminator (hard-capped at 16 KiB) so no bytes belonging to the tunnelled upstream (the TLS ClientHello or h2 preface) are over-read by a buffered reader. Only 2xx CONNECT responses proceed. Only `http://` proxies are supported (plain CONNECT); HTTPS-to-proxy and SOCKS are out of scope. `HTTP_PROXY` / `NO_PROXY` env vars are not honoured automatically so embedders get a deterministic surface.
 
 ### TunnelEvent channel
 

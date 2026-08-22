@@ -1,4 +1,4 @@
-# chan-tunnel-proto: design
+# chan-tunnel-proto design
 
 ## Cross-crate context
 
@@ -106,7 +106,7 @@ Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence
 
 ### Hello.name (display name, additive)
 
-`Hello` carries an optional `name` (`#[serde(default)] Option<String>`): the display name the devserver announces for the gateway roster (`chan devserver run --tunnel-devserver-name`, defaulting to the client host's hostname). It is display-only metadata -- never part of routing or the registry key, which stay token-resolved -- and rides the additive-field rule with no `ProtocolVersion` bump: an old client omits the key and decodes as `None` on a new server; an old server ignores the unknown key from a new client. The terminator hands a non-empty name to its validator hook (`Validator::announce_devserver_name`); the production gateway persists it as the devserver's label, deduped per owner with `-2`/`-3` suffixes.
+`Hello` carries an optional `name` (`#[serde(default)] Option<String>`): the display name the devserver announces for the gateway roster (`chan devserver run --tunnel-devserver-name`, defaulting to the client host's hostname). It is display-only metadata, never part of routing or the registry key, which stay token-resolved, and rides the additive-field rule with no `ProtocolVersion` bump: an old client omits the key and decodes as `None` on a new server; an old server ignores the unknown key from a new client. The terminator hands a non-empty name to its validator hook (`Validator::announce_devserver_name`); the production gateway persists it as the devserver's label, deduped per owner with `-2`/`-3` suffixes.
 
 ### HelloAck: Ok or Refused
 
@@ -114,7 +114,7 @@ Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence
 
 ### HelloAckOk.prefix
 
-Server-assigned public path prefix, shape `/{devserver_id}` -- one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.proxy.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
+Server-assigned public path prefix, shape `/{devserver_id}`: one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.proxy.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
 
 ### ProtocolVersion negotiation
 
@@ -139,7 +139,7 @@ This crate is the validator surface for two values that flow into public routing
 
 ### Workspace name (`is_valid_workspace_name`)
 
-Rules: 1..=32 ASCII bytes; characters `[a-z0-9-]`; first and last character alphanumeric (no leading/trailing hyphen). Both sides call it: the client refuses to send an invalid name, and the server refuses to accept one (`invalid_workspace_name` refusal). The duplication is intentional -- the server does not trust clients, and the client check surfaces a config error locally without a round-trip.
+Rules: 1..=32 ASCII bytes; characters `[a-z0-9-]`; first and last character alphanumeric (no leading/trailing hyphen). Both sides call it: the client refuses to send an invalid name, and the server refuses to accept one (`invalid_workspace_name` refusal). The duplication is intentional; the server does not trust clients, and the client check surfaces a config error locally without a round-trip.
 
 `sanitize_workspace_name` is a best-effort transform from a free-form string (often the workspace directory's basename) into a valid name: lowercase ASCII, collapse non-alnum runs to single `-`, trim, truncate. Returns `None` when the result would be empty so the caller can prompt the user instead of inventing a name.
 
@@ -161,5 +161,5 @@ The async helpers return `IoFrameError`; the sync codec returns `FrameError`. Cl
 
 ## 8. Open questions / future extensions
 
-- Multi-workspace over a single tunnel -- already met above the protocol, so no wire change is planned. `chan devserver` registers one tunnel (keyed on its token-resolved devserver id) and the gateway's devserver-proxy routes workspaces by the preserved `{workspace}` path segment, so a whole library rides one h2/yamux session without a `Hello { workspaces: Vec<...> }` shape or a per-workspace registry rework.
+- Multi-workspace over a single tunnel: already met above the protocol, so no wire change is planned. `chan devserver` registers one tunnel (keyed on its token-resolved devserver id) and the gateway's devserver-proxy routes workspaces by the preserved `{workspace}` path segment, so a whole library rides one h2/yamux session without a `Hello { workspaces: Vec<...> }` shape or a per-workspace registry rework.
 - Negotiated frame cap. Both sides hard-code 64 KiB; a larger cap negotiated inside `Hello` would let future versions carry richer initial metadata without a protocol bump.

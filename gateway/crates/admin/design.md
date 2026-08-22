@@ -1,4 +1,4 @@
-# chan-gateway-admin: design
+# chan-gateway-admin design
 
 ## Problem
 

@@ -1,4 +1,4 @@
-# chan editor (CM6) - design
+# chan editor (CM6) design
 
 Load-bearing reference for the chan editor. Mirrors the workspace design doc's role for the editor surface.
 

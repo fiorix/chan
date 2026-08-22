@@ -1,4 +1,4 @@
-# chan-tunnel-server: design
+# chan-tunnel-server design
 
 ## Keying and authentication model
 
@@ -52,8 +52,8 @@ flowchart TD
     h1["hyper h1 send_request over substream"]
 
     client --> nginx --> listener --> h2 --> validate
-    validate -- "fail" --> reject
-    validate -- "ok" --> ack --> register --> driver
+    validate -->|"fail"| reject
+    validate -->|"ok"| ack --> register --> driver
     register -. "insert handle" .-> registry
     proxy --> get
     get -. "lookup" .-> registry
@@ -209,7 +209,7 @@ Server-specific notes:
 - Failures after the 200 (bad protocol, bad workspace name, `pre_ack` policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyWorkspaces` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
 - `HELLO_READ_TIMEOUT = 15s` bounds slow-loris-style peers that connect, get the 200, and never frame a `Hello`. 15s is plenty for trans-pacific; tighter would risk false positives on slow mobile uplinks.
 - The yamux config caps each tunnel at 256 concurrent streams and a 64 MiB aggregate receive window. A visitor opening many slow requests is bounded without reducing normal browser concurrency.
-- `HelloAckOk.prefix` is `/{devserver_id}` (the resolved id the registration is keyed on; the devserver client ignores it -- tenants self-prefix at their public slugs). The username travels in the wildcard host on the public side, not in the path.
+- `HelloAckOk.prefix` is `/{devserver_id}` (the resolved id the registration is keyed on; the devserver client ignores it; tenants self-prefix at their public slugs). The username travels in the wildcard host on the public side, not in the path.
 
 ## 6. Trust boundaries / validation
 
@@ -217,7 +217,7 @@ Server-specific notes:
 - **Control-plane admission**: `RegistrationAdmission` is the fleet-capacity and liveness authority. The proxy must obtain a current permit before acknowledging or inserting a tunnel. Control loss invalidates permits and refuses new admissions; there is no local fallback in the production embedding.
 - **Residual assigned-node trust**: an honest proxy does not retain the PAT beyond validation and redacts all related debug surfaces, but the proxy process necessarily sees the raw PAT during initial validation and refresh. A fully compromised assigned node can capture and reuse it until identity revokes it or it expires. Admission leases are not a TEE boundary; node isolation and PAT rotation/revocation remain required incident response.
 - **Tunnel scope**: the validator returns scopes; the listener refuses tokens missing `TUNNEL_SCOPE` (`"tunnel"`) with the same empty 401 used for an invalid token, while logging `ServerError::MissingScope` internally.
-- **Public scope**: REMOVED. The tunnel is always authenticated -- there is no anonymous-readable path -- so `TUNNEL_PUBLIC_SCOPE` / `Hello.public` / `MissingPublicScope` are gone. The gateway authorizes a viewer with one `devserver_access(owner, devserver, caller)` check (a grant is the whole library); see the gateway's `devserver-proxy/design.md` and ADR-0001.
+- **Public scope**: REMOVED. The tunnel is always authenticated; there is no anonymous-readable path, so `TUNNEL_PUBLIC_SCOPE` / `Hello.public` / `MissingPublicScope` are gone. The gateway authorizes a viewer with one `devserver_access(owner, devserver, caller)` check (a grant is the whole library); see the gateway's `devserver-proxy/design.md` and ADR-0001.
 - **Username validation** (`is_valid_username`): defense-in-depth. The username flows into public routing; if the upstream identity service ever emits `..`, slashes, or whitespace, the public side would mis-route. The handshake refuses any username that wouldn't be URL-safe.
 - **Workspace name validation** (`is_valid_workspace_name`): every Hello's `workspace` field is checked; clients pre-check too but we don't trust them.
 - **Per-user registration cap**: `max_workspaces_per_user` bounds how many distinct registrations (distinct `devserver_id`s) one user can keep. Checked best-effort in admission (clean refusal on the wire) and authoritatively under the registry lock at insert.
@@ -230,7 +230,7 @@ Server-specific notes:
 - **WS idle window**: a bridged WebSocket is cut only after BOTH directions are quiet for `DEFAULT_WS_IDLE_TIMEOUT` (300s); any frame resets the window, and teardown sends a real Close frame to each half. Keeps a public client that 101'd and went silent from pinning the substream forever.
 - **Host routing**: the dispatcher accepts only the configured apex and the configured wildcard suffix (`{owner}` / `{owner}--{disc}` single label); any other Host is 404, so a misrouted listener exposes nothing.
 - **Per-visitor rate limit**: none in-process. Behind nginx the visible peer is always the proxy, so a peer-IP limiter would key every visitor into a single bucket; rate-limiting belongs upstream (`limit_req_zone $binary_remote_addr`).
-- **Forwarded-header sanitisation** (`strip_inbound_headers` + `apply_forwarded`): hop-by-hop and Connection-listed headers, `Host`, `Cookie`, `Authorization`, the CSRF header, and inbound `X-Forwarded-{For,Proto,Host}` are stripped before the proxy re-injects its own values; the public side does not get to dictate any of these to the devserver, and public visitors cannot inject bearer tokens or cookie state into it (public-side authentication is the proxy's job). `X-Forwarded-Proto` comes from `FORWARDED_PROTO` (default https), `X-Forwarded-Host` from the routed Host, and `X-Forwarded-For` is the socket peer only -- inbound XFF is never trusted and there is no append knob.
+- **Forwarded-header sanitisation** (`strip_inbound_headers` + `apply_forwarded`): hop-by-hop and Connection-listed headers, `Host`, `Cookie`, `Authorization`, the CSRF header, and inbound `X-Forwarded-{For,Proto,Host}` are stripped before the proxy re-injects its own values; the public side does not get to dictate any of these to the devserver, and public visitors cannot inject bearer tokens or cookie state into it (public-side authentication is the proxy's job). `X-Forwarded-Proto` comes from `FORWARDED_PROTO` (default https), `X-Forwarded-Host` from the routed Host, and `X-Forwarded-For` is the socket peer only; inbound XFF is never trusted and there is no append knob.
 
 ## 7. Error model
 

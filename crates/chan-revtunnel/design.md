@@ -1,4 +1,4 @@
-# chan-revtunnel -- design
+# chan-revtunnel design
 
 Reverse port forwarding from a chan devserver to a connected chan-desktop: `cs tunnel [bind:]desktop-port:devserver-port`, run in a devserver terminal, asks the desktop that owns the terminal's window to listen on a desktop-machine port and forward every connection back to a port on the devserver host. It is `ssh -R` with the roles the chan topology already has: the devserver can never dial the desktop, so it asks over a channel the desktop already holds open. The name disambiguates on purpose: the `chan-tunnel-*` crates are the dial-out gateway tunnel; this crate is the desktop-facing reverse port forward.
 
