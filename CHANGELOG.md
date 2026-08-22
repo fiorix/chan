@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.95.1] - 2026-08-22
+
+v0.95.1 is a one-fix patch release from using v0.95.0: turning a workspace off on a gateway-registered devserver works from the launcher, and from `chan workspace close WS --on TARGET`, again.
 
 ### Fixed
 
