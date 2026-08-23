@@ -23,9 +23,10 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [the-fd-budget-disengages-where-it-cannot-measure](v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md) | implemented on `fix/freebsd-fd-budget-no-probe` (`2a4b6d16`); 13 focused tests green and the FreeBSD `--tests` check green under `-D warnings` | run the owner's acceptance on a real FreeBSD box, then merge; it is a correctness fix in a platform v0.96.0 has already published |
+| [the-fd-budget-disengages-where-it-cannot-measure](v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md) | implemented (`2a4b6d16`); acceptance 1 run on FreeBSD 15.0-RELEASE arm64 with no `fdescfs`, and `fd_snapshot()` now has a test that reaches the kernel rather than a synthesized snapshot | nothing outstanding on this item; the acceptance run's second finding is tracked as the pacing item below |
+| [the-reindex-pacing-loop-can-wait-forever](v0.97.0/the-reindex-pacing-loop-can-wait-forever.md) | fixed (`a447eed7`); 16 tests green under `-D warnings` on macOS and natively on FreeBSD, and the `ulimit -n` 64 through 256 boundary indexes 413/413 on both | nothing outstanding; found by running the fd-budget acceptance, and pre-existing on every unix rather than introduced by it |
 | [the-windows-cli-ships-but-is-unreachable](v0.97.0/the-windows-cli-ships-but-is-unreachable.md) | accepted, not started | build the three parts together: `chan upgrade` resolving the published zip, a PowerShell install path, and the docs; the discriminator between a standalone CLI and the desktop's companion `chan.exe` is the real content |
-| [freebsd-devserver-has-no-default-service](v0.97.0/freebsd-devserver-has-no-default-service.md) | accepted, not started | add the `freebsd` arm to `resolve_auto` and its matrix, and update the prose that lists the per-OS backends |
+| [freebsd-devserver-has-no-default-service](v0.97.0/freebsd-devserver-has-no-default-service.md) | implemented (`f12501f6`); acceptances 1 through 3 pinned in `resolve_auto_matrix` and acceptance 4 run on a real FreeBSD box | nothing outstanding on this item |
 
 ## Completed
 

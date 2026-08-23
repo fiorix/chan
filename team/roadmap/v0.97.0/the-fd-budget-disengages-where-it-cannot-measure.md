@@ -1,6 +1,6 @@
 # The descriptor budget disengages exactly where it cannot measure
 
-Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close after hitting the failure on FreeBSD. Implemented on `fix/freebsd-fd-budget-no-probe` (`41718877`) and verified before the item was written.
+Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close after hitting the failure on FreeBSD. Implemented on `fix/freebsd-fd-budget-no-probe` (`41718877`). Acceptance 1 ran on a real FreeBSD box and found a second defect, now its own item: [the-reindex-pacing-loop-can-wait-forever](the-reindex-pacing-loop-can-wait-forever.md).
 
 ## Problem
 
@@ -58,7 +58,11 @@ No consumer, threshold or policy changes. No non-FreeBSD dependency graph moves.
 - `RUSTFLAGS="-D warnings" cargo test -p chan-workspace fd_budget`: 13 passed, 0 failed, 0 ignored.
 - `RUSTFLAGS="-D warnings" cargo check -p chan-workspace --tests --target x86_64-unknown-freebsd`: rc0 in 11.17s, no warnings.
 - `KERN_PROC_NFDS = 43` confirmed present in the vendored libc 0.2.178, 0.2.186 and 0.2.189 for FreeBSD before the approach was approved, rather than assumed from documentation.
-- Acceptance 1 is the owner's, on the FreeBSD box that produced the original failure. Nothing in this round executes FreeBSD code.
+- Acceptance 1 ran on FreeBSD 15.0-RELEASE arm64 with no `fdescfs` mounted (`/dev/fd` listing exactly `0`, `1`, `2`).
+  - The mechanism holds: a C probe against the same sysctl reports `KERN_PROC_NFDS` as 43, a baseline count of 3, 19 while 16 descriptors are held, and 3 again once they are dropped. The baseline of 3 rather than 4 is the no-perturbation property the direction rests on, measured rather than argued.
+  - `fd_snapshot()` itself now has a test that reaches the kernel, `freebsd_measures_live_descriptors_without_fdescfs`, added at `a447eed7`. It returns `Some` on a stock box and its count tracks descriptors the process actually holds. The 13 tests this item shipped are all pure decisions over synthesized snapshots and none of them reaches the sysctl, so until that test existed nothing pinned the property the item exists for.
+  - `RUSTFLAGS="-D warnings" cargo test -p chan-workspace fd_budget` runs natively on FreeBSD: 13 passed at this item's own commit, 16 at `a447eed7`.
+  - The second half of acceptance 1, that indexing chan's own source graph completes rather than failing with `EMFILE`, did not reproduce the original failure at this box's limits and instead surfaced a non-terminating reindex below `ulimit -n 96`. That is recorded and fixed as the linked item; the boundary table lives there.
 
 ## What made this one cheap to trust
 

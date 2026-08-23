@@ -1,6 +1,6 @@
 # `chan devserver` has no default service backend on FreeBSD
 
-Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close.
+Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close. Implemented at `f12501f6`, with acceptance 4 run on a real FreeBSD box.
 
 ## Problem
 
@@ -52,3 +52,12 @@ One arm in `resolve_auto`, its test matrix, and the prose that describes it. No 
 So unlike every other FreeBSD change in v0.96.0, which lived in `#[cfg(target_os = "freebsd")]` blocks that no machine in that round could compile or execute, **this one is fully testable on the round's own Linux box.** Acceptance 1 and 2 are ordinary unit tests. Only acceptance 4 needs a FreeBSD host, and it is a confirmation rather than the proof.
 
 That difference is worth stating in the round's report: the v0.96.0 FreeBSD work was expensive to trust because it was unreachable, and this change is cheap to trust because someone made the resolver pure.
+
+## Evidence
+
+- Implemented at `f12501f6`: `crates/chan/src/lib.rs`, `crates/chan/src/help.rs`, `design.md`.
+- The refusal was reproduced first, on FreeBSD 15.0-RELEASE arm64: `status`, `start`, `stop` and `join` each failed with `could not auto-detect a service backend for this OS ("freebsd"); use --service=chan for the portable background daemon`. All four verbs, not the one the item quoted.
+- The backend was confirmed to work under an explicit `--service=chan` on that box before it was made the default, so the arm points at a path that runs there rather than one assumed to: `start` emitted the `CHAN_DEVSERVER_TOKEN=` marker and a pid, `status` reported the pid, bind and log path, `stop` stopped it, and no `__devserver-daemon` process survived.
+- Acceptance 4, on the same box with no `--service` flag: `status` reports not running, `start` emits the token marker and a pid, `status` reports it running with `command: chan devserver start --service=chan`, `stop` stops it, and `status` reports not running again.
+- Acceptances 1 and 2 are pinned in `resolve_auto_matrix`, green under `RUSTFLAGS="-D warnings"` on macOS under the pinned 1.95.0 and natively on FreeBSD. Acceptance 2 is asserted rather than assumed: `openbsd`, `netbsd`, `dragonfly`, `illumos` and `android` are each checked to still error, so naming FreeBSD cannot widen into a default for every unrecognized OS.
+- Acceptance 3: `crates/chan/src/help.rs` and `design.md` name FreeBSD. A sweep for the backend prose found no other copy of the per-OS table under `docs/`.
