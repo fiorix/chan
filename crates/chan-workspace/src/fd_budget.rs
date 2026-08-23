@@ -62,11 +62,14 @@ const MODEST_HEADROOM_ACTIVE_WORKSPACES: usize = 8;
 /// they cannot react to terminals or editor handles that appear AFTER
 /// a long reindex has already committed to its worker count. This
 /// reserve is the mid-flight piece: the reindex read loop re-samples
-/// the live descriptor count between files and backs off when fewer
-/// than this many descriptors remain, so a rebuild can never starve a
-/// concurrent autosave or terminal spawn of the handles they need.
+/// the live descriptor count between files and backs off once the
+/// headroom is gone, so a rebuild can never starve a concurrent
+/// autosave or terminal spawn of the handles they need.
 /// Bug 7: "Too Many Open Files" during autosave while indexing + two
 /// terminals run.
+///
+/// This is the ceiling on that headroom rather than a flat demand;
+/// [`reindex_reserve_for`] scales it down on a table too small to spare it.
 const REINDEX_RESERVE: u64 = 64;
 
 /// Spacing between back-off probes while a reindex waits for headroom.
@@ -75,6 +78,19 @@ const REINDEX_RESERVE: u64 = 64;
 /// spin. The probe reads process-wide kernel state, so we keep the cadence
 /// modest.
 const REINDEX_BACKOFF_STEP: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Ceiling on the back-off steps one `pace_reindex_worker` call will take
+/// before proceeding anyway, so the wait is `REINDEX_BACKOFF_STEP` times this
+/// at worst. Pacing is a courtesy to interactive work, not a correctness gate:
+/// under pressure that does not lift, a reindex must degrade into a slower
+/// reindex rather than one that never finishes. The failure modes are not
+/// symmetric -- running out of descriptors reports itself as an error the
+/// caller can act on, while a parked worker is silent and reads as a hang.
+///
+/// This is the backstop, not the brake: [`reindex_reserve_for`] is what keeps
+/// a small table from asking for headroom it can never have. Half a second is
+/// far longer than an autosave or a terminal spawn needs to claim its handles.
+const REINDEX_BACKOFF_MAX_STEPS: u32 = 20;
 
 /// Non-Unix only: how many files a reindex worker processes between
 /// time-sliced yields (see `pace_reindex_worker_timesliced`). Unix paces
@@ -147,13 +163,26 @@ pub(crate) fn acquire_workspace_permit() -> WorkspacePermit {
 /// rebuild from holding fds an interactive autosave or terminal spawn
 /// needs RIGHT NOW.
 pub(crate) fn pace_reindex_worker(cancel: Option<&std::sync::atomic::AtomicBool>) -> u32 {
+    pace_reindex_worker_with(snapshot, cancel)
+}
+
+/// [`pace_reindex_worker`] with the descriptor probe injected, so the wait
+/// bound is testable against a snapshot that never improves. The real call
+/// passes [`snapshot`].
+fn pace_reindex_worker_with(
+    mut probe: impl FnMut() -> Option<FdSnapshot>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> u32 {
     let mut steps = 0u32;
     loop {
         if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
             return steps;
         }
-        match snapshot() {
+        match probe() {
             Some(snap) if reindex_should_pace(snap) => {
+                if steps >= REINDEX_BACKOFF_MAX_STEPS {
+                    return steps;
+                }
                 steps = steps.saturating_add(1);
                 std::thread::sleep(REINDEX_BACKOFF_STEP);
             }
@@ -215,11 +244,27 @@ fn pace_reindex_worker_timesliced() -> u32 {
     })
 }
 
+/// Headroom a reindex keeps free at this descriptor limit: [`REINDEX_RESERVE`]
+/// on any table big enough to give that much away, and a quarter of the table
+/// otherwise.
+///
+/// [`REINDEX_RESERVE`] is sized for the 256-descriptor tables macOS shells hand
+/// out, where 64 is a quarter of the budget. Unscaled on a much smaller table
+/// it stops describing headroom and starts describing the whole table: at
+/// `ulimit -n 72` a process holding its own stdio and index handles never has
+/// 64 free, so every snapshot says "back off" and the pacing loop waits for
+/// headroom that cannot arrive. Scaling keeps the intent -- leave a slice for
+/// a concurrent autosave or terminal spawn -- at every limit, and leaves the
+/// macOS case untouched, since `256 / 4` is exactly [`REINDEX_RESERVE`].
+fn reindex_reserve_for(limit: u64) -> u64 {
+    REINDEX_RESERVE.min(limit / 4)
+}
+
 /// Pure decision the pacing loop is built on: should a reindex worker
 /// back off at this snapshot? Split out so the policy is unit-testable
-/// without touching the real `/dev/fd` count or sleeping.
+/// without touching the real descriptor count or sleeping.
 fn reindex_should_pace(snap: FdSnapshot) -> bool {
-    snap.remaining() < REINDEX_RESERVE
+    snap.remaining() < reindex_reserve_for(snap.limit)
 }
 
 fn graph_reader_pool_size_for(default: u32, snap: FdSnapshot) -> u32 {
@@ -461,6 +506,36 @@ mod tests {
         );
     }
 
+    /// The decode tests above run everywhere; this one is the only thing that
+    /// exercises the `sysctl` call itself, so it runs only where that call is
+    /// real. It pins the property the whole item exists for: on a stock box
+    /// with no `fdescfs` mounted the snapshot is `Some` rather than `None`, and
+    /// the count it carries tracks descriptors this process actually holds.
+    /// Only the lower bound is asserted, so a sibling test thread opening its
+    /// own files cannot make it flake.
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_measures_live_descriptors_without_fdescfs() {
+        const HELD: usize = 16;
+
+        let before = fd_snapshot().expect("KERN_PROC_NFDS must measure a stock FreeBSD box");
+        assert!(before.limit > 0, "a descriptor limit must be read too");
+        assert!(before.open >= 3, "stdin/stdout/stderr are always open");
+
+        let held: Vec<std::fs::File> = (0..HELD)
+            .map(|_| std::fs::File::open("/dev/null").expect("open /dev/null"))
+            .collect();
+        let during = fd_snapshot().expect("the snapshot stays available under load");
+        assert_eq!(during.limit, before.limit, "the limit does not move");
+        assert!(
+            during.open >= before.open + HELD as u64,
+            "holding {HELD} descriptors must show up: {} -> {}",
+            before.open,
+            during.open
+        );
+        drop(held);
+    }
+
     #[test]
     fn sysctl_fd_count_requires_an_exact_nonnegative_result() {
         let count_len = std::mem::size_of::<i32>();
@@ -505,6 +580,57 @@ mod tests {
             limit: 256,
         };
         assert!(reindex_should_pace(just_under));
+    }
+
+    #[test]
+    fn the_reserve_scales_down_on_a_table_too_small_to_spare_it() {
+        // 256 is the table the flat reserve was sized against, so it and
+        // everything above must be unchanged.
+        assert_eq!(reindex_reserve_for(256), REINDEX_RESERVE);
+        assert_eq!(reindex_reserve_for(4096), REINDEX_RESERVE);
+        // Below that the reserve is a quarter of the table rather than most
+        // of it.
+        assert_eq!(reindex_reserve_for(80), 20);
+        assert_eq!(reindex_reserve_for(64), 16);
+        assert_eq!(reindex_reserve_for(8), 2);
+        assert_eq!(reindex_reserve_for(1), 0);
+    }
+
+    #[test]
+    fn a_small_table_does_not_pace_on_headroom_it_can_never_have() {
+        // Reproduces reindexes that never terminated under `ulimit -n` of 64,
+        // 72 and 80 on FreeBSD: a process holding stdio plus its index handles
+        // never leaves 64 descriptors free in a table this size, so a flat
+        // 64-descriptor demand asks for headroom that cannot arrive.
+        for limit in [64, 72, 80] {
+            let realistic = FdSnapshot { open: 24, limit };
+            assert!(
+                !reindex_should_pace(realistic),
+                "limit {limit} must make progress, not wait on 64 free"
+            );
+        }
+        // The protection itself is intact: a quarter-full table still paces.
+        let squeezed = FdSnapshot {
+            open: 72 - 4,
+            limit: 72,
+        };
+        assert!(reindex_should_pace(squeezed));
+    }
+
+    #[test]
+    fn pace_reindex_worker_stops_waiting_for_headroom_that_never_arrives() {
+        // Pressure that never lifts, at a limit large enough that the reserve
+        // is satisfiable in principle. The worker must give up and let the
+        // rebuild proceed rather than park on it forever.
+        let stuck = FdSnapshot {
+            open: 4096 - 1,
+            limit: 4096,
+        };
+        assert!(reindex_should_pace(stuck));
+        assert_eq!(
+            pace_reindex_worker_with(|| Some(stuck), None),
+            REINDEX_BACKOFF_MAX_STEPS
+        );
     }
 
     #[test]
