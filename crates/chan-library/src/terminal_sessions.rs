@@ -8389,6 +8389,9 @@ mod tests {
         assert_eq!(parse_terminal_ordinal("Terminal-0"), None);
     }
 
+    /// Run real PTY allocation on both sides of the barrier. Besides the name
+    /// reservation contract, this guards FreeBSD's serialized `openpty` call:
+    /// its libc implementation uses a process-global `ptsname` buffer.
     fn concurrent_created_names(proposed_name: Option<&str>) -> Vec<String> {
         let registry = Arc::new(Registry::new(test_config(1024, 4, 60)));
         *registry.spawn_barrier.lock().unwrap() = Some(Arc::new(std::sync::Barrier::new(2)));

@@ -21,8 +21,8 @@ pub(super) const TERMINAL_SESSION_FD_ESTIMATE: u64 = 8;
 const OPENPTY_ATTEMPTS: u32 = 5;
 const OPENPTY_RETRY_FLOOR: Duration = Duration::from_millis(10);
 
-/// Open the session PTY, absorbing the darwin pty allocator's transient
-/// refusal. On macOS `openpty` fails with ENXIO ("Device not configured")
+/// Open the session PTY with the platform's contention handling. On macOS
+/// `openpty` fails with ENXIO ("Device not configured")
 /// both when the pool is exhausted (`kern.tty.ptmx_max`) and transiently
 /// under concurrent open/close churn, where the very next attempt succeeds.
 /// The NOFILE guard cannot cover this: it is a kernel pty-table refusal, not
@@ -33,7 +33,26 @@ pub(super) fn openpty_absorbing_transient_refusal(
     pty_system: &dyn PtySystem,
     size: PtySize,
 ) -> anyhow::Result<PtyPair> {
-    retry_transient_openpty(|| pty_system.openpty(size), std::thread::sleep)
+    retry_transient_openpty(|| openpty_once(pty_system, size), std::thread::sleep)
+}
+
+/// FreeBSD's `openpty` calls the non-thread-safe `ptsname`, whose static buffer
+/// can be overwritten by another concurrent call before the slave is opened.
+/// Both callers can then receive the same slave, and the second child's
+/// `TIOCSCTTY` fails with EPERM. The returned descriptors are independent, so
+/// only the libc call needs serialization.
+#[cfg(target_os = "freebsd")]
+fn openpty_once(pty_system: &dyn PtySystem, size: PtySize) -> anyhow::Result<PtyPair> {
+    static OPENPTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = OPENPTY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pty_system.openpty(size)
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn openpty_once(pty_system: &dyn PtySystem, size: PtySize) -> anyhow::Result<PtyPair> {
+    pty_system.openpty(size)
 }
 
 fn retry_transient_openpty<T>(
