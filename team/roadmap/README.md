@@ -17,16 +17,23 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 `done/` is intentionally flat, so item filenames must stay descriptive and repository-wide unique. If a future item would collide with a closed one, prefix that filename with its version when it is closed.
 
+The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. That leaves a filename budget of roughly fifty characters before a row outgrows the width.
+
 ## Active
 
 ### v0.97.0
 
-| item | state | what needs to happen |
+| item | state | next |
 | --- | --- | --- |
-| [the-fd-budget-disengages-where-it-cannot-measure](v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md) | implemented (`2a4b6d16`); acceptance 1 run on FreeBSD 15.0-RELEASE arm64 with no `fdescfs`, and `fd_snapshot()` now has a test that reaches the kernel rather than a synthesized snapshot | nothing outstanding on this item; the acceptance run's second finding is tracked as the pacing item below |
-| [the-reindex-pacing-loop-can-wait-forever](v0.97.0/the-reindex-pacing-loop-can-wait-forever.md) | fixed (`a447eed7`); 16 tests green under `-D warnings` on macOS and natively on FreeBSD, and the `ulimit -n` 64 through 256 boundary indexes 413/413 on both | nothing outstanding; found by running the fd-budget acceptance, and pre-existing on every unix rather than introduced by it |
-| [the-windows-cli-ships-but-is-unreachable](v0.97.0/the-windows-cli-ships-but-is-unreachable.md) | accepted, not started | build the three parts together: `chan upgrade` resolving the published zip, a PowerShell install path, and the docs; the discriminator between a standalone CLI and the desktop's companion `chan.exe` is the real content |
-| [freebsd-devserver-has-no-default-service](v0.97.0/freebsd-devserver-has-no-default-service.md) | implemented (`f12501f6`); acceptances 1 through 3 pinned in `resolve_auto_matrix` and acceptance 4 run on a real FreeBSD box | nothing outstanding on this item |
+| [the-fd-budget-disengages-where-it-cannot-measure][fd] | implemented | none |
+| [the-reindex-pacing-loop-can-wait-forever][pace] | fixed | none |
+| [the-windows-cli-ships-but-is-unreachable][win] | accepted | not started |
+| [freebsd-devserver-has-no-default-service][svc] | implemented | none |
+
+[fd]: v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md
+[pace]: v0.97.0/the-reindex-pacing-loop-can-wait-forever.md
+[win]: v0.97.0/the-windows-cli-ships-but-is-unreachable.md
+[svc]: v0.97.0/freebsd-devserver-has-no-default-service.md
 
 ## Completed
 
