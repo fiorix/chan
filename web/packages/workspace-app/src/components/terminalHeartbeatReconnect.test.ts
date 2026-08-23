@@ -24,10 +24,15 @@ import {
 } from "../api/transport";
 import { ui } from "../state/store.svelte";
 import { WAKE_PROBE_MS } from "../wakeGap";
-import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import {
+  bumpTabFocusPulse,
+  type TerminalTab as TerminalTabState,
+} from "../state/tabs.svelte";
 
 const mounted: Array<Record<string, any>> = [];
 const sockets: TestWebSocket[] = [];
+const xtermDataHandlers = vi.hoisted(() => [] as Array<(data: string) => void>);
+const xtermFocusCalls = vi.hoisted(() => [] as HTMLTextAreaElement[]);
 
 class TestResizeObserver {
   observe() {}
@@ -83,11 +88,17 @@ vi.mock("@xterm/xterm", () => ({
     cols = 80;
     rows = 24;
     options: Record<string, unknown> = {};
+    textarea: HTMLTextAreaElement | null = null;
 
     loadAddon() {}
-    open() {}
+    open(host: HTMLElement) {
+      this.textarea = document.createElement("textarea");
+      host.append(this.textarea);
+    }
     attachCustomKeyEventHandler() {}
-    onData() {}
+    onData(handler: (data: string) => void) {
+      xtermDataHandlers.push(handler);
+    }
     onResize() {}
     write() {}
     writeln(line: string) {
@@ -97,8 +108,18 @@ vi.mock("@xterm/xterm", () => ({
       this.cols = cols;
       this.rows = rows;
     }
-    focus() {}
-    dispose() {}
+    focus() {
+      if (!this.textarea) return;
+      xtermFocusCalls.push(this.textarea);
+      this.textarea.focus();
+    }
+    blur() {
+      this.textarea?.blur();
+    }
+    dispose() {
+      this.textarea?.remove();
+      this.textarea = null;
+    }
   },
 }));
 
@@ -142,6 +163,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   sockets.splice(0);
+  xtermDataHandlers.splice(0);
+  xtermFocusCalls.splice(0);
   writtenLines.splice(0);
   document.body.innerHTML = "";
   vi.useRealTimers();
@@ -159,12 +182,12 @@ function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState 
   };
 }
 
-async function renderTerminal(tab: TerminalTabState) {
+async function renderTerminal(tab: TerminalTabState, focused = false) {
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
     target,
-    props: { tab, paneId: "pane-1", active: true, focused: false },
+    props: { tab, paneId: "pane-1", active: true, focused },
   });
   mounted.push(component);
   await tick();
@@ -402,5 +425,113 @@ describe("heartbeat source pins", () => {
       // No local literals left to drift.
       expect(source).not.toMatch(/RECONNECT_BASE_MS|RECONNECT_MAX_MS/);
     }
+  });
+});
+
+describe("wake input recovery", () => {
+  async function wake(): Promise<void> {
+    vi.setSystemTime(Date.now() + 60_000);
+    await vi.advanceTimersByTimeAsync(WAKE_PROBE_MS);
+  }
+
+  test("a wake restores DOM focus to the still-focused terminal", async () => {
+    const tab = terminalTab();
+    const target = await renderTerminal(tab, true);
+    await attach(lastSocket(), "sess-focus");
+
+    const textarea = target.querySelector<HTMLTextAreaElement>(
+      ".terminal-host textarea",
+    );
+    expect(textarea).not.toBeNull();
+    expect(document.activeElement).toBe(textarea);
+
+    // WKWebView keeps the page-level `focused` prop true across sleep, but its
+    // xterm textarea can lose DOM focus. The wake callback must restore the
+    // keyboard owner even though no Svelte focus-state edge fires.
+    textarea?.blur();
+    expect(document.activeElement).not.toBe(textarea);
+
+    await wake();
+
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  test("a wake reissues focus when xterm still appears focused", async () => {
+    const target = await renderTerminal(terminalTab(), true);
+    await attach(lastSocket(), "sess-stale-focus");
+
+    const textarea = target.querySelector<HTMLTextAreaElement>(
+      ".terminal-host textarea",
+    );
+    expect(document.activeElement).toBe(textarea);
+    const callsBeforeWake = xtermFocusCalls.length;
+
+    await wake();
+
+    expect(xtermFocusCalls.length).toBe(callsBeforeWake + 1);
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  test("a wake does not steal focus from another DOM owner", async () => {
+    await renderTerminal(terminalTab(), true);
+    await attach(lastSocket(), "sess-external-focus");
+    const external = document.createElement("input");
+    document.body.append(external);
+    external.focus();
+
+    await wake();
+
+    expect(document.activeElement).toBe(external);
+  });
+
+  test("a wake does not focus a background terminal", async () => {
+    const target = await renderTerminal(terminalTab());
+    await attach(lastSocket(), "sess-background");
+    const textarea = target.querySelector<HTMLTextAreaElement>(
+      ".terminal-host textarea",
+    );
+    expect(xtermFocusCalls).toHaveLength(0);
+
+    await wake();
+
+    expect(xtermFocusCalls).toHaveLength(0);
+    expect(document.activeElement).not.toBe(textarea);
+  });
+
+  test("the tab focus pulse restores the same lost terminal focus", async () => {
+    const target = await renderTerminal(terminalTab(), true);
+    await attach(lastSocket(), "sess-tab-focus");
+
+    const textarea = target.querySelector<HTMLTextAreaElement>(
+      ".terminal-host textarea",
+    );
+    expect(document.activeElement).toBe(textarea);
+
+    textarea?.blur();
+    bumpTabFocusPulse();
+    await tick();
+
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  test("input typed during reconnect backoff is dropped rather than replayed", async () => {
+    await renderTerminal(terminalTab());
+    const first = lastSocket();
+    await attach(first, "sess-backoff");
+
+    first.close();
+    const onData = xtermDataHandlers.at(-1);
+    expect(onData).toBeDefined();
+    onData?.("x");
+    expect(first.sent).not.toContain(
+      JSON.stringify({ type: "input", data: "x" }),
+    );
+
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    const second = lastSocket();
+    await attach(second, "sess-backoff");
+    expect(second.sent).not.toContain(
+      JSON.stringify({ type: "input", data: "x" }),
+    );
   });
 });

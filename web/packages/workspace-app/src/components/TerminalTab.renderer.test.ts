@@ -107,6 +107,15 @@ describe("TerminalTab WebGL renderer", () => {
     );
   });
 
+  test("host resume restores only terminal-owned keyboard focus", () => {
+    expect(tab).toMatch(
+      /function recoverTerminalFocusAfterHostResume\(\): void \{[\s\S]*?if \(!active \|\| !focused\) return;[\s\S]*?if \(findOpen \|\| menuOpen \|\| isRichPromptVisible\(tab\.id\)\) return;[\s\S]*?owner !== document\.body[\s\S]*?owner !== document\.documentElement[\s\S]*?!host\?\.contains\(owner\)[\s\S]*?focusTerminal\(\);/,
+    );
+    expect(tab).toMatch(
+      /function recoverTerminalAfterHostResume\(\): void \{[\s\S]*?recoverTerminalRendererAfterHostResume\(\);[\s\S]*?recoverTerminalFocusAfterHostResume\(\);/,
+    );
+  });
+
   test("refreshes renderer after native host resume", () => {
     expect(tab).toMatch(/function recoverTerminalRendererAfterHostResume\(\): void/);
     expect(tab).toMatch(/clearHostResumeTimers\(\);[\s\S]*?queueFit\(\);[\s\S]*?refreshTerminalRenderer\(\);/);
@@ -125,7 +134,7 @@ describe("TerminalTab WebGL renderer", () => {
     // socket via the resume path (no scrollback loss).
     expect(tab).toMatch(/import \{ installWakeGapDetector \} from "\.\.\/wakeGap"/);
     expect(tab).toMatch(
-      /disposeWakeGap = installWakeGapDetector\(\(\) => \{[\s\S]*?recoverTerminalRendererAfterHostResume\(\);[\s\S]*?recyclePtySocketAfterWake\(\);[\s\S]*?\}\);/,
+      /disposeWakeGap = installWakeGapDetector\(\(\) => \{[\s\S]*?recoverTerminalAfterHostResume\(\);[\s\S]*?recyclePtySocketAfterWake\(\);[\s\S]*?\}\);/,
     );
     expect(tab).toMatch(/function recyclePtySocketAfterWake\(\): void/);
     expect(tab).toMatch(/if \(ws && ws\.readyState === WebSocket\.OPEN\)[\s\S]*?void connect\(\);/);

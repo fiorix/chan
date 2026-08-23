@@ -717,6 +717,34 @@
     }
   }
 
+  // Renderer recovery cannot restore the DOM/native keyboard bridge. A host
+  // resume therefore reasserts focus for the one terminal that still owns the
+  // pane, but never steals it from an editor, prompt, menu, find box, or other
+  // focused surface. Re-focus even when xterm's textarea still appears active:
+  // WKWebView can retain document.activeElement while detaching keyboard input.
+  function recoverTerminalFocusAfterHostResume(): void {
+    queueMicrotask(() => {
+      if (!active || !focused) return;
+      if (findOpen || menuOpen || isRichPromptVisible(tab.id)) return;
+      const owner = document.activeElement;
+      if (
+        owner !== null &&
+        owner !== document.body &&
+        owner !== document.documentElement &&
+        !host?.contains(owner)
+      ) {
+        return;
+      }
+      // focusTerminal carries the remaining survey-overlay ownership guard.
+      focusTerminal();
+    });
+  }
+
+  function recoverTerminalAfterHostResume(): void {
+    recoverTerminalRendererAfterHostResume();
+    recoverTerminalFocusAfterHostResume();
+  }
+
   function clearHostResumeTimers(): void {
     for (const timer of hostResumeTimers) clearTimeout(timer);
     hostResumeTimers = [];
@@ -724,7 +752,7 @@
 
   function installHostResumeListeners(): void {
     if (hostResumeListenerCleanup) return;
-    const onHostResume = () => recoverTerminalRendererAfterHostResume();
+    const onHostResume = () => recoverTerminalAfterHostResume();
     const onVisibility = () => {
       if (document.visibilityState === "visible") onHostResume();
     };
@@ -745,7 +773,7 @@
     // does not freeze timers is not caught here; verify in chan-desktop --
     // WebKit-only.)
     disposeWakeGap = installWakeGapDetector(() => {
-      recoverTerminalRendererAfterHostResume();
+      recoverTerminalAfterHostResume();
       recyclePtySocketAfterWake();
     });
     hostResumeListenerCleanup = () => {
