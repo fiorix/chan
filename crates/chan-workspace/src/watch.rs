@@ -449,8 +449,12 @@ impl CatchUpQueue {
                 if plan_dir(&child_rel, name, policy) != DirPlan::WatchAndDescend {
                     continue;
                 }
-                let Ok(metadata) = entry.metadata() else {
-                    continue;
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(_) => {
+                        descend.push((entry.path(), child_rel));
+                        continue;
+                    }
                 };
                 let identity = (entry.ino(), metadata.ctime(), metadata.ctime_nsec());
                 let path = entry.path();
