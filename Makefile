@@ -1,7 +1,7 @@
 # chan public build surface.
 #
 # Keep this file as the command contract. Platform and package details belong
-# in subdirectories such as desktop/ and packaging/linux/.
+# in subdirectories such as desktop/, packaging/linux/, and packaging/freebsd/.
 
 .DEFAULT_GOAL := help
 
@@ -26,6 +26,8 @@ WINDOWS_CROSS_ROOTFS ?= ubuntu
 NIX_PACKAGE ?= all
 NIX_SDME_ROOTFS ?= ubuntu
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
+FREEBSD_TARGET ?= x86_64-unknown-freebsd
+FREEBSD_SYSROOT ?=
 DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
@@ -106,6 +108,13 @@ linux-chan-tarball: ## Build the Linux CLI tarball for LINUX_TARGET.
 	$(MAKE) -C packaging/linux \
 		CHAN_REPO="$(REPO_ROOT)" CARGO="$(CARGO)" NPM="$(NPM)" \
 		LINUX_TARGET="$(LINUX_TARGET)" chan-tarball
+
+.PHONY: freebsd-chan-tarball
+freebsd-chan-tarball: ## Cross-build the static FreeBSD CLI tarball.
+	$(MAKE) -C packaging/freebsd \
+		CHAN_REPO="$(REPO_ROOT)" CARGO="$(CARGO)" NPM="$(NPM)" \
+		FREEBSD_TARGET="$(FREEBSD_TARGET)" \
+		FREEBSD_SYSROOT="$(FREEBSD_SYSROOT)" chan-tarball
 
 .PHONY: linux-deb
 linux-deb: ## Build a .deb for DEB_TARGET, defaulting to LINUX_TARGET.
@@ -444,7 +453,7 @@ web-launcher: ## Build the embedded launcher bundle (web-launcher/dist).
 	# path that builds web/dist before the cargo/rust-embed step must build
 	# this too -- wired as a prerequisite of `web`/`web-check` so the single
 	# `make web` funnel (root `chan`, desktop/Makefile, packaging/linux,
-	# release.yml) builds both with no per-consumer edit.
+	# packaging/freebsd, release.yml) builds both with no per-consumer edit.
 	cd web && $(NPM_INSTALL) && $(NPM) run build -w @chan/launcher
 	@date -u '+%Y-%m-%dT%H:%M:%SZ' > "$(LAUNCHER_BUILD_STAMP)"
 

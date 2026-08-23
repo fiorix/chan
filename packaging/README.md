@@ -7,6 +7,7 @@ Build, package, and deploy infrastructure for chan, one directory per concern. T
 | `packaging/docker/` | OCI images for chan + the gateway services, plus `test/`. |
 | `packaging/kube/` | Kubernetes manifests for the gateway stack, plus sdme. |
 | `packaging/linux/` | CLI Linux artifacts: musl tarball, deb, rpm, Arch. |
+| `packaging/freebsd/` | Static amd64 CLI tarball cross-built against a pinned FreeBSD sysroot. |
 | `packaging/distros/` | Fedora COPR, Ubuntu Launchpad, and Arch AUR source packaging. |
 | `packaging/desktop/` | macOS DMG packaging (`build-dmg.sh` + `dmg_settings.py`). |
 | `packaging/sdme/` | chan-desktop Linux build images and the single-trust-domain chan-devserver image. |

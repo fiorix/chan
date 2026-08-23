@@ -112,6 +112,15 @@ def check_make_contract() -> None:
     )
     require_target(
         makefile,
+        "freebsd-chan-tarball",
+        (
+            "$(MAKE) -C packaging/freebsd",
+            'FREEBSD_TARGET="$(FREEBSD_TARGET)"',
+            'FREEBSD_SYSROOT="$(FREEBSD_SYSROOT)"',
+        ),
+    )
+    require_target(
+        makefile,
         "ci-distro-sources",
         ("$(MAKE) copr-srpm", "$(MAKE) ppa-source"),
     )
@@ -303,6 +312,67 @@ def check_workflow_contract() -> None:
             ".github/workflows/release.yml job linux-cli-artifacts: "
             "musl build carries a gnu or generic target field"
         )
+
+    freebsd_cli = workflow_job(
+        release,
+        "freebsd-cli-artifacts",
+        ".github/workflows/release.yml",
+    )
+    for needle in (
+        "name: FreeBSD CLI tarball (x86_64-unknown-freebsd)",
+        "needs: context",
+        "runs-on: ubuntu-latest",
+        "target: x86_64-unknown-freebsd",
+        "key: freebsd-x86_64-unknown-freebsd",
+        "save-if: false",
+        "rustup target add x86_64-unknown-freebsd",
+        "15.0-RELEASE/base.txz",
+        "ac0c933cc02ee8af4da793f551e4a9a15cdcf0e67851290b1e8c19dd6d30bba8",
+        "make freebsd-chan-tarball FREEBSD_TARGET=x86_64-unknown-freebsd",
+        "*ELF\\ 64-bit*FreeBSD*statically\\ linked*",
+        "name: release-freebsd-cli",
+        "chan-x86_64-unknown-freebsd.tar.gz",
+    ):
+        require(
+            freebsd_cli,
+            needle,
+            ".github/workflows/release.yml job freebsd-cli-artifacts",
+        )
+    if "aarch64-unknown-freebsd" in freebsd_cli:
+        raise ContractError(
+            ".github/workflows/release.yml job freebsd-cli-artifacts: "
+            "FreeBSD arm64 is outside the published matrix"
+        )
+
+    publish_release = workflow_job(
+        release,
+        "publish-release",
+        ".github/workflows/release.yml",
+    )
+    require(
+        publish_release,
+        "- freebsd-cli-artifacts",
+        ".github/workflows/release.yml job publish-release",
+    )
+
+    freebsd_packaging = read("packaging/freebsd/Makefile")
+    for needle in (
+        "FREEBSD_TARGET ?= x86_64-unknown-freebsd",
+        "FREEBSD_ABI_TARGET ?= x86_64-unknown-freebsd15.0",
+        "-C target-feature=+crt-static",
+        "-C link-arg=--target=$(FREEBSD_ABI_TARGET)",
+        "-C link-arg=--sysroot=$(FREEBSD_SYSROOT_ABS)",
+        '$(CARGO) build --release --target "$(FREEBSD_TARGET)" -p chan',
+        '$(TARBALL_STAGE)/chan',
+        '$(TARBALL_STAGE)/LICENSE',
+        '$(TARBALL_STAGE)/README.md',
+    ):
+        require(
+            freebsd_packaging,
+            needle,
+            "packaging/freebsd/Makefile",
+        )
+
     for needle in (
         "copr:",
         "launchpad:",
