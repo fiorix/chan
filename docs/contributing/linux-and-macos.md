@@ -146,6 +146,24 @@ file /tmp/chan          # -> ... statically linked
 
 CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/setup-zig` + cargo-zigbuild); the locally built `.deb`/`.rpm` bundles stay gnu. The `chan-tarball` Make target uses `cargo zigbuild` for musl targets and plain `cargo build` for gnu.
 
+## CLI: the FreeBSD standalone target
+
+Releases publish `chan-x86_64-unknown-freebsd.tar.gz`, a static amd64 tarball
+containing `chan`, `LICENSE`, and `README.md`. On a stock FreeBSD amd64 host,
+the base-system `fetch` command is enough to run the installer:
+
+```sh
+fetch -o - https://chan.app/install.sh | sh
+```
+
+The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux
+and macOS standalone builds, including for `chan upgrade`. FreeBSD arm64 is not
+a published target because Rust does not distribute its standard library for
+`aarch64-unknown-freebsd`; build `chan` from source with the FreeBSD ports Rust
+toolchain instead. Release CI cross-builds amd64 through
+`make freebsd-chan-tarball FREEBSD_TARGET=x86_64-unknown-freebsd` against its
+pinned FreeBSD sysroot.
+
 ## Devserver: the `--service=systemd` user-service path
 
 `chan devserver` supervision is per-OS, and `--service` defaults to `auto`, which resolves to systemd on a systemd Linux host (so a bare `chan devserver join` and the explicit `join --service=systemd` below are equivalent there; the examples name the backend explicitly to make clear which path they exercise). `chan devserver join --service=systemd` runs the server under a `chan-devserver.service` systemd **user** service (it ensures linger, starts the unit, re-attaches to an already-running one, and stays attached blocking on the health watchdog), and the `chan serve PATH` discovery socket that registers workspaces with it is Unix-only. `start --service=systemd` does the same setup but returns instead of attaching, `stop --service=systemd` stops and disables the unit, and `restart --service=systemd` bounces it. On macOS `--service=systemd` errors (systemd is Linux-only; use `--service=launchd` or `--service=chan` there), so to develop and exercise the systemd path on a Mac you run it inside lima/sdme, the same Linux flow as everyone else. The supervision shape and its token-delivery contract are in [`design.md`](../../design.md) ("Devserver and the multi-workspace host").

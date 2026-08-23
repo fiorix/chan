@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import {
+  archiveOptionalCliAssets,
   cliAssets,
   desktopAssets,
   gatewayDebAssets,
@@ -266,16 +267,20 @@ async function collectManifest(release, options) {
   }
 
   const assets = [];
-  for (const name of [...cliAssets(), ...desktopAssets(version)]) {
+  const archiveOptionalCli = new Set(archiveOptionalCliAssets());
+  for (const name of cliAssets()) {
+    if (archiveOptionalCli.has(name) && !releaseAssets.has(name)) continue;
     assets.push(await collectAsset(name, releaseAssets, options));
   }
-  // Gateway .debs and Windows are REQUIRED by the verifier for the release
-  // being cut (release.yml gates publish on the gateway and windows jobs), but
-  // the collector keeps them OPTIONAL on purpose: it also walks archived
-  // releases via --latest-count, and an older release legitimately predates a
-  // gateway service (devserver-control arrived in 0.74.0) or the Windows
-  // artifacts, so a missing one must not fail that release's /dl metadata.
-  // Collect each only when the release actually shipped it.
+  for (const name of desktopAssets(version)) {
+    assets.push(await collectAsset(name, releaseAssets, options));
+  }
+  // FreeBSD above, gateway .debs, and Windows are REQUIRED by the verifier for
+  // the release being cut, but the collector keeps them OPTIONAL on purpose:
+  // it also walks archived releases via --latest-count, and an older release
+  // legitimately predates the FreeBSD target, a gateway service
+  // (devserver-control arrived in 0.74.0), or the Windows artifacts. Collect
+  // each only when the release actually shipped it.
   for (const name of [...gatewayDebAssets(version), ...windowsAssets(version)]) {
     if (!releaseAssets.has(name)) continue;
     assets.push(await collectAsset(name, releaseAssets, options));

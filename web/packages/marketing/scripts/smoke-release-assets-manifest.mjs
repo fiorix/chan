@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  archiveOptionalCliAssets,
   cliAssets,
   desktopAssets,
   gatewayDebAssets,
@@ -174,7 +175,13 @@ try {
     gatewayDebAssets(v).filter((name) => name.includes("devserver-control"));
   const sparse = runFixtureCollect(
     "sparse-gateway",
-    [{ releaseVersion: "0.74.0" }, { releaseVersion: "0.73.0", omit: controlDebs("0.73.0") }],
+    [
+      { releaseVersion: "0.74.0" },
+      {
+        releaseVersion: "0.73.0",
+        omit: [...controlDebs("0.73.0"), ...archiveOptionalCliAssets()],
+      },
+    ],
     { latestCount: 5 },
   );
   assertEqual(
@@ -191,6 +198,26 @@ try {
     archived.assets.some((asset) => asset.name.includes("chan-gateway-identity")),
     "the gateway services the archived release did ship are still collected",
   );
+  assert(
+    !archived.assets.some((asset) => asset.name.endsWith("unknown-freebsd.tar.gz")),
+    "an archived release that predates FreeBSD remains collectable",
+  );
+  const sparseDl = path.join(root, "sparse-gateway", "dl");
+  execFileSync("node", [
+    "scripts/generate-release-metadata.mjs",
+    "--manifest",
+    sparse.manifestPath,
+    "--out",
+    sparseDl,
+  ], { cwd: siteRoot });
+  const currentSparseCli = JSON.parse(
+    readFileSync(path.join(sparseDl, "cli", "latest.json"), "utf8"),
+  );
+  const archivedSparseCli = JSON.parse(
+    readFileSync(path.join(sparseDl, "cli", "v0.73.0.json"), "utf8"),
+  );
+  assertEqual(currentSparseCli.targets.length, 4, "current release includes FreeBSD target");
+  assertEqual(archivedSparseCli.targets.length, 3, "pre-FreeBSD release retains three targets");
 
   // An archived release that predates the AppImage updater signatures ships
   // no .AppImage.sig, so the collector must keep it (with no Linux updater
@@ -313,7 +340,7 @@ try {
     const cliJson = JSON.parse(readFileSync(path.join(dlOut, "cli", `${retained}.json`), "utf8"));
     assertEqual(cliJson.version, retainedVersion, `cli ${retained} version`);
     assertEqual(cliJson.tag, retained, `cli ${retained} tag`);
-    assertEqual(cliJson.targets.length, 3, `cli ${retained} target count`);
+    assertEqual(cliJson.targets.length, 4, `cli ${retained} target count`);
     assert(
       cliJson.targets.every((target) => /^[a-f0-9]{64}$/.test(target.sha256)),
       `cli ${retained} sha256 values`,

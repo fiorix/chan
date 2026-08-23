@@ -12,13 +12,21 @@
 import { gatewayServices } from "./gateway-services.mjs";
 import { gatewayPackageVersion } from "./release-version.mjs";
 
-// The standalone musl/darwin self-upgrade tarballs. Distro-built CLI packages
-// ship through COPR/PPA/AUR, not as GitHub Release assets.
+// FreeBSD first ships in v0.96.0. The verifier requires it for the release
+// being cut, while the collector and metadata generator may omit it from
+// retained older releases that predate the target.
+export function archiveOptionalCliAssets() {
+  return ["chan-x86_64-unknown-freebsd.tar.gz"];
+}
+
+// The standalone musl/darwin/FreeBSD self-upgrade tarballs. Distro-built CLI
+// packages ship through COPR/PPA/AUR, not as GitHub Release assets.
 export function cliAssets() {
   return [
     "chan-x86_64-unknown-linux-musl.tar.gz",
     "chan-aarch64-unknown-linux-musl.tar.gz",
     "chan-aarch64-apple-darwin.tar.gz",
+    ...archiveOptionalCliAssets(),
   ];
 }
 

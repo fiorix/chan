@@ -24,6 +24,7 @@ async function main() {
 
     const linuxTar = await makeTarball(assets, "x86_64-unknown-linux-musl", "linux");
     const macTar = await makeTarball(assets, "aarch64-apple-darwin", "mac");
+    const freebsdTar = await makeTarball(assets, "x86_64-unknown-freebsd", "freebsd");
     const metadataPath = path.join(root, "latest.json");
     const metadata = JSON.stringify(
         {
@@ -42,6 +43,12 @@ async function main() {
               asset: "chan-aarch64-apple-darwin.tar.gz",
               url: pathToFileURL(macTar.path).href,
               sha256: macTar.sha256,
+            },
+            {
+              target: "x86_64-unknown-freebsd",
+              asset: "chan-x86_64-unknown-freebsd.tar.gz",
+              url: pathToFileURL(freebsdTar.path).href,
+              sha256: freebsdTar.sha256,
             },
           ],
         },
@@ -68,6 +75,25 @@ async function main() {
       unameS: "Darwin",
       unameM: "arm64",
       expected: "mac",
+    });
+    runInstall({
+      fakeBin,
+      metadataPath,
+      prefix: path.join(prefixes, "freebsd"),
+      unameS: "FreeBSD",
+      unameM: "amd64",
+      expected: "freebsd",
+    });
+    runFreebsdArm64Refusal({
+      fakeBin,
+      metadataPath,
+      prefix: path.join(prefixes, "freebsd-arm64"),
+    });
+    await runFetchFallback({
+      freebsdTar,
+      metadata,
+      prefix: path.join(prefixes, "freebsd-fetch"),
+      root,
     });
     runMetadataFailureFallback({
       fakeBin,
@@ -112,15 +138,25 @@ async function makeTarball(assets, target, marker) {
   };
 }
 
-function runInstall({ fakeBin, metadataPath, prefix, unameS, unameM, expected }) {
+function runInstall({
+  fakeBin,
+  metadataPath,
+  prefix,
+  unameS,
+  unameM,
+  expected,
+  extraEnv = {},
+  pathEnv = `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+}) {
   const result = spawnSync("sh", [installer], {
     encoding: "utf8",
     env: {
       ...process.env,
+      ...extraEnv,
       FAKE_UNAME_S: unameS,
       FAKE_UNAME_M: unameM,
       METADATA_URL: metadataPath,
-      PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+      PATH: pathEnv,
       PREFIX: prefix,
     },
   });
@@ -131,6 +167,94 @@ function runInstall({ fakeBin, metadataPath, prefix, unameS, unameM, expected })
   if (output !== expected) {
     throw new Error(`installed binary printed ${JSON.stringify(output)}, expected ${expected}`);
   }
+}
+
+function runFreebsdArm64Refusal({ fakeBin, metadataPath, prefix }) {
+  const result = spawnSync("sh", [installer], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FAKE_UNAME_S: "FreeBSD",
+      FAKE_UNAME_M: "arm64",
+      METADATA_URL: metadataPath,
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+      PREFIX: prefix,
+    },
+  });
+  if (result.status === 0) {
+    throw new Error("install unexpectedly accepted FreeBSD arm64");
+  }
+  const expected = "FreeBSD on arm64 is not published. amd64 only for now.";
+  if (!result.stderr.includes(expected)) {
+    throw new Error(`FreeBSD arm64 refusal not found: ${result.stderr}`);
+  }
+}
+
+async function runFetchFallback({ freebsdTar, metadata, prefix, root }) {
+  const fetchBin = path.join(root, "fetch-only-bin");
+  const fetchRoot = path.join(root, "fetch-only-assets");
+  await fs.mkdir(fetchBin, { recursive: true });
+  await fs.mkdir(fetchRoot, { recursive: true });
+  await writeFakeUname(fetchBin);
+
+  // Isolate PATH from host curl/wget while retaining only the POSIX tools the
+  // installer itself needs. The fake fetch then proves both HTTP downloads
+  // use the base-system fallback.
+  const tools = [
+    "awk",
+    "cp",
+    "find",
+    "gzip",
+    "head",
+    "install",
+    "ln",
+    "mkdir",
+    "mktemp",
+    "rm",
+    "sed",
+    "sh",
+    "sha256sum",
+    "tar",
+    "tr",
+  ];
+  for (const tool of tools) {
+    const resolved = execFileSync(
+      "/bin/sh",
+      ["-c", 'command -v "$1"', "chan-install-smoke", tool],
+      { encoding: "utf8" },
+    ).trim();
+    await fs.symlink(resolved, path.join(fetchBin, tool));
+  }
+  const fetch = path.join(fetchBin, "fetch");
+  await fs.writeFile(
+    fetch,
+    `#!/bin/sh
+[ "$1" = "-qo" ] || exit 64
+out=$2
+url=$3
+cp "$FAKE_FETCH_ROOT/\${url##*/}" "$out"
+`,
+  );
+  await fs.chmod(fetch, 0o755);
+
+  const tarName = path.basename(freebsdTar.path);
+  await fs.copyFile(freebsdTar.path, path.join(fetchRoot, tarName));
+  const remoteMetadata = metadata.replace(
+    pathToFileURL(freebsdTar.path).href,
+    `https://downloads.invalid/${tarName}`,
+  );
+  await fs.writeFile(path.join(fetchRoot, "latest.json"), remoteMetadata);
+
+  runInstall({
+    fakeBin: fetchBin,
+    metadataPath: "https://downloads.invalid/latest.json",
+    prefix,
+    unameS: "FreeBSD",
+    unameM: "amd64",
+    expected: "freebsd",
+    extraEnv: { FAKE_FETCH_ROOT: fetchRoot },
+    pathEnv: fetchBin,
+  });
 }
 
 function runMetadataFailureFallback({ fakeBin, metadataPath, prefix }) {

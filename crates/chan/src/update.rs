@@ -151,13 +151,15 @@ fn release_target_for(os: &str, arch: &str) -> Result<(&'static str, &'static st
     match (os, arch) {
         // The standalone Linux CLI tarball is musl (fully static) so a too-new
         // build glibc does not gate older machines; self-upgrade resolves the
-        // same musl asset install.sh and latest.json publish. macOS is native.
+        // same musl asset install.sh and latest.json publish. macOS and
+        // FreeBSD use their native target triples.
         ("linux", "x86_64") => Ok(("x86_64-unknown-linux-musl", "tar.gz", "chan")),
         ("linux", "aarch64") => Ok(("aarch64-unknown-linux-musl", "tar.gz", "chan")),
         ("macos", "aarch64") => Ok(("aarch64-apple-darwin", "tar.gz", "chan")),
+        ("freebsd", "x86_64") => Ok(("x86_64-unknown-freebsd", "tar.gz", "chan")),
         (os, arch) => bail!(
             "no published standalone chan CLI release for {os}/{arch}. \
-             Supported targets: linux x86_64/aarch64, macos aarch64."
+             Supported targets: linux x86_64/aarch64, macos aarch64, freebsd x86_64."
         ),
     }
 }
@@ -1440,6 +1442,10 @@ mod tests {
             release_target_for("macos", "aarch64").unwrap(),
             ("aarch64-apple-darwin", "tar.gz", "chan")
         );
+        assert_eq!(
+            release_target_for("freebsd", "x86_64").unwrap(),
+            ("x86_64-unknown-freebsd", "tar.gz", "chan")
+        );
     }
 
     #[test]
@@ -1448,32 +1454,44 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(windows.contains("no published standalone chan CLI release for windows/x86_64"));
-        assert!(windows.contains("linux x86_64/aarch64, macos aarch64"));
+        assert!(windows.contains(
+            "linux x86_64/aarch64, macos aarch64, freebsd x86_64"
+        ));
         assert!(!windows.contains("windows x86_64/aarch64"));
 
         let mac_intel = release_target_for("macos", "x86_64")
             .unwrap_err()
             .to_string();
         assert!(mac_intel.contains("no published standalone chan CLI release for macos/x86_64"));
+
+        let freebsd_arm64 = release_target_for("freebsd", "aarch64")
+            .unwrap_err()
+            .to_string();
+        assert!(freebsd_arm64
+            .contains("no published standalone chan CLI release for freebsd/aarch64"));
     }
 
     #[test]
     fn test_current_target_supported_pair() {
         // The running build's target resolves only where a standalone chan CLI
-        // is published: Linux x86_64 and aarch64, macOS aarch64. Windows ships
-        // the desktop app and no standalone CLI, so `current_target` refusing
-        // there is the contract rather than a gap, and this asserts both
-        // directions instead of assuming the suite only ever runs where it
-        // resolves.
+        // is published: Linux x86_64 and aarch64, macOS aarch64, and FreeBSD
+        // x86_64. Other pairs refuse by contract, including Windows and
+        // FreeBSD arm64, so assert both directions instead of assuming the
+        // suite only ever runs where the target resolves.
         let resolved = current_target();
-        if cfg!(windows) {
-            let message = resolved.unwrap_err().to_string();
-            assert!(
-                message.contains("no published standalone chan CLI release"),
-                "unexpected refusal: {message}"
-            );
-        } else {
-            let _ = resolved.expect("target supported");
+        match (env::consts::OS, env::consts::ARCH) {
+            ("linux", "x86_64" | "aarch64")
+            | ("macos", "aarch64")
+            | ("freebsd", "x86_64") => {
+                let _ = resolved.expect("target supported");
+            }
+            _ => {
+                let message = resolved.unwrap_err().to_string();
+                assert!(
+                    message.contains("no published standalone chan CLI release"),
+                    "unexpected refusal: {message}"
+                );
+            }
         }
     }
 

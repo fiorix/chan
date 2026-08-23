@@ -12,19 +12,34 @@ import {
 
 // The standalone Linux CLI tarball is musl (fully static): a too-new build
 // glibc must not gate older machines. install.sh maps Linux arch to these
-// musl targets. macOS is the native darwin target.
+// musl targets. macOS and FreeBSD use native target triples. FreeBSD is
+// optional only for retained releases that predate its v0.96.0 publication;
+// the release verifier still requires it for every new GA.
 const cliTargets = [
   {
+    id: "cli-linux-x64",
+    label: "Linux x86_64 tarball (static)",
     target: "x86_64-unknown-linux-musl",
     asset: "chan-x86_64-unknown-linux-musl.tar.gz",
   },
   {
+    id: "cli-linux-arm64",
+    label: "Linux aarch64 tarball (static)",
     target: "aarch64-unknown-linux-musl",
     asset: "chan-aarch64-unknown-linux-musl.tar.gz",
   },
   {
+    id: "cli-macos-arm64",
+    label: "macOS aarch64 tarball",
     target: "aarch64-apple-darwin",
     asset: "chan-aarch64-apple-darwin.tar.gz",
+  },
+  {
+    id: "cli-freebsd-x64",
+    label: "FreeBSD amd64 tarball (static)",
+    target: "x86_64-unknown-freebsd",
+    asset: "chan-x86_64-unknown-freebsd.tar.gz",
+    archiveOptional: true,
   },
 ];
 
@@ -57,35 +72,24 @@ function desktopDownloads(version) {
   ];
 }
 
-// The standalone tarballs are the static musl/darwin self-upgrade targets.
-// Distro-built CLI packages live in COPR, the PPA, and the AUR.
-function cliDownloads() {
-  return [
-    {
-      id: "cli-linux-x64",
-      kind: "cli",
-      label: "Linux x86_64 tarball (static)",
-      target: "x86_64-unknown-linux-musl",
-      format: "tar.gz",
-      asset: "chan-x86_64-unknown-linux-musl.tar.gz",
-    },
-    {
-      id: "cli-linux-arm64",
-      kind: "cli",
-      label: "Linux aarch64 tarball (static)",
-      target: "aarch64-unknown-linux-musl",
-      format: "tar.gz",
-      asset: "chan-aarch64-unknown-linux-musl.tar.gz",
-    },
-    {
-      id: "cli-macos-arm64",
-      kind: "cli",
-      label: "macOS aarch64 tarball",
-      target: "aarch64-apple-darwin",
-      format: "tar.gz",
-      asset: "chan-aarch64-apple-darwin.tar.gz",
-    },
-  ];
+// The standalone tarballs are the static musl/FreeBSD and native darwin
+// self-upgrade targets. Distro-built CLI packages live in COPR, the PPA, and
+// the AUR.
+function availableCliTargets(manifest) {
+  return cliTargets.filter(
+    (target) => !target.archiveOptional || manifest.assets.has(target.asset),
+  );
+}
+
+function cliDownloads(manifest) {
+  return availableCliTargets(manifest).map(({ id, label, target, asset }) => ({
+    id,
+    kind: "cli",
+    label,
+    target,
+    format: "tar.gz",
+    asset,
+  }));
 }
 
 // Gateway downloads are DERIVED from the manifest's actual assets, not a fixed
@@ -327,7 +331,7 @@ function buildRelease(manifest) {
     version: manifest.version,
     tag: manifest.tag,
     published_at: manifest.publishedAt,
-    targets: cliTargets.map((target) => {
+    targets: availableCliTargets(manifest).map((target) => {
       const asset = requireAsset(manifest, target.asset);
       return {
         target: target.target,
@@ -340,7 +344,7 @@ function buildRelease(manifest) {
 
   const publicDownloads = [
     ...desktopDownloads(manifest.version),
-    ...cliDownloads(),
+    ...cliDownloads(manifest),
     ...gatewayDownloads(manifest),
     ...windowsDownloads(manifest),
   ].map((download) => {

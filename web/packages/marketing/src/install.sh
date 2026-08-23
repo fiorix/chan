@@ -1,5 +1,5 @@
 #!/bin/sh
-# chan CLI installer for macOS and Linux.
+# chan CLI installer for macOS, Linux, and FreeBSD.
 #
 #   curl -fsSL https://chan.app/install.sh | sh
 #
@@ -71,6 +71,13 @@ case "$os" in
             *) err "Linux on $arch is not published." ;;
         esac
         ;;
+    FreeBSD)
+        case "$arch" in
+            x86_64|amd64)  target="x86_64-unknown-freebsd" ;;
+            aarch64|arm64) err "FreeBSD on $arch is not published. amd64 only for now." ;;
+            *) err "FreeBSD on $arch is not published." ;;
+        esac
+        ;;
     *) err "Unsupported OS: $os." ;;
 esac
 
@@ -85,8 +92,10 @@ fetch_url() {
                 curl -fsSL "$url" -o "$out"
             elif command -v wget >/dev/null 2>&1; then
                 wget -qO "$out" "$url"
+            elif command -v fetch >/dev/null 2>&1; then
+                fetch -qo "$out" "$url"
             else
-                printf 'install: need curl or wget on PATH.\n' >&2
+                printf 'install: need curl, wget, or fetch on PATH.\n' >&2
                 return 1
             fi
             ;;
