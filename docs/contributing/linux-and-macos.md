@@ -148,21 +148,13 @@ CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/set
 
 ## CLI: the FreeBSD standalone target
 
-Releases publish `chan-x86_64-unknown-freebsd.tar.gz`, a static amd64 tarball
-containing `chan`, `LICENSE`, and `README.md`. On a stock FreeBSD amd64 host,
-the base-system `fetch` command is enough to run the installer:
+Releases publish `chan-x86_64-unknown-freebsd.tar.gz`, a static amd64 tarball containing `chan`, `LICENSE`, and `README.md`. The installer supports FreeBSD's base-system `fetch` command:
 
 ```sh
 fetch -o - https://chan.app/install.sh | sh
 ```
 
-The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux
-and macOS standalone builds, including for `chan upgrade`. FreeBSD arm64 is not
-a published target because Rust does not distribute its standard library for
-`aarch64-unknown-freebsd`; build `chan` from source with the FreeBSD ports Rust
-toolchain instead. Release CI cross-builds amd64 through
-`make freebsd-chan-tarball FREEBSD_TARGET=x86_64-unknown-freebsd` against its
-pinned FreeBSD sysroot.
+The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux and macOS standalone builds, including for `chan upgrade`. FreeBSD arm64 is not a published target because Rust does not distribute its standard library for `aarch64-unknown-freebsd`; build `chan` from source with the FreeBSD ports Rust toolchain instead. Release CI cross-builds amd64 through `make freebsd-chan-tarball FREEBSD_TARGET=x86_64-unknown-freebsd` against its pinned FreeBSD sysroot. The release checklist still requires an end-to-end installer and upgrade check against the published artifact on stock FreeBSD.
 
 ## Devserver: the `--service=systemd` user-service path
 
