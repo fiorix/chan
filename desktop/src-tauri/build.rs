@@ -74,7 +74,12 @@ fn git_build_id() -> Option<String> {
     let hash = git(&["rev-parse", "--short=12", "HEAD"])?;
     // A `git status` that could not run reads as clean: an unprovable `-dirty`
     // is worse than none.
-    let dirty = git(&["status", "--porcelain"]).is_some_and(|status| !status.is_empty());
+    // `--no-optional-locks` keeps `status` from refreshing the index as a
+    // side effect: the index is a rerun-if-changed input above, so a
+    // refresh here would mark this very script stale for the next cargo
+    // invocation (and recompile the crate) with nothing changed.
+    let dirty = git(&["--no-optional-locks", "status", "--porcelain"])
+        .is_some_and(|status| !status.is_empty());
     let suffix = if dirty { "-dirty" } else { "" };
     Some(format!("{GIT_BUILD_ID_TAG}{hash}{suffix}"))
 }
