@@ -347,9 +347,13 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# Linux and macOS arms run their sweeps without this step. The web bundles
 	# are built before it on purpose: chan-server embeds web/dist and
 	# web-launcher/dist via rust-embed, so a CLI built before they exist is
-	# rebuilt from the embed crates up once `desktop ci-windows` creates them
-	# (about nine minutes on the Windows runner). With the bundles in place
-	# the later `desktop ci-windows` build of the same target is a no-op.
+	# rebuilt from the embed crates up once the bundles appear, and so is one
+	# built before a second `make web` rewrites them (vite emits the same
+	# files with new mtimes, which is a rebuild to cargo). Either costs about
+	# nine minutes on the Windows runner. So: build the bundles once, here,
+	# and tell `desktop ci-windows` they exist (WEB_ALREADY_BUILT=1, as
+	# ci-linux-build and ci-macos-build do), which makes its own
+	# `cargo build --release -p chan` a no-op.
 	$(MAKE) web
 	$(CARGO) build --release -p chan
 	# The `chan` crate's own tests run on no Windows arm (see above), and the
@@ -361,7 +365,7 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# a few seconds and is not the deferred full-suite Windows port.
 	scripts/smoke-windows-cli.sh target/release/chan.exe
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
-	$(MAKE) -C desktop ci-windows
+	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
 
 .PHONY: ci-linux-packages
