@@ -102,18 +102,18 @@ sudo dnf install chan-desktop</b></code>
   </div>
 
   <div class="download-group">
-    <h3>Quick install <span class="group-note">macOS + Linux + FreeBSD amd64</span></h3>
+    <h3>Quick install <span class="group-note">macOS + Linux</span></h3>
     <p class="minor">macOS and Linux:</p>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
       {{copyButton}}
     </div>
-    <p class="minor">FreeBSD base system:</p>
+    <p class="minor">FreeBSD amd64 (pending published-artifact acceptance):</p>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>fetch -o - https://chan.app/install.sh | sh</b></code>
       {{copyButton}}
     </div>
-    <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command. FreeBSD publishes an amd64 static tarball; on FreeBSD arm64, build from source.</p>
+    <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command. The v0.96.0 FreeBSD amd64 path is implemented but still awaits an end-to-end installer and upgrade check against the published artifact on a stock host. FreeBSD arm64 remains source-only.</p>
   </div>
 
   <div class="download-group">
