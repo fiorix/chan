@@ -1454,9 +1454,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(windows.contains("no published standalone chan CLI release for windows/x86_64"));
-        assert!(windows.contains(
-            "linux x86_64/aarch64, macos aarch64, freebsd x86_64"
-        ));
+        assert!(windows.contains("linux x86_64/aarch64, macos aarch64, freebsd x86_64"));
         assert!(!windows.contains("windows x86_64/aarch64"));
 
         let mac_intel = release_target_for("macos", "x86_64")
@@ -1467,8 +1465,9 @@ mod tests {
         let freebsd_arm64 = release_target_for("freebsd", "aarch64")
             .unwrap_err()
             .to_string();
-        assert!(freebsd_arm64
-            .contains("no published standalone chan CLI release for freebsd/aarch64"));
+        assert!(
+            freebsd_arm64.contains("no published standalone chan CLI release for freebsd/aarch64")
+        );
     }
 
     #[test]
@@ -1480,9 +1479,7 @@ mod tests {
         // suite only ever runs where the target resolves.
         let resolved = current_target();
         match (env::consts::OS, env::consts::ARCH) {
-            ("linux", "x86_64" | "aarch64")
-            | ("macos", "aarch64")
-            | ("freebsd", "x86_64") => {
+            ("linux", "x86_64" | "aarch64") | ("macos", "aarch64") | ("freebsd", "x86_64") => {
                 let _ = resolved.expect("target supported");
             }
             _ => {
