@@ -238,11 +238,11 @@ suspected leak) and prints the new CHAN_DEVSERVER_TOKEN= marker and
 reopen any browser tab that used the old URL. Tokens also rotate on
 their own at the first cold start after they turn 30 days old.
 
---service picks the backend. `auto` (the default) resolves per-OS
-at runtime: under a management verb it is systemd on Linux, launchd
-on macOS, and chan's own daemon on Windows; under `run` it is the
-plain foreground server. `none` forces the foreground server and
-only `run` accepts it. `chan` is the cross-OS self-managed
+--service picks the backend. `auto` (the default) resolves per-OS at
+runtime: under a management verb it is systemd on Linux, launchd on
+macOS, and chan's own daemon on Windows and FreeBSD; under `run` it
+is the plain foreground server. `none` forces the foreground server
+and only `run` accepts it. `chan` is the cross-OS self-managed
 background daemon (pidfile + flock) and works under `run` or a
 management verb. `systemd` and `launchd` are OS-backed and need a
 management verb.

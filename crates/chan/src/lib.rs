@@ -1657,17 +1657,18 @@ fn plan_devserver(service: ServiceKind, action: Option<DevAction>) -> Result<Dev
 ///
 /// With NO action verb the devserver always runs in the foreground, so a bare
 /// `chan devserver` works on every host as `None` (unsupervised). With an action
-/// verb it selects the OS supervisor: `Systemd` on Linux, `Launchd` on macOS,
-/// `Chan` on Windows. An unrecognized OS has no manager for an action verb, so
-/// that one case errors (the message points at `--service=chan`). The OS is not
-/// threaded into `plan_devserver`, which keeps validating the resolved
-/// `(backend, action)` pair on its own matrix.
+/// verb it selects the OS supervisor: `Systemd` on Linux, `Launchd` on macOS, and
+/// `Chan` on Windows and FreeBSD, neither of which has an OS supervisor chan
+/// drives, so both take its own portable daemon. An unrecognized OS has no
+/// manager for an action verb, so that one case errors (the message points at
+/// `--service=chan`). The OS is not threaded into `plan_devserver`, which keeps
+/// validating the resolved `(backend, action)` pair on its own matrix.
 fn resolve_auto(os: &str, has_action: bool) -> Result<ServiceKind, String> {
     if !has_action {
         return Ok(ServiceKind::None);
     }
     match os {
-        "windows" => Ok(ServiceKind::Chan),
+        "windows" | "freebsd" => Ok(ServiceKind::Chan),
         "linux" => Ok(ServiceKind::Systemd),
         "macos" => Ok(ServiceKind::Launchd),
         other => Err(format!(
@@ -10768,17 +10769,28 @@ mod tests {
         assert_eq!(resolve_auto("macos", false), Ok(ServiceKind::None));
         assert_eq!(resolve_auto("plan9", false), Ok(ServiceKind::None));
         assert_eq!(resolve_auto("windows", false), Ok(ServiceKind::None));
+        assert_eq!(resolve_auto("freebsd", false), Ok(ServiceKind::None));
 
         // An action verb selects the OS supervisor.
         assert_eq!(resolve_auto("linux", true), Ok(Systemd));
         assert_eq!(resolve_auto("macos", true), Ok(Launchd));
         assert_eq!(resolve_auto("windows", true), Ok(Chan));
+        // FreeBSD has no OS supervisor chan drives, so it takes the portable
+        // daemon Windows already defaults to.
+        assert_eq!(resolve_auto("freebsd", true), Ok(Chan));
 
-        // An unrecognized OS has no manager for an action verb.
+        // An unrecognized OS has no manager for an action verb. Naming FreeBSD
+        // above must not widen into a silent default for every other OS.
         let err = resolve_auto("plan9", true).unwrap_err();
         assert!(err.contains("could not auto-detect a service backend"));
         assert!(err.contains("plan9"));
         assert!(err.contains("--service=chan"));
+        for unknown in ["openbsd", "netbsd", "dragonfly", "illumos", "android"] {
+            assert!(
+                resolve_auto(unknown, true).is_err(),
+                "{unknown} must not resolve a backend"
+            );
+        }
 
         // The Linux systemd pick is confirmed only when systemd is the init.
         assert!(require_systemd_for_auto(true).is_ok());
