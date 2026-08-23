@@ -1459,9 +1459,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(windows.contains("no published standalone chan CLI release for windows/x86_64"));
-        assert!(
-            windows.contains("linux x86_64/aarch64, macos aarch64, freebsd x86_64/aarch64")
-        );
+        assert!(windows.contains("linux x86_64/aarch64, macos aarch64, freebsd x86_64/aarch64"));
         assert!(!windows.contains("windows x86_64/aarch64"));
 
         let mac_intel = release_target_for("macos", "x86_64")
