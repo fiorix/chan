@@ -4,6 +4,13 @@ name: CI
 # push/PR matrix builds real packages on every supported desktop OS, plus
 # the Linux devserver, distro recipes, and chan container. Signing and
 # notarization remain release gates because they require protected secrets.
+#
+# Rust cache policy: the three make ci-* jobs are the single writers of the
+# per-OS/arch shared keys, and only on main (save-if), so a branch run never
+# evicts main's entries under the repository cache cap. release.yml and the
+# desktop dry run read the same keys and never write. They build a superset
+# of what the release jobs compile (debug checks, the release CLI, the
+# desktop package), so a restored key is warm for every release job too.
 
 on:
   push:
@@ -33,9 +40,14 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - uses: actions/setup-node@v6
         with:
@@ -74,9 +86,14 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       # Window chrome follows the linked SDK. Match the release workflow so
       # this build is a useful rehearsal of the shipped macOS desktop.
@@ -113,9 +130,14 @@ jobs:
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
         shell: bash
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - uses: actions/setup-node@v6
         with:
@@ -145,9 +167,13 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - uses: actions/setup-node@v6
         with:

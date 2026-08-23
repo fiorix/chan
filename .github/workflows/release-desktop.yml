@@ -37,9 +37,14 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      # Read-only against the per-OS/arch shared key ci.yml writes on main.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       # Match release.yml: window chrome follows the linked SDK, so
       # build against the newest Xcode on the image (the default is
@@ -107,9 +112,21 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path $env:RUNNER_TEMP "codesigntool-for-windows.zip"
           $extractRoot = Join-Path $env:RUNNER_TEMP "codesigntool"
-          Invoke-WebRequest `
-            -Uri "https://ssl.com/download/codesigntool-for-windows/" `
-            -OutFile $archive
+          # Same pinned GitHub release and bounded retry as release.yml; the
+          # ssl.com/download page is not a reliable CI source.
+          $uri = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip"
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            try {
+              Invoke-WebRequest -Uri $uri -OutFile $archive
+              break
+            } catch {
+              if ($attempt -ge 3) { throw }
+              Write-Output "CodeSignTool download attempt $attempt failed: $($_.Exception.Message); retrying in 20s"
+              Start-Sleep -Seconds 20
+            }
+          }
           New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
           Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
           $tool = Get-ChildItem -LiteralPath $extractRoot -Filter "CodeSignTool.bat" -Recurse -File |

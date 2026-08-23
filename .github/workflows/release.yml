@@ -6,6 +6,11 @@ name: Release
 # - Tag pushes and workflow_dispatch publish=true are release-cut gates.
 # - Publishing uploads assets first, verifies the uploaded assets, generates
 #   /dl metadata from those assets, then deploys Pages.
+# - Every build job starts from `context`; validation and artifacts run side by
+#   side and only publish-release waits for both.
+# - The Rust caches are read-only here (save-if: false): ci.yml on main is the
+#   single writer of the per-OS/arch shared keys, so a release branch or tag
+#   never evicts main's entries and always restores them.
 
 on:
   push:
@@ -114,9 +119,13 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       - uses: actions/setup-node@v6
         with:
@@ -162,12 +171,19 @@ jobs:
             install_deps
           fi
 
+      # Prebuilt: without it desktop/Makefile's tauri-cli target falls back
+      # to `cargo install`, a five-minute source build on this path.
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
       - run: make ci-linux
         working-directory: chan
 
   linux-cli-artifacts:
     name: linux CLI tarball (${{ matrix.musl_target }})
-    needs: linux-validate
+    needs: context
     strategy:
       fail-fast: false
       matrix:
@@ -186,9 +202,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.musl_target }}
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          save-if: false
 
       # The standalone CLI tarball is musl (fully static) so a too-new build
       # glibc does not gate older machines. zig is the cross C/C++ compiler
@@ -256,10 +274,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan/gateway
           key: gateway-${{ matrix.target }}
+          save-if: false
 
       - uses: actions/setup-node@v6
         with:
@@ -316,9 +336,7 @@ jobs:
     # not consumable by GH Actions, so CI leans on the universal AppImage
     # rather than literal fedora/arch container jobs (which would re-list
     # distro deps = the single-source drift that killed v0.19.0).
-    needs:
-      - context
-      - linux-validate
+    needs: context
     strategy:
       fail-fast: false
       matrix:
@@ -339,9 +357,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       - uses: actions/setup-node@v6
         with:
@@ -473,16 +494,39 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
+
+      # Match ci.yml's macOS job: window chrome follows the linked SDK, and
+      # the prebuilt tauri-cli replaces a six-minute source build.
+      - name: Select newest Xcode
+        run: |
+          sudo xcode-select -s "$(python3 chan/scripts/select-newest-xcode.py)"
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
 
       - run: make ci-macos
         working-directory: chan
 
   macos-cli-artifact:
     name: macOS CLI package
-    needs: macos-validate
+    needs: context
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -492,10 +536,12 @@ jobs:
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          target: aarch64-apple-darwin
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       - uses: actions/setup-node@v6
         with:
@@ -503,7 +549,11 @@ jobs:
           cache: 'npm'
           cache-dependency-path: chan/web/package-lock.json
 
-      - run: make chan CHAN_TARGET=aarch64-apple-darwin
+      # macos-latest is an aarch64 host, so the plain host build IS the
+      # aarch64-apple-darwin binary; building it under target/release (no
+      # --target dir) lets this job reuse the shared Rust cache the validate
+      # and desktop jobs restore.
+      - run: make chan
         working-directory: chan
 
       - name: Stage macOS CLI artifact
@@ -511,7 +561,7 @@ jobs:
         run: |
           set -e
           mkdir -p release-artifacts staging
-          cp target/aarch64-apple-darwin/release/chan staging/
+          cp target/release/chan staging/
           cp LICENSE README.md staging/
           tar -czf release-artifacts/chan-aarch64-apple-darwin.tar.gz -C staging .
           ls -la release-artifacts
@@ -524,9 +574,7 @@ jobs:
 
   macos-desktop-artifacts:
     name: macOS desktop package
-    needs:
-      - context
-      - macos-validate
+    needs: context
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -535,9 +583,13 @@ jobs:
 
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       # macOS window chrome follows the SDK the binary was LINKED
       # against: the runner's default Xcode is older than current, so
@@ -690,9 +742,13 @@ jobs:
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
         shell: bash
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan
+          shared-key: rust-${{ runner.os }}-${{ runner.arch }}
+          save-if: false
 
       - uses: actions/setup-node@v6
         with:
@@ -739,9 +795,21 @@ jobs:
           $extractRoot = Join-Path $env:RUNNER_TEMP "codesigntool"
           # CodeSignTool from SSL.com's official GitHub releases (pinned). The
           # ssl.com/download page is not a reliable CI source (intermittent 500s).
-          Invoke-WebRequest `
-            -Uri "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip" `
-            -OutFile $archive
+          # Three attempts with a pause: this download has failed a release day
+          # outright once, and a retry is cheaper than a rerun of a 40-minute job.
+          $uri = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip"
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            try {
+              Invoke-WebRequest -Uri $uri -OutFile $archive
+              break
+            } catch {
+              if ($attempt -ge 3) { throw }
+              Write-Output "CodeSignTool download attempt $attempt failed: $($_.Exception.Message); retrying in 20s"
+              Start-Sleep -Seconds 20
+            }
+          }
           New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
           Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
           $tool = Get-ChildItem -LiteralPath $extractRoot -Filter "CodeSignTool.bat" -Recurse -File |
@@ -895,8 +963,11 @@ jobs:
   publish-release:
     name: publish GitHub Release
     if: needs.context.outputs.publish == 'true'
+    # Validation and artifacts run side by side; publication waits for both.
     needs:
       - context
+      - linux-validate
+      - macos-validate
       - linux-cli-artifacts
       - gateway-linux-packages
       - linux-desktop-artifacts

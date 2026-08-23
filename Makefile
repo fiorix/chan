@@ -344,8 +344,13 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# workspace member, so compiling chan-desktop's tests pulls in its
 	# Windows Tauri config, which declares `target/release/chan.exe` as a
 	# bundled resource. Only the Windows config declares it, which is why the
-	# Linux and macOS arms run their sweeps without this step. The later
-	# `desktop ci-windows` build re-runs this and hits a warm cache.
+	# Linux and macOS arms run their sweeps without this step. The web bundles
+	# are built before it on purpose: chan-server embeds web/dist and
+	# web-launcher/dist via rust-embed, so a CLI built before they exist is
+	# rebuilt from the embed crates up once `desktop ci-windows` creates them
+	# (about nine minutes on the Windows runner). With the bundles in place
+	# the later `desktop ci-windows` build of the same target is a no-op.
+	$(MAKE) web
 	$(CARGO) build --release -p chan
 	# The `chan` crate's own tests run on no Windows arm (see above), and the
 	# standalone chan.exe is a published release artifact. Most of the crate is

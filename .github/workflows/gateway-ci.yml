@@ -78,9 +78,16 @@ jobs:
       # action installs the same channel CI uses for the core.
       - run: cp chan/rust-toolchain.toml ./rust-toolchain.toml
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      # Single writer of the gateway workspace key, on main only, so branch
+      # runs never evict it under the repository cache cap.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: chan/gateway
+          shared-key: gateway-${{ runner.os }}-${{ runner.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - uses: actions/setup-node@v6
         with:

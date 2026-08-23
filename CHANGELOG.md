@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The release workflow runs warm and in parallel.** The Rust caches are keyed per OS and architecture and shared between `ci.yml` and `release.yml`, with the three `make ci-*` jobs on `main` as their only writers, so a release branch or tag no longer fills the repository cache cap and evicts `main`'s entries: every Release job now restores a warm dependency cache instead of compiling two thousand crates cold. The Linux and macOS artifact jobs start from `release context` alongside the validation jobs instead of behind them (publication still waits for both), the validation jobs install the prebuilt `tauri-cli` instead of compiling it, `macOS validation` selects the same Xcode the desktop package links against, the macOS CLI package builds the host target so it shares the cache, and the SSL.com CodeSignTool download retries. `make ci-windows` builds the web bundles before the release CLI, so the CLI is no longer compiled twice. The release process records the cycle's run ids after the tag instead of re-cutting the GA commit for them, which removes a second full CI wait from every GA.
+
 ## [v0.95.1] - 2026-08-22
 
 v0.95.1 is a one-fix patch release from using v0.95.0: turning a workspace off on a gateway-registered devserver works from the launcher, and from `chan workspace close WS --on TARGET`, again.
