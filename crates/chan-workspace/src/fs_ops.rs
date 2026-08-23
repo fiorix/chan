@@ -1539,9 +1539,15 @@ where
 
 /// Map a cap-std `io::Error` into our error enum, distinguishing
 /// "you tried to escape the sandbox" from generic I/O. cap-std
-/// signals an escape via the message string (see `map_cap_err` in
-/// `workspace.rs` for the symmetric mapping on the Workspace side).
+/// signals an escape via the message string, or via `ENOTCAPABLE`
+/// where the kernel resolved the path (see `map_cap_err` in
+/// `rooted_fs.rs` for the symmetric mapping on the Workspace side).
 fn map_cap(err: std::io::Error, rel: &Path) -> ChanError {
+    // The kernel-resolved escape, per the note above: no message to match on.
+    #[cfg(target_os = "freebsd")]
+    if err.raw_os_error() == Some(rustix::io::Errno::NOTCAPABLE.raw_os_error()) {
+        return ChanError::SymlinkEscape(rel.to_path_buf());
+    }
     let msg = err.to_string();
     if msg.contains("outside of the filesystem") || msg.contains("path escape") {
         return ChanError::SymlinkEscape(rel.to_path_buf());
@@ -1688,13 +1694,17 @@ fn write_xattrs_via_fd(
 /// durable. On Windows this is a no-op (NTFS commits dirent changes
 /// through the journal as part of the rename itself).
 ///
-/// Linux quirk: `Dir::open_ambient_dir` opens directories with
-/// `O_PATH` via cap-primitives, and an `O_PATH` fd does not support
-/// `fsync` (returns `EBADF`). Dup'ing the fd preserves `O_PATH`, so a
-/// straight `try_clone_to_owned` + `sync_all` fails on Linux. We
-/// re-open the same dir via `/proc/self/fd/<n>` to get a fresh
-/// non-`O_PATH` fd that supports `fsync`. Other unixes (macOS, BSDs)
-/// don't carry `O_PATH`, so the dup path is fine there.
+/// `O_PATH` quirk: `Dir::open_ambient_dir` opens directories with
+/// `O_PATH` wherever cap-primitives has it, and `target_o_path` in
+/// `cap-primitives/src/rustix/fs/dir_utils.rs` names freebsd alongside
+/// linux. An `O_PATH` fd does not support `fsync`: it returns `EBADF`.
+/// Dup'ing the fd preserves `O_PATH`, so a straight `try_clone_to_owned`
+/// + `sync_all` fails on both, and each needs its own way back to a plain
+/// directory fd. Linux re-opens through `/proc/self/fd/<n>`. FreeBSD has
+/// no procfs mounted by default, but it does accept an `O_PATH` descriptor
+/// as the `dirfd` of an `*at` call, so it re-opens through
+/// `openat(dir, ".")`. macOS and the remaining BSDs carry no `O_PATH` at
+/// all, so the dup path is correct there.
 #[cfg(target_os = "linux")]
 pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
     use std::os::fd::AsRawFd;
@@ -1707,7 +1717,23 @@ pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "freebsd")]
+pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
+    use std::os::fd::AsFd;
+    let reopened = rustix::fs::openat(
+        dir.as_fd(),
+        ".",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| ChanError::Io(format!("reopen dir for fsync: {e}")))?;
+    let f: std::fs::File = reopened.into();
+    f.sync_all()
+        .map_err(|e| ChanError::Io(format!("fsync dir: {e}")))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "freebsd"))))]
 pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
     use std::os::fd::AsFd;
     let owned = dir
