@@ -315,12 +315,7 @@ fn fd_snapshot() -> Option<FdSnapshot> {
 
 #[cfg(target_os = "freebsd")]
 fn freebsd_open_fd_count() -> Option<u64> {
-    let mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_NFDS,
-        0,
-    ];
+    let mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_NFDS, 0];
     let mut count: libc::c_int = 0;
     let mut count_len = std::mem::size_of_val(&count);
     // SAFETY: `mib` and `count` are live, correctly sized objects for the
