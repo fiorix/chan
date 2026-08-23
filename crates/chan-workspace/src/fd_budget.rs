@@ -72,8 +72,8 @@ const REINDEX_RESERVE: u64 = 64;
 /// Spacing between back-off probes while a reindex waits for headroom.
 /// Short enough that the rebuild resumes promptly once interactive work
 /// releases descriptors, long enough that the probe loop is not a busy
-/// spin. The probe itself is a `read_dir("/dev/fd")` count, so we keep
-/// the cadence modest.
+/// spin. The probe reads process-wide kernel state, so we keep the cadence
+/// modest.
 const REINDEX_BACKOFF_STEP: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Non-Unix only: how many files a reindex worker processes between
@@ -166,20 +166,16 @@ pub(crate) fn pace_reindex_worker(cancel: Option<&std::sync::atomic::AtomicBool>
             // monopolise the graph DB -- the Windows file-open hang. We
             // can't measure fd pressure, so we fall back to a coarse
             // time-sliced yield (see `pace_reindex_worker_timesliced`).
-            // Best-effort and bounded: it never blocks indefinitely. It is
-            // also reachable on FreeBSD without `fdescfs`, where the same
-            // reasoning does not apply; see `pace_no_probe`.
+            // Best-effort and bounded: it never blocks indefinitely.
             None => return pace_no_probe(),
         }
     }
 }
 
-/// `None`-snapshot fallback for `pace_reindex_worker`. Unix does not pace
-/// without a probe: Linux and macOS always have one, and FreeBSD without
-/// `fdescfs` reaches this arm with the same reindex behaviour it had when the
-/// stub `/dev/fd` count reported permanent clear headroom. The time-sliced
-/// yield below exists for the Windows graph-DB hang, which is not a condition
-/// FreeBSD is in. On non-Unix this dispatches to that yield.
+/// `None`-snapshot fallback for `pace_reindex_worker`. Unix does not invent fd
+/// pressure when its platform probe fails. The time-sliced yield below exists
+/// for the Windows graph-DB hang, not descriptor pressure; on non-Unix this
+/// dispatches to that yield.
 #[cfg(unix)]
 fn pace_no_probe() -> u32 {
     0
@@ -306,46 +302,51 @@ fn fd_snapshot() -> Option<FdSnapshot> {
     Some(FdSnapshot { open, limit })
 }
 
-/// FreeBSD only counts descriptors through `/dev/fd` when `fdescfs` is mounted
-/// over it. Bare devfs publishes `0`, `1`, `2` and nothing else, so the count
-/// is a constant 3 however many descriptors the process holds. Reporting that
-/// is worse than reporting nothing: every consumer would read permanent clear
-/// headroom and disengage, believing it had measured something. Probe once for
-/// the real thing and fall back to "no probe" when it is absent.
+/// FreeBSD's bare devfs does not enumerate open descriptors under `/dev/fd`,
+/// and opening that directory through fdescfs would itself perturb the count.
+/// `KERN_PROC_NFDS` reads the current process's descriptor bitmap directly,
+/// without opening a descriptor or allocating a file-information array.
 #[cfg(target_os = "freebsd")]
 fn fd_snapshot() -> Option<FdSnapshot> {
-    if !dev_fd_lists_open_descriptors() {
-        return None;
-    }
-    let open = std::fs::read_dir("/dev/fd").ok()?.count() as u64;
+    let open = freebsd_open_fd_count()?;
     let limit = nofile_limit()?;
     Some(FdSnapshot { open, limit })
 }
 
-/// Whether `/dev/fd` reflects this process's descriptors. Holding a descriptor
-/// the listing has to show separates `fdescfs` from the devfs stub: with the
-/// stub the answer is always exactly the three standard entries, while under
-/// `fdescfs` the probe descriptor and `read_dir`'s own handle are both listed,
-/// which the stub can never reach. Resolved once; the mount does not come and
-/// go under a running devserver.
 #[cfg(target_os = "freebsd")]
-fn dev_fd_lists_open_descriptors() -> bool {
-    static LIVE: OnceLock<bool> = OnceLock::new();
-    *LIVE.get_or_init(|| {
-        let Ok(probe) = std::fs::File::open("/dev/null") else {
-            return false;
-        };
-        let seen = std::fs::read_dir("/dev/fd")
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        drop(probe);
-        seen > STUB_DEV_FD_ENTRIES
-    })
+fn freebsd_open_fd_count() -> Option<u64> {
+    let mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_NFDS,
+        0,
+    ];
+    let mut count: libc::c_int = 0;
+    let mut count_len = std::mem::size_of_val(&count);
+    // SAFETY: `mib` and `count` are live, correctly sized objects for the
+    // duration of this read-only call. `count_len` describes the writable
+    // output buffer, and a null new-value pointer with length zero requests
+    // no mutation.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_ptr(),
+            mib.len() as libc::c_uint,
+            (&mut count as *mut libc::c_int).cast(),
+            &mut count_len,
+            std::ptr::null(),
+            0,
+        )
+    };
+    decode_sysctl_fd_count(status, count_len, count)
 }
 
-/// `0`, `1`, `2`: what bare devfs publishes under `/dev/fd`.
-#[cfg(target_os = "freebsd")]
-const STUB_DEV_FD_ENTRIES: usize = 3;
+#[cfg(any(test, target_os = "freebsd"))]
+fn decode_sysctl_fd_count(status: i32, returned_len: usize, count: i32) -> Option<u64> {
+    if status != 0 || returned_len != std::mem::size_of::<i32>() {
+        return None;
+    }
+    u64::try_from(count).ok()
+}
 
 #[cfg(not(unix))]
 fn fd_snapshot() -> Option<FdSnapshot> {
@@ -463,6 +464,15 @@ mod tests {
             effective_nofile_limit(Some(EFFECTIVE_NOFILE_CEILING * 4)),
             EFFECTIVE_NOFILE_CEILING
         );
+    }
+
+    #[test]
+    fn sysctl_fd_count_requires_an_exact_nonnegative_result() {
+        let count_len = std::mem::size_of::<i32>();
+        assert_eq!(decode_sysctl_fd_count(0, count_len, 17), Some(17));
+        assert_eq!(decode_sysctl_fd_count(-1, count_len, 17), None);
+        assert_eq!(decode_sysctl_fd_count(0, count_len - 1, 17), None);
+        assert_eq!(decode_sysctl_fd_count(0, count_len, -1), None);
     }
 
     #[test]

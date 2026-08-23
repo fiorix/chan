@@ -91,6 +91,12 @@ hf-hub = { version = "0.4", default-features = false, optional = true, features 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
 xattr = "1"
 
+# Count the current process's descriptors through `KERN_PROC_NFDS`. Unlike
+# `/dev/fd`, the sysctl works on stock FreeBSD without fdescfs and does not
+# consume a descriptor while measuring them.
+[target.'cfg(target_os = "freebsd")'.dependencies]
+libc = "0.2"
+
 # Windows process-liveness probe for the writer-lock steal path
 # (`lock.rs`): OpenProcess + GetExitCodeProcess decide whether a
 # recorded lock holder is provably dead before its leaked LockFileEx
