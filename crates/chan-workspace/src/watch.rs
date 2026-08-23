@@ -254,9 +254,21 @@ struct DirRegistration {
     root_device: Option<u64>,
 }
 
+/// A directory the FreeBSD dispatcher wants rescanned, because notify's kqueue
+/// backend can only name one new entry per directory write.
+#[cfg(target_os = "freebsd")]
+struct CatchUpRequest {
+    abs: PathBuf,
+    rel: String,
+    prefix: Option<String>,
+    generation: crate::WorkspaceGeneration,
+}
+
 enum WatchCommand {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Register(DirRegistration),
+    #[cfg(target_os = "freebsd")]
+    CatchUp(CatchUpRequest),
     ProviderLost {
         message: String,
         #[cfg(test)]
@@ -319,6 +331,168 @@ impl DegradeThrottle {
     }
 }
 
+/// How long the FreeBSD catch-up queue waits before draining, so a burst of
+/// creations in one directory costs one rescan rather than one per event. Long
+/// enough to swallow an unpack or a checkout's per-directory storm, short
+/// enough that a single stray create still reaches the index promptly.
+#[cfg(target_os = "freebsd")]
+const CATCH_UP_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Coalescing queue for the FreeBSD catch-up rescans, and the record of which
+/// directories have already been accounted for. A zero-sized no-op on every
+/// other platform, which keeps the supervisor loop free of platform branches
+/// for a mechanism only one backend needs.
+///
+/// `known_dirs` is what makes a rescan proportional to the change instead of to
+/// the tree. It maps a directory to its inode, not merely to its existence, so
+/// a directory deleted and recreated under the same name reads as new and its
+/// contents are announced again rather than silently skipped. Entries for
+/// deleted directories are left in place: each costs one path, and because the
+/// inode has to match as well, a stale entry can never suppress a genuine
+/// announcement.
+#[cfg(target_os = "freebsd")]
+#[derive(Default)]
+struct CatchUpQueue {
+    pending: std::collections::HashMap<PathBuf, CatchUpRequest>,
+    due: Option<Instant>,
+    known_dirs: std::collections::HashMap<PathBuf, u64>,
+}
+
+#[cfg(target_os = "freebsd")]
+impl CatchUpQueue {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Learn the tree that already exists, without announcing any of it. The
+    /// first live event would otherwise find every directory unknown and
+    /// re-announce the whole workspace. This is the walk Linux already performs
+    /// to register each subdirectory, minus the registration: notify's kqueue
+    /// backend watches the root recursively and has walked it once itself.
+    fn seed(&mut self, roots: &[WatchRoot], policy: &IndexScopePolicy) {
+        for root in roots {
+            self.scan(&root.abs, "", root.prefix.as_deref(), policy, None);
+        }
+    }
+
+    fn push(&mut self, request: CatchUpRequest) {
+        // The deadline is taken from the first pending request and never pushed
+        // out by a later one, so a directory under continuous write drains on a
+        // fixed cadence instead of starving behind its own churn.
+        self.due
+            .get_or_insert_with(|| Instant::now() + CATCH_UP_DEBOUNCE);
+        self.pending.entry(request.abs.clone()).or_insert(request);
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.due
+    }
+
+    fn drain_due(&mut self, policy_source: &ScopePolicySource, cb: &dyn WatchCallback) {
+        if self.due.is_none_or(|deadline| Instant::now() < deadline) {
+            return;
+        }
+        self.due = None;
+        let policy = Arc::clone(&policy_source.read().unwrap());
+        for (_, request) in std::mem::take(&mut self.pending) {
+            // A policy change reindexes from scratch; scanning against the
+            // superseded generation would emit events the consumer discards.
+            if request.generation != policy.generation() {
+                continue;
+            }
+            self.scan(
+                &request.abs,
+                &request.rel,
+                request.prefix.as_deref(),
+                &policy,
+                Some(cb),
+            );
+        }
+    }
+
+    /// Walk one directory, announcing the regular files in it when `cb` is set
+    /// and filtering exactly like live dispatch. Child directories are followed
+    /// only when they are not already known, which is what keeps an ordinary
+    /// rescan shallow while a subtree that just appeared is walked in full.
+    ///
+    /// Registration is deliberately not this function's job: the FreeBSD root
+    /// is watched recursively, so notify is already following the subtree and
+    /// only the events it swallowed are missing. Synthesized events may race
+    /// live ones and surface a file twice, the same duplicate class the Linux
+    /// catch-up scan produces and the indexer already coalesces.
+    fn scan(
+        &mut self,
+        abs: &Path,
+        rel: &str,
+        prefix: Option<&str>,
+        policy: &IndexScopePolicy,
+        cb: Option<&dyn WatchCallback>,
+    ) {
+        use std::os::unix::fs::DirEntryExt;
+
+        let Ok(entries) = std::fs::read_dir(abs) else {
+            return;
+        };
+        let mut descend = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let child_rel = if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ft.is_dir() {
+                if plan_dir(&child_rel, name, policy) != DirPlan::WatchAndDescend {
+                    continue;
+                }
+                let path = entry.path();
+                if self.known_dirs.insert(path.clone(), entry.ino()) != Some(entry.ino()) {
+                    descend.push((path, child_rel));
+                }
+            } else if ft.is_file() && !is_filtered(&child_rel, false, policy) {
+                if let Some(cb) = cb {
+                    safe_call(
+                        cb,
+                        WatchEvent::file(
+                            WatchKind::Created,
+                            apply_prefix(prefix, child_rel),
+                            policy.generation(),
+                        ),
+                    );
+                }
+            }
+        }
+        // Collected first so the borrow of `entries` is done before recursing.
+        for (path, child_rel) in descend {
+            self.scan(&path, &child_rel, prefix, policy, cb);
+        }
+    }
+}
+
+#[cfg(not(target_os = "freebsd"))]
+struct CatchUpQueue;
+
+#[cfg(not(target_os = "freebsd"))]
+impl CatchUpQueue {
+    fn new() -> Self {
+        Self
+    }
+
+    fn seed(&mut self, _roots: &[WatchRoot], _policy: &IndexScopePolicy) {}
+
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    fn drain_due(&mut self, _policy_source: &ScopePolicySource, _cb: &dyn WatchCallback) {}
+}
+
 /// Own the watcher, registration retries, and provider-loss recovery.
 ///
 /// notify's Linux backend answers `watch()` through its event loop, so
@@ -343,14 +517,28 @@ fn watch_supervisor_loop(
     let mut retry_at = (!errors.is_empty()).then(|| Instant::now() + WATCH_RETRY_INTERVAL);
     let mut missing_roots = HashSet::<PathBuf>::new();
     record_registration_result(&health, errors, &*cb, policy.generation(), true);
+    // Learned before `start` is unblocked, so a caller that creates a directory
+    // the instant `watch` returns finds it genuinely unknown. Seeding after the
+    // handshake would race that create and quietly file it as pre-existing.
+    let mut catch_up = CatchUpQueue::new();
+    catch_up.seed(&roots, &policy);
     let _ = initial.send(());
 
     loop {
-        let timeout = retry_at
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        // Ahead of the wait, so the arms below can `continue` without skipping
+        // a drain whose deadline has come due.
+        catch_up.drain_due(&policy_source, &*cb);
+        let now = Instant::now();
+        let timeout = [retry_at, catch_up.deadline()]
+            .into_iter()
+            .flatten()
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
             .unwrap_or(WATCH_RETRY_INTERVAL);
         let command = rx.recv_timeout(timeout);
         match command {
+            #[cfg(target_os = "freebsd")]
+            Ok(WatchCommand::CatchUp(request)) => catch_up.push(request),
             Ok(WatchCommand::Register(registration)) => {
                 policy = Arc::clone(&policy_source.read().unwrap());
                 if registration.generation != policy.generation() {
@@ -1188,6 +1376,68 @@ fn new_dir_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<Path
     }
 }
 
+/// The directory a live event says to rescan on FreeBSD, computed before
+/// `event.paths` is consumed.
+///
+/// A create targets the *containing* directory, whatever was created. That is
+/// where the backend's one-entry-per-write limit does its damage: two
+/// directories created together produce a single event naming only the first,
+/// so taking the named directory as the target would never reach the second.
+/// Scanning the parent finds both, and the unknown-directory rule below carries
+/// the walk into whichever of them is new.
+///
+/// A modify on a directory is the backend saying it found nothing new there,
+/// which is the one case where the file it missed has no event of its own to
+/// ride in on, so that directory is the target.
+///
+/// How deep the rescan goes is not decided here. `CatchUpQueue` follows child
+/// directories it does not already know, which covers a subtree that arrived
+/// whole without walking one that did not.
+///
+/// `symlink_metadata` keeps a symlinked directory out of the modify arm; the
+/// scan stays inside the root the same way the Linux registration walk does.
+#[cfg(target_os = "freebsd")]
+fn catch_up_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<PathBuf> {
+    use notify::EventKind;
+    let path = paths.first()?;
+    match kind {
+        EventKind::Create(_) => Some(path.parent()?.to_path_buf()),
+        EventKind::Modify(_) if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) => {
+            Some(path.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Hand a rescan target to the supervisor, dropping anything the scope policy
+/// excludes so an ignored build tree cannot be walked on every write inside it.
+#[cfg(target_os = "freebsd")]
+fn queue_catch_up(
+    roots: &[WatchRoot],
+    policy: &IndexScopePolicy,
+    reg_tx: &RegistrationTx,
+    candidate: Option<PathBuf>,
+) {
+    let Some(abs) = candidate else {
+        return;
+    };
+    let Some((root, rel)) = locate_root(roots, &abs) else {
+        return;
+    };
+    // A root has no file name to plan against and is always in scope.
+    if let Some(name) = abs.file_name().and_then(|name| name.to_str()) {
+        if plan_dir(&rel, name, policy) == DirPlan::Skip {
+            return;
+        }
+    }
+    let _ = reg_tx.send(WatchCommand::CatchUp(CatchUpRequest {
+        abs,
+        rel,
+        prefix: root.prefix.clone(),
+        generation: policy.generation(),
+    }));
+}
+
 fn event_is_dir(event: &notify::Event, registered_dirs: &RegisteredDirs) -> bool {
     use notify::event::{CreateKind, RemoveKind};
     use notify::EventKind;
@@ -1238,6 +1488,8 @@ fn dispatch(
     // mode decides which path (if any) is the appeared directory.
     #[cfg(target_os = "linux")]
     let dir_candidate = new_dir_candidate(&event.kind, &event.paths);
+    #[cfg(target_os = "freebsd")]
+    let catch_up_candidate = catch_up_candidate(&event.kind, &event.paths);
     let kind = match event.kind {
         EventKind::Create(_) => WatchKind::Created,
         EventKind::Modify(notify::event::ModifyKind::Name(_)) => WatchKind::Renamed,
@@ -1273,7 +1525,13 @@ fn dispatch(
     // event's fate.
     #[cfg(target_os = "linux")]
     track_new_dirs(roots, &policy, reg_tx, dir_candidate.as_deref());
-    #[cfg(not(target_os = "linux"))]
+    // FreeBSD: queue the rescan that recovers the entries notify's kqueue
+    // backend could not name. Queued before the consumer filter runs, for the
+    // same reason Linux queues registration there: this one event's fate does
+    // not decide what the directory now holds.
+    #[cfg(target_os = "freebsd")]
+    queue_catch_up(roots, &policy, reg_tx, catch_up_candidate);
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let _ = reg_tx;
 
     let from_resolved = from

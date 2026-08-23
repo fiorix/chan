@@ -149,3 +149,15 @@ strip = "symbols"
 [profile.release.package.chan-desktop]
 opt-level = "s"
 strip = true
+
+# gemm's fp16 kernels reach the `fmla v0.8h, ...` instructions through `#[inline]`
+# helpers called from `#[target_feature(enable = "fp16")]` code. At opt-level 0
+# those helpers are emitted as standalone functions that do not carry the
+# feature, and the assembler rejects them with `instruction requires: fullfp16`.
+# It only bites where the aarch64 baseline lacks fp16, which is every aarch64
+# target except apple-darwin: `cargo test` on aarch64 linux or freebsd cannot
+# build without this. opt-level 1 is enough to inline the helpers back into
+# their feature-carrying callers, and a dev-profile override leaves every
+# shipped artifact's instruction-set baseline untouched.
+[profile.dev.package.gemm-f16]
+opt-level = 1

@@ -161,23 +161,25 @@ pub(crate) fn pace_reindex_worker(cancel: Option<&std::sync::atomic::AtomicBool>
             // is the common case.
             Some(_) => return steps,
             // No descriptor probe available: the fd-pressure heuristics
-            // above all key off `snapshot()`. On Unix `snapshot()` is
-            // always `Some`, so this arm is dead there. On non-Unix
-            // (Windows) it is the ONLY arm, and without pacing the cold
-            // rebuild would monopolise the graph DB -- the Windows
-            // file-open hang. We can't measure fd pressure, so we fall
-            // back to a coarse time-sliced yield (see
-            // `pace_reindex_worker_timesliced`). Best-effort and
-            // bounded: it never blocks indefinitely.
+            // above all key off `snapshot()`. On non-Unix (Windows) this
+            // is the ONLY arm, and without pacing the cold rebuild would
+            // monopolise the graph DB -- the Windows file-open hang. We
+            // can't measure fd pressure, so we fall back to a coarse
+            // time-sliced yield (see `pace_reindex_worker_timesliced`).
+            // Best-effort and bounded: it never blocks indefinitely. It is
+            // also reachable on FreeBSD without `fdescfs`, where the same
+            // reasoning does not apply; see `pace_no_probe`.
             None => return pace_no_probe(),
         }
     }
 }
 
-/// `None`-snapshot fallback for `pace_reindex_worker`. On Unix the probe
-/// is always available so this is never hit (and pacing without a probe
-/// would be wrong -- Unix already has its fd-driven policy); on non-Unix
-/// it dispatches to the time-sliced yield.
+/// `None`-snapshot fallback for `pace_reindex_worker`. Unix does not pace
+/// without a probe: Linux and macOS always have one, and FreeBSD without
+/// `fdescfs` reaches this arm with the same reindex behaviour it had when the
+/// stub `/dev/fd` count reported permanent clear headroom. The time-sliced
+/// yield below exists for the Windows graph-DB hang, which is not a condition
+/// FreeBSD is in. On non-Unix this dispatches to that yield.
 #[cfg(unix)]
 fn pace_no_probe() -> u32 {
     0
@@ -297,33 +299,78 @@ impl Drop for WorkspacePermit {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "freebsd")))]
 fn fd_snapshot() -> Option<FdSnapshot> {
     let open = std::fs::read_dir("/dev/fd").ok()?.count() as u64;
     let limit = nofile_limit()?;
     Some(FdSnapshot { open, limit })
 }
 
+/// FreeBSD only counts descriptors through `/dev/fd` when `fdescfs` is mounted
+/// over it. Bare devfs publishes `0`, `1`, `2` and nothing else, so the count
+/// is a constant 3 however many descriptors the process holds. Reporting that
+/// is worse than reporting nothing: every consumer would read permanent clear
+/// headroom and disengage, believing it had measured something. Probe once for
+/// the real thing and fall back to "no probe" when it is absent.
+#[cfg(target_os = "freebsd")]
+fn fd_snapshot() -> Option<FdSnapshot> {
+    if !dev_fd_lists_open_descriptors() {
+        return None;
+    }
+    let open = std::fs::read_dir("/dev/fd").ok()?.count() as u64;
+    let limit = nofile_limit()?;
+    Some(FdSnapshot { open, limit })
+}
+
+/// Whether `/dev/fd` reflects this process's descriptors. Holding a descriptor
+/// the listing has to show separates `fdescfs` from the devfs stub: with the
+/// stub the answer is always exactly the three standard entries, while under
+/// `fdescfs` the probe descriptor and `read_dir`'s own handle are both listed,
+/// which the stub can never reach. Resolved once; the mount does not come and
+/// go under a running devserver.
+#[cfg(target_os = "freebsd")]
+fn dev_fd_lists_open_descriptors() -> bool {
+    static LIVE: OnceLock<bool> = OnceLock::new();
+    *LIVE.get_or_init(|| {
+        let Ok(probe) = std::fs::File::open("/dev/null") else {
+            return false;
+        };
+        let seen = std::fs::read_dir("/dev/fd")
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        drop(probe);
+        seen > STUB_DEV_FD_ENTRIES
+    })
+}
+
+/// `0`, `1`, `2`: what bare devfs publishes under `/dev/fd`.
+#[cfg(target_os = "freebsd")]
+const STUB_DEV_FD_ENTRIES: usize = 3;
+
 #[cfg(not(unix))]
 fn fd_snapshot() -> Option<FdSnapshot> {
     None
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn nofile_limit() -> Option<u64> {
     let current = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
     Some(effective_nofile_limit(current))
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))
+))]
 fn nofile_limit() -> Option<u64> {
     Some(EFFECTIVE_NOFILE_CEILING)
 }
 
-// Unix-only: called only from the linux/macos `nofile_limit` arm (clamping the
-// host rlimit). Off unix there is no rlimit to clamp, so gating it keeps the
-// windows build dead-code-clean.
-#[cfg(unix)]
+// Called only from the rlimit arm of `nofile_limit`, clamping the host value.
+// The remaining unix arm returns the ceiling directly and off unix there is no
+// rlimit to clamp, so the gate names its callers' platforms and every other
+// target stays dead-code-clean under `-D warnings`.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn effective_nofile_limit(limit: Option<u64>) -> u64 {
     limit
         .unwrap_or(EFFECTIVE_NOFILE_CEILING)
@@ -406,9 +453,9 @@ mod tests {
         assert_eq!(active_workspace_capacity_for(snap), MAX_ACTIVE_WORKSPACES);
     }
 
-    // Exercises the unix-only `effective_nofile_limit` / `EFFECTIVE_NOFILE_CEILING`;
-    // gated to match so a windows `--tests` build stays clean.
-    #[cfg(unix)]
+    // Exercises `effective_nofile_limit` / `EFFECTIVE_NOFILE_CEILING`; gated to
+    // match the function so every other target's `--tests` build stays clean.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     #[test]
     fn unlimited_nofile_uses_internal_ceiling() {
         assert_eq!(effective_nofile_limit(None), EFFECTIVE_NOFILE_CEILING);
