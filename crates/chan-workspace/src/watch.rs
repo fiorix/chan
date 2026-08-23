@@ -344,18 +344,16 @@ const CATCH_UP_DEBOUNCE: Duration = Duration::from_millis(150);
 /// for a mechanism only one backend needs.
 ///
 /// `known_dirs` is what makes a rescan proportional to the change instead of to
-/// the tree. It maps a directory to its inode, not merely to its existence, so
-/// a directory deleted and recreated under the same name reads as new and its
-/// contents are announced again rather than silently skipped. Entries for
-/// deleted directories are left in place: each costs one path, and because the
-/// inode has to match as well, a stale entry can never suppress a genuine
-/// announcement.
+/// the tree. It maps a directory to its inode and nanosecond change timestamp,
+/// so deletion and recreation reads as new even if the filesystem immediately
+/// reuses the inode. Entries for deleted directories are left in place; each
+/// costs one path and cannot match a new directory without both identities.
 #[cfg(target_os = "freebsd")]
 #[derive(Default)]
 struct CatchUpQueue {
     pending: std::collections::HashMap<PathBuf, CatchUpRequest>,
     due: Option<Instant>,
-    known_dirs: std::collections::HashMap<PathBuf, u64>,
+    known_dirs: std::collections::HashMap<PathBuf, (u64, i64, i64)>,
 }
 
 #[cfg(target_os = "freebsd")]
@@ -428,7 +426,7 @@ impl CatchUpQueue {
         policy: &IndexScopePolicy,
         cb: Option<&dyn WatchCallback>,
     ) {
-        use std::os::unix::fs::DirEntryExt;
+        use std::os::unix::fs::{DirEntryExt, MetadataExt};
 
         let Ok(entries) = std::fs::read_dir(abs) else {
             return;
@@ -451,8 +449,12 @@ impl CatchUpQueue {
                 if plan_dir(&child_rel, name, policy) != DirPlan::WatchAndDescend {
                     continue;
                 }
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                let identity = (entry.ino(), metadata.ctime(), metadata.ctime_nsec());
                 let path = entry.path();
-                if self.known_dirs.insert(path.clone(), entry.ino()) != Some(entry.ino()) {
+                if self.known_dirs.insert(path.clone(), identity) != Some(identity) {
                     descend.push((path, child_rel));
                 }
             } else if ft.is_file() && !is_filtered(&child_rel, false, policy) {
