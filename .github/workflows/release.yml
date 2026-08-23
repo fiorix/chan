@@ -339,6 +339,97 @@ jobs:
           path: chan/release-artifacts/chan-x86_64-unknown-freebsd.tar.gz
           if-no-files-found: error
 
+  freebsd-cli-arm64-artifacts:
+    name: FreeBSD CLI tarball (aarch64-unknown-freebsd)
+    needs: context
+    runs-on: ubuntu-latest
+    env:
+      FREEBSD_TARGET: aarch64-unknown-freebsd
+      FREEBSD_BASE_URL: https://download.freebsd.org/releases/arm64/aarch64/15.0-RELEASE/base.txz
+      FREEBSD_BASE_SHA256: d63d5c5bd01a1e2d8b990102abd5077a26e8232bb1d02234deaed420e71f1343
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-23
+          components: rust-src
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chan
+          key: freebsd-aarch64-unknown-freebsd
+          save-if: false
+
+      - name: Install FreeBSD cross-linker
+        timeout-minutes: 10
+        run: |
+          set -e
+          if ! command -v clang >/dev/null \
+            || ! command -v clang++ >/dev/null \
+            || ! command -v ld.lld >/dev/null \
+            || ! command -v llvm-ar >/dev/null \
+            || ! command -v llvm-ranlib >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y clang lld llvm
+          fi
+          clang --version
+          ld.lld --version
+          llvm-ar --version
+          llvm-ranlib --version
+
+      - name: Fetch pinned FreeBSD 15.0 arm64 sysroot
+        run: |
+          set -e
+          archive="$RUNNER_TEMP/freebsd-base.txz"
+          sysroot="$RUNNER_TEMP/freebsd-sysroot"
+          curl -fL --retry 5 --retry-all-errors \
+            --output "$archive" "$FREEBSD_BASE_URL"
+          printf '%s  %s\n' "$FREEBSD_BASE_SHA256" "$archive" \
+            | sha256sum -c -
+          mkdir -p "$sysroot"
+          tar -xJf "$archive" -C "$sysroot" --no-same-owner
+          test -f "$sysroot/usr/lib/crt1.o"
+          test -f "$sysroot/usr/lib/libc.a"
+          echo "FREEBSD_SYSROOT=$sysroot" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: chan/web/package-lock.json
+
+      - run: make freebsd-arm64-chan-tarball
+        working-directory: chan
+
+      - name: Assert and stage FreeBSD arm64 CLI artifact
+        working-directory: chan
+        run: |
+          set -e
+          binary="target/$FREEBSD_TARGET/release/chan"
+          description=$(file "$binary")
+          echo "$description"
+          case "$description" in
+            *ELF\ 64-bit*ARM\ aarch64*FreeBSD*statically\ linked*) ;;
+            *)
+              echo "::error::expected a statically linked FreeBSD arm64 ELF"
+              exit 1
+              ;;
+          esac
+          tarball="target/release/chan-$FREEBSD_TARGET.tar.gz"
+          tar -tzf "$tarball" | sort
+          mkdir -p release-artifacts
+          cp "$tarball" release-artifacts/
+          ls -la release-artifacts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-freebsd-cli-arm64
+          path: chan/release-artifacts/chan-aarch64-unknown-freebsd.tar.gz
+          if-no-files-found: error
+
   gateway-linux-packages:
     name: gateway packages (${{ matrix.target }})
     # The gateway is a separate nested workspace and ships only the
@@ -1063,6 +1154,7 @@ jobs:
       - macos-validate
       - linux-cli-artifacts
       - freebsd-cli-artifacts
+      - freebsd-cli-arm64-artifacts
       - gateway-linux-packages
       - linux-desktop-artifacts
       - macos-cli-artifact

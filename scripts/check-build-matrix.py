@@ -117,6 +117,22 @@ def check_make_contract() -> None:
             "$(MAKE) -C packaging/freebsd",
             'FREEBSD_TARGET="$(FREEBSD_TARGET)"',
             'FREEBSD_SYSROOT="$(FREEBSD_SYSROOT)"',
+            'FREEBSD_CARGO_FLAGS="$(FREEBSD_CARGO_FLAGS)"',
+        ),
+    )
+    require(
+        makefile,
+        "FREEBSD_ARM64_TOOLCHAIN ?= nightly-2026-08-23",
+        "Makefile",
+    )
+    require_target(
+        makefile,
+        "freebsd-arm64-chan-tarball",
+        (
+            "$(MAKE) freebsd-chan-tarball",
+            "FREEBSD_TARGET=aarch64-unknown-freebsd",
+            'CARGO="$(CARGO) +$(FREEBSD_ARM64_TOOLCHAIN)"',
+            'FREEBSD_CARGO_FLAGS="-Z build-std=std,panic_abort"',
         ),
     )
     require_target(
@@ -344,7 +360,48 @@ def check_workflow_contract() -> None:
     if "aarch64-unknown-freebsd" in freebsd_cli:
         raise ContractError(
             ".github/workflows/release.yml job freebsd-cli-artifacts: "
-            "FreeBSD arm64 is outside the published matrix"
+            "amd64 job must remain on the pinned stable target"
+        )
+
+    freebsd_cli_arm64 = workflow_job(
+        release,
+        "freebsd-cli-arm64-artifacts",
+        ".github/workflows/release.yml",
+    )
+    for needle in (
+        "name: FreeBSD CLI tarball (aarch64-unknown-freebsd)",
+        "needs: context",
+        "runs-on: ubuntu-latest",
+        "FREEBSD_TARGET: aarch64-unknown-freebsd",
+        "toolchain: nightly-2026-08-23",
+        "components: rust-src",
+        "cache: false",
+        "key: freebsd-aarch64-unknown-freebsd",
+        "save-if: false",
+        "sudo apt-get install -y clang lld llvm",
+        "llvm-ar --version",
+        "llvm-ranlib --version",
+        "releases/arm64/aarch64/15.0-RELEASE/base.txz",
+        "d63d5c5bd01a1e2d8b990102abd5077a26e8232bb1d02234deaed420e71f1343",
+        "make freebsd-arm64-chan-tarball",
+        "*ELF\\ 64-bit*ARM\\ aarch64*FreeBSD*statically\\ linked*",
+        "name: release-freebsd-cli-arm64",
+        "chan-aarch64-unknown-freebsd.tar.gz",
+    ):
+        require(
+            freebsd_cli_arm64,
+            needle,
+            ".github/workflows/release.yml job freebsd-cli-arm64-artifacts",
+        )
+    if "cp chan/rust-toolchain.toml" in freebsd_cli_arm64:
+        raise ContractError(
+            ".github/workflows/release.yml job freebsd-cli-arm64-artifacts: "
+            "tier-3 arm64 job must not select the repository's stable toolchain"
+        )
+    if "rustup target add aarch64-unknown-freebsd" in freebsd_cli_arm64:
+        raise ContractError(
+            ".github/workflows/release.yml job freebsd-cli-arm64-artifacts: "
+            "tier-3 arm64 target must build std from rust-src"
         )
 
     publish_release = workflow_job(
@@ -352,20 +409,30 @@ def check_workflow_contract() -> None:
         "publish-release",
         ".github/workflows/release.yml",
     )
-    require(
-        publish_release,
+    for needle in (
         "- freebsd-cli-artifacts",
-        ".github/workflows/release.yml job publish-release",
-    )
+        "- freebsd-cli-arm64-artifacts",
+    ):
+        require(
+            publish_release,
+            needle,
+            ".github/workflows/release.yml job publish-release",
+        )
 
     freebsd_packaging = read("packaging/freebsd/Makefile")
     for needle in (
         "FREEBSD_TARGET ?= x86_64-unknown-freebsd",
-        "FREEBSD_ABI_TARGET ?= x86_64-unknown-freebsd15.0",
+        "FREEBSD_ABI_TARGET ?= $(FREEBSD_TARGET)15.0",
+        "FREEBSD_CARGO_FLAGS ?=",
+        "x86_64-unknown-freebsd|aarch64-unknown-freebsd",
+        "FREEBSD_TARGET_ENV := aarch64_unknown_freebsd",
+        "FREEBSD_TARGET_ENV_UPPER := AARCH64_UNKNOWN_FREEBSD",
         "-C target-feature=+crt-static",
         "-C link-arg=--target=$(FREEBSD_ABI_TARGET)",
         "-C link-arg=--sysroot=$(FREEBSD_SYSROOT_ABS)",
-        '$(CARGO) build --release --target "$(FREEBSD_TARGET)" -p chan',
+        "CARGO_TARGET_$(FREEBSD_TARGET_ENV_UPPER)_LINKER",
+        "CC_$(FREEBSD_TARGET_ENV)",
+        '$(CARGO) build $(FREEBSD_CARGO_FLAGS) --release --target "$(FREEBSD_TARGET)" -p chan',
         '$(TARBALL_STAGE)/chan',
         '$(TARBALL_STAGE)/LICENSE',
         '$(TARBALL_STAGE)/README.md',

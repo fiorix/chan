@@ -28,6 +28,8 @@ NIX_SDME_ROOTFS ?= ubuntu
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
 FREEBSD_TARGET ?= x86_64-unknown-freebsd
 FREEBSD_SYSROOT ?=
+FREEBSD_CARGO_FLAGS ?=
+FREEBSD_ARM64_TOOLCHAIN ?= nightly-2026-08-23
 DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
@@ -114,7 +116,15 @@ freebsd-chan-tarball: ## Cross-build the static FreeBSD CLI tarball.
 	$(MAKE) -C packaging/freebsd \
 		CHAN_REPO="$(REPO_ROOT)" CARGO="$(CARGO)" NPM="$(NPM)" \
 		FREEBSD_TARGET="$(FREEBSD_TARGET)" \
-		FREEBSD_SYSROOT="$(FREEBSD_SYSROOT)" chan-tarball
+		FREEBSD_SYSROOT="$(FREEBSD_SYSROOT)" \
+		FREEBSD_CARGO_FLAGS="$(FREEBSD_CARGO_FLAGS)" chan-tarball
+
+.PHONY: freebsd-arm64-chan-tarball
+freebsd-arm64-chan-tarball: ## Cross-build the static FreeBSD arm64 CLI tarball.
+	$(MAKE) freebsd-chan-tarball \
+		FREEBSD_TARGET=aarch64-unknown-freebsd \
+		CARGO="$(CARGO) +$(FREEBSD_ARM64_TOOLCHAIN)" \
+		FREEBSD_CARGO_FLAGS="-Z build-std=std,panic_abort"
 
 .PHONY: linux-deb
 linux-deb: ## Build a .deb for DEB_TARGET, defaulting to LINUX_TARGET.
