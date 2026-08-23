@@ -1923,11 +1923,8 @@ mod tests {
         let queued = parent.join("queued");
         std::fs::create_dir_all(&queued).unwrap();
         std::fs::create_dir(outside.path().join("queued")).unwrap();
-        let capability_root = cap_std::fs::Dir::open_ambient_dir(
-            root.path(),
-            cap_std::ambient_authority(),
-        )
-        .unwrap();
+        let capability_root =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
 
         std::fs::remove_dir(&queued).unwrap();
         symlink(outside.path().join("queued"), &queued).unwrap();
@@ -2239,8 +2236,8 @@ mod tests {
             let (tx, rx) = channel();
             let cb = Channel(std::sync::Mutex::new(tx));
             let roots = [WatchRoot::workspace(root.path())];
-            let handle = WatchHandle::start(&roots, (), policy, Arc::new(cb))
-                .expect("watcher starts");
+            let handle =
+                WatchHandle::start(&roots, (), policy, Arc::new(cb)).expect("watcher starts");
             (handle, rx)
         }
 

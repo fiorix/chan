@@ -3657,19 +3657,13 @@ impl Workspace {
         // node_modules/target/venv/.git storm never reaches the
         // broadcast bus or the indexer.
         #[cfg(target_os = "freebsd")]
-        let capability_root = self
-            .fs
-            .dir()
-            .try_clone()
-            .map_err(|error| ChanError::Io(format!("clone workspace root for watcher: {error}")))?;
+        let capability_root =
+            self.fs.dir().try_clone().map_err(|error| {
+                ChanError::Io(format!("clone workspace root for watcher: {error}"))
+            })?;
         #[cfg(not(target_os = "freebsd"))]
         let capability_root = ();
-        WatchHandle::start(
-            &roots,
-            capability_root,
-            Arc::clone(&self.scope_policy),
-            fan,
-        )
+        WatchHandle::start(&roots, capability_root, Arc::clone(&self.scope_policy), fan)
     }
 
     /// Start the built-in graph indexer on this workspace. Returns a
