@@ -282,10 +282,12 @@ jobs:
             || ! command -v llvm-ar >/dev/null \
             || ! command -v llvm-ranlib >/dev/null; then
             sudo apt-get update
-            sudo apt-get install -y clang lld
+            sudo apt-get install -y clang lld llvm
           fi
           clang --version
           ld.lld --version
+          llvm-ar --version
+          llvm-ranlib --version
 
       - name: Fetch pinned FreeBSD 15.0 sysroot
         run: |
