@@ -58,7 +58,12 @@ fn main() {
     // embed-model` build without a prior `make models` to compile
     // (the seeder treats an empty bundle as "no embedded model").
     // rerun-if-changed pins the build to the bundle's mtime so a
-    // subsequent `make models` re-links.
+    // subsequent `make models` re-links. It is emitted only when the
+    // bundle (or the stub) exists: Cargo treats a rerun-if-changed path
+    // that does not exist as stale on every invocation, so a default
+    // build on a tree without the gitignored bundle recompiled
+    // chan-server, and every crate above it, on each cargo call in the
+    // same target dir even when nothing had changed.
     let model_bundle = Path::new("resources/models.tar.zst");
     if env::var_os("CARGO_FEATURE_EMBED_MODEL").is_some() && !model_bundle.exists() {
         if let Some(parent) = model_bundle.parent() {
@@ -71,7 +76,9 @@ fn main() {
             )
         });
     }
-    println!("cargo:rerun-if-changed={}", model_bundle.display());
+    if model_bundle.exists() {
+        println!("cargo:rerun-if-changed={}", model_bundle.display());
+    }
 }
 
 fn create_required_dir(path: &Path) {
