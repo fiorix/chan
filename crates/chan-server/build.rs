@@ -36,16 +36,25 @@ fn main() {
     println!("cargo:rerun-if-changed={}", launcher_dist.display());
     walk(launcher_dist);
 
-    // Makefile creates and rewrites this after every frontend build. A missing
-    // stamp is valid before the first frontend build; Cargo keeps watching the
-    // path without a build script writing a placeholder into the source tree.
-    let web_build_stamp = Path::new("../../web/.chan-build-stamp");
-    println!("cargo:rerun-if-changed={}", web_build_stamp.display());
-
-    // The launcher's build stamp mirrors web/.chan-build-stamp. Makefile
-    // creates and rewrites it after every launcher build.
-    let launcher_build_stamp = Path::new("../../web-launcher/.chan-build-stamp");
-    println!("cargo:rerun-if-changed={}", launcher_build_stamp.display());
+    // Makefile creates and rewrites these after every frontend and launcher
+    // build, so a rebuilt bundle relinks. Each is emitted only when it exists,
+    // for the reason the model bundle below is: Cargo treats a
+    // `rerun-if-changed` path that does not exist as stale on every
+    // invocation. Watching an absent stamp therefore re-runs this script, and
+    // both of its recursive `dist` walks, on every cargo call in a tree that
+    // has not built the frontend through the Makefile (a fresh clone, an
+    // isolated gate worktree), where an idle build should do nothing at all.
+    // Nothing is lost by skipping it: the `dist` directories above are watched
+    // whole, and Cargo resolves a watched directory recursively, which is what
+    // covers a bundle appearing where there was none.
+    for build_stamp in [
+        Path::new("../../web/.chan-build-stamp"),
+        Path::new("../../web-launcher/.chan-build-stamp"),
+    ] {
+        if build_stamp.exists() {
+            println!("cargo:rerun-if-changed={}", build_stamp.display());
+        }
+    }
 
     // Embedded model bundle. Only consumed when the `embed-model`
     // cargo feature is on: the `include_bytes!` in
