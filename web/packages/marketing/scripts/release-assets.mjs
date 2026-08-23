@@ -16,7 +16,10 @@ import { gatewayPackageVersion } from "./release-version.mjs";
 // being cut, while the collector and metadata generator may omit it from
 // retained older releases that predate the target.
 export function archiveOptionalCliAssets() {
-  return ["chan-x86_64-unknown-freebsd.tar.gz"];
+  return [
+    "chan-x86_64-unknown-freebsd.tar.gz",
+    "chan-aarch64-unknown-freebsd.tar.gz",
+  ];
 }
 
 // The standalone musl/darwin/FreeBSD self-upgrade tarballs. Distro-built CLI

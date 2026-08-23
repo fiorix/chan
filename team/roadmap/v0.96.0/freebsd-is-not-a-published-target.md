@@ -1,8 +1,8 @@
-# FreeBSD is not a published target
+# FreeBSD standalone release targets
 
-Status: accepted scope for v0.96.0. FreeBSD build support is merged at `13ca1ff7`; the static amd64 release arm, packaging, installer, updater metadata, and documentation are implemented at `455d6880`, `3125fb64`, and `5ca6aa89`. The three intake findings are fixed through `6bccf704`, with the plain, warnings-as-errors, and test-target FreeBSD cross-checks green at that commit. Integrated CI and stock-FreeBSD published-artifact acceptance remain open.
+Status: accepted scope for v0.96.0. FreeBSD build support is merged at `13ca1ff7`; the release is configured to publish static amd64 and arm64 CLI tarballs through the packaging, installer, updater metadata, and documentation paths built in this round. The three intake findings are fixed through `6bccf704`, with the plain, warnings-as-errors, and test-target FreeBSD cross-checks green at that commit. Integrated CI and stock-FreeBSD published-artifact acceptance remain open.
 
-chan builds, tests, and runs on FreeBSD. The v0.96.0 release pipeline includes `chan-x86_64-unknown-freebsd.tar.gz`; `install.sh` selects that target and supports the base-system `fetch` command, and `chan upgrade` understands its release metadata. FreeBSD arm64 remains source-only because Rust does not distribute its standard library for `aarch64-unknown-freebsd`.
+chan builds, tests, and runs on FreeBSD. The v0.96.0 release pipeline includes `chan-x86_64-unknown-freebsd.tar.gz` and `chan-aarch64-unknown-freebsd.tar.gz`; `install.sh` selects both targets and supports the base-system `fetch` command, and `chan upgrade` understands their release metadata. The tier-3 arm64 target builds its standard library from source because rustup does not distribute it.
 
 ## Problem
 
@@ -10,7 +10,7 @@ The port itself was never the obstacle. A feasibility run on 2026-08-23 against 
 
 Running the tests found five defects fixed in the same change and described under Landed below. Two were not FreeBSD-specific: one breaks `cargo test` on every aarch64 Linux machine too, and the other is a false assumption about cap-std that the code had written down as fact.
 
-The release implementation now builds and packages the amd64 target, exposes it through the installer and updater metadata, and documents the supported path. Shipping still depends on the integrated CI and host acceptance below.
+The release implementation now builds and packages both targets, exposes them through the installer and updater metadata, and documents the supported paths. Shipping still depends on the integrated CI and host acceptance below.
 
 ## Landed
 
@@ -23,15 +23,15 @@ The release implementation now builds and packages the amd64 target, exposes it 
 
 ## Release target
 
-The release targets amd64 first. `x86_64-unknown-freebsd` is a Rust tier-2 target with rustup-distributed std, so the existing `ubuntu-latest` runners can cross-compile it against a sysroot unpacked from a checksum-pinned FreeBSD 15.0 `base.txz`. That toolchain support is sufficient reason to choose it as the first published architecture.
+The release targets both amd64 and arm64. `x86_64-unknown-freebsd` is a Rust tier-2 target with rustup-distributed std, so the existing `ubuntu-latest` runners cross-compile it against a sysroot unpacked from a checksum-pinned FreeBSD 15.0 `base.txz`.
 
-arm64 is a separate decision, not a follow-on commit. `aarch64-unknown-freebsd` is tier 3: rustup ships neither host tools nor std, and the ports toolchain that does exist only runs on FreeBSD itself. It needs a native FreeBSD arm64 builder or nightly `-Z build-std`, and the choice should be made on whether anyone is actually asking for it.
+`aarch64-unknown-freebsd` is tier 3: rustup ships neither host tools nor std, and the ports toolchain only runs on FreeBSD itself. The owner chose nightly `-Z build-std` on the existing Linux release runner. A pre-commit probe compiled the standard library and the complete chan dependency graph, linked with `+crt-static`, and produced a statically linked FreeBSD 15.0 aarch64 ELF. That is build evidence, not runtime acceptance: nothing has executed the v0.96.0 arm64 binary.
 
 - **Static is the shipping format.** `-C target-feature=+crt-static` is respected on FreeBSD and produced a working binary: 58 MB, `ldd` reports "not a dynamic ELF executable", and it passed the full runtime smoke. The usual static casualty survives, verified through the real binary rather than inferred: `chan workspace index download-model` fetched bge-small from HuggingFace over HTTPS and exited 0, so DNS, rustls, and certificate verification all work. FreeBSD 15 carries the trust bundle at `/etc/ssl/cert.pem` in base with no `ca_root_nss` package needed.
 - **Pass `--target` explicitly.** Without it, Cargo applies `RUSTFLAGS` to host artifacts and `+crt-static` breaks the proc-macro builds (`cannot produce proc-macro for async-trait`). A release pipeline passes `--target` anyway and `Makefile`'s `chan` target already threads `CHAN_TARGET` through, so this is a local-invocation trap rather than a packaging problem.
-- **Packaging is target-specific.** `packaging/freebsd/Makefile` requires `x86_64-unknown-freebsd` and a FreeBSD sysroot, builds with the explicit target and static feature, and stages `chan`, `LICENSE`, and `README.md` in `chan-x86_64-unknown-freebsd.tar.gz`.
-- **The installer and updater select only the published architecture.** `install.sh` maps FreeBSD amd64 to `x86_64-unknown-freebsd`, falls back to the base-system `fetch` command when curl and wget are absent, and refuses FreeBSD arm64. The updater target table uses the same mapping and refusal.
-- **The release arm is build-only.** `freebsd-cli-artifacts` runs on Ubuntu, installs the pinned Rust target and clang/LLVM tools, verifies the checksum-pinned FreeBSD 15.0 sysroot, asserts that the result is a static FreeBSD amd64 ELF, and uploads `release-freebsd-cli`. Native FreeBSD behavior remains host acceptance because GitHub Actions has no FreeBSD runner.
+- **Packaging is target-specific.** `packaging/freebsd/Makefile` builds against a pinned FreeBSD sysroot with the explicit target and static feature, then stages `chan`, `LICENSE`, and `README.md` in the amd64 or arm64 target-named tarball.
+- **The installer and updater select both published architectures.** `install.sh` maps FreeBSD amd64 to `x86_64-unknown-freebsd` and arm64 or aarch64 to `aarch64-unknown-freebsd`, while retaining the base-system `fetch` fallback and refusing other architectures. The updater target table uses the same mappings.
+- **The release arms are build-only.** The amd64 and arm64 jobs run on Ubuntu, install their architecture's Rust inputs and clang/LLVM tools, verify the checksum-pinned FreeBSD 15.0 sysroot, assert that each result is a static FreeBSD ELF, and upload `release-freebsd-cli` and `release-freebsd-cli-arm64`. Native FreeBSD behavior remains host acceptance because GitHub Actions has no FreeBSD runner.
 
 ## Known gaps to accept or close
 
@@ -41,8 +41,8 @@ arm64 is a separate decision, not a follow-on commit. `aarch64-unknown-freebsd` 
 
 ## Acceptance
 
-- `install.sh` on a stock FreeBSD amd64 machine with neither curl nor wget installs a working `chan` and links `cs`, verified end to end rather than by reading the script.
-- The release publishes a static `chan-x86_64-unknown-freebsd.tar.gz` whose SHA256 matches its `/dl/cli/latest.json` entry, and `chan upgrade --check` on FreeBSD reports the published version instead of refusing the target.
+- `install.sh` on stock FreeBSD amd64 and arm64 machines with neither curl nor wget installs a working `chan` and links `cs`, verified end to end rather than by reading the script.
+- The release publishes static `chan-x86_64-unknown-freebsd.tar.gz` and `chan-aarch64-unknown-freebsd.tar.gz` assets whose SHA256 values match their `/dl/cli/latest.json` entries, and `chan upgrade --check` on both architectures reports the published version instead of refusing the target.
 - A FreeBSD devserver serves a real workspace: `chan serve` binds, `/api/health` answers ok, an unauthenticated request is refused, the embedded SPA is served, and SIGINT exits cleanly. All of this already passes on the guest against both the dynamic and the static binary; the acceptance is that it passes against a *published* artifact.
 - `cargo test --workspace --exclude chan-desktop` on FreeBSD is green apart from the intermittent terminal tests above, which are named rather than hidden.
 - `crates/chan-workspace/tests/watch_completeness.rs` passes on every platform. It is not gated to FreeBSD: it states a contract every backend owes, and it fails on FreeBSD with the watcher fix reverted.
@@ -50,6 +50,7 @@ arm64 is a separate decision, not a follow-on commit. `aarch64-unknown-freebsd` 
 ## Evidence
 
 - Feasibility run 2026-08-23 on FreeBSD 15.0-RELEASE arm64 at `41fcf6880051`. Unpatched: `cargo check -p chan` green in 79 s with one `dead_code` warning; `cargo build --release -p chan` green; `chan --version` reported `chan 0.95.1 (build git-41fcf6880051)`, linked only against FreeBSD base (`libutil`, `libthr`, `libgcc_s`, `libc`, `libm`, `libsys`).
+- Release-arm probe on Linux: nightly `-Z build-std` compiled the standard library and the complete dependency graph for `aarch64-unknown-freebsd`; `+crt-static` linked successfully and `file` identified a statically linked FreeBSD 15.0 aarch64 ELF. The binary was not executed.
 - Recorded suite transitions: 2398 passed / 374 failed before the directory `fsync` fix point, 2766 / 6 afterward, 2768 / 4 after the escape-classification fix, and the watcher and probe fixes close the remaining structural one. These aggregate transitions are established; no per-cause attribution was captured.
 - The watcher fix is pinned adversarially: with `queue_catch_up` disabled on the guest, both `watch_completeness` tests fail; restored, they pass three of three, and `ignore_consistency` passes ten of ten where it previously failed three of three.
 - The `O_PATH` mechanism was confirmed at the syscall level with a C probe on the guest: `fsync` on an `O_PATH` fd returns errno 9, `openat(o_path_fd, ".")` succeeds, and `fsync` on the reopened fd returns 0.

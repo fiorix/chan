@@ -41,6 +41,13 @@ const cliTargets = [
     asset: "chan-x86_64-unknown-freebsd.tar.gz",
     archiveOptional: true,
   },
+  {
+    id: "cli-freebsd-arm64",
+    label: "FreeBSD arm64 tarball (static)",
+    target: "aarch64-unknown-freebsd",
+    asset: "chan-aarch64-unknown-freebsd.tar.gz",
+    archiveOptional: true,
+  },
 ];
 
 function desktopDownloads(version) {

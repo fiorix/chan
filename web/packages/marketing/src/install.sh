@@ -74,7 +74,7 @@ case "$os" in
     FreeBSD)
         case "$arch" in
             x86_64|amd64)  target="x86_64-unknown-freebsd" ;;
-            aarch64|arm64) err "FreeBSD on $arch is not published. amd64 only for now." ;;
+            aarch64|arm64) target="aarch64-unknown-freebsd" ;;
             *) err "FreeBSD on $arch is not published." ;;
         esac
         ;;

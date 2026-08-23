@@ -71,15 +71,28 @@ async function main() {
     assert(!downloadIds.has("cli-windows-x64"), "windows cli absent without asset");
 
     // FreeBSD begins with v0.96.0, so the historical fixture above correctly
-    // retains three targets. A manifest that carries the new tarball must add
-    // both the self-upgrade target and the install-page download.
+    // retains three targets. A manifest that carries the new tarballs must add
+    // both self-upgrade targets and install-page downloads.
     const withFreebsd = JSON.parse(await fs.readFile(fixture, "utf8"));
-    const freebsdName = "chan-x86_64-unknown-freebsd.tar.gz";
-    withFreebsd.assets.push({
-      name: freebsdName,
-      url: `https://github.com/fiorix/chan/releases/download/v0.15.4/${freebsdName}`,
-      sha256: createHash("sha256").update(freebsdName).digest("hex"),
-    });
+    const freebsdAssets = [
+      {
+        id: "cli-freebsd-x64",
+        target: "x86_64-unknown-freebsd",
+        name: "chan-x86_64-unknown-freebsd.tar.gz",
+      },
+      {
+        id: "cli-freebsd-arm64",
+        target: "aarch64-unknown-freebsd",
+        name: "chan-aarch64-unknown-freebsd.tar.gz",
+      },
+    ];
+    for (const { name } of freebsdAssets) {
+      withFreebsd.assets.push({
+        name,
+        url: `https://github.com/fiorix/chan/releases/download/v0.15.4/${name}`,
+        sha256: createHash("sha256").update(name).digest("hex"),
+      });
+    }
     const freebsdManifest = path.join(out, "with-freebsd.json");
     await fs.writeFile(freebsdManifest, `${JSON.stringify(withFreebsd)}\n`);
     const freebsdOut = path.join(out, "freebsd");
@@ -90,19 +103,24 @@ async function main() {
       freebsdOut,
     ]);
     const freebsdCli = await readJson(path.join(freebsdOut, "cli", "latest.json"));
-    assert(freebsdCli.targets.length === 4, "FreeBSD asset adds one CLI target");
-    const freebsdTarget = freebsdCli.targets.find(
-      (target) => target.target === "x86_64-unknown-freebsd",
-    );
-    assert(freebsdTarget?.asset === freebsdName, "FreeBSD CLI target asset");
-    assert(/^[a-f0-9]{64}$/.test(freebsdTarget?.sha256 ?? ""), "FreeBSD CLI sha256");
+    assert(freebsdCli.targets.length === 5, "FreeBSD assets add two CLI targets");
+    for (const { target, name } of freebsdAssets) {
+      const freebsdTarget = freebsdCli.targets.find((entry) => entry.target === target);
+      assert(freebsdTarget?.asset === name, `FreeBSD CLI target asset: ${target}`);
+      assert(
+        /^[a-f0-9]{64}$/.test(freebsdTarget?.sha256 ?? ""),
+        `FreeBSD CLI sha256: ${target}`,
+      );
+    }
     const freebsdDownloads = (await readJson(path.join(freebsdOut, "releases.json")))
       .releases[0].downloads;
-    assert(freebsdDownloads.length === 15, "FreeBSD present adds one download");
-    assert(
-      freebsdDownloads.some((download) => download.id === "cli-freebsd-x64"),
-      "FreeBSD CLI download present",
-    );
+    assert(freebsdDownloads.length === 16, "FreeBSD present adds two downloads");
+    for (const { id } of freebsdAssets) {
+      assert(
+        freebsdDownloads.some((download) => download.id === id),
+        `FreeBSD CLI download present: ${id}`,
+      );
+    }
 
     // With the Windows assets present, the optional Windows downloads light up.
     const withWindows = JSON.parse(await fs.readFile(fixture, "utf8"));

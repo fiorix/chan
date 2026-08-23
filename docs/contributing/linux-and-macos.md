@@ -148,13 +148,13 @@ CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/set
 
 ## CLI: the FreeBSD standalone target
 
-Releases publish `chan-x86_64-unknown-freebsd.tar.gz`, a static amd64 tarball containing `chan`, `LICENSE`, and `README.md`. The installer supports FreeBSD's base-system `fetch` command:
+Releases publish `chan-x86_64-unknown-freebsd.tar.gz` and `chan-aarch64-unknown-freebsd.tar.gz`, static amd64 and arm64 tarballs containing `chan`, `LICENSE`, and `README.md`. The installer supports FreeBSD's base-system `fetch` command:
 
 ```sh
 fetch -o - https://chan.app/install.sh | sh
 ```
 
-The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux and macOS standalone builds, including for `chan upgrade`. FreeBSD arm64 is not a published target because Rust does not distribute its standard library for `aarch64-unknown-freebsd`; build `chan` from source with the FreeBSD ports Rust toolchain instead. Release CI cross-builds amd64 through `make freebsd-chan-tarball FREEBSD_TARGET=x86_64-unknown-freebsd` against its pinned FreeBSD sysroot. The release checklist still requires an end-to-end installer and upgrade check against the published artifact on stock FreeBSD.
+The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux and macOS standalone builds, including for `chan upgrade`. Release CI cross-builds both FreeBSD architectures against its pinned FreeBSD sysroot: amd64 uses the rustup-distributed standard library for the tier-2 `x86_64-unknown-freebsd` target, while the tier-3 `aarch64-unknown-freebsd` target builds the standard library from source with nightly `-Z build-std`. The original port feasibility and runtime work ran on FreeBSD 15.0 arm64 before the port fixes; the v0.96.0 arm64 release binary has only build and ELF-format evidence and has not executed. The release checklist still requires end-to-end installer and upgrade checks against the published artifacts on stock FreeBSD amd64 and arm64 hosts.
 
 ## Devserver: the `--service=systemd` user-service path
 

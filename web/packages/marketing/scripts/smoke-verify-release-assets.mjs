@@ -29,13 +29,18 @@ const verifyScript = "scripts/verify-release-assets.mjs";
 const version = "9.9.9";
 const tag = `v${version}`;
 const windowsZip = "chan-x86_64-pc-windows-msvc.zip";
-const freebsdTarball = "chan-x86_64-unknown-freebsd.tar.gz";
+const freebsdTarballs = [
+  "chan-x86_64-unknown-freebsd.tar.gz",
+  "chan-aarch64-unknown-freebsd.tar.gz",
+];
 
 const root = mkdtempSync(path.join(tmpdir(), "chan-verify-release-"));
 try {
   const v096Assets = requiredAssets("0.96.0");
-  assertEqual(v096Assets.length, 24, "v0.96.0 required asset count");
-  assert(v096Assets.includes(freebsdTarball), "FreeBSD tarball is required");
+  assertEqual(v096Assets.length, 25, "v0.96.0 required asset count");
+  for (const tarball of freebsdTarballs) {
+    assert(v096Assets.includes(tarball), `FreeBSD tarball is required: ${tarball}`);
+  }
 
   // 1. A complete fixture release verifies clean.
   const complete = runVerify("complete", requiredAssets(version));

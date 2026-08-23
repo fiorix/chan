@@ -25,6 +25,11 @@ async function main() {
     const linuxTar = await makeTarball(assets, "x86_64-unknown-linux-musl", "linux");
     const macTar = await makeTarball(assets, "aarch64-apple-darwin", "mac");
     const freebsdTar = await makeTarball(assets, "x86_64-unknown-freebsd", "freebsd");
+    const freebsdArm64Tar = await makeTarball(
+      assets,
+      "aarch64-unknown-freebsd",
+      "freebsd-arm64",
+    );
     const metadataPath = path.join(root, "latest.json");
     const metadata = JSON.stringify(
         {
@@ -49,6 +54,12 @@ async function main() {
               asset: "chan-x86_64-unknown-freebsd.tar.gz",
               url: pathToFileURL(freebsdTar.path).href,
               sha256: freebsdTar.sha256,
+            },
+            {
+              target: "aarch64-unknown-freebsd",
+              asset: "chan-aarch64-unknown-freebsd.tar.gz",
+              url: pathToFileURL(freebsdArm64Tar.path).href,
+              sha256: freebsdArm64Tar.sha256,
             },
           ],
         },
@@ -84,10 +95,21 @@ async function main() {
       unameM: "amd64",
       expected: "freebsd",
     });
-    runFreebsdArm64Refusal({
+    runInstall({
       fakeBin,
       metadataPath,
       prefix: path.join(prefixes, "freebsd-arm64"),
+      unameS: "FreeBSD",
+      unameM: "arm64",
+      expected: "freebsd-arm64",
+    });
+    runInstall({
+      fakeBin,
+      metadataPath,
+      prefix: path.join(prefixes, "freebsd-aarch64"),
+      unameS: "FreeBSD",
+      unameM: "aarch64",
+      expected: "freebsd-arm64",
     });
     await runFetchFallback({
       freebsdTar,
@@ -166,27 +188,6 @@ function runInstall({
   const output = execFileSync(path.join(prefix, "bin", "chan"), { encoding: "utf8" }).trim();
   if (output !== expected) {
     throw new Error(`installed binary printed ${JSON.stringify(output)}, expected ${expected}`);
-  }
-}
-
-function runFreebsdArm64Refusal({ fakeBin, metadataPath, prefix }) {
-  const result = spawnSync("sh", [installer], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      FAKE_UNAME_S: "FreeBSD",
-      FAKE_UNAME_M: "arm64",
-      METADATA_URL: metadataPath,
-      PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
-      PREFIX: prefix,
-    },
-  });
-  if (result.status === 0) {
-    throw new Error("install unexpectedly accepted FreeBSD arm64");
-  }
-  const expected = "FreeBSD on arm64 is not published. amd64 only for now.";
-  if (!result.stderr.includes(expected)) {
-    throw new Error(`FreeBSD arm64 refusal not found: ${result.stderr}`);
   }
 }
 
