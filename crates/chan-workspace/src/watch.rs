@@ -384,7 +384,7 @@ impl CatchUpQueue {
         let Some(dir) = open_catch_up_dir(&self.root, Path::new(".")) else {
             return;
         };
-        self.scan(dir, "", root.prefix.as_deref(), policy, None);
+        let _ = self.scan(dir, "", root.prefix.as_deref(), policy, None);
     }
 
     fn push(&mut self, request: CatchUpRequest) {
@@ -415,9 +415,16 @@ impl CatchUpQueue {
                 continue;
             }
             let Some(dir) = open_catch_up_dir(&self.root, Path::new(&request.rel)) else {
-                continue;
+                safe_call(
+                    cb,
+                    WatchEvent::provider_error(
+                        format!("FreeBSD catch-up could not open {}", request.rel),
+                        policy.generation(),
+                    ),
+                );
+                return;
             };
-            self.scan(
+            let _ = self.scan(
                 dir,
                 &request.rel,
                 request.prefix.as_deref(),
@@ -444,11 +451,23 @@ impl CatchUpQueue {
         prefix: Option<&str>,
         policy: &IndexScopePolicy,
         cb: Option<&dyn WatchCallback>,
-    ) {
+    ) -> bool {
         use cap_std::fs::MetadataExt as _;
 
-        let Ok(entries) = dir.entries() else {
-            return;
+        let entries = match dir.entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                if let Some(cb) = cb {
+                    safe_call(
+                        cb,
+                        WatchEvent::provider_error(
+                            format!("FreeBSD catch-up could not scan {rel}: {error}"),
+                            policy.generation(),
+                        ),
+                    );
+                }
+                return false;
+            }
         };
         let mut descend = Vec::new();
         for entry in entries.flatten() {
@@ -471,20 +490,14 @@ impl CatchUpQueue {
                 let metadata = match entry.metadata() {
                     Ok(metadata) => metadata,
                     Err(_) => {
-                        if let Some(child) = open_catch_up_dir(&dir, Path::new(name)) {
-                            descend.push((child, child_rel));
-                        }
+                        descend.push((name.to_string(), child_rel, None));
                         continue;
                     }
                 };
                 let identity = (metadata.ino(), metadata.ctime(), metadata.ctime_nsec());
                 let path = PathBuf::from(&child_rel);
-                if self.known_dirs.insert(path.clone(), identity) != Some(identity) {
-                    if let Some(child) = open_catch_up_dir(&dir, Path::new(name)) {
-                        descend.push((child, child_rel));
-                    } else {
-                        self.known_dirs.remove(&path);
-                    }
+                if self.known_dirs.get(&path) != Some(&identity) {
+                    descend.push((name.to_string(), child_rel, Some((path, identity))));
                 }
             } else if ft.is_file() && !is_filtered(&child_rel, false, policy) {
                 if let Some(cb) = cb {
@@ -499,10 +512,29 @@ impl CatchUpQueue {
                 }
             }
         }
-        // Collected first so the borrow of `entries` is done before recursing.
-        for (dir, child_rel) in descend {
-            self.scan(dir, &child_rel, prefix, policy, cb);
+        // Retain names, not handles: each child is opened, scanned, and dropped
+        // before its sibling, so descriptor use follows depth rather than width.
+        for (name, child_rel, identity) in descend {
+            let Some(child) = open_catch_up_dir(&dir, Path::new(&name)) else {
+                if let Some(cb) = cb {
+                    safe_call(
+                        cb,
+                        WatchEvent::provider_error(
+                            format!("FreeBSD catch-up could not open {child_rel}"),
+                            policy.generation(),
+                        ),
+                    );
+                }
+                return false;
+            };
+            if !self.scan(child, &child_rel, prefix, policy, cb) {
+                return false;
+            }
+            if let Some((path, identity)) = identity {
+                self.known_dirs.insert(path, identity);
+            }
         }
+        true
     }
 }
 
