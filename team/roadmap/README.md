@@ -24,7 +24,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 | item | state | what needs to happen |
 | --- | --- | --- |
 | [the-release-pipeline-builds-cold-and-serially](v0.96.0/the-release-pipeline-builds-cold-and-serially.md) | merged at `aa1dca8c`; both tip dispatches green, every build job started within 5s of `release context` | close at GA; acceptance 3 is met for the model bundle only, the web build stamps still mark `chan-server` stale while absent |
-| [a-terminal-can-lose-keyboard-focus-after-macos-wake](v0.96.0/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) | merged at `98af7f7f`; static intake green; 50 focused tests, svelte-check and an effective two-test negative control all green | run the owner-only macOS WKWebView sleep/wake smoke |
+| [a-terminal-can-lose-keyboard-focus-after-macos-wake](v0.96.0/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) | merged at `98af7f7f`; static intake green; 50 focused tests and svelte-check green, and the negative control failed exactly the two intended tests before the restore returned all 50 to green | run the owner-only macOS WKWebView sleep/wake smoke |
 | [freebsd-is-not-a-published-target](v0.96.0/freebsd-is-not-a-published-target.md) | port code merged; release arm merged; static intake found three findings in the FreeBSD-only code and one documentation mismatch | settle the four findings, prove the arm in the round's `publish=false` dispatch, and run the FreeBSD install and upgrade acceptance on a real box |
 
 ## Completed

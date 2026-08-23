@@ -11,7 +11,7 @@ when_to_use: >-
 
 # Cut a release
 
-A release is a single annotated tag `vX.Y.Z` on `main`. Pushing that tag fires `.github/workflows/release.yml` with publish semantics: it builds the CLI, gateway, and desktop artifacts across Linux, macOS, Windows, and FreeBSD, signs and notarizes the macOS desktop build, uploads the GitHub Release assets, regenerates the chan.app `/dl` metadata (moving `latest`), and deploys GitHub Pages. A successful Release run then triggers `.github/workflows/publish-downstream.yml` once for Docker Hub, Cachix, COPR, the PPA, the AUR, and the Homebrew tap. The tag push is the public release; everything before it is preparation.
+A release is a single annotated tag `vX.Y.Z` on `main`. Pushing that tag fires `.github/workflows/release.yml` with publish semantics: it builds the CLI for Linux, macOS, Windows and FreeBSD, the gateway packages for Linux, and the desktop artifacts for Linux, macOS and Windows, signs and notarizes the macOS desktop build, uploads the GitHub Release assets, regenerates the chan.app `/dl` metadata (moving `latest`), and deploys GitHub Pages. A successful Release run then triggers `.github/workflows/publish-downstream.yml` once for Docker Hub, Cachix, COPR, the PPA, the AUR, and the Homebrew tap. The tag push is the public release; everything before it is preparation.
 
 ## Publication layers
 
