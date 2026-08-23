@@ -19,7 +19,13 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.97.0
+
+| item | state | what needs to happen |
+| --- | --- | --- |
+| [the-fd-budget-disengages-where-it-cannot-measure](v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md) | implemented on `fix/freebsd-fd-budget-no-probe` (`2a4b6d16`); 13 focused tests green and the FreeBSD `--tests` check green under `-D warnings` | run the owner's acceptance on a real FreeBSD box, then merge; it is a correctness fix in a platform v0.96.0 has already published |
+| [the-windows-cli-ships-but-is-unreachable](v0.97.0/the-windows-cli-ships-but-is-unreachable.md) | accepted, not started | build the three parts together: `chan upgrade` resolving the published zip, a PowerShell install path, and the docs; the discriminator between a standalone CLI and the desktop's companion `chan.exe` is the real content |
+| [freebsd-devserver-has-no-default-service](v0.97.0/freebsd-devserver-has-no-default-service.md) | accepted, not started | add the `freebsd` arm to `resolve_auto` and its matrix, and update the prose that lists the per-OS backends |
 
 ## Completed
 
