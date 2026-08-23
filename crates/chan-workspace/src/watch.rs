@@ -53,6 +53,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::fs_ops::{IndexScopeDecision, IndexScopeExclusion, IndexScopePolicy};
 
+#[cfg(target_os = "freebsd")]
+type WatchCapabilityRoot = cap_std::fs::Dir;
+#[cfg(not(target_os = "freebsd"))]
+type WatchCapabilityRoot = ();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WatchKind {
     Created,
@@ -258,7 +263,6 @@ struct DirRegistration {
 /// backend can only name one new entry per directory write.
 #[cfg(target_os = "freebsd")]
 struct CatchUpRequest {
-    abs: PathBuf,
     rel: String,
     prefix: Option<String>,
     generation: crate::WorkspaceGeneration,
@@ -286,6 +290,7 @@ type RegisteredDirs = Arc<std::sync::RwLock<HashSet<PathBuf>>>;
 
 struct WatchRegistrationScope {
     roots: Arc<Vec<WatchRoot>>,
+    capability_root: WatchCapabilityRoot,
     policy_source: ScopePolicySource,
     registered_dirs: RegisteredDirs,
 }
@@ -349,8 +354,8 @@ const CATCH_UP_DEBOUNCE: Duration = Duration::from_millis(150);
 /// reuses the inode. Entries for deleted directories are left in place; each
 /// costs one path and cannot match a new directory without both identities.
 #[cfg(target_os = "freebsd")]
-#[derive(Default)]
 struct CatchUpQueue {
+    root: cap_std::fs::Dir,
     pending: std::collections::HashMap<PathBuf, CatchUpRequest>,
     due: Option<Instant>,
     known_dirs: std::collections::HashMap<PathBuf, (u64, i64, i64)>,
@@ -358,8 +363,13 @@ struct CatchUpQueue {
 
 #[cfg(target_os = "freebsd")]
 impl CatchUpQueue {
-    fn new() -> Self {
-        Self::default()
+    fn new(root: WatchCapabilityRoot) -> Self {
+        Self {
+            root,
+            pending: std::collections::HashMap::new(),
+            due: None,
+            known_dirs: std::collections::HashMap::new(),
+        }
     }
 
     /// Learn the tree that already exists, without announcing any of it. The
@@ -368,9 +378,13 @@ impl CatchUpQueue {
     /// to register each subdirectory, minus the registration: notify's kqueue
     /// backend watches the root recursively and has walked it once itself.
     fn seed(&mut self, roots: &[WatchRoot], policy: &IndexScopePolicy) {
-        for root in roots {
-            self.scan(&root.abs, "", root.prefix.as_deref(), policy, None);
-        }
+        let Some(root) = roots.first() else {
+            return;
+        };
+        let Some(dir) = open_catch_up_dir(&self.root, Path::new(".")) else {
+            return;
+        };
+        self.scan(dir, "", root.prefix.as_deref(), policy, None);
     }
 
     fn push(&mut self, request: CatchUpRequest) {
@@ -379,7 +393,9 @@ impl CatchUpQueue {
         // fixed cadence instead of starving behind its own churn.
         self.due
             .get_or_insert_with(|| Instant::now() + CATCH_UP_DEBOUNCE);
-        self.pending.entry(request.abs.clone()).or_insert(request);
+        self.pending
+            .entry(PathBuf::from(&request.rel))
+            .or_insert(request);
     }
 
     fn deadline(&self) -> Option<Instant> {
@@ -398,8 +414,11 @@ impl CatchUpQueue {
             if request.generation != policy.generation() {
                 continue;
             }
+            let Some(dir) = open_catch_up_dir(&self.root, Path::new(&request.rel)) else {
+                continue;
+            };
             self.scan(
-                &request.abs,
+                dir,
                 &request.rel,
                 request.prefix.as_deref(),
                 &policy,
@@ -420,15 +439,15 @@ impl CatchUpQueue {
     /// catch-up scan produces and the indexer already coalesces.
     fn scan(
         &mut self,
-        abs: &Path,
+        dir: cap_std::fs::Dir,
         rel: &str,
         prefix: Option<&str>,
         policy: &IndexScopePolicy,
         cb: Option<&dyn WatchCallback>,
     ) {
-        use std::os::unix::fs::{DirEntryExt, MetadataExt};
+        use cap_std::fs::MetadataExt as _;
 
-        let Ok(entries) = std::fs::read_dir(abs) else {
+        let Ok(entries) = dir.entries() else {
             return;
         };
         let mut descend = Vec::new();
@@ -452,14 +471,20 @@ impl CatchUpQueue {
                 let metadata = match entry.metadata() {
                     Ok(metadata) => metadata,
                     Err(_) => {
-                        descend.push((entry.path(), child_rel));
+                        if let Some(child) = open_catch_up_dir(&dir, Path::new(name)) {
+                            descend.push((child, child_rel));
+                        }
                         continue;
                     }
                 };
-                let identity = (entry.ino(), metadata.ctime(), metadata.ctime_nsec());
-                let path = entry.path();
+                let identity = (metadata.ino(), metadata.ctime(), metadata.ctime_nsec());
+                let path = PathBuf::from(&child_rel);
                 if self.known_dirs.insert(path.clone(), identity) != Some(identity) {
-                    descend.push((path, child_rel));
+                    if let Some(child) = open_catch_up_dir(&dir, Path::new(name)) {
+                        descend.push((child, child_rel));
+                    } else {
+                        self.known_dirs.remove(&path);
+                    }
                 }
             } else if ft.is_file() && !is_filtered(&child_rel, false, policy) {
                 if let Some(cb) = cb {
@@ -475,10 +500,34 @@ impl CatchUpQueue {
             }
         }
         // Collected first so the borrow of `entries` is done before recursing.
-        for (path, child_rel) in descend {
-            self.scan(&path, &child_rel, prefix, policy, cb);
+        for (dir, child_rel) in descend {
+            self.scan(dir, &child_rel, prefix, policy, cb);
         }
     }
+}
+
+#[cfg(target_os = "freebsd")]
+fn open_catch_up_dir(dir: &cap_std::fs::Dir, rel: &Path) -> Option<cap_std::fs::Dir> {
+    use std::os::fd::AsFd;
+
+    let rel = if rel.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        rel
+    };
+    let opened = rustix::fs::openat(
+        dir.as_fd(),
+        rel,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::RESOLVE_BENEATH,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()?;
+    let file: std::fs::File = opened.into();
+    Some(cap_std::fs::Dir::from_std_file(file))
 }
 
 #[cfg(not(target_os = "freebsd"))]
@@ -486,7 +535,7 @@ struct CatchUpQueue;
 
 #[cfg(not(target_os = "freebsd"))]
 impl CatchUpQueue {
-    fn new() -> Self {
+    fn new(_root: WatchCapabilityRoot) -> Self {
         Self
     }
 
@@ -514,6 +563,7 @@ fn watch_supervisor_loop(
 ) {
     let WatchRegistrationScope {
         roots,
+        capability_root,
         policy_source,
         registered_dirs,
     } = scope;
@@ -526,7 +576,7 @@ fn watch_supervisor_loop(
     // Learned before `start` is unblocked, so a caller that creates a directory
     // the instant `watch` returns finds it genuinely unknown. Seeding after the
     // handshake would race that create and quietly file it as pre-existing.
-    let mut catch_up = CatchUpQueue::new();
+    let mut catch_up = CatchUpQueue::new(capability_root);
     catch_up.seed(&roots, &policy);
     let _ = initial.send(());
 
@@ -1188,12 +1238,19 @@ impl WatchHandle {
     /// registrations are rebuilt when the policy generation changes.
     pub(crate) fn start(
         roots: &[WatchRoot],
+        capability_root: WatchCapabilityRoot,
         policy_source: ScopePolicySource,
         cb: Arc<dyn WatchCallback>,
     ) -> Result<Self> {
         if roots.is_empty() {
             return Err(crate::error::ChanError::Io(
                 "WatchHandle::start: at least one root required".into(),
+            ));
+        }
+        #[cfg(target_os = "freebsd")]
+        if roots.len() != 1 {
+            return Err(crate::error::ChanError::Io(
+                "WatchHandle::start: FreeBSD catch-up requires exactly one capability root".into(),
             ));
         }
         let dispatch_roots: Arc<Vec<WatchRoot>> = Arc::new(roots.to_vec());
@@ -1251,6 +1308,7 @@ impl WatchHandle {
                     watcher,
                     WatchRegistrationScope {
                         roots: dispatch_roots,
+                        capability_root,
                         policy_source,
                         registered_dirs,
                     },
@@ -1400,8 +1458,9 @@ fn new_dir_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<Path
 /// directories it does not already know, which covers a subtree that arrived
 /// whole without walking one that did not.
 ///
-/// `symlink_metadata` keeps a symlinked directory out of the modify arm; the
-/// scan stays inside the root the same way the Linux registration walk does.
+/// `symlink_metadata` keeps an existing symlink out of the modify arm. It is
+/// only a candidate filter: the drain re-opens this root-relative path through
+/// the retained workspace handle with no-follow and resolve-beneath flags.
 #[cfg(target_os = "freebsd")]
 fn catch_up_candidate(kind: &notify::EventKind, paths: &[PathBuf]) -> Option<PathBuf> {
     use notify::EventKind;
@@ -1437,7 +1496,6 @@ fn queue_catch_up(
         }
     }
     let _ = reg_tx.send(WatchCommand::CatchUp(CatchUpRequest {
-        abs,
         rel,
         prefix: root.prefix.clone(),
         generation: policy.generation(),
@@ -1854,6 +1912,33 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn catch_up_open_rejects_replaced_root_and_ancestor_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let queued = parent.join("queued");
+        std::fs::create_dir_all(&queued).unwrap();
+        std::fs::create_dir(outside.path().join("queued")).unwrap();
+        let capability_root = cap_std::fs::Dir::open_ambient_dir(
+            root.path(),
+            cap_std::ambient_authority(),
+        )
+        .unwrap();
+
+        std::fs::remove_dir(&queued).unwrap();
+        symlink(outside.path().join("queued"), &queued).unwrap();
+        assert!(open_catch_up_dir(&capability_root, Path::new("parent/queued")).is_none());
+
+        std::fs::remove_file(&queued).unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        symlink(outside.path(), &parent).unwrap();
+        assert!(open_catch_up_dir(&capability_root, Path::new("parent/queued")).is_none());
+    }
+
     #[test]
     fn watch_event_constructors_and_legacy_defaults_are_stable() {
         let generation: crate::WorkspaceGeneration = serde_json::from_str("7").unwrap();
@@ -2154,7 +2239,8 @@ mod tests {
             let (tx, rx) = channel();
             let cb = Channel(std::sync::Mutex::new(tx));
             let roots = [WatchRoot::workspace(root.path())];
-            let handle = WatchHandle::start(&roots, policy, Arc::new(cb)).expect("watcher starts");
+            let handle = WatchHandle::start(&roots, (), policy, Arc::new(cb))
+                .expect("watcher starts");
             (handle, rx)
         }
 
