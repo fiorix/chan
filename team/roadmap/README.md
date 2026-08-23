@@ -19,7 +19,9 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.96.0
+
+- [freebsd-is-not-a-published-target](v0.96.0/freebsd-is-not-a-published-target.md) - chan builds, tests, and runs on FreeBSD, and the build-side defects the port surfaced are fixed on main; what remains is the release side, which is a shipping decision rather than a build fix: the amd64 cross-compile arm, static packaging, the two `install.sh` changes, and the update target table.
 
 ## Completed
 
