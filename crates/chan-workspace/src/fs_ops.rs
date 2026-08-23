@@ -1699,8 +1699,8 @@ fn write_xattrs_via_fd(
 /// `cap-primitives/src/rustix/fs/dir_utils.rs` names freebsd alongside
 /// linux. An `O_PATH` fd does not support `fsync`: it returns `EBADF`.
 /// Dup'ing the fd preserves `O_PATH`, so a straight `try_clone_to_owned`
-/// + `sync_all` fails on both, and each needs its own way back to a plain
-/// directory fd. Linux re-opens through `/proc/self/fd/<n>`. FreeBSD has
+/// plus `sync_all` fails on both, and each needs its own way back to a
+/// plain directory fd. Linux re-opens through `/proc/self/fd/<n>`. FreeBSD has
 /// no procfs mounted by default, but it does accept an `O_PATH` descriptor
 /// as the `dirfd` of an `*at` call, so it re-opens through
 /// `openat(dir, ".")`. macOS and the remaining BSDs carry no `O_PATH` at
