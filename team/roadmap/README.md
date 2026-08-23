@@ -19,11 +19,12 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.95.2
+### v0.96.0
 
 | item | state | what needs to happen |
 | --- | --- | --- |
-| [a-terminal-can-lose-keyboard-focus-after-macos-wake](v0.95.2/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) | implemented on `fix/macos-wake-terminal-focus`; scoped automated checks green | run the owner-only macOS WKWebView sleep/wake smoke, then integrate for v0.95.2 |
+| [the-release-pipeline-builds-cold-and-serially](v0.96.0/the-release-pipeline-builds-cold-and-serially.md) | merged at `aa1dca8c`; both tip dispatches green, every build job started within 5s of `release context` | close at GA; acceptance 4 is met for the model bundle only, the web build stamps still mark `chan-server` stale while absent |
+| [a-terminal-can-lose-keyboard-focus-after-macos-wake](v0.96.0/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) | merged at `98af7f7f`; static intake green; integrated checks queued | run the integrated checks and the owner-only macOS WKWebView sleep/wake smoke |
 
 ## Completed
 
