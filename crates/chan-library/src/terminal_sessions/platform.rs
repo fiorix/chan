@@ -93,29 +93,67 @@ pub(super) fn fd_headroom_allows(open: u64, limit: u64, new_fds: u64) -> bool {
         < limit
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "freebsd")))]
 fn fd_snapshot() -> Option<(u64, u64)> {
     let open = std::fs::read_dir("/dev/fd").ok()?.count() as u64;
     let limit = nofile_limit()?;
     Some((open, limit))
 }
 
+/// FreeBSD publishes `/dev/fd` as a devfs stub holding `0`, `1`, `2` unless
+/// `fdescfs` is mounted over it, so the entry count is a constant 3 whatever
+/// the process actually holds. Counting that would tell the terminal guard it
+/// has permanent clear headroom, which is a worse answer than admitting there
+/// is no probe. `chan_workspace::fd_budget` carries the same guard for the
+/// index side.
+#[cfg(target_os = "freebsd")]
+fn fd_snapshot() -> Option<(u64, u64)> {
+    if !dev_fd_lists_open_descriptors() {
+        return None;
+    }
+    let open = std::fs::read_dir("/dev/fd").ok()?.count() as u64;
+    let limit = nofile_limit()?;
+    Some((open, limit))
+}
+
+/// Whether `/dev/fd` reflects this process's descriptors. Holding a descriptor
+/// the listing has to show separates `fdescfs` from the stub: the stub answers
+/// with the three standard entries and nothing else, while under `fdescfs` the
+/// probe descriptor and `read_dir`'s own handle are both listed. Resolved once.
+#[cfg(target_os = "freebsd")]
+fn dev_fd_lists_open_descriptors() -> bool {
+    use std::sync::OnceLock;
+    static LIVE: OnceLock<bool> = OnceLock::new();
+    *LIVE.get_or_init(|| {
+        let Ok(probe) = std::fs::File::open("/dev/null") else {
+            return false;
+        };
+        let seen = std::fs::read_dir("/dev/fd")
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        drop(probe);
+        seen > STUB_DEV_FD_ENTRIES
+    })
+}
+
+/// `0`, `1`, `2`: what bare devfs publishes under `/dev/fd`.
+#[cfg(target_os = "freebsd")]
+const STUB_DEV_FD_ENTRIES: usize = 3;
+
 #[cfg(not(unix))]
 fn fd_snapshot() -> Option<(u64, u64)> {
     None
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 fn nofile_limit() -> Option<u64> {
     rustix::process::getrlimit(rustix::process::Resource::Nofile).current
 }
 
-#[cfg(target_os = "macos")]
-fn nofile_limit() -> Option<u64> {
-    rustix::process::getrlimit(rustix::process::Resource::Nofile).current
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))
+))]
 fn nofile_limit() -> Option<u64> {
     None
 }
