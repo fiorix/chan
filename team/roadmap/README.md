@@ -19,15 +19,19 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 ## Active
 
-### v0.96.0
-
-| item | state | what needs to happen |
-| --- | --- | --- |
-| [the-release-pipeline-builds-cold-and-serially](v0.96.0/the-release-pipeline-builds-cold-and-serially.md) | merged at `aa1dca8c`; both tip dispatches green, every build job started within 5s of `release context` | close at GA; acceptance 3 is met for the model bundle only, the web build stamps still mark `chan-server` stale while absent |
-| [a-terminal-can-lose-keyboard-focus-after-macos-wake](v0.96.0/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) | merged at `98af7f7f`; static intake green; 50 focused tests and svelte-check green, and the negative control failed exactly the two intended tests before the restore returned all 50 to green | run the owner-only macOS WKWebView sleep/wake smoke |
-| [freebsd-is-not-a-published-target](v0.96.0/freebsd-is-not-a-published-target.md) | port code merged; release arm merged; static intake found three findings in the FreeBSD-only code and one documentation mismatch | settle the four findings, prove the arm in the round's `publish=false` dispatch, and run the FreeBSD install and upgrade acceptance on a real box |
+No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
+
+### v0.96.0
+
+Shipped 2026-08-23; see [release-v0.96.0](../release/release-v0.96.0.md). Closed items in [`done/`](done/):
+
+- [freebsd-is-not-a-published-target](done/freebsd-is-not-a-published-target.md) - chan publishes static FreeBSD amd64 and arm64 tarballs, `install.sh` selects both and falls back to base-system `fetch`, and `chan upgrade` resolves either; the port's build-side fixes ship with it, and the four defects intake found in the FreeBSD-only code were fixed in the round. arm64 was scoped out and added back at the close after a probe proved nightly `-Z build-std` builds the tier-3 target. No FreeBSD code in the release has been executed on either architecture, and the stock-host checks remain owner acceptance.
+- [the-release-pipeline-builds-cold-and-serially](done/the-release-pipeline-builds-cold-and-serially.md) - release jobs restore the caches `main`'s CI writes and start from `release context` rather than behind validation, the validate jobs stop compiling `tauri-cli`, and the build scripts stop marking unchanged trees stale; acceptance 3 holds for the model bundle only and acceptance 4 cannot be observed until the first `main` run after this GA.
+- [a-terminal-can-lose-keyboard-focus-after-macos-wake](done/a-terminal-can-lose-keyboard-focus-after-macos-wake.md) - a focused terminal accepts keyboard input after macOS wake without a tab switch, guarded so no overlay or external DOM owner is stolen from; the real WKWebView sleep/wake smoke remains owner acceptance.
+
+Three items closed and none carried. All three arrived as finished branches and were taken through intake; the FreeBSD intake found four defects that four green dispatches had not, because the code is `#[cfg(target_os = "freebsd")]` and no test in the round could reach it, and the round's gate then found two more that review had not.
 
 ### v0.95.0
 

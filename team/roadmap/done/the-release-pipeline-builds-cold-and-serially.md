@@ -1,6 +1,6 @@
 # The release pipeline builds cold and serially
 
-Status: accepted scope for v0.96.0. Implemented on `ci/pipeline-speedup` (`3e9c19c1`, `81c0c922`, `26e67783`, `aa1dca8c`), verified by that branch's own `ci.yml` and `release.yml publish=false` dispatches, and merged into the v0.96.0 round at `aa1dca8c`; the warm-cache half of the effect is first observable after the change reaches `main`.
+Status: SHIPPED in [v0.96.0](../../release/release-v0.96.0.md) with acceptance 3 partly met and acceptance 4 not yet observable. Landed from `ci/pipeline-speedup` (`3e9c19c1`, `81c0c922`, `26e67783`, `aa1dca8c`), fast-forwarded so the four commits land verbatim. Acceptance 1 was verified independently on Release run `32636504451`: every build job started within five seconds of `release context`, against the item's claimed ten. Acceptance 3 holds for the model bundle and not in full: `crates/chan-server/build.rs` still emits `rerun-if-changed` unconditionally for the two frontend build stamps, so a second `cargo build` is a no-op only on a tree whose frontend was built through the Makefile. Acceptance 4, the warm-cache observation, cannot be made until the first `main` CI run after this GA, by construction.
 
 ## Problem
 

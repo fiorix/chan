@@ -1,6 +1,6 @@
 # A terminal can lose keyboard focus after macOS wake
 
-Status: accepted scope for v0.96.0. Implemented on `fix/macos-wake-terminal-focus`; the scoped automated checks are green and the real macOS WKWebView sleep/wake smoke remains owner validation.
+Status: SHIPPED in [v0.96.0](../../release/release-v0.96.0.md) with its acceptance gap open. Accepted for v0.95.2 and moved to v0.96.0 by the owner. Landed from `fix/macos-wake-terminal-focus` (`89aebf20`) through intake at `98af7f7f`. The three focused suites run 50 tests green with `svelte-check` at 0 errors and 0 warnings, and the negative control is effective: removing the wake focus call fails exactly `a wake restores DOM focus to the still-focused terminal` and `a wake reissues focus when xterm still appears focused`, and restoring it returns all 50 to green. Acceptance 4, sleeping and waking Chan Desktop in a real macOS WKWebView and typing without switching tabs, is unproven: the round's box has no display, no GPU and no macOS.
 
 ## Problem
 
