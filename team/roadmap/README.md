@@ -21,7 +21,19 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
+### v0.98.0
+
+| item | state | next |
+| --- | --- | --- |
+| [an-empty-table-cell-breaks-the-editor-grid][tbl] | investigated | implement |
+| [chan-serve-does-not-always-open-a-window][serve] | accepted | not started |
+| [the-cs-link-bubble-outlived-its-automation][cs] | accepted | not started |
+| [a-new-deck-does-not-say-how-to-add-a-slide][deck] | accepted | not started |
+
+[tbl]: v0.98.0/an-empty-table-cell-breaks-the-editor-grid.md
+[serve]: v0.98.0/chan-serve-does-not-always-open-a-window.md
+[cs]: v0.98.0/the-cs-link-bubble-outlived-its-automation.md
+[deck]: v0.98.0/a-new-deck-does-not-say-how-to-add-a-slide.md
 
 ## Completed
 
