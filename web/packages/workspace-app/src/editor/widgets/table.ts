@@ -165,7 +165,7 @@ function extractTable(
     // Other children (TableDelimiter for the --- separator row) are
     // ignored.
   } while (cursor.nextSibling());
-  if (!foundHeader || headers.length === 0) return null;
+  if (!foundHeader) return null;
   return { headers, rows };
 }
 
@@ -173,13 +173,26 @@ function extractCells(
   state: EditorView["state"],
   rowNode: import("@lezer/common").SyntaxNode,
 ): string[] {
-  const cells: string[] = [];
+  const delimiters: Array<{ from: number; to: number }> = [];
   const cursor = rowNode.cursor();
-  if (!cursor.firstChild()) return cells;
+  if (!cursor.firstChild()) return [];
   do {
-    if (cursor.name === "TableCell") {
-      cells.push(state.doc.sliceString(cursor.from, cursor.to).trim());
+    if (cursor.name === "TableDelimiter") {
+      delimiters.push({ from: cursor.from, to: cursor.to });
     }
   } while (cursor.nextSibling());
+
+  const cells: string[] = [];
+  let segmentFrom = rowNode.from;
+  for (let index = 0; index < delimiters.length; index++) {
+    const delimiter = delimiters[index]!;
+    const source = state.doc
+      .sliceString(segmentFrom, delimiter.from)
+      .trim();
+    if (index > 0 || source.length > 0) cells.push(source);
+    segmentFrom = delimiter.to;
+  }
+  const source = state.doc.sliceString(segmentFrom, rowNode.to).trim();
+  if (source.length > 0) cells.push(source);
   return cells;
 }

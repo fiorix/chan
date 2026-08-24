@@ -5,6 +5,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { describe, expect, test } from "vitest";
+import { renderMarkdown } from "../../api/markdown";
 import { chanMarkdown } from "../markdown/grammar";
 import { tableDecorations } from "./table";
 
@@ -32,6 +33,7 @@ function mountTable(doc: string): { parent: HTMLElement; view: EditorView } {
     parent,
     state: EditorState.create({
       doc,
+      selection: { anchor: doc.length },
       extensions: [chanMarkdown(), tableDecorations()],
     }),
   });
@@ -39,6 +41,33 @@ function mountTable(doc: string): { parent: HTMLElement; view: EditorView } {
     throw new Error("parse did not complete within its budget");
   }
   return { parent, view };
+}
+
+function tableText(table: Element): string[][] {
+  return Array.from(table.querySelectorAll("tr"), (row) =>
+    Array.from(row.querySelectorAll("th, td"), (cell) =>
+      cell.textContent ?? "",
+    ),
+  );
+}
+
+function expectTableMatchesMarkdown(
+  source: string,
+  expected: string[][],
+): void {
+  const { parent, view } = mountTable(source);
+  const widget = parent.querySelector(".cm-md-table");
+  expect(widget).toBeTruthy();
+
+  const rendered = document.createElement("div");
+  rendered.innerHTML = renderMarkdown(source);
+  const exported = rendered.querySelector("table");
+  expect(exported).toBeTruthy();
+  expect(tableText(widget!)).toEqual(expected);
+  expect(tableText(widget!)).toEqual(tableText(exported!));
+
+  view.destroy();
+  parent.remove();
 }
 
 describe("tableDecorations", () => {
@@ -69,6 +98,194 @@ describe("tableDecorations", () => {
     const strong = parent.querySelector(".cm-md-table td strong");
     expect(strong).toBeTruthy();
     expect(strong?.textContent).toBe("bold");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test.each([
+    {
+      name: "two columns with a body at the document start and a tight heading",
+      source: [
+        "| | |",
+        "|---|---|",
+        "| A | B |",
+        "# Foo",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["", ""],
+        ["A", "B"],
+      ],
+    },
+    {
+      name: "one column without a body and a blank before the heading",
+      source: ["| |", "|---|", "", "# Foo", "", "after"].join("\n"),
+      expected: [[""]],
+    },
+    {
+      name: "two columns without a body in the document middle",
+      source: [
+        "before",
+        "",
+        "| | |",
+        "|---|---|",
+        "# Foo",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [["", ""]],
+    },
+    {
+      name: "one column with a body in the document middle",
+      source: [
+        "before",
+        "",
+        "| |",
+        "|---|",
+        "| A |",
+        "",
+        "# Foo",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [[""], ["A"]],
+    },
+    {
+      name: "whitespace-only columns",
+      source: [
+        "|   | \t |",
+        "|---|---|",
+        "| A | B |",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["", ""],
+        ["A", "B"],
+      ],
+    },
+  ])("renders an empty header: $name", ({ source, expected }) => {
+    expectTableMatchesMarkdown(source, expected);
+  });
+
+  test.each([
+    {
+      name: "middle header cell",
+      source: [
+        "| A |  | C |",
+        "|---|---|---|",
+        "| 1 | 2 | 3 |",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["A", "", "C"],
+        ["1", "2", "3"],
+      ],
+    },
+    {
+      name: "first header cell",
+      source: [
+        "| | B | C |",
+        "|---|---|---|",
+        "| 1 | 2 | 3 |",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["", "B", "C"],
+        ["1", "2", "3"],
+      ],
+    },
+    {
+      name: "last header cell",
+      source: [
+        "| A | B | |",
+        "|---|---|---|",
+        "| 1 | 2 | 3 |",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["A", "B", ""],
+        ["1", "2", "3"],
+      ],
+    },
+    {
+      name: "middle body cell",
+      source: [
+        "| A | B | C |",
+        "|---|---|---|",
+        "| 1 |  | 3 |",
+        "",
+        "after",
+      ].join("\n"),
+      expected: [
+        ["A", "B", "C"],
+        ["1", "", "3"],
+      ],
+    },
+  ])("preserves an empty $name", ({ source, expected }) => {
+    expectTableMatchesMarkdown(source, expected);
+  });
+
+  test("keeps rows without outer pipes at their parser widths", () => {
+    const source = [
+      "A | B",
+      "---|---",
+      "1 | 2",
+      "left | ",
+      "",
+      "after",
+    ].join("\n");
+    const { parent, view } = mountTable(source);
+    const widget = parent.querySelector(".cm-md-table");
+
+    expect(widget).toBeTruthy();
+    expect(tableText(widget!)).toEqual([
+      ["A", "B"],
+      ["1", "2"],
+      ["left"],
+    ]);
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("keeps an escaped pipe aligned with markdown export", () => {
+    const source = [
+      "| A \\| B | C |",
+      "|---|---|",
+      "| 1 | 2 |",
+      "",
+      "after",
+    ].join("\n");
+    expectTableMatchesMarkdown(source, [
+      ["A | B", "C"],
+      ["1", "2"],
+    ]);
+  });
+
+  test("keeps ragged short and long body rows at their source widths", () => {
+    const source = [
+      "| A | B | C |",
+      "|---|---|---|",
+      "| 1 | 2 |",
+      "| 3 | 4 | 5 | 6 |",
+      "",
+      "after",
+    ].join("\n");
+    const { parent, view } = mountTable(source);
+    const widget = parent.querySelector(".cm-md-table");
+
+    expect(widget).toBeTruthy();
+    expect(tableText(widget!)).toEqual([
+      ["A", "B", "C"],
+      ["1", "2"],
+      ["3", "4", "5", "6"],
+    ]);
 
     view.destroy();
     parent.remove();

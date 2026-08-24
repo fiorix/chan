@@ -76,3 +76,9 @@ Two alternatives were considered and are worse. Counting delimiters only to pad 
 5. A row with no outer pipes, a row with an escaped `\|`, and a ragged short and long body row all render exactly as they do today.
 6. The existing `table.test.ts` cases pass unchanged, including bold-in-a-cell and the past-the-parse-frontier case.
 7. Every case is asserted with the caret parked outside the table, so no assertion can pass or fail because of selection-intersect suppression.
+
+## Implementation and validation
+
+`extractCells` derives each row from its `TableDelimiter` ranges and keeps every segment between adjacent delimiters, including blank segments. Non-blank outer segments preserve rows without outer pipes, escaped pipes remain part of their source segment, and ragged rows retain their authored width. `extractTable` now requires the header node rather than at least one materialized `TableCell`.
+
+The table widget tests cover empty and whitespace-only one- and two-column headers with and without body rows, tables at the document start and middle, tight and blank-line-separated following headings, empty cells at every header position, an empty body cell, rows without outer pipes including an unforced blank trailing segment, an escaped pipe, and ragged rows. Every new editor state parks its caret after the table, and the empty-cell fixtures compare the widget's row text with the real `renderMarkdown` output. The focused Vitest run passes all 17 table tests.
