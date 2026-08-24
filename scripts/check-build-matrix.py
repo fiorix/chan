@@ -496,6 +496,28 @@ def check_workflow_contract() -> None:
             ".github/workflows/publish-downstream.yml job cachix-substitute",
         )
 
+    docker_build = workflow_job(
+        downstream,
+        "docker-build",
+        ".github/workflows/publish-downstream.yml",
+    )
+    for needle in (
+        "needs.context.result == 'success' &&",
+        "github.event_name == 'workflow_dispatch'",
+        "(inputs.targets == 'all' || inputs.targets == 'docker')) ||",
+        "github.event_name == 'workflow_run'",
+    ):
+        require(
+            docker_build,
+            needle,
+            ".github/workflows/publish-downstream.yml job docker-build",
+        )
+    if "inputs.targets == 'cachix'" in docker_build:
+        raise ContractError(
+            ".github/workflows/publish-downstream.yml job docker-build: "
+            "Cachix dispatches must not schedule Docker builds"
+        )
+
 
 def check_docker_contract() -> None:
     script = read("packaging/docker/build.sh")

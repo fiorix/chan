@@ -1011,6 +1011,11 @@ jobs:
   docker-build:
     name: docker ${{ matrix.component }} (${{ matrix.arch }})
     needs: context
+    if: >-
+      needs.context.result == 'success' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'docker')) ||
+       github.event_name == 'workflow_run')
     strategy:
       fail-fast: false
       matrix:
