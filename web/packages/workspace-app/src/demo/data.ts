@@ -72,7 +72,6 @@ export const DEMO_PREFERENCES: Preferences = {
   empty_pane_carousel_cycling: true,
   page_width_ratio: 1,
   overlay_maximized: false,
-  cs_dismissed: true,
 };
 
 /// Build the WorkspaceInfo the demo serves from GET /api/workspace.

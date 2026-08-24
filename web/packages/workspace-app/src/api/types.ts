@@ -404,10 +404,6 @@ export type Preferences = {
   /// Global overlay-maximize toggle for the overlay surfaces (search /
   /// file browser). Optional on the wire; absent is treated as off.
   overlay_maximized?: boolean;
-  /// Whether the `cs` terminal-alias offer card has been dismissed.
-  /// Optional on the wire; absent is treated as not-dismissed, so the
-  /// offer shows until the user dismisses it.
-  cs_dismissed?: boolean;
   /// Per-command keyboard shortcut overrides, keyed by Command id, each
   /// holding an optional chord per client slot. Sparse: absent slots fall
   /// back to the built-in chord. Consumed by the keymap override layer
@@ -792,22 +788,6 @@ export type PreflightStep = {
   decision?: PreflightDecision;
 };
 export type PreflightError = { step: string; message: string };
-// The `cs` terminal-alias offer rides on the snapshot but never feeds the
-// lock gate; present only when `cs` is missing from the host's PATH.
-export type CsLink = {
-  /// Absolute path where the `cs` link would be created: a sibling of the
-  /// running binary. The server re-derives this on create; the client never
-  /// picks it.
-  target: string;
-  /// What the link resolves to: the running chan / chan-desktop binary.
-  /// Shown in the manual `ln -s` hint.
-  points_to: string;
-  /// True when the SPA may offer one-click Create (the dir is writable and
-  /// on PATH). False -> show the manual hint + `note` instead.
-  can_create: boolean;
-  /// Why auto-create is unavailable, when `can_create` is false.
-  note?: string | null;
-};
 // Post-open workspace facts for the first-run onboarding nudge. Rides on
 // the pre-flight snapshot, present only once the workspace is ready; never
 // feeds the lock gate.
@@ -834,26 +814,10 @@ export type PreflightSnapshot = {
   readiness: WorkspaceReadiness;
   steps: PreflightStep[];
   error?: PreflightError | null;
-  /// Non-blocking `cs` alias offer; rendered as a dismissible card, never
-  /// part of the lock.
-  cs_link?: CsLink | null;
-  /// The per-library `cs` dismissal pref, surfaced on the snapshot so the
-  /// card can gate at pre-flight time, before the workspace preferences
-  /// finish loading. Always present; defaults false.
-  cs_dismissed: boolean;
   /// Post-open workspace facts for the onboarding nudge; present once ready.
   summary?: WorkspaceSummary | null;
 };
 export type PreflightDecisionRequest = { step: string; choice: string };
-// POST /api/preflight/cs-link result.
-export type CsLinkResult = {
-  /// True when `cs` now resolves on PATH after the call.
-  resolved: boolean;
-  /// The path created (empty when nothing was created).
-  target: string;
-  /// User-facing outcome line.
-  message: string;
-};
 
 // ---------------------------------------------------------------------------
 // /ws message-type catalog.

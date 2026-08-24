@@ -17,7 +17,6 @@ import type {
   FsGraphResponse,
   PreflightSnapshot,
   PreflightDecisionRequest,
-  CsLinkResult,
   GlobalConfig,
   GraphEdge,
   GraphSnapshot,
@@ -1304,9 +1303,6 @@ export const api = {
   preflight: () => req<PreflightSnapshot>("GET", "/api/preflight"),
   preflightDecision: (body: PreflightDecisionRequest) =>
     req<PreflightSnapshot>("POST", "/api/preflight/decision", body),
-  // Non-blocking: create the `cs` terminal alias when it is missing from the
-  // host's PATH (the pre-flight snapshot's `cs_link` offer).
-  createCsLink: () => req<CsLinkResult>("POST", "/api/preflight/cs-link"),
   /// Next per-tenant default terminal name (`Terminal-1`, `Terminal-2`, ...).
   /// Backed by an atomic counter on the per-tenant terminal registry, so
   /// numbering stays consistent across every window of the tenant: all
@@ -1390,11 +1386,6 @@ export const api = {
   setOverlayMaximizedPref: (on: boolean): Promise<void> =>
     updateGlobalConfigSerial((p) =>
       p.overlay_maximized === on ? null : { overlay_maximized: on },
-    ),
-  /// Persist the per-library `cs` terminal-alias offer dismissal.
-  setCsDismissed: (on: boolean): Promise<void> =>
-    updateGlobalConfigSerial((p) =>
-      p.cs_dismissed === on ? null : { cs_dismissed: on },
     ),
   /// Semantic-search endpoints. Open-read for state; settings-
   /// gated for mutations (download / enable / disable). The

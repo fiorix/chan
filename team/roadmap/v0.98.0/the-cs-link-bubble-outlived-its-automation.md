@@ -48,3 +48,11 @@ Whether to drop `cs_dismissed` from the persisted editor preferences outright, o
 3. A library whose persisted preferences file still contains `cs_dismissed = true` loads without error.
 4. The pre-flight lock, its phase reporting, and the Dashboard onboarding nudge are unchanged, including the nudge's per-workspace dismissal.
 5. `chan --help` still shows the manual `ln -s` line, which is now the only place chan mentions it.
+
+## Implementation and validation
+
+The pre-flight card, its client state and calls, the server route and detector module, the snapshot fields, and the persisted dismissal preference were removed together. Demo and Settings fixtures, CLI config help, and the config reference no longer advertise the retired key. The pre-flight lock and phase derivation were left intact, and the separate Dashboard onboarding nudge still uses its existing per-workspace dismissal key.
+
+`EditorPrefs::load_from` reaches normal serde TOML deserialization through `store::load_toml`, and `EditorPrefs` does not use `deny_unknown_fields`. The field was therefore removed outright. A focused regression test starts with `cs_dismissed = true`, confirms the file loads, saves it again, and confirms the retired key is omitted.
+
+The container web check passed after the cut with 383 test files and 3,835 tests, zero Svelte errors or warnings, the profile tests, and a production build. An adversarial scan of that build found no `Terminal shortcut`, `/api/preflight/cs-link`, `cs_link`, or `cs_dismissed` strings and did find the retained onboarding content. The manual `ln -s "$(command -v chan)" ~/.local/bin/cs` example remains in `chan --help`.

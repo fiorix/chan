@@ -10,7 +10,6 @@
 mod attachments;
 mod build_info;
 mod contacts;
-mod cs_link;
 // pub(crate) so the server-side doc-session authority (registry, flusher,
 // reconciler) fans the exact ServerFrame shapes the `/api/doc/ws` route
 // serves; the frame enums in `doc` are the wire contract's single source.
@@ -69,7 +68,6 @@ mod ws;
 pub use attachments::api_post_attachment;
 pub use build_info::api_build_info;
 pub use contacts::{api_get_contacts, api_post_contacts_import};
-pub use cs_link::api_cs_link_create;
 pub use doc::api_doc_ws;
 pub use drafts::{
     api_create_diagram, api_create_draft, api_discard_draft, api_inspect_draft, api_promote_draft,

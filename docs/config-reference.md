@@ -132,7 +132,7 @@ The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_S
 
 Source: `crates/chan-server/src/preferences.rs`.
 
-The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf is reachable through `chan config get/set`, including optional leaves when present; `none` clears `editor_font_size` and the five Hybrid surface overrides. `cs_dismissed` is readable but intentionally read-only, and `shortcuts` is the documented collection exception (read with the CLI; edit through Settings or `PATCH /api/config`).
+The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf is reachable through `chan config get/set`, including optional leaves when present; `none` clears `editor_font_size` and the five Hybrid surface overrides. `shortcuts` is the documented collection exception (read with the CLI; edit through Settings or `PATCH /api/config`).
 
 | Field | Type | Reachability | Consumers |
 |-------|------|--------------|-----------|
@@ -180,7 +180,6 @@ The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf i
 | `empty_pane_carousel_cycling` | `bool` | `chan config get/set` + Settings | Settings → Global → empty-pane carousel; empty-pane behavior |
 | `page_width_ratio` | `f64` | `chan config get/set` + Settings | Settings → Editor → page width; editor page-width cap, constrained to `0.25..=1.0` by the CLI |
 | `overlay_maximized` | `bool` | `chan config get/set` + overlay control | Not surfaced as a Settings row (it already has a control: the Settings overlay header's maximize button); global overlay-maximize preference |
-| `cs_dismissed` | `bool` | `chan config get` (read-only) + cs-link prompt | Not surfaced in Settings (read-only, and inert until the next window load once `cs` is on PATH); whether the terminal alias offer was dismissed |
 | `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | `chan config get` + `PATCH /api/config` | Settings → Keyboard Shortcuts → assignment grid; keymap override layer (opaque chord strings, sparse); CLI set refuses with the supported edit route |
 
 `editor_font_size` is unset by default. The Settings `Use theme` action clears it, restoring the exact body and source sizes supplied by `editor_theme`. Inline and block code keep the theme's existing `em` ratios. The root override and the document/slide token paths update mounted editor surfaces without a reload.

@@ -61,8 +61,6 @@ pub struct PreferencesView {
     pub page_width_ratio: f64,
     #[serde(default)]
     pub overlay_maximized: bool,
-    #[serde(default)]
-    pub cs_dismissed: bool,
     /// Per-command keyboard shortcut overrides, keyed by `Command` id.
     /// Opaque chord strings, sparse, `""` preserved verbatim; the server
     /// stores and serves them without parsing (see `ShortcutOverride`).
@@ -111,7 +109,6 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         empty_pane_carousel_cycling: editor.empty_pane_carousel_cycling,
         page_width_ratio: editor.page_width_ratio,
         overlay_maximized: editor.overlay_maximized,
-        cs_dismissed: editor.cs_dismissed,
         shortcuts: editor.shortcuts.clone(),
         graph_colors: editor.graph_colors.clone(),
     })
@@ -160,7 +157,6 @@ struct PreferencesPatch {
     empty_pane_carousel_cycling: Option<bool>,
     page_width_ratio: Option<f64>,
     overlay_maximized: Option<bool>,
-    cs_dismissed: Option<bool>,
     shortcuts: Option<BTreeMap<String, ShortcutOverride>>,
     graph_colors: Option<GraphColorPrefs>,
 
@@ -201,7 +197,6 @@ impl PreferencesPatch {
             || self.empty_pane_carousel_cycling.is_some()
             || self.page_width_ratio.is_some()
             || self.overlay_maximized.is_some()
-            || self.cs_dismissed.is_some()
             || self.shortcuts.is_some()
             || self.graph_colors.is_some();
         let server = self.attachments_dir.is_some()
@@ -262,9 +257,6 @@ impl PreferencesPatch {
         }
         if let Some(value) = self.overlay_maximized {
             editor.overlay_maximized = value;
-        }
-        if let Some(value) = self.cs_dismissed {
-            editor.cs_dismissed = value;
         }
         if let Some(value) = self.shortcuts {
             editor.shortcuts = value;

@@ -37,7 +37,6 @@ use axum::Json;
 use chan_workspace::WorkspaceReadiness;
 use serde::{Deserialize, Serialize};
 
-use super::cs_link::{self, CsLink};
 use crate::error::{err, err_state};
 use crate::indexer::IndexStatus;
 use crate::state::AppState;
@@ -52,22 +51,6 @@ struct PreflightSnapshot {
     steps: Vec<PreflightStep>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<PreflightError>,
-    /// The `cs` terminal-alias offer, present only when `cs` is missing
-    /// from `$PATH`. NON-BLOCKING: it never feeds `phase` / `locked`, so a
-    /// missing alias never holds the boot overlay; the SPA renders it as a
-    /// dismissible card once the workspace is ready. `build_snapshot`
-    /// leaves it `None`; the route handlers attach it behind the owner
-    /// gate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cs_link: Option<CsLink>,
-    /// The per-library `cs_dismissed` editor pref, surfaced ON the snapshot
-    /// (not only `/api/config` preferences) because the cs offer card renders
-    /// DURING preflight polling -- before `workspace.info.preferences` exists, so
-    /// the SPA cannot gate the card from the prefs summary at that point. Always
-    /// present so the card can be gated at preflight time; the WRITE stays
-    /// `PATCH /api/config`. `build_snapshot` defaults it false; the route
-    /// handlers set it from the editor prefs alongside `cs_link`.
-    cs_dismissed: bool,
     /// Post-open workspace facts for the SPA onboarding surface. Cleanly
     /// SEPARATED from the lock gate: it carries
     /// no readiness signal and never feeds `phase` / `locked`. `build_snapshot`
@@ -322,29 +305,8 @@ fn build_snapshot(
         readiness,
         error: index_error(status),
         steps,
-        // Attached by the route handlers; neither gates the boot overlay.
-        cs_link: None,
-        cs_dismissed: false,
         summary: None,
     }
-}
-
-/// The `cs` offer is owner-only: a settings-locked (kiosk) deployment must
-/// not let the operator at the keyboard mutate the host's PATH. The default
-/// leaves `settings_disabled` false, so the offer shows on a plain `chan serve`.
-fn cs_link_allowed(state: &AppState) -> bool {
-    !state.settings_disabled
-}
-
-/// The per-library `cs_dismissed` editor pref for the preflight snapshot.
-/// Degrades to `false` (offer shows) on a poisoned lock -- a settings read must
-/// never block or fail the boot snapshot.
-fn cs_dismissed_pref(state: &AppState) -> bool {
-    state
-        .editor_prefs
-        .lock()
-        .map(|prefs| prefs.cs_dismissed)
-        .unwrap_or(false)
 }
 
 /// Source-control kind at the workspace root, mirroring chan's own walk: a
@@ -386,16 +348,11 @@ pub async fn api_preflight(State(state): State<Arc<AppState>>) -> Response {
         Ok(i) => i,
         Err(e) => return err_state(&e),
     };
-    let allow_cs = cs_link_allowed(&state);
-    let cs_dismissed = cs_dismissed_pref(&state);
-    // Semantic reads hit sqlite + the model resolver touches the
-    // filesystem, and the cs detection scans $PATH; do the whole
-    // derivation on the blocking pool.
+    // Semantic reads hit sqlite + the model resolver touches the filesystem,
+    // so do the whole derivation on the blocking pool.
     match tokio::task::spawn_blocking(move || {
         let status = indexer.snapshot();
         let mut snapshot = build_snapshot(&workspace, &status);
-        snapshot.cs_link = cs_link::detect(allow_cs);
-        snapshot.cs_dismissed = cs_dismissed;
         // The onboarding summary describes an OPEN workspace, so attach it only
         // once ready (also keeps the per-poll work off the cold-build path).
         if snapshot.is_settled() {
@@ -458,13 +415,9 @@ async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
         Err(e) => return err_state(&e),
     };
     indexer.request_rebuild();
-    let allow_cs = cs_link_allowed(state);
-    let cs_dismissed = cs_dismissed_pref(state);
     match tokio::task::spawn_blocking(move || {
         let status = indexer.snapshot();
         let mut snapshot = build_snapshot(&workspace, &status);
-        snapshot.cs_link = cs_link::detect(allow_cs);
-        snapshot.cs_dismissed = cs_dismissed;
         if snapshot.is_settled() {
             snapshot.summary = Some(workspace_summary(&workspace));
         }
@@ -496,8 +449,6 @@ async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
         Err(e) => return err_state(&e),
     };
     let choice = choice.to_owned();
-    let allow_cs = cs_link_allowed(state);
-    let cs_dismissed = cs_dismissed_pref(state);
     // The blocking closure carries its error as `Box<Response>` so the
     // `Result` Err variant stays pointer-sized (an axum `Response` is
     // large; clippy::result_large_err otherwise fires under -D warnings).
@@ -535,8 +486,6 @@ async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
         }
         let status = indexer.snapshot();
         let mut snapshot = build_snapshot(&workspace, &status);
-        snapshot.cs_link = cs_link::detect(allow_cs);
-        snapshot.cs_dismissed = cs_dismissed;
         if snapshot.is_settled() {
             snapshot.summary = Some(workspace_summary(&workspace));
         }
@@ -671,15 +620,11 @@ mod tests {
 
     #[test]
     fn build_snapshot_leaves_summary_for_the_handler() {
-        // The summary, cs_link, and cs_dismissed are all attached by the route
-        // handler (cs_link/cs_dismissed behind the owner path, summary once
-        // ready), never by the gate logic. build_snapshot must leave them at
-        // their defaults so the phase/locked derivation stays free of them.
+        // The route handler attaches the summary once ready; the gate logic
+        // leaves it empty so phase and lock derivation stay independent.
         let (_c, _r, ws) = workspace();
         let snap = build_snapshot(&ws, &idle());
         assert!(snap.summary.is_none());
-        assert!(snap.cs_link.is_none());
-        assert!(!snap.cs_dismissed);
     }
 
     #[test]

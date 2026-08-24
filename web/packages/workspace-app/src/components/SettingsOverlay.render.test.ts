@@ -54,7 +54,6 @@ function basePrefs(): Record<string, unknown> {
     empty_pane_carousel_cycling: true,
     page_width_ratio: 0.8,
     overlay_maximized: false,
-    cs_dismissed: false,
   };
 }
 

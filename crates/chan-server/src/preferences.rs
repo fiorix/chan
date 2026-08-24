@@ -27,8 +27,6 @@
 //!     `chan.pageWidth.ratio` localStorage so it lives in the library)
 //!   - overlay_maximized (global overlay-maximize toggle; migrated
 //!     from the SPA `chan.overlayMaximized` localStorage)
-//!   - cs_dismissed (the `cs` terminal-alias offer was dismissed;
-//!     migrated from the SPA `chan.csLinkDismissed` localStorage)
 //!   - hybrid_surface_themes (optional body-theme overrides for
 //!     Hybrid Editor / Terminal / File Browser / Graph / Dashboard)
 //!   - graph_colors (optional custom graph node palettes, one per
@@ -101,12 +99,6 @@ pub struct EditorPrefs {
     /// lives in the library.
     #[serde(default)]
     pub overlay_maximized: bool,
-    /// The `cs` terminal-alias offer (PreflightOverlay) was dismissed.
-    /// Migrated from the SPA `chan.csLinkDismissed` localStorage so the
-    /// dismissal lives in the library. Default false (the offer shows
-    /// until dismissed).
-    #[serde(default)]
-    pub cs_dismissed: bool,
     /// Per-command keyboard shortcut overrides, keyed by `Command` id
     /// (`state/commands.ts`). A local-machine part under the per-OS
     /// shortcut model: the desktop client's overrides travel to every
@@ -172,7 +164,6 @@ impl Default for EditorPrefs {
             empty_pane_carousel_cycling: default_empty_pane_carousel_cycling(),
             page_width_ratio: default_page_width_ratio(),
             overlay_maximized: false,
-            cs_dismissed: false,
             shortcuts: BTreeMap::new(),
             graph_colors: GraphColorPrefs::default(),
         }
@@ -668,14 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn migrated_settings_defaults_and_round_trip() {
-        // Fresh install defaults for the migrated localStorage settings:
-        // 80% page-width ratio, overlay not maximized, cs offer not
-        // dismissed (mirrors the SPA defaults).
+    fn layout_preferences_defaults_and_round_trip() {
+        // Fresh installs use an 80% page width and unmaximized overlays.
         let prefs = EditorPrefs::default();
         assert_eq!(prefs.page_width_ratio, 0.8);
         assert!(!prefs.overlay_maximized);
-        assert!(!prefs.cs_dismissed);
 
         // Older preferences.toml omits the fields; serde fills the
         // defaults on load.
@@ -685,24 +673,34 @@ mod tests {
         let loaded = EditorPrefs::load_from(&p).unwrap();
         assert_eq!(loaded.page_width_ratio, 0.8);
         assert!(!loaded.overlay_maximized);
-        assert!(!loaded.cs_dismissed);
 
         // Non-default values persist and round-trip verbatim.
         let custom = EditorPrefs {
             page_width_ratio: 0.5,
             overlay_maximized: true,
-            cs_dismissed: true,
             ..Default::default()
         };
         custom.save_to(&p).unwrap();
         let saved = std::fs::read_to_string(&p).unwrap();
         assert!(saved.contains("page_width_ratio = 0.5"), "got: {saved}");
         assert!(saved.contains("overlay_maximized = true"), "got: {saved}");
-        assert!(saved.contains("cs_dismissed = true"), "got: {saved}");
         let reloaded = EditorPrefs::load_from(&p).unwrap();
         assert_eq!(reloaded.page_width_ratio, 0.5);
         assert!(reloaded.overlay_maximized);
-        assert!(reloaded.cs_dismissed);
+    }
+
+    #[test]
+    fn unknown_preference_keys_are_ignored_and_omitted_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preferences.toml");
+        std::fs::write(&path, "theme = \"dark\"\ncs_dismissed = true\n").unwrap();
+
+        let prefs = EditorPrefs::load_from(&path).unwrap();
+        assert_eq!(prefs.theme, ThemeChoice::Dark);
+        prefs.save_to(&path).unwrap();
+
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(!saved.contains("cs_dismissed"), "got: {saved}");
     }
 
     #[test]

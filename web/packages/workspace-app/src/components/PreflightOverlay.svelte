@@ -33,42 +33,6 @@
   // Show only while the server reports the workspace is not yet ready.
   const locked = $derived(snapshot?.locked === true);
 
-  // The non-blocking `cs` terminal-alias offer. It rides on the snapshot but
-  // never gates `locked`, so it renders as a dismissible corner card once the
-  // workspace is ready (or right away when nothing locked the boot). Dismissal
-  // persists in the per-library server prefs (so it travels with the library
-  // and stays consistent across clients). The card gates at pre-flight time,
-  // before the workspace preferences finish loading, so it reads the dismissal
-  // from the snapshot, where the server surfaces the same per-library pref
-  // alongside `cs_link`. `csDismissedLocal` is the optimistic in-session flip
-  // so the card hides instantly on the × click, before the prefs round-trip
-  // lands and the next poll reflects it.
-  const csOffer = $derived(snapshot?.cs_link ?? null);
-  let csDismissedLocal = $state(false);
-  const csDismissed = $derived(
-    csDismissedLocal || (snapshot?.cs_dismissed ?? false),
-  );
-  let csBusy = $state(false);
-  let csResult = $state<string | null>(null);
-  let csError = $state<string | null>(null);
-  // Flip to the manual `ln -s` hint when one-click create is unavailable or
-  // failed (e.g. a root-owned bin dir).
-  let manualMode = $state(false);
-  // Offer the `cs` alias only when `cs` is genuinely absent. `csOffer` (the
-  // server's `cs_link`) IS that signal: the server sets it only when its
-  // `cs_on_path()` scan finds no `cs`, and chan-desktop now resolves the user's
-  // real interactive PATH before the embedded server starts, so the scan is
-  // accurate even on a macOS GUI launch. So the gate is purely `csOffer` -- host
-  // type is the wrong axis (a desktop user who genuinely lacks `cs` should still
-  // get the offer).
-  const showCsCard = $derived(!!csOffer && !locked && !csDismissed);
-
-  function dismissCs(): void {
-    csDismissedLocal = true;
-    api.setCsDismissed(true).catch((e) => {
-      console.warn("chan: failed to persist cs-dismiss", e);
-    });
-  }
   function errText(e: unknown): string {
     if (e instanceof ApiError) {
       // Some transports hand back the raw JSON body; unwrap { error }.
@@ -82,32 +46,8 @@
     }
     return e instanceof Error ? e.message : String(e);
   }
-  async function createCsLink(): Promise<void> {
-    if (csBusy) return;
-    csBusy = true;
-    csError = null;
-    try {
-      const res = await api.createCsLink();
-      csResult = res.message;
-      // Succeeded (or already present): don't ask again on future loads.
-      if (res.resolved) {
-        csDismissedLocal = true;
-        api.setCsDismissed(true).catch((e) => {
-          console.warn("chan: failed to persist cs-dismiss", e);
-        });
-      }
-    } catch (e) {
-      // Non-fatal: surface why and fall back to the manual hint so the user
-      // can finish by hand, then continue.
-      csError = errText(e);
-      manualMode = true;
-    } finally {
-      csBusy = false;
-    }
-  }
-
-  // First-run onboarding nudge. Non-locking, like the cs card: it rides on
-  // the ready snapshot's `summary` block and points the user at the Dashboard
+  // First-run onboarding nudge. Non-locking: it rides on the ready snapshot's
+  // `summary` block and points the user at the Dashboard
   // to enable the optional Semantic / Reports layers (a thin nudge, NOT inline
   // toggles). Dismissal is persisted PER WORKSPACE so each new workspace gets
   // its own one-time nudge, keyed off the workspace identity the store already
@@ -340,128 +280,84 @@
   </main>
 {/if}
 
-<!-- Non-blocking boot cards: a corner stack shown once the workspace is ready
-     (or right away when nothing locked the boot). Never modal, the workspace
-     is already usable. Holds the first-run onboarding nudge and the cs offer,
-     stacked when both apply. -->
-{#if (showOnboardCard && summary) || (showCsCard && csOffer)}
+<!-- Non-blocking onboarding nudge shown once the workspace is ready. Never
+     modal, the workspace is already usable. -->
+{#if showOnboardCard && summary}
   <div class="boot-cards">
-    {#if showOnboardCard && summary}
-      <aside class="boot-card onboard-card" role="status" aria-label="workspace ready">
-        <div class="boot-head">
-          <strong>{workspace.info?.label ?? "Workspace"} is ready</strong>
-          <button class="boot-x" type="button" aria-label="Dismiss" onclick={dismissOnboard}>×</button>
-        </div>
-        <p class="onboard-summary">
-          {summary.indexed_docs.toLocaleString()} indexed{#if summary.scm} · {summary.scm} repository{/if}
-        </p>
-        <p class="boot-body">
-          Keyword search and the wiki-link graph are always on, the minimum
-          needed to operate. Two optional layers you can toggle here:
-        </p>
-        <ul class="onboard-layers">
-          <li>
-            <!-- One checkmark toggle per layer: checked = on. The whole row is
-                 the click/keyboard target (role=checkbox + aria-checked, so
-                 Space/Enter toggle and screen readers announce on/off). -->
-            <button
-              class="onboard-switch"
-              type="button"
-              role="checkbox"
-              aria-checked={semanticOn}
-              aria-label="Semantic search"
-              disabled={semanticBusy}
-              onclick={toggleSemantic}
-            >
-              <span class="onboard-check" data-on={semanticOn} aria-hidden="true">
-                {#if semanticBusy}
-                  <span class="onboard-spin"></span>
-                {:else if semanticOn}
-                  <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>
-                {/if}
-              </span>
-              <span class="onboard-layer-name">Semantic search</span>
-              {#if semanticDownloading}
-                <span class="onboard-aside">Downloading…</span>
-              {:else if !semanticOn && semanticNeedsModel}
-                <span class="onboard-aside">downloads ~63 MB</span>
+    <aside class="boot-card onboard-card" role="status" aria-label="workspace ready">
+      <div class="boot-head">
+        <strong>{workspace.info?.label ?? "Workspace"} is ready</strong>
+        <button class="boot-x" type="button" aria-label="Dismiss" onclick={dismissOnboard}>×</button>
+      </div>
+      <p class="onboard-summary">
+        {summary.indexed_docs.toLocaleString()} indexed{#if summary.scm} · {summary.scm} repository{/if}
+      </p>
+      <p class="boot-body">
+        Keyword search and the wiki-link graph are always on, the minimum
+        needed to operate. Two optional layers you can toggle here:
+      </p>
+      <ul class="onboard-layers">
+        <li>
+          <!-- One checkmark toggle per layer: checked = on. The whole row is
+               the click/keyboard target (role=checkbox + aria-checked, so
+               Space/Enter toggle and screen readers announce on/off). -->
+          <button
+            class="onboard-switch"
+            type="button"
+            role="checkbox"
+            aria-checked={semanticOn}
+            aria-label="Semantic search"
+            disabled={semanticBusy}
+            onclick={toggleSemantic}
+          >
+            <span class="onboard-check" data-on={semanticOn} aria-hidden="true">
+              {#if semanticBusy}
+                <span class="onboard-spin"></span>
+              {:else if semanticOn}
+                <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>
               {/if}
-            </button>
-            <span class="onboard-layer-hint">
-              find by meaning; needs the BGE-small model (~63 MB, shared)
             </span>
-            {#if semanticError}<span class="onboard-err">{semanticError}</span>{/if}
-          </li>
-          <li>
-            <button
-              class="onboard-switch"
-              type="button"
-              role="checkbox"
-              aria-checked={reportsOn}
-              aria-label="Reports"
-              disabled={reportsBusy}
-              onclick={toggleReports}
-            >
-              <span class="onboard-check" data-on={reportsOn} aria-hidden="true">
-                {#if reportsBusy}
-                  <span class="onboard-spin"></span>
-                {:else if reportsOn}
-                  <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>
-                {/if}
-              </span>
-              <span class="onboard-layer-name">Reports</span>
-            </button>
-            <span class="onboard-layer-hint">
-              per-file language, SLOC and COCOMO analysis
-            </span>
-            {#if reportsError}<span class="onboard-err">{reportsError}</span>{/if}
-          </li>
-        </ul>
-        <div class="boot-actions boot-actions-end">
-          <button type="button" onclick={dismissOnboard}>OK</button>
-        </div>
-      </aside>
-    {/if}
-    {#if showCsCard && csOffer}
-      <aside class="boot-card cs-card" role="status" aria-label="terminal shortcut setup">
-        <div class="boot-head">
-          <strong>Terminal shortcut</strong>
-          <button class="boot-x" type="button" aria-label="Dismiss" onclick={dismissCs}>×</button>
-        </div>
-        {#if csResult}
-          <p class="boot-msg done">{csResult}</p>
-          <div class="boot-actions">
-            <button type="button" class="primary" onclick={dismissCs}>Done</button>
-          </div>
-        {:else}
-          <p class="boot-body">
-            Add <code>cs</code> to your PATH to drive this window from the terminal
-            (open files, split panes, run Team Work).
-          </p>
-          {#if csError}
-            <p class="boot-msg warn">{csError}</p>
-          {/if}
-          {#if csOffer.can_create && !manualMode}
-            <div class="boot-actions">
-              <button type="button" class="primary" disabled={csBusy} onclick={createCsLink}>
-                {csBusy ? "Creating…" : "Create link"}
-              </button>
-              <button type="button" disabled={csBusy} onclick={dismissCs}>Not now</button>
-            </div>
-            <p class="cs-target">{csOffer.target}</p>
-          {:else}
-            <p class="cs-hint">Run this once in a terminal whose PATH you control:</p>
-            <code class="cs-cmd">ln -s "{csOffer.points_to}" ~/.local/bin/cs</code>
-            {#if csOffer.note}
-              <p class="cs-note">({csOffer.note})</p>
+            <span class="onboard-layer-name">Semantic search</span>
+            {#if semanticDownloading}
+              <span class="onboard-aside">Downloading…</span>
+            {:else if !semanticOn && semanticNeedsModel}
+              <span class="onboard-aside">downloads ~63 MB</span>
             {/if}
-            <div class="boot-actions">
-              <button type="button" onclick={dismissCs}>Got it</button>
-            </div>
-          {/if}
-        {/if}
-      </aside>
-    {/if}
+          </button>
+          <span class="onboard-layer-hint">
+            find by meaning; needs the BGE-small model (~63 MB, shared)
+          </span>
+          {#if semanticError}<span class="onboard-err">{semanticError}</span>{/if}
+        </li>
+        <li>
+          <button
+            class="onboard-switch"
+            type="button"
+            role="checkbox"
+            aria-checked={reportsOn}
+            aria-label="Reports"
+            disabled={reportsBusy}
+            onclick={toggleReports}
+          >
+            <span class="onboard-check" data-on={reportsOn} aria-hidden="true">
+              {#if reportsBusy}
+                <span class="onboard-spin"></span>
+              {:else if reportsOn}
+                <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>
+              {/if}
+            </span>
+            <span class="onboard-layer-name">Reports</span>
+          </button>
+          <span class="onboard-layer-hint">
+            per-file language, SLOC and COCOMO analysis
+          </span>
+          {#if reportsError}<span class="onboard-err">{reportsError}</span>{/if}
+        </li>
+      </ul>
+      <div class="boot-actions boot-actions-end">
+        <button type="button" onclick={dismissOnboard}>OK</button>
+      </div>
+    </aside>
   </div>
 {/if}
 
@@ -545,10 +441,9 @@
     line-height: 1.5;
   }
 
-  /* Non-blocking corner stack. Sits above the editor but well below the
+  /* Non-blocking corner surface. Sits above the editor but well below the
      locked boot surface (z=40000), and only renders when nothing is locked,
-     so the two never overlap. Holds the onboarding nudge and the cs offer,
-     stacked when both apply. */
+     so the two never overlap. */
   .boot-cards {
     position: fixed;
     right: 1rem;
@@ -597,21 +492,6 @@
     color: var(--text-secondary);
     line-height: 1.5;
   }
-  .boot-body code,
-  .cs-cmd {
-    font-family: "Source Code Pro", ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .boot-msg {
-    margin: 0;
-    font-size: 12px;
-    line-height: 1.4;
-  }
-  .boot-msg.done {
-    color: var(--text);
-  }
-  .boot-msg.warn {
-    color: var(--warn-text);
-  }
   .boot-actions {
     display: flex;
     gap: 0.5rem;
@@ -630,47 +510,6 @@
     cursor: pointer;
     font-size: 12.5px;
   }
-  .boot-actions button.primary {
-    background: var(--text);
-    color: var(--bg);
-    border-color: var(--text);
-  }
-  .boot-actions button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  /* cs-offer specifics */
-  .cs-hint {
-    margin: 0;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  .cs-cmd {
-    display: block;
-    font-size: 11.5px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.4rem 0.5rem;
-    overflow-x: auto;
-    white-space: pre;
-    user-select: all;
-  }
-  .cs-target {
-    margin: 0;
-    font-size: 11px;
-    color: var(--text-secondary);
-    font-family: "Source Code Pro", ui-monospace, SFMono-Regular, Menlo, monospace;
-    overflow-wrap: anywhere;
-  }
-  .cs-note {
-    margin: 0;
-    font-size: 11.5px;
-    color: var(--text-secondary);
-    line-height: 1.4;
-  }
-
   /* onboarding-nudge specifics */
   .onboard-summary {
     margin: 0;

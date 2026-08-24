@@ -341,8 +341,6 @@ export function createDemoFetch(
         locked: false,
         steps: [],
         error: null,
-        cs_link: null,
-        cs_dismissed: true,
         summary: null,
       });
     }
