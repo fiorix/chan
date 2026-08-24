@@ -1,6 +1,6 @@
 # `chan devserver` has no default service backend on FreeBSD
 
-Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close. Implemented at `f12501f6`, with acceptance 4 run on a real FreeBSD box.
+Status: SHIPPED in [v0.97.0](../../release/release-v0.97.0.md). Raised by the owner at the v0.96.0 close and implemented at `f12501f6`, with acceptance 4 run on a real FreeBSD box.
 
 ## Problem
 

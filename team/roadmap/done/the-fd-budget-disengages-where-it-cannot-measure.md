@@ -1,6 +1,6 @@
 # The descriptor budget disengages exactly where it cannot measure
 
-Status: accepted scope for v0.97.0, raised by the owner at the v0.96.0 close after hitting the failure on FreeBSD. Implemented on `fix/freebsd-fd-budget-no-probe` (`41718877`). Acceptance 1 ran on a real FreeBSD box and found a second defect, now its own item: [the-reindex-pacing-loop-can-wait-forever](the-reindex-pacing-loop-can-wait-forever.md).
+Status: SHIPPED in [v0.97.0](../../release/release-v0.97.0.md). Raised by the owner at the v0.96.0 close after hitting the failure on FreeBSD and implemented at `41718877`. Acceptance 1 ran on a real FreeBSD box and found a second defect, closed beside this item as [the-reindex-pacing-loop-can-wait-forever](the-reindex-pacing-loop-can-wait-forever.md).
 
 ## Problem
 

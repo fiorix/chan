@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.97.0] - 2026-08-24
+
+v0.97.0 makes the standalone Windows CLI installable and self-upgrading, turns the FreeBSD CLI into a usable default devserver, and keeps indexing responsive under descriptor pressure on stock FreeBSD systems.
+
+### Added
+
+- **The standalone Windows CLI has an install and upgrade path.** `irm https://chan.app/install.ps1 | iex` installs the published `chan-x86_64-pc-windows-msvc.zip` under `%LOCALAPPDATA%\chan-cli\bin`, verifies its SHA-256 and exact archive shape under a 256 MiB cap, adds the directory to the user PATH, and writes `cs.cmd` plus a Git Bash `cs` shim. It refuses arm64, a digest mismatch, an unowned destination, foreign shims, and command shims owned by Chan Desktop rather than overwriting them. `/dl/cli/latest.json` lists the Windows CLI from v0.97.0 onward, `chan upgrade --check` resolves it, and `chan upgrade` replaces the running standalone executable through a rollback-safe rename and schedules deletion of the mapped backup. The companion `chan.exe` beside a desktop install still hands upgrades to the desktop's NSIS updater and never self-replaces. Native Windows CI installs into an empty isolated profile, exercises every refusal and PATH/shim idempotence, then completes a real SHA-verified self-replacement.
+
+### Changed
+
+- **FreeBSD devserver management works without naming a service backend.** `--service=auto` resolves `start`, `status`, `stop` and `join` to chan's portable pidfile-and-flock daemon, the same backend Windows uses. Foreground `chan devserver run`, explicit `--service=chan`, Linux systemd and macOS launchd are unchanged, and unknown operating systems still refuse rather than silently inheriting the FreeBSD default. The no-flag lifecycle was verified on FreeBSD 15.0-RELEASE arm64.
+
+### Fixed
+
+- **Descriptor pressure is measurable on stock FreeBSD without `fdescfs`.** The workspace reads the current process count through `KERN_PROC_NFDS`, which neither opens a probe descriptor nor allocates a file-description array, so the existing writer, reader-pool, workspace-admission and reindex policies receive a real snapshot instead of disengaging. The syscall and live-count movement were exercised on FreeBSD 15.0-RELEASE arm64.
+- **Reindex pacing cannot wait forever for headroom the descriptor table cannot provide.** Its 64-descriptor reserve scales down to a quarter of smaller tables and each pacing call has a half-second backstop, leaving the 256-and-up policy unchanged. Indexing all 413 files completed at descriptor limits 64, 72, 80, 96, 128 and 256 on FreeBSD and macOS; the hang reproduces in v0.95.1 and therefore predates the FreeBSD measurement change.
+- **Concurrent terminal creation on FreeBSD cannot receive one slave PTY twice.** FreeBSD's `openpty` reaches a process-global `ptsname` buffer, so concurrent callers could resolve the same slave and the second child failed `TIOCSCTTY` with `EPERM`; only the allocation call is now serialized, with the rest of spawn outside the lock.
+- **An idle Cargo build in a tree without frontend build stamps stays idle.** `chan-server` watches each generated stamp only when it exists, while retaining recursive watches on the bundle directories that detect a bundle appearing. Two consecutive builds on a stamp-free tree now report no activity through Cargo's own freshness diagnostics.
+
 ## [v0.96.0] - 2026-08-23
 
 v0.96.0 publishes FreeBSD amd64 and arm64 as supported targets, makes the release pipeline build warm and in parallel instead of cold and serially, and restores keyboard focus to a terminal after macOS wake.

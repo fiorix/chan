@@ -1,6 +1,6 @@
 # The reindex pacing loop can wait for headroom that cannot arrive
 
-Status: accepted scope for v0.97.0, raised while running the owner's acceptance for [the-fd-budget-disengages-where-it-cannot-measure](the-fd-budget-disengages-where-it-cannot-measure.md) on a real FreeBSD box. Fixed at `a447eed7`.
+Status: SHIPPED in [v0.97.0](../../release/release-v0.97.0.md). Raised while running the owner's acceptance for [the-fd-budget-disengages-where-it-cannot-measure](the-fd-budget-disengages-where-it-cannot-measure.md) on a real FreeBSD box and fixed at `a447eed7`.
 
 ## Problem
 

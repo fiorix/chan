@@ -1,6 +1,6 @@
 # The Windows CLI ships but is unreachable
 
-Status: accepted scope for v0.97.0, raised at the v0.96.0 close.96.0 GA commit was staged when this was raised and the release skill forbids adding to it before the tag.
+Status: SHIPPED in [v0.97.0](../../release/release-v0.97.0.md). Raised at the v0.96.0 close and implemented at `6ba42025`, with the replacement rollback description corrected at `a9d8b613`. Native Windows CI proves the installer and a real standalone self-replacement; the public `https://chan.app/install.ps1` fetch is necessarily a post-tag acceptance.
 
 ## Problem
 
@@ -47,7 +47,11 @@ The desktop install and its NSIS updater path do not change behaviour. arm64 Win
 
 ## Evidence
 
+- Implemented at `6ba42025`: the updater selects `x86_64-pc-windows-msvc`, extracts the exact top-level `chan.exe` from the zip under a 256 MiB cap, verifies SHA-256, swaps the running executable through a rollback-safe rename, and schedules deletion of the mapped backup. `a9d8b613` corrected the design text to describe that rollback boundary exactly.
+- `web/packages/marketing/src/install.ps1` installs under `%LOCALAPPDATA%\chan-cli\bin` by default, verifies the exact release asset and digest, refuses unsupported architectures and foreign or desktop-owned shims, writes both `cs.cmd` and a Git Bash shim, and updates the user PATH idempotently. The install and manual pages expose the stable PowerShell command.
+- The metadata generator includes the Windows CLI from v0.97.0 onward while retaining historical target truth. The updater tests select the zip, reject Windows arm64 by name, and pin both standalone and desktop-companion routing.
+- Native Windows job `97389867646` in CI run `32713530630`, on exact implementation commit `a9d8b613`, built the release CLI and NSIS package; passed 361 desktop tests and 303 library tests; passed the release CLI and packaged-devserver smokes; and ended with `windows installer smoke: install, refusal cases, PATH, and self-upgrade PASS`. The smoke installs into an empty isolated `%LOCALAPPDATA%`, proves digest, ownership, architecture, PATH and shim refusals, then drives `chan upgrade -y --verbose` against local release metadata and confirms the installed executable's SHA-256 changes to the verified payload.
 - `web/packages/marketing/scripts/release-assets.mjs`: `windowsAssets()` returns `Chan_${version}_x64-setup.exe` and `chan-x86_64-pc-windows-msvc.zip`, and the comment records that `publish-release` gates on the windows-artifacts job so the verifier requires both.
 - The v0.96.0 dry-run artifact diff carried `chan-x86_64-pc-windows-msvc.zip` among the required assets, so the zip is real and current rather than historical.
-- `crates/chan/src/update.rs`: `release_target_for` has no windows arm; the windows `extract_tar_gz` is a bail stub; `test_target_asset_for_rejects_unsupported_target` pins the metadata's omission.
+- Before implementation, `crates/chan/src/update.rs` had no Windows release target, its Windows extraction arm was a bail stub, and `test_target_asset_for_rejects_unsupported_target` pinned the metadata's omission.
 - v0.95.0's CHANGELOG records the desktop routing decision and its stated premise, a Windows CLI tarball "that does not exist", which is the assumption this item overturns.

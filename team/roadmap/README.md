@@ -21,21 +21,20 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.97.0
-
-| item | state | next |
-| --- | --- | --- |
-| [the-fd-budget-disengages-where-it-cannot-measure][fd] | implemented | none |
-| [the-reindex-pacing-loop-can-wait-forever][pace] | fixed | none |
-| [the-windows-cli-ships-but-is-unreachable][win] | accepted | not started |
-| [freebsd-devserver-has-no-default-service][svc] | implemented | none |
-
-[fd]: v0.97.0/the-fd-budget-disengages-where-it-cannot-measure.md
-[pace]: v0.97.0/the-reindex-pacing-loop-can-wait-forever.md
-[win]: v0.97.0/the-windows-cli-ships-but-is-unreachable.md
-[svc]: v0.97.0/freebsd-devserver-has-no-default-service.md
+No version has accepted scope yet. An item earns a place here once it is accepted for a concrete target version, which happens when a round is set up; until then, candidates raised by the last release live in that release's report under Follow-ups.
 
 ## Completed
+
+### v0.97.0
+
+Shipped 2026-08-24; see [release-v0.97.0](../release/release-v0.97.0.md). Closed items in [`done/`](done/):
+
+- [the-fd-budget-disengages-where-it-cannot-measure](done/the-fd-budget-disengages-where-it-cannot-measure.md) - FreeBSD reads the current process's descriptor count through `KERN_PROC_NFDS` without opening a probe descriptor, so pressure policy stays engaged on stock systems without `fdescfs`; the kernel path and live count were exercised on FreeBSD 15 arm64.
+- [the-reindex-pacing-loop-can-wait-forever](done/the-reindex-pacing-loop-can-wait-forever.md) - the reserve scales to a quarter of small descriptor tables and every pacing call has a half-second backstop, so indexing degrades under pressure rather than waiting for impossible headroom; limits 64 through 256 completed on FreeBSD and macOS.
+- [the-windows-cli-ships-but-is-unreachable](done/the-windows-cli-ships-but-is-unreachable.md) - the standalone x64 Windows CLI has a SHA-verified PowerShell installer, published metadata and self-upgrade, while a desktop companion still routes to NSIS; native Windows CI installs, refuses unsafe cases and completes a real self-replacement.
+- [freebsd-devserver-has-no-default-service](done/freebsd-devserver-has-no-default-service.md) - `chan devserver start|status|stop|join` defaults to chan's portable daemon on FreeBSD while unknown systems still refuse; the no-flag lifecycle ran on a real FreeBSD box.
+
+Four items closed and none carried. The round also fixed the remaining absent frontend build-stamp invalidation, serialized FreeBSD's process-global `openpty` allocation, and removed a wall-clock race from both disk-echo TTL tests. The Windows stable-URL fetch is post-tag acceptance because the endpoint cannot serve v0.97.0 before publication.
 
 ### v0.96.0
 
