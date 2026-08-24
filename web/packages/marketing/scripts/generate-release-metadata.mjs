@@ -12,32 +12,37 @@ import {
 
 // The standalone Linux CLI tarball is musl (fully static): a too-new build
 // glibc must not gate older machines. install.sh maps Linux arch to these
-// musl targets. macOS and FreeBSD use native target triples. FreeBSD is
-// optional only for retained releases that predate its v0.96.0 publication;
-// the release verifier still requires it for every new GA.
+// musl targets. macOS and FreeBSD use native target triples. Windows ships a
+// signed x64 MSVC executable in a zip. Newer targets are optional only while
+// walking retained releases that predate their publication; the release
+// verifier still requires them for every new GA.
 const cliTargets = [
   {
     id: "cli-linux-x64",
     label: "Linux x86_64 tarball (static)",
     target: "x86_64-unknown-linux-musl",
+    format: "tar.gz",
     asset: "chan-x86_64-unknown-linux-musl.tar.gz",
   },
   {
     id: "cli-linux-arm64",
     label: "Linux aarch64 tarball (static)",
     target: "aarch64-unknown-linux-musl",
+    format: "tar.gz",
     asset: "chan-aarch64-unknown-linux-musl.tar.gz",
   },
   {
     id: "cli-macos-arm64",
     label: "macOS aarch64 tarball",
     target: "aarch64-apple-darwin",
+    format: "tar.gz",
     asset: "chan-aarch64-apple-darwin.tar.gz",
   },
   {
     id: "cli-freebsd-x64",
     label: "FreeBSD amd64 tarball (static)",
     target: "x86_64-unknown-freebsd",
+    format: "tar.gz",
     asset: "chan-x86_64-unknown-freebsd.tar.gz",
     archiveOptional: true,
   },
@@ -45,8 +50,18 @@ const cliTargets = [
     id: "cli-freebsd-arm64",
     label: "FreeBSD arm64 tarball (static)",
     target: "aarch64-unknown-freebsd",
+    format: "tar.gz",
     asset: "chan-aarch64-unknown-freebsd.tar.gz",
     archiveOptional: true,
+  },
+  {
+    id: "cli-windows-x64",
+    label: "Windows x86_64 zip",
+    target: "x86_64-pc-windows-msvc",
+    format: "zip",
+    asset: "chan-x86_64-pc-windows-msvc.zip",
+    archiveOptional: true,
+    selfUpgradeSince: "0.97.0",
   },
 ];
 
@@ -79,24 +94,30 @@ function desktopDownloads(version) {
   ];
 }
 
-// The standalone tarballs are the static musl/FreeBSD and native darwin
-// self-upgrade targets. Distro-built CLI packages live in COPR, the PPA, and
-// the AUR.
+// Update metadata must not advertise a target to a binary that predates its
+// updater support. In particular, retained pre-v0.97 Windows zip downloads
+// remain visible on the install page but cannot strand a user on an old binary
+// by appearing in its version-pinned self-upgrade metadata.
 function availableCliTargets(manifest) {
   return cliTargets.filter(
-    (target) => !target.archiveOptional || manifest.assets.has(target.asset),
+    (target) =>
+      (!target.archiveOptional || manifest.assets.has(target.asset)) &&
+      (!target.selfUpgradeSince ||
+        compareVersions(manifest.version, target.selfUpgradeSince) >= 0),
   );
 }
 
 function cliDownloads(manifest) {
-  return availableCliTargets(manifest).map(({ id, label, target, asset }) => ({
-    id,
-    kind: "cli",
-    label,
-    target,
-    format: "tar.gz",
-    asset,
-  }));
+  return cliTargets
+    .filter((target) => !target.archiveOptional || manifest.assets.has(target.asset))
+    .map(({ id, label, target, format, asset }) => ({
+      id,
+      kind: "cli",
+      label,
+      target,
+      format,
+      asset,
+    }));
 }
 
 // Gateway downloads are DERIVED from the manifest's actual assets, not a fixed
@@ -124,11 +145,9 @@ function gatewayDownloads(manifest) {
   }));
 }
 
-// Windows downloads are DERIVED from the manifest (like gateway), not a fixed
-// list: the NSIS desktop installer and the standalone Windows CLI zip are
-// optional assets (see collect-release-assets.mjs), so they only appear on the
-// install page once a release actually ships them. Until then the install-page
-// buttons fall back to the GitHub releases page.
+// The Windows desktop download is derived from the manifest because retained
+// older releases may not carry it. The standalone Windows CLI zip is described
+// by cliTargets so its public download and self-upgrade identities cannot drift.
 function windowsDownloads(manifest) {
   const candidates = [
     {
@@ -138,14 +157,6 @@ function windowsDownloads(manifest) {
       platform: "windows-x86_64",
       format: "exe",
       asset: `Chan_${manifest.version}_x64-setup.exe`,
-    },
-    {
-      id: "cli-windows-x64",
-      kind: "cli",
-      label: "Windows x86_64 zip",
-      target: "x86_64-pc-windows-msvc",
-      format: "zip",
-      asset: "chan-x86_64-pc-windows-msvc.zip",
     },
   ];
   return candidates.filter((download) => manifest.assets.has(download.asset));

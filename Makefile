@@ -386,6 +386,10 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
+	# Compile a debug-only CLI with a loopback metadata origin after every
+	# production/package build is complete, then prove install.ps1 and Windows
+	# self-replacement end to end on the stock Windows Server runner.
+	CARGO="$(CARGO)" scripts/smoke-windows-installer.sh target/release/chan.exe
 
 .PHONY: ci-linux-packages
 ci-linux-packages: ## Build the direct-download Linux deb and rpm packages.

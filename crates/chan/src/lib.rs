@@ -1801,7 +1801,8 @@ where
         ) {
             // A distro-packaged build: the package manager owns the files.
             UpgradeRoute::Refuse(message) => anyhow::bail!(message),
-            // Standalone (install.sh) replaces the CLI tarball in place.
+            // Standalone (install.sh / install.ps1) replaces its CLI archive
+            // in place.
             UpgradeRoute::Cli => {
                 update::run_upgrade(update::UpgradeOptions {
                     assume_yes: yes,
@@ -9008,7 +9009,7 @@ mod tests {
     fn upgrade_route_sends_the_desktop_companion_cli_to_the_desktop() {
         // The desktop's Windows shim runs the console chan.exe (a Standalone
         // binary) with CHAN_DESKTOP_HANDOFF=1: that binary upgrades the
-        // desktop it ships with, never a CLI tarball Windows does not publish.
+        // desktop it ships with, never the standalone Windows CLI archive.
         assert_eq!(
             decide_upgrade_route(Personality::Standalone, None, true),
             UpgradeRoute::Desktop
@@ -9023,8 +9024,8 @@ mod tests {
     fn desktop_companion_needs_windows_and_the_handoff_hint() {
         // The hint alone is not a companion: a unix install.sh `chan` run
         // with CHAN_DESKTOP_HANDOFF=1 (the serve-handoff steer) keeps
-        // replacing its own tarball, and a Windows process without the hint
-        // is the standalone zip.
+        // replacing its own archive, and a Windows process without the hint
+        // is the loose standalone CLI that self-upgrades from the ZIP.
         assert!(desktop_companion(true, true));
         assert!(!desktop_companion(false, true));
         assert!(!desktop_companion(true, false));

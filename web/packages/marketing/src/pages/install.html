@@ -102,18 +102,23 @@ sudo dnf install chan-desktop</b></code>
   </div>
 
   <div class="download-group">
-    <h3>Quick install <span class="group-note">macOS + Linux</span></h3>
+    <h3>Quick install <span class="group-note">macOS + Linux + FreeBSD + Windows</span></h3>
     <p class="minor">macOS and Linux:</p>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
       {{copyButton}}
     </div>
-    <p class="minor">FreeBSD amd64 + arm64 (pending published-artifact acceptance):</p>
+    <p class="minor">FreeBSD amd64 + arm64:</p>
     <div class="command-copy" data-copy-block>
       <code><span>$</span><b data-copy-value>fetch -o - https://chan.app/install.sh | sh</b></code>
       {{copyButton}}
     </div>
-    <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command. The v0.96.0 FreeBSD amd64 and arm64 paths are implemented but still await end-to-end installer and upgrade checks against the published artifacts on stock hosts.</p>
+    <p class="minor">Windows x64, from PowerShell:</p>
+    <div class="command-copy" data-copy-block>
+      <code><span>PS&gt;</span><b data-copy-value>irm https://chan.app/install.ps1 | iex</b></code>
+      {{copyButton}}
+    </div>
+    <p class="minor">Installs the latest standalone <code>chan</code> binary and its <code>cs</code> command. On Windows it installs under <code>%LOCALAPPDATA%\chan-cli\bin</code>, adds that directory to your user PATH, and refuses to compete with a Chan Desktop install.</p>
   </div>
 
   <div class="download-group">

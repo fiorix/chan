@@ -39,6 +39,7 @@ const requiredInputs = [
   path.join(srcRoot, "pages", "install.html"),
   path.join(srcRoot, "pages", "manual.html"),
   path.join(srcRoot, "install.sh"),
+  path.join(srcRoot, "install.ps1"),
   path.join(srcRoot, "styles.css"),
   path.join(srcRoot, "site.js"),
   path.join(siteRoot, "chan-favicon.png"),
@@ -144,10 +145,11 @@ async function copyStaticAssets() {
 }
 
 async function copyInstaller() {
-  const source = path.join(srcRoot, "install.sh");
-  const target = path.join(distRoot, "install.sh");
-  await fs.copyFile(source, target);
-  await fs.chmod(target, 0o755);
+  const shellSource = path.join(srcRoot, "install.sh");
+  const shellTarget = path.join(distRoot, "install.sh");
+  await fs.copyFile(shellSource, shellTarget);
+  await fs.chmod(shellTarget, 0o755);
+  await fs.copyFile(path.join(srcRoot, "install.ps1"), path.join(distRoot, "install.ps1"));
 }
 
 async function copyDir(source, target) {
@@ -291,12 +293,11 @@ async function validateDist(version) {
     validateLocalLinks(htmlFile, html, allDistPaths);
   }
 
-  const textFiles = files.filter((file) => /\.(html|css|js|sh|txt|xml)$/.test(file) || path.basename(file) === "CNAME");
+  const textFiles = files.filter((file) => /\.(html|css|js|sh|ps1|txt|xml)$/.test(file) || path.basename(file) === "CNAME");
   for (const file of textFiles) {
     const rel = path.relative(distRoot, file).split(path.sep).join("/");
     const text = await fs.readFile(file, "utf8");
     textByDistPath.set(rel, text);
-    validateNoRemovedInstallSurface(file, text);
     // The stale-copy sweep polices the site's own public copy: the pages,
     // the installer, and assets/site.{js,css}. All other js/css under
     // assets/ is bundler output (the launcher demo and its vendored
@@ -309,7 +310,7 @@ async function validateDist(version) {
     }
   }
 
-  for (const required of ["index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "install.sh", "CNAME"]) {
+  for (const required of ["index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "install.sh", "install.ps1", "CNAME"]) {
     if (!allDistPaths.has(required)) throw new Error(`dist is missing ${required}`);
   }
 
@@ -385,23 +386,6 @@ function distPathForUrl(url) {
   return url.slice(1);
 }
 
-// The removed surface is the PowerShell one-liner install (install.ps1 +
-// `irm <url> | iex`), which stays scrubbed. The Windows DESKTOP installer
-// (NSIS .exe) and the standalone Windows CLI zip ARE first-class downloads on
-// the install page, so the phrase "Windows installer" is allowed.
-function validateNoRemovedInstallSurface(file, text) {
-  const forbidden = [
-    /install\.ps1/i,
-    /PowerShell/i,
-    /irm\s+https?:/i,
-  ];
-  for (const pattern of forbidden) {
-    if (pattern.test(text)) {
-      throw new Error(`${path.relative(repoRoot, file)} contains removed install surface: ${pattern}`);
-    }
-  }
-}
-
 function validateNoStalePublicCopy(file, text) {
   const forbidden = [
     /\bCLI[- ]only\b/i,
@@ -456,6 +440,13 @@ function validateReleaseDownloadContract(textByDistPath) {
   }
   if (installer.includes("/releases/latest/download")) {
     throw new Error("install.sh must not depend on GitHub latest-download URLs");
+  }
+  const windowsInstaller = textByDistPath.get("install.ps1") ?? "";
+  if (!windowsInstaller.includes(`$DefaultMetadataBase = "${cliMetadataBase}"`)) {
+    throw new Error(`install.ps1 must default metadata base to ${cliMetadataBase}`);
+  }
+  if (!html.includes("irm https://chan.app/install.ps1 | iex")) {
+    throw new Error("generated pages must present the Windows PowerShell installer");
   }
 }
 

@@ -149,6 +149,13 @@ async function main() {
     ]);
     const winDownloads = (await readJson(path.join(winOut, "releases.json"))).releases[0].downloads;
     assert(winDownloads.length === 16, "windows present adds two downloads");
+    const historicalWinCli = await readJson(path.join(winOut, "cli", "latest.json"));
+    assert(
+      !historicalWinCli.targets.some(
+        (target) => target.target === "x86_64-pc-windows-msvc",
+      ),
+      "pre-v0.97 metadata does not advertise unsupported Windows self-upgrade",
+    );
     const winById = new Map(winDownloads.map((download) => [download.id, download]));
     assert(winById.has("desktop-windows-nsis"), "windows installer download present");
     assert(winById.has("cli-windows-x64"), "windows cli download present");
@@ -168,6 +175,28 @@ async function main() {
     assert(
       winDesktopLatest.platforms["windows-x86_64"]?.url.endsWith("/Chan_0.15.4_x64-setup.exe"),
       "desktop windows-x86_64 updater url is the installer",
+    );
+
+    const currentWindows = rewriteFixtureVersion(
+      JSON.parse(JSON.stringify(withWindows)),
+      "0.97.0",
+    );
+    const currentWinManifest = path.join(out, "current-windows.json");
+    await fs.writeFile(currentWinManifest, `${JSON.stringify(currentWindows)}\n`);
+    const currentWinOut = path.join(out, "current-win");
+    await runNode(path.join(scriptsRoot, "generate-release-metadata.mjs"), [
+      "--manifest",
+      currentWinManifest,
+      "--out",
+      currentWinOut,
+    ]);
+    const currentWinCli = await readJson(path.join(currentWinOut, "cli", "latest.json"));
+    const currentWinTarget = currentWinCli.targets.find(
+      (target) => target.target === "x86_64-pc-windows-msvc",
+    );
+    assert(
+      currentWinTarget?.asset === "chan-x86_64-pc-windows-msvc.zip",
+      "v0.97 metadata advertises the Windows self-upgrade asset",
     );
 
     const prerelease = rewriteFixtureVersion(

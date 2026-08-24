@@ -70,14 +70,19 @@ reqwest = { workspace = true, features = ["stream"] }
 sha2 = { workspace = true }
 rustix = { workspace = true }
 
-# Archive extraction for the upgrade flow. Published standalone CLI
-# releases ship as `.tar.gz` on Linux and macOS.
+# Archive extraction for the upgrade flow. Unix standalone CLI releases
+# ship as `.tar.gz`; Windows ships a signed executable in a `.zip`.
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tar = { workspace = true }
 flate2 = "1"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+self-replace = "1.5"
+zip = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
+zip = { workspace = true }
 # The reverse-tunnel end-to-end harness (tests/revtunnel_e2e.rs) plays the
 # desktop role in-process: the `client` feature is the same Tauri-free
 # listener/dialer chan-desktop uses, which is what makes the flow runnable

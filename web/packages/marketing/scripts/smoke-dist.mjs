@@ -38,9 +38,13 @@ const checks = [
     status: 200,
     includes: 'DEFAULT_METADATA_BASE="https://chan.app/dl/cli"',
   },
+  {
+    path: "/install.ps1",
+    status: 200,
+    includes: '$DefaultMetadataBase = "https://chan.app/dl/cli"',
+  },
   { path: "/assets/demo-workspace.json", status: 404 },
   { path: "/assets/home/videos/terminal-commands.mp4", status: 200 },
-  { path: "/install.ps1", status: 404 },
 ];
 
 async function main() {
@@ -104,6 +108,7 @@ function contentType(file) {
   if (file.endsWith(".js")) return "text/javascript; charset=utf-8";
   if (file.endsWith(".mp4")) return "video/mp4";
   if (file.endsWith(".sh")) return "text/x-shellscript; charset=utf-8";
+  if (file.endsWith(".ps1")) return "text/plain; charset=utf-8";
   if (file.endsWith(".png")) return "image/png";
   if (file.endsWith(".ico")) return "image/x-icon";
   return "application/octet-stream";

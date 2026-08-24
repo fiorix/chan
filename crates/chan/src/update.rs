@@ -15,11 +15,13 @@
 //      metadata, downloads the archive for the current target into a
 //      sibling temp file, verifies SHA-256 against the metadata,
 //      extracts the `chan` binary out of the archive into a second
-//      temp file, and atomically renames it over the running
-//      executable.
+//      temp file, and replaces the running executable using the
+//      platform's safe replacement mechanism.
 //
-// Metadata URLs are hardcoded to chan.app. Release assets may live on
-// GitHub Releases or another HTTPS origin chosen by the metadata.
+// Production metadata URLs are hardcoded to chan.app. A compile-time-only
+// loopback seam exists for the native Windows installer/upgrade smoke.
+// Release assets may live on GitHub Releases or another HTTPS origin chosen
+// by the metadata.
 // Self-hosted / mirrored deployments are not supported for the CLI
 // upgrade path. Offline / proxy hosts:
 // reqwest honors HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY
@@ -33,12 +35,18 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(any(test, target_os = "windows"))]
+use std::io::Read;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const CLI_METADATA_BASE: &str = "https://chan.app/dl/cli";
-const CLI_LATEST_METADATA_URL: &str = "https://chan.app/dl/cli/latest.json";
+
+// Compile-time-only seam for the native Windows installer/upgrade smoke.
+// Production release builds do not set it and remain pinned to chan.app.
+const TEST_CLI_METADATA_BASE: Option<&str> = option_env!("CHAN_TEST_CLI_METADATA_BASE");
 
 /// Disable the probe (banner still prints from cached state).
 const ENV_DISABLE: &str = "CHAN_UPDATE_CHECK";
@@ -140,7 +148,8 @@ fn write_state(path: &Path, state: &State) -> Result<()> {
     chan_workspace::fs_ops::atomic_write(path, &body).context("writing state file")
 }
 
-/// Match the standalone CLI tarballs published by release.yml and install.sh.
+/// Match the standalone CLI archives published by release.yml and the
+/// platform installers.
 ///
 /// Returns `(target_triple, archive_extension, binary_filename)`.
 pub fn current_target() -> Result<(&'static str, &'static str, &'static str)> {
@@ -158,9 +167,11 @@ fn release_target_for(os: &str, arch: &str) -> Result<(&'static str, &'static st
         ("macos", "aarch64") => Ok(("aarch64-apple-darwin", "tar.gz", "chan")),
         ("freebsd", "x86_64") => Ok(("x86_64-unknown-freebsd", "tar.gz", "chan")),
         ("freebsd", "aarch64") => Ok(("aarch64-unknown-freebsd", "tar.gz", "chan")),
+        ("windows", "x86_64") => Ok(("x86_64-pc-windows-msvc", "zip", "chan.exe")),
         (os, arch) => bail!(
             "no published standalone chan CLI release for {os}/{arch}. \
-             Supported targets: linux x86_64/aarch64, macos aarch64, freebsd x86_64/aarch64."
+             Supported targets: linux x86_64/aarch64, macos aarch64, \
+             freebsd x86_64/aarch64, windows x86_64."
         ),
     }
 }
@@ -267,12 +278,44 @@ fn validate_prerelease(pre: &str, version: &str) -> Result<()> {
 }
 
 fn metadata_url_for_version(version: &str) -> String {
-    format!("{CLI_METADATA_BASE}/v{version}.json")
+    format!("{}/v{version}.json", cli_metadata_base())
 }
 
-fn ensure_https_url(url: &str) -> Result<()> {
-    if !url.starts_with("https://") {
+fn cli_metadata_base() -> &'static str {
+    TEST_CLI_METADATA_BASE.unwrap_or(CLI_METADATA_BASE)
+}
+
+fn latest_metadata_url() -> String {
+    format!("{}/latest.json", cli_metadata_base())
+}
+
+fn ensure_update_url(url: &str) -> Result<()> {
+    ensure_update_url_with_test_base(url, TEST_CLI_METADATA_BASE)
+}
+
+fn ensure_update_url_with_test_base(url: &str, test_base: Option<&str>) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid update URL: {url}"))?;
+    if parsed.scheme() == "https" {
+        return Ok(());
+    }
+
+    let Some(test_base) = test_base else {
         bail!("refusing non-https URL: {url}");
+    };
+    let base = reqwest::Url::parse(test_base)
+        .with_context(|| format!("invalid compiled test metadata base: {test_base}"))?;
+    let loopback = match base.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
+    };
+    if base.scheme() != "http" || !loopback {
+        bail!("compiled test metadata base must be loopback http: {test_base}");
+    }
+    if parsed.scheme() != "http" || parsed.origin() != base.origin() {
+        bail!("refusing non-https URL outside the compiled test origin: {url}");
     }
     Ok(())
 }
@@ -473,7 +516,7 @@ fn http_client(connect: Duration, total: Duration) -> Result<reqwest::Client> {
 }
 
 async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
-    ensure_https_url(url)?;
+    ensure_update_url(url)?;
     let resp = client
         .get(url)
         .send()
@@ -531,7 +574,7 @@ fn validate_cli_metadata(metadata: CliReleaseMetadata) -> Result<CliReleaseMetad
         if target.asset.trim().is_empty() {
             bail!("CLI metadata target {} has no asset name", target.target);
         }
-        ensure_https_url(&target.url)
+        ensure_update_url(&target.url)
             .with_context(|| format!("CLI metadata target {} has invalid URL", target.target))?;
         normalize_sha256(&target.sha256, &target.asset)
             .with_context(|| format!("CLI metadata target {} has invalid SHA256", target.target))?;
@@ -571,7 +614,7 @@ async fn fetch_cli_metadata(client: &reqwest::Client, url: &str) -> Result<CliRe
 }
 
 async fn fetch_latest_cli_metadata(client: &reqwest::Client) -> Result<CliReleaseMetadata> {
-    fetch_cli_metadata(client, CLI_LATEST_METADATA_URL).await
+    fetch_cli_metadata(client, &latest_metadata_url()).await
 }
 
 /// Print the banner if a newer release is cached. Stderr-only,
@@ -743,8 +786,9 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
             metadata
         }
         None => {
+            let url = latest_metadata_url();
             if opts.verbose {
-                eprintln!("chan: checking latest release metadata at {CLI_LATEST_METADATA_URL}");
+                eprintln!("chan: checking latest release metadata at {url}");
             }
             fetch_latest_cli_metadata(&client).await?
         }
@@ -815,7 +859,7 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
 
     // Stream archive into a temp file alongside the running binary
     // and SHA-256 it on the fly.
-    ensure_https_url(&archive_url)?;
+    ensure_update_url(&archive_url)?;
     let archive_path = binary_dir.join(format!(".chan.upgrade-archive.{}", std::process::id()));
     let archive_guard = TempGuard::new(archive_path.clone());
 
@@ -1063,10 +1107,12 @@ fn extract_binary(
     }
     match ext {
         "tar.gz" => extract_tar_gz(archive, out, bin_name),
+        "zip" => extract_zip(archive, out, bin_name),
         other => bail!("unsupported archive extension: {other}"),
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
     fs::rename(new_bin, exe_path).with_context(|| {
         format!(
@@ -1075,6 +1121,118 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
             new_bin.display()
         )
     })
+}
+
+#[cfg(target_os = "windows")]
+fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
+    let running =
+        env::current_exe().context("resolving current executable for Windows replacement")?;
+    let running = running.canonicalize().unwrap_or(running);
+    if running != exe_path {
+        bail!(
+            "refusing to replace {} because the running executable is {}",
+            exe_path.display(),
+            running.display()
+        );
+    }
+
+    // Windows permits renaming the mapped executable but not deleting or
+    // overwriting it. Keep the old image at a path we control until the new
+    // image is in place, so a failed second rename can restore it. The
+    // self-replace crate is used only for its delayed, post-exit deletion of
+    // that known backup; its one-shot replacement helper cannot roll back a
+    // failure after it has moved the running executable.
+    let file_name = exe_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("current Windows executable has no UTF-8 filename")?;
+    let backup =
+        exe_path.with_file_name(format!(".{file_name}.upgrade-old.{}", std::process::id()));
+    if backup.exists() {
+        bail!(
+            "refusing Windows replacement because {} already exists",
+            backup.display()
+        );
+    }
+    fs::rename(exe_path, &backup).with_context(|| {
+        format!(
+            "moving running executable {} to {}",
+            exe_path.display(),
+            backup.display()
+        )
+    })?;
+    if let Err(replace_error) = fs::rename(new_bin, exe_path) {
+        if let Err(rollback_error) = fs::rename(&backup, exe_path) {
+            bail!(
+                "replacing {} failed ({replace_error}); restoring the previous executable also \
+                 failed ({rollback_error}). The previous executable remains at {}",
+                exe_path.display(),
+                backup.display()
+            );
+        }
+        return Err(replace_error).with_context(|| {
+            format!(
+                "replacing {} with {}; the previous executable was restored",
+                exe_path.display(),
+                new_bin.display()
+            )
+        });
+    }
+    if let Err(error) = self_replace::self_delete_at(&backup) {
+        eprintln!(
+            "chan: warning: upgraded successfully but could not schedule removal of {}: {error}",
+            backup.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn extract_zip(archive: &Path, out: &Path, bin_name: &str) -> Result<()> {
+    let file = fs::File::open(archive).with_context(|| format!("opening {}", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .with_context(|| format!("reading ZIP archive {}", archive.display()))?;
+    let mut found = None;
+    for index in 0..zip.len() {
+        let entry = zip
+            .by_index(index)
+            .with_context(|| format!("reading ZIP entry {index}"))?;
+        if entry.name() != bin_name {
+            continue;
+        }
+        if entry.is_dir() {
+            bail!("ZIP entry {bin_name} is a directory");
+        }
+        if found.replace(index).is_some() {
+            bail!(
+                "archive {} contains duplicate {bin_name} entries",
+                archive.display()
+            );
+        }
+    }
+    let index = found
+        .with_context(|| format!("archive {} does not contain {bin_name}", archive.display()))?;
+    let entry = zip
+        .by_index(index)
+        .with_context(|| format!("opening {bin_name} in {}", archive.display()))?;
+    if entry.size() > MAX_ARCHIVE_SIZE {
+        bail!("extracted binary exceeds safety cap of {MAX_ARCHIVE_SIZE} bytes");
+    }
+    let mut limited = entry.take(MAX_ARCHIVE_SIZE + 1);
+    let mut out_file =
+        fs::File::create(out).with_context(|| format!("creating {}", out.display()))?;
+    let written = std::io::copy(&mut limited, &mut out_file)
+        .with_context(|| format!("extracting {bin_name}"))?;
+    if written > MAX_ARCHIVE_SIZE {
+        bail!("extracted binary exceeds safety cap of {MAX_ARCHIVE_SIZE} bytes");
+    }
+    out_file.flush()?;
+    Ok(())
+}
+
+#[cfg(all(not(test), not(target_os = "windows")))]
+fn extract_zip(_archive: &Path, _out: &Path, _bin_name: &str) -> Result<()> {
+    bail!("ZIP upgrades are only supported on Windows")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1104,7 +1262,7 @@ fn extract_tar_gz(archive: &Path, out: &Path, bin_name: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn extract_tar_gz(_archive: &Path, _out: &Path, _bin_name: &str) -> Result<()> {
-    bail!("chan upgrade is not published for Windows")
+    bail!("tar.gz upgrades are not supported on Windows")
 }
 
 #[cfg(unix)]
@@ -1140,21 +1298,27 @@ mod tests {
 
     fn sample_cli_metadata() -> &'static str {
         r#"{
-  "version":"0.14.0",
-  "tag":"v0.14.0",
+  "version":"0.97.0",
+  "tag":"v0.97.0",
   "published_at":"2026-05-27T00:00:00Z",
   "targets":[
     {
       "target":"x86_64-unknown-linux-musl",
       "asset":"chan-x86_64-unknown-linux-musl.tar.gz",
-      "url":"https://github.com/fiorix/chan/releases/download/v0.14.0/chan-x86_64-unknown-linux-musl.tar.gz",
+      "url":"https://github.com/fiorix/chan/releases/download/v0.97.0/chan-x86_64-unknown-linux-musl.tar.gz",
       "sha256":"DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
     },
     {
       "target":"aarch64-apple-darwin",
       "asset":"chan-aarch64-apple-darwin.tar.gz",
-      "url":"https://github.com/fiorix/chan/releases/download/v0.14.0/chan-aarch64-apple-darwin.tar.gz",
+      "url":"https://github.com/fiorix/chan/releases/download/v0.97.0/chan-aarch64-apple-darwin.tar.gz",
       "sha256":"cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+    },
+    {
+      "target":"x86_64-pc-windows-msvc",
+      "asset":"chan-x86_64-pc-windows-msvc.zip",
+      "url":"https://github.com/fiorix/chan/releases/download/v0.97.0/chan-x86_64-pc-windows-msvc.zip",
+      "sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     }
   ]
 }"#
@@ -1289,8 +1453,8 @@ mod tests {
     #[test]
     fn test_parse_cli_metadata_selects_target_asset() {
         let metadata = parse_cli_metadata(sample_cli_metadata()).unwrap();
-        assert_eq!(metadata.version, "0.14.0");
-        assert_eq!(metadata.tag, "v0.14.0");
+        assert_eq!(metadata.version, "0.97.0");
+        assert_eq!(metadata.tag, "v0.97.0");
 
         let asset = target_asset_for(&metadata, "x86_64-unknown-linux-musl", "tar.gz").unwrap();
         assert_eq!(
@@ -1298,7 +1462,7 @@ mod tests {
             CliTargetAsset {
                 target: "x86_64-unknown-linux-musl".into(),
                 asset: "chan-x86_64-unknown-linux-musl.tar.gz".into(),
-                url: "https://github.com/fiorix/chan/releases/download/v0.14.0/chan-x86_64-unknown-linux-musl.tar.gz".into(),
+                url: "https://github.com/fiorix/chan/releases/download/v0.97.0/chan-x86_64-unknown-linux-musl.tar.gz".into(),
                 sha256: "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF".into(),
             }
         );
@@ -1307,11 +1471,11 @@ mod tests {
     #[test]
     fn test_parse_cli_metadata_rejects_bad_contracts() {
         let tag_mismatch =
-            sample_cli_metadata().replace(r#""tag":"v0.14.0""#, r#""tag":"v0.15.0""#);
+            sample_cli_metadata().replace(r#""tag":"v0.97.0""#, r#""tag":"v0.98.0""#);
         assert!(parse_cli_metadata(&tag_mismatch).is_err());
 
         let malformed_tag =
-            sample_cli_metadata().replace(r#""tag":"v0.14.0""#, r#""tag":"release-0.14.0""#);
+            sample_cli_metadata().replace(r#""tag":"v0.97.0""#, r#""tag":"release-0.97.0""#);
         assert!(parse_cli_metadata(&malformed_tag).is_err());
 
         let bad_hash = sample_cli_metadata().replace(
@@ -1322,20 +1486,56 @@ mod tests {
     }
 
     #[test]
-    fn test_target_asset_for_rejects_unsupported_target() {
+    fn test_target_asset_for_selects_windows_zip() {
         let metadata = parse_cli_metadata(sample_cli_metadata()).unwrap();
-        let err = target_asset_for(&metadata, "x86_64-pc-windows-msvc", "zip")
+        let asset =
+            target_asset_for(&metadata, "x86_64-pc-windows-msvc", "zip").expect("Windows asset");
+        assert_eq!(asset.asset, "chan-x86_64-pc-windows-msvc.zip");
+    }
+
+    #[test]
+    fn test_target_asset_for_rejects_missing_target() {
+        let metadata = parse_cli_metadata(sample_cli_metadata()).unwrap();
+        let err = target_asset_for(&metadata, "riscv64gc-unknown-linux-gnu", "tar.gz")
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not include a standalone chan CLI asset"));
     }
 
     #[test]
-    fn test_ensure_https_url_rejects_plain_http() {
-        assert!(ensure_https_url(CLI_LATEST_METADATA_URL).is_ok());
-        assert!(ensure_https_url("http://chan.app/dl/cli/latest.json").is_err());
+    fn test_update_url_requires_https_without_test_seam() {
+        assert!(
+            ensure_update_url_with_test_base("https://chan.app/dl/cli/latest.json", None).is_ok()
+        );
+        assert!(
+            ensure_update_url_with_test_base("http://chan.app/dl/cli/latest.json", None).is_err()
+        );
     }
 
+    #[test]
+    fn test_update_url_test_seam_is_loopback_origin_scoped() {
+        let base = Some("http://127.0.0.1:43191/dl/cli");
+        assert!(ensure_update_url_with_test_base(
+            "http://127.0.0.1:43191/dl/cli/latest.json",
+            base
+        )
+        .is_ok());
+        assert!(
+            ensure_update_url_with_test_base("http://127.0.0.1:43191/assets/chan.zip", base)
+                .is_ok()
+        );
+        assert!(
+            ensure_update_url_with_test_base("http://127.0.0.1:43192/assets/chan.zip", base)
+                .is_err()
+        );
+        assert!(ensure_update_url_with_test_base(
+            "http://example.com/assets/chan.zip",
+            Some("http://example.com/dl/cli")
+        )
+        .is_err());
+    }
+
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_install_replacement_renames() {
         let dir = tempfile::tempdir().unwrap();
@@ -1348,6 +1548,46 @@ mod tests {
 
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert!(!new_bin.exists());
+    }
+
+    #[test]
+    fn test_extract_binary_reads_exact_top_level_windows_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("chan.zip");
+        let out = dir.path().join("chan.exe");
+        let file = fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("docs/chan.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"nested").unwrap();
+        writer
+            .start_file("chan.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"windows-cli").unwrap();
+        writer.finish().unwrap();
+
+        extract_binary(&archive, &out, "chan.exe", "zip", false).unwrap();
+        assert_eq!(fs::read(out).unwrap(), b"windows-cli");
+    }
+
+    #[test]
+    fn test_extract_binary_rejects_nested_only_windows_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("chan.zip");
+        let out = dir.path().join("chan.exe");
+        let file = fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("nested/chan.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"nested").unwrap();
+        writer.finish().unwrap();
+
+        let error = extract_binary(&archive, &out, "chan.exe", "zip", false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not contain chan.exe"));
     }
 
     #[test]
@@ -1451,16 +1691,22 @@ mod tests {
             release_target_for("freebsd", "aarch64").unwrap(),
             ("aarch64-unknown-freebsd", "tar.gz", "chan")
         );
+        assert_eq!(
+            release_target_for("windows", "x86_64").unwrap(),
+            ("x86_64-pc-windows-msvc", "zip", "chan.exe")
+        );
     }
 
     #[test]
     fn test_release_target_for_inactive_public_artifacts() {
-        let windows = release_target_for("windows", "x86_64")
+        let windows_arm = release_target_for("windows", "aarch64")
             .unwrap_err()
             .to_string();
-        assert!(windows.contains("no published standalone chan CLI release for windows/x86_64"));
-        assert!(windows.contains("linux x86_64/aarch64, macos aarch64, freebsd x86_64/aarch64"));
-        assert!(!windows.contains("windows x86_64/aarch64"));
+        assert!(
+            windows_arm.contains("no published standalone chan CLI release for windows/aarch64")
+        );
+        assert!(windows_arm.contains("windows x86_64"));
+        assert!(!windows_arm.contains("windows x86_64/aarch64"));
 
         let mac_intel = release_target_for("macos", "x86_64")
             .unwrap_err()
@@ -1471,13 +1717,15 @@ mod tests {
     #[test]
     fn test_current_target_supported_pair() {
         // The running build's target resolves only where a standalone chan CLI
-        // is published: Linux and FreeBSD x86_64 and aarch64, plus macOS
-        // aarch64. Other pairs refuse by contract, including Windows, so
+        // is published: Linux and FreeBSD x86_64 and aarch64, macOS
+        // aarch64, and Windows x86_64. Other pairs refuse by contract, so
         // assert both directions instead of assuming the suite only ever runs
         // where the target resolves.
         let resolved = current_target();
         match (env::consts::OS, env::consts::ARCH) {
-            ("linux" | "freebsd", "x86_64" | "aarch64") | ("macos", "aarch64") => {
+            ("linux" | "freebsd", "x86_64" | "aarch64")
+            | ("macos", "aarch64")
+            | ("windows", "x86_64") => {
                 let _ = resolved.expect("target supported");
             }
             _ => {

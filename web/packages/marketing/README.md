@@ -10,7 +10,8 @@ web/packages/marketing/
 +-- scripts/
 |   `-- build.mjs          static generator and validator
 +-- src/
-|   +-- install.sh              public CLI installer source
+|   +-- install.sh              public Unix CLI installer source
+|   +-- install.ps1             public Windows CLI installer source
 |   +-- pages/                  homepage and install page templates
 |   +-- site.js
 |   +-- styles.css
@@ -38,7 +39,7 @@ npm run check
 
 The build/check gate:
 
-- renders `/`, `/install/`, and `/install.sh`
+- renders `/`, `/install/`, `/install.sh`, and `/install.ps1`
 - writes `CNAME` for `chan.app`
 - copies static assets into `dist/`
 - fails on missing required inputs
@@ -49,7 +50,7 @@ The build/check gate:
 - dry-runs `/dl/**` release metadata generation from a local fixture
 - dry-runs collection of uploaded release assets into the metadata manifest
 - builds the embedded launcher demo (see below)
-- serves `dist/` on loopback and smokes `/`, `/install/`, `/install.sh`, and `/install.ps1` absence
+- serves `dist/` on loopback and smokes `/`, `/install/`, `/install.sh`, and `/install.ps1`
 
 ## Preview
 
@@ -116,19 +117,22 @@ While `github.com/fiorix/chan` is still private during pre-release work, use `--
 `/install/` separates two installation paths:
 
 - Desktop: Homebrew or DMG on macOS, the Windows installer, then the Linux AppImage and managed `chan-desktop` packages.
-- Server: the shell installer first, managed `chan` packages second, then Docker and the optional self-hosted gateway.
+- Server: the Unix and Windows installers first, managed `chan` packages second, then Docker and the optional self-hosted gateway.
 
-The shell installer is CLI-only and supports the active standalone CLI release targets:
+The standalone installers support the active CLI release targets:
 
 - Linux x86_64
 - Linux aarch64
 - macOS aarch64
+- FreeBSD x86_64
+- FreeBSD aarch64
+- Windows x86_64
 
 Desktop packages are downloaded directly as release artifacts. They are not installed by `install.sh`. Raw CLI archives remain in release metadata and on GitHub Releases, but are not presented as primary install-page choices.
 
 Linux users can also install the root Nix flake. Its default package is `chan-desktop` on x86_64 and aarch64, with `chan` and `cs` entry points in the same output; it does not add a systemd user unit.
 
-`install.sh` defaults to `https://chan.app/dl/cli/latest.json`. Download links on the site read `/dl/releases.json` at runtime and fall back to the GitHub Releases page if metadata is unavailable.
+`install.sh` and `install.ps1` default to `https://chan.app/dl/cli/latest.json`. The Windows installer uses a separate `%LOCALAPPDATA%\chan-cli` prefix and refuses when Chan Desktop already owns the command shims. Download links on the site read `/dl/releases.json` at runtime and fall back to the GitHub Releases page if metadata is unavailable.
 
 ## Workspace boundary
 

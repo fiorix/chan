@@ -140,19 +140,25 @@
   <p>Pick where to run it:</p>
   <ul>
     <li>On macOS: a lima-vm, or a remote machine via ssh.</li>
-    <li>On Windows: a WSL sandbox, or a remote machine via ssh.</li>
+    <li>On Windows: the native x64 standalone CLI, a WSL sandbox, or a remote machine via ssh.</li>
     <li>On Linux: an isolated devserver on the same machine (all platforms support <code>CHAN_HOME=/path</code>), a <a href="/install/">docker container</a>, or a remote machine via ssh.</li>
   </ul>
-  <p>On the target system, install chan:</p>
+  <p>On macOS, Linux, or FreeBSD, install chan:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
     {{copyButton}}
   </div>
-  <p>This installs <code>~/.local/bin/chan</code> and the symlink <code>cs -&gt; chan</code> in the same directory. Start the devserver:</p>
+  <p>On native Windows x64, run this from PowerShell:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>PS&gt;</span><b data-copy-value>irm https://chan.app/install.ps1 | iex</b></code>
+    {{copyButton}}
+  </div>
+  <p>The Unix installer writes <code>~/.local/bin/chan</code> and the symlink <code>cs -&gt; chan</code>. The Windows installer writes <code>chan.exe</code>, <code>cs.cmd</code>, and a Git Bash <code>cs</code> shim under <code>%LOCALAPPDATA%\chan-cli\bin</code> and adds it to your user PATH. Start the devserver:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>~/.local/bin/chan devserver start</b></code>
     {{copyButton}}
   </div>
+  <p class="minor">In a new native Windows terminal, use <code>chan devserver start</code>.</p>
   <p>This installs the devserver as a background service listening on <code>localhost:8787</code>, using the default service manager for your platform:</p>
   <ul>
     <li>On Linux it uses systemd: a user-scoped service that survives logout once linger is on (chan enables it, or asks you to run <code>sudo loginctl enable-linger</code>).</li>
