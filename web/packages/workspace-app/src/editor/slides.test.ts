@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   firstSlideHeadingCaret,
   groupHeadingsBySlides,
+  PAGE_BREAK_RE,
   parseSlidesSpec,
   slideIndexForLine,
   splitSlidePages,
@@ -236,6 +237,7 @@ chan:
 ---
 
 # Slide 1
+* use \`@pagebreak\` on empty line to create new slide
 `;
 
   test("lands at the end of the seed's # Slide 1 heading line", () => {
@@ -245,6 +247,29 @@ chan:
     // the metadata block.
     expect(at).toBeGreaterThan(seed.indexOf("\n---\n") + "\n---\n".length);
     expect(seed.slice(at! - "# Slide 1".length, at!)).toBe("# Slide 1");
+  });
+
+  test("keeps the seed in slides mode without creating a page break", () => {
+    expect(parseSlidesSpec(seed)).toEqual({
+      aspectRatio: "16:9",
+      zoomFactor: 2,
+    });
+    const pageBreakLines = seed
+      .split(/\r?\n/)
+      .filter((line) => PAGE_BREAK_RE.test(line));
+    expect(pageBreakLines).toEqual([]);
+    expect(splitSlidePages(`${seed}@pagebreak\n# Slide 2\n`)).toHaveLength(
+      2,
+    );
+    expect(splitSlidePages(seed)).toEqual([
+      {
+        number: 1,
+        startLine: 6,
+        endLine: 9,
+        markdown:
+          "\n# Slide 1\n* use `@pagebreak` on empty line to create new slide\n",
+      },
+    ]);
   });
 
   test("CRLF sources resolve to the heading end before the \\r", () => {

@@ -28,8 +28,9 @@ pub(crate) const NEW_DRAFT_CONTENT: &str = "# Draft\n";
 
 /// Seed for a brand-new slide deck: the canonical `chan: kind: slides`
 /// frontmatter block the SPA's `parseSlidesSpec` recognizes (16:9 default
-/// aspect) plus a first slide heading, so the draft opens straight into the
-/// slides layout. The primary file is still `draft.md`: a deck is markdown.
+/// aspect) plus a first slide heading and its page-break authoring hint, so the
+/// draft opens straight into the slides layout. The primary file is still
+/// `draft.md`: a deck is markdown.
 pub(crate) const NEW_SLIDES_CONTENT: &str = r#"---
 chan:
   kind: slides
@@ -39,6 +40,7 @@ chan:
 ---
 
 # Slide 1
+* use `@pagebreak` on empty line to create new slide
 "#;
 
 /// Seed for a brand-new diagram: a valid, non-empty Excalidraw scene so
@@ -419,13 +421,17 @@ mod tests {
 
     #[test]
     fn slides_seed_carries_the_canonical_frontmatter_block() {
-        // The exact block `parseSlidesSpec` matches on: frontmatter at the
-        // very start, `chan: kind: slides`, quoted 16:9 aspect. A drift here
-        // opens the new deck as a plain draft instead of slides.
-        assert!(NEW_SLIDES_CONTENT.starts_with(
-            "---\nchan:\n  kind: slides\n  slides:\n    aspect_ratio: \"16:9\"\n    zoom_factor: 2\n---\n"
-        ));
-        assert!(NEW_SLIDES_CONTENT.contains("# Slide 1"));
+        let (frontmatter, body) = NEW_SLIDES_CONTENT
+            .split_once("\n\n")
+            .expect("slides seed separates frontmatter from its body");
+        assert_eq!(
+            frontmatter,
+            "---\nchan:\n  kind: slides\n  slides:\n    aspect_ratio: \"16:9\"\n    zoom_factor: 2\n---"
+        );
+        assert_eq!(
+            body,
+            "# Slide 1\n* use `@pagebreak` on empty line to create new slide\n"
+        );
     }
 
     #[test]

@@ -37,3 +37,9 @@ The authoring corpus in `crates/chan-shell/src/help.rs` mirrors a deck skeleton 
 3. The caret lands at the end of the `# Slide 1` line, as it does today.
 4. Typing `@pagebreak` on an empty line below the bullet and committing with Space or Enter splits the deck into two slides.
 5. The seed's page-break line count is zero: the bullet does not register as a page break in `splitSlidePages`, in PDF export, or in present mode.
+
+## Implementation and validation
+
+`NEW_SLIDES_CONTENT` keeps the canonical frontmatter byte-for-byte and adds the instructional bullet immediately after `# Slide 1`. Its Rust test splits the seed at the frontmatter/body boundary and asserts both halves exactly, so metadata drift, wording drift, or an extra blank line fails the test.
+
+The frontend seed mirror asserts that `parseSlidesSpec` still selects the slides layout, `PAGE_BREAK_RE` matches zero seed lines, `splitSlidePages` returns exactly one page containing the bullet, appending a real `@pagebreak` line produces two pages, and `firstSlideHeadingCaret` still lands at the heading end. Present mode and deck PDF export both consume `splitSlidePages`, so the same one-page assertion covers their page count. The focused seed test passes, `slides.test.ts` passes 18/18, `page_break.test.ts` passes 9/9, and `cargo fmt --check` passes after the final Rust edit.
