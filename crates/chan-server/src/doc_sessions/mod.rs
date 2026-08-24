@@ -4380,8 +4380,13 @@ mod tests {
         let fx = fixture(&[("a.md", "v1")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
         drain(&mut rxa);
-        ha.session()
-            .test_set_disk_echo_ttl(Duration::from_millis(500));
+        // The expiry half of this test travels time with `test_age_disk_echo`
+        // rather than waiting, so the TTL only has to outlast the real time
+        // spent reaching the "still live" assertion below. Keep it far longer
+        // than that costs: at 500ms the two reconciles could outrun their own
+        // echo entry on a loaded machine, and the live-entry assertion failed
+        // as though the entry had never protected authority.
+        ha.session().test_set_disk_echo_ttl(Duration::from_secs(30));
         ha.session()
             .lock_state()
             .disk_echo
@@ -4408,7 +4413,7 @@ mod tests {
             "the restore observation remains scheduled"
         );
 
-        ha.session().test_age_disk_echo(Duration::from_millis(600));
+        ha.session().test_age_disk_echo(Duration::from_secs(31));
         fx.registry.reconcile_pending(&fx.workspace).await;
         assert_eq!(ha.session().authority_view().0, "v1");
         let frames = drain(&mut rxa);
