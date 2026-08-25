@@ -7733,7 +7733,6 @@ enum ConfigValueKind {
     OptionalString,
     StringList(usize),
     Color,
-    ReadOnly(&'static str),
     Collection(&'static str),
 }
 
@@ -7919,10 +7918,6 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     ConfigKeySpec {
         key: "editor.overlay_maximized",
         kind: ConfigValueKind::Bool,
-    },
-    ConfigKeySpec {
-        key: "editor.cs_dismissed",
-        kind: ConfigValueKind::ReadOnly("managed by the cs-link prompt"),
     },
     ConfigKeySpec {
         key: "editor.shortcuts",
@@ -8381,12 +8376,7 @@ fn config_key_spec(key: &str) -> Result<ConfigKeySpec> {
         .ok_or_else(|| {
             let settable = CONFIG_KEYS
                 .iter()
-                .filter(|spec| {
-                    !matches!(
-                        spec.kind,
-                        ConfigValueKind::ReadOnly(_) | ConfigValueKind::Collection(_)
-                    )
-                })
+                .filter(|spec| !matches!(spec.kind, ConfigValueKind::Collection(_)))
                 .map(|spec| spec.key)
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -8582,9 +8572,6 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
             serde_json::to_value(entries)?
         }
         ConfigValueKind::Color => Value::String(normalize_config_color(spec.key, raw)?),
-        ConfigValueKind::ReadOnly(reason) => {
-            anyhow::bail!("{} is read-only in `chan config`: {reason}", spec.key)
-        }
         ConfigValueKind::Collection(route) => {
             anyhow::bail!("{} is a collection; {route}", spec.key)
         }
@@ -12099,9 +12086,6 @@ mod tests {
             let actual = read_config_key(&editor, &server, &key)
                 .unwrap_or_else(|error| panic!("{key} is printed but not readable: {error}"));
             assert_eq!(actual, expected, "{key} read changed the serialized value");
-            if key == "editor.cs_dismissed" {
-                continue;
-            }
             let raw = scalar_to_string(&expected);
             if key.starts_with("server.") {
                 let mut updated = server.clone();
@@ -12122,10 +12106,6 @@ mod tests {
         let error = write_pref_key(&mut updated, "editor.shortcuts.workspace.open.web", "Mod+K")
             .unwrap_err();
         assert!(error.to_string().contains("collection"), "{error:#}");
-
-        let mut updated = editor;
-        let error = write_pref_key(&mut updated, "editor.cs_dismissed", "true").unwrap_err();
-        assert!(error.to_string().contains("read-only"), "{error:#}");
 
         let mut updated = server;
         let error = write_server_config_key(
