@@ -1094,9 +1094,12 @@ impl DocSession {
             Err(_) => {
                 let ws = Arc::clone(workspace);
                 let probe_path = self.path.clone();
-                let exists = tokio::task::spawn_blocking(move || ws.exists(&probe_path))
-                    .await
-                    .unwrap_or(true);
+                // `try_exists`, not `exists`: an unreachable mount must not
+                // read as "absent" on a path that tears session state down.
+                let exists =
+                    tokio::task::spawn_blocking(move || ws.try_exists(&probe_path).unwrap_or(true))
+                        .await
+                        .unwrap_or(true);
                 if exists {
                     // Present but unreadable (non-UTF-8, oversized):
                     // nothing safe to adopt.
@@ -1912,9 +1915,14 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         Ok(Err(_)) => {
             let ws = Arc::clone(workspace);
             let probe_path = session.path.clone();
-            let exists = tokio::task::spawn_blocking(move || ws.exists(&probe_path))
-                .await
-                .unwrap_or(true);
+            // `try_exists`, not `exists`: `exists` collapses every errno into
+            // false, so a stalled network mount answering ENOTCONN would read
+            // as "the user deleted this file" and mark the session removed.
+            // An unreachable root is unknown, and unknown holds.
+            let exists =
+                tokio::task::spawn_blocking(move || ws.try_exists(&probe_path).unwrap_or(true))
+                    .await
+                    .unwrap_or(true);
             let mut st = session.lock_state();
             if exists {
                 if st.session_state.removal_observation().is_some() {

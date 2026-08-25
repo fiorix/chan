@@ -95,6 +95,16 @@ pub enum WorkspaceStatus {
     /// The last mount attempt failed; [`LauncherWorkspace::error`] carries the
     /// reason. The launcher clears the spinner and surfaces the reason.
     Error,
+    /// Mounted, but the filesystem under the root is currently unreachable --
+    /// a network mount whose client stalled, died, or is being remounted.
+    ///
+    /// Distinct from both `Running` (which claims the workspace works) and
+    /// `Error` (which reads as a failed mount the user should retry). The
+    /// tenant stays up and keeps its live state; the health probe clears this
+    /// back to `Running` on its own once the mount answers again, including
+    /// across a remount. The launcher shows the row as degraded and keeps the
+    /// toggle enabled, because turning it off is still a valid thing to do.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,6 +466,10 @@ enum MountState {
     Removing,
     /// The last mount attempt failed; the string is the short human reason.
     Error(String),
+    /// Mounted but the filesystem under the root is unreachable; the string is
+    /// the transport reason. Set and cleared by the health probe, never by a
+    /// mount attempt.
+    Unavailable(String),
 }
 
 struct HostedWorkspaceRuntime {
@@ -475,6 +489,17 @@ impl HostedWorkspaceRuntime {
     /// Stop and join the tenant tasks before clearing the workspace cell, then
     /// verify the workspace flock is released before returning.
     async fn shutdown(mut self) {
+        // Signal the reindex coordinator FIRST. Its pass runs on the blocking
+        // pool holding a strong `Arc<Workspace>`, and `spawn_blocking` cannot
+        // be cancelled: if the pass is mid-walk when we tear down, that handle
+        // outlives the tenant, keeps the writer flock, and makes every later
+        // open of this root fail `WorkspaceAlreadyOpen` for the life of the
+        // process. The cancel flag is checked at file boundaries, so raising it
+        // here bounds the strand to one filesystem call instead of a whole
+        // pass. On a stalled network mount that single call can still hang --
+        // which is why `wait_for_workspace_release` is bounded rather than
+        // infinite -- but the window shrinks from minutes to one operation.
+        self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.shutdown().await;
         let released = self.artifacts.cell.clear();
         if let Some((weak, lock_dir)) = released {
@@ -493,6 +518,7 @@ impl Drop for HostedWorkspaceRuntime {
         // Cancellation/unwind fallback: no async join is possible here. Abort
         // the tasks explicitly before clearing the cell so field declaration
         // order can never expose a cleared cell to a detached flusher.
+        self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.cancel_and_abort();
         let _ = self.artifacts.cell.clear();
     }
@@ -2832,10 +2858,20 @@ impl WorkspaceHost {
             _ => {}
         }
         if self.is_root_mounted(root) {
-            return (WorkspaceStatus::Running, None);
+            // A mounted tenant whose filesystem is unreachable is NOT running.
+            // Reporting `running` over a dead mount is what let a workspace sit
+            // green in the launcher while every read returned a transport
+            // error, so the degraded state wins here.
+            return match state {
+                Some(MountState::Unavailable(reason)) => {
+                    (WorkspaceStatus::Unavailable, Some(reason))
+                }
+                _ => (WorkspaceStatus::Running, None),
+            };
         }
         match state {
             Some(MountState::Starting) => (WorkspaceStatus::Starting, None),
+            Some(MountState::Unavailable(reason)) => (WorkspaceStatus::Unavailable, Some(reason)),
             Some(MountState::Error(reason)) => (WorkspaceStatus::Error, Some(reason)),
             Some(MountState::Closing) | Some(MountState::Removing) => {
                 (WorkspaceStatus::Stopped, None)
@@ -2928,6 +2964,93 @@ impl WorkspaceHost {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, MountState::Error(reason));
         self.notify_window_change();
+    }
+
+    /// Probe every mounted workspace's root and reconcile the degraded
+    /// overlay, adopting a remount in place where one happened.
+    ///
+    /// This exists because a mounted tenant has no other way to learn that its
+    /// filesystem went away: nothing in the request path runs when the user is
+    /// idle, so a dead mount stayed `running` until someone tried to read
+    /// through it. Worse, a capability handle does not survive a remount --
+    /// the fd is bound to the mount's kernel connection, so a repaired mount
+    /// left the workspace permanently broken with no way back except a
+    /// devserver restart. `revalidate_root` swaps the handle in place, which is
+    /// the only recovery available while this process still holds the writer
+    /// lock for that root.
+    ///
+    /// Returns the number of roots whose handle was refreshed. Blocking: the
+    /// caller runs it off the async runtime.
+    pub fn probe_mounted_roots(&self) -> usize {
+        let mounted: Vec<(PathBuf, Arc<Workspace>)> = {
+            let Ok(workspaces) = self.workspaces.read() else {
+                return 0;
+            };
+            workspaces
+                .values()
+                .filter_map(|runtime| {
+                    let workspace = runtime.artifacts.cell.workspace()?;
+                    Some((runtime.root.clone(), workspace))
+                })
+                .collect()
+        };
+        let mut refreshed = 0;
+        for (root, workspace) in mounted {
+            let key = canonical_key(&root);
+            let was_degraded = matches!(
+                self.mount_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&key),
+                Some(MountState::Unavailable(_))
+            );
+            match workspace.revalidate_root() {
+                Ok(remounted) => {
+                    if remounted {
+                        refreshed += 1;
+                    }
+                    if was_degraded {
+                        self.mount_state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&key);
+                        tracing::info!(
+                            root = %root.display(),
+                            remounted,
+                            "workspace root is reachable again",
+                        );
+                        self.notify_window_change();
+                    }
+                }
+                Err(chan_workspace::ChanError::RootUnavailable { reason, .. }) => {
+                    if !was_degraded {
+                        tracing::warn!(
+                            root = %root.display(),
+                            %reason,
+                            "workspace root is unreachable; marking the row degraded",
+                        );
+                        self.mount_state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, MountState::Unavailable(reason));
+                        self.notify_window_change();
+                    }
+                }
+                // A genuinely missing or replaced root is the terminal
+                // condition WL-13/WL-14 already own; the probe does not tear
+                // tenants down, it only reports.
+                Err(error) => {
+                    if !was_degraded {
+                        tracing::warn!(
+                            root = %root.display(),
+                            %error,
+                            "workspace root probe failed",
+                        );
+                    }
+                }
+            }
+        }
+        refreshed
     }
 
     /// Drop a workspace root's transient lifecycle state (it settled to running,
