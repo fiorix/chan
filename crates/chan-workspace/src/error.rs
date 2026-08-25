@@ -26,6 +26,18 @@ pub enum ChanError {
     WorkspaceNotRegistered(PathBuf),
     #[error("workspace root does not exist: {0}")]
     WorkspaceRootMissing(PathBuf),
+    /// The workspace root is not reachable right now, and we cannot say
+    /// whether its contents still exist.
+    ///
+    /// Distinct from [`ChanError::WorkspaceRootMissing`], which is terminal:
+    /// this is a TRANSPORT failure. A network filesystem whose client has
+    /// stalled, been killed, or been remounted answers every syscall
+    /// `ENOTCONN`/`ESTALE`/`EIO` rather than `ENOENT`, and folding that into
+    /// "the root is gone" tells an editor its file was deleted when the file
+    /// is fine and the mount is not. Callers hold their state and retry;
+    /// they must not treat this as removal.
+    #[error("workspace root is unavailable ({reason}): {path}")]
+    RootUnavailable { path: PathBuf, reason: String },
     #[error("workspace is locked by another process")]
     WorkspaceLocked,
     #[error("workspace is already open in this process; drop the existing handle first")]

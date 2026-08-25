@@ -2,12 +2,71 @@
 // plus the root path, canonical form, and identity checks that every
 // sandboxed user-path operation routes through.
 
+use std::sync::{Arc, RwLock};
+
 use crate::error::{ChanError, Result};
 use crate::fs_ops::{self, AtomicWriteKind, AtomicWriteSink};
 use crate::workspace::{
     semantic_write_budget, BoundedFileReader, CopyOutcome, DirEntry, FileStat, TextReadEvent,
     WorkspacePath, WritableFile,
 };
+
+/// Whether an `io::Error` is the filesystem saying "gone" or "unreachable".
+///
+/// A network mount that has stalled, had its client killed, or been remounted
+/// underneath us does not answer `ENOENT` -- it answers one of these. The
+/// distinction is load-bearing: `ENOENT` is terminal and may tear a session
+/// down, while these are transport failures that say nothing about whether
+/// the content still exists, and must never be read as removal.
+fn is_transport_error(error: &std::io::Error) -> bool {
+    // `ErrorKind` has no stable variant for most of these, so match the raw
+    // errno. Anything not listed keeps its existing classification.
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::ENOTCONN     // FUSE daemon gone: "Transport endpoint is not connected"
+                | libc::ESTALE // handle invalidated by a remount / server restart
+                | libc::EIO    // generic lower-layer failure
+                | libc::ENODEV
+                | libc::EHOSTDOWN
+                | libc::EHOSTUNREACH
+                | libc::ENETDOWN
+                | libc::ENETUNREACH
+                | libc::ETIMEDOUT
+                | libc::EREMOTEIO
+        )
+    )
+}
+
+/// Map a root-level `io::Error` to the typed condition it represents:
+/// absent (terminal) or unreachable (transient).
+fn root_error(path: &std::path::Path, error: &std::io::Error) -> ChanError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ChanError::WorkspaceRootMissing(path.to_path_buf())
+    } else if is_transport_error(error) {
+        ChanError::RootUnavailable {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        }
+    } else {
+        ChanError::Io(error.to_string())
+    }
+}
+
+/// The part of a rooted filesystem that a remount replaces.
+///
+/// The capability `Dir` is bound to the mount's kernel connection, not to its
+/// path: when a FUSE client dies, every operation on the retained fd answers
+/// `ENOTCONN` forever, and mounting a fresh client at the same path does not
+/// revive it. So the handle, the canonical path it resolved to, and the unix
+/// identity it was opened against move together and are replaceable as a unit
+/// by [`RootedFs::revalidate`].
+struct RootHandle {
+    canon: std::path::PathBuf,
+    #[cfg(unix)]
+    identity: (u64, u64),
+    dir: Arc<cap_std::fs::Dir>,
+}
 
 /// Per-owner listing policy: the workspace hides its top-level control
 /// dirs and tolerates lossy names; a standalone owner shows everything
@@ -26,24 +85,21 @@ pub(crate) struct RootedFs {
     /// Workspace root as registered; the display form used by errors and
     /// the live path re-checked by `ensure_root_available`.
     root_path: std::path::PathBuf,
-    /// Canonical form of `root_path`, computed once at open. Used where
-    /// an absolute path is needed and as the slow-path baseline for
-    /// trash::restore.
-    root_canon: std::path::PathBuf,
-    /// Device/inode identity of the capability root on Unix. A deleted root
-    /// can be recreated at the same path while this handle still points at the
-    /// unlinked original; path existence alone cannot distinguish them.
-    #[cfg(unix)]
-    root_identity: (u64, u64),
-    /// Capability-based handle to the workspace root. All filesystem
-    /// ops on user-controllable paths go through this so a mid-path
-    /// symlink swap between path-resolution and the actual op
-    /// cannot escape the sandbox: cap-std opens each path component
-    /// with O_NOFOLLOW and refuses paths that walk outside the
-    /// dir handle. The previous resolve_safe_strict + std::fs::op
-    /// pair had a small TOCTOU window between the lexical sandbox
-    /// check and the kernel-side path walk; cap-std closes it.
-    dir: cap_std::fs::Dir,
+    /// The replaceable half: the capability handle plus the canonical path and
+    /// unix identity it was opened against.
+    ///
+    /// All filesystem ops on user-controllable paths route through the `Dir`
+    /// so a mid-path symlink swap between path-resolution and the actual op
+    /// cannot escape the sandbox: cap-std opens each path component with
+    /// `O_NOFOLLOW` and refuses paths that walk outside the dir handle. The
+    /// previous resolve_safe_strict + std::fs::op pair had a small TOCTOU
+    /// window between the lexical sandbox check and the kernel-side path walk;
+    /// cap-std closes it.
+    ///
+    /// Behind an `RwLock` because a remount must be able to swap the handle
+    /// under concurrent readers ([`RootedFs::revalidate`]); the lock is taken
+    /// for the length of an `Arc` clone, never across an IO call.
+    root: RwLock<RootHandle>,
     /// Effective transfer ceiling inherited immutably from the owning Library.
     /// Kept separate from the current fixed transfer enforcement sites.
     transfer_max_bytes: u64,
@@ -61,60 +117,62 @@ impl RootedFs {
         // shape itself is no longer what the user signed up for.
         // `exists()` follows symlinks, so we use lstat here to catch
         // a "directory turned into a symlink" replacement.
-        let meta = match std::fs::symlink_metadata(&root_path) {
+        let root = Self::open_root_handle(&root_path)?;
+        Ok(RootedFs {
+            root_path,
+            root: RwLock::new(root),
+            transfer_max_bytes,
+        })
+    }
+
+    /// Open one [`RootHandle`] for `root_path`: shape check, ambient `Dir`
+    /// open, canonical form, and unix identity capture. Shared by the initial
+    /// open and by [`revalidate`](Self::revalidate)'s re-open, so a refreshed
+    /// handle is built through exactly the same gates as the original.
+    fn open_root_handle(root_path: &std::path::Path) -> Result<RootHandle> {
+        let meta = match std::fs::symlink_metadata(root_path) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(root_path.clone()));
-            }
-            Err(e) => return Err(ChanError::Io(e.to_string())),
+            Err(e) => return Err(root_error(root_path, &e)),
         };
         let ft = meta.file_type();
         if !ft.is_dir() || ft.is_symlink() {
             return Err(ChanError::SpecialFile {
                 kind: fs_ops::describe_file_kind(&ft).to_string(),
-                path: root_path.clone(),
+                path: root_path.to_path_buf(),
             });
         }
-        let root_canon = match root_path.canonicalize() {
+        let canon = match root_path.canonicalize() {
             Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(root_path.clone()));
-            }
-            Err(error) => {
-                return Err(ChanError::Io(format!(
-                    "canonicalize workspace root: {error}"
-                )));
-            }
+            Err(error) => return Err(root_error(root_path, &error)),
         };
-        let dir = cap_std::fs::Dir::open_ambient_dir(&root_path, cap_std::ambient_authority())
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    ChanError::WorkspaceRootMissing(root_path.clone())
-                } else {
-                    ChanError::Io(format!("open workspace root: {error}"))
-                }
-            })?;
+        let dir = cap_std::fs::Dir::open_ambient_dir(root_path, cap_std::ambient_authority())
+            .map_err(|error| root_error(root_path, &error))?;
         #[cfg(unix)]
-        let root_identity = {
+        let identity = {
             use cap_std::fs::MetadataExt as _;
-            let opened = dir
-                .dir_metadata()
-                .map_err(|e| ChanError::Io(format!("stat open workspace root: {e}")))?;
+            let opened = dir.dir_metadata().map_err(|e| root_error(root_path, &e))?;
             let identity = (opened.dev(), opened.ino());
             use std::os::unix::fs::MetadataExt as _;
             if identity != (meta.dev(), meta.ino()) {
-                return Err(ChanError::WorkspaceRootMissing(root_path.clone()));
+                return Err(ChanError::WorkspaceRootMissing(root_path.to_path_buf()));
             }
             identity
         };
-        Ok(RootedFs {
-            root_path,
-            root_canon,
+        Ok(RootHandle {
+            canon,
             #[cfg(unix)]
-            root_identity,
-            dir,
-            transfer_max_bytes,
+            identity,
+            dir: Arc::new(dir),
         })
+    }
+
+    /// Canonical form of the root as the live handle resolved it.
+    fn canon(&self) -> std::path::PathBuf {
+        self.root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .canon
+            .clone()
     }
 
     /// Validate `rel` into a pure-`Component::Normal` path for the `Dir`.
@@ -128,18 +186,94 @@ impl RootedFs {
     /// drafts are real in-root files under `<drafts_dir_name>/...`, so
     /// `.Drafts/untitled-1/draft.md` resolves like any other path. The
     /// cap-std sandbox prevents traversal escape.
-    pub(crate) fn resolve_io(&self, rel: &str) -> Result<(&cap_std::fs::Dir, std::path::PathBuf)> {
+    pub(crate) fn resolve_io(
+        &self,
+        rel: &str,
+    ) -> Result<(Arc<cap_std::fs::Dir>, std::path::PathBuf)> {
         let validated = fs_ops::validate_rel(rel)?;
-        Ok((&self.dir, validated))
+        Ok((self.dir(), validated))
+    }
+
+    /// Re-open the capability handle when the mount underneath the root has
+    /// been replaced, and report whether it was.
+    ///
+    /// A FUSE handle is bound to the mount's kernel connection: once that
+    /// client dies every operation on the retained fd answers `ENOTCONN`
+    /// forever, and mounting a fresh client at the same path does NOT revive
+    /// it. Re-opening the workspace is not an option either -- this process
+    /// still holds the per-workspace flock, so a second open is refused
+    /// `WorkspaceAlreadyOpen`. So the handle is refreshed in place instead.
+    ///
+    /// A remount is adopted only when the root still canonicalizes to the same
+    /// path AND its inode is unchanged while its device number moved: that is
+    /// the signature of the same directory reached through a new mount. A
+    /// changed inode means a DIFFERENT directory now occupies the path (the
+    /// `rm -rf root && mkdir root` shape), which stays terminal
+    /// [`ChanError::WorkspaceRootMissing`] -- chan must never silently adopt a
+    /// recreated root.
+    ///
+    /// Returns `Ok(true)` when the handle was replaced, `Ok(false)` when the
+    /// existing one is still good, and the typed root condition otherwise.
+    pub(crate) fn revalidate(&self) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            let (current_canon, current_identity) = {
+                let root = self.root.read().unwrap_or_else(|e| e.into_inner());
+                (root.canon.clone(), root.identity)
+            };
+            let meta = match std::fs::symlink_metadata(&self.root_path) {
+                Ok(meta) => meta,
+                Err(error) => return Err(root_error(&self.root_path, &error)),
+            };
+            use std::os::unix::fs::MetadataExt as _;
+            let live_identity = (meta.dev(), meta.ino());
+            if live_identity == current_identity {
+                // Same mount, same directory. The handle may still be dead if
+                // the connection was aborted without the mount going away, so
+                // prove it with a cheap op before declaring the root healthy.
+                return match self.dir().dir_metadata() {
+                    Ok(_) => Ok(false),
+                    Err(error) if is_transport_error(&error) => Err(ChanError::RootUnavailable {
+                        path: self.root_path.clone(),
+                        reason: error.to_string(),
+                    }),
+                    Err(error) => Err(root_error(&self.root_path, &error)),
+                };
+            }
+            let live_canon = match self.root_path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => return Err(root_error(&self.root_path, &error)),
+            };
+            let remounted = live_canon == current_canon && live_identity.1 == current_identity.1;
+            if !remounted {
+                return Err(ChanError::WorkspaceRootMissing(self.root_path.clone()));
+            }
+            let refreshed = Self::open_root_handle(&self.root_path)?;
+            tracing::warn!(
+                root = %self.root_path.display(),
+                from_dev = current_identity.0,
+                to_dev = refreshed.identity.0,
+                "workspace root was remounted; refreshing the capability handle in place",
+            );
+            *self.root.write().unwrap_or_else(|e| e.into_inner()) = refreshed;
+            Ok(true)
+        }
+        #[cfg(not(unix))]
+        {
+            match self.dir().dir_metadata() {
+                Ok(_) => Ok(false),
+                Err(error) => Err(root_error(&self.root_path, &error)),
+            }
+        }
     }
 
     /// Map a public chan path to the real host path under the root.
     pub(crate) fn resolve_physical_path(&self, rel: &str) -> Result<std::path::PathBuf> {
         let trimmed = rel.trim_matches('/');
         if trimmed.is_empty() || trimmed == "." {
-            return Ok(self.root_canon.clone());
+            return Ok(self.canon());
         }
-        fs_ops::resolve_safe_strict_canon(self.root(), &self.root_canon, trimmed)
+        fs_ops::resolve_safe_strict_canon(self.root(), &self.canon(), trimmed)
     }
 
     /// Map a public chan path to an existing real directory.
@@ -155,10 +289,11 @@ impl RootedFs {
     /// Map a host path back into chan's public namespace when in-root.
     pub(crate) fn physical_path_to_virtual(&self, path: &std::path::Path) -> Option<String> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if path == self.root_canon {
+        let canon = self.canon();
+        if path == canon {
             return Some(String::new());
         }
-        if let Ok(rel) = path.strip_prefix(&self.root_canon) {
+        if let Ok(rel) = path.strip_prefix(&canon) {
             return Some(posix_path(rel));
         }
         None
@@ -175,13 +310,18 @@ impl RootedFs {
     }
 
     /// Verify that the root path still resolves to the opened directory.
+    ///
+    /// Three outcomes, deliberately kept apart. `Ok` is a healthy root.
+    /// [`ChanError::WorkspaceRootMissing`] is terminal: the directory is gone
+    /// or a different one now occupies the path. [`ChanError::RootUnavailable`]
+    /// is transient: the mount is unreachable and says nothing about whether
+    /// the content survives, so callers hold their state instead of tearing it
+    /// down. A root that was merely REMOUNTED is none of the three -- it is
+    /// adopted in place by [`revalidate`](Self::revalidate) and reads `Ok`.
     pub(crate) fn ensure_root_available(&self) -> Result<()> {
         let meta = match std::fs::symlink_metadata(&self.root_path) {
             Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(self.root_path.clone()));
-            }
-            Err(error) => return Err(ChanError::Io(error.to_string())),
+            Err(error) => return Err(root_error(&self.root_path, &error)),
         };
         let file_type = meta.file_type();
         if !file_type.is_dir() || file_type.is_symlink() {
@@ -192,42 +332,43 @@ impl RootedFs {
         }
         let live_canon = match self.root_path.canonicalize() {
             Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChanError::WorkspaceRootMissing(self.root_path.clone()));
-            }
-            Err(error) => {
-                return Err(ChanError::Io(format!(
-                    "canonicalize workspace root: {error}"
-                )));
-            }
+            Err(error) => return Err(root_error(&self.root_path, &error)),
         };
-        if live_canon != self.root_canon {
+        if live_canon != self.canon() {
             return Err(ChanError::WorkspaceRootMissing(self.root_path.clone()));
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            if (meta.dev(), meta.ino()) != self.root_identity {
-                return Err(ChanError::WorkspaceRootMissing(self.root_path.clone()));
+            let identity = self.root.read().unwrap_or_else(|e| e.into_inner()).identity;
+            if (meta.dev(), meta.ino()) != identity {
+                // Either a remount (adopt it) or a different directory at the
+                // same path (terminal). `revalidate` owns that distinction.
+                self.revalidate()?;
             }
         }
         Ok(())
     }
 
-    /// Canonical root captured at open.
-    pub(crate) fn canonical_root(&self) -> &std::path::Path {
-        &self.root_canon
+    /// Canonical root as the live handle resolved it. Owned rather than
+    /// borrowed: a remount can replace it, so there is no stable reference
+    /// to hand out.
+    pub(crate) fn canonical_root(&self) -> std::path::PathBuf {
+        self.canon()
     }
 
     /// Capability handle to the root; sandboxed relative ops go through it.
-    pub(crate) fn dir(&self) -> &cap_std::fs::Dir {
-        &self.dir
+    /// Cloned out under the lock so no IO call ever runs while the lock is
+    /// held and a concurrent [`revalidate`](Self::revalidate) is never blocked
+    /// behind a slow read.
+    pub(crate) fn dir(&self) -> Arc<cap_std::fs::Dir> {
+        Arc::clone(&self.root.read().unwrap_or_else(|e| e.into_inner()).dir)
     }
 
     /// Classify a path through the sandbox; a missing leaf is a value.
     pub(crate) fn classify_workspace_path(&self, rel: &str) -> Result<WorkspacePath> {
         let rel_path = self.rel(rel)?;
-        let metadata = match self.dir.symlink_metadata(&rel_path) {
+        let metadata = match self.dir().symlink_metadata(&rel_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(WorkspacePath::Missing);
@@ -252,7 +393,7 @@ impl RootedFs {
         // directory: callers need a typed root-loss error instead.
         self.ensure_root_available()?;
         let rel_path = self.rel(rel)?;
-        let stat = match self.dir.symlink_metadata(&rel_path) {
+        let stat = match self.dir().symlink_metadata(&rel_path) {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if !file_type.is_file() || file_type.is_symlink() {
@@ -275,7 +416,7 @@ impl RootedFs {
 
         if let Some(parent) = rel_path.parent() {
             if !parent.as_os_str().is_empty() {
-                self.dir
+                self.dir()
                     .create_dir_all(parent)
                     .map_err(|error| map_cap_err(error, &rel_path))?;
             }
@@ -283,16 +424,13 @@ impl RootedFs {
         let parent = rel_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty());
-        let parent_dir;
         let target_dir = match parent {
-            Some(parent) => {
-                parent_dir = self
-                    .dir
+            Some(parent) => Arc::new(
+                self.dir()
                     .open_dir(parent)
-                    .map_err(|error| map_cap_err(error, &rel_path))?;
-                &parent_dir
-            }
-            None => &self.dir,
+                    .map_err(|error| map_cap_err(error, &rel_path))?,
+            ),
+            None => self.dir(),
         };
         let parent_metadata = target_dir
             .dir_metadata()
@@ -305,7 +443,7 @@ impl RootedFs {
                     .display()
             )));
         }
-        let probe = cap_tempfile::TempFile::new(target_dir)
+        let probe = cap_tempfile::TempFile::new(&target_dir)
             .map_err(|error| map_cap_err(error, &rel_path))?;
         drop(probe);
         Ok(WritableFile { stat })
@@ -342,7 +480,7 @@ impl RootedFs {
         let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
         let (dir, rel_path) = self.resolve_io(rel)?;
         if let Err(error) =
-            fs_ops::atomic_write_stream_in(dir, &rel_path, kind, limit, validate_utf8, feed)
+            fs_ops::atomic_write_stream_in(&dir, &rel_path, kind, limit, validate_utf8, feed)
         {
             // Prefer the terminal root-loss condition over an incidental
             // mid-delete I/O failure. This keeps an editor autosave racing
@@ -383,7 +521,7 @@ impl RootedFs {
         use std::io::{Seek, SeekFrom};
 
         let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
         let mut file = dir
             .open(&rel_path)
             .map_err(|error| map_cap_err(error, &rel_path))?;
@@ -406,7 +544,7 @@ impl RootedFs {
     /// Read raw bytes from a regular file.
     pub(crate) fn read(&self, rel: &str) -> Result<Vec<u8>> {
         let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
         let mut f = dir
             .open(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
@@ -422,7 +560,7 @@ impl RootedFs {
         let Ok((dir, rel_path)) = self.resolve_io(rel) else {
             return false;
         };
-        if ensure_regular_file_in(dir, &rel_path).is_err() {
+        if ensure_regular_file_in(&dir, &rel_path).is_err() {
             return false;
         }
         let Ok(f) = dir.open(&rel_path) else {
@@ -454,7 +592,7 @@ impl RootedFs {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
         let mut f = dir
             .open(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
@@ -471,7 +609,7 @@ impl RootedFs {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
         let mut f = dir
             .open(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
@@ -502,7 +640,7 @@ impl RootedFs {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
-        ensure_regular_file_in(dir, &rel_path)?;
+        ensure_regular_file_in(&dir, &rel_path)?;
         let mut f = dir
             .open(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
@@ -600,12 +738,29 @@ impl RootedFs {
 
     /// True iff `rel` resolves under the root to a regular file.
     pub(crate) fn exists(&self, rel: &str) -> bool {
-        let Ok((dir, rel_path)) = self.resolve_io(rel) else {
-            return false;
-        };
+        self.try_exists(rel).unwrap_or(false)
+    }
+
+    /// [`exists`](Self::exists), but an unreachable mount is an error rather
+    /// than a `false`.
+    ///
+    /// The bool form has to answer something when the filesystem itself is
+    /// broken, and "absent" is the only choice it has -- which is a lie a
+    /// caller must not act on destructively. Anything that would TEAR DOWN
+    /// state on absence (the document reconciler's removal path) asks here
+    /// instead, so a stalled network mount cannot be mistaken for the user
+    /// deleting their file. Callers that only decorate a listing keep using
+    /// the lenient bool.
+    pub(crate) fn try_exists(&self, rel: &str) -> Result<bool> {
+        let (dir, rel_path) = self.resolve_io(rel)?;
         match dir.symlink_metadata(&rel_path) {
-            Ok(m) => m.is_file() && !m.file_type().is_symlink(),
-            Err(_) => false,
+            Ok(m) => Ok(m.is_file() && !m.file_type().is_symlink()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) if is_transport_error(&error) => Err(ChanError::RootUnavailable {
+                path: self.root_path.join(&rel_path),
+                reason: error.to_string(),
+            }),
+            Err(_) => Ok(false),
         }
     }
 
@@ -653,12 +808,12 @@ impl RootedFs {
         // so `.Drafts/<name>` lists through the workspace-root handle
         // like any other path.
         let read = if at_root {
-            self.dir
+            self.dir()
                 .read_dir(".")
                 .map_err(|e| ChanError::Io(e.to_string()))?
         } else {
             let rel_path = self.rel(rel)?;
-            self.dir
+            self.dir()
                 .read_dir(&rel_path)
                 .map_err(|e| ChanError::Io(e.to_string()))?
         };
@@ -723,7 +878,7 @@ impl RootedFs {
     /// Create a directory chain under the root.
     pub(crate) fn create_dir(&self, rel: &str) -> Result<()> {
         let rel_path = self.rel(rel)?;
-        self.dir
+        self.dir()
             .create_dir_all(&rel_path)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         Ok(())
@@ -738,7 +893,7 @@ impl RootedFs {
         // is well-defined at the syscall level but not something
         // the editor should ever do silently.)
         let src_meta = self
-            .dir
+            .dir()
             .symlink_metadata(&from_rel)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         let src_ft = src_meta.file_type();
@@ -751,7 +906,7 @@ impl RootedFs {
         self.ensure_writable(to)?;
         if let Some(parent) = to_rel.parent() {
             if !parent.as_os_str().is_empty() {
-                self.dir
+                self.dir()
                     .create_dir_all(parent)
                     .map_err(|e| ChanError::Io(e.to_string()))?;
             }
@@ -759,8 +914,8 @@ impl RootedFs {
         // cap-std rename within the same Dir is TOCTOU-free: source
         // and destination resolve through the dir handle, no
         // path-walk through swappable ancestors.
-        self.dir
-            .rename(&from_rel, &self.dir, &to_rel)
+        self.dir()
+            .rename(&from_rel, &self.dir(), &to_rel)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         Ok(())
     }
@@ -770,7 +925,7 @@ impl RootedFs {
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
         let src_meta = self
-            .dir
+            .dir()
             .symlink_metadata(&from_rel)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         let src_ft = src_meta.file_type();
@@ -783,7 +938,7 @@ impl RootedFs {
         // Refuse to clobber: paste-collision resolution happens in the
         // server (it picks a free name); a bare copy onto an existing
         // path is a programming error, not a silent overwrite.
-        if self.dir.symlink_metadata(&to_rel).is_ok() {
+        if self.dir().symlink_metadata(&to_rel).is_ok() {
             return Err(ChanError::Io(format!(
                 "copy destination already exists: {to}"
             )));
@@ -794,7 +949,7 @@ impl RootedFs {
             self.copy_one_file(&from_rel, &to_rel, &to_canon, &mut created)?;
         } else {
             // Create the destination root dir, then walk descendants.
-            self.dir
+            self.dir()
                 .create_dir_all(&to_rel)
                 .map_err(|e| ChanError::Io(e.to_string()))?;
             self.copy_subtree(&from_rel, &to_rel, &to_canon, &mut created)?;
@@ -804,7 +959,7 @@ impl RootedFs {
     }
 
     /// Copy one regular file from `src_rel` to `dst_rel` (both relative
-    /// to `self.dir`), recording the destination's workspace-rooted POSIX
+    /// to `self.dir()`), recording the destination's workspace-rooted POSIX
     /// path in `created`.
     fn copy_one_file(
         &self,
@@ -847,7 +1002,7 @@ impl RootedFs {
         created: &mut Vec<String>,
     ) -> Result<()> {
         let read = self
-            .dir
+            .dir()
             .read_dir(src_rel)
             .map_err(|e| ChanError::Io(e.to_string()))?;
         for entry in read {
@@ -871,7 +1026,7 @@ impl RootedFs {
                 });
             }
             if ft.is_dir() {
-                self.dir
+                self.dir()
                     .create_dir_all(&child_dst)
                     .map_err(|e| ChanError::Io(e.to_string()))?;
                 self.copy_subtree(&child_src, &child_dst, &child_dst_canon, created)?;
@@ -923,7 +1078,7 @@ impl RootedFs {
         let Ok(rel_path) = self.rel(rel) else {
             return false;
         };
-        self.dir.symlink_metadata(&rel_path).is_ok()
+        self.dir().symlink_metadata(&rel_path).is_ok()
     }
 }
 
@@ -1124,4 +1279,115 @@ pub(crate) fn split_name_ext(name: &str) -> (String, String) {
 
 fn posix_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod root_availability_tests {
+    use super::*;
+
+    fn fs_at(root: &std::path::Path) -> RootedFs {
+        RootedFs::open(root.to_path_buf(), 1 << 20).expect("open rooted fs")
+    }
+
+    #[test]
+    fn transport_errnos_are_not_not_found() {
+        // The whole point of the split: a dead network mount answers one of
+        // these, and reading any of them as "the file is gone" is what told an
+        // editor its file had been deleted while the mount was merely stalled.
+        for errno in [
+            libc::ENOTCONN,
+            libc::ESTALE,
+            libc::EIO,
+            libc::EHOSTDOWN,
+            libc::ETIMEDOUT,
+        ] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert!(
+                is_transport_error(&error),
+                "errno {errno} must be transport"
+            );
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+        assert!(!is_transport_error(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(!is_transport_error(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
+
+    #[test]
+    fn root_error_separates_absent_from_unreachable() {
+        let path = std::path::Path::new("/nonexistent/root");
+        assert!(matches!(
+            root_error(path, &std::io::Error::from_raw_os_error(libc::ENOENT)),
+            ChanError::WorkspaceRootMissing(_)
+        ));
+        assert!(matches!(
+            root_error(path, &std::io::Error::from_raw_os_error(libc::ENOTCONN)),
+            ChanError::RootUnavailable { .. }
+        ));
+        // Anything unclassified keeps its previous generic mapping rather than
+        // silently joining either terminal bucket.
+        assert!(matches!(
+            root_error(path, &std::io::Error::from_raw_os_error(libc::EACCES)),
+            ChanError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn try_exists_reports_absence_as_a_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("there.md"), "x").expect("seed");
+        let fs = fs_at(dir.path());
+        assert!(fs.try_exists("there.md").expect("present"));
+        assert!(!fs.try_exists("gone.md").expect("absent is a value"));
+    }
+
+    #[test]
+    fn revalidate_is_a_no_op_on_a_healthy_unchanged_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = fs_at(dir.path());
+        assert!(
+            !fs.revalidate().expect("healthy root"),
+            "nothing to refresh"
+        );
+        fs.ensure_root_available().expect("root is available");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_recreated_root_stays_terminal_and_is_never_adopted() {
+        // WL-13/WL-14: a root that was deleted and remade is a DIFFERENT
+        // directory. The remount adoption path must not launder it back into a
+        // healthy workspace, so the inode change keeps it terminal.
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("ws");
+        std::fs::create_dir(&root).expect("create root");
+        let fs = fs_at(&root);
+        std::fs::remove_dir_all(&root).expect("remove root");
+        std::fs::create_dir(&root).expect("recreate root");
+        assert!(
+            matches!(fs.revalidate(), Err(ChanError::WorkspaceRootMissing(_))),
+            "a recreated root must not be adopted as a remount"
+        );
+        assert!(matches!(
+            fs.ensure_root_available(),
+            Err(ChanError::WorkspaceRootMissing(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deleted_root_reports_missing_not_unreachable() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("ws");
+        std::fs::create_dir(&root).expect("create root");
+        let fs = fs_at(&root);
+        std::fs::remove_dir_all(&root).expect("remove root");
+        assert!(matches!(
+            fs.ensure_root_available(),
+            Err(ChanError::WorkspaceRootMissing(_))
+        ));
+    }
 }

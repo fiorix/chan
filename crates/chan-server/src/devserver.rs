@@ -297,6 +297,12 @@ pub fn persisted_devserver_port() -> Option<u16> {
 /// workspace and building its tenant. A timeout remains a visible desired-on
 /// failure; it never wedges systemd READY forever.
 const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often a mounted workspace's root is probed for reachability and for a
+/// remount underneath it. Cheap (one `lstat` per mounted root) and far below
+/// the human threshold for noticing a degraded row, while rare enough that a
+/// stalled mount's hung probe cannot pile up.
+const ROOT_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Absolute cold-start restore budget. Remaining desired-on rows become
 /// visible failures when it expires; the systemd unit grants ten minutes.
 const STARTUP_RESTORE_TIMEOUT: Duration = Duration::from_secs(8 * 60);
@@ -1308,7 +1314,16 @@ impl DevserverState {
         let (status, error) = match &record.phase {
             MountPhase::Starting => (WorkspaceStatus::Starting, None),
             MountPhase::Failed(reason) => (WorkspaceStatus::Error, Some(reason.clone())),
-            MountPhase::Mounted if mounted => (WorkspaceStatus::Running, None),
+            // A mounted tenant is `running` UNLESS the health probe has found
+            // its filesystem unreachable. Short-circuiting to `running` here is
+            // what let a row sit green in the launcher over a dead mount while
+            // every read through it failed, so the degraded overlay is
+            // consulted before that conclusion. Only that one state overrides:
+            // every other overlay value on a mounted row stays `running`.
+            MountPhase::Mounted if mounted => match self.host.workspace_status(&record.root) {
+                (WorkspaceStatus::Unavailable, reason) => (WorkspaceStatus::Unavailable, reason),
+                _ => (WorkspaceStatus::Running, None),
+            },
             MountPhase::Mounted | MountPhase::Stopped => self.host.workspace_status(&record.root),
         };
         let on =
@@ -1725,6 +1740,37 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         cancel_host.cancel_all_reindex();
     });
 
+    // Root health probe. Nothing else in the devserver ever re-checks a
+    // MOUNTED workspace's filesystem, so a network mount that stalls or is
+    // remounted underneath a tenant went unnoticed until a request happened to
+    // fail -- and, because a capability handle cannot survive a remount, stayed
+    // broken until the process restarted. The probe reports the degraded state
+    // and refreshes the handle in place when the mount comes back.
+    //
+    // On the blocking pool: it stats real roots, and a stalled network mount is
+    // exactly where that call hangs. A hung probe must never occupy a runtime
+    // worker, and it must not accumulate either, so ticks are serialized by
+    // awaiting each one before scheduling the next.
+    let probe_host = host.clone();
+    let mut probe_rx = signal_tx.subscribe();
+    let probe_task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(ROOT_HEALTH_PROBE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = probe_rx.changed() => return,
+            }
+            let host = probe_host.clone();
+            if tokio::task::spawn_blocking(move || host.probe_mounted_roots())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
     state
         .startup
         .advance(StartupPhase::ServingAndRestoring)
@@ -1808,6 +1854,9 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             let watchdog_pings = (ready && notify_result.is_ok())
                 .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
             let serve_join = serve_arm.join(watchdog_pings).await;
+            // Aborted rather than joined: a probe stuck in a stalled mount's
+            // `lstat` is uninterruptible, and shutdown must not wait on it.
+            probe_task.abort();
             let cancel_join = cancel_task.await;
             let tunnel_join = match tunnel_task {
                 Some(task) => Some(task.await),
@@ -1885,6 +1934,9 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             let watchdog_pings = (ready && notify_result.is_ok())
                 .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
             let serve_join = serve_arm.join(watchdog_pings).await;
+            // Aborted rather than joined: a probe stuck in a stalled mount's
+            // `lstat` is uninterruptible, and shutdown must not wait on it.
+            probe_task.abort();
             let cancel_join = cancel_task.await;
             let tunnel_join = match tunnel_task {
                 Some(task) => Some(task.await),
@@ -4269,6 +4321,185 @@ mod tests {
 
         let asserted = tunnel.oneshot(asserted_req()).await.unwrap();
         assert_eq!(asserted.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Strands the workspace handle on the blocking pool the way a wedged
+    /// network mount does. `build_workspace` hands its `Arc<Workspace>` to an
+    /// uncancellable `spawn_blocking` that parks until the test releases it, so
+    /// the attempt's timeout drops the awaiting future while the handle stays
+    /// alive -- what a FUSE syscall stuck on a dead mount does to the real
+    /// recursive watcher registration and index pass.
+    struct StrandedBuildBuilder {
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl chan_library::TenantBuilder for StrandedBuildBuilder {
+        async fn build_workspace(
+            &self,
+            _library: Library,
+            workspace: Arc<chan_workspace::Workspace>,
+            _config: &ServeConfig,
+            _desktop: crate::DesktopBridge,
+            _unserve: chan_library::UnserveMode,
+            _control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            let release = self
+                .release
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            let Some(release) = release else {
+                // Every attempt after the first builds a real tenant, so the
+                // test measures recovery rather than this stub.
+                let artifacts = crate::build_app(
+                    _library,
+                    workspace,
+                    _config,
+                    _desktop,
+                    _unserve,
+                    _control_identity,
+                )
+                .await?;
+                return Ok(crate::into_tenant_artifacts(artifacts));
+            };
+            let park = tokio::task::spawn_blocking(move || {
+                // The stranded handle: held for as long as the "syscall" blocks.
+                let _held = workspace;
+                let _ = release.recv();
+            });
+            let _ = park.await;
+            Err(Error::Config("stranded build released".into()))
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: crate::DesktopBridge,
+            _unserve: chan_library::UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            Err(Error::Config("stranded builder has no terminal".into()))
+        }
+    }
+
+    /// A mount attempt whose tenant build strands the workspace handle must not
+    /// wedge the row for the life of the process.
+    ///
+    /// The attempt timing out and the row going `error` is correct. What was
+    /// not correct is the NEXT turn-on: the stranded `Arc<Workspace>` still
+    /// upgraded in `Library::live_workspaces` and still held the writer flock,
+    /// so every retry was refused `WorkspaceAlreadyOpen` and only a devserver
+    /// restart cleared it. That is the state a flaky network mount leaves
+    /// behind -- the filesystem is healthy again and the workspace still cannot
+    /// be turned on.
+    ///
+    /// Once the stranded call returns (which is what a repaired mount causes:
+    /// the parked syscall fails instead of hanging), the handle drops and the
+    /// row must recover WITHOUT a restart.
+    #[tokio::test]
+    async fn stranded_mount_build_recovers_once_the_handle_is_released() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let ws = tempfile::tempdir().expect("workspace");
+        std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let lib = Library::open_at(home.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(
+            lib,
+            Arc::new(StrandedBuildBuilder {
+                release: Mutex::new(Some(release_rx)),
+            }),
+        ));
+        host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
+            home.path().join("devserver").join("workspaces.json"),
+        )));
+        let state = Arc::new(DevserverState {
+            host,
+            addr,
+            token: Arc::new(std::sync::RwLock::new("test-token".to_string())),
+            token_minted_at: AtomicU64::new(0),
+            library_id: "lib-test".into(),
+            host_label: "test".into(),
+            workspaces: Mutex::new(HashMap::new()),
+            mount_attempt_lock: tokio::sync::Mutex::new(()),
+            startup: Arc::new(StartupCoordinator::new()),
+            store: DevserverStore::at(home.path().join("devserver").join("config.json")),
+            persist_serial: Mutex::new(()),
+            bound_port: AtomicU16::new(0),
+        });
+        complete_test_startup(&state).await;
+
+        // First turn-on: the build strands the handle, the bounded attempt
+        // times out, and the row settles as a visible failure.
+        let prefix = allocate_workspace_prefix(ws.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(ws.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        let error = state
+            .execute_mount_attempt(attempt, Duration::from_millis(300))
+            .await
+            .expect_err("stranded build must time out");
+        assert!(
+            error.to_string().contains("timed out"),
+            "unexpected first-attempt error: {error}"
+        );
+        assert_eq!(
+            state.entry_for(&prefix).expect("failed row").status,
+            WorkspaceStatus::Error
+        );
+
+        // Release the stranded call, exactly as repairing the mount does: the
+        // parked syscall returns and the handle drops.
+        let _ = release_tx.send(());
+        for _ in 0..200 {
+            if state.host.library().open_workspace(ws.path()).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // The row must now turn on again with no restart in between.
+        let row = state
+            .set_workspace_on(&prefix, true, false)
+            .await
+            .map(updated_row)
+            .expect("turn-on after the strand is released must succeed");
+        assert!(row.on, "row did not come back on: {row:?}");
+        assert_eq!(row.status, WorkspaceStatus::Running);
+    }
+
+    /// The writer flock and the in-process handle map must agree, and both must
+    /// release once the last `Arc<Workspace>` is dropped. This is the invariant
+    /// the wedge violated: a handle nobody can reach still owned the root.
+    #[tokio::test]
+    async fn released_workspace_handle_frees_the_root_for_reopen() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let ws = tempfile::tempdir().expect("workspace");
+        std::fs::write(ws.path().join("a.md"), "# A\n").expect("seed");
+        let library = Library::open_at(home.path().join("config.toml")).expect("library");
+        library.register_workspace(ws.path()).expect("register");
+
+        let first = library.open_workspace(ws.path()).expect("first open");
+        assert!(
+            matches!(
+                library.open_workspace(ws.path()),
+                Err(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+            ),
+            "a live handle must refuse a second open"
+        );
+        drop(first);
+        library
+            .open_workspace(ws.path())
+            .expect("a dropped handle must free the root for reopen");
     }
 
     #[tokio::test]

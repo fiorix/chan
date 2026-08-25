@@ -815,7 +815,7 @@ impl Workspace {
         }
         let paths = ensure_workspace_metadata_dirs_in(chan_home, &entry.metadata_key)
             .map_err(|e| ChanError::Io(format!("ensure workspace metadata dirs: {e}")))?;
-        let lock = WorkspaceLock::acquire(&paths.lock, fs.canonical_root())?;
+        let lock = WorkspaceLock::acquire(&paths.lock, &fs.canonical_root())?;
         // Rescue draft discards an older release nested under a
         // `drafts/` bucket before the sweep below reads that bucket as
         // one meta-less junk entry and reclaims it wholesale. Must run
@@ -1261,8 +1261,30 @@ impl Workspace {
         self.fs.ensure_root_available()
     }
 
+    /// Re-check the root's mount and adopt a remount in place, reporting
+    /// whether the capability handle was replaced.
+    ///
+    /// A network filesystem that is remounted underneath a live workspace
+    /// leaves this process holding a handle bound to the dead connection:
+    /// every operation on it answers `ENOTCONN` forever even though the path
+    /// is healthy again, and re-opening the workspace is refused because we
+    /// still hold its writer lock. The host's health probe calls this so the
+    /// workspace recovers without a restart. See
+    /// [`RootedFs::revalidate`](crate::rooted_fs::RootedFs::revalidate) for
+    /// how a remount is told apart from a recreated root.
+    pub fn revalidate_root(&self) -> Result<bool> {
+        self.fs.revalidate()
+    }
+
+    /// [`exists`](Self::exists) that reports an unreachable mount instead of
+    /// answering "absent". Callers that tear down state on absence must use
+    /// this; see [`RootedFs::try_exists`](crate::rooted_fs::RootedFs::try_exists).
+    pub fn try_exists(&self, rel: &str) -> Result<bool> {
+        self.fs.try_exists(rel)
+    }
+
     /// Canonical workspace root captured when the writer handle opened.
-    pub fn canonical_root(&self) -> &std::path::Path {
+    pub fn canonical_root(&self) -> std::path::PathBuf {
         self.fs.canonical_root()
     }
 
@@ -1775,8 +1797,12 @@ impl Workspace {
     /// back to the next reindex pass.
     pub fn trash_restore(&self, id: &str) -> Result<()> {
         let _ = trash::sweep_expired(&self.paths.trash, TRASH_RETENTION_SECS);
-        let restored =
-            trash::restore(&self.paths.trash, self.root(), self.fs.canonical_root(), id)?;
+        let restored = trash::restore(
+            &self.paths.trash,
+            self.root(),
+            &self.fs.canonical_root(),
+            id,
+        )?;
         self.reindex_after_restore(&restored);
         Ok(())
     }
@@ -1935,7 +1961,7 @@ impl Workspace {
         drafts::promote(
             &self.drafts_root,
             self.root(),
-            self.fs.canonical_root(),
+            &self.fs.canonical_root(),
             name,
             target_rel,
         )

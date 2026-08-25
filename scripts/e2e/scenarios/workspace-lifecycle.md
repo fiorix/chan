@@ -13,7 +13,8 @@ Each scenario states behavior that must hold today. Where an executable check or
 - shared-terminal and workspace PTYs survive every non-destructive devserver restart;
 - stopping a workspace is distinct from removing it;
 - an editor open on a file converges on external filesystem edits in both directions, including shrinkage, byte-exact restores, and truncation;
-- a workspace root that disappears is a terminal filesystem state, never an empty workspace and never an invitation to recreate the root.
+- a workspace root that disappears is a terminal filesystem state, never an empty workspace and never an invitation to recreate the root;
+- a workspace root that becomes UNREACHABLE is not the same as one that disappeared, and a mount repaired underneath a live workspace recovers without restarting the devserver.
 
 ## When to re-run
 
@@ -25,7 +26,8 @@ Look up the area you changed and run the scenarios listed against it.
 - **Watcher, index, graph, recovery**: WL-11, WL-14, WL-15
 - **Terminal and pane state, layout restore, devserver restart**: WL-05, WL-06, WL-10, WL-16
 - **File browser**: WL-12, WL-14
-- **Anything that touches path resolution or the workspace root**: WL-13, WL-14
+- **Anything that touches path resolution or the workspace root**: WL-13, WL-14, WL-17
+- **Mount handling, root health, error classification**: WL-17
 
 ## Scenarios
 
@@ -47,6 +49,7 @@ Look up the area you changed and run the scenarios listed against it.
 | WL-14 | Root disappears while fully in use | destructive |
 | WL-15 | Filesystem-driven edits converge in an open editor | automated |
 | WL-16 | Devserver restart preserves shared and workspace PTYs | destructive |
+| WL-17 | Root mount flaps under a live workspace | destructive |
 
 Automated coverage runs from two places. The Rust cases run under the normal test command; the browser cases run through the smoke harness:
 
@@ -224,6 +227,24 @@ During startup, root health and management routes remain responsive while persis
 **Backing.** `scripts/e2e/devserver-fdstore.sh`; `devserver::tests::startup_gate_keeps_root_healthy_and_refuses_tenant_routes`; `devserver::tests::fdstore_finalization_is_single_and_precedes_tenant_readiness`; `devserver::fdstore::linux::parker_tests::shutdown_before_activation_preserves_the_inherited_manifest`.
 
 **Evidence.** Child liveness, exact per-window tenant rosters, session ids, restart counters, and systemd `NFileDescriptorStore` after every phase.
+
+### WL-17 - root mount flaps under a live workspace
+
+**Expectation.** A network filesystem that stalls, dies, or is remounted underneath a MOUNTED workspace is a transient transport condition, not a removal, and the workspace recovers from it on its own.
+
+- **Classification**: the root answering `ENOTCONN`/`ESTALE`/`EIO` is `RootUnavailable`, never `WorkspaceRootMissing`. The two are not interchangeable: root-missing is terminal and tears sessions down, and a stalled mount says nothing about whether the content still exists. A root that is genuinely deleted, or replaced by a different directory at the same path, still reports missing -- WL-13 and WL-14 keep their contract.
+- **Editor**: an open document does not enter the removed state while the mount is unreachable. The buffer, the dirty indicator and the session survive; the flusher pauses rather than counting failures toward a conflict. `exists()` collapsing every errno into "absent" is what made a stalled mount look like a deletion, so the removal path asks `try_exists`.
+- **Launcher row**: a mounted workspace whose filesystem is unreachable reports `unavailable`, not `running` and not `error`. Reporting `running` over a dead mount left a row green while every read failed; reporting `error` reads as a failed mount the user should retry.
+- **Remount recovery**: a capability handle is bound to the mount's kernel connection, not its path. When the client dies, every operation on the retained fd answers `ENOTCONN` forever and a fresh mount at the same path does not revive it. Re-opening the workspace is not available either, because this process still holds its writer lock. So the handle is refreshed in place, and the row returns to `running` with no devserver restart and no user action.
+- **No wedge**: a mount that dies while chan has filesystem work in flight must not leave the workspace unopenable. A tenant build or index pass stranded on the blocking pool holds a strong `Arc<Workspace>` that `spawn_blocking` cannot cancel; while it is held, the writer lock is held and every turn-on is refused `WorkspaceAlreadyOpen`. Teardown raises the reindex cancel flag first so the strand is bounded by one filesystem call rather than a whole pass, and once the stranded call returns the row turns on again without a restart.
+
+**Run.** `scripts/e2e/flaky-mount.sh`. It mounts a local rclone `:memory:` remote -- no cloud account and no network, only the FUSE transport is real -- seeds a workspace on it, turns it on in a throwaway devserver, then kills the mount daemon, asserts the degraded row and the classification, remounts a fresh daemon at the same path, and asserts the row returns to `running` and serves a read. A second arm repeats the kill while an index pass is walking a seeded tree, which is the in-flight case that produced the wedge.
+
+Needs `mclone` (or `rclone`), `fusermount`, `curl` and `python3`, and a host where FUSE mounts work: an sdme container needs `/dev/fuse` passed in, and the suite exits 2 when it cannot mount. Never point it at a real remote.
+
+**Backing.** `scripts/e2e/flaky-mount.sh`; `rooted_fs::root_availability_tests::*` for the classification and the recreated-root refusal; `devserver::tests::stranded_mount_build_recovers_once_the_handle_is_released` and `devserver::tests::released_workspace_handle_frees_the_root_for_reopen` for the wedge.
+
+**Evidence.** The errno the dead mount returns, the row status and reason at each phase, the `st_dev` before and after the remount, and the read that succeeds after recovery.
 
 ## Manual and soak
 

@@ -397,7 +397,7 @@ impl MiniWorkspace {
                     .map_err(|e| ChanError::Io(e.to_string()))?;
             }
         }
-        match dir.rename(&from_path, dir, &to_path) {
+        match dir.rename(&from_path, &dir, &to_path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 self.move_across_devices(from, to)
@@ -436,7 +436,7 @@ impl MiniWorkspace {
             }
         }
         let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
-        if let Err(e) = dir.rename(&tmp_path, dir, &to_path) {
+        if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
             self.remove_tree_best_effort(&tmp);
             return Err(ChanError::Io(e.to_string()));
         }
@@ -537,7 +537,7 @@ impl MiniWorkspace {
         }
         let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
         let (_, to_path) = self.fs.resolve_io(to)?;
-        if let Err(e) = dir.rename(&tmp_path, dir, &to_path) {
+        if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
             self.remove_tree_best_effort(&tmp);
             return Err(ChanError::Io(e.to_string()));
         }

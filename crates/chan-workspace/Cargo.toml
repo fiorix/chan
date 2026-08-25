@@ -91,6 +91,13 @@ hf-hub = { version = "0.4", default-features = false, optional = true, features 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
 xattr = "1"
 
+# Raw errno constants for `rooted_fs::is_transport_error`: telling a mount
+# that is UNREACHABLE (ENOTCONN/ESTALE/EIO from a dead or remounted network
+# filesystem) apart from one that is GONE (ENOENT). `io::ErrorKind` has no
+# stable variant for most of them, so the classification reads the errno.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Count the current process's descriptors through `KERN_PROC_NFDS`. Unlike
 # `/dev/fd`, the sysctl works on stock FreeBSD without fdescfs and does not
 # consume a descriptor while measuring them.
