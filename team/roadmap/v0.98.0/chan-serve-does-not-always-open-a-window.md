@@ -71,7 +71,9 @@ Desktop user opens and boot restore now use an explicit `WorkspaceOpenMode`. Eve
 
 The ordering review found a gap in the original premise: workspace ordinals reused the lowest free number, so restored ordinals 1 and 3 gave a fresh window ordinal 2 and sorted it before the old window 3. Terminal windows retain lowest-free numbering, while workspace windows allocate above their family's current maximum. The regression fixture persists ordinals 1 and 3, reopens the registry, and requires the requested row to snapshot last as ordinal 4. Reverting that allocation made the test fail with actual ordinals `[1, 2, 3]`; restoring it made the same test pass with `[1, 3, 4]`.
 
-The devserver contract is atomic from the CLI's perspective: `Registered` means the workspace is mounted and exactly one workspace window record was minted. Repeated registration reuses the mount prefix and mints another window. A missing registry is rejected before taking the workspace flock, and a mint failure returns `Error` rather than reporting a successful open. This keeps the existing wire schema while making the success text truthful: `chan: opened a window for PATH with local devserver on port N ...`.
+The user-visible tradeoff is that workspace window titles can have gaps: three open windows may be numbered Window 1, Window 3, and Window 4 because a fresh window no longer reuses the closed Window 2 slot. Once every window in that workspace family is closed, the next mint starts at Window 1 again.
+
+The devserver contract is conjunctive: `Registered` means the workspace is mounted and exactly one workspace window record was minted. Repeated registration reuses the mount prefix and mints another window. A missing registry is rejected before taking the workspace flock, and a mint failure returns `Error` rather than reporting a successful open. This keeps the existing wire schema while making the success text truthful: `chan: opened a window for PATH with local devserver on port N ...`.
 
 ### Proved on the headless build host
 
@@ -82,10 +84,25 @@ The devserver contract is atomic from the CLI's perspective: `Registered` means 
 - An isolated copied binary and throwaway devserver proved both devserver discovery contexts without touching the owner's live instance. A command carrying that test server's explicit terminal control socket and a plain-shell command with no `CHAN_*` context each exited 0, printed `opened a window`, mounted the requested workspace, and produced a distinct persisted/API window row. Repeating the first command kept its prefix and produced ordinals 1 and 2 with unique window IDs. The isolated server logged no warnings or errors and was stopped and removed after the check.
 - The standalone route and `--no-browser` code paths are unchanged.
 
-### Display smoke still required
+### Owner smoke: desktop serve windows
 
-This host has no GUI session, so it cannot render a Tauri window or observe OS focus. The desktop mint decisions, registry ordering, and watcher input are tested, but the visible window and focus portions of acceptance checks 1 through 3 remain unproven here. The isolated devserver proves acceptance check 4 through its persisted and authenticated API records, but no browser was attached to observe presentation. A display-host smoke should take about five minutes:
+This host has no GUI session, so the visible window and OS-focus portions of acceptance checks 1 through 3 require one display-host smoke. Use the freshly built candidate desktop and its matching `chan` CLI, verify the About window's build id names the candidate commit, and keep the launcher open. `--desktop` below forces the route under test instead of depending on shell parentage.
 
-1. With the desktop app serving a workspace, run `chan serve PATH` from a normal terminal. Confirm the native window count increases by one and the new window is focused.
-2. For another workspace, create three windows, close Window 2, turn the workspace off while preserving Windows 1 and 3, then run `chan serve PATH`. Confirm Windows 1 and 3 restore first, a new Window 4 opens last, and Window 4 is focused.
-3. Run `chan serve PATH` for a workspace the desktop has never served. Confirm exactly one workspace window appears and is focused.
+Prepare three isolated paths in a normal terminal:
+
+```sh
+SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chan-serve-window-smoke.XXXXXX")"
+LIVE="$SMOKE_ROOT/live"
+SAVED="$SMOKE_ROOT/saved"
+FRESH="$SMOKE_ROOT/fresh"
+mkdir -p "$LIVE" "$SAVED"
+test ! -e "$FRESH"
+```
+
+Prepare the live and saved-record cases before judging results. Run `chan serve --desktop "$LIVE"` once and leave its Window 1 open. Run `chan serve --desktop "$SAVED"` twice, verify that its Window 1 and Window 2 exist, then use the launcher's On toggle to turn that workspace off and wait for both native windows to close. Do not create or register `$FRESH`.
+
+1. Already serving: run `chan serve --desktop "$LIVE"`. Pass only if the live workspace gains exactly one window, the newly created Window 2 is frontmost, and keyboard input goes to it without another click.
+2. Off with saved records: run `chan serve --desktop "$SAVED"`. Pass only if the saved Window 1 and Window 2 return, one previously absent Window 3 is added, and Window 3 is frontmost and accepts keyboard input immediately. Merely seeing three windows is not a pass: a frontmost Window 1 or Window 2 means restore ordering took focus instead of the requested window.
+3. Never served: run `chan serve --desktop "$FRESH"`. Pass only if the path is registered and exactly one Window 1 appears frontmost and accepts keyboard input immediately.
+
+Acceptance check 7 needs no manual step. `workspace_minted_after_restore_sorts_last_even_with_an_ordinal_gap` persists Window 1 and Window 3, reopens the registry, mints the requested Window 4, and asserts both the `[1, 3, 4]` ordinal sequence and the corresponding window-id order.
