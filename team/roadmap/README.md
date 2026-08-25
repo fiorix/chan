@@ -27,9 +27,11 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 | --- | --- | --- |
 | [four-detectors-disagree-about-page-breaks][pgbrk] | raised | decide reading |
 | [no-test-pins-the-unavailable-mint-contract][unav] | raised | choose seam |
+| [the-copr-probe-window-is-shorter-than-its-builds][copr] | raised | measure |
 
 [pgbrk]: v0.99.0/four-detectors-disagree-about-page-breaks.md
 [unav]: v0.99.0/no-test-pins-the-unavailable-mint-contract.md
+[copr]: v0.99.0/the-copr-probe-window-is-shorter-than-its-builds.md
 
 ## Completed
 
