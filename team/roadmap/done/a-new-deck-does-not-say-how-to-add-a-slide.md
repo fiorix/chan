@@ -1,6 +1,6 @@
 # A new slide deck does not say how to add a slide
 
-Status: accepted scope for v0.98.0, raised by the owner.
+Status: SHIPPED in [v0.98.0](../../release/release-v0.98.0.md). Implemented at `9bf5cd01`. The seed's frontmatter and body are pinned by exact equality rather than by prefix. The item's own description of `PAGE_BREAK_RE` was narrower than the regex, which is corrected in the changelog and carried forward as [four-detectors-disagree-about-page-breaks](../v0.99.0/four-detectors-disagree-about-page-breaks.md).
 
 ## What was seen
 

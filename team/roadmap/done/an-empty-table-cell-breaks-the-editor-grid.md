@@ -1,6 +1,6 @@
 # An empty table cell breaks the editor's table grid
 
-Status: accepted scope for v0.98.0, raised by the owner. The behavior is reproduced and its mechanism is confirmed against the live tree.
+Status: SHIPPED in [v0.98.0](../../release/release-v0.98.0.md). Implemented at `ebd9eeb6`. The widget reads each row from its `TableDelimiter` positions, so an empty cell is a cell, and the per-row cell text is pinned against `renderMarkdown` for the empty, whitespace-only and escaped-pipe cases so the editor and the export cannot drift apart again.
 
 ## What was seen
 

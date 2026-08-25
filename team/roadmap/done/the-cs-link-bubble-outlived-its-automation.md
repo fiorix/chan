@@ -1,6 +1,6 @@
 # The `cs` link bubble outlived the automation that replaced it
 
-Status: accepted scope for v0.98.0, raised by the owner.
+Status: SHIPPED in [v0.98.0](../../release/release-v0.98.0.md). Implemented at `64f86d64`, with the retired `editor.cs_dismissed` config key and its now-unused `ConfigValueKind::ReadOnly` variant removed at `8b5cc226`. The preferences loader ignores unknown keys, so an existing file carrying `cs_dismissed` still loads. Acceptance 1, a real first open with no card, was not observed on a display host; see the release report's known gaps.
 
 ## What was seen
 

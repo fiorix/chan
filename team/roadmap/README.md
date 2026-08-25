@@ -21,20 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.98.0
-
-| item | state | next |
-| --- | --- | --- |
-| [an-empty-table-cell-breaks-the-editor-grid][tbl] | implemented | release |
-| [chan-serve-does-not-always-open-a-window][serve] | implemented | smoke |
-| [the-cs-link-bubble-outlived-its-automation][cs] | implemented | smoke |
-| [a-new-deck-does-not-say-how-to-add-a-slide][deck] | implemented | release |
-
-[tbl]: v0.98.0/an-empty-table-cell-breaks-the-editor-grid.md
-[serve]: v0.98.0/chan-serve-does-not-always-open-a-window.md
-[cs]: v0.98.0/the-cs-link-bubble-outlived-its-automation.md
-[deck]: v0.98.0/a-new-deck-does-not-say-how-to-add-a-slide.md
-
 ### v0.99.0
 
 | item | state | next |
@@ -46,6 +32,17 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [unav]: v0.99.0/no-test-pins-the-unavailable-mint-contract.md
 
 ## Completed
+
+### v0.98.0
+
+Shipped 2026-08-25; see [release-v0.98.0](../release/release-v0.98.0.md). Closed items in [`done/`](done/):
+
+- [an-empty-table-cell-breaks-the-editor-grid](done/an-empty-table-cell-breaks-the-editor-grid.md) - the editor's grid keeps the columns the source has, reading each row from its `TableDelimiter` positions so an empty cell is a cell, with the per-row text pinned against `renderMarkdown` so the editor and the export cannot drift apart again.
+- [chan-serve-does-not-always-open-a-window](done/chan-serve-does-not-always-open-a-window.md) - `chan serve PATH` ends with a window on every route, minting after restore on an explicit open while boot restore still mints nothing, with devserver registration made conjunctive; the desktop focus checks need a display host and were not observed.
+- [the-cs-link-bubble-outlived-its-automation](done/the-cs-link-bubble-outlived-its-automation.md) - the `cs` card, its route, its snapshot fields and its persisted preference are gone now that every supported install creates the alias; a real first open with no card was not observed on a display host.
+- [a-new-deck-does-not-say-how-to-add-a-slide](done/a-new-deck-does-not-say-how-to-add-a-slide.md) - a new deck seeds the page-break instruction under its first heading, pinned by exact equality on both the frontmatter and the body.
+
+Four items closed and none carried. The round also folded in a merged branch that keeps a workspace on a flapping network mount openable, and fixed the two defects that branch brought with it: an e2e script that failed `make shell-check`, and a transport-error classifier that made `chan-workspace` fail to compile for Windows. The second was caught by the mandatory Windows cross-check with the tag still unpushed, which four green full-tree gates could not see because the gate is Linux-only. Two follow-ups were raised into v0.99.0, one of them from checking a claim the deck item made about its own regex.
 
 ### v0.97.0
 

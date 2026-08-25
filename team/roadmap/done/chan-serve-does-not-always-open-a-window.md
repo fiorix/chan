@@ -1,6 +1,6 @@
 # `chan serve PATH` does not always open a window
 
-Status: accepted scope for v0.98.0, raised by the owner.
+Status: SHIPPED in [v0.98.0](../../release/release-v0.98.0.md). Implemented at `075f37cb`. The item's claim that the snapshot ordering already worked was wrong in the gap case and the ordinal allocation was fixed with it. The devserver route was proved end to end against a throwaway devserver; acceptance checks 1, 2, 3 and 7 need a display host and were not observed, see the release report's known gaps.
 
 ## What was seen
 
