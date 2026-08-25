@@ -25,15 +25,25 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 | item | state | next |
 | --- | --- | --- |
-| [an-empty-table-cell-breaks-the-editor-grid][tbl] | investigated | implement |
-| [chan-serve-does-not-always-open-a-window][serve] | accepted | not started |
-| [the-cs-link-bubble-outlived-its-automation][cs] | accepted | not started |
-| [a-new-deck-does-not-say-how-to-add-a-slide][deck] | accepted | not started |
+| [an-empty-table-cell-breaks-the-editor-grid][tbl] | implemented | release |
+| [chan-serve-does-not-always-open-a-window][serve] | implemented | smoke |
+| [the-cs-link-bubble-outlived-its-automation][cs] | implemented | smoke |
+| [a-new-deck-does-not-say-how-to-add-a-slide][deck] | implemented | release |
 
 [tbl]: v0.98.0/an-empty-table-cell-breaks-the-editor-grid.md
 [serve]: v0.98.0/chan-serve-does-not-always-open-a-window.md
 [cs]: v0.98.0/the-cs-link-bubble-outlived-its-automation.md
 [deck]: v0.98.0/a-new-deck-does-not-say-how-to-add-a-slide.md
+
+### v0.99.0
+
+| item | state | next |
+| --- | --- | --- |
+| [four-detectors-disagree-about-page-breaks][pgbrk] | raised | decide reading |
+| [no-test-pins-the-unavailable-mint-contract][unav] | raised | choose seam |
+
+[pgbrk]: v0.99.0/four-detectors-disagree-about-page-breaks.md
+[unav]: v0.99.0/no-test-pins-the-unavailable-mint-contract.md
 
 ## Completed
 
