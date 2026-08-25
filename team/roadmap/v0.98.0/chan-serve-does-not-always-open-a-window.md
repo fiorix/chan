@@ -75,6 +75,17 @@ The user-visible tradeoff is that workspace window titles can have gaps: three o
 
 The devserver contract is conjunctive: `Registered` means the workspace is mounted and exactly one workspace window record was minted. Repeated registration reuses the mount prefix and mints another window. A missing registry is rejected before taking the workspace flock, and a mint failure returns `Error` rather than reporting a successful open. This keeps the existing wire schema while making the success text truthful: `chan: opened a window for PATH with local devserver on port N ...`.
 
+### Unavailable workspaces still get a window
+
+Registration mints a window even when the mounted workspace currently has `WorkspaceStatus::Unavailable`. The window and launcher row are where the degraded state is reported; the window is not conditional on a healthy probe result.
+
+1. Refusing to mint returns the user to the prompt with nothing to look at, recreating the defect this contract fixes.
+2. The unavailable state keeps a workspace on a flapping mount openable while reporting its health honestly. Preventing that workspace from opening contradicts the purpose of retaining it in a degraded state.
+3. `Unavailable` is a sampled, self-clearing overlay. A timer probes each root, and `revalidate_root` clears the mark when the root responds again. Making registration depend on the latest sample makes identical commands succeed or fail according to probe timing rather than policy.
+4. Genuine failures retain their existing refusal paths. A missing window registry declines before mounting or taking the flock, a mount failure returns `Error` before the mint, and a mint failure also returns `Error`. The remaining case is a mounted but degraded workspace, which still gets the requested window.
+
+The CLI continues to say `opened a window for PATH`. That line describes the completed action, while current health belongs in the window and launcher row; including a sampled health result in the command output would race the next probe.
+
 ### Proved on the headless build host
 
 - `cargo test -p chan-library workspace_minted_after_restore_sorts_last_even_with_an_ordinal_gap`: pass after the deliberate red proof.
