@@ -22,8 +22,9 @@ use crate::workspace::{
 fn is_transport_error(error: &std::io::Error) -> bool {
     // `ErrorKind` has no stable variant for most of these, so match the raw
     // errno. Anything not listed keeps its existing classification.
-    matches!(
-        error.raw_os_error(),
+    let errno = error.raw_os_error();
+    let is_transport = matches!(
+        errno,
         Some(
             libc::ENOTCONN     // FUSE daemon gone: "Transport endpoint is not connected"
                 | libc::ESTALE // handle invalidated by a remount / server restart
@@ -34,9 +35,13 @@ fn is_transport_error(error: &std::io::Error) -> bool {
                 | libc::ENETDOWN
                 | libc::ENETUNREACH
                 | libc::ETIMEDOUT
-                | libc::EREMOTEIO
         )
-    )
+    );
+    // The shared set is POSIX or BSD-portable. `EREMOTEIO` is a Linux errno,
+    // so only Linux adds it to the classification.
+    #[cfg(target_os = "linux")]
+    let is_transport = is_transport || errno == Some(libc::EREMOTEIO);
+    is_transport
 }
 
 #[cfg(not(unix))]
@@ -1323,6 +1328,10 @@ mod root_availability_tests {
         )));
         assert!(!is_transport_error(&std::io::Error::from_raw_os_error(
             libc::EACCES
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(is_transport_error(&std::io::Error::from_raw_os_error(
+            libc::EREMOTEIO
         )));
     }
 
