@@ -67,6 +67,8 @@ RCLONE_PID=""
 SERVER_PID=""
 KEEP_ON_FAIL=""
 
+# ShellCheck does not trace cleanup through `trap cleanup EXIT`.
+# shellcheck disable=SC2329
 cleanup() {
   if [ -n "$SERVER_PID" ]; then
     kill "$SERVER_PID" 2>/dev/null
@@ -100,6 +102,9 @@ mount_fuse() {
     sleep 0.25
   done
   mountpoint -q "$MNT" || die_env "could not mount the :memory: remote at $MNT"
+  # `--daemon` means the surviving pid is unavailable from `$!`; the bracket
+  # construction keeps grep from matching itself.
+  # shellcheck disable=SC2009
   RCLONE_PID="$(ps -eo pid,args | grep "[${RCLONE:0:1}]${RCLONE:1} mount :memory: $MNT" \
     | awk '{print $1}' | head -1)"
   [ -n "$RCLONE_PID" ] || die_env "mounted but could not find the daemon pid"
