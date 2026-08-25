@@ -79,9 +79,9 @@ pub struct Instance {
 pub enum Request {
     /// Ask a candidate endpoint which devserver instance owns it.
     Identify { protocol: u32, cli_version: String },
-    /// Ask the devserver to mount the given workspace path and report the
-    /// prefix it landed at. Idempotent devserver-side: an already-mounted
-    /// root returns its existing prefix.
+    /// Ask the devserver to mount the given workspace path, mint one workspace
+    /// window record, and report the prefix it landed at. Mounting is
+    /// idempotent, but every accepted request mints a new window.
     RegisterWorkspace {
         protocol: u32,
         cli_version: String,
@@ -121,8 +121,9 @@ pub enum Response {
         port: u16,
         version: String,
     },
-    /// The devserver mounted (or already had) the workspace at `prefix`.
-    /// The CLI prints a note and exits; the devserver owns the flock.
+    /// The devserver mounted (or already had) the workspace at `prefix` and
+    /// minted its requested window. The CLI prints a note and exits; the
+    /// devserver owns the flock.
     Registered {
         devserver_version: String,
         prefix: String,
@@ -144,8 +145,8 @@ pub enum Response {
 /// note.
 #[derive(Debug)]
 pub enum Outcome {
-    /// The devserver mounted the workspace at `prefix`. The CLI exits 0
-    /// without opening it.
+    /// The devserver mounted the workspace at `prefix` and minted its requested
+    /// window. The CLI reports both and exits 0.
     Registered { prefix: String },
     /// No devserver discovered: no socket, connect refused, stale socket,
     /// or any I/O error before a valid response. Own the server standalone.
@@ -660,7 +661,8 @@ async fn probe_instance(endpoint: PathBuf, timeout: Duration) -> Option<Instance
     }
 }
 
-/// Register `workspace_path` with the selected local devserver instance.
+/// Register `workspace_path` with the selected local devserver instance and ask
+/// it to mint one workspace window record.
 ///
 /// A dead endpoint, timeout, malformed reply, or response for another verb
 /// maps to [`Outcome::NoDevserver`]. Protocol skew and an application-level

@@ -62,20 +62,35 @@ impl ServeHandle {
     }
 }
 
+/// Whether mounting a workspace should also mint a native window.
+///
+/// User-requested opens always mint one window, including when persisted
+/// windows already exist. Boot restore mounts the workspace without minting so
+/// an empty persisted set stays empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceOpenMode {
+    OpenWindow,
+    RestoreOnly,
+}
+
+impl WorkspaceOpenMode {
+    fn should_mint(self) -> bool {
+        matches!(self, Self::OpenWindow)
+    }
+}
+
 /// Open a local workspace through the embedded chan-server host.
 ///
-/// `mint_first_window` mints the workspace's FIRST window when it has no
-/// persisted window record yet -- true for a USER turn-on (add / set-on / `chan
-/// open`: the user wants a window), false for the BOOT re-serve (restore the
-/// persisted set only). On boot, a workspace that is on but whose windows were
-/// all CLOSED has no record; minting there would RE-OPEN a window the user
-/// closed. A buried/hidden window keeps its
-/// record, so the watcher restores it honoring `should_show`'s `!hidden`.
+/// [`WorkspaceOpenMode::OpenWindow`] mints one window after mounting, even when
+/// persisted windows already exist. [`WorkspaceOpenMode::RestoreOnly`] restores
+/// only the persisted set, so a workspace whose windows were all closed stays
+/// windowless on boot. A buried or hidden window keeps its record, so the
+/// watcher restores it while honoring `should_show`'s `!hidden`.
 pub async fn start(
     app: AppHandle,
     state: Arc<AppState>,
     key: String,
-    mint_first_window: bool,
+    open_mode: WorkspaceOpenMode,
 ) -> Result<(), String> {
     if state.serves.lock().unwrap().contains_key(&key) {
         return Ok(());
@@ -101,22 +116,12 @@ pub async fn start(
         return Ok(());
     }
     let _ = app.emit(SERVES_CHANGED, ());
-    // Mint the FIRST window only on a USER turn-on (`mint_first_window`) when this
-    // workspace has no persisted window record yet; the watcher then opens it. On
-    // a re-on the records already exist, and the mount above (which fired the
-    // library change signal) makes them live, so the watcher reopens them at their
-    // stable window_id -- restoring each window's tabs. The BOOT re-serve passes
-    // `mint_first_window=false`: it RESTORES the persisted set only, never mints --
-    // a workspace whose windows were all CLOSED has no record, and minting there
-    // would re-open a window the user closed. The registry is the sole
-    // window-creation authority; there is no imperative window build. LOCAL records
-    // only: the merged set now includes connected devservers' windows, and a remote
-    // workspace served at the SAME absolute path (common with `ssh -L` boxes) would
-    // otherwise false-match and skip minting the local window.
-    let has_window = embedded.local_window_records().iter().any(|r| {
-        r.kind == WindowKind::Workspace && r.workspace_path.as_deref() == Some(key.as_str())
-    });
-    if mint_first_window && !has_window {
+    // A user-requested open always mints after the mount. Persisted rows became
+    // live when the mount fired the library change signal, and the registry
+    // orders the fresh row last for this workspace. Boot restore skips this
+    // block so an empty persisted set stays empty. The registry remains the
+    // sole window-creation authority; there is no imperative window build.
+    if open_mode.should_mint() {
         if let Err(e) = embedded.mint_window(WindowKind::Workspace, Some(key.clone())) {
             let removed = { state.serves.lock().unwrap().remove(&key) };
             if let Some(handle) = removed {
@@ -2430,6 +2435,48 @@ const KEY_BRIDGE_JS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_open_mode_mints_only_for_explicit_opens() {
+        assert!(WorkspaceOpenMode::OpenWindow.should_mint());
+        assert!(!WorkspaceOpenMode::RestoreOnly.should_mint());
+    }
+
+    #[test]
+    fn cli_handoff_mints_for_running_and_stopped_workspaces() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let handoff = MAIN_RS
+            .split("fn open_workspace_from_handoff(")
+            .nth(1)
+            .expect("handoff function exists")
+            .split("async fn close_workspace_from_handoff(")
+            .next()
+            .expect("handoff section ends before close");
+
+        assert!(
+            handoff.contains(".mint_window(chan_server::WindowKind::Workspace"),
+            "an already-running workspace must mint immediately",
+        );
+        assert!(
+            handoff.contains("serve::WorkspaceOpenMode::OpenWindow"),
+            "a stopped workspace must mint after mounting",
+        );
+    }
+
+    #[test]
+    fn boot_restore_requests_no_window_mint() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boot = MAIN_RS
+            .split("// Boot matrix.")
+            .nth(1)
+            .expect("boot matrix exists")
+            .split("// On-launch self-update check")
+            .next()
+            .expect("boot matrix ends before update check");
+
+        assert!(boot.contains("serve::WorkspaceOpenMode::RestoreOnly"));
+        assert!(!boot.contains("serve::WorkspaceOpenMode::OpenWindow"));
+    }
 
     #[test]
     fn renderer_signal_is_appended_for_the_serving_tenant() {

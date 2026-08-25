@@ -653,22 +653,34 @@ fn mint_id(windows: &[PersistedWindow]) -> String {
     }
 }
 
-/// Lowest-free "Window N" within the same `(kind, workspace_path)` family, so a
-/// closed window's number is reused rather than monotonically climbing (mirrors
-/// the terminal-tab lowest-free numbering). Starts at 1.
+/// Allocate "Window N" within the same `(kind, workspace_path)` family.
+/// Terminals reuse the lowest free number to mirror terminal-tab numbering.
+/// Workspace windows allocate above the current maximum so a window minted
+/// after persisted rows are restored sorts after every restored row.
 fn next_ordinal(
     windows: &[PersistedWindow],
     kind: WindowKind,
     workspace_path: Option<&str>,
 ) -> u32 {
-    let used: HashSet<u32> = windows
-        .iter()
-        .filter(|w| w.kind == kind && w.workspace_path.as_deref() == workspace_path)
-        .map(|w| w.ordinal)
-        .collect();
-    (1u32..)
-        .find(|n| !used.contains(n))
-        .expect("u32 always has a free ordinal for a realistic window count")
+    let family = || {
+        windows
+            .iter()
+            .filter(|w| w.kind == kind && w.workspace_path.as_deref() == workspace_path)
+    };
+    match kind {
+        WindowKind::Terminal => {
+            let used: HashSet<u32> = family().map(|w| w.ordinal).collect();
+            (1u32..)
+                .find(|n| !used.contains(n))
+                .expect("u32 always has a free ordinal for a realistic window count")
+        }
+        WindowKind::Workspace => family()
+            .map(|w| w.ordinal)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .expect("a realistic workspace window count fits in u32"),
+    }
 }
 
 /// Compose the persisted, library-perspective title: `⌂ Terminal Window N` for
@@ -1278,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinal_is_lowest_free_per_kind_and_workspace() {
+    fn terminal_ordinal_is_lowest_free_and_workspace_families_are_independent() {
         let (reg, _d) = registry();
         // Terminals number independently: 1, 2, 3.
         let t1 = reg.create(WindowKind::Terminal, None);
@@ -1405,6 +1417,43 @@ mod tests {
             .map(|w| w.workspace_path)
             .collect();
         assert_eq!(paths, vec![Some("/a".into()), Some("/z".into())]);
+    }
+
+    #[test]
+    fn workspace_minted_after_restore_sorts_last_even_with_an_ordinal_gap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("windows.json");
+        let (first_id, third_id) = {
+            let registry = WindowRegistry::open(store.clone());
+            let first = registry.create(WindowKind::Workspace, Some("/notes".into()));
+            let removed = registry.create(WindowKind::Workspace, Some("/notes".into()));
+            let third = registry.create(WindowKind::Workspace, Some("/notes".into()));
+            assert!(registry.remove(&removed.window_id));
+            (first.window_id, third.window_id)
+        };
+
+        let restored = WindowRegistry::open(store);
+        let requested = restored.create(WindowKind::Workspace, Some("/notes".into()));
+        let rows: Vec<_> = restored
+            .snapshot()
+            .into_iter()
+            .filter(|row| row.workspace_path.as_deref() == Some("/notes"))
+            .collect();
+
+        assert_eq!(
+            rows.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+            vec![1, 3, 4],
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.window_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                first_id.as_str(),
+                third_id.as_str(),
+                requested.window_id.as_str()
+            ],
+        );
     }
 
     #[test]

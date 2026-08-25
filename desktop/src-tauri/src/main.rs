@@ -1278,8 +1278,14 @@ async fn add_workspace(
     // serve immediately is what they expect; otherwise the freshly
     // added row sits there with On=off and Launch disabled, which
     // looks broken.
-    // User add → they want a window minted (a fresh turn-on).
-    serve::start(app, Arc::clone(&state), path, true).await?;
+    // A user add opens one new window after mounting the workspace.
+    serve::start(
+        app,
+        Arc::clone(&state),
+        path,
+        serve::WorkspaceOpenMode::OpenWindow,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1342,9 +1348,14 @@ async fn set_workspace_on(
 ) -> Result<(), String> {
     let key = canonical_key(Path::new(&path));
     if on {
-        // User toggled on → mint the first window (fresh on); a kept record means
-        // has_window=true so it won't double-mint.
-        serve::start(app, Arc::clone(&state), key, true).await?;
+        // A user turn-on restores saved windows and opens one new window last.
+        serve::start(
+            app,
+            Arc::clone(&state),
+            key,
+            serve::WorkspaceOpenMode::OpenWindow,
+        )
+        .await?;
     } else {
         // The host runs its bounded flock verifier on Tokio's blocking pool,
         // so the async close can be awaited directly without blocking Tauri.
@@ -3573,11 +3584,10 @@ fn register_devserver_from_handoff(
 /// request (`chan serve <workspace>` while this desktop is running).
 ///
 /// Mirrors the `add_workspace` flow: register + boot the workspace through the
-/// shared embedded Library, then `serve::start` (mount + mint the
-/// first window). If the workspace is ALREADY running, `serve::start`
-/// returns early without minting, so we mint an additional window (the
-/// watcher opens it) to match the user's intent
-/// ("show me this workspace now").
+/// shared embedded Library, then `serve::start` mounts it, restores persisted
+/// windows, and mints one new window. If the workspace is already running,
+/// `serve::start` returns early, so this function mints the requested window
+/// directly. The watcher opens the newly minted row in both cases.
 ///
 /// The slow work (registry write, boot scan, mount) runs on a spawned
 /// task so the callback returns promptly and the CLI doesn't block on
@@ -3644,9 +3654,14 @@ fn open_workspace_from_handoff(
                 return;
             }
         }
-        // `chan serve <workspace>` handoff: the user explicitly opened it → mint a window.
-        if let Err(e) =
-            serve::start(app.clone(), Arc::clone(&state), key_for_block.clone(), true).await
+        // The handoff is an explicit open, so mint after mounting and restoring.
+        if let Err(e) = serve::start(
+            app.clone(),
+            Arc::clone(&state),
+            key_for_block.clone(),
+            serve::WorkspaceOpenMode::OpenWindow,
+        )
+        .await
         {
             emit_system_notice(
                 &app,
@@ -6259,16 +6274,14 @@ fn main() {
                     "restoring the on workspaces from the overlay"
                 );
                 for key in enabled {
-                    // BOOT re-serve: RESTORE the persisted windows only -- do NOT
-                    // mint (mint_first_window=false). A workspace whose windows were
-                    // all closed has no record; minting would re-open a closed
-                    // window. The watcher restores existing records honoring
-                    // should_show (hidden stays hidden).
+                    // Boot restores persisted windows only. A workspace whose
+                    // windows were all closed has no record, so it stays
+                    // windowless. The watcher keeps hidden records hidden.
                     if let Err(e) = serve::start(
                         handle.clone(),
                         Arc::clone(&state_for_restore),
                         key.clone(),
-                        false,
+                        serve::WorkspaceOpenMode::RestoreOnly,
                     )
                     .await
                     {

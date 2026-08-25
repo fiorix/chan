@@ -3236,6 +3236,16 @@ fn devserver_candidates_text(instances: &[DevserverCandidate]) -> String {
     text
 }
 
+fn devserver_window_opened_message(root: &Path, instance: &DevserverCandidate) -> String {
+    format!(
+        "chan: opened a window for {} with local devserver on port {} (library {}, chan {})",
+        root.display(),
+        instance.port,
+        instance.library_root.display(),
+        instance.version,
+    )
+}
+
 /// The chan control socket exported into a chan-spawned terminal
 /// (`$CHAN_CONTROL_SOCKET`), trimmed and non-empty, or `None` outside a chan
 /// session. Its mere presence marks "some chan context" even when the holder
@@ -3887,12 +3897,13 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
             }
         }
         // CLI-to-devserver registration. A running same-user devserver mounts
-        // this workspace and owns its flock, so the CLI prints a note and exits
-        // WITHOUT opening it. CHAN_NO_DEVSERVER_HANDOFF opts out (skip the
+        // this workspace, mints one window, and owns its flock, so the CLI
+        // prints a note and exits. CHAN_NO_DEVSERVER_HANDOFF opts out (skip the
         // attempt, serve standalone); every non-registered outcome drops
         // through to the standalone path below.
         OpenTarget::Devserver => {
             if let Some(instance_index) = selected_devserver {
+                let candidate = &candidates[instance_index];
                 let instance = &devservers
                     .as_ref()
                     .expect("selected devserver came from discovery")[instance_index];
@@ -3900,14 +3911,8 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
                 match chan_server::devserver_handoff::try_register_devserver(instance, &root).await
                 {
                     Outcome::Registered { prefix: _ } => {
-                        println!(
-                            "chan: registered {} with local devserver on port {} (library {}, chan \
-                             {})",
-                            root.display(),
-                            instance.port,
-                            instance.library_root.display(),
-                            instance.version,
-                        );
+                        let message = devserver_window_opened_message(&root, candidate);
+                        println!("{message}");
                         return Ok(());
                     }
                     Outcome::VersionSkew => {
@@ -9504,6 +9509,16 @@ mod tests {
             port,
             version: format!("0.74.{index}"),
         }
+    }
+
+    #[test]
+    fn devserver_serve_note_says_a_window_opened() {
+        let instance = candidate(0, 10, "/library/a", 8787);
+        assert_eq!(
+            devserver_window_opened_message(Path::new("/tmp/notes"), &instance),
+            "chan: opened a window for /tmp/notes with local devserver on port 8787 \
+             (library /library/a, chan 0.74.0)",
+        );
     }
 
     #[test]

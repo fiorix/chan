@@ -64,3 +64,28 @@ Recommendation: land the `chan serve` contract, and treat `cs window new --works
 5. Standalone route: unchanged, including `--no-browser`.
 6. Boot re-serve still mints nothing: a workspace whose windows were all closed comes back with no window.
 7. The snapshot ordering that puts a newly minted window last for its workspace is pinned by a test, so case 2's focus outcome does not depend on watcher timing.
+
+## Implementation and evidence
+
+Desktop user opens and boot restore now use an explicit `WorkspaceOpenMode`. Every user open mints one window after mounting and restoring persisted rows, while boot restore mounts without minting. The already-running desktop handoff retains its direct mint because no mount cycle is needed.
+
+The ordering review found a gap in the original premise: workspace ordinals reused the lowest free number, so restored ordinals 1 and 3 gave a fresh window ordinal 2 and sorted it before the old window 3. Terminal windows retain lowest-free numbering, while workspace windows allocate above their family's current maximum. The regression fixture persists ordinals 1 and 3, reopens the registry, and requires the requested row to snapshot last as ordinal 4. Reverting that allocation made the test fail with actual ordinals `[1, 2, 3]`; restoring it made the same test pass with `[1, 3, 4]`.
+
+The devserver contract is atomic from the CLI's perspective: `Registered` means the workspace is mounted and exactly one workspace window record was minted. Repeated registration reuses the mount prefix and mints another window. A missing registry is rejected before taking the workspace flock, and a mint failure returns `Error` rather than reporting a successful open. This keeps the existing wire schema while making the success text truthful: `chan: opened a window for PATH with local devserver on port N ...`.
+
+### Proved on the headless build host
+
+- `cargo test -p chan-library workspace_minted_after_restore_sorts_last_even_with_an_ordinal_gap`: pass after the deliberate red proof.
+- `cargo test -p chan-server discovery_registration`: 2 passed, proving one mint per accepted request, stable prefix reuse, distinct IDs, and refusal before mount when no registry exists.
+- `cargo test -p chan devserver_serve_note_says_a_window_opened`: pass, pinning the success text.
+- `cargo test -p chan-desktop --bin chan-desktop`: 378 passed, including the explicit-open mint mode, both desktop handoff branches, and the boot restore no-mint guard.
+- An isolated copied binary and throwaway devserver proved both devserver discovery contexts without touching the owner's live instance. A command carrying that test server's explicit terminal control socket and a plain-shell command with no `CHAN_*` context each exited 0, printed `opened a window`, mounted the requested workspace, and produced a distinct persisted/API window row. Repeating the first command kept its prefix and produced ordinals 1 and 2 with unique window IDs. The isolated server logged no warnings or errors and was stopped and removed after the check.
+- The standalone route and `--no-browser` code paths are unchanged.
+
+### Display smoke still required
+
+This host has no GUI session, so it cannot render a Tauri window or observe OS focus. The desktop mint decisions, registry ordering, and watcher input are tested, but the visible window and focus portions of acceptance checks 1 through 3 remain unproven here. The isolated devserver proves acceptance check 4 through its persisted and authenticated API records, but no browser was attached to observe presentation. A display-host smoke should take about five minutes:
+
+1. With the desktop app serving a workspace, run `chan serve PATH` from a normal terminal. Confirm the native window count increases by one and the new window is focused.
+2. For another workspace, create three windows, close Window 2, turn the workspace off while preserving Windows 1 and 3, then run `chan serve PATH`. Confirm Windows 1 and 3 restore first, a new Window 4 opens last, and Window 4 is focused.
+3. Run `chan serve PATH` for a workspace the desktop has never served. Confirm exactly one workspace window appears and is focused.

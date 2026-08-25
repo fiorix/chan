@@ -13,8 +13,8 @@
 //!   reserved top-level slug is `api`.
 //! - A per-user discovery namespace ([`crate::devserver_handoff`]): each local
 //!   instance publishes a stable endpoint, and `chan serve <path>` selects one,
-//!   registers the workspace there, then exits instead of binding a second
-//!   server, so the devserver owns the single-writer flock.
+//!   registers the workspace there, mints one window record, then exits instead
+//!   of binding a second server, so the devserver owns the single-writer flock.
 //!
 //! What was mounted survives a restart: the enabled workspace roots and the
 //! devserver bearer token persist in `~/.chan/devserver/config.json` (0600).
@@ -56,7 +56,7 @@ use crate::devserver_api::{
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
 // Prefix allocation lives in chan-library (the window-record assembly needs the
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
-use chan_library::windows::WindowRegistry;
+use chan_library::windows::{WindowKind, WindowRegistry};
 use chan_library::{
     allocate_workspace_prefix, FileLocalColor, PersistedWorkspace, WorkspaceOverlay,
 };
@@ -2216,9 +2216,65 @@ async fn mark_tunnel_origin(
     next.run(req).await
 }
 
+/// Handle one request from the local discovery endpoint.
+///
+/// A successful serve registration mounts the workspace and mints exactly one
+/// workspace window record. The registry is checked before mounting so a host
+/// that cannot mint does not take the workspace flock and then tell the CLI to
+/// fall back to a standalone server.
+async fn handle_discovery_request(
+    state: &DevserverState,
+    port: u16,
+    request: crate::devserver_handoff::Request,
+) -> crate::devserver_handoff::Response {
+    match request {
+        crate::devserver_handoff::Request::Identify { .. } => {
+            let library_root = state
+                .host
+                .library()
+                .config_path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            crate::devserver_handoff::Response::Identified {
+                pid: std::process::id(),
+                library_root,
+                port,
+                version: crate::devserver_handoff::CHAN_VERSION.to_string(),
+            }
+        }
+        crate::devserver_handoff::Request::RegisterWorkspace { workspace_path, .. } => {
+            if state.host.window_registry().is_none() {
+                return crate::devserver_handoff::Response::Error {
+                    message: "devserver window registry is unavailable".to_string(),
+                };
+            }
+            let root = Path::new(&workspace_path);
+            match state.register_workspace(root).await {
+                Ok(prefix) => {
+                    let key = canonical_root(root).to_string_lossy().into_owned();
+                    match state.host.mint_window(WindowKind::Workspace, Some(key)) {
+                        Ok(_) => crate::devserver_handoff::Response::Registered {
+                            devserver_version: crate::devserver_handoff::CHAN_VERSION.to_string(),
+                            prefix,
+                        },
+                        Err(error) => crate::devserver_handoff::Response::Error {
+                            message: format!("opening workspace window: {error}"),
+                        },
+                    }
+                }
+                Err(error) => crate::devserver_handoff::Response::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+    }
+}
+
 /// Bind this instance's discovery endpoint. Its registration handler mounts
-/// the requested workspace. Returns `None` (and prints a note) when the
-/// endpoint cannot bind, so the management API still serves.
+/// the requested workspace and mints its requested window. Returns `None` (and
+/// prints a note) when the endpoint cannot bind, so the management API still
+/// serves.
 fn start_discovery_listener(
     state: Arc<DevserverState>,
     port: u16,
@@ -2234,36 +2290,7 @@ fn start_discovery_listener(
     };
     let result = crate::devserver_handoff::start_listener(socket_path, move |req| {
         let state = state.clone();
-        async move {
-            match req {
-                crate::devserver_handoff::Request::Identify { .. } => {
-                    let library_root = state
-                        .host
-                        .library()
-                        .config_path()
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_default();
-                    crate::devserver_handoff::Response::Identified {
-                        pid: std::process::id(),
-                        library_root,
-                        port,
-                        version: crate::devserver_handoff::CHAN_VERSION.to_string(),
-                    }
-                }
-                crate::devserver_handoff::Request::RegisterWorkspace { workspace_path, .. } => {
-                    match state.register_workspace(Path::new(&workspace_path)).await {
-                        Ok(prefix) => crate::devserver_handoff::Response::Registered {
-                            devserver_version: crate::devserver_handoff::CHAN_VERSION.to_string(),
-                            prefix,
-                        },
-                        Err(e) => crate::devserver_handoff::Response::Error {
-                            message: e.to_string(),
-                        },
-                    }
-                }
-            }
-        }
+        async move { handle_discovery_request(&state, port, req).await }
     });
     match result {
         Ok(handle) => Some(handle),
@@ -4055,6 +4082,75 @@ mod tests {
             persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
         })
+    }
+
+    #[tokio::test]
+    async fn discovery_registration_mounts_and_mints_one_window_per_request() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+        let request = || crate::devserver_handoff::Request::RegisterWorkspace {
+            protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+            cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+            workspace_path: workspace.path().display().to_string(),
+        };
+
+        let first = handle_discovery_request(&state, 8787, request()).await;
+        let first_prefix = match first {
+            crate::devserver_handoff::Response::Registered { prefix, .. } => prefix,
+            other => panic!("expected registered response, got {other:?}"),
+        };
+        let records = state.host.assemble_window_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, WindowKind::Workspace);
+        assert_eq!(records[0].prefix, first_prefix);
+        assert_eq!(records[0].ordinal, 1);
+
+        let second = handle_discovery_request(&state, 8787, request()).await;
+        assert!(matches!(
+            second,
+            crate::devserver_handoff::Response::Registered { ref prefix, .. }
+                if prefix == &first_prefix
+        ));
+        let records = state.host.assemble_window_records();
+        assert_eq!(records.len(), 2, "each serve request mints one window");
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+        );
+        assert_ne!(records[0].window_id, records[1].window_id);
+    }
+
+    #[tokio::test]
+    async fn discovery_registration_without_a_window_registry_does_not_mount() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let response = handle_discovery_request(
+            &state,
+            8787,
+            crate::devserver_handoff::Request::RegisterWorkspace {
+                protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+                cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+                workspace_path: workspace.path().display().to_string(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            crate::devserver_handoff::Response::Error { ref message }
+                if message.contains("window registry")
+        ));
+        assert!(!state.host.is_root_mounted(workspace.path()));
     }
 
     async fn complete_test_startup(state: &DevserverState) {
