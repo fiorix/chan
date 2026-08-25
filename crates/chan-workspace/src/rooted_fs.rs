@@ -18,6 +18,7 @@ use crate::workspace::{
 /// distinction is load-bearing: `ENOENT` is terminal and may tear a session
 /// down, while these are transport failures that say nothing about whether
 /// the content still exists, and must never be read as removal.
+#[cfg(unix)]
 fn is_transport_error(error: &std::io::Error) -> bool {
     // `ErrorKind` has no stable variant for most of these, so match the raw
     // errno. Anything not listed keeps its existing classification.
@@ -36,6 +37,14 @@ fn is_transport_error(error: &std::io::Error) -> bool {
                 | libc::EREMOTEIO
         )
     )
+}
+
+#[cfg(not(unix))]
+fn is_transport_error(_error: &std::io::Error) -> bool {
+    // These classifications are POSIX transport errnos. Windows reports
+    // different Win32 codes, and classifying those requires separate evidence.
+    // Leaving them unclassified preserves the platform's existing behavior.
+    false
 }
 
 /// Map a root-level `io::Error` to the typed condition it represents:
@@ -1289,6 +1298,7 @@ mod root_availability_tests {
         RootedFs::open(root.to_path_buf(), 1 << 20).expect("open rooted fs")
     }
 
+    #[cfg(unix)]
     #[test]
     fn transport_errnos_are_not_not_found() {
         // The whole point of the split: a dead network mount answers one of
@@ -1316,6 +1326,7 @@ mod root_availability_tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_error_separates_absent_from_unreachable() {
         let path = std::path::Path::new("/nonexistent/root");
