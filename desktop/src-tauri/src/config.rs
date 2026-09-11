@@ -499,15 +499,27 @@ impl ConfigStore {
         }
     }
 
+    /// This file holds devserver bearer tokens and token-bearing URLs, so it
+    /// is written like the token stores it sits beside: through
+    /// chan-workspace's atomic_write (tempfile + fsync of the file AND the
+    /// parent dir + rename), then narrowed to 0600 on unix. A plain write and
+    /// rename would leave the token at the process umask with no fsync behind
+    /// the publication.
+    ///
+    /// atomic_write carries an existing file's mode across the rename, so the
+    /// chmod runs on every save rather than only where the file is created:
+    /// a config that reaches this process group- or world-readable does not
+    /// stay that way.
     pub fn save(&mut self, cfg: &Config) -> io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
         let bytes = serde_json::to_vec_pretty(cfg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, bytes)?;
-        fs::rename(&tmp, &self.path)?;
+        chan_workspace::fs_ops::atomic_write(&self.path, &bytes)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 }
@@ -1802,6 +1814,49 @@ mod tests {
         assert_eq!(ds.added_at, 0);
         assert_eq!(ds.gateway_owner, None);
         assert_eq!(ds.gateway_devserver_id, None);
+    }
+
+    /// The config carries devserver bearer tokens and token-bearing URLs, so a
+    /// save has to leave it owner-only, including over a file an older build
+    /// created at the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn config_save_is_owner_only_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop").join("config.json");
+        let mut store = ConfigStore { path: path.clone() };
+        let cfg = Config {
+            collapsed_machines: vec!["box".to_string()],
+            ..Default::default()
+        };
+
+        store.save(&cfg).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(store.get().unwrap().collapsed_machines, vec!["box"]);
+
+        // atomic_write carries an existing file's mode across the rename, so a
+        // config left world-readable by an older build is only narrowed if the
+        // save chmods every time rather than on create.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&cfg).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "config.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "stray files beside the config: {leftovers:?}"
+        );
     }
 
     /// The registry projects a stored `Devserver` to a wire `DevserverEntry`
