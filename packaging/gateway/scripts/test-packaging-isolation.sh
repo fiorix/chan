@@ -16,6 +16,37 @@ assert_contains() {
         || die "$file does not contain: $text"
 }
 
+# grep exits 0 for a match, 1 for no match, and 2 for an error such as an
+# unreadable file or a bad pattern. Both helpers below treat anything other
+# than 0 or 1 as a failure of the check itself: reading an error as "pattern
+# absent" is exactly what made the retired ripgrep calls here pass vacuously.
+#
+# refute_pattern fails when the extended regular expression IS found.
+refute_pattern() {
+    local message=$1 pattern=$2
+    shift 2
+    local status=0
+    grep -rEn -e "$pattern" "$@" || status=$?
+    case "$status" in
+        0) die "$message" ;;
+        1) ;;
+        *) die "grep failed (status $status) while checking: $message" ;;
+    esac
+}
+
+# require_fixed fails when the literal string is NOT found.
+require_fixed() {
+    local message=$1 text=$2
+    shift 2
+    local status=0
+    grep -rFq -e "$text" "$@" || status=$?
+    case "$status" in
+        0) ;;
+        1) die "$message" ;;
+        *) die "grep failed (status $status) while checking: $message" ;;
+    esac
+}
+
 services=(profile identity devserver-control devserver-proxy)
 for service in "${services[@]}"; do
     user="chan-gateway-$service"
@@ -101,10 +132,9 @@ assert_contains "$REPO/gateway/crates/admin/packaging/postinst" \
 assert_contains "$REPO/gateway/crates/admin/packaging/postinst" \
     "      chmod 0600 /etc/chan-gateway/admin.env"
 
-if rg -n '^(User|Group)=chan-gateway$' \
-    "$REPO"/gateway/crates/*/packaging/*.service; then
-    die "a gateway daemon still uses the shared chan-gateway identity"
-fi
+refute_pattern "a gateway daemon still uses the shared chan-gateway identity" \
+    '^(User|Group)=chan-gateway$' \
+    "$REPO"/gateway/crates/*/packaging/*.service
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -246,12 +276,11 @@ assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     'INTERNAL_BIND_ADDR=127.0.0.1:7004'
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     'IDENTITY_URL=http://127.0.0.1:7004'
-if rg -n '^IDENTITY_URL=.*:7000/?$' \
+refute_pattern "an internal identity client still targets the public listener" \
+    '^IDENTITY_URL=.*:7000/?$' \
     "$REPO"/gateway/crates/*/packaging/*.env \
     "$REPO/packaging/gateway/scripts/configure.sh" \
-    "$REPO/packaging/gateway/scripts/dev/setup.sh"; then
-    die "an internal identity client still targets the public listener"
-fi
+    "$REPO/packaging/gateway/scripts/dev/setup.sh"
 
 for scoped_env in \
     DEVSERVER_OPERATOR_ADMIN_TOKENS \
@@ -286,55 +315,50 @@ for scoped_env in \
     CHAN_ADMIN_PROFILE_TOKEN CHAN_ADMIN_IDENTITY_TOKEN CHAN_ADMIN_OPERATOR_TOKEN; do
     assert_contains "$REPO/gateway/crates/admin/packaging/admin.env" "$scoped_env="
 done
-if rg -n '^DEVSERVER_ADMIN_TOKEN=|^CHAN_ADMIN_TOKEN=' \
+refute_pattern "packaging retains a shared admin bearer" \
+    '^DEVSERVER_ADMIN_TOKEN=|^CHAN_ADMIN_TOKEN=' \
     "$REPO"/gateway/crates/*/packaging/*.env \
-    "$REPO/packaging/gateway/scripts/configure.sh"; then
-    die "packaging retains a shared admin bearer"
-fi
-if rg -n '^DEVSERVER_GATE_SECRET=' \
+    "$REPO/packaging/gateway/scripts/configure.sh"
+refute_pattern "runtime packaging retains the retired cross-service session secret" \
+    '^DEVSERVER_GATE_SECRET=' \
     "$REPO"/gateway/crates/*/packaging/*.env \
     "$REPO/packaging/gateway/scripts/configure.sh" \
-    "$REPO/packaging/gateway/scripts/dev/setup.sh"; then
-    die "runtime packaging retains the retired cross-service session secret"
-fi
-if rg -n '^IDENTITY_(SESSION_INTERNAL|ACCOUNT_ADMIN)_TOKEN=' \
+    "$REPO/packaging/gateway/scripts/dev/setup.sh"
+refute_pattern "a narrow account bearer escaped identity packaging" \
+    '^IDENTITY_(SESSION_INTERNAL|ACCOUNT_ADMIN)_TOKEN=' \
     "$REPO/gateway/crates/devserver-proxy/packaging/devserver-proxy.env" \
-    "$REPO/gateway/crates/admin/packaging/admin.env"; then
-    die "a narrow account bearer escaped identity packaging"
-fi
+    "$REPO/gateway/crates/admin/packaging/admin.env"
 
 # Keep both developer E2E paths on the production credential and transport
 # contracts. These fixtures are executable documentation and must not quietly
 # regress to the retired shared-secret/query-bearer flow or cleartext public
 # DNS origins.
 sdme_e2e="$REPO/packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e"
-if rg -n 'DEVSERVER_GATE_SECRET|HS256|mint-gate-token|entry_url[^[:space:]]*\?t=' \
-    "$sdme_e2e"; then
-    die "sdme devserver E2E retains a retired credential contract"
-fi
+refute_pattern "sdme devserver E2E retains a retired credential contract" \
+    'DEVSERVER_GATE_SECRET|HS256|mint-gate-token|entry_url[^[:space:]]*[?]t=' \
+    "$sdme_e2e"
 for expected in \
     DEVSERVER_ENTRY_VERIFYING_KEYS \
     IDENTITY_PUBLIC_ORIGIN \
     DEVSERVER_PROXY_CREDENTIALS \
     devserver-control-service \
     mint-signed-credential.py; do
-    rg -q --fixed-strings "$expected" "$sdme_e2e" \
-        || die "sdme devserver E2E does not exercise $expected"
+    require_fixed "sdme devserver E2E does not exercise $expected" \
+        "$expected" "$sdme_e2e"
 done
 
 dev_setup="$REPO/packaging/gateway/scripts/dev/setup.sh"
 dev_run="$REPO/packaging/gateway/scripts/dev/run.sh"
-if rg -n '^(BASE_URL|DEVSERVER_PROXY_ORIGIN|DEVSERVER_TUNNEL_ORIGIN|DEVSERVER_PROXY_BASE_URL|IDENTITY_PUBLIC_ORIGIN|DASHBOARD_URL)=http://.*localtest\.me' \
-    "$dev_setup"; then
-    die "local gateway runner publishes a cleartext DNS origin"
-fi
+refute_pattern "local gateway runner publishes a cleartext DNS origin" \
+    '^(BASE_URL|DEVSERVER_PROXY_ORIGIN|DEVSERVER_TUNNEL_ORIGIN|DEVSERVER_PROXY_BASE_URL|IDENTITY_PUBLIC_ORIGIN|DASHBOARD_URL)=http://.*localtest\.me' \
+    "$dev_setup"
 for expected in \
-    'BASE_URL=https://id.localtest.me:17000' \
-    'DEVSERVER_PROXY_ORIGIN=https://devserver.localtest.me:17002' \
-    'DEVSERVER_TUNNEL_ORIGIN=https://devserver.localtest.me:17100' \
-    'IDENTITY_PUBLIC_ORIGIN=https://id.localtest.me:17000'; do
-    grep -Fq "$expected" "$dev_setup" \
-        || die "local gateway setup does not contain: $expected"
+    'BASE_URL=https://gw.localtest.me:17000' \
+    'DEVSERVER_PROXY_ORIGIN=https://proxy.localtest.me:17002' \
+    'DEVSERVER_TUNNEL_ORIGIN=https://proxy.localtest.me:17100' \
+    'IDENTITY_PUBLIC_ORIGIN=https://gw.localtest.me:17000'; do
+    require_fixed "local gateway setup does not contain: $expected" \
+        "$expected" "$dev_setup"
 done
 grep -Fq 'TLS_SHIM="$SCRIPT_DIR/tls-shim.mjs"' "$dev_run" \
     || die "local gateway runner does not publish TLS edges"
