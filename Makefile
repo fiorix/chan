@@ -437,12 +437,18 @@ gateway-build: gateway-spa ## Build, but do not test, the gateway release crates
 	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
 
+.PHONY: gateway-version-pin-check
+gateway-version-pin-check: ## Check the gateway deb dependency pins against the workspace version.
+	packaging/gateway/scripts/check-package-version-pins.sh
+
 .PHONY: gateway-lint
-gateway-lint: gateway-spa ## Clippy all gateway targets without executing tests.
+gateway-lint: gateway-version-pin-check gateway-spa ## Clippy all gateway targets without executing tests.
 	$(LINUX_ONLY)
 	# The gateway is a separate Cargo workspace, so the root clippy run does
 	# not reach it. Depends on gateway-spa for the same rust-embed reason as
-	# gateway-build.
+	# gateway-build, and on gateway-version-pin-check first: it is a
+	# seconds-long static check, so a stale pin should not cost an SPA build
+	# and a full clippy pass to discover.
 	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 
 .PHONY: gateway-test

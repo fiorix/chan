@@ -374,11 +374,8 @@ grep -Fqx "EXPECTED_SQLX_MIGRATION=$latest_migration" \
     "$migrate_packaging/migrate.env" \
     || die "migrate.env does not pin the latest sqlx migration"
 
-gateway_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' \
-    "$REPO/gateway/Cargo.toml" | head -n 1)
-grep -Fq "chan-gateway-identity (= ${gateway_version}-1)" \
-    "$REPO/gateway/crates/profile/Cargo.toml" \
-    || die "profile package does not require the same-version identity migrator"
+"$REPO/packaging/gateway/scripts/check-package-version-pins.sh" \
+    || die "gateway deb dependency pins are stale"
 
 mapfile -t admission_keys < <("$REPO/packaging/gateway/scripts/generate-admission-keypair.py")
 [[ ${#admission_keys[@]} -eq 2 ]] \
