@@ -56,6 +56,14 @@ fn default_search_limit() -> usize {
 
 const MAX_FILE_SEARCH_LIMIT: usize = 50;
 
+/// Ceiling on the caller-supplied `/api/search/content` limit. The value
+/// reaches `TopDocs::with_limit`, which allocates in proportion to it, and
+/// drives the O(n*limit) dedup in `collapse_hits_by_file`, so an unclamped
+/// client number is an abort waiting to happen. 200 is the same ceiling
+/// `expanded_content_candidate_limit` already applies to the widened
+/// candidate pool it derives from this value.
+const MAX_CONTENT_SEARCH_LIMIT: u32 = 200;
+
 fn filename_recovery(
     workspace: &chan_workspace::Workspace,
     basename: &str,
@@ -288,7 +296,7 @@ fn normalized_content_limit(limit: u32) -> u32 {
     if limit == 0 {
         default_content_limit()
     } else {
-        limit
+        limit.min(MAX_CONTENT_SEARCH_LIMIT)
     }
 }
 
@@ -628,6 +636,15 @@ mod tests {
         );
 
         assert_eq!(hits, vec![hit("a.md", "best", 10.0)]);
+    }
+
+    #[test]
+    fn normalized_content_limit_clamps_the_client_value() {
+        assert_eq!(normalized_content_limit(0), default_content_limit());
+        assert_eq!(normalized_content_limit(50), 50);
+        assert_eq!(normalized_content_limit(200), MAX_CONTENT_SEARCH_LIMIT);
+        assert_eq!(normalized_content_limit(100_000), MAX_CONTENT_SEARCH_LIMIT);
+        assert_eq!(normalized_content_limit(u32::MAX), MAX_CONTENT_SEARCH_LIMIT);
     }
 
     #[test]
