@@ -111,6 +111,10 @@ pub struct FeatureFlagOverride {
 /// the registry (treat as false).
 pub type FlagMap = std::collections::BTreeMap<String, bool>;
 
+/// Route prefix profile gates with its admin bearer. Every path under
+/// it is behind `admin_auth` in `crates/profile/src/http.rs`.
+const ADMIN_PATH_PREFIX: &str = "/v1/admin/";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Devserver {
     pub id: Uuid,
@@ -238,20 +242,39 @@ impl ProfileClient {
         u
     }
 
-    fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, self.url(path))
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+    /// Bearer for `path`, derived from the path itself.
+    ///
+    /// Profile gates `/v1/admin/*` with `admin_auth`, which compares
+    /// only against its admin token and never accepts the service
+    /// token; every other route takes the service token. Deriving the
+    /// tier here rather than at the call site is what keeps an admin
+    /// route from being issued with the service bearer: there is no
+    /// second builder to pick the wrong one from.
+    ///
+    /// The fallback is load bearing. A single-token deployment leaves
+    /// `admin_token` unset and profile's `admin_token` is then the
+    /// same value as its service token, so admin routes have to go
+    /// out on `self.token`.
+    fn bearer(&self, path: &str) -> &str {
+        if path.starts_with(ADMIN_PATH_PREFIX) {
+            self.admin_token.as_ref().unwrap_or(&self.token)
+        } else {
+            &self.token
+        }
     }
 
-    fn admin_req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http.request(method, self.url(path)).header(
-            header::AUTHORIZATION,
-            format!(
-                "Bearer {}",
-                self.admin_token.as_ref().unwrap_or(&self.token)
-            ),
-        )
+    /// Attach the tier's bearer to an already-built URL. Callers that
+    /// need query parameters build the `Url` first and come through
+    /// here, so they are covered by the same rule as `req`.
+    fn authed(&self, method: reqwest::Method, url: Url) -> reqwest::RequestBuilder {
+        let authorization = format!("Bearer {}", self.bearer(url.path()));
+        self.http
+            .request(method, url)
+            .header(header::AUTHORIZATION, authorization)
+    }
+
+    fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.authed(method, self.url(path))
     }
 
     /// Send a request that is safe to replay: one retry after 100 ms
@@ -296,7 +319,7 @@ impl ProfileClient {
         &self,
         user_id: Uuid,
     ) -> ProfileResult<Option<DevserverUserPolicy>> {
-        let builder = self.admin_req(
+        let builder = self.req(
             reqwest::Method::GET,
             &format!("/v1/admin/users/{user_id}/devserver-policy"),
         );
@@ -315,7 +338,7 @@ impl ProfileClient {
         max_connected_devservers: i32,
     ) -> ProfileResult<DevserverUserPolicy> {
         let res = self
-            .admin_req(
+            .req(
                 reqwest::Method::PUT,
                 &format!("/v1/admin/users/{user_id}/devserver-policy"),
             )
@@ -334,7 +357,7 @@ impl ProfileClient {
     }
 
     pub async fn admin_get_fleet_policy(&self) -> ProfileResult<DevserverFleetPolicy> {
-        let builder = self.admin_req(reqwest::Method::GET, "/v1/admin/devserver-policy");
+        let builder = self.req(reqwest::Method::GET, "/v1/admin/devserver-policy");
         let res = Self::send_idempotent(builder).await?;
         match res.status() {
             StatusCode::OK => Ok(res.json().await?),
@@ -347,7 +370,7 @@ impl ProfileClient {
         admissions_enabled: bool,
     ) -> ProfileResult<DevserverFleetPolicy> {
         let res = self
-            .admin_req(reqwest::Method::PUT, "/v1/admin/devserver-policy")
+            .req(reqwest::Method::PUT, "/v1/admin/devserver-policy")
             .json(&UpdateDevserverFleetPolicy { admissions_enabled })
             .send()
             .await?;
@@ -360,7 +383,7 @@ impl ProfileClient {
 
     pub async fn admin_revoke_user_access(&self, user_id: Uuid) -> ProfileResult<AccessRevocation> {
         let res = self
-            .admin_req(
+            .req(
                 reqwest::Method::POST,
                 &format!("/v1/admin/users/{user_id}/access/revoke"),
             )
@@ -376,10 +399,7 @@ impl ProfileClient {
     pub async fn find_user_by_username(&self, username: &str) -> ProfileResult<Option<User>> {
         let mut url = self.url("/v1/users/by-username");
         url.query_pairs_mut().append_pair("u", username);
-        let builder = self
-            .http
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
+        let builder = self.authed(reqwest::Method::GET, url);
         let res = Self::send_idempotent(builder).await?;
         match res.status() {
             StatusCode::OK => Ok(Some(res.json().await?)),
@@ -397,12 +417,7 @@ impl ProfileClient {
         url.query_pairs_mut()
             .append_pair("provider", provider)
             .append_pair("subject", subject);
-        let res = self
-            .http
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let res = self.authed(reqwest::Method::GET, url).send().await?;
         match res.status() {
             StatusCode::OK => Ok(Some(res.json().await?)),
             StatusCode::NOT_FOUND => Ok(None),
@@ -883,10 +898,7 @@ impl ProfileClient {
             "/v1/users/{owner_id}/devservers/{devserver_id}/access"
         ));
         url.query_pairs_mut().append_pair("as", &caller.to_string());
-        let builder = self
-            .http
-            .get(url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.token));
+        let builder = self.authed(reqwest::Method::GET, url);
         let res = Self::send_idempotent(builder).await?;
         match res.status() {
             StatusCode::OK => Ok(Some(res.json().await?)),
@@ -964,4 +976,127 @@ async fn read_error(res: reqwest::Response) -> String {
     res.text()
         .await
         .unwrap_or_else(|e| format!("<read error: {e}>"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SERVICE_TOKEN: &str = "service-bearer";
+    const ADMIN_TOKEN: &str = "admin-bearer";
+    const USER: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// Paths profile gates with `admin_auth`, which accepts only the
+    /// admin bearer. One entry per `/v1/admin/*` shape this client
+    /// issues.
+    const ADMIN_ROUTES: &[(reqwest::Method, &str)] = &[
+        (reqwest::Method::POST, "/v1/admin/tokens/abc/revoke"),
+        (reqwest::Method::GET, "/v1/admin/flags"),
+        (reqwest::Method::POST, "/v1/admin/flags"),
+        (reqwest::Method::DELETE, "/v1/admin/flags/beta"),
+        (reqwest::Method::GET, "/v1/admin/flags/beta/overrides"),
+        (reqwest::Method::POST, "/v1/admin/flags/beta/overrides"),
+        (
+            reqwest::Method::DELETE,
+            "/v1/admin/flags/beta/overrides/abc",
+        ),
+        (reqwest::Method::GET, "/v1/admin/devserver-policy"),
+        (reqwest::Method::PUT, "/v1/admin/devserver-policy"),
+    ];
+
+    /// Paths profile gates with the service bearer.
+    const SERVICE_ROUTES: &[(reqwest::Method, &str)] = &[
+        (reqwest::Method::POST, "/v1/users"),
+        (reqwest::Method::POST, "/v1/users/upsert-by-identity"),
+        (reqwest::Method::POST, "/v1/auth-audit"),
+        (reqwest::Method::GET, "/v1/users/by-username"),
+    ];
+
+    fn client(admin_token: Option<&str>) -> ProfileClient {
+        let base: Url = "https://profile.internal.test/".parse().unwrap();
+        let client = ProfileClient::new(base, SERVICE_TOKEN.to_string()).unwrap();
+        match admin_token {
+            Some(token) => client.with_admin_token(token.to_string()).unwrap(),
+            None => client,
+        }
+    }
+
+    fn authorization(builder: reqwest::RequestBuilder) -> String {
+        builder
+            .build()
+            .expect("request builds")
+            .headers()
+            .get(header::AUTHORIZATION)
+            .expect("request carries an Authorization header")
+            .to_str()
+            .expect("Authorization header is ascii")
+            .to_owned()
+    }
+
+    #[test]
+    fn admin_routes_carry_the_admin_bearer() {
+        let client = client(Some(ADMIN_TOKEN));
+        for (method, path) in ADMIN_ROUTES {
+            let path = path.replace("abc", USER);
+            assert_eq!(
+                authorization(client.req(method.clone(), &path)),
+                format!("Bearer {ADMIN_TOKEN}"),
+                "{method} {path} was not issued with the admin bearer"
+            );
+        }
+    }
+
+    #[test]
+    fn service_routes_carry_the_service_bearer() {
+        let client = client(Some(ADMIN_TOKEN));
+        for (method, path) in SERVICE_ROUTES {
+            assert_eq!(
+                authorization(client.req(method.clone(), path)),
+                format!("Bearer {SERVICE_TOKEN}"),
+                "{method} {path} was not issued with the service bearer"
+            );
+        }
+        let path = format!("/v1/users/{USER}/flags");
+        assert_eq!(
+            authorization(client.req(reqwest::Method::GET, &path)),
+            format!("Bearer {SERVICE_TOKEN}")
+        );
+    }
+
+    /// The three read paths that append query parameters build their
+    /// `Url` first, so they reach the header through `authed` rather
+    /// than `req`. Pin them to the same rule.
+    #[test]
+    fn query_string_routes_use_the_same_path_derived_tier() {
+        let client = client(Some(ADMIN_TOKEN));
+        let mut service = client.url("/v1/users/by-username");
+        service.query_pairs_mut().append_pair("u", "alice");
+        assert_eq!(
+            authorization(client.authed(reqwest::Method::GET, service)),
+            format!("Bearer {SERVICE_TOKEN}")
+        );
+        let mut admin = client.url("/v1/admin/flags");
+        admin.query_pairs_mut().append_pair("key", "beta");
+        assert_eq!(
+            authorization(client.authed(reqwest::Method::GET, admin)),
+            format!("Bearer {ADMIN_TOKEN}")
+        );
+    }
+
+    /// A single-token deployment leaves the admin token unset and
+    /// runs every tier on the service bearer. That fallback is load
+    /// bearing: dropping it would lock those deployments out of
+    /// `/v1/admin/*`.
+    #[test]
+    fn admin_routes_fall_back_to_the_service_bearer_without_an_admin_token() {
+        let client = client(None);
+        for (method, path) in ADMIN_ROUTES.iter().chain(SERVICE_ROUTES) {
+            let path = path.replace("abc", USER);
+            assert_eq!(
+                authorization(client.req(method.clone(), &path)),
+                format!("Bearer {SERVICE_TOKEN}"),
+                "{method} {path} was not issued with the service bearer"
+            );
+        }
+    }
 }
