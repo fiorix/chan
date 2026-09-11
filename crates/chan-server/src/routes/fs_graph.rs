@@ -130,6 +130,10 @@ impl FsGraphScope {
 /// of its walk so a stale cursor from a different scope is rejected up
 /// front rather than silently producing a wrong batch.
 ///
+/// The encoding is opaque, not authenticated, so every field is client
+/// input and the frames are re-validated on decode; see
+/// [`validated_frames`].
+///
 /// The walk is a depth-first pre-order over sorted directory entries;
 /// the resume state is therefore the DFS stack, which is bounded to at
 /// most `MAX_DEPTH` entries -- that is what keeps the cursor small.
@@ -497,7 +501,7 @@ pub fn build_fs_graph_paged(
                     "graph cursor does not match the requested scope/depth",
                 ));
             }
-            Some(parsed.s)
+            Some(validated_frames(&r.root, &r.rel, r.depth, parsed.s)?)
         }
         None => None,
     };
@@ -543,6 +547,113 @@ pub fn build_fs_graph_paged(
         cursor: cursor_out,
         done,
     })
+}
+
+/// Admit a decoded cursor's DFS frames, or refuse the whole request.
+///
+/// The cursor is base64url of JSON over an unauthenticated wire, so every
+/// frame is client input. `walk_directory_paged` joins each frame's `r` onto
+/// the workspace root and reads it, and `Path::join` replaces the whole path
+/// for an absolute `r` and walks upward for a `..`, so an unvalidated frame
+/// lists any directory the server can read. Only this walk's own frame shape
+/// is admitted, and every check runs before the first `read_dir`:
+///
+///   - `r` is already in normal form and lexically inside the root, so no
+///     absolute path, `.` segment, or `..` traversal survives;
+///   - `r` canonicalizes inside the root, so a frame naming an in-workspace
+///     symlink that points outside is refused too: `resolve_safe` is lexical
+///     and would let that through, and the honest walk never produces such a
+///     frame because it refuses to descend into a symlink;
+///   - `r` is the scope directory or a descendant of it;
+///   - frames nest, each exactly one segment below the one before it, which
+///     is what a DFS stack is;
+///   - `l`, the remaining depth budget, is clamped to the walk's own depth.
+fn validated_frames(
+    root: &Path,
+    scope_rel: &str,
+    depth: usize,
+    frames: Vec<CursorFrame>,
+) -> Result<Vec<CursorFrame>, FsGraphError> {
+    let reject = |rel: &str| {
+        FsGraphError::new(
+            StatusCode::BAD_REQUEST,
+            format!("graph cursor frame is not inside the requested scope: {rel}"),
+        )
+    };
+    let root_canon = root.canonicalize().map_err(|e| {
+        FsGraphError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("canonicalize workspace root: {e}"),
+        )
+    })?;
+    let mut out: Vec<CursorFrame> = Vec::with_capacity(frames.len());
+    for frame in frames {
+        if !frame.r.is_empty() {
+            if !rel_is_normal_form(&frame.r) {
+                return Err(reject(&frame.r));
+            }
+            let abs = chan_workspace::fs_ops::resolve_safe(root, &frame.r)
+                .map_err(|_| reject(&frame.r))?;
+            // A frame that vanished between pages canonicalizes nowhere;
+            // let the walk open it and end that branch on the empty read.
+            if let Ok(canon) = abs.canonicalize() {
+                if !canon.starts_with(&root_canon) {
+                    return Err(reject(&frame.r));
+                }
+            }
+        }
+        if !rel_is_within(scope_rel, &frame.r) {
+            return Err(reject(&frame.r));
+        }
+        if let Some(previous) = out.last() {
+            if !rel_is_child_of(&previous.r, &frame.r) {
+                return Err(reject(&frame.r));
+            }
+        }
+        out.push(CursorFrame {
+            r: frame.r,
+            i: frame.i,
+            l: frame.l.min(depth),
+        });
+    }
+    Ok(out)
+}
+
+/// Whether `rel` has the exact shape the walker emits: slash-separated,
+/// non-empty segments, none of them `.` or `..`, and no leading slash.
+/// Deliberately not `normalize_rel`, which also rewrites `\\` to `/` and so
+/// would refuse a legitimate frame for a Unix directory whose name contains a
+/// backslash.
+fn rel_is_normal_form(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && rel
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+/// Whether the workspace-relative `rel` is `scope` itself or under it. The
+/// empty scope is the workspace root, which contains everything.
+fn rel_is_within(scope: &str, rel: &str) -> bool {
+    scope.is_empty()
+        || rel == scope
+        || rel
+            .strip_prefix(scope)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rest| !rest.is_empty())
+}
+
+/// Whether the workspace-relative `rel` names a direct child of `parent`.
+/// The empty parent is the workspace root, whose children are single
+/// segments.
+fn rel_is_child_of(parent: &str, rel: &str) -> bool {
+    let child = if parent.is_empty() {
+        Some(rel)
+    } else {
+        rel.strip_prefix(parent)
+            .and_then(|rest| rest.strip_prefix('/'))
+    };
+    child.is_some_and(|child| !child.is_empty() && !child.contains('/'))
 }
 
 /// Verify that the parent of the joined request path resolves
@@ -2215,6 +2326,163 @@ mod tests {
             "dir0/file0.md".to_string(),
             "contains".to_string()
         )));
+    }
+
+    /// A workspace under `base/ws` plus an outside sibling `base/outside`
+    /// holding a marker file, so a forged cursor frame has something
+    /// recognisable to leak if the walk honours it.
+    fn seed_escape_workspace() -> (TempDir, TempDir, std::sync::Arc<chan_workspace::Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let base = TempDir::new().unwrap();
+        let ws_root = base.path().join("ws");
+        let outside = base.path().join("outside");
+        fs::create_dir_all(&ws_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "outside\n").unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&ws_root).unwrap();
+        let ws = lib.open_workspace(&ws_root).unwrap();
+        ws.write_text("inside.md", "# in\n").unwrap();
+        (cfg, base, ws)
+    }
+
+    fn forged_page(frame_rel: &str) -> FsGraphParams {
+        FsGraphParams {
+            scope: FsGraphScope::Directory,
+            path: String::new(),
+            depth: 1,
+            cursor: Some(encode_cursor(&FsCursor {
+                p: String::new(),
+                d: 1,
+                s: vec![CursorFrame {
+                    r: frame_rel.to_string(),
+                    i: 0,
+                    l: 1,
+                }],
+            })),
+            limit: Some(64),
+        }
+    }
+
+    /// The cursor is unauthenticated client input. A frame naming an absolute
+    /// path or a `..` traversal must be refused at decode time, before any
+    /// directory outside the workspace is read.
+    #[test]
+    fn a_forged_cursor_frame_cannot_walk_outside_the_workspace() {
+        let (_cfg, base, ws) = seed_escape_workspace();
+        let outside = base.path().join("outside");
+        for frame_rel in [outside.to_string_lossy().into_owned(), "../outside".into()] {
+            let outcome = build_fs_graph_paged(&ws, &forged_page(&frame_rel));
+            let listed: Vec<String> = match &outcome {
+                Ok(resp) => resp.nodes.iter().map(|n| n.id.clone()).collect(),
+                Err(_) => Vec::new(),
+            };
+            assert!(
+                !listed.iter().any(|id| id.contains("secret.txt")),
+                "frame {frame_rel:?} listed outside the workspace: {listed:?}"
+            );
+            let Err(error) = outcome else {
+                panic!("frame {frame_rel:?} was accepted");
+            };
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{}", error.message);
+        }
+    }
+
+    /// `resolve_safe` is lexical, so a frame naming an in-workspace symlink
+    /// whose target escapes is still an escape: `read_dir` follows it. The
+    /// unpaged walk never descends into a symlink, so no honest cursor can
+    /// carry such a frame.
+    #[cfg(unix)]
+    #[test]
+    fn a_forged_cursor_frame_cannot_walk_through_an_escaping_symlink() {
+        let (_cfg, base, ws) = seed_escape_workspace();
+        symlink(base.path().join("outside"), ws.root().join("escape-link")).unwrap();
+        let outcome = build_fs_graph_paged(&ws, &forged_page("escape-link"));
+        let listed: Vec<String> = match &outcome {
+            Ok(resp) => resp.nodes.iter().map(|n| n.id.clone()).collect(),
+            Err(_) => Vec::new(),
+        };
+        assert!(
+            !listed.iter().any(|id| id.contains("secret.txt")),
+            "a symlink frame listed outside the workspace: {listed:?}"
+        );
+        let Err(error) = outcome else {
+            panic!("a symlink frame was accepted");
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{}", error.message);
+    }
+
+    /// The stack a DFS hands back is one nested path. A frame that jumps to
+    /// an unrelated directory, or several levels at once, is not a resume
+    /// position this walk ever issued.
+    #[test]
+    fn a_forged_cursor_frame_must_nest_under_the_one_before_it() {
+        let (_cfg, _root, ws) = seed_paged_workspace();
+        let stacks = [
+            vec![("", 6), ("dir0/sub", 5)],
+            vec![("dir0", 6), ("dir1", 5)],
+            vec![("dir0", 6), ("dir0", 5)],
+        ];
+        for stack in stacks {
+            let frames: Vec<CursorFrame> = stack
+                .iter()
+                .map(|(rel, levels)| CursorFrame {
+                    r: (*rel).to_string(),
+                    i: 0,
+                    l: *levels,
+                })
+                .collect();
+            let error = build_fs_graph_paged(
+                &ws,
+                &FsGraphParams {
+                    scope: FsGraphScope::Directory,
+                    path: String::new(),
+                    depth: 6,
+                    cursor: Some(encode_cursor(&FsCursor {
+                        p: String::new(),
+                        d: 6,
+                        s: frames,
+                    })),
+                    limit: Some(64),
+                },
+            )
+            .err()
+            .unwrap_or_else(|| panic!("stack {stack:?} was accepted"));
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{}", error.message);
+        }
+    }
+
+    /// A frame's `l` is the depth budget the walk descends on. Forging it
+    /// past the request's own depth would widen the walk the request paid
+    /// for, so it is clamped rather than trusted.
+    #[test]
+    fn a_forged_cursor_depth_budget_is_clamped_to_the_request() {
+        let (_cfg, _root, ws) = seed_paged_workspace();
+        let resp = build_fs_graph_paged(
+            &ws,
+            &FsGraphParams {
+                scope: FsGraphScope::Directory,
+                path: String::new(),
+                depth: 1,
+                cursor: Some(encode_cursor(&FsCursor {
+                    p: String::new(),
+                    d: 1,
+                    s: vec![CursorFrame {
+                        r: String::new(),
+                        i: 0,
+                        l: 99,
+                    }],
+                })),
+                limit: Some(256),
+            },
+        )
+        .expect("an in-scope frame still resumes");
+        let ids: Vec<&str> = resp.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"dir0"), "direct child missing: {ids:?}");
+        assert!(
+            !ids.iter().any(|id| id.contains('/')),
+            "a forged depth budget walked below the requested depth: {ids:?}"
+        );
     }
 
     #[test]
