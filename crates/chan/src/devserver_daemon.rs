@@ -306,14 +306,22 @@ fn spawn_daemon_child(
         .with_context(|| format!("spawning `{}` __devserver-daemon", exe.display()))
 }
 
+/// Open `devserver.log` for the daemon child's stdout and stderr.
+///
+/// The child prints the tokened launch URL and the `CHAN_DEVSERVER_TOKEN=`
+/// marker on every ready, so this file holds the same bearer the token store
+/// keeps at 0600. Create it 0600 rather than at the process umask, and narrow
+/// a log left behind by an earlier start before appending to it.
 fn open_daemon_log(log_path: &Path) -> Result<(File, File)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
+    restrict_existing_log(log_path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    set_owner_only_create_mode(&mut options);
+    let stdout = options
         .open(log_path)
         .with_context(|| format!("opening {}", log_path.display()))?;
     let stderr = stdout
@@ -321,6 +329,39 @@ fn open_daemon_log(log_path: &Path) -> Result<(File, File)> {
         .with_context(|| format!("cloning {}", log_path.display()))?;
     Ok((stdout, stderr))
 }
+
+/// `mode` applies only when the open creates the file, and by the second
+/// `chan devserver start` the log always exists, so the reused file needs its
+/// own chmod. Skips anything that is not a regular file: the open would refuse
+/// it or follow it elsewhere, and neither is this function's to repair.
+#[cfg(unix)]
+fn restrict_existing_log(log_path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(meta) = std::fs::symlink_metadata(log_path) else {
+        return Ok(());
+    };
+    if !meta.is_file() || meta.permissions().mode() & 0o777 == 0o600 {
+        return Ok(());
+    }
+    std::fs::set_permissions(log_path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod 600 {}", log_path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_existing_log(_log_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_create_mode(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_create_mode(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
 fn detach_command(cmd: &mut Command) {
@@ -540,4 +581,45 @@ fn print_daemon_paths(lock_path: &Path, record_path: &Path, log_path: &Path) {
             .join("config.json")
             .display()
     );
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::open_daemon_log;
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn daemon_log_is_created_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("devserver").join("devserver.log");
+
+        let _handles = open_daemon_log(&log).unwrap();
+
+        assert_eq!(mode_of(&log), 0o600);
+    }
+
+    /// The common case: the log exists from an earlier start, so the create
+    /// mode never applies and only the chmod keeps the token off the group
+    /// and other bits.
+    #[test]
+    fn daemon_log_from_an_earlier_start_is_narrowed_before_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("devserver.log");
+        std::fs::write(&log, b"CHAN_DEVSERVER_TOKEN=tok_abc\n").unwrap();
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _handles = open_daemon_log(&log).unwrap();
+
+        assert_eq!(mode_of(&log), 0o600);
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            b"CHAN_DEVSERVER_TOKEN=tok_abc\n",
+            "reuse must append, not truncate"
+        );
+    }
 }
