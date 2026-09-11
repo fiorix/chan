@@ -7,7 +7,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -1242,9 +1242,13 @@ pub async fn api_read_file(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
     Query(query): Query<ReadFileQuery>,
+    origin: Option<Extension<crate::TunnelOrigin>>,
     headers: HeaderMap,
 ) -> Response {
     if query.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        if let Some(refusal) = filesystem_root_refusal(origin.as_deref()) {
+            return refusal;
+        }
         if !query_flag(&query.download) {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -2215,14 +2219,64 @@ pub(crate) struct UploadFileResponse {
 pub async fn api_upload_file(
     State(state): State<Arc<AppState>>,
     Query(root): Query<UploadRootQuery>,
+    origin: Option<Extension<crate::TunnelOrigin>>,
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
     if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        if let Some(refusal) = filesystem_root_refusal(origin.as_deref()) {
+            return refusal;
+        }
         return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
             .await;
     }
     workspace_upload_response(state, headers, multipart).await
+}
+
+/// Refuse the client-selected `root=filesystem` to a tunnel guest.
+///
+/// The workspace tenant is sandboxed under its workspace root; this query
+/// parameter re-roots the transfer at `/`, so it hands out reads and writes
+/// over the whole uid. It exists for the owner's own `cs upload` / `cs
+/// download` against a window whose absolute path escapes its workspace, and
+/// a gateway session that is not the owner's holds strictly less authority
+/// than that: the same line `require_tunnel_owner` and `require_local_mutation`
+/// draw on the launcher and extension-proxy lanes.
+///
+/// The gate is on the caller's gateway role, not on the bind address. A
+/// non-loopback bind is bearer-gated, and that bearer already carries terminal
+/// spawn, which is this uid's full authority anyway; a tunnel guest never holds
+/// it. A request with no `TunnelOrigin` never came through the tunnel, so the
+/// loopback bind and the terminal tenant's own routes are unaffected.
+fn filesystem_root_refusal(origin: Option<&crate::TunnelOrigin>) -> Option<Response> {
+    origin.is_some_and(|origin| !origin.owner()).then(|| {
+        err(
+            StatusCode::FORBIDDEN,
+            "the filesystem root is not available for this gateway role".into(),
+        )
+    })
+}
+
+/// A `TunnelOrigin` whose `owner()` is false: the gateway authenticated the
+/// browser, but not as the devserver's owner.
+#[cfg(test)]
+fn test_tunnel_guest() -> crate::TunnelOrigin {
+    crate::TunnelOrigin { caller: None }
+}
+
+/// A verified owner assertion; `is_owner` is `sub == owner_user_id`.
+#[cfg(test)]
+fn test_tunnel_owner() -> crate::TunnelOrigin {
+    crate::TunnelOrigin {
+        caller: Some(chan_tunnel_proto::gateway_assertion::Claims {
+            sub: "owner-user".to_string(),
+            owner_user_id: "owner-user".to_string(),
+            aud: "owner--abc.proxy.example".to_string(),
+            drv: "devserver".to_string(),
+            iat: 0,
+            exp: 0,
+        }),
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -3244,6 +3298,7 @@ mod write_tests {
         let refused = super::api_upload_file(
             State(Arc::clone(&state)),
             Query(super::UploadRootQuery::default()),
+            None,
             HeaderMap::new(),
             upload_multipart("refused-upload", "", "declined.bin", "payload").await,
         )
@@ -3276,6 +3331,7 @@ mod write_tests {
         let admitted = super::api_upload_file(
             State(Arc::clone(&state)),
             Query(super::UploadRootQuery::default()),
+            None,
             HeaderMap::new(),
             upload_multipart("admitted-upload", "", "admitted.bin", "payload").await,
         )
@@ -3289,6 +3345,60 @@ mod write_tests {
             std::fs::read(root.path().join("admitted.bin")).unwrap(),
             b"payload"
         );
+    }
+
+    /// `?root=filesystem` re-roots the upload at `/`, outside the workspace
+    /// sandbox. A tunnel guest is refused and writes nothing; the owner and a
+    /// loopback caller carrying no marker keep the lane they had.
+    #[tokio::test]
+    async fn a_tunnel_guest_cannot_upload_through_the_filesystem_root() {
+        let (_cfg, _root, state) = super::doc_divert_tests::divert_app();
+        let outside = tempfile::TempDir::new().unwrap();
+        let dir = outside.path().to_string_lossy().into_owned();
+        let filesystem_root = || {
+            Query(super::UploadRootQuery {
+                root: Some(crate::routes::transfer::TransferRoot::Filesystem),
+            })
+        };
+
+        let refused = super::api_upload_file(
+            State(Arc::clone(&state)),
+            filesystem_root(),
+            Some(Extension(test_tunnel_guest())),
+            HeaderMap::new(),
+            upload_multipart("guest-upload", &dir, "planted.bin", "payload").await,
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "a tunnel guest must not write outside the workspace"
+        );
+        assert!(
+            !outside.path().join("planted.bin").exists(),
+            "the refused upload still created its target"
+        );
+
+        for (label, origin) in [
+            ("owner", Some(Extension(test_tunnel_owner()))),
+            ("loopback", None),
+        ] {
+            let filename = format!("{label}.bin");
+            let admitted = super::api_upload_file(
+                State(Arc::clone(&state)),
+                filesystem_root(),
+                origin,
+                HeaderMap::new(),
+                upload_multipart(label, &dir, &filename, "payload").await,
+            )
+            .await;
+            assert_eq!(admitted.status(), StatusCode::OK, "{label} upload refused");
+            assert_eq!(
+                std::fs::read(outside.path().join(&filename)).unwrap(),
+                b"payload",
+                "{label} upload wrote nothing"
+            );
+        }
     }
 
     /// The copy/move asymmetry is deliberate, so it is pinned from both sides
@@ -3370,6 +3480,7 @@ mod write_tests {
         let exact = super::api_upload_file(
             State(Arc::clone(&state)),
             Query(super::UploadRootQuery::default()),
+            None,
             HeaderMap::new(),
             upload_multipart("cap-exact", "", "exact.bin", &"z".repeat(CAP as usize)).await,
         )
@@ -3389,6 +3500,7 @@ mod write_tests {
         let over = super::api_upload_file(
             State(Arc::clone(&state)),
             Query(super::UploadRootQuery::default()),
+            None,
             HeaderMap::new(),
             upload_multipart("cap-over", "", "over.bin", &"z".repeat(CAP as usize + 1)).await,
         )
@@ -5037,7 +5149,7 @@ mod doc_divert_tests {
     use axum::body::{to_bytes, Body, Bytes};
     use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{header, HeaderMap, Request, StatusCode};
-    use axum::Json;
+    use axum::{Extension, Json};
     use chan_workspace::{SearchAggression, WatchEvent, WatchKind};
     use serde_json::Value;
     use tempfile::TempDir;
@@ -5045,8 +5157,8 @@ mod doc_divert_tests {
     use tower::ServiceExt;
 
     use super::{
-        api_read_file, api_write_file as api_write_file_raw, ReadFileQuery, WriteBody,
-        WriteFileQuery,
+        api_read_file, api_write_file as api_write_file_raw, test_tunnel_guest, test_tunnel_owner,
+        ReadFileQuery, WriteBody, WriteFileQuery,
     };
     use crate::doc_sessions::changes::{replace_diff, UpdateJson};
     use crate::self_writes::SelfWrites;
@@ -5368,6 +5480,57 @@ mod doc_divert_tests {
         );
     }
 
+    /// `?root=filesystem&download=1` re-roots the read at `/`, outside the
+    /// workspace sandbox. A tunnel guest is refused; the owner and a loopback
+    /// caller carrying no marker still read the file.
+    #[tokio::test]
+    async fn a_tunnel_guest_cannot_download_through_the_filesystem_root() {
+        let (_cfg, _root, state) = divert_app();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "outside\n").unwrap();
+        // The route re-roots at `/`, matching how the control socket sends it.
+        let target = secret.to_string_lossy().trim_start_matches('/').to_string();
+        let filesystem_download = || {
+            Query(ReadFileQuery {
+                download: Some("1".to_string()),
+                stream: None,
+                root: Some(crate::routes::transfer::TransferRoot::Filesystem),
+            })
+        };
+
+        let refused = api_read_file(
+            State(Arc::clone(&state)),
+            AxumPath(target.clone()),
+            filesystem_download(),
+            Some(Extension(test_tunnel_guest())),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "a tunnel guest must not read outside the workspace"
+        );
+
+        for (label, origin) in [
+            ("owner", Some(Extension(test_tunnel_owner()))),
+            ("loopback", None),
+        ] {
+            let allowed = api_read_file(
+                State(Arc::clone(&state)),
+                AxumPath(target.clone()),
+                filesystem_download(),
+                origin,
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(allowed.status(), StatusCode::OK, "{label} download refused");
+            let body = to_bytes(allowed.into_body(), 1024).await.unwrap();
+            assert_eq!(body.as_ref(), b"outside\n", "{label} read the wrong bytes");
+        }
+    }
+
     #[tokio::test]
     async fn svg_read_is_an_attached_sandboxed_resource() {
         let (_cfg, root, state) = divert_app();
@@ -5381,6 +5544,7 @@ mod doc_divert_tests {
             State(state),
             AxumPath("active.svg".to_string()),
             Query(ReadFileQuery::default()),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -5433,6 +5597,7 @@ mod doc_divert_tests {
                 stream: None,
                 root: None,
             }),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -5454,6 +5619,7 @@ mod doc_divert_tests {
                 stream: Some("1".into()),
                 root: None,
             }),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -5483,6 +5649,7 @@ mod doc_divert_tests {
                 stream: None,
                 root: None,
             }),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -5876,6 +6043,7 @@ mod doc_divert_tests {
             State(state.clone()),
             AxumPath("n.md".into()),
             Query(ReadFileQuery::default()),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -5891,6 +6059,7 @@ mod doc_divert_tests {
                 stream: Some("1".into()),
                 root: None,
             }),
+            None,
             HeaderMap::new(),
         )
         .await;
@@ -6160,6 +6329,7 @@ mod scene_divert_tests {
                 stream: None,
                 root: None,
             }),
+            None,
             HeaderMap::new(),
         )
         .await;
