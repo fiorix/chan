@@ -436,7 +436,9 @@ where
                 incoming = incoming_rx.recv() => {
                     let incoming = incoming
                         .ok_or_else(|| SessionError::Protocol("client frame reader stopped".into()))??;
-                    if !frame_rate.accept(Instant::now()) {
+                    if !snapshot_chunk_is_exempt(&phase, &incoming)
+                        && !frame_rate.accept(Instant::now())
+                    {
                         send_shutdown(writer, "client frame rate limit exceeded").await?;
                         return Err(SessionError::Protocol("client frame rate limit exceeded".into()));
                     }
@@ -776,6 +778,35 @@ where
     Ok(())
 }
 
+/// Whether a frame streams initial-snapshot rows and so does not spend
+/// the per-frame rate budget.
+///
+/// Chunks carry at most `MAX_SNAPSHOT_CHUNK_ROWS` rows each, and a
+/// proxy may hold 2,048 tunnel rows (16 chunks) plus
+/// `MAX_BROWSER_SESSION_SNAPSHOT_ROWS` browser-session rows (782
+/// chunks). The proxy writes `SnapshotStart`, every chunk, and
+/// `SnapshotEnd` in one tight loop with no pacing, so at
+/// `MAX_CLIENT_FRAMES_PER_WINDOW` frames per window any snapshot past
+/// roughly 31 chunks tripped the limiter and the proxy could never
+/// join. The rows themselves stay bounded by `snapshot_rows_fit`, the
+/// browser-session row and byte caps, and the absolute snapshot
+/// deadline, so the exemption removes no real bound.
+///
+/// A chunk with no rows consumes none of those bounds, so it is not
+/// exempt. A real proxy never sends one -- it chunks a slice, which
+/// never yields an empty piece -- and an empty chunk is the cheapest
+/// shape a flood could take.
+fn snapshot_chunk_is_exempt(phase: &Phase, frame: &ClientFrame) -> bool {
+    if !matches!(phase, Phase::Snapshot { .. }) {
+        return false;
+    }
+    match frame {
+        ClientFrame::SnapshotChunk { rows } => !rows.is_empty(),
+        ClientFrame::BrowserSessionSnapshotChunk { rows } => !rows.is_empty(),
+        _ => false,
+    }
+}
+
 fn snapshot_rows_fit(current: usize, incoming: usize) -> bool {
     current
         .checked_add(incoming)
@@ -925,7 +956,7 @@ enum SessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devserver_control_proto::{AdmissionLeaseSigner, TunnelRow};
+    use devserver_control_proto::{AdmissionLeaseSigner, TunnelRow, MAX_SNAPSHOT_CHUNK_ROWS};
     use uuid::Uuid;
 
     const TEST_PROXY_TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -1444,6 +1475,108 @@ mod tests {
         write_frame(peer_stream, &ClientFrame::Pong { nonce })
             .await
             .unwrap();
+    }
+
+    /// A proxy carrying a full browser-session registry writes 781
+    /// snapshot chunks back to back with no pacing. At 32 frames per
+    /// second the per-frame limiter used to shut the session down
+    /// around the 31st chunk, so such a proxy could never join.
+    #[tokio::test]
+    async fn a_full_browser_session_snapshot_joins_instead_of_being_rate_limited() {
+        const CHUNKS: usize = MAX_BROWSER_SESSION_SNAPSHOT_ROWS / MAX_SNAPSHOT_CHUNK_ROWS;
+        let mut opened = connected(crate::spawn_controller(100)).await;
+        let stream = opened.stream.as_mut().unwrap();
+        handshake(stream).await;
+        write_frame(stream, &ClientFrame::SnapshotStart { base_generation: 0 })
+            .await
+            .unwrap();
+        let created_at = chrono::Utc::now();
+        let expires_at = created_at + chrono::Duration::seconds(300);
+        for chunk in 0..CHUNKS {
+            let rows = (0..MAX_SNAPSHOT_CHUNK_ROWS)
+                .map(|_| BrowserSessionRow {
+                    admin_session_id: Uuid::new_v4(),
+                    subject_user_id: Uuid::new_v4(),
+                    owner_user_id: Uuid::new_v4(),
+                    devserver_id: "d".into(),
+                    created_at,
+                    expires_at,
+                })
+                .collect();
+            if let Err(error) =
+                write_frame(stream, &ClientFrame::BrowserSessionSnapshotChunk { rows }).await
+            {
+                panic!("controller closed the session at chunk {chunk}: {error}");
+            }
+        }
+        write_frame(stream, &ClientFrame::SnapshotEnd { base_generation: 0 })
+            .await
+            .unwrap();
+        // Streaming this many chunks outlasts a heartbeat interval, so
+        // answer any ping that lands before the acceptance.
+        loop {
+            match read_frame::<_, ServerFrame>(stream).await.unwrap() {
+                ServerFrame::SnapshotAccepted { base_generation: 0 } => break,
+                ServerFrame::Ping { nonce } => {
+                    write_frame(stream, &ClientFrame::Pong { nonce })
+                        .await
+                        .unwrap();
+                }
+                frame => panic!("a {CHUNKS}-chunk snapshot was not accepted: {frame:?}"),
+            }
+        }
+    }
+
+    /// The exemption is narrow on purpose: only a row-carrying
+    /// snapshot chunk, and only while the session is streaming its
+    /// snapshot.
+    #[test]
+    fn only_row_carrying_snapshot_chunks_skip_the_rate_limiter() {
+        let streaming = Phase::Snapshot {
+            deadline: Instant::now() + SNAPSHOT_TIMEOUT,
+            base_generation: 0,
+            rows: Vec::new(),
+            registration_ids: HashSet::new(),
+            bytes: 0,
+            browser_sessions: Vec::new(),
+            browser_session_ids: HashSet::new(),
+            browser_session_bytes: 0,
+        };
+        let created_at = chrono::Utc::now();
+        let browser_chunk = ClientFrame::BrowserSessionSnapshotChunk {
+            rows: vec![BrowserSessionRow {
+                admin_session_id: Uuid::new_v4(),
+                subject_user_id: Uuid::new_v4(),
+                owner_user_id: Uuid::new_v4(),
+                devserver_id: "d".into(),
+                created_at,
+                expires_at: created_at + chrono::Duration::seconds(300),
+            }],
+        };
+        let tunnel_chunk = ClientFrame::SnapshotChunk {
+            rows: vec![signed_row("alice", "one", Uuid::new_v4())],
+        };
+        assert!(snapshot_chunk_is_exempt(&streaming, &browser_chunk));
+        assert!(snapshot_chunk_is_exempt(&streaming, &tunnel_chunk));
+
+        assert!(!snapshot_chunk_is_exempt(&Phase::Active, &browser_chunk));
+        assert!(!snapshot_chunk_is_exempt(&Phase::Active, &tunnel_chunk));
+        assert!(!snapshot_chunk_is_exempt(
+            &Phase::awaiting_snapshot(),
+            &tunnel_chunk
+        ));
+        assert!(!snapshot_chunk_is_exempt(
+            &streaming,
+            &ClientFrame::SnapshotChunk { rows: Vec::new() }
+        ));
+        assert!(!snapshot_chunk_is_exempt(
+            &streaming,
+            &ClientFrame::BrowserSessionSnapshotChunk { rows: Vec::new() }
+        ));
+        assert!(!snapshot_chunk_is_exempt(
+            &streaming,
+            &ClientFrame::SnapshotEnd { base_generation: 0 }
+        ));
     }
 
     #[test]
