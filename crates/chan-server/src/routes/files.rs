@@ -449,8 +449,7 @@ fn download_path_sync(
         // Pre-flight the tree before streaming so an unreadable entry fails fast
         // with a clear "cannot read X" status instead of truncating a streamed
         // archive mid-flight.
-        let payload_bytes = verify_readable_workspace_tree(workspace, path)
-            .map_err(chan_workspace::ChanError::Io)?;
+        let payload_bytes = verify_readable_workspace_tree(workspace, path)?;
         let limit = workspace.transfer_max_bytes();
         if payload_bytes > limit {
             return Err(chan_workspace::ChanError::WriteTooLarge {
@@ -924,31 +923,50 @@ fn bounded_reader_body(
 /// Pre-flight for a directory download: confirm every file in the tree we will
 /// tar is readable before any archive work. Walks via `Workspace::list` so it
 /// visits exactly the entries `append_dir_to_archive` will (same `.chan` /
-/// `.git` filter), and opens each backing file to check read permission without
-/// pulling its bytes (the archive reads them next). Returns the member bytes
-/// known at preflight so the plan can refuse a tree already past the ceiling.
+/// `.git` filter), and opens each backing file through the same facade call
+/// the archive walk uses, so the two agree about what the archive contains.
+/// Returns the member bytes known at preflight so the plan can refuse a tree
+/// already past the ceiling.
+///
+/// The open is `read_bytes_bounded`, not `std::fs::File::open`: `list`
+/// reports a symlink as a non-dir entry and `open(2)` follows it, which would
+/// count a target outside the workspace root and admit a download the walk
+/// then refuses mid-stream. The facade refuses anything that is not a regular
+/// file, and the size comes from the open handle, so no byte is read here.
 fn verify_readable_workspace_tree(
     workspace: &chan_workspace::Workspace,
     rel: &str,
-) -> std::result::Result<u64, String> {
+) -> chan_workspace::Result<u64> {
     let mut payload_bytes = 0u64;
     for child in workspace
         .list(rel)
-        .map_err(|e| format!("cannot read directory {rel}: {e}"))?
+        .map_err(|e| name_preflight_path(rel, e))?
     {
         let child_rel = join_rel(rel.trim_matches('/'), &child.name);
         let child_bytes = if child.is_dir {
             verify_readable_workspace_tree(workspace, &child_rel)?
         } else {
-            let file = std::fs::File::open(workspace.root().join(&child_rel))
-                .map_err(|e| format!("cannot read {child_rel}: {e}"))?;
-            file.metadata()
-                .map_err(|e| format!("cannot read metadata for {child_rel}: {e}"))?
-                .len()
+            workspace
+                .read_bytes_bounded(&child_rel)
+                .map_err(|e| name_preflight_path(&child_rel, e))?
+                .stat()
+                .size
         };
         payload_bytes = payload_bytes.saturating_add(child_bytes);
     }
     Ok(payload_bytes)
+}
+
+/// Name the offending path in a preflight failure. The typed refusals carry
+/// their own path; a bare `Io` error is an errno with nothing in it, and a
+/// download that fails has to say which entry stopped it.
+fn name_preflight_path(rel: &str, error: chan_workspace::ChanError) -> chan_workspace::ChanError {
+    match error {
+        chan_workspace::ChanError::Io(message) => {
+            chan_workspace::ChanError::Io(format!("cannot read {rel}: {message}"))
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn download_filename(path: &str) -> String {
@@ -2578,7 +2596,7 @@ mod file_browser_listing_tests {
     use super::{
         append_dir_to_archive, create_target_exists, download_path_sync, list_dir_entries,
         list_files_sync, replace_file_sync, upload_file_sync, upload_leaf_filename,
-        workspace_path_writable, DownloadPayload, ListFilesQuery,
+        verify_readable_workspace_tree, workspace_path_writable, DownloadPayload, ListFilesQuery,
     };
 
     #[test]
@@ -2732,6 +2750,58 @@ mod file_browser_listing_tests {
             builder.finish().unwrap();
         }
         assert!(!bytes.is_empty());
+    }
+
+    /// The preflight and the archive walk have to agree about what is in the
+    /// archive. `Workspace::list` reports a symlink as a non-dir entry, so a
+    /// preflight that opens the root-joined path with `std::fs` follows the
+    /// link, counts the target's bytes, and admits a download the streaming
+    /// walk then refuses mid-flight.
+    #[cfg(unix)]
+    #[test]
+    fn download_path_sync_refuses_a_symlink_the_archive_walk_cannot_carry() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, vec![b'x'; 4096]).unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.create_dir("docs").unwrap();
+        workspace.write_bytes("docs/a.txt", b"a").unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join("docs/escape.txt")).unwrap();
+
+        // The walk that actually streams refuses the link, which is what the
+        // preflight has to match.
+        let mut bytes = Vec::new();
+        let mut builder = tar::Builder::new(&mut bytes);
+        let walk = append_dir_to_archive(&mut builder, &workspace, "docs", "docs");
+        assert!(walk.is_err(), "the archive walk accepted a symlink");
+
+        let counted = verify_readable_workspace_tree(&workspace, "docs");
+        assert!(
+            counted.is_err(),
+            "the preflight counted {:?} bytes through a symlink",
+            counted.ok()
+        );
+        let error = match download_path_sync(&workspace, "docs", None) {
+            Ok(_) => panic!("the preflight admitted a tree the walk cannot archive"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, chan_workspace::ChanError::SpecialFile { .. }),
+            "expected a non-regular-file refusal: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("escape.txt"),
+            "the refusal should name the link: {message}"
+        );
+        assert!(
+            crate::error::err_from(&error).status().is_client_error(),
+            "a refused archive must answer 4xx before any byte streams"
+        );
     }
 
     #[cfg(unix)]
