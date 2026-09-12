@@ -1570,6 +1570,7 @@ fn dispatch(
     reg_tx: &RegistrationTx,
     throttle: &DegradeThrottle,
 ) {
+    use notify::event::{ModifyKind, RenameMode};
     use notify::EventKind;
     let policy = Arc::clone(&policy_source.read().unwrap());
     let generation = policy.generation();
@@ -1586,9 +1587,15 @@ fn dispatch(
     let dir_candidate = new_dir_candidate(&event.kind, &event.paths);
     #[cfg(target_os = "freebsd")]
     let catch_up_candidate = catch_up_candidate(&event.kind, &event.paths);
+    // The rename mode says which end of the rename the event's one
+    // path is, so it has to survive the collapse into `WatchKind`.
+    let mut rename_mode = None;
     let kind = match event.kind {
         EventKind::Create(_) => WatchKind::Created,
-        EventKind::Modify(notify::event::ModifyKind::Name(_)) => WatchKind::Renamed,
+        EventKind::Modify(ModifyKind::Name(mode)) => {
+            rename_mode = Some(mode);
+            WatchKind::Renamed
+        }
         EventKind::Modify(_) => WatchKind::Modified,
         EventKind::Remove(_) => WatchKind::Removed,
         // notify 6.1.1 delivers inotify queue overflow as
@@ -1612,8 +1619,26 @@ fn dispatch(
         _ => return,
     };
     let mut paths = event.paths.into_iter();
-    let from = paths.next();
-    let to = paths.next();
+    let first = paths.next();
+    let second = paths.next();
+    // Assign by mode, not by position. A `To` event carries exactly
+    // one path and that path is the DESTINATION: notify emits one for
+    // an inotify `MOVED_TO` with no paired `MOVED_FROM`, which is what
+    // a file moved into the workspace from outside it (or out of an
+    // unwatched excluded subtree such as `node_modules` or `.chan`)
+    // produces, and Windows splits every rename into separate
+    // single-path `From` and `To` events. Dropping it into the source
+    // slot makes every consumer read it as "the destination vanished"
+    // and forget a file that just arrived.
+    //
+    // `Any` is the macOS FSEvents shape and names no end at all, so
+    // its path stays in the source slot: consumers have to stat it,
+    // which is what `report.rs` already does on the `(Some, None)`
+    // arm.
+    let (from, to) = match rename_mode {
+        Some(RenameMode::To) => (None, first),
+        _ => (first, second),
+    };
 
     // Linux: queue registration (and catch-up scan) for directories
     // that appeared under a watched parent, before the consumer
@@ -1677,7 +1702,16 @@ fn dispatch(
         WatchEvent::loss(generation)
     };
     safe_call(cb, watch_event);
-    if is_dir && matches!(kind, WatchKind::Removed | WatchKind::Renamed) {
+    // Only a path that is genuinely a rename SOURCE deregisters a
+    // subtree. A single-path `To` names a directory that just
+    // appeared, and `Any` cannot say which end it is, so neither may
+    // drop a registration record; `None` here is a Removed event,
+    // whose path is a source by definition.
+    let names_a_source = matches!(
+        rename_mode,
+        None | Some(RenameMode::From) | Some(RenameMode::Both)
+    );
+    if is_dir && names_a_source && matches!(kind, WatchKind::Removed | WatchKind::Renamed) {
         if let Some(from) = from.as_deref() {
             forget_registered_subtree(registered_dirs, from);
         }
@@ -2180,6 +2214,149 @@ mod tests {
         );
         #[cfg(target_os = "linux")]
         assert_eq!(events[1].cookie, Some(73));
+    }
+
+    /// Harness shared by the single-path rename cases: dispatch one
+    /// notify event and hand back the `WatchEvent` it produced.
+    fn dispatch_rename(
+        root: &Path,
+        registered: &RegisteredDirs,
+        mode: notify::event::RenameMode,
+        paths: Vec<PathBuf>,
+    ) -> WatchEvent {
+        use std::sync::Mutex;
+        struct Collect(Mutex<Vec<WatchEvent>>);
+        impl WatchCallback for Collect {
+            fn on_event(&self, event: WatchEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let generation: crate::WorkspaceGeneration = serde_json::from_str("3").unwrap();
+        let policy = Arc::new(
+            IndexScopePolicy::new(root.to_path_buf(), generation, crate::WalkFilter::default())
+                .unwrap(),
+        );
+        let policy_source = Arc::new(std::sync::RwLock::new(policy));
+        let roots = [WatchRoot::workspace(root)];
+        let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
+        let throttle = DegradeThrottle::new();
+        let cb = Collect(Mutex::new(Vec::new()));
+        dispatch(
+            &roots,
+            &policy_source,
+            registered,
+            notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(mode)),
+                paths,
+                attrs: Default::default(),
+            },
+            &cb,
+            &reg_tx,
+            &throttle,
+        );
+        let events = cb.0.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one dispatched event");
+        events[0].clone()
+    }
+
+    #[test]
+    fn dispatch_assigns_a_single_path_rename_by_its_mode() {
+        // A lone `To` is what an inotify MOVED_TO with no paired
+        // MOVED_FROM produces: a file moved into the workspace from
+        // outside it, or out of an excluded subtree. Its one path is
+        // the DESTINATION, and every consumer reads the source slot
+        // as "this path vanished".
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("moved-in.md"), "# in\n").unwrap();
+        let registered = registered_dirs();
+
+        let to = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::To,
+            vec![root.path().join("moved-in.md")],
+        );
+        assert_eq!(to.kind, WatchKind::Renamed);
+        assert_eq!(
+            to.path, None,
+            "a To-mode path must not land in the source slot"
+        );
+        assert_eq!(to.to.as_deref(), Some("moved-in.md"));
+
+        // The mirror: a lone `From` names the source and nothing else.
+        let from = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::From,
+            vec![root.path().join("moved-in.md")],
+        );
+        assert_eq!(from.kind, WatchKind::Renamed);
+        assert_eq!(from.path.as_deref(), Some("moved-in.md"));
+        assert_eq!(from.to, None);
+
+        // `Both` is unchanged: two paths, source then destination.
+        let both = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::Both,
+            vec![root.path().join("was.md"), root.path().join("moved-in.md")],
+        );
+        assert_eq!(both.path.as_deref(), Some("was.md"));
+        assert_eq!(both.to.as_deref(), Some("moved-in.md"));
+
+        // `Any` is the FSEvents shape and names no end, so its path
+        // stays in the source slot for consumers to stat.
+        let any = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::Any,
+            vec![root.path().join("moved-in.md")],
+        );
+        assert_eq!(any.path.as_deref(), Some("moved-in.md"));
+        assert_eq!(any.to, None);
+    }
+
+    #[test]
+    fn dispatch_keeps_the_registration_of_a_directory_renamed_in() {
+        // A directory that just arrived is not a directory that just
+        // left: dropping its registration record stops its subtree
+        // streaming events, and on Linux that record is what says the
+        // subtree is watched at all.
+        let root = tempfile::tempdir().unwrap();
+        let arrived = root.path().join("arrived");
+        std::fs::create_dir(&arrived).unwrap();
+        let registered = registered_dirs();
+        registered.write().unwrap().insert(arrived.clone());
+
+        let event = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::To,
+            vec![arrived.clone()],
+        );
+        assert!(event.is_dir);
+        assert_eq!(event.path, None);
+        assert_eq!(event.to.as_deref(), Some("arrived"));
+        assert!(
+            registered.read().unwrap().contains(&arrived),
+            "a directory renamed IN must keep its registration record",
+        );
+
+        // The source half still deregisters: a directory renamed away
+        // is gone and its record has to go with it.
+        let gone = root.path().join("gone");
+        registered.write().unwrap().insert(gone.clone());
+        let event = dispatch_rename(
+            root.path(),
+            &registered,
+            notify::event::RenameMode::From,
+            vec![gone.clone()],
+        );
+        assert!(event.is_dir, "a registered directory keeps its identity");
+        assert!(
+            !registered.read().unwrap().contains(&gone),
+            "a directory renamed away must drop its registration record",
+        );
     }
 
     #[test]

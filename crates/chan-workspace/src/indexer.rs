@@ -639,6 +639,54 @@ mod tests {
         indexer.stop();
     }
 
+    /// A file moved into the workspace from outside it reaches the
+    /// index. inotify reports that as a lone `MOVED_TO`, which notify
+    /// delivers as a single-path `RenameMode::To`; it used to arrive
+    /// with the destination in the SOURCE slot, so this consumer read
+    /// it as "the destination vanished", called `forget_file` on a
+    /// file that had just arrived and scheduled nothing.
+    ///
+    /// Linux only: this is the inotify shape. Windows delivers a move
+    /// into a watched directory as a create, and FSEvents reports
+    /// every rename as a mode-less single-path event that stays in the
+    /// source slot on purpose. `watch::tests` covers each mode's slot
+    /// assignment on every platform.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_moved_in_from_outside_is_indexed_not_forgotten() {
+        let _serial = fs_test_lock();
+        let (_cfg, workspace_dir, workspace) = setup_workspace();
+        let outside = TempDir::new().unwrap();
+        let source = outside.path().join("moved-in.md");
+        std::fs::write(&source, "# moved\nmoved-in-token here\n").unwrap();
+        let indexer = GraphIndexer::start_on(Arc::clone(&workspace), DEBOUNCE_TEST_MS).unwrap();
+
+        std::fs::rename(&source, workspace_dir.path().join("moved-in.md")).unwrap();
+
+        let opts = crate::workspace::SearchOpts {
+            mode: SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let visible = wait_for(FS_DELIVERY_BUDGET, || {
+            workspace
+                .search("moved-in-token", &opts)
+                .map(|hits| hits.hits.iter().any(|h| h.path == "moved-in.md"))
+                .unwrap_or(false)
+        });
+        let forgotten = indexer.forgotten_total();
+        indexer.stop();
+        assert!(
+            visible,
+            "a file moved into the workspace never reached the index \
+             (forgotten_total = {forgotten})",
+        );
+        assert_eq!(
+            forgotten, 0,
+            "the destination of a move-in must never be forgotten",
+        );
+    }
+
     #[test]
     fn delete_from_disk_drops_file_from_index() {
         let _serial = fs_test_lock();

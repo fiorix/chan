@@ -126,22 +126,25 @@ impl ReportState {
                             return;
                         }
                     },
-                    // macOS FSEvents reports a rename as UNPAIRED Name events
-                    // (one path each, no `to`), so the paired arm above never
-                    // fires there. Treat a lone path as an update: `idx.update`
-                    // stats the path, indexing the destination if it now
-                    // exists or dropping the row if the source vanished.
-                    // Without this the rename destination never gets a report
-                    // row, so its graph language edge stays missing until a
-                    // later edit re-indexes it via a Modified event.
-                    (Some(p), None) => match idx.update(p) {
+                    // A rename can arrive as a single path in either slot.
+                    // macOS FSEvents reports every rename as UNPAIRED Name
+                    // events (one path each, no mode), which land in the
+                    // source slot; a `To`-mode event (a file moved into the
+                    // workspace from outside it, or any Windows rename) names
+                    // only the destination and lands in the `to` slot. Treat
+                    // either as an update: `idx.update` stats the path,
+                    // indexing it if it now exists or dropping the row if it
+                    // vanished. Without this the rename destination never gets
+                    // a report row, so its graph language edge stays missing
+                    // until a later edit re-indexes it via a Modified event.
+                    (Some(p), None) | (None, Some(p)) => match idx.update(p) {
                         Ok(o) => o,
                         Err(e) => {
                             tracing::warn!(error = %e, "chan-report rename update failed");
                             return;
                         }
                     },
-                    (None, _) => return,
+                    (None, None) => return,
                 },
                 WatchKind::Created | WatchKind::Modified => {
                     let Some(p) = &ev.path else {
@@ -409,6 +412,41 @@ mod tests {
         assert!(
             lang_of(&state, "a.md").is_none(),
             "vanished rename source must be dropped from the report",
+        );
+    }
+
+    // A single-path `To` rename (a file moved into the workspace from
+    // outside it, or any Windows rename) arrives with its one path in
+    // the DESTINATION slot. Without an arm for that shape the report
+    // drops the event and the destination never gets a row.
+    #[test]
+    fn destination_only_rename_indexes_the_destination() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let jsonl = root.join(".chan/report.jsonl");
+        let policy = Arc::new(
+            IndexScopePolicy::new(
+                root.to_path_buf(),
+                crate::WorkspaceGeneration::INITIAL,
+                crate::WalkFilter::default(),
+            )
+            .unwrap(),
+        );
+        let state = ReportState::open(root, &jsonl, policy).unwrap();
+        assert_eq!(lang_of(&state, "arrived.md"), None);
+
+        fs::write(root.join("arrived.md"), "# Arrived\n\nprose\n").unwrap();
+        state.on_event(&WatchEvent::rename(
+            None,
+            Some("arrived.md".to_string()),
+            false,
+            None,
+            crate::WorkspaceGeneration::INITIAL,
+        ));
+        assert_eq!(
+            lang_of(&state, "arrived.md").as_deref(),
+            Some("Markdown"),
+            "a destination-only rename must be indexed with its language",
         );
     }
 }
