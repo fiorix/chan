@@ -982,31 +982,13 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
 /// refuse a build too old to speak this protocol) means threading it from the
 /// identity service through the gateway session into the assertion.
 async fn require_tunnel_owner(req: Request<Body>, next: Next) -> Response {
-    refuse_non_owner_tunnel(
-        "reverse tunnels are not available for this gateway role",
-        req,
-        next,
-    )
-    .await
-}
-
-/// Refuse a `TunnelOrigin` whose `owner()` is false, naming what the lane
-/// withheld. The authority test is one line and identical everywhere, but the
-/// refusal a caller reads is not: "reverse tunnels" is meaningless on a lane
-/// that serves no tunnel legs, so the message is the parameter rather than the
-/// gate being copied per lane. A request with no `TunnelOrigin` never came
-/// through the tunnel and is untouched; the local bearer gates those.
-pub(crate) async fn refuse_non_owner_tunnel(
-    message: &'static str,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    if req
-        .extensions()
-        .get::<crate::TunnelOrigin>()
-        .is_some_and(|origin| !origin.owner())
-    {
-        return (StatusCode::FORBIDDEN, message).into_response();
+    let tunnel_origin = req.extensions().get::<crate::TunnelOrigin>();
+    if tunnel_origin.is_some_and(|origin| !origin.owner()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "reverse tunnels are not available for this gateway role",
+        )
+            .into_response();
     }
     next.run(req).await
 }

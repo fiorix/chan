@@ -95,8 +95,8 @@ pub use index::{
     api_semantic_models, api_semantic_state,
 };
 pub use inspector::api_inspector;
+pub(crate) use library::require_local_mutation;
 pub use library::{launcher_router, LauncherBearer};
-pub(crate) use library::{refuse_non_owner_tunnel, require_local_mutation};
 pub use mentions::api_get_mentions;
 pub use metadata::{api_metadata_export, api_metadata_import};
 pub use open::api_open;
