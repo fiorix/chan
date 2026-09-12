@@ -770,13 +770,45 @@ mod windows_shim {
         let out = Command::new("reg")
             .args(["query", "HKCU\\Environment", "/v", "Path"])
             .output()?;
-        if !out.status.success() {
+        decode_user_path(out.status.success(), &out.stdout)
+    }
+
+    /// Decide what `reg query HKCU\Environment /v Path` actually reported.
+    /// Pure, so the fail-closed rules below are testable.
+    ///
+    /// Only a NON-ZERO exit means "this user has no `Path` value"; everything
+    /// the caller does afterwards rests on that, because an empty `current`
+    /// makes `ensure_on_user_path` write `Path = <our bin dir>` with `/f`,
+    /// replacing the user's entire per-user PATH. So the two ways a successful
+    /// query can still fail to produce a value are errors, not emptiness:
+    ///
+    ///   - stdout that is not valid UTF-8. `reg.exe` writes its output in the
+    ///     console code page, so a non-ASCII PATH entry is not UTF-8 at all.
+    ///     Decoding it lossily turned every such byte into U+FFFD and wrote
+    ///     the replacement characters straight back, corrupting the entry even
+    ///     when the parse succeeded. There is no dependency-free way to decode
+    ///     the right code page here that could be verified on this host, so the
+    ///     lossy decode is removed rather than replaced: unreadable bytes are
+    ///     refused instead of guessed at.
+    ///   - a zero exit whose output the parser does not recognize. That is the
+    ///     parser failing, not the value being absent.
+    fn decode_user_path(query_succeeded: bool, stdout: &[u8]) -> std::io::Result<(String, String)> {
+        if !query_succeeded {
             // No Path value yet: create it as REG_EXPAND_SZ.
             return Ok((String::new(), "REG_EXPAND_SZ".to_string()));
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        Ok(parse_reg_query_path(&text)
-            .unwrap_or_else(|| (String::new(), "REG_EXPAND_SZ".to_string())))
+        let text = std::str::from_utf8(stdout).map_err(|e| {
+            std::io::Error::other(format!(
+                "reg query HKCU\\Environment Path returned output this build cannot \
+                 decode ({e}); refusing to rewrite the user PATH from it"
+            ))
+        })?;
+        parse_reg_query_path(text).ok_or_else(|| {
+            std::io::Error::other(
+                "reg query HKCU\\Environment Path succeeded but its output could not be \
+                 parsed; refusing to rewrite the user PATH from it",
+            )
+        })
     }
 
     /// Parse `reg query HKCU\Environment /v Path` output into (value, type).
@@ -795,8 +827,12 @@ mod windows_shim {
             let trimmed = line.trim_start();
             // The data line is `<name>    REG_TYPE    <value>`; skip every
             // other line (header, blank). The char after the name must be
-            // whitespace so `Path` does not match `PathExt`.
-            let Some(rest) = trimmed.strip_prefix(name) else {
+            // whitespace so `Path` does not match `PathExt`. Registry value
+            // names are case-insensitive, and `reg query` echoes back the
+            // spelling on disk, so a user whose value is stored as `PATH`
+            // must match too -- a case-sensitive compare read that as "no
+            // value" and the caller then overwrote the whole PATH.
+            let Some(rest) = strip_prefix_ignore_ascii_case(trimmed, name) else {
                 continue;
             };
             if !rest.starts_with(char::is_whitespace) {
@@ -819,6 +855,14 @@ mod windows_shim {
             return Some((value, kind.to_string()));
         }
         None
+    }
+
+    /// `str::strip_prefix`, matching ASCII case-insensitively. Registry value
+    /// names are ASCII, so ASCII folding is the whole job.
+    fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+        let head = text.get(..prefix.len())?;
+        head.eq_ignore_ascii_case(prefix)
+            .then(|| &text[prefix.len()..])
     }
 
     #[cfg(test)]
@@ -1042,6 +1086,78 @@ mod windows_shim {
                 parse_reg_query_path("HKEY_CURRENT_USER\\Environment\r\n"),
                 None
             );
+        }
+
+        #[test]
+        fn reg_query_parse_matches_the_value_name_case_insensitively() {
+            // Registry value names are case-insensitive and `reg query` echoes
+            // the spelling on disk, so a user whose value is stored as `PATH`
+            // (or `path`) must parse. A case-sensitive match read those as "no
+            // value", and `ensure_on_user_path` then replaced the whole PATH.
+            for name in ["PATH", "path", "PaTh"] {
+                let out = format!(
+                    "\r\nHKEY_CURRENT_USER\\Environment\r\n    \
+                     {name}    REG_EXPAND_SZ    C:\\tools\r\n\r\n"
+                );
+                assert_eq!(
+                    parse_reg_query_path(&out),
+                    Some(("C:\\tools".to_string(), "REG_EXPAND_SZ".to_string())),
+                    "{name} must parse as the Path value",
+                );
+            }
+            // Folding the case must not start matching a different value:
+            // `PathExt` still fails the "name ends the token" rule.
+            let path_ext = "\r\nHKEY_CURRENT_USER\\Environment\r\n    \
+                PathExt    REG_SZ    .COM;.EXE\r\n\r\n";
+            assert_eq!(parse_reg_query_path(path_ext), None);
+        }
+
+        #[test]
+        fn reading_the_user_path_fails_closed_instead_of_reporting_empty() {
+            // A non-zero exit is the ONLY "this user has no Path value".
+            assert_eq!(
+                decode_user_path(false, b"").unwrap(),
+                (String::new(), "REG_EXPAND_SZ".to_string()),
+            );
+
+            // A successful query the parser cannot read is a parser failure,
+            // not an empty PATH. Reporting it as empty made the caller write
+            // `Path = <our bin dir>` with /f over the user's whole PATH.
+            let unparseable = b"\r\nHKEY_CURRENT_USER\\Environment\r\n\r\n";
+            let error = decode_user_path(true, unparseable)
+                .expect_err("a zero-exit unparseable query must be an error");
+            assert!(error.to_string().contains("could not be parsed"), "{error}",);
+
+            // `reg.exe` writes the console code page, so a non-ASCII PATH
+            // entry is not UTF-8. The old lossy decode turned those bytes into
+            // U+FFFD and wrote the replacement characters back; now they are
+            // refused. (0x82 is `e-acute` in CP437 and a lone continuation
+            // byte in UTF-8.)
+            let mut oem = Vec::new();
+            oem.extend_from_slice(
+                b"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\caf",
+            );
+            oem.push(0x82);
+            oem.extend_from_slice(b";C:\\tools\r\n\r\n");
+            let error = decode_user_path(true, &oem)
+                .expect_err("non-UTF-8 reg output must be an error, not U+FFFD");
+            assert!(error.to_string().contains("cannot decode"), "{error}");
+
+            // A UTF-8 console (chcp 65001) still reads through unchanged, and
+            // the non-ASCII entry survives verbatim.
+            let utf8 = "\r\nHKEY_CURRENT_USER\\Environment\r\n    \
+                Path    REG_EXPAND_SZ    C:\\caf\u{e9};C:\\tools\r\n\r\n";
+            assert_eq!(
+                decode_user_path(true, utf8.as_bytes()).unwrap(),
+                (
+                    "C:\\caf\u{e9};C:\\tools".to_string(),
+                    "REG_EXPAND_SZ".to_string()
+                ),
+            );
+            // And nothing in that value is a replacement character, which is
+            // what would have been written back before.
+            let (value, _) = decode_user_path(true, utf8.as_bytes()).unwrap();
+            assert!(!value.contains('\u{fffd}'), "{value}");
         }
     }
 }
