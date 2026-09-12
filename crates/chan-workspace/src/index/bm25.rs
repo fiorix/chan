@@ -395,24 +395,25 @@ fn has_operator(tok: &str) -> bool {
 /// Build a snippet for a body whose match is a prefix of an
 /// indexed token (the path tantivy's term-based SnippetGenerator
 /// does not cover). Walks `body` once with case-insensitive
-/// substring search per prefix, wraps every match in
-/// `<b>...</b>`, and excerpts ~200 chars centered on the first
-/// hit so the user sees relevant context. Returns an empty
-/// string when no prefix is found.
+/// matching per prefix, wraps every match in `<b>...</b>`, and
+/// excerpts ~200 bytes centered on the first hit so the user sees
+/// relevant context. Returns an empty string when no prefix is
+/// found.
 fn manual_prefix_snippet(body: &str, prefixes: &[String]) -> String {
     if prefixes.is_empty() || body.is_empty() {
         return String::new();
     }
-    let lc = body.to_lowercase();
-    // First-match position (byte offset in `lc`/`body`; ASCII
-    // prefixes only; non-ASCII case folding is approximate but
-    // good enough for English typeahead).
-    let first_idx = prefixes.iter().filter_map(|p| lc.find(p.as_str())).min();
-    let first_idx = match first_idx {
-        Some(i) => i,
+    // Every offset below is an offset into `body`. Matching against
+    // a lowercased copy and slicing the original with the result is
+    // not sound: `to_lowercase` is not byte-length preserving (the
+    // Kelvin sign folds three bytes down to one, U+0130 folds two up
+    // to three), so the two strings diverge after the first such
+    // character and the slice either panics or bolds the wrong span.
+    let first_idx = match find_folded(body, 0, prefixes) {
+        Some((idx, _)) => idx,
         None => return String::new(),
     };
-    // Excerpt window: ~200 chars wide, anchored on the first
+    // Excerpt window: ~200 bytes wide, anchored on the first
     // match. Skip past the previous word boundary so the snippet
     // starts cleanly.
     const WINDOW: usize = 200;
@@ -426,22 +427,11 @@ fn manual_prefix_snippet(body: &str, prefixes: &[String]) -> String {
         excerpt.push('…');
     }
     let segment = &body[start..end];
-    let lc_segment = &lc[start..end];
     // Multi-prefix highlight: scan once, at each position pick
     // the longest matching prefix and wrap it.
     let mut cursor = 0usize;
     while cursor < segment.len() {
-        // Find the next prefix match starting at or after cursor.
-        let next = prefixes
-            .iter()
-            .filter_map(|p| {
-                let needle = p.as_str();
-                lc_segment[cursor..]
-                    .find(needle)
-                    .map(|rel| (cursor + rel, needle.len()))
-            })
-            .min_by_key(|&(idx, _)| idx);
-        match next {
+        match find_folded(segment, cursor, prefixes) {
             Some((idx, len)) => {
                 excerpt.push_str(&segment[cursor..idx]);
                 excerpt.push_str("<b>");
@@ -459,6 +449,73 @@ fn manual_prefix_snippet(body: &str, prefixes: &[String]) -> String {
         excerpt.push('…');
     }
     excerpt
+}
+
+/// First position at or after `from` where any of `prefixes` matches
+/// `s` case-insensitively, paired with the byte length of that match
+/// in `s`. Ties at one position go to the longest match. `from` must
+/// be a char boundary of `s`.
+fn find_folded(s: &str, from: usize, prefixes: &[String]) -> Option<(usize, usize)> {
+    for (off, ch) in s[from..].char_indices() {
+        let at = from + off;
+        // Reject most positions on one character. Folding the whole
+        // prefix at every offset costs an order of magnitude more on a
+        // large body than the substring search this replaced, and a
+        // position whose first folded character starts no prefix can
+        // never begin a match.
+        let head = fold_head(ch);
+        let best = prefixes
+            .iter()
+            .filter(|p| p.starts_with(head))
+            .filter_map(|p| folded_match_len(s, at, p))
+            .max();
+        if let Some(len) = best {
+            return Some((at, len));
+        }
+    }
+    None
+}
+
+/// First character of `ch`'s lowercase fold. ASCII short-circuits the
+/// Unicode tables, which is what keeps the scan above cheap on the
+/// bodies this actually runs over. `char::to_lowercase` always yields
+/// at least one character.
+fn fold_head(ch: char) -> char {
+    if ch.is_ascii() {
+        ch.to_ascii_lowercase()
+    } else {
+        ch.to_lowercase().next().unwrap_or(ch)
+    }
+}
+
+/// Byte length within `s` of a case-insensitive match of the
+/// already-lowercased `needle` starting at `at`, or `None` when the
+/// text there does not fold to `needle`. The length is measured on
+/// `s` itself, so it always lands on a char boundary even where a
+/// character folds to a different number of bytes; a needle that
+/// runs out part-way through one character's fold still consumes
+/// that whole character, so a highlight never splits it.
+fn folded_match_len(s: &str, at: usize, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut want = needle.chars();
+    let mut next = want.next();
+    let mut consumed = 0usize;
+    for ch in s[at..].chars() {
+        for folded in ch.to_lowercase() {
+            match next {
+                Some(c) if c == folded => next = want.next(),
+                Some(_) => return None,
+                None => break,
+            }
+        }
+        consumed += ch.len_utf8();
+        if next.is_none() {
+            return Some(consumed);
+        }
+    }
+    None
 }
 
 /// Move `idx` to the nearest UTF-8 char boundary so a slice with
@@ -839,5 +896,59 @@ mod tests {
         let paths: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
         assert!(paths.contains(&"a.md"));
         assert!(!paths.contains(&"b.md"));
+    }
+
+    #[test]
+    fn prefix_snippet_handles_expanding_lowercase_fold() {
+        // U+0130 (capital I with a dot above) is two bytes and
+        // lowercases to three ("i" plus a combining dot), so every
+        // offset past it differs between the body and its lowercased
+        // copy.
+        let body = "\u{130}stanbul lemon caf\u{e9}";
+        let out = manual_prefix_snippet(body, &["lem".to_string()]);
+        assert_eq!(out, "\u{130}stanbul <b>lem</b>on caf\u{e9}");
+    }
+
+    #[test]
+    fn prefix_snippet_handles_shrinking_lowercase_fold() {
+        // U+212A (Kelvin sign) is three bytes and lowercases to the
+        // one-byte 'k', so the lowercased copy is shorter than the
+        // body and an offset taken from the body runs off its end.
+        let body = "Reference 300\u{212a} lemon sorbet";
+        let out = manual_prefix_snippet(body, &["lem".to_string()]);
+        assert_eq!(out, "Reference 300\u{212a} <b>lem</b>on sorbet");
+    }
+
+    #[test]
+    fn prefix_snippet_highlights_the_whole_folded_char() {
+        // The match length is measured on the body, not on the
+        // prefix: one-byte 'k' matches the three-byte Kelvin sign,
+        // and the highlight has to wrap the character that is
+        // actually there.
+        let body = "Value 300\u{212a} today";
+        let out = manual_prefix_snippet(body, &["k".to_string()]);
+        assert_eq!(out, "Value 300<b>\u{212a}</b> today");
+    }
+
+    #[test]
+    fn prefix_search_survives_a_non_ascii_body() {
+        // The manual highlighter is the typeahead fallback, so one
+        // indexed note carrying a character whose case fold changes
+        // its byte length used to take down the whole search call.
+        let (_tmp, idx) = fresh();
+        idx.index_file(
+            "a.md",
+            "# h\nReference 300\u{212a} lemon sorbet\n",
+            &Chunking::Headings,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+        let hits = idx.search("lem", 10).unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().any(|h| h.snippet.contains("<b>lem")),
+            "expected a highlighted prefix in {:?}",
+            hits.iter().map(|h| h.snippet.as_str()).collect::<Vec<_>>()
+        );
     }
 }
