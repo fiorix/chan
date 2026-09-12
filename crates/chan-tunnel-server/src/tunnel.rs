@@ -13,7 +13,10 @@
 //! else (additional streams, wrong method, wrong path, missing
 //! Authorization) gets a final-frame error response and the rest
 //! of the connection is treated as a keepalive driver until the
-//! peer closes.
+//! peer closes. For a pre-auth refusal that keepalive driver is
+//! bounded and holds nothing: `h2::server::Connection` has no idle
+//! timeout, so anything an unauthenticated peer can park on is
+//! something any peer that reaches the listener can exhaust.
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -74,6 +77,14 @@ impl RegistrationAdmission for LocalAdmission {
         })
     }
 }
+
+/// How long a pre-auth refusal keeps polling the connection after
+/// its final response frame is queued. h2 writes nothing unless the
+/// connection is polled, so returning straight away would drop the
+/// 404 / 401 on the floor; and `h2::server::Connection` has no idle
+/// timeout of its own, so a peer that takes its refusal and then
+/// holds the TCP open must not be able to park the task forever.
+const REJECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How many "stream beyond the first" rejections the drainer task
 /// will tolerate before tearing down the whole h2 connection with
@@ -211,9 +222,12 @@ async fn handle_tunnel_conn(
             .body(())
             .expect("constant response");
         let _ = respond.send_response(resp, true);
-        // Drain any further streams so the peer's GOAWAY arrives
-        // cleanly; we don't expect any.
-        while conn.accept().await.is_some() {}
+        // The refusal is the whole exchange: the in-flight slot goes
+        // back to the next dialer before the connection is flushed,
+        // so an unauthenticated peer that then sits on an open TCP
+        // connection cannot hold a slot with it.
+        drop(inflight_permit);
+        drain_refused_conn(conn).await;
         return Ok(());
     }
 
@@ -225,7 +239,8 @@ async fn handle_tunnel_conn(
                 .body(())
                 .expect("constant response");
             let _ = respond.send_response(resp, true);
-            while conn.accept().await.is_some() {}
+            drop(inflight_permit);
+            drain_refused_conn(conn).await;
             return Ok(());
         }
     };
@@ -413,6 +428,24 @@ async fn handle_tunnel_conn(
     Ok(())
 }
 
+/// Flush a refused connection's final response and let the peer close,
+/// bounded by `REJECTION_DRAIN_TIMEOUT`. The caller releases the
+/// in-flight permit before calling this: a refused peer gets the
+/// courtesy of a clean close, not a slot to sit in.
+async fn drain_refused_conn<T, B>(mut conn: h2::server::Connection<T, B>)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: bytes::Buf,
+{
+    let drained = tokio::time::timeout(REJECTION_DRAIN_TIMEOUT, async {
+        while conn.accept().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        conn.abrupt_shutdown(Reason::NO_ERROR);
+    }
+}
+
 /// Pull a Bearer token out of an Authorization header. Per RFC 6750
 /// the scheme name is case-insensitive ("Bearer", "bearer", "BEARER"
 /// all valid); some clients in the wild only emit lowercase, so a
@@ -441,10 +474,17 @@ fn extract_bearer<B>(request: &http::Request<B>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bearer, tunnel_h2_server_builder};
+    use super::{extract_bearer, handle_tunnel_conn, tunnel_h2_server_builder};
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use http::header::AUTHORIZATION;
+    use http::{Method, Request, StatusCode};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Semaphore;
+
+    use crate::{AllowAllAdmission, Registry, ServerError, Validated, Validator};
 
     /// Read one h2 frame as (frame type, stream id, payload).
     async fn read_h2_frame(stream: &mut TcpStream) -> (u8, u32, Vec<u8>) {
@@ -599,6 +639,103 @@ mod tests {
         assert_eq!(
             extract_bearer(&req_with_auth("  Bearer tok")).as_deref(),
             Some("tok"),
+        );
+    }
+
+    struct UnreachableValidator;
+
+    #[async_trait::async_trait]
+    impl Validator for UnreachableValidator {
+        async fn validate(&self, _token: &str) -> Result<Validated, ServerError> {
+            panic!("a pre-auth rejection must never reach the validator")
+        }
+    }
+
+    /// Drive one connection into a pre-auth rejection, then leave the
+    /// peer sitting on an open TCP connection the way an idle client
+    /// does, and report whether the listener's in-flight slot came back
+    /// while it sat there.
+    async fn slot_returns_while_the_peer_holds_the_connection(
+        request: Request<()>,
+        expect: StatusCode,
+    ) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        // One slot, taken by this connection: whether it comes back is
+        // the whole question, and a pool of one makes the answer exact.
+        let inflight = Arc::new(Semaphore::new(1));
+        let permit = inflight
+            .clone()
+            .try_acquire_owned()
+            .expect("the pool starts with a free slot");
+        let serving = tokio::spawn(async move {
+            let (tcp, peer) = listener.accept().await.expect("accept");
+            let _ = handle_tunnel_conn(
+                tcp,
+                peer,
+                Arc::new(UnreachableValidator),
+                Arc::new(AllowAllAdmission),
+                Registry::new(),
+                0,
+                permit,
+            )
+            .await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let (mut send_request, connection) = h2::client::handshake(tcp)
+            .await
+            .expect("client h2 handshake");
+        let driving = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let (response, _body) = send_request
+            .send_request(request, true)
+            .expect("send request");
+        let response = tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .expect("the rejection response never arrived")
+            .expect("h2 response");
+        assert_eq!(response.status(), expect);
+
+        // `send_request` and the connection task are deliberately still
+        // alive: nothing here closes the connection after the refusal.
+        let returned = tokio::time::timeout(Duration::from_secs(2), inflight.acquire())
+            .await
+            .is_ok();
+        drop(send_request);
+        driving.abort();
+        serving.abort();
+        returned
+    }
+
+    #[tokio::test]
+    async fn a_wrong_path_rejection_frees_the_inflight_slot() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("http://tunnel.test/not-the-tunnel")
+            .body(())
+            .expect("request");
+        assert!(
+            slot_returns_while_the_peer_holds_the_connection(request, StatusCode::NOT_FOUND).await,
+            "the 404 branch held the in-flight slot while the peer idled",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_bearer_rejection_frees_the_inflight_slot() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "http://tunnel.test{}",
+                chan_tunnel_proto::TUNNEL_PATH
+            ))
+            .body(())
+            .expect("request");
+        assert!(
+            slot_returns_while_the_peer_holds_the_connection(request, StatusCode::UNAUTHORIZED)
+                .await,
+            "the 401 branch held the in-flight slot while the peer idled",
         );
     }
 }
