@@ -369,11 +369,11 @@
 
   /// The actions this particular window can take. Focus and Show both route
   /// through focusLibraryWindow, which unhides and raises in one step, so a
-  /// window offers one of the two and never both. Hide and Close are the
-  /// owner-only mutations, and the capability route refuses either on a
-  /// control terminal, so neither is offered there.
-  function scopedWindowActions(window: ScopedLibraryWindow, owner: boolean): WindowActionId[] {
-    const manageable = owner && window.can_act && !window.control;
+  /// window offers one of the two and never both. The capability route
+  /// refuses Hide and Close on a control terminal, so neither is offered
+  /// there.
+  function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
+    const manageable = !window.control;
     const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
     if (manageable && !window.hidden) actions.push("hide");
     if (manageable) actions.push("close");
@@ -431,38 +431,33 @@
   function computerTargetEntries(path: readonly string[]): Entry[] {
     const snapshot = scopedLibrary;
     if (!snapshot) return [];
-    const owner = snapshot.role === "owner";
     const [branch, windowId] = path;
     switch (branch) {
       case "new-terminal":
-        return owner
-          ? [
-              {
-                id: "computers:new-terminal:this-library",
-                title: "This library",
-                breadcrumb: "Computers › New terminal",
-                searchText: "this computer library shell terminal",
-                scope: "computers",
-                icon: Terminal,
-                awaitResult: true,
-                dismissImmediatelyOnSuccess: true,
-                run: () => createScopedWindow({ action: "new_terminal" }),
-              },
-            ]
-          : [];
+        return [
+          {
+            id: "computers:new-terminal:this-library",
+            title: "This library",
+            breadcrumb: "Computers › New terminal",
+            searchText: "this computer library shell terminal",
+            scope: "computers",
+            icon: Terminal,
+            awaitResult: true,
+            dismissImmediatelyOnSuccess: true,
+            run: () => createScopedWindow({ action: "new_terminal" }),
+          },
+        ];
       case "new-window":
-        return owner
-          ? snapshot.workspaces
-              .filter((workspace) => workspace.can_act && workspace.status === "running")
-              .map(scopedWorkspaceEntry)
-          : [];
+        return snapshot.workspaces
+          .filter((workspace) => workspace.status === "running")
+          .map(scopedWorkspaceEntry);
       case "windows": {
         // The roster order is the server's: this window first, then terminals
         // before workspaces, then ordinal.
         if (windowId === undefined) return snapshot.windows.map(scopedWindowBranch);
         const window = snapshot.windows.find((candidate) => candidate.window_id === windowId);
         if (!window) return [];
-        return scopedWindowActions(window, owner).map((action) => scopedWindowEntry(action, window));
+        return scopedWindowActions(window).map((action) => scopedWindowEntry(action, window));
       }
       default:
         return [];
@@ -485,18 +480,11 @@
         },
       ];
     }
-    const owner = scopedLibrary.role === "owner";
-    const entries: Entry[] = [];
-    if (owner) {
-      entries.push(
-        computerCommandEntry("new-terminal", "New terminal", "This library", Terminal, "shell"),
-        computerCommandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
-      );
-    }
-    // One target-first branch instead of a Focus/Hide/Show/Close quartet that
-    // showed the same roster four times. Every role gets it: a grantee's
-    // windows still offer Focus, which is what the old Focus branch gave them.
-    entries.push(
+    // One target-first Windows branch instead of a Focus/Hide/Show/Close
+    // quartet that showed the same roster four times.
+    return [
+      computerCommandEntry("new-terminal", "New terminal", "This library", Terminal, "shell"),
+      computerCommandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
       computerCommandEntry(
         "windows",
         "Windows",
@@ -504,8 +492,7 @@
         Layers3,
         "focus show hide close open activate control terminal",
       ),
-    );
-    return entries;
+    ];
   });
 
   // Typed search crosses every level, so it carries the window rows AND each
@@ -514,13 +501,12 @@
   const computerDeepEntries = $derived.by<Entry[]>(() => {
     const snapshot = scopedLibrary;
     if (!snapshot) return [];
-    const owner = snapshot.role === "owner";
     return [
       ...computerTargetEntries(["new-terminal"]),
       ...computerTargetEntries(["new-window"]),
       ...computerTargetEntries(["windows"]),
       ...snapshot.windows.flatMap((window) =>
-        scopedWindowActions(window, owner).map((action) => scopedWindowEntry(action, window)),
+        scopedWindowActions(window).map((action) => scopedWindowEntry(action, window)),
       ),
     ];
   });

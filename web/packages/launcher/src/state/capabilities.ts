@@ -8,12 +8,14 @@
 //
 //   desktop    a loopback with a desktop window bridge: full registry mutation
 //              and native focus/hide/connect ops.
-//   devserver  a bridgeless local loopback (the browser-leader surface): full
-//              registry mutation, but windows are self-managed client-side
-//              (window.open + the leader story) instead of a native bridge.
-//   readonly   the tunnel-trust gateway surface: a grantee can't be told from
-//              the owner, so the server 403s registry mutation and the SPA hides
-//              the mutation controls behind a "manage elsewhere" hint.
+//   devserver  a bridgeless devserver, over its loopback or the gateway tunnel
+//              (the browser-leader surface): full registry mutation, but windows
+//              are self-managed client-side (window.open + the leader story)
+//              instead of a native bridge. The owner and a grantee get it alike:
+//              a grant carries the owner's authority over the devserver.
+//   readonly   a surface with nowhere to mount a workspace: the server 403s
+//              registry mutation and the SPA hides the mutation controls behind
+//              a "manage elsewhere" hint.
 
 export type LauncherSurface = "desktop" | "devserver" | "readonly";
 
@@ -60,8 +62,8 @@ export const canMutateRegistry = caps.canMutateRegistry;
 export const hasDesktopBridge = caps.hasDesktopBridge;
 export const selfManagedWindows = caps.selfManagedWindows;
 
-/** The readonly (tunnel-trust) surface. Equivalent to `!canMutateRegistry`;
- * registry-mutation controls gate on this. */
+/** The readonly surface. Equivalent to `!canMutateRegistry`; registry-mutation
+ * controls gate on this. */
 export const readOnly = surface === "readonly";
 
 // The launcher host's OS family, injected by the server as a <meta> tag so the

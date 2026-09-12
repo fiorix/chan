@@ -7,7 +7,7 @@ Design reference for the chan web frontend: first the two web SPAs and how each 
 chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles and built on the color system below:
 
 - **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix, whether Settings is disabled, and an optional desktop terminal-renderer capability, so a reverse-proxied instance builds correct `/api` URLs, can grey restricted controls, and follows the native WebKit process's renderer decision.
-- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces**: devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.proxy.{domain}/`), and desktop loopback. The same bundle is installed per surface, with three surfaces (desktop / devserver / readonly) derived from that meta, and owner-vs-grantee mutation over the gateway enforced by the proxy's signed assertion. Its serving and auth contract is documented in the launcher design doc.
+- **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces**: devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.proxy.{domain}/`), and desktop loopback. The same bundle is installed per surface, with three surfaces (desktop / devserver / readonly) derived from that meta; over the gateway the owner and a grantee get the same surface, since a grant is all-or-nothing. Its serving and auth contract is documented in the launcher design doc.
 
 The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
 
@@ -33,8 +33,8 @@ flowchart TB
     LAPP -->|served by| LAUNA
     subgraph surfaces["the launcher is served on all 3 surfaces (same bundle)"]
         direction LR
-        DEV["devserver loopback<br/>auth Some(devserver token) · full mutation; tunnel non-owners read-only"]
-        GW["gateway-proxied<br/>{owner}--{disc}.{proxy}.proxy.{domain}/ via devserver-proxy · read-only for non-owners"]
+        DEV["devserver loopback<br/>auth Some(devserver token) · full mutation, over the tunnel too"]
+        GW["gateway-proxied<br/>{owner}--{disc}.{proxy}.proxy.{domain}/ via devserver-proxy · owner and grantees alike"]
         LOOP["desktop loopback<br/>auth Some(window token) · full mutation"]
     end
     LAUNA --- DEV

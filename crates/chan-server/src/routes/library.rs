@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
@@ -42,13 +42,12 @@ use crate::{
 /// State shared by the `/api/library/workspaces` handlers: the library host plus
 /// the surface's serve address. `serve_addr` is the read-only/full discriminator
 /// AND the mount enabler:
-///   - `Some(cell)` -- the desktop loopback (single-user, token-gated). Workspace
-///     MUTATION (add/on/off/rm) is served; mounting needs the listen address,
-///     which the embedder fills into the `OnceLock` after it binds (the install
-///     happens before the bind, so the cell is read at request time).
-///   - `None` -- the tunnel-trust devserver/gateway surface. Workspaces are
-///     READ-ONLY: a grantee holding a `__Host-devserver_gate` cookie must not mutate the
-///     owner's library, and `bearer=None` can't enforce role. The mutation
+///   - `Some(cell)` -- the desktop and devserver surfaces, the devserver's tunnel
+///     included. Workspace MUTATION (add/on/off/rm) is served; mounting needs
+///     the listen address, which the embedder fills into the `OnceLock` after it
+///     binds (the install happens before the bind, so the cell is read at
+///     request time).
+///   - `None` -- a surface with nowhere to mount a workspace. The mutation
 ///     handlers answer 403 there.
 struct LauncherState {
     host: Arc<WorkspaceHost>,
@@ -57,19 +56,11 @@ struct LauncherState {
 
 const COMMAND_CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum CommandCapabilityRole {
-    Owner,
-    Readonly,
-}
-
 #[derive(Clone)]
 struct LibraryCommandCapability {
     token: String,
     window_id: String,
     tenant_prefix: String,
-    role: CommandCapabilityRole,
     expires_at: Instant,
 }
 
@@ -109,20 +100,20 @@ pub type LauncherBearer = Arc<std::sync::RwLock<String>>;
 ///
 /// `bearer` is the per-surface launcher token: `Some` gates `/api/library/*` on
 /// `Authorization: Bearer <token>` (the watch WS additionally accepts
-/// `?t=<token>`); `None` leaves the data surface public (tests / the
-/// tunnel-trust install). The static SPA shell is ALWAYS public so it can
-/// load before it holds the token -- the SPA then reads `?t=` from its URL and
-/// presents it on every data call.
+/// `?t=<token>`); `None` leaves the data surface public (tests). The static SPA
+/// shell is ALWAYS public so it can load before it holds the token -- the SPA
+/// then reads `?t=` from its URL and presents it on every data call.
 pub fn launcher_router(
     host: Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
 ) -> Router {
     // The launcher surface descriptor the injected meta advertises: no serve
-    // address is the tunnel-trust read-only surface; a serve address plus a
-    // desktop bridge is the desktop loopback; a serve address without one is a
-    // local devserver loopback (browser-managed windows). The mutation handlers
-    // still gate on `serve_addr` via `require_mutable`; this only shapes the meta.
+    // address is the read-only surface; a serve address plus a desktop bridge is
+    // the desktop loopback; a serve address without one is a devserver
+    // (browser-managed windows), over its loopback and its tunnel alike. The
+    // mutation handlers still gate on `serve_addr` via `require_mutable`; this
+    // only shapes the meta.
     let surface = if serve_addr.is_none() {
         LauncherSurface::ReadOnly
     } else if host.has_desktop_bridge() {
@@ -229,7 +220,6 @@ pub fn launcher_router(
         // New-Workspace "Browse…"), so it sits with the other bridge ops.
         .route("/api/library/fs/pick-folder", post(handle_pick_folder))
         .merge(tunnel_legs())
-        .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(host.clone());
     // Workspaces: list always; the mutation routes are always present but
     // refuse with 403 on the read-only surface (gated by `serve_addr` inside the
@@ -248,7 +238,6 @@ pub fn launcher_router(
             "/api/library/workspaces/{id}",
             delete(handle_remove_workspace),
         )
-        .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(Arc::new(LauncherState {
             host: host.clone(),
             serve_addr: serve_addr.clone(),
@@ -280,7 +269,6 @@ pub fn launcher_router(
             "/api/library/collapsed-machines",
             get(handle_get_collapsed_machines).put(handle_set_collapsed_machines),
         )
-        .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(Arc::new(LauncherState {
             host: host.clone(),
             serve_addr: serve_addr.clone(),
@@ -337,7 +325,6 @@ pub fn launcher_router(
             "/api/library/gateways/{id}",
             put(handle_update_gateway).delete(handle_remove_gateway),
         )
-        .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(Arc::new(LauncherState {
             host: host.clone(),
             serve_addr: serve_addr.clone(),
@@ -354,7 +341,6 @@ pub fn launcher_router(
             "/api/library/devservers/{id}",
             put(handle_update_devserver).delete(handle_remove_devserver),
         )
-        .route_layer(middleware::from_fn(require_local_mutation))
         .with_state(Arc::new(LauncherState { host, serve_addr }));
     // The launcher-management routes (windows / workspaces / devservers) stay
     // gated on the launcher token. The local-color (`config`) routes set the
@@ -386,28 +372,19 @@ pub fn launcher_router(
         .merge(command_uses);
     // The static SPA shell is ALWAYS public (loads before it holds the token) and
     // carries the surface hint so the SPA hides mutation controls on a read-only
-    // surface rather than showing buttons that 403. A tunnel-origin owner keeps
-    // the router's native surface (the full devserver launcher); a tunnel-origin
-    // non-owner is downgraded to `readonly`. The `require_local_mutation` gate
-    // enforces the same role split on the data routes.
+    // surface rather than showing buttons that 403. The hint is the router's own
+    // for every caller: the gateway admits only the owner and a grantee to a
+    // devserver session, and a grant carries the owner's authority.
     Router::new()
         .merge(api)
-        .fallback(move |req: Request<Body>| {
-            let effective = if tunnel_owner(&req) {
-                surface
-            } else if req.extensions().get::<crate::TunnelOrigin>().is_some() {
-                LauncherSurface::ReadOnly
-            } else {
-                surface
-            };
-            serve_launcher(req.uri().clone(), effective)
-        })
+        .fallback(move |req: Request<Body>| serve_launcher(req.uri().clone(), surface))
 }
 
 /// Gate `/api/library/*` on the surface's launcher token. Tunnel-origin
 /// requests already passed the gateway's `__Host-devserver_gate` check and arrive with
-/// client credentials stripped, so they bypass this local bearer; owner vs
-/// non-owner mutation is enforced separately by [`require_local_mutation`].
+/// client credentials stripped, so they bypass this local bearer; the
+/// reverse-tunnel legs, the only launcher routes that tell the owner from a
+/// grantee, are guarded separately by [`require_tunnel_owner`].
 /// Other requests accept the token in the `Authorization: Bearer` header on
 /// every route, and additionally as the `?t=` query param on watch WebSockets
 /// (a browser WS can't header). The comparison is constant-time so a wrong token
@@ -521,7 +498,6 @@ struct MintLibraryCommandCapability {
 #[derive(Serialize)]
 struct MintedLibraryCommandCapability {
     token: String,
-    role: CommandCapabilityRole,
     expires_in_seconds: u64,
 }
 
@@ -536,23 +512,14 @@ struct ScopedLibraryWindow {
     connected: bool,
     hidden: bool,
     control: bool,
-    can_act: bool,
     launch_path: String,
-}
-
-#[derive(Serialize)]
-struct ScopedLibraryWorkspace {
-    #[serde(flatten)]
-    workspace: LauncherWorkspace,
-    can_act: bool,
 }
 
 #[derive(Serialize)]
 struct ScopedLibrarySnapshot {
     library_id: String,
-    role: CommandCapabilityRole,
     windows: Vec<ScopedLibraryWindow>,
-    workspaces: Vec<ScopedLibraryWorkspace>,
+    workspaces: Vec<LauncherWorkspace>,
 }
 
 #[derive(Deserialize)]
@@ -641,7 +608,6 @@ fn scoped_window(
         connected: record.connected,
         hidden: record.hidden,
         control: record.control,
-        can_act: capability.role == CommandCapabilityRole::Owner,
     }
 }
 
@@ -678,10 +644,7 @@ fn scoped_local_windows(
     rows
 }
 
-fn scoped_local_workspaces(
-    host: &WorkspaceHost,
-    role: CommandCapabilityRole,
-) -> Vec<ScopedLibraryWorkspace> {
+fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
     let library_id = host.library_id().to_string();
     let mut rows: Vec<_> = host
         .library()
@@ -693,26 +656,23 @@ fn scoped_local_workspaces(
                 .trim_start_matches('/')
                 .to_string();
             let (status, error) = host.workspace_status(&workspace.root_path);
-            Some(ScopedLibraryWorkspace {
-                workspace: LauncherWorkspace {
-                    path: workspace.root_path.to_string_lossy().into_owned(),
-                    label: workspace
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| workspace_label(&workspace.root_path)),
-                    on: status == WorkspaceStatus::Running,
-                    status,
-                    error,
-                    library_id: Some(library_id.clone()),
-                    devserver_id: None,
-                    prefix: workspace_id.clone(),
-                    workspace_id,
-                },
-                can_act: role == CommandCapabilityRole::Owner,
+            Some(LauncherWorkspace {
+                path: workspace.root_path.to_string_lossy().into_owned(),
+                label: workspace
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| workspace_label(&workspace.root_path)),
+                on: status == WorkspaceStatus::Running,
+                status,
+                error,
+                library_id: Some(library_id.clone()),
+                devserver_id: None,
+                prefix: workspace_id.clone(),
+                workspace_id,
             })
         })
         .collect();
-    rows.sort_by(|a, b| a.workspace.workspace_id.cmp(&b.workspace.workspace_id));
+    rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
     rows
 }
 
@@ -728,16 +688,6 @@ async fn handle_mint_library_command_capability(
     {
         return command_capability_error(StatusCode::BAD_REQUEST, "invalid invoking window");
     }
-    let role = origin
-        .as_ref()
-        .map(|origin| {
-            if origin.owner() {
-                CommandCapabilityRole::Owner
-            } else {
-                CommandCapabilityRole::Readonly
-            }
-        })
-        .unwrap_or(CommandCapabilityRole::Owner);
     let authorized = if origin.is_some() {
         state
             .host
@@ -771,7 +721,6 @@ async fn handle_mint_library_command_capability(
         token: token.clone(),
         window_id: request.window_id,
         tenant_prefix: request.tenant_prefix,
-        role,
         expires_at: Instant::now() + COMMAND_CAPABILITY_TTL,
     };
     let mut capabilities = state
@@ -786,7 +735,6 @@ async fn handle_mint_library_command_capability(
     capabilities.insert(token.clone(), capability);
     Json(MintedLibraryCommandCapability {
         token,
-        role,
         expires_in_seconds: COMMAND_CAPABILITY_TTL.as_secs(),
     })
     .into_response()
@@ -802,9 +750,8 @@ async fn handle_library_command_snapshot(
     };
     Json(ScopedLibrarySnapshot {
         library_id: state.host.library_id().to_string(),
-        role: capability.role,
         windows: scoped_local_windows(&state.host, &capability),
-        workspaces: scoped_local_workspaces(&state.host, capability.role),
+        workspaces: scoped_local_workspaces(&state.host),
     })
     .into_response()
 }
@@ -818,12 +765,6 @@ async fn handle_library_command_action(
         Ok(capability) => capability,
         Err(error) => return error.into_response(),
     };
-    if capability.role != CommandCapabilityRole::Owner {
-        return command_capability_error(
-            StatusCode::FORBIDDEN,
-            "this gateway role may inspect but not control the library",
-        );
-    }
     let record = match action {
         ScopedLibraryAction::NewTerminal => {
             state
@@ -941,12 +882,6 @@ async fn handle_library_command_launch(
     Redirect::temporary(&target).into_response()
 }
 
-/// Gate tunnel-origin mutations by the gateway caller role. The headless
-/// devserver serves ONE app on both its loopback bind (a mutable `devserver`
-/// surface) and the gateway tunnel. The proxy strips client credentials and
-/// forwards a verified gateway assertion; owner assertions get the full launcher,
-/// while missing/non-owner assertions may read but not mutate. Non-tunnel
-/// requests keep the existing local bearer/bridge behavior.
 /// The desktop-dialed reverse-tunnel legs (`cs tunnel`), behind their own
 /// owner gate. They live under `/api/library/*` because `/api/devserver/*` is
 /// 404'd on the gateway's public wildcard; handlers and the three-leg contract
@@ -966,13 +901,14 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
 
 /// Restrict the tunnel legs to the devserver's owner.
 ///
-/// Both legs are GET, so neither [`require_local_mutation`] nor the launcher
-/// bearer covers them over the gateway: a tunnel-origin request bypasses the
-/// bearer entirely, which would leave the unguessable tunnel id as the only
+/// A grant is all-or-nothing over the devserver, and these are the only
+/// launcher routes a grantee does not share with the owner: a reverse tunnel
+/// dials out through an addressed app window, whose host can be the owner's
+/// own desktop, outside the devserver a grant covers. A tunnel-origin request bypasses the
+/// launcher bearer, which would leave the unguessable tunnel id as the only
 /// thing standing between any session holder and a listener on the owner's
-/// desktop. A grantee holds a valid session, so "valid session" is not the
-/// authority to open sockets on someone else's machine. Local (non-tunnel)
-/// requests are unaffected: the launcher bearer already gates those.
+/// desktop. Local (non-tunnel) requests are unaffected: the launcher bearer
+/// already gates those.
 ///
 /// TODO: tighten this from owner to the owner's DESKTOP. Gateway assertion
 /// claims carry only sub / owner_user_id / aud / drv / iat / exp, so the
@@ -991,32 +927,6 @@ async fn require_tunnel_owner(req: Request<Body>, next: Next) -> Response {
             .into_response();
     }
     next.run(req).await
-}
-
-/// Tunnel guests (a `TunnelOrigin` whose `owner()` is false) may read but
-/// not mutate. Mounted on the launcher mutation lanes here and on the
-/// extension capability proxy routes in `lib.rs`.
-pub(crate) async fn require_local_mutation(req: Request<Body>, next: Next) -> Response {
-    let is_mutation = matches!(*req.method(), Method::POST | Method::PUT | Method::DELETE);
-    if is_mutation
-        && req
-            .extensions()
-            .get::<crate::TunnelOrigin>()
-            .is_some_and(|origin| !origin.owner())
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            "launcher mutation is not available for this gateway role",
-        )
-            .into_response();
-    }
-    next.run(req).await
-}
-
-fn tunnel_owner(req: &Request<Body>) -> bool {
-    req.extensions()
-        .get::<crate::TunnelOrigin>()
-        .is_some_and(crate::TunnelOrigin::owner)
 }
 
 /// The `t` bearer from a URL query string (`...?t=<token>`), for the watch WS
@@ -1673,9 +1583,9 @@ fn workspace_label(root: &Path) -> String {
 }
 
 /// The serve address for a mutating workspace handler, or the error response to
-/// return instead. Mutation is loopback-only: `serve_addr=None` is the
-/// read-only devserver/gateway surface → 403. A present-but-unfilled cell
-/// means a request landed before the embedder finished binding → 503 (momentary).
+/// return instead. `serve_addr=None` is the read-only surface, with nowhere to
+/// mount a workspace → 403. A present-but-unfilled cell means a request landed
+/// before the embedder finished binding → 503 (momentary).
 /// The `Response` is boxed to keep the `Err` variant small (`clippy::result_large_err`).
 fn require_mutable(state: &LauncherState) -> Result<SocketAddr, Box<Response>> {
     match state.serve_addr.as_ref() {
@@ -2318,6 +2228,7 @@ mod devserver_route_tests {
     use tower::ServiceExt;
 
     use super::launcher_router;
+    use crate::route_authority::test_support::Caller;
     use crate::{
         CollapsedMachinesStore, DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus,
         LocalColorStore, LocalThemeStore, WorkspaceHost,
@@ -2427,8 +2338,8 @@ mod devserver_route_tests {
 
     /// A launcher router over an empty host with the given registry installed (or
     /// none). `mutable` Some → a loopback surface with a bound `serve_addr` (the
-    /// mutation gate opens); None → the read-only devserver/gateway surface. The
-    /// bearer is `None`, leaving the data surface public so tests need no header.
+    /// mutation gate opens); None → the read-only surface. The bearer is `None`,
+    /// leaving the data surface public so tests need no header.
     fn router_with(registry: Option<Arc<dyn DevserverRegistry>>, mutable: bool) -> axum::Router {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::open_at(dir.path().join("config.toml")).unwrap();
@@ -2453,7 +2364,19 @@ mod devserver_route_tests {
         uri: &str,
         body: Option<&str>,
     ) -> (StatusCode, serde_json::Value) {
-        let mut req = Request::builder().method(method).uri(uri);
+        request_as(router, Caller::Local, method, uri, body).await
+    }
+
+    /// [`request`] as `caller`. These routers carry no bearer, so a local
+    /// caller presents nothing.
+    async fn request_as(
+        router: &axum::Router,
+        caller: Caller,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = caller.stamp(Request::builder().method(method).uri(uri), None);
         let body = if let Some(b) = body {
             req = req.header(header::CONTENT_TYPE, "application/json");
             Body::from(b.to_string())
@@ -2735,7 +2658,7 @@ mod devserver_route_tests {
     #[tokio::test]
     async fn mutation_on_read_only_surface_is_403() {
         // require_mutable runs FIRST: even with a registry installed, the
-        // read-only devserver/gateway surface refuses every mutation with 403.
+        // read-only surface refuses every mutation with 403.
         let reg = Arc::new(FakeRegistry::seeded());
         let router = router_with(Some(reg), false);
         for (method, uri, body) in [
@@ -2795,6 +2718,47 @@ mod devserver_route_tests {
             )
             .await;
             assert_eq!(del_status, StatusCode::NOT_FOUND, "DELETE {id}");
+        }
+    }
+
+    /// A grant is all-or-nothing: a grantee adds, edits and removes devserver
+    /// registry rows exactly as the owner and a local caller do. The launcher
+    /// does not tell an anonymous caller from a grantee; the gateway forwards
+    /// an anonymous caller only to extension capability paths, which never
+    /// route here.
+    #[tokio::test]
+    async fn a_grantee_manages_the_devserver_registry_like_the_owner() {
+        for caller in Caller::ALL {
+            let router = router_with(Some(Arc::new(FakeRegistry::seeded())), true);
+            let (status, body) = request_as(
+                &router,
+                caller,
+                "POST",
+                "/api/library/devservers",
+                Some(r#"{"host":"other","port":9000}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{caller:?} add");
+            assert_eq!(body["host"], "other", "{caller:?} add");
+            let (status, body) = request_as(
+                &router,
+                caller,
+                "PUT",
+                "/api/library/devservers/ds1",
+                Some(r#"{"host":"box.example.com","port":8788}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{caller:?} update");
+            assert_eq!(body["port"], 8788, "{caller:?} update");
+            let (status, _) = request_as(
+                &router,
+                caller,
+                "DELETE",
+                "/api/library/devservers/ds1",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} remove");
         }
     }
 
@@ -3056,6 +3020,50 @@ mod devserver_route_tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    /// The library's pane colour, theme and collapsed machines are settings a
+    /// grantee changes as the owner does. As for the registry, the launcher
+    /// does not tell an anonymous caller from a grantee.
+    #[tokio::test]
+    async fn a_grantee_sets_the_library_appearance_like_the_owner() {
+        for caller in Caller::ALL {
+            let color = color_router(Some(Arc::new(FakeColorStore::default())), true);
+            let (status, _) = request_as(
+                &color,
+                caller,
+                "PUT",
+                "/api/library/local-color",
+                Some(r##"{"color":"#0af"}"##),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} colour");
+            let (_, body) =
+                request_as(&color, caller, "GET", "/api/library/local-color", None).await;
+            assert_eq!(body["color"], "#0af", "{caller:?} colour");
+
+            let theme = theme_router(Some(Arc::new(FakeThemeStore::default())));
+            let (status, _) = request_as(
+                &theme,
+                caller,
+                "PUT",
+                "/api/library/local-theme",
+                Some(r#"{"theme":"light"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} theme");
+
+            let collapsed = collapsed_router(Some(Arc::new(FakeCollapsedStore::default())));
+            let (status, _) = request_as(
+                &collapsed,
+                caller,
+                "PUT",
+                "/api/library/collapsed-machines",
+                Some(r#"{"collapsed":["local"]}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} collapsed");
+        }
+    }
+
     #[tokio::test]
     async fn local_workspace_off_confirms_on_live_terminals_then_force_offs() {
         // Parity with the devserver off: an unforced local off of a workspace
@@ -3143,6 +3151,7 @@ mod gateway_route_tests {
     use tower::ServiceExt;
 
     use super::launcher_router;
+    use crate::route_authority::test_support::Caller;
     use crate::{GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, WorkspaceHost};
 
     /// An in-memory `GatewayRegistry` standing in for the desktop config so
@@ -3214,7 +3223,7 @@ mod gateway_route_tests {
 
     /// A launcher router over an empty host with the given gateway registry
     /// installed (or none). `mutable` true → a loopback surface with a bound
-    /// `serve_addr`; false → the read-only devserver/gateway surface.
+    /// `serve_addr`; false → the read-only surface.
     fn router_with(registry: Option<Arc<dyn GatewayRegistry>>, mutable: bool) -> axum::Router {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::open_at(dir.path().join("config.toml")).unwrap();
@@ -3239,7 +3248,19 @@ mod gateway_route_tests {
         uri: &str,
         body: Option<&str>,
     ) -> (StatusCode, serde_json::Value) {
-        let mut req = Request::builder().method(method).uri(uri);
+        request_as(router, Caller::Local, method, uri, body).await
+    }
+
+    /// [`request`] as `caller`. These routers carry no bearer, so a local
+    /// caller presents nothing.
+    async fn request_as(
+        router: &axum::Router,
+        caller: Caller,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = caller.stamp(Request::builder().method(method).uri(uri), None);
         let body = if let Some(b) = body {
             req = req.header(header::CONTENT_TYPE, "application/json");
             Body::from(b.to_string())
@@ -3257,6 +3278,47 @@ mod gateway_route_tests {
             .unwrap();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
+    }
+
+    /// A grant is all-or-nothing: a grantee adds, renames and removes gateway
+    /// registry rows exactly as the owner and a local caller do. The launcher
+    /// does not tell an anonymous caller from a grantee; the gateway forwards
+    /// an anonymous caller only to extension capability paths, which never
+    /// route here.
+    #[tokio::test]
+    async fn a_grantee_manages_the_gateway_registry_like_the_owner() {
+        for caller in Caller::ALL {
+            let router = router_with(Some(Arc::new(FakeGatewayRegistry::seeded())), true);
+            let (status, body) = request_as(
+                &router,
+                caller,
+                "POST",
+                "/api/library/gateways",
+                Some(r#"{"url":"https://other.chan.app"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{caller:?} add");
+            assert_eq!(body["id"], "gw-feedface", "{caller:?} add");
+            let (status, body) = request_as(
+                &router,
+                caller,
+                "PUT",
+                "/api/library/gateways/gw-1a2b3c4d",
+                Some(r#"{"url":"https://gw.chan.app","label":"prod"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{caller:?} rename");
+            assert_eq!(body["label"], "prod", "{caller:?} rename");
+            let (status, _) = request_as(
+                &router,
+                caller,
+                "DELETE",
+                "/api/library/gateways/gw-1a2b3c4d",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} remove");
+        }
     }
 
     #[tokio::test]
@@ -3349,7 +3411,7 @@ mod gateway_route_tests {
     #[tokio::test]
     async fn mutation_on_read_only_surface_is_403() {
         // require_mutable runs FIRST: even with a registry installed, the
-        // read-only devserver/gateway surface refuses every mutation.
+        // read-only surface refuses every mutation.
         let router = router_with(Some(Arc::new(FakeGatewayRegistry::seeded())), false);
         for (method, uri, body) in [
             (
@@ -3420,6 +3482,7 @@ mod window_op_route_tests {
     use tower::ServiceExt;
 
     use super::{launcher_router, leader_gate};
+    use crate::route_authority::test_support::Caller;
     use crate::{
         DesktopBridge, DesktopWindowOp, DevserverFeedSource, LauncherWorkspace,
         SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WorkspaceHost, NO_DESKTOP,
@@ -3462,7 +3525,19 @@ mod window_op_route_tests {
         uri: &str,
         json: Option<&str>,
     ) -> (StatusCode, String) {
-        let mut builder = Request::builder().method(method).uri(uri);
+        send_as(router, Caller::Local, method, uri, json).await
+    }
+
+    /// [`send`] as `caller`. A local caller presents no bearer: these tests
+    /// build public routers or drive the always-public launcher shell.
+    async fn send_as(
+        router: &axum::Router,
+        caller: Caller,
+        method: &str,
+        uri: &str,
+        json: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut builder = caller.stamp(Request::builder().method(method).uri(uri), None);
         let body = match json {
             Some(j) => {
                 builder = builder.header("content-type", "application/json");
@@ -3905,28 +3980,27 @@ mod window_op_route_tests {
         assert_eq!(body, NO_DESKTOP, "pick-folder");
     }
 
+    /// Native trust is a desktop-bridge op, and no gate in front of it tells
+    /// the owner from a grantee: every caller reaches the bridge guard, which
+    /// answers 409 on a surface with no desktop.
     #[tokio::test]
-    async fn native_trust_mutation_is_forbidden_from_non_owner_tunnel() {
+    async fn native_trust_mutation_reaches_the_desktop_guard_for_every_caller() {
         let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
         let router = launcher_router(host, None, None);
 
         for method in ["PUT", "DELETE"] {
-            let request = Request::builder()
-                .method(method)
-                .uri("/api/library/devservers/gw%3A1%3Aalice%3Adev/native-trust")
-                .extension(crate::TunnelOrigin { caller: None })
-                .body(Body::empty())
-                .unwrap();
-            let response = router.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method}");
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&body),
-                "launcher mutation is not available for this gateway role",
-                "{method}"
-            );
+            for caller in Caller::ALL {
+                let (status, body) = send_as(
+                    &router,
+                    caller,
+                    method,
+                    "/api/library/devservers/gw%3A1%3Aalice%3Adev/native-trust",
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{caller:?} {method}");
+                assert_eq!(body, NO_DESKTOP, "{caller:?} {method}");
+            }
         }
     }
 
@@ -3971,6 +4045,127 @@ mod window_op_route_tests {
                 .unwrap();
             let response = router.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    /// The value of the `chan-launcher-surface` meta an index page carries.
+    fn surface_meta(page: &str) -> Option<&str> {
+        let (_, rest) = page.split_once(r#"<meta name="chan-launcher-surface" content=""#)?;
+        rest.split_once('"').map(|(value, _)| value)
+    }
+
+    /// A grant is all-or-nothing, so the launcher shell advertises the
+    /// router's own surface whoever asks: a grantee gets the owner's mutable
+    /// `devserver` surface, and the SPA shows it the owner's controls. The
+    /// meta is injected only when the launcher bundle is built; without one,
+    /// every caller still gets the same answer.
+    #[tokio::test]
+    async fn a_grantee_gets_the_full_launcher_surface_meta() {
+        let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
+        let bound = std::sync::OnceLock::new();
+        bound.set("127.0.0.1:8080".parse().unwrap()).unwrap();
+        let bearer = Arc::new(std::sync::RwLock::new("launcher-bearer".to_string()));
+        let router = launcher_router(host, Some(bearer), Some(Arc::new(bound)));
+
+        let (local_status, local_page) = send_as(&router, Caller::Local, "GET", "/", None).await;
+        if local_status == StatusCode::OK {
+            assert_eq!(surface_meta(&local_page), Some("devserver"));
+        }
+        for caller in Caller::ALL {
+            let (status, page) = send_as(&router, caller, "GET", "/", None).await;
+            assert_eq!(status, local_status, "{caller:?}");
+            assert_eq!(
+                surface_meta(&page),
+                surface_meta(&local_page),
+                "{caller:?} got a different launcher surface"
+            );
+            assert_eq!(page, local_page, "{caller:?}");
+        }
+    }
+
+    /// A grantee manages the library's windows as the owner does: mint, label,
+    /// hide, show and discard. The launcher does not tell an anonymous caller
+    /// from a grantee; the gateway forwards an anonymous caller only to
+    /// extension capability paths, which never route here.
+    #[tokio::test]
+    async fn a_grantee_manages_library_windows_like_the_owner() {
+        for caller in Caller::ALL {
+            let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
+            let store = tempfile::tempdir().unwrap();
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+                "local".into(),
+            );
+            let router = launcher_router(host, None, None);
+
+            let (status, body) = send_as(
+                &router,
+                caller,
+                "POST",
+                "/api/library/windows",
+                Some(r#"{"kind":"terminal"}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{caller:?} mint: {body}");
+            let minted: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let id = minted["window_id"].as_str().expect("window id").to_string();
+            for (method, uri, json, expected) in [
+                (
+                    "PUT",
+                    format!("/api/library/windows/{id}/label"),
+                    Some(r#"{"label":"shared"}"#),
+                    StatusCode::NO_CONTENT,
+                ),
+                (
+                    "POST",
+                    format!("/api/library/windows/{id}/visibility"),
+                    Some(r#"{"hidden":true}"#),
+                    StatusCode::NO_CONTENT,
+                ),
+                (
+                    "POST",
+                    format!("/api/library/windows/{id}/visibility"),
+                    Some(r#"{"hidden":false}"#),
+                    StatusCode::NO_CONTENT,
+                ),
+                (
+                    "DELETE",
+                    format!("/api/library/windows/{id}"),
+                    None,
+                    StatusCode::NO_CONTENT,
+                ),
+            ] {
+                let (status, body) = send_as(&router, caller, method, &uri, json).await;
+                assert_eq!(status, expected, "{caller:?} {method} {uri}: {body}");
+            }
+        }
+    }
+
+    /// The reverse-tunnel legs stay the owner's: a tunnel dials out through an
+    /// addressed app window whose host can be the owner's own desktop, outside
+    /// the devserver a grant covers. A grantee and an anonymous caller are
+    /// refused before the upgrade; the owner and a local caller reach the
+    /// `WebSocketUpgrade` extractor, which rejects a plain GET.
+    #[tokio::test]
+    async fn a_grantee_is_refused_the_reverse_tunnel_legs() {
+        let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
+        let router = launcher_router(host, None, None);
+        for uri in [
+            "/api/library/tunnel/control?tunnel=tun-1",
+            "/api/library/tunnel/conn?tunnel=tun-1&conn=c0",
+        ] {
+            for caller in Caller::ALL {
+                let (status, body) = send_as(&router, caller, "GET", uri, None).await;
+                if matches!(caller, Caller::Local | Caller::Owner) {
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{caller:?} {uri}: {body}");
+                } else {
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{caller:?} {uri}");
+                    assert_eq!(
+                        body, "reverse tunnels are not available for this gateway role",
+                        "{caller:?} {uri}"
+                    );
+                }
+            }
         }
     }
 

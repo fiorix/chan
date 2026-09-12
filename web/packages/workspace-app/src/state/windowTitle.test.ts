@@ -25,14 +25,13 @@ function scopedWindow(over: Partial<ScopedLibraryWindow> = {}): ScopedLibraryWin
     connected: true,
     hidden: false,
     control: false,
-    can_act: true,
     launch_path: "/notes/",
     ...over,
   };
 }
 
 function snapshot(windows: ScopedLibraryWindow[]): ScopedLibrarySnapshot {
-  return { library_id: "local", role: "owner", windows, workspaces: [] };
+  return { library_id: "local", windows, workspaces: [] };
 }
 
 beforeEach(() => {

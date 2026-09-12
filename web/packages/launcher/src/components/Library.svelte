@@ -6,9 +6,9 @@
   // WORKSPACES section of collapsible cards whose windows nest inside on expand.
   // A disconnected devserver shows only its header + a connect prompt. The
   // grouping is the pure lib/machineTree; this component is the presentation +
-  // the per-row actions. The read-only surface (devserver/gateway) shows the
-  // on-state statically with no mutation controls, but keeps the [edit config]
-  // view and can still expand a card to read its windows.
+  // the per-row actions. The read-only surface shows the on-state statically
+  // with no mutation controls, but keeps the [edit config] view and can still
+  // expand a card to read its windows.
   import {
     AppWindow,
     ChevronRight,

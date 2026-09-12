@@ -1,6 +1,6 @@
 # devserver tunnel e2e (cross-container, sdme)
 
-An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver run --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes: the immutable owner reaches the desktop-bridge guard, while a grantee is rejected by `require_local_mutation`. The production chan-gateway run (`--tunnel-url` against the `proxy.chan.app` tunnel ingress) is a separate follow-up.
+An end-to-end test that drives authenticated desktop entry handoffs through a real `devserver-control-service`, `devserver-proxy-service`, and `chan devserver run --tunnel-url`, running in two separate sdme containers, over the gateway tunnel, into a mounted workspace. An authenticated `200` from the mounted workspace's `/api/health` is the data-path proof, so debug builds do not need a separately staged SPA bundle. The same binary owner/grantee sessions exercise both native-trust mutation routes, and both reach the desktop-bridge guard: a grant is all-or-nothing on the devserver. The production chan-gateway run (`--tunnel-url` against the `proxy.chan.app` tunnel ingress) is a separate follow-up.
 
 ## What it proves
 
@@ -20,7 +20,7 @@ stub identity ─▶ signed admission + POST entry credential (owner/grantee)
 
 The request `GET /notes-<hash8>/api/health` at the exact `{owner}--{disc}.{proxy_id}` origin returns `200` with the live workspace instance id. The bearer-gated identity response pins the immutable owner UUID, full devserver id, exact proxy origin, fixed `/_chan/entry` exchange URL, and a separate 30-second Ed25519 credential. The credential carries no name, email, or role, never appears in a URL, and succeeds exactly once in a bounded form POST from the configured identity origin. The real proxy exchanges it for opaque session + CSRF cookies.
 
-With those authenticated sessions, the harness sends both `PUT` and `DELETE` to `/api/library/devservers/{id}/native-trust`. The caller whose subject UUID equals the immutable owner UUID gets the expected `409` no-desktop result. The binary grantee gets the exact `403` from `require_local_mutation`; no mutable viewer/editor role exists.
+With those authenticated sessions, the harness sends both `PUT` and `DELETE` to `/api/library/devservers/{id}/native-trust`. The caller whose subject UUID equals the immutable owner UUID gets the expected `409` no-desktop result, and so does the binary grantee; no viewer/editor role exists.
 
 The controller, proxy, and chan binaries (including the tunnel-client/-proto crates) are real release builds. Two narrow pieces are fixtures because the rig does not stand up postgres-backed identity/profile or an edge TLS proxy:
 

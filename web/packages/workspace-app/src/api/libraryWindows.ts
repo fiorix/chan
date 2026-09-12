@@ -183,7 +183,7 @@ export async function focusLibraryWindow(
     return;
   }
   const popup = popupFor(window, bridge);
-  if (window.hidden && window.can_act) {
+  if (window.hidden) {
     await bridge.runAction({
       action: "set_window_visibility",
       window_id: window.window_id,

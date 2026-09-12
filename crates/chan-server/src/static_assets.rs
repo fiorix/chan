@@ -171,7 +171,7 @@ pub enum LauncherSurface {
     /// Local devserver loopback: registry-mutable, no bridge; the browser
     /// manages its own windows (the PWA-leader surface).
     Devserver,
-    /// Tunnel-trust devserver / gateway: read-only, no bridge.
+    /// No serve address, so nowhere to mount a workspace: read-only, no bridge.
     ReadOnly,
 }
 

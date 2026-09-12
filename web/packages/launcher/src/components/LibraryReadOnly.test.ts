@@ -1,5 +1,5 @@
-// Read-only surface (gateway/devserver, no desktop bridge): the Library shows
-// the on-state statically with NO mutation controls -- no new-workspace /
+// Read-only surface (no desktop bridge): the Library shows the on-state
+// statically with NO mutation controls -- no new-workspace /
 // new-terminal, no add-devserver, no checkboxes, no on/off or open-window, no
 // connect/disconnect, and no edit-config affordance (the devserver header is a
 // static identity, not a click target). A card can still expand to read its
@@ -90,9 +90,9 @@ describe("Library read-only parity", () => {
   });
 
   it("shows the red lost icon for an unreachable devserver on the gateway surface", () => {
-    // The gateway (read-only) surface is where a post-sleep unreachable devserver
-    // appears; the honest red icon comes from the status field, no mutation
-    // controls involved.
+    // A post-sleep unreachable devserver on the read-only surface still gets
+    // the honest red icon from the status field, no mutation controls
+    // involved.
     library.devservers = library.devservers.map(
       (d): DevserverEntry => (d.id === "ds-1" ? { ...d, status: "unreachable" } : d),
     );

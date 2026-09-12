@@ -7,7 +7,6 @@ import { sessionWindowId } from "./client";
 import { ApiError } from "./errors";
 import { requestRoot } from "./transport";
 
-export type LibraryCommandRole = "owner" | "readonly";
 export type ScopedWindowKind = "terminal" | "workspace";
 export type ScopedWorkspaceStatus =
   | "stopped"
@@ -28,7 +27,6 @@ export interface ScopedLibraryWindow {
   connected: boolean;
   hidden: boolean;
   control: boolean;
-  can_act: boolean;
   /** Same-origin redirect that revalidates the capability before attaching. */
   launch_path: string;
 }
@@ -43,12 +41,10 @@ export interface ScopedLibraryWorkspace {
   library_id: string | null;
   devserver_id: string | null;
   prefix: string;
-  can_act: boolean;
 }
 
 export interface ScopedLibrarySnapshot {
   library_id: string;
-  role: LibraryCommandRole;
   windows: ScopedLibraryWindow[];
   workspaces: ScopedLibraryWorkspace[];
 }
@@ -61,7 +57,6 @@ export type ScopedLibraryAction =
 
 interface MintedLibraryCommandCapability {
   token: string;
-  role: LibraryCommandRole;
   expires_in_seconds: number;
 }
 

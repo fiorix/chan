@@ -10,6 +10,7 @@ use chan_workspace::Library;
 use tower::ServiceExt;
 
 use super::{launcher_router, tenant_config};
+use crate::route_authority::test_support::Caller;
 use crate::{WindowKind, WindowOrigin, WindowRecord, WorkspaceHost};
 
 struct RemoteFeed;
@@ -102,7 +103,6 @@ async fn send(
     uri: &str,
     bearer: Option<&str>,
     body: Option<serde_json::Value>,
-    tunnel_readonly: bool,
 ) -> Response {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(bearer) = bearer {
@@ -114,13 +114,11 @@ async fn send(
     } else {
         Body::empty()
     };
-    let mut request = builder.body(body).unwrap();
-    if tunnel_readonly {
-        request
-            .extensions_mut()
-            .insert(crate::TunnelOrigin { caller: None });
-    }
-    router.clone().oneshot(request).await.unwrap()
+    router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
 }
 
 async fn json(response: Response) -> (StatusCode, serde_json::Value) {
@@ -179,7 +177,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
             "/api/library/command-capabilities",
             Some(wrong),
             Some(mint_body(&fixture)),
-            false,
         )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -191,7 +188,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
         "/api/library/command-capabilities",
         Some(&fixture.tenant_token),
         Some(mint_body(&fixture)),
-        false,
     )
     .await;
     assert_eq!(minted.status(), StatusCode::OK);
@@ -206,7 +202,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
         &format!("/api/library/command-capabilities/{capability}"),
         None,
         None,
-        false,
     )
     .await;
     assert_eq!(snapshot.status(), StatusCode::OK);
@@ -217,7 +212,6 @@ async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
     assert!(!wire.contains("remote-window-must-not-leak"));
     assert!(!wire.contains("remote-tenant-secret"));
     assert_eq!(snapshot["library_id"], fixture.host.library_id());
-    assert_eq!(snapshot["role"], "owner");
     for window in snapshot["windows"].as_array().unwrap() {
         assert!(window.get("token").is_none());
         assert!(window.get("prefix").is_none());
@@ -235,7 +229,6 @@ async fn capability_dies_with_its_invoking_window() {
         "/api/library/command-capabilities",
         None,
         Some(mint_body(&fixture)),
-        false,
     )
     .await;
     let (_, minted) = json(minted).await;
@@ -248,48 +241,67 @@ async fn capability_dies_with_its_invoking_window() {
         &format!("/api/library/command-capabilities/{capability}"),
         None,
         None,
-        false,
     )
     .await;
     assert_eq!(response.status(), StatusCode::GONE);
 }
 
+/// A grant is all-or-nothing: a grantee's mint yields the capability the
+/// owner's does, and the grantee inspects the library and acts on it with
+/// that capability. The launcher does not tell an anonymous caller from a
+/// grantee; the gateway forwards an anonymous caller only to extension
+/// capability paths, which never route here.
 #[tokio::test]
-async fn readonly_tunnel_capability_can_inspect_but_cannot_mutate() {
+async fn a_grantee_capability_inspects_and_acts_like_the_owner() {
     let fixture = fixture().await;
     let router = launcher_router(fixture.host.clone(), None, None);
-    let minted = send(
-        &router,
-        "POST",
-        "/api/library/command-capabilities",
-        None,
-        Some(mint_body(&fixture)),
-        true,
-    )
-    .await;
-    assert_eq!(minted.status(), StatusCode::OK);
-    let (_, minted) = json(minted).await;
-    assert_eq!(minted["role"], "readonly");
-    let capability = minted["token"].as_str().unwrap();
+    for caller in Caller::ALL {
+        let request = |method: &str, uri: &str, body: Option<serde_json::Value>| {
+            let mut builder = caller.stamp(Request::builder().method(method).uri(uri), None);
+            let body = match body {
+                Some(body) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(body.to_string())
+                }
+                None => Body::empty(),
+            };
+            router.clone().oneshot(builder.body(body).unwrap())
+        };
 
-    let snapshot = send(
-        &router,
-        "GET",
-        &format!("/api/library/command-capabilities/{capability}"),
-        None,
-        None,
-        false,
-    )
-    .await;
-    assert_eq!(snapshot.status(), StatusCode::OK);
-    let action = send(
-        &router,
-        "POST",
-        &format!("/api/library/command-capabilities/{capability}/actions"),
-        None,
-        Some(serde_json::json!({ "action": "new_terminal" })),
-        false,
-    )
-    .await;
-    assert_eq!(action.status(), StatusCode::FORBIDDEN);
+        let minted = request(
+            "POST",
+            "/api/library/command-capabilities",
+            Some(mint_body(&fixture)),
+        )
+        .await
+        .unwrap();
+        let (status, minted) = json(minted).await;
+        assert_eq!(status, StatusCode::OK, "{caller:?} mint");
+        let capability = minted["token"].as_str().unwrap().to_string();
+
+        let snapshot = request(
+            "GET",
+            &format!("/api/library/command-capabilities/{capability}"),
+            None,
+        )
+        .await
+        .unwrap();
+        let (status, snapshot) = json(snapshot).await;
+        assert_eq!(status, StatusCode::OK, "{caller:?} inspect");
+        assert!(
+            !snapshot["windows"].as_array().unwrap().is_empty(),
+            "{caller:?} inspect"
+        );
+
+        let action = request(
+            "POST",
+            &format!("/api/library/command-capabilities/{capability}/actions"),
+            Some(serde_json::json!({ "action": "new_terminal" })),
+        )
+        .await
+        .unwrap();
+        let (status, action) = json(action).await;
+        assert_eq!(status, StatusCode::OK, "{caller:?} act");
+        assert!(action["window"]["window_id"].is_string(), "{caller:?} act");
+    }
 }

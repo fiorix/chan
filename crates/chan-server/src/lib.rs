@@ -134,7 +134,7 @@ use routes::{
     api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
     api_terminal_next_name, api_terminal_shells, api_terminal_ws, api_terminals_roster,
     api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
-    extension_response_policy, proxy_extension, proxy_extension_root, require_local_mutation,
+    extension_response_policy, proxy_extension, proxy_extension_root, refuse_anonymous_mutation,
     spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
@@ -1523,14 +1523,16 @@ pub fn install_local_workspace_overlay(host: &WorkspaceHost) {
 /// shell is always public regardless, so it loads before it holds the token.
 ///
 /// `serve_addr` is the read-only/full discriminator AND the mount enabler for
-/// workspace mutation (which is loopback-only):
-///   - `Some(cell)` -- the loopback: workspace add/on/off/rm is served, and the
-///     mount path reads the listen address from the `OnceLock`. The embedder
-///     fills it AFTER it binds (the install happens before the bind), so it is
-///     read at request time, not install time.
-///   - `None` -- the tunnel-trust devserver/gateway surface: workspaces are
-///     read-only (mutation handlers answer 403, and the SPA shell is served with
-///     a read-only hint so it hides those controls).
+/// workspace mutation:
+///   - `Some(cell)` -- workspace add/on/off/rm is served, and the mount path
+///     reads the listen address from the `OnceLock`. The embedder fills it
+///     AFTER it binds (the install happens before the bind), so it is read at
+///     request time, not install time. Both embedders pass it, and the
+///     devserver's tunnel callers reach the same mutable surface as its
+///     loopback.
+///   - `None` -- a surface with nowhere to mount a workspace: mutation handlers
+///     answer 403, and the SPA shell is served with the `readonly` hint so it
+///     hides those controls.
 pub fn install_launcher_root_fallback(
     host: &Arc<WorkspaceHost>,
     bearer: Option<routes::LauncherBearer>,
@@ -1553,6 +1555,22 @@ impl TunnelOrigin {
         self.caller
             .as_ref()
             .is_some_and(chan_tunnel_proto::gateway_assertion::Claims::is_owner)
+    }
+
+    /// A caller with no real subject. The gateway's extension capability lane
+    /// signs its requests with the nil UUID as `sub`
+    /// (`gateway/crates/devserver-proxy/src/proxy.rs`, the
+    /// `extension_capability` branch of `handle_gated`), because a capability
+    /// link names no user. Every other caller's subject is its `users.id`, a
+    /// `gen_random_uuid()` that is never nil, so the nil subject is a sound
+    /// way to tell an anonymous caller from a grantee. This check reads the nil
+    /// UUID in any spelling, and an empty subject, as anonymous, erring toward
+    /// the caller with less; a missing caller, which `mark_tunnel_origin`
+    /// never produces, is anonymous as well.
+    pub fn anonymous(&self) -> bool {
+        self.caller
+            .as_ref()
+            .is_none_or(|claims| claims.sub.bytes().all(|byte| byte == b'0' || byte == b'-'))
     }
 }
 
@@ -2080,11 +2098,12 @@ fn router_with_extensions(
         .route("/api/screensaver/state", get(api_screensaver_state))
         .route("/api/screensaver/verify", post(api_screensaver_verify));
     let api = api.merge(settings_writes);
-    // Extension capability proxy. Non-owner tunnel guests are read-only
-    // here: the shared `require_local_mutation` lane 403s their
-    // POST/PUT/DELETE, mirroring the launcher routes. GETs — including
-    // WebSocket upgrades — still pass for guests (accepted v1 caveat:
-    // the extension document itself loads via GET).
+    // Extension capability proxy. The gateway forwards two kinds of caller
+    // here: a session holder (the owner or a grantee, who reach it as they
+    // reach every tenant route) and the anonymous capability lane, which
+    // carries no session at all. `refuse_anonymous_mutation` 403s the
+    // anonymous caller's POST/PUT/DELETE; its GETs, WebSocket upgrades
+    // included, pass, because the extension document itself loads by GET.
     let extension_proxy = Router::new()
         .route(
             "/_chan/extensions/{id}/{capability}/",
@@ -2094,9 +2113,9 @@ fn router_with_extensions(
             "/_chan/extensions/{id}/{capability}/{*path}",
             any(proxy_extension),
         )
-        .route_layer(middleware::from_fn(require_local_mutation))
+        .route_layer(middleware::from_fn(refuse_anonymous_mutation))
         // Outermost on the namespace: every response leaving these
-        // routes, the guest 403 included, carries the extension
+        // routes, the anonymous 403 included, carries the extension
         // response policy so the opaque-origin frame reads true
         // statuses instead of a CORS mask.
         .route_layer(middleware::from_fn(extension_response_policy));

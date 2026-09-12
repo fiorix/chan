@@ -76,6 +76,7 @@ pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
 pub(crate) use extensions::loggable_uri;
 pub use extensions::{
     api_extensions, extension_response_policy, proxy_extension, proxy_extension_root,
+    refuse_anonymous_mutation,
 };
 pub use files::{
     api_create_file, api_delete_file, api_fs_transfer, api_list_files, api_move, api_read_file,
@@ -95,7 +96,6 @@ pub use index::{
     api_semantic_models, api_semantic_state,
 };
 pub use inspector::api_inspector;
-pub(crate) use library::require_local_mutation;
 pub use library::{launcher_router, LauncherBearer};
 pub use mentions::api_get_mentions;
 pub use metadata::{api_metadata_export, api_metadata_import};

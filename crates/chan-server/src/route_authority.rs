@@ -4,24 +4,11 @@
 //! gateway tunnel, to callers the gateway authenticated. `auth_middleware`
 //! admits every tunnel request past the tenant bearer because the gateway is
 //! the trust boundary, and the gateway in turn leaves the decision between
-//! owner and non-owner to the devserver. A non-owner here is a `TunnelOrigin`
-//! whose `owner()` is false, and who that caller is depends on the route:
+//! the kinds of tunnel caller to the devserver. [`Authority`] names those
+//! kinds and what each meets.
 //!
-//! - On a tenant `/api` route, and on the tenant `/ws` bus, a non-owner is an
-//!   invited grantee. The gateway admits only the owner and a grantee to a
-//!   devserver session, and a grant is one binary, shell-equivalent authority
-//!   over the devserver, not a viewer or editor role
-//!   (`gateway/migrations/0014_drop_devserver_grant_roles.sql`).
-//! - The one caller with a nil subject, the extension capability lane, is
-//!   path-gated by the gateway proxy to `/_chan/extensions/...` and never
-//!   reaches a tenant `/api` route. On those extension routes a non-owner is
-//!   either that caller or a grantee.
-//! - On the launcher, `require_local_mutation` and `require_tunnel_owner` are
-//!   what separate a grantee from the owner: a grantee cannot mutate the
-//!   owner's library or open reverse tunnels.
-//!
-//! What a non-owner may do with a route cannot be read off the HTTP verb:
-//! some reads are POSTs (workspace search, the team-config read, draft
+//! What a caller may do with a route cannot be read off the HTTP verb: some
+//! reads are POSTs (workspace search, the team-config read, draft
 //! inspection) and some GETs confer shell or write access (the terminal and
 //! document WebSocket upgrades).
 //!
@@ -30,8 +17,8 @@
 //! routers; nothing at runtime consults them. A test walks each assembled
 //! router and fails on a mounted route with no row and on a row with no route,
 //! so a route cannot be added without somebody classifying it. A second test
-//! sends every row through its router as a non-owner and fails where the
-//! router's gates disagree with the row.
+//! sends every row through its router as each kind of caller and fails where
+//! the router's gates disagree with the row.
 
 /// An HTTP verb a route answers. HEAD is served by the GET handler unless a
 /// route registers its own, so a GET row covers it.
@@ -51,23 +38,45 @@ pub(crate) enum Verb {
     Any,
 }
 
-/// What a non-owner tunnel caller may do with a route. On a tenant `/api`
-/// route that caller is an invited grantee holding shell-equivalent authority;
-/// the module docs give the whole caller model.
+/// What each kind of caller meets on a route. There are four kinds:
+///
+/// - A **local** caller carries no `TunnelOrigin`: it came in on the loopback
+///   bind, holding whatever bearer the router asks for.
+/// - The **owner** is a tunnel caller whose verified subject is the
+///   devserver's owner.
+/// - A **grantee** is a tunnel caller with any other real subject. The gateway
+///   admits only the owner and a grantee to a devserver session, and a grant
+///   is all-or-nothing: one binary, shell-equivalent authority over the
+///   devserver (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). A
+///   grantee meets what the owner meets everywhere except the reverse-tunnel
+///   legs, which dial out through an addressed app window whose host can be
+///   the owner's own desktop, outside the devserver a grant covers.
+/// - An **anonymous** caller is a tunnel caller with no real subject: the nil
+///   subject the gateway signs on its extension capability lane, or no
+///   verified caller at all. The gateway path-gates that lane to
+///   `/_chan/extensions/...`, so in production an anonymous caller reaches
+///   the extension routes and nothing else, and there it may not POST, PUT or
+///   DELETE.
+///
+/// A row records what the router does with each caller, not what the gateway
+/// forwards: a `NonOwner` row on a tenant `/api` route says no gate there
+/// would stop an anonymous caller, even though the gateway never sends one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Authority {
     /// Answered before any caller authority is consulted: static assets, the
     /// devserver's liveness and identity probes, and the fallback that
     /// dispatches into the tenants (whose own tables then apply).
     Public,
-    /// A non-owner reaches the handler: no gate on the route consults the
-    /// caller's role. A handler that refuses one request shape by role says
-    /// so in a comment on its row.
+    /// Every caller reaches the handler: no gate on the route tells the
+    /// owner, a grantee and an anonymous caller apart.
     NonOwner,
-    /// A non-owner is refused with 403; the owner and a local caller reach the
-    /// handler.
+    /// The owner, a grantee and a local caller reach the handler; an
+    /// anonymous caller is refused with 403.
+    Grantee,
+    /// The owner and a local caller reach the handler; a grantee and an
+    /// anonymous caller are refused with 403.
     Owner,
-    /// Only a caller holding the devserver's local bearer reaches the
+    /// Only a local caller holding the devserver's bearer reaches the
     /// handler. The gateway strips client credentials, so no tunnel caller
     /// does, the owner included.
     Local,
@@ -81,14 +90,14 @@ pub(crate) type RouteTable = &'static [(Verb, &'static str, Authority)];
 /// route path starts with `/`.
 pub(crate) const FALLBACK: &str = "{fallback}";
 
-use Authority::{Local, NonOwner, Owner, Public};
+use Authority::{Grantee, Local, NonOwner, Owner, Public};
 use Verb::{Any, Connect, Delete, Get, Options, Patch, Post, Put, Trace};
 
 /// The workspace tenant: `router_with_extensions` in `lib.rs`.
 pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     // The settings-write lane. `settings_guard` refuses it on a
-    // `--no-settings` serve for every caller alike; it never consults the
-    // caller's role.
+    // `--no-settings` serve for every caller alike; it never consults who the
+    // caller is.
     (Patch, "/api/config", NonOwner),
     (Post, "/api/storage/reset", NonOwner),
     (Post, "/api/index/rebuild", NonOwner),
@@ -107,14 +116,12 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Delete, "/api/screensaver/pin", NonOwner),
     (Post, "/api/metadata/export", NonOwner),
     (Post, "/api/metadata/import", NonOwner),
-    // The open lane: no route layer consults the caller's role.
+    // The open lane: no route layer consults who the caller is.
     (Get, "/api/workspace", NonOwner),
     (Get, "/api/workspace/bootstrap", NonOwner),
     (Get, "/api/cloud-workspaces", NonOwner),
     (Get, "/api/fs", NonOwner),
     (Post, "/api/fs", NonOwner),
-    // `api_upload_file` refuses a non-owner's `?root=filesystem` upload
-    // itself; the route is open.
     (Post, "/api/fs/upload", NonOwner),
     (Post, "/api/drafts/new", NonOwner),
     (Post, "/api/diagrams/new", NonOwner),
@@ -128,8 +135,6 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Post, "/api/window/reply", NonOwner),
     (Post, "/api/open", NonOwner),
     (Post, "/api/session/handover/reply", NonOwner),
-    // `api_read_file` refuses a non-owner's `?root=filesystem` read itself;
-    // the route is open.
     (Get, "/api/fs/{*path}", NonOwner),
     (Delete, "/api/fs/{*path}", NonOwner),
     (Put, "/api/fs/{*path}", NonOwner),
@@ -188,25 +193,29 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Get, "/api/screensaver/state", NonOwner),
     (Post, "/api/screensaver/verify", NonOwner),
     // The extension capability proxy answers every verb. Its
-    // `require_local_mutation` layer refuses a non-owner's POST, PUT and
-    // DELETE and passes the rest.
+    // `refuse_anonymous_mutation` layer refuses an anonymous caller's POST,
+    // PUT and DELETE and passes every other verb and every other caller.
     (Get, "/_chan/extensions/{id}/{capability}/", NonOwner),
-    (Post, "/_chan/extensions/{id}/{capability}/", Owner),
-    (Put, "/_chan/extensions/{id}/{capability}/", Owner),
+    (Post, "/_chan/extensions/{id}/{capability}/", Grantee),
+    (Put, "/_chan/extensions/{id}/{capability}/", Grantee),
     (Patch, "/_chan/extensions/{id}/{capability}/", NonOwner),
-    (Delete, "/_chan/extensions/{id}/{capability}/", Owner),
+    (Delete, "/_chan/extensions/{id}/{capability}/", Grantee),
     (Options, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Trace, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Connect, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Get, "/_chan/extensions/{id}/{capability}/{*path}", NonOwner),
-    (Post, "/_chan/extensions/{id}/{capability}/{*path}", Owner),
-    (Put, "/_chan/extensions/{id}/{capability}/{*path}", Owner),
+    (Post, "/_chan/extensions/{id}/{capability}/{*path}", Grantee),
+    (Put, "/_chan/extensions/{id}/{capability}/{*path}", Grantee),
     (
         Patch,
         "/_chan/extensions/{id}/{capability}/{*path}",
         NonOwner,
     ),
-    (Delete, "/_chan/extensions/{id}/{capability}/{*path}", Owner),
+    (
+        Delete,
+        "/_chan/extensions/{id}/{capability}/{*path}",
+        Grantee,
+    ),
     (
         Options,
         "/_chan/extensions/{id}/{capability}/{*path}",
@@ -227,7 +236,7 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
 ];
 
 /// The standalone terminal tenant: `terminal_router` in `lib.rs`. No gate on
-/// it consults the caller's role, so a non-owner reaches every route it
+/// it consults who the caller is, so every caller reaches every route it
 /// mounts, the PTY spawn and the transfer lane re-rooted at `/` included.
 pub(crate) static TERMINAL_TENANT: RouteTable = &[
     (Get, "/api/terminal/ws", NonOwner),
@@ -270,53 +279,71 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
     (Any, FALLBACK, Public),
 ];
 
-/// The launcher root: `routes::library::launcher_router`. Its mutation lanes
-/// carry `require_local_mutation`, which refuses a non-owner's POST, PUT and
-/// DELETE, and the reverse-tunnel legs carry `require_tunnel_owner`.
+/// The launcher root: `routes::library::launcher_router`. No gate on it
+/// consults the caller except `require_tunnel_owner` on the reverse-tunnel
+/// legs, so a grantee reaches every other route the owner does.
 pub(crate) static LAUNCHER: RouteTable = &[
     (Get, "/api/library/windows", NonOwner),
-    (Post, "/api/library/windows", Owner),
+    (Post, "/api/library/windows", NonOwner),
     (Get, "/api/library/windows/watch", NonOwner),
-    (Delete, "/api/library/windows/{window_id}", Owner),
-    (Post, "/api/library/windows/{window_id}/open", Owner),
-    (Post, "/api/library/windows/{window_id}/hide", Owner),
-    (Post, "/api/library/windows/{window_id}/close", Owner),
-    (Put, "/api/library/windows/{window_id}/label", Owner),
-    (Post, "/api/library/windows/{window_id}/visibility", Owner),
-    (Post, "/api/library/devservers/{id}/connect", Owner),
-    (Post, "/api/library/devservers/{id}/disconnect", Owner),
-    (Put, "/api/library/devservers/{id}/native-trust", Owner),
-    (Delete, "/api/library/devservers/{id}/native-trust", Owner),
-    (Post, "/api/library/devservers/{id}/terminal", Owner),
-    (Post, "/api/library/devservers/{id}/workspaces/open", Owner),
-    (Post, "/api/library/devservers/{id}/workspaces/on", Owner),
-    (Post, "/api/library/devservers/{id}/workspaces/off", Owner),
+    (Delete, "/api/library/windows/{window_id}", NonOwner),
+    (Post, "/api/library/windows/{window_id}/open", NonOwner),
+    (Post, "/api/library/windows/{window_id}/hide", NonOwner),
+    (Post, "/api/library/windows/{window_id}/close", NonOwner),
+    (Put, "/api/library/windows/{window_id}/label", NonOwner),
+    (
+        Post,
+        "/api/library/windows/{window_id}/visibility",
+        NonOwner,
+    ),
+    (Post, "/api/library/devservers/{id}/connect", NonOwner),
+    (Post, "/api/library/devservers/{id}/disconnect", NonOwner),
+    (Put, "/api/library/devservers/{id}/native-trust", NonOwner),
+    (
+        Delete,
+        "/api/library/devservers/{id}/native-trust",
+        NonOwner,
+    ),
+    (Post, "/api/library/devservers/{id}/terminal", NonOwner),
+    (
+        Post,
+        "/api/library/devservers/{id}/workspaces/open",
+        NonOwner,
+    ),
+    (Post, "/api/library/devservers/{id}/workspaces/on", NonOwner),
+    (
+        Post,
+        "/api/library/devservers/{id}/workspaces/off",
+        NonOwner,
+    ),
     (
         Post,
         "/api/library/devservers/{id}/workspaces/forget",
-        Owner,
+        NonOwner,
     ),
-    (Post, "/api/library/gateways/{id}/connect", Owner),
-    (Post, "/api/library/gateways/{id}/disconnect", Owner),
-    (Post, "/api/library/fs/pick-folder", Owner),
-    // The reverse-tunnel legs are GETs, so the owner gate is theirs alone.
+    (Post, "/api/library/gateways/{id}/connect", NonOwner),
+    (Post, "/api/library/gateways/{id}/disconnect", NonOwner),
+    (Post, "/api/library/fs/pick-folder", NonOwner),
+    // The reverse-tunnel legs dial out through an addressed app window whose
+    // host can be the owner's own desktop, outside the devserver a grant
+    // covers, so they stay the owner's.
     (Get, "/api/library/tunnel/control", Owner),
     (Get, "/api/library/tunnel/conn", Owner),
     (Get, "/api/library/workspaces", NonOwner),
-    (Post, "/api/library/workspaces", Owner),
-    (Post, "/api/library/workspaces/{id}/on", Owner),
-    (Post, "/api/library/workspaces/{id}/off", Owner),
-    (Delete, "/api/library/workspaces/{id}", Owner),
+    (Post, "/api/library/workspaces", NonOwner),
+    (Post, "/api/library/workspaces/{id}/on", NonOwner),
+    (Post, "/api/library/workspaces/{id}/off", NonOwner),
+    (Delete, "/api/library/workspaces/{id}", NonOwner),
     (Get, "/api/library/local-color", NonOwner),
-    (Put, "/api/library/local-color", Owner),
+    (Put, "/api/library/local-color", NonOwner),
     (Get, "/api/library/local-color/watch", NonOwner),
     (Get, "/api/library/local-theme", NonOwner),
-    (Put, "/api/library/local-theme", Owner),
+    (Put, "/api/library/local-theme", NonOwner),
     (Get, "/api/library/local-theme/watch", NonOwner),
     (Get, "/api/library/collapsed-machines", NonOwner),
-    (Put, "/api/library/collapsed-machines", Owner),
-    // Command capabilities carry their own role: a non-owner's mint yields a
-    // read-only capability, and every use is authorized by the capability.
+    (Put, "/api/library/collapsed-machines", NonOwner),
+    // Every use of a command capability is authorized by the capability, and
+    // a grantee's mint yields the same capability the owner's does.
     (Post, "/api/library/command-capabilities", NonOwner),
     (
         Get,
@@ -334,15 +361,15 @@ pub(crate) static LAUNCHER: RouteTable = &[
         NonOwner,
     ),
     (Get, "/api/library/gateways", NonOwner),
-    (Post, "/api/library/gateways", Owner),
-    (Put, "/api/library/gateways/{id}", Owner),
-    (Delete, "/api/library/gateways/{id}", Owner),
+    (Post, "/api/library/gateways", NonOwner),
+    (Put, "/api/library/gateways/{id}", NonOwner),
+    (Delete, "/api/library/gateways/{id}", NonOwner),
     (Get, "/api/library/devservers", NonOwner),
-    (Post, "/api/library/devservers", Owner),
-    (Put, "/api/library/devservers/{id}", Owner),
-    (Delete, "/api/library/devservers/{id}", Owner),
-    // `serve_launcher`: the launcher SPA shell, downgraded to its read-only
-    // surface for a non-owner.
+    (Post, "/api/library/devservers", NonOwner),
+    (Put, "/api/library/devservers/{id}", NonOwner),
+    (Delete, "/api/library/devservers/{id}", NonOwner),
+    // `serve_launcher`: the launcher SPA shell, with the router's own surface
+    // for every caller.
     (Any, FALLBACK, Public),
 ];
 
@@ -367,7 +394,7 @@ pub(crate) mod test_support {
 
     use std::collections::BTreeSet;
 
-    use super::{RouteTable, Verb, FALLBACK};
+    use super::{Authority, RouteTable, Verb, FALLBACK};
 
     /// The concrete verbs a route reaches when it answers every method (an
     /// `any()` handler, a method fallback, or a mounted service). HEAD is
@@ -535,13 +562,96 @@ pub(crate) mod test_support {
         assert!(
             unclassified.is_empty() && stale.is_empty() && duplicated.is_empty(),
             "the {name} route table does not match the router it describes\n\
-             mounted but unclassified (add a row declaring what a non-owner may do): {unclassified:#?}\n\
+             mounted but unclassified (add a row declaring what each caller may do): {unclassified:#?}\n\
              declared but not mounted (drop the row): {stale:#?}\n\
              declared twice: {duplicated:#?}"
         );
     }
 
-    /// The tail every gateway-role refusal in chan-server shares.
+    /// The kinds of caller [`Authority`] is written against, as the probe
+    /// and the grant tests drive them.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Caller {
+        /// No `TunnelOrigin`: the loopback bind.
+        Local,
+        /// A verified assertion whose subject is the devserver's owner.
+        Owner,
+        /// A verified assertion with a real subject that is not the owner's.
+        Grantee,
+        /// A verified assertion with the nil subject, the one the gateway's
+        /// extension capability lane signs.
+        Anonymous,
+        /// A `TunnelOrigin` with no verified caller. `mark_tunnel_origin`
+        /// never builds one, and it must fail closed exactly as `Anonymous`
+        /// does.
+        Unverified,
+    }
+
+    impl Caller {
+        pub(crate) const ALL: [Caller; 5] = [
+            Caller::Local,
+            Caller::Owner,
+            Caller::Grantee,
+            Caller::Anonymous,
+            Caller::Unverified,
+        ];
+
+        /// The owner's user id, shared with the devserver tests' signed
+        /// assertions.
+        pub(crate) const OWNER_ID: &str = "11111111-1111-4111-8111-111111111111";
+        /// A grantee's user id: a real subject that is not the owner's.
+        pub(crate) const GRANTEE_ID: &str = "22222222-2222-4222-8222-222222222222";
+        /// `Uuid::nil().to_string()`, the subject the gateway signs on its
+        /// extension capability lane.
+        pub(crate) const NIL_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+        /// Both anonymous shapes.
+        pub(crate) fn is_anonymous(self) -> bool {
+            matches!(self, Caller::Anonymous | Caller::Unverified)
+        }
+
+        /// The `TunnelOrigin` a request from this caller carries.
+        pub(crate) fn origin(self) -> Option<crate::TunnelOrigin> {
+            let verified = |sub: &str| crate::TunnelOrigin {
+                caller: Some(chan_tunnel_proto::gateway_assertion::Claims {
+                    sub: sub.to_string(),
+                    owner_user_id: Self::OWNER_ID.to_string(),
+                    aud: "owner--probe.p1.proxy.example".to_string(),
+                    drv: "probe".to_string(),
+                    iat: 0,
+                    exp: 0,
+                }),
+            };
+            match self {
+                Caller::Local => None,
+                Caller::Owner => Some(verified(Self::OWNER_ID)),
+                Caller::Grantee => Some(verified(Self::GRANTEE_ID)),
+                Caller::Anonymous => Some(verified(Self::NIL_ID)),
+                Caller::Unverified => Some(crate::TunnelOrigin { caller: None }),
+            }
+        }
+
+        /// Stamp this caller on a request. A tunnel caller carries its
+        /// `TunnelOrigin` and never a bearer, because the gateway strips
+        /// client credentials; a local caller carries `bearer` when the
+        /// router asks for one.
+        pub(crate) fn stamp(
+            self,
+            builder: axum::http::request::Builder,
+            bearer: Option<&str>,
+        ) -> axum::http::request::Builder {
+            match (self.origin(), bearer) {
+                (Some(origin), _) => builder.extension(origin),
+                (None, Some(bearer)) => builder.header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bearer}"),
+                ),
+                (None, None) => builder,
+            }
+        }
+    }
+
+    /// The tail every caller refusal in chan-server shares.
     const ROLE_REFUSAL: &str = "for this gateway role";
 
     /// The head every bearer refusal in chan-server shares: the tenant's
@@ -549,25 +659,47 @@ pub(crate) mod test_support {
     /// management bearer.
     const BEARER_REFUSAL: &str = "missing or invalid";
 
-    /// Send every row of `table` through `router` as a non-owner tunnel caller
-    /// and fail on each row whose outcome contradicts its authority. An
-    /// `Owner` row must answer 403 with a gateway-role refusal, a `NonOwner` or
-    /// `Public` row must get past every bearer and role gate to a routed
-    /// handler, and a `Local` row must answer 401 for want of the devserver
-    /// bearer.
+    /// What a probe request must meet.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// Past every bearer and caller gate to a routed handler.
+        Reach,
+        /// A 403 whose body ends in [`ROLE_REFUSAL`].
+        Refused,
+        /// A 401 whose body starts with [`BEARER_REFUSAL`].
+        NoBearer,
+    }
+
+    fn expected(authority: Authority, caller: Caller) -> Outcome {
+        match authority {
+            Authority::Public | Authority::NonOwner => Outcome::Reach,
+            Authority::Grantee if caller.is_anonymous() => Outcome::Refused,
+            Authority::Grantee => Outcome::Reach,
+            Authority::Owner if matches!(caller, Caller::Local | Caller::Owner) => Outcome::Reach,
+            Authority::Owner => Outcome::Refused,
+            Authority::Local if caller == Caller::Local => Outcome::Reach,
+            Authority::Local => Outcome::NoBearer,
+        }
+    }
+
+    /// Send every row of `table` through `router` once as each [`Caller`] and
+    /// fail on each answer that contradicts the row's authority.
     ///
-    /// The tenant states the tests pass carry a bearer, so a tunnel caller the
-    /// bearer lane stopped admitting would answer a bearer refusal here rather
-    /// than slip past a tokenless no-op.
+    /// `local_bearer` is what the router asks of a local caller, read per
+    /// request because a `Local` row may rotate it. The tenant states the
+    /// tests pass carry a bearer too, so a tunnel caller the bearer lane
+    /// stopped admitting would answer a bearer refusal here rather than slip
+    /// past a tokenless no-op.
     ///
     /// Captures are filled with a placeholder and every body is malformed
     /// JSON, so a request that reaches a handler stops at the handler's own
     /// validation or at a missing workspace rather than acting. What is under
-    /// test is only whether a role gate answered first.
-    pub(crate) async fn assert_non_owner_meets_table(
+    /// test is only whether a bearer or caller gate answered first.
+    pub(crate) async fn assert_callers_meet_table(
         name: &str,
         router: axum::Router,
         table: RouteTable,
+        local_bearer: Option<crate::routes::LauncherBearer>,
     ) {
         use axum::http::StatusCode;
         use tower::ServiceExt;
@@ -577,39 +709,47 @@ pub(crate) mod test_support {
             if verb == Verb::Any {
                 continue;
             }
-            let request = axum::http::Request::builder()
-                .method(method(verb))
-                .uri(fill_captures(path))
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .extension(crate::TunnelOrigin { caller: None })
-                .body(axum::body::Body::from("{"))
-                .expect("probe request");
-            let response = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                router.clone().oneshot(request),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("{verb:?} {path} did not answer"))
-            .expect("infallible router");
-            let status = response.status();
-            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            for caller in Caller::ALL {
+                let bearer = local_bearer
+                    .as_ref()
+                    .map(|cell| cell.read().unwrap_or_else(|e| e.into_inner()).clone());
+                let request = caller
+                    .stamp(
+                        axum::http::Request::builder()
+                            .method(method(verb))
+                            .uri(fill_captures(path))
+                            .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                        bearer.as_deref(),
+                    )
+                    .body(axum::body::Body::from("{"))
+                    .expect("probe request");
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    router.clone().oneshot(request),
+                )
                 .await
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or_default();
-            let refused = status == StatusCode::FORBIDDEN && body.ends_with(ROLE_REFUSAL);
-            let bearer_refused =
-                status == StatusCode::UNAUTHORIZED && body.starts_with(BEARER_REFUSAL);
-            let holds = match authority {
-                super::Authority::Owner => refused,
-                super::Authority::NonOwner | super::Authority::Public => {
-                    !refused && !bearer_refused && status != StatusCode::METHOD_NOT_ALLOWED
+                .unwrap_or_else(|_| panic!("{verb:?} {path} did not answer {caller:?}"))
+                .expect("infallible router");
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                let refused = status == StatusCode::FORBIDDEN && body.ends_with(ROLE_REFUSAL);
+                let no_bearer =
+                    status == StatusCode::UNAUTHORIZED && body.starts_with(BEARER_REFUSAL);
+                let met = match expected(authority, caller) {
+                    Outcome::Reach => {
+                        !refused && !no_bearer && status != StatusCode::METHOD_NOT_ALLOWED
+                    }
+                    Outcome::Refused => refused,
+                    Outcome::NoBearer => no_bearer,
+                };
+                if !met {
+                    contradictions.push(format!(
+                        "{verb:?} {path} is declared {authority:?}; {caller:?} got {status} {body:.120}"
+                    ));
                 }
-                super::Authority::Local => status == StatusCode::UNAUTHORIZED,
-            };
-            if !holds {
-                contradictions.push(format!(
-                    "{verb:?} {path} is declared {authority:?}; a non-owner got {status} {body:.120}"
-                ));
             }
         }
         assert!(
@@ -664,7 +804,7 @@ mod tests {
     use axum::routing::{any, get, put};
     use axum::Router;
 
-    use super::test_support::{assert_non_owner_meets_table, assert_table_matches, mounted_routes};
+    use super::test_support::{assert_callers_meet_table, assert_table_matches, mounted_routes};
     use super::{Verb, FALLBACK, LAUNCHER, TERMINAL_TENANT, WORKSPACE_TENANT};
 
     /// The ratchet is only as good as the walk, so pin the walk against a
@@ -735,35 +875,42 @@ mod tests {
         ))
     }
 
+    const LAUNCHER_BEARER: &str = "launcher-bearer";
+
+    fn bearer_cell(token: &str) -> crate::routes::LauncherBearer {
+        Arc::new(std::sync::RwLock::new(token.to_string()))
+    }
+
     /// Every surface the launcher bundle is installed on: bearer-gated or not,
-    /// with or without a bound serve address. They mount one route set.
-    fn launcher_surfaces() -> Vec<(&'static str, Router)> {
-        let bearer = || {
-            Some(Arc::new(std::sync::RwLock::new(
-                "launcher-bearer".to_string(),
-            )))
-        };
+    /// with or without a bound serve address, each with the bearer a local
+    /// caller presents to it. They mount one route set.
+    fn launcher_surfaces() -> Vec<(&'static str, Router, Option<crate::routes::LauncherBearer>)> {
         let bound = || {
             let cell = OnceLock::new();
             let _ = cell.set("127.0.0.1:8080".parse().expect("addr"));
             Some(Arc::new(cell))
         };
+        let bearer = || Some(bearer_cell(LAUNCHER_BEARER));
         vec![
             (
                 "bearer, bound",
                 crate::routes::launcher_router(launcher_host(), bearer(), bound()),
+                bearer(),
             ),
             (
                 "bearer, unbound",
                 crate::routes::launcher_router(launcher_host(), bearer(), None),
+                bearer(),
             ),
             (
                 "public, bound",
                 crate::routes::launcher_router(launcher_host(), None, bound()),
+                None,
             ),
             (
                 "public, unbound",
                 crate::routes::launcher_router(launcher_host(), None, None),
+                None,
             ),
         ]
     }
@@ -782,33 +929,40 @@ mod tests {
 
     #[test]
     fn every_launcher_route_declares_its_authority() {
-        for (surface, router) in launcher_surfaces() {
+        for (surface, router, _) in launcher_surfaces() {
             assert_table_matches(&format!("launcher ({surface})"), &router, LAUNCHER);
         }
     }
 
     #[tokio::test]
-    async fn a_non_owner_meets_the_declared_authority_on_every_workspace_tenant_route() {
+    async fn every_caller_meets_the_declared_authority_on_every_workspace_tenant_route() {
         let state = crate::state::test_support::make_test_state_with_token("workspace-bearer");
-        assert_non_owner_meets_table("workspace tenant", crate::router(state), WORKSPACE_TENANT)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn a_non_owner_meets_the_declared_authority_on_every_terminal_tenant_route() {
-        let state = crate::state::test_support::make_test_state_with_token("terminal-bearer");
-        assert_non_owner_meets_table(
-            "terminal tenant",
-            crate::terminal_router(state),
-            TERMINAL_TENANT,
+        assert_callers_meet_table(
+            "workspace tenant",
+            crate::router(state),
+            WORKSPACE_TENANT,
+            Some(bearer_cell("workspace-bearer")),
         )
         .await;
     }
 
     #[tokio::test]
-    async fn a_non_owner_meets_the_declared_authority_on_every_launcher_route() {
-        for (surface, router) in launcher_surfaces() {
-            assert_non_owner_meets_table(&format!("launcher ({surface})"), router, LAUNCHER).await;
+    async fn every_caller_meets_the_declared_authority_on_every_terminal_tenant_route() {
+        let state = crate::state::test_support::make_test_state_with_token("terminal-bearer");
+        assert_callers_meet_table(
+            "terminal tenant",
+            crate::terminal_router(state),
+            TERMINAL_TENANT,
+            Some(bearer_cell("terminal-bearer")),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn every_caller_meets_the_declared_authority_on_every_launcher_route() {
+        for (surface, router, bearer) in launcher_surfaces() {
+            assert_callers_meet_table(&format!("launcher ({surface})"), router, LAUNCHER, bearer)
+                .await;
         }
     }
 }

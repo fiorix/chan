@@ -1797,9 +1797,8 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 &tunnel.token,
             ),
         };
-        // Mark every tunnel request as tunnel-origin. A verified owner assertion
-        // unlocks the full launcher; missing or non-owner assertions stay
-        // read-only.
+        // Mark every tunnel request as tunnel-origin, carrying the verified
+        // gateway caller; a request without a verifiable assertion is refused.
         let tunnel_app = app.clone().layer(middleware::from_fn_with_state(
             assertion,
             mark_tunnel_origin,
@@ -2136,15 +2135,15 @@ fn build_devserver_app(
     // first, then the printed `/?t=<token>` URL lets it present the bearer on
     // `/api/library/*`.
     //
-    // `serve_addr = Some(cell)` emits the MUTABLE `devserver` surface (the local
-    // web launcher gets the real Power toggle + self-managed windows) and lets
-    // the workspace-mount path read the bound address. The tunnel MUST stay
-    // read-only: the devserver's tunnel layer marks every tunnel request with
-    // `TunnelOrigin`, which `require_local_mutation` 403s and the launcher-meta
-    // fallback downgrades to `readonly`, so a credential-stripped tunnel request
-    // can never flip the owner's workspaces. The cell is filled with the bound
-    // address after the listener binds (unfilled on a tunnel-only devserver,
-    // where there is no local bind to mutate from anyway).
+    // `serve_addr = Some(cell)` emits the MUTABLE `devserver` surface (the web
+    // launcher gets the real Power toggle + self-managed windows) and lets the
+    // workspace-mount path read the bound address. The tunnel reaches the same
+    // surface: the gateway admits only the owner and a grantee to a devserver
+    // session, and a grant carries the owner's authority over the devserver.
+    // The one launcher route a grantee does not share is the reverse-tunnel
+    // pair, which `require_tunnel_owner` keeps the owner's. The cell is filled
+    // with the bound address after the listener binds (unfilled on a
+    // tunnel-only devserver, where `require_mutable` answers 503).
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
     crate::install_launcher_root_fallback(
         &host,
@@ -2185,10 +2184,10 @@ async fn gate_tenant_during_startup(
 }
 
 /// Middleware that stamps every request entering the tunnel-only app clone with
-/// [`crate::TunnelOrigin`]. A verified owner assertion lets the public gateway
-/// use the same launcher surface as loopback; missing or non-owner assertions
-/// stay read-only. A local loopback request never passes through this layer, so
-/// it never carries the marker.
+/// [`crate::TunnelOrigin`], carrying the verified gateway caller. A request with
+/// a missing or unverifiable assertion is refused with 401 here. A local
+/// loopback request never passes through this layer, so it never carries the
+/// marker.
 #[derive(Clone)]
 struct TunnelAssertion {
     key: chan_tunnel_proto::gateway_assertion::AssertionKey,
@@ -3986,15 +3985,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_non_owner_meets_the_declared_authority_on_every_devserver_route() {
+    async fn every_caller_meets_the_declared_authority_on_every_devserver_route() {
         let home = tempfile::tempdir().expect("home");
         let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
         let host = state.host.clone();
+        let bearer = state.token.clone();
         let (app, _serve_addr) = build_devserver_app(state, host);
-        crate::route_authority::test_support::assert_non_owner_meets_table(
+        crate::route_authority::test_support::assert_callers_meet_table(
             "devserver",
             app,
             crate::route_authority::DEVSERVER,
+            Some(bearer),
         )
         .await;
     }
@@ -4277,12 +4278,16 @@ mod tests {
         }
     }
 
-    fn test_gateway_assertion(assertion: &TunnelAssertion, aud: &str, role: &str) -> String {
-        let owner = "11111111-1111-4111-8111-111111111111";
-        let subject = if role == "owner" {
-            owner
-        } else {
-            "22222222-2222-4222-8222-222222222222"
+    /// A signed assertion for `caller`: `"owner"`, `"anonymous"` (the nil
+    /// subject the gateway's extension capability lane signs), or anything
+    /// else for a grantee.
+    fn test_gateway_assertion(assertion: &TunnelAssertion, aud: &str, caller: &str) -> String {
+        use crate::route_authority::test_support::Caller;
+        let owner = Caller::OWNER_ID;
+        let subject = match caller {
+            "owner" => owner,
+            "anonymous" => Caller::NIL_ID,
+            _ => Caller::GRANTEE_ID,
         };
         let claims = chan_tunnel_proto::gateway_assertion::claims(
             subject,
@@ -5393,8 +5398,8 @@ mod tests {
         let state = test_state(home.path(), addr);
         let host = state.host.clone();
 
-        // Read-only surface (serve_addr = None): a mutating call is refused 403,
-        // so a grantee can never escalate to mutation.
+        // Read-only surface (serve_addr = None): there is nowhere to mount a
+        // workspace, so a mutating call is refused 403 whoever makes it.
         let readonly = crate::routes::launcher_router(host.clone(), None, None);
         let refused = readonly
             .oneshot(
@@ -5481,23 +5486,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn devserver_local_bind_is_mutable_but_the_tunnel_is_readonly() {
+    async fn devserver_local_bind_and_a_tunnel_grantee_share_the_mutable_launcher() {
         use axum::body::to_bytes;
         use tower::ServiceExt;
 
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
         let owner_ws = tempfile::tempdir().expect("owner workspace");
-        let non_owner_ws = tempfile::tempdir().expect("non-owner workspace");
+        let grantee_ws = tempfile::tempdir().expect("grantee workspace");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let state = test_state(home.path(), addr);
         let host = state.host.clone();
         let (app, serve_addr) = build_devserver_app(state, host);
-        // Simulate the post-bind fill so the loopback surface is fully mutable.
+        // Simulate the post-bind fill so the launcher surface is fully mutable.
         serve_addr.set(addr).unwrap();
         // The tunnel clone marks every request tunnel-origin, exactly like the
-        // serve loop; this also exercises that the marker survives the host's
-        // root-fallback dispatch to require_local_mutation.
+        // serve loop, and the marker survives the host's root-fallback dispatch
+        // into the launcher.
         let assertion = test_tunnel_assertion();
         let tunnel = app.clone().layer(middleware::from_fn_with_state(
             assertion.clone(),
@@ -5530,8 +5535,8 @@ mod tests {
                 .body(Body::from(body))
                 .unwrap()
         };
-        let non_owner_add_req = || {
-            let body = format!(r#"{{"path":{:?}}}"#, non_owner_ws.path().to_string_lossy());
+        let grantee_add_req = || {
+            let body = format!(r#"{{"path":{:?}}}"#, grantee_ws.path().to_string_lossy());
             HttpRequest::builder()
                 .method("POST")
                 .uri("/api/library/workspaces")
@@ -5539,22 +5544,21 @@ mod tests {
                 .header("x-forwarded-host", "owner.dev")
                 .header(
                     chan_tunnel_proto::gateway_assertion::HEADER_NAME,
-                    test_gateway_assertion(&assertion, "owner.dev", "editor"),
+                    test_gateway_assertion(&assertion, "owner.dev", "grantee"),
                 )
                 .body(Body::from(body))
                 .unwrap()
         };
 
         // A tunnel request without the bound gateway assertion is rejected
-        // before route authorization. The explicit non-owner case below pins
-        // the separate 403 policy boundary.
+        // before route authorization.
         let refused = tunnel.clone().oneshot(add_req(false)).await.unwrap();
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
 
-        // A valid non-owner gateway assertion may read the launcher but still
-        // cannot mutate `/api/library/*`.
-        let non_owner_refused = tunnel.clone().oneshot(non_owner_add_req()).await.unwrap();
-        assert_eq!(non_owner_refused.status(), StatusCode::FORBIDDEN);
+        // A valid grantee assertion mutates `/api/library/*` like the owner's:
+        // a grant is all-or-nothing on the devserver.
+        let grantee_added = tunnel.clone().oneshot(grantee_add_req()).await.unwrap();
+        assert_eq!(grantee_added.status(), StatusCode::OK);
 
         // The gateway owner assertion unlocks the full launcher over the tunnel.
         let owner_added = tunnel.clone().oneshot(owner_add_req()).await.unwrap();
@@ -5567,18 +5571,18 @@ mod tests {
         let added = app.clone().oneshot(add_req(true)).await.unwrap();
         assert_eq!(added.status(), StatusCode::OK);
 
-        // Meta: when the launcher bundle is built, the local bind advertises the
-        // mutable `devserver` surface and the tunnel the `readonly` one from the
-        // SAME app. Tolerate an unbuilt bundle (no meta) so a bare cargo test
-        // without `make web` still passes; pre-push builds it and verifies both.
+        // Meta: when the launcher bundle is built, the local bind and every
+        // tunnel session advertise the mutable `devserver` surface from the SAME
+        // app. Tolerate an unbuilt bundle (no meta) so a bare cargo test without
+        // `make web` still passes; pre-push builds it and verifies both.
         let get_root = || HttpRequest::builder().uri("/").body(Body::empty()).unwrap();
-        let get_readonly_root = || {
+        let get_grantee_root = || {
             HttpRequest::builder()
                 .uri("/")
                 .header("x-forwarded-host", "owner.dev")
                 .header(
                     chan_tunnel_proto::gateway_assertion::HEADER_NAME,
-                    test_gateway_assertion(&assertion, "owner.dev", "guest"),
+                    test_gateway_assertion(&assertion, "owner.dev", "grantee"),
                 )
                 .body(Body::empty())
                 .unwrap()
@@ -5599,7 +5603,7 @@ mod tests {
             String::from_utf8_lossy(&bytes).into_owned()
         };
         let local_body = body_of(app.oneshot(get_root()).await.unwrap()).await;
-        let tunnel_body = body_of(tunnel.clone().oneshot(get_readonly_root()).await.unwrap()).await;
+        let tunnel_body = body_of(tunnel.clone().oneshot(get_grantee_root()).await.unwrap()).await;
         let owner_tunnel_body = body_of(tunnel.oneshot(get_owner_root()).await.unwrap()).await;
         if local_body.contains("chan-launcher-surface") {
             assert!(
@@ -5607,13 +5611,127 @@ mod tests {
                 "local bind should advertise the devserver surface"
             );
             assert!(
-                tunnel_body.contains(r#"content="readonly""#),
-                "the tunnel should advertise the readonly surface"
+                tunnel_body.contains(r#"content="devserver""#),
+                "a tunnel grantee should advertise the full devserver surface"
             );
             assert!(
                 owner_tunnel_body.contains(r#"content="devserver""#),
                 "the owner tunnel should advertise the full devserver surface"
             );
+        }
+    }
+
+    /// A grant is all-or-nothing on the devserver: over the real tunnel layer,
+    /// with signed assertions, a grantee adds, stops, starts and forgets a
+    /// library workspace and gets the full launcher surface, exactly as the
+    /// owner and a local caller do. The reverse-tunnel legs stay the owner's.
+    /// The launcher does not tell an anonymous caller from a grantee; the
+    /// gateway signs the nil subject only on extension capability paths,
+    /// which never route here.
+    #[tokio::test]
+    async fn a_grantee_manages_the_devserver_launcher_over_the_tunnel_like_the_owner() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let state = test_state(home.path(), addr);
+        let host = state.host.clone();
+        let (app, serve_addr) = build_devserver_app(state, host);
+        serve_addr.set(addr).unwrap();
+        let assertion = test_tunnel_assertion();
+        let tunnel = app
+            .clone()
+            .layer(middleware::from_fn_with_state(
+                assertion.clone(),
+                mark_tunnel_origin,
+            ))
+            .layer(axum::Extension(test_tunnel_registration()));
+
+        let send = |caller: &'static str, method: &str, uri: &str, body: Option<String>| {
+            let mut builder = HttpRequest::builder().method(method).uri(uri);
+            let router = if caller == "local" {
+                builder = builder.header(header::AUTHORIZATION, "Bearer test-token");
+                app.clone()
+            } else {
+                builder = builder.header("x-forwarded-host", "owner.dev").header(
+                    chan_tunnel_proto::gateway_assertion::HEADER_NAME,
+                    test_gateway_assertion(&assertion, "owner.dev", caller),
+                );
+                tunnel.clone()
+            };
+            let body = match body {
+                Some(body) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(body)
+                }
+                None => Body::empty(),
+            };
+            let request = builder.body(body).unwrap();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        let surface = |page: &str| {
+            page.split_once(r#"<meta name="chan-launcher-surface" content=""#)
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_string())
+        };
+
+        let (local_status, local_page) = send("local", "GET", "/", None).await;
+        let local_surface = surface(&local_page);
+        if let Some(value) = &local_surface {
+            assert_eq!(value, "devserver");
+        }
+        for caller in ["local", "owner", "grantee", "anonymous"] {
+            let ws = tempfile::tempdir().expect("workspace");
+            let body = format!(r#"{{"path":{:?}}}"#, ws.path().to_string_lossy());
+            let (status, row) = send(caller, "POST", "/api/library/workspaces", Some(body)).await;
+            assert_eq!(status, StatusCode::OK, "{caller} add: {row}");
+            let row: serde_json::Value = serde_json::from_str(&row).unwrap();
+            let id = row["workspace_id"].as_str().unwrap().to_string();
+            assert_eq!(
+                launcher_workspace_on(&app, &id).await,
+                Some(true),
+                "{caller}"
+            );
+            for (step, method, uri) in [
+                ("off", "POST", format!("/api/library/workspaces/{id}/off")),
+                ("on", "POST", format!("/api/library/workspaces/{id}/on")),
+                ("remove", "DELETE", format!("/api/library/workspaces/{id}")),
+            ] {
+                let (status, body) = send(caller, method, &uri, None).await;
+                assert_eq!(status, StatusCode::NO_CONTENT, "{caller} {step}: {body}");
+            }
+            assert_eq!(launcher_workspace_on(&app, &id).await, None, "{caller}");
+
+            let (status, page) = send(caller, "GET", "/", None).await;
+            assert_eq!(status, local_status, "{caller} launcher page");
+            assert_eq!(surface(&page), local_surface, "{caller} launcher surface");
+
+            let (status, body) = send(
+                caller,
+                "GET",
+                "/api/library/tunnel/control?tunnel=tun-1",
+                None,
+            )
+            .await;
+            if matches!(caller, "local" | "owner") {
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{caller} tunnel leg: {body}"
+                );
+            } else {
+                assert_eq!(status, StatusCode::FORBIDDEN, "{caller} tunnel leg");
+                assert_eq!(
+                    body, "reverse tunnels are not available for this gateway role",
+                    "{caller} tunnel leg"
+                );
+            }
         }
     }
 

@@ -366,7 +366,7 @@ CODE="$(proxy_curl -sS -o "$RESP_B" -D "$RESP_H" -w '%{http_code}' \
   -H "Cookie: __Host-devserver_gate=$OWNER_GATE; __Host-devserver_csrf=$OWNER_CSRF" \
   "$PROXY_ORIGIN$PREFIX/api/health" || echo 000)"
 
-say "prove native-trust routes and require_local_mutation"
+say "prove native-trust routes reach the desktop guard for owner and grantee"
 TRUST_PATH="/api/library/devservers/gw%3Afeedface%3A$TENANT_USER%3A$DEVSERVER_ID/native-trust"
 MUT_B="$(mktemp)"
 for METHOD in PUT DELETE; do
@@ -379,10 +379,9 @@ for METHOD in PUT DELETE; do
   GRANTEE_MUT_CODE="$(proxy_curl -sS -o "$MUT_B" -w '%{http_code}' -X "$METHOD" \
     -H "Cookie: __Host-devserver_gate=$GRANTEE_GATE; __Host-devserver_csrf=$GRANTEE_CSRF" \
     -H "x-chan-csrf: $GRANTEE_CSRF" "$PROXY_ORIGIN$TRUST_PATH" || echo 000)"
-  [ "$GRANTEE_MUT_CODE" = "403" ] \
-    && grep -qx 'launcher mutation is not available for this gateway role' "$MUT_B" \
-    || die "grantee $METHOD native-trust bypassed require_local_mutation ($GRANTEE_MUT_CODE)"
-  info "$METHOD native-trust: owner reached route (409 no desktop); grantee refused (403)"
+  [ "$GRANTEE_MUT_CODE" = "409" ] && grep -qx 'window management requires the chan desktop app' "$MUT_B" \
+    || die "grantee $METHOD native-trust did not reach desktop bridge guard ($GRANTEE_MUT_CODE)"
+  info "$METHOD native-trust: owner and grantee both reached route (409 no desktop)"
 done
 
 say "RESULT"

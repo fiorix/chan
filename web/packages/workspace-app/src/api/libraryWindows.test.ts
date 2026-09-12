@@ -94,7 +94,6 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
     connected: true,
     hidden: false,
     control: false,
-    can_act: true,
     launch_path: "/lib-0a1b/index.html?w=w-other",
     ...overrides,
   };

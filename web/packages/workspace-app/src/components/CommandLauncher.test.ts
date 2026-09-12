@@ -169,7 +169,6 @@ registerCommands([
 
 const librarySnapshot = {
   library_id: "lib-local-test",
-  role: "owner" as const,
   windows: [
     {
       window_id: "control-1",
@@ -184,7 +183,6 @@ const librarySnapshot = {
       connected: true,
       hidden: false,
       control: true,
-      can_act: true,
       launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
     },
     {
@@ -199,7 +197,6 @@ const librarySnapshot = {
       connected: true,
       hidden: false,
       control: false,
-      can_act: true,
       launch_path: "/api/library/command-capabilities/cap/windows/w-captioned/launch",
     },
   ],
@@ -213,7 +210,6 @@ const librarySnapshot = {
       library_id: "lib-local-test",
       devserver_id: null,
       prefix: "project-a",
-      can_act: true,
     },
   ],
 };
@@ -598,21 +594,6 @@ describe("contextual command deck", () => {
     await tick();
     // set_window_visibility and close_window both refuse a control terminal
     // server-side, so offering either here would only ever fail.
-    expect(titles(target)).toEqual(["Focus"]);
-  });
-
-  test("a readonly grantee gets Focus and no mutation on any window", async () => {
-    scopedLibrary.load.mockResolvedValue({ ...librarySnapshot, role: "readonly" as const });
-    const target = openLauncher();
-    await flush();
-    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
-    await tick();
-    // No New terminal or New window either: those are owner-only already.
-    expect(titles(target)).toEqual(["Windows"]);
-    row(target, "Windows").click();
-    await tick();
-    row(target, "Window 2 [release checks]").click();
-    await tick();
     expect(titles(target)).toEqual(["Focus"]);
   });
 

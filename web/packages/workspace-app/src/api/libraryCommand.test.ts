@@ -16,7 +16,6 @@ import {
 
 const snapshot = {
   library_id: "lib-test",
-  role: "owner",
   windows: [],
   workspaces: [],
 };
@@ -31,7 +30,7 @@ beforeEach(() => {
 describe("scoped library command client", () => {
   test("mints from this tenant/window and keeps the capability out of storage", async () => {
     transport.requestRoot
-      .mockResolvedValueOnce({ token: "cap-secret", role: "owner", expires_in_seconds: 300 })
+      .mockResolvedValueOnce({ token: "cap-secret", expires_in_seconds: 300 })
       .mockResolvedValueOnce(snapshot);
 
     await expect(loadScopedLibrarySnapshot()).resolves.toEqual(snapshot);
@@ -51,9 +50,9 @@ describe("scoped library command client", () => {
 
   test("remints once after the server revokes a stale capability", async () => {
     transport.requestRoot
-      .mockResolvedValueOnce({ token: "cap-old", role: "owner", expires_in_seconds: 300 })
+      .mockResolvedValueOnce({ token: "cap-old", expires_in_seconds: 300 })
       .mockRejectedValueOnce(new ApiError(410, "source window is gone"))
-      .mockResolvedValueOnce({ token: "cap-new", role: "owner", expires_in_seconds: 300 })
+      .mockResolvedValueOnce({ token: "cap-new", expires_in_seconds: 300 })
       .mockResolvedValueOnce(snapshot);
 
     await expect(loadScopedLibrarySnapshot()).resolves.toEqual(snapshot);
@@ -66,7 +65,7 @@ describe("scoped library command client", () => {
 
   test("executes only through the capability action route", async () => {
     transport.requestRoot
-      .mockResolvedValueOnce({ token: "cap-action", role: "owner", expires_in_seconds: 300 })
+      .mockResolvedValueOnce({ token: "cap-action", expires_in_seconds: 300 })
       .mockResolvedValueOnce(undefined);
 
     await runScopedLibraryAction({

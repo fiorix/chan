@@ -31,7 +31,7 @@ flowchart TB
 
     subgraph surfaces["3 serving surfaces: same bundle, per-surface install"]
         direction LR
-        DEV["devserver (build_devserver_app)<br/>bearer=Some(devserver token) · serve_addr=Some(addr) full mutation<br/>tunnel requests carry TunnelOrigin: owner=full, else read-only"]
+        DEV["devserver (build_devserver_app)<br/>bearer=Some(devserver token) · serve_addr=Some(addr) full mutation<br/>tunnel requests carry TunnelOrigin: owner and grantee alike"]
         GW["gateway-proxied = the devserver reached via<br/>devserver-proxy at {owner}--{disc}.{proxy}.proxy.{domain}/<br/>(proxy strips browser credentials and gates at edge)"]
         LOOP["desktop loopback<br/>bearer=Some(per-launch token) · serve_addr=Some(addr) full mutation"]
     end
@@ -57,7 +57,7 @@ flowchart LR
 
 The command launcher is one product and one shared Svelte component, rendered inline inside the page that invoked it on every surface; there is no native launcher window. Its empty query is the **contextual deck**: focused tab actions first, then pane, window, and Computers. Each surface exposes the scopes it has commands for (this bundle exposes Computers only), and the scope orbs stay visible for direct keyboard navigation. Typed deep search may jump directly to a permitted nested target while retaining the trusted breadcrumb and any confirmation step.
 
-In this bundle the deck's Computers scope rides the same `/api/library/*` feed the screens render, so the launcher window's deck carries the full Computers catalog of the surface that serves it. Workspace and standalone-terminal windows run the workspace app's own inline deck with a narrower Computers scope: `POST /api/library/command-capabilities` accepts a tenant token only when the claimed `window_id` has live `/ws` presence in that exact tenant. The opaque capability has a five-minute sliding expiry and dies immediately when that window disappears. Its snapshot omits tenant tokens, route prefixes, and aggregate remote-feed rows. Owner capabilities may create/focus/hide/show/close browser windows in that library; readonly tunnel capabilities may inspect and focus only. Launch redirects revalidate liveness, are `no-store`, and send `Referrer-Policy: no-referrer`. The desktop-side authority split across window classes is [ADR 0001](../../../docs/adr/0001-desktop-owns-aggregate-launcher-authority.md).
+In this bundle the deck's Computers scope rides the same `/api/library/*` feed the screens render, so the launcher window's deck carries the full Computers catalog of the surface that serves it. Workspace and standalone-terminal windows run the workspace app's own inline deck with a narrower Computers scope: `POST /api/library/command-capabilities` accepts a tenant token only when the claimed `window_id` has live `/ws` presence in that exact tenant. The opaque capability has a five-minute sliding expiry and dies immediately when that window disappears. Its snapshot omits tenant tokens, route prefixes, and aggregate remote-feed rows. A capability may create/focus/hide/show/close browser windows in that library, and a grantee's capability is the owner's. Launch redirects revalidate liveness, are `no-store`, and send `Referrer-Policy: no-referrer`. The desktop-side authority split across window classes is [ADR 0001](../../../docs/adr/0001-desktop-owns-aggregate-launcher-authority.md).
 
 ### Keyboard and draft contract
 
@@ -107,7 +107,7 @@ flowchart TB
 
     subgraph authx["bearer: who may call /api/library/*"]
         BTOK["Some(token): require Authorization: Bearer<br/>watch WS also accepts ?t= (constant-time)"]
-        BNONE["None: tunnel-trust, data surface public<br/>(proxy gates at the edge)"]
+        BNONE["None: data surface public<br/>(tests)"]
         SHELL["static SPA shell ALWAYS public<br/>(loads before it holds the token)"]
     end
 
@@ -124,23 +124,23 @@ flowchart TB
 
     subgraph surfx["serving surfaces (same bundle)"]
         LOOP["desktop loopback<br/>bearer=Some · serve_addr=Some"]
-        DEV["gateway tunnel (TunnelOrigin non-owner)<br/>read-only; owner assertion keeps the full surface"]
+        DEV["devserver, loopback and gateway tunnel<br/>bearer=Some · serve_addr=Some<br/>tunnel callers bypass the bearer"]
     end
 
     BTOK --> LOOP
     AFULL --> LOOP
-    BNONE --> DEV
-    ARO --> DEV
+    BTOK --> DEV
+    AFULL --> DEV
 ```
 
 *The two policy knobs the installer sets per surface: `bearer` (who may call `/api/library/*`) and `serve_addr` (read-only vs full mutation).*
 
 `launcher_router(host, bearer, serve_addr)` is auth-agnostic in its handlers; the installer sets the policy per surface:
 
-- **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` is tunnel-trust. The static SPA shell is always public so it loads before it holds the token.
-- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is the tunnel-trust surface: workspaces are read-only: the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`; tunnel non-owners are downgraded to `readonly` per request, and on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
+- **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` leaves the data surface public (tests). The static SPA shell is always public so it loads before it holds the token.
+- **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is a surface with nowhere to mount a workspace: workspaces are read-only: the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`, the router's own surface for every caller; on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.
 
-On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion; owner assertions mutate over the tunnel, missing/non-owner assertions may read but not mutate (403). Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. A collaborator holding a `__Host-devserver_gate` cookie must not unmount or remove the owner's workspaces. Window mint/discard follow the same split (per-view state, low-risk): owners on every surface, 403 for tunnel non-owners. Owners manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
+On the gateway surface the proxy strips browser `Cookie` and `Authorization` credentials and forwards a signed gateway assertion, and the devserver refuses a tunnel request without a verifiable one (401). A grant is all-or-nothing on the devserver: a grantee's assertion mutates `/api/library/*` over the tunnel exactly as the owner's does, windows and workspaces included, and gets the owner's surface meta; the reverse-tunnel legs are the one launcher route a grantee does not share. Query parameters are ordinary tenant application data; proxy entry credentials are accepted only at the fixed body-only exchange endpoint. Owners also manage a headless devserver's workspaces over the bearer-gated `/api/devserver/*` management API and `cs`/CLI.
 
 An unforced off answers `409 {error:"live_terminals", active_terminals:N}` on this surface; the launcher confirms and retries the same route with `force: true`.
 
