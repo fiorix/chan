@@ -13,6 +13,11 @@
 //                            (e.g. crash mid-copy on a cross-fs
 //                            workspace) has no meta and the next sweep
 //                            treats it as junk.
+//       recover-me.txt       present only on the entry the sweep must
+//                            NOT treat as junk: the same-fs move took
+//                            the content out of the workspace, the meta
+//                            write failed, and putting it back failed
+//                            too, so this payload is the only copy.
 //
 // `<id>` is `unix_nanos`, with a `-N` suffix retry on the rare
 // same-nanosecond collision. Opaque to callers.
@@ -29,6 +34,9 @@
 // back to copy-then-remove. The fallback writes meta.json BEFORE
 // removing the source, so a remove failure leaves a complete trash
 // entry plus a partial source (recoverable) instead of data loss.
+// The rename lane has no such ordering available -- after the rename
+// the payload IS the content -- so it undoes the rename when the meta
+// write fails, and marks the entry when even that fails.
 
 use std::fs;
 use std::io;
@@ -43,6 +51,15 @@ use crate::fs_ops;
 /// 30 days. Hardcoded for v1; promote to a `Library` setting later
 /// if users want to tune it.
 pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Marker file naming an entry that holds the only copy of a user's
+/// content and has no meta.json. Written when the same-fs move already
+/// took the content out of the workspace, the meta write then failed,
+/// and putting the content back failed too. The sweep reclaims any
+/// meta-less entry as a crash leftover; this one is not, so the marker
+/// makes the sweep skip it and the body names the path it came from for
+/// a manual recovery.
+const RECOVERY_MARKER: &str = "recover-me.txt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Meta {
@@ -88,8 +105,31 @@ pub fn move_into(trash_dir: &Path, src_abs: &Path, original_rel: &str, is_dir: b
     };
 
     if fs::rename(src_abs, &payload).is_ok() {
-        // Atomic same-fs move. Source is gone; payload is in place.
-        write_meta(&entry_dir, original_rel, size, is_dir)?;
+        // Atomic same-fs move. Source is gone; payload is in place, and it
+        // is now the only copy. The meta write is the one step left that
+        // can fail (ENOSPC for its temp file, EACCES / EIO on the entry
+        // dir), and a bare `?` here would return "delete failed" to the
+        // caller while leaving the content in a meta-less entry the next
+        // sweep reclaims. Put it back instead.
+        if let Err(error) = write_meta(&entry_dir, original_rel, size, is_dir) {
+            match fs::rename(&payload, src_abs) {
+                Ok(()) => {
+                    // Nothing moved, so leave nothing behind either.
+                    let _ = fs::remove_dir_all(&entry_dir);
+                }
+                Err(undo) => {
+                    tracing::error!(
+                        payload = %payload.display(),
+                        source = %src_abs.display(),
+                        %undo,
+                        "trash: meta write failed and the payload could not be \
+                         moved back; entry kept for manual recovery"
+                    );
+                    mark_for_recovery(&entry_dir, src_abs);
+                }
+            }
+            return Err(error);
+        }
         return Ok(());
     }
 
@@ -296,6 +336,11 @@ pub fn sweep_expired(trash_dir: &Path, retention_secs: i64) -> Result<()> {
     let cutoff = now_secs() - retention_secs;
     for entry in rd.flatten() {
         let entry_dir = entry.path();
+        // An entry holding the only copy of a user's file is never junk,
+        // however meta-less it looks. See `RECOVERY_MARKER`.
+        if entry_dir.join(RECOVERY_MARKER).exists() {
+            continue;
+        }
         let meta_path = entry_dir.join("meta.json");
         let expired = match fs::read(&meta_path) {
             Ok(b) => match serde_json::from_slice::<Meta>(&b) {
@@ -359,7 +404,29 @@ pub(crate) fn hoist_nested_entries(trash_dir: &Path, bucket: &str) -> Result<()>
     Ok(())
 }
 
+/// Flag an entry whose payload is the only surviving copy so the sweep
+/// leaves it alone, and record where it came from. Best-effort: the same
+/// filesystem trouble that broke the meta write can break this too, and
+/// the `tracing::error!` above is what the operator actually reads.
+fn mark_for_recovery(entry_dir: &Path, src_abs: &Path) {
+    let body = format!(
+        "chan could not finish moving this file to the trash, and could not \
+         put it back.\nThe only copy is the `payload` next to this file.\nIt \
+         came from: {}\n",
+        src_abs.display()
+    );
+    if let Err(error) = fs::write(entry_dir.join(RECOVERY_MARKER), body) {
+        tracing::error!(
+            entry = %entry_dir.display(),
+            %error,
+            "trash: could not write the recovery marker; the sweep will reclaim this entry"
+        );
+    }
+}
+
 fn write_meta(entry_dir: &Path, original_rel: &str, size: u64, is_dir: bool) -> Result<()> {
+    #[cfg(test)]
+    record_test_meta_write(entry_dir)?;
     let meta = Meta {
         original_path: original_rel.to_string(),
         deleted_at: now_secs(),
@@ -439,6 +506,61 @@ fn dir_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Fault injection for the one step of the rename lane that can fail
+/// after the user's content has already left the workspace. Keyed by
+/// trash dir so parallel tests do not see each other's injections; the
+/// thread-local keeps a test's injection on the thread that made it.
+#[cfg(test)]
+#[derive(Default)]
+struct TestMetaProbe {
+    fail_next: bool,
+    /// When set, the injected failure first recreates this path as a
+    /// non-empty directory, so the undo rename cannot put the payload
+    /// back and the recovery marker lane runs instead.
+    block_undo_at: Option<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_META_PROBES: std::cell::RefCell<
+        std::collections::HashMap<std::path::PathBuf, TestMetaProbe>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(test)]
+fn record_test_meta_write(entry_dir: &Path) -> Result<()> {
+    let trash_dir = entry_dir.parent().unwrap_or(entry_dir).to_path_buf();
+    let blocker = TEST_META_PROBES.with(|probes| {
+        let mut probes = probes.borrow_mut();
+        let probe = probes.get_mut(&trash_dir)?;
+        if !probe.fail_next {
+            return None;
+        }
+        probe.fail_next = false;
+        Some(probe.block_undo_at.take())
+    });
+    let Some(blocker) = blocker else {
+        return Ok(());
+    };
+    if let Some(path) = blocker {
+        fs::create_dir_all(path.join("occupied")).unwrap();
+    }
+    Err(ChanError::Io("injected meta.json write failure".into()))
+}
+
+#[cfg(test)]
+fn inject_test_meta_write_failure(trash_dir: &Path, block_undo_at: Option<&Path>) {
+    TEST_META_PROBES.with(|probes| {
+        probes.borrow_mut().insert(
+            trash_dir.to_path_buf(),
+            TestMetaProbe {
+                fail_next: true,
+                block_undo_at: block_undo_at.map(Path::to_path_buf),
+            },
+        );
+    });
 }
 
 #[cfg(test)]
@@ -675,6 +797,111 @@ mod tests {
         sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
         assert!(!trash.join("drafts").exists());
         assert_eq!(list(&trash).unwrap().len(), 2);
+    }
+
+    /// Every child of the trash root, entry dirs and leftovers alike.
+    /// `list` only reports entries with a parsable meta.json, so it cannot
+    /// see the orphan a half-written move leaves behind.
+    fn entry_dirs(trash: &Path) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<_> = match std::fs::read_dir(trash) {
+            Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+            Err(_) => Vec::new(),
+        };
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_failed_meta_write_after_the_rename_puts_the_file_back() {
+        let workspace = TempDir::new().unwrap();
+        let src = workspace.path().join("notes/keep.md");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"the only copy").unwrap();
+        let (_t, trash) = ts();
+        std::fs::create_dir_all(&trash).unwrap();
+
+        inject_test_meta_write_failure(&trash, None);
+        let err = move_into(&trash, &src, "notes/keep.md", false).unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+
+        // The caller reported a failed delete, so the content has to still be
+        // where the user left it. Without the undo it lives only under
+        // trash/<id>/payload, in an entry with no meta.json.
+        assert!(
+            src.exists(),
+            "source destroyed by a failed trash move; trash holds {:?}",
+            entry_dirs(&trash)
+        );
+        assert_eq!(std::fs::read(&src).unwrap(), b"the only copy");
+        assert!(
+            entry_dirs(&trash).is_empty(),
+            "failed move left {:?} behind",
+            entry_dirs(&trash)
+        );
+        // And the sweep, which reclaims any meta-less entry, has nothing to
+        // destroy.
+        sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), b"the only copy");
+        assert!(list(&trash).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_meta_write_after_the_rename_puts_the_directory_back() {
+        let workspace = TempDir::new().unwrap();
+        let dir = workspace.path().join("notes");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.md"), b"a").unwrap();
+        std::fs::write(dir.join("sub/b.md"), b"bb").unwrap();
+        let (_t, trash) = ts();
+        std::fs::create_dir_all(&trash).unwrap();
+
+        inject_test_meta_write_failure(&trash, None);
+        let err = move_into(&trash, &dir, "notes", true).unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+
+        assert_eq!(
+            std::fs::read(dir.join("a.md")).unwrap(),
+            b"a",
+            "subtree destroyed by a failed trash move; trash holds {:?}",
+            entry_dirs(&trash)
+        );
+        assert_eq!(std::fs::read(dir.join("sub/b.md")).unwrap(), b"bb");
+        assert!(entry_dirs(&trash).is_empty());
+    }
+
+    #[test]
+    fn an_undo_that_also_fails_leaves_a_marker_the_sweep_respects() {
+        let workspace = TempDir::new().unwrap();
+        let src = workspace.path().join("keep.md");
+        std::fs::write(&src, b"the only copy").unwrap();
+        let (_t, trash) = ts();
+        std::fs::create_dir_all(&trash).unwrap();
+
+        // The meta write fails AND the source path is occupied by a
+        // non-empty directory before the undo runs, so the payload cannot
+        // go back. The content now exists only under trash/.
+        inject_test_meta_write_failure(&trash, Some(&src));
+        let err = move_into(&trash, &src, "keep.md", false).unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+
+        let entries = entry_dirs(&trash);
+        assert_eq!(entries.len(), 1, "entry kept for manual recovery");
+        let entry = &entries[0];
+        assert_eq!(
+            std::fs::read(entry.join("payload")).unwrap(),
+            b"the only copy"
+        );
+        assert!(entry.join(RECOVERY_MARKER).exists(), "marker written");
+
+        // Meta-less, so the lister ignores it; marked, so the sweep that
+        // reclaims meta-less entries leaves it alone.
+        assert!(list(&trash).unwrap().is_empty());
+        sweep_expired(&trash, TRASH_RETENTION_SECS).unwrap();
+        assert_eq!(
+            std::fs::read(entry.join("payload")).unwrap(),
+            b"the only copy",
+            "sweep destroyed the only remaining copy"
+        );
     }
 
     #[test]
