@@ -58,9 +58,10 @@ pub enum ClientError {
 }
 
 /// Default concurrent yamux substreams served by one client.
-/// This bounds spawned h1 handler tasks when the public side floods
-/// a tunnel. Excess streams remain backpressured in yamux until an
-/// active handler exits.
+/// This bounds the h1 handler work running at once when the public
+/// side floods a tunnel. Excess substreams are still accepted, and
+/// wait for a permit before they are served; how many can exist at
+/// all is bounded by `TUNNEL_YAMUX_MAX_STREAMS`.
 pub const DEFAULT_MAX_CONCURRENT_SUBSTREAMS: usize = 128;
 const LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const LEASE_REFRESH_RETRY_MIN: Duration = Duration::from_secs(5);
@@ -320,17 +321,12 @@ where
 {
     let limit = max_concurrent_substreams.max(1);
     let permits = Arc::new(Semaphore::new(limit));
-    let mut inbound_permit = None;
-    let mut permit_wait = Box::pin(acquire_substream_permit(permits.clone()));
     let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
     let mut refresh_delay = Box::pin(tokio::time::sleep(LEASE_REFRESH_INTERVAL));
     let mut refresh_retry = LEASE_REFRESH_RETRY_MIN;
     let mut refresh_pending = false;
     loop {
         tokio::select! {
-            permit = &mut permit_wait, if inbound_permit.is_none() => {
-                inbound_permit = Some(permit);
-            }
             result = refresh_rx.recv(), if refresh_pending => {
                 refresh_pending = false;
                 match result {
@@ -361,17 +357,22 @@ where
                     let _ = refresh_tx.send(result).await;
                 });
             }
-            next = futures::future::poll_fn(|cx| std::pin::Pin::new(&mut conn).poll_next_inbound(cx)), if inbound_permit.is_some() => match next {
+            // Polled unconditionally, whatever the permit pool is
+            // doing: `poll_next_inbound` is the only yamux entry point
+            // that drives the connection, so gating it on a free permit
+            // would stop reads, writes, flushes and keepalives for the
+            // substreams already in flight, not just for the new one.
+            // The permit is admission control for the work; how many
+            // substreams may exist at all is yamux's own
+            // `TUNNEL_YAMUX_MAX_STREAMS` accounting.
+            next = futures::future::poll_fn(|cx| std::pin::Pin::new(&mut conn).poll_next_inbound(cx)) => match next {
             Some(Ok(stream)) => {
                 let router = router.clone();
-                let permit = inbound_permit.take().expect("select guard requires a permit");
-                permit_wait
-                    .as_mut()
-                    .set(acquire_substream_permit(permits.clone()));
+                let permits = permits.clone();
                 tokio::spawn(async move {
+                    let _permit = acquire_substream_permit(permits).await;
                     #[cfg(test)]
-                    let _task_guard = SubstreamTaskGuard::new();
-                    let _permit = permit;
+                    let _task_guard = SubstreamServeGuard::new();
                     serve_one_substream(stream, router).await;
                 });
             }
@@ -388,31 +389,33 @@ async fn acquire_substream_permit(permits: Arc<Semaphore>) -> OwnedSemaphorePerm
         .expect("substream semaphore is never closed")
 }
 
+/// Counts substreams being served, which is what the permit pool
+/// bounds. A spawned task that is still waiting for its permit is
+/// not counted: it holds a substream, not a handler.
 #[cfg(test)]
-static ACTIVE_SUBSTREAM_TASKS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SERVING_SUBSTREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
-static MAX_ACTIVE_SUBSTREAM_TASKS: std::sync::atomic::AtomicUsize =
+static MAX_SERVING_SUBSTREAMS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
-struct SubstreamTaskGuard;
+struct SubstreamServeGuard;
 
 #[cfg(test)]
-impl SubstreamTaskGuard {
+impl SubstreamServeGuard {
     fn new() -> Self {
         use std::sync::atomic::Ordering;
 
-        let active = ACTIVE_SUBSTREAM_TASKS.fetch_add(1, Ordering::SeqCst) + 1;
-        MAX_ACTIVE_SUBSTREAM_TASKS.fetch_max(active, Ordering::SeqCst);
+        let active = SERVING_SUBSTREAMS.fetch_add(1, Ordering::SeqCst) + 1;
+        MAX_SERVING_SUBSTREAMS.fetch_max(active, Ordering::SeqCst);
         Self
     }
 }
 
 #[cfg(test)]
-impl Drop for SubstreamTaskGuard {
+impl Drop for SubstreamServeGuard {
     fn drop(&mut self) {
-        ACTIVE_SUBSTREAM_TASKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        SERVING_SUBSTREAMS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -629,10 +632,13 @@ mod backoff_tests {
         }
     }
 
+    /// The permit pool bounds served work, not accepts: a flood of
+    /// inbound substreams is taken off the connection (yamux caps how
+    /// many may exist) but only `limit` of them are ever being served.
     #[tokio::test]
-    async fn inbound_flood_never_spawns_work_beyond_the_permit_limit() {
-        ACTIVE_SUBSTREAM_TASKS.store(0, Ordering::SeqCst);
-        MAX_ACTIVE_SUBSTREAM_TASKS.store(0, Ordering::SeqCst);
+    async fn inbound_flood_never_serves_beyond_the_permit_limit() {
+        SERVING_SUBSTREAMS.store(0, Ordering::SeqCst);
+        MAX_SERVING_SUBSTREAMS.store(0, Ordering::SeqCst);
 
         let (client_io, server_io) = tokio::io::duplex(256 * 1024);
         let client = YamuxConnection::new(client_io.compat(), YamuxConfig::default(), Mode::Client);
@@ -660,21 +666,31 @@ mod backoff_tests {
         });
 
         tokio::time::timeout(Duration::from_secs(2), async {
-            while ACTIVE_SUBSTREAM_TASKS.load(Ordering::SeqCst) == 0 {
+            while SERVING_SUBSTREAMS.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the first inbound stream was not accepted");
+        .expect("the first inbound stream was not served");
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(ACTIVE_SUBSTREAM_TASKS.load(Ordering::SeqCst), 1);
-        assert_eq!(MAX_ACTIVE_SUBSTREAM_TASKS.load(Ordering::SeqCst), 1);
+        assert_eq!(SERVING_SUBSTREAMS.load(Ordering::SeqCst), 1);
+        assert_eq!(MAX_SERVING_SUBSTREAMS.load(Ordering::SeqCst), 1);
 
         drop(remote_streams);
         pumping.abort();
         serving.abort();
+        // These counters are process-wide: let the aborted connection's
+        // handlers exit before another test resets them. Best effort,
+        // since a stuck handler is this test's failure to report, not a
+        // reason to fail the drain.
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while SERVING_SUBSTREAMS.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
     }
 }
 

@@ -69,7 +69,7 @@ Connection lifecycle:
 
 ### Per-substream serving
 
-Before polling an inbound yamux substream, the loop acquires a concurrency permit. This ordering is security-relevant: yamux cannot hand the client an arbitrary backlog of already-accepted streams while every handler slot is busy. A 32-stream, one-permit flood regression pins the bound. For each accepted substream:
+The loop polls `poll_next_inbound` unconditionally and the spawned per-substream task acquires the concurrency permit before it serves. That ordering is load-bearing: `poll_next_inbound` is the only yamux entry point that drives the connection, and that driver is the sole reader, writer and flusher of the socket, so gating the accept on a free permit stops serving every substream already in flight the moment the pool saturates. How many substreams can exist at all is yamux's own `TUNNEL_YAMUX_MAX_STREAMS` (256), which is what bounds the parked tasks. A 32-stream, one-permit flood regression pins the served bound; a saturated-pool regression pins that the connection still makes progress. For each accepted substream:
 
 1. Wrap the futures-io stream into tokio via `compat()`, then into hyper's IO via `TokioIo::new`.
 2. Run `hyper::server::conn::http1::Builder::serve_connection(io, service).with_upgrades()`. The `with_upgrades()` is required so WebSocket 101 responses keep the substream alive.
@@ -77,7 +77,7 @@ Before polling an inbound yamux substream, the loop acquires a concurrency permi
 
 Each substream is one logical HTTP request from the public side. Stacking h2 here would be mux-on-mux; h1 over yamux is the right shape.
 
-`serve_substreams` caps concurrent handler tasks at `DEFAULT_MAX_CONCURRENT_SUBSTREAMS` (128) via a semaphore. `run` uses `ClientConfig::max_concurrent_substreams` (clamped to >= 1), and direct callers can use `serve_substreams_with_limit`. When the cap is full, the client holds no inbound permit and does not poll yamux for another stream, so floods backpressure at the mux instead of becoming either unbounded accepted streams or unbounded h1 tasks.
+`serve_substreams` caps the substreams being served at `DEFAULT_MAX_CONCURRENT_SUBSTREAMS` (128) via a semaphore. `run` uses `ClientConfig::max_concurrent_substreams` (clamped to >= 1), and direct callers can use `serve_substreams_with_limit`. When the cap is full, further substreams are accepted and wait for a permit in their own task, so a flood becomes queued streams bounded by the yamux stream cap rather than unbounded h1 work, and the connection keeps being driven while they wait.
 
 ### Admission-lease refresh
 
