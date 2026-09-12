@@ -1286,8 +1286,10 @@ impl crate::standalone_watch::WatchScopeResolver for MiniScopeResolver {
 /// event/pane `/ws` bus, build-info / health, and the SPA shell
 /// fallback. No file / graph / index / drafts / contacts / inspector /
 /// settings route is present (they all require a live workspace), so a stray
-/// workspace-content request 404s. Auth + serve_static are layered identically to
-/// [`router`] so `/api/*` stays tokened -- a PTY is shell access.
+/// workspace-content request 404s. Auth + serve_static are layered like
+/// [`router`]'s so `/api/*` stays tokened -- a PTY is shell access -- and a
+/// non-owner gateway tunnel origin, which walks past that bearer, is refused
+/// outright on the whole `/api` surface rather than downgraded to read-only.
 fn terminal_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/terminal/ws", get(api_terminal_ws))
@@ -1436,7 +1438,24 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             post(api_session_handover_reply),
         )
         // Events / broadcast / pane bus.
-        .route("/ws", get(ws_upgrade));
+        .route("/ws", get(ws_upgrade))
+        // A terminal tenant IS a PTY: there is no read-only face of it to
+        // hand a guest the way a workspace tenant has one, and the routes
+        // that carry the most authority here are a shell spawn and a transfer
+        // lane rooted at `/` over the whole uid. `auth_middleware` lets a
+        // tunnel request past the bearer because the gateway is the trust
+        // boundary for the workspace tenant's guest mode, and the gateway
+        // proxy in turn delegates the authority decision to this side, so
+        // without this layer nothing between the two ever consults `owner()`.
+        // A `route_layer` rather than a `layer`: the SPA shell on the fallback
+        // stays public like every other static asset.
+        .route_layer(middleware::from_fn(|req, next| {
+            crate::routes::refuse_non_owner_tunnel(
+                "terminal sessions are not available for this gateway role",
+                req,
+                next,
+            )
+        }));
     Router::new()
         .merge(api)
         .fallback(serve_static)
@@ -2167,6 +2186,7 @@ mod terminal_router_tests {
     use crate::terminal_sessions::{
         AttachHandle, CloseReason, CreateOptions, RestartOverrides, SessionEvent,
     };
+    use axum::http::StatusCode;
     use portable_pty::PtySize;
 
     const HOSTED_BACKEND_CHILD: &str = "CHAN_TEST_HOSTED_TERMINAL_BACKEND_CHILD";
@@ -2398,6 +2418,299 @@ mod terminal_router_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// The gateway refusal every lane on this tenant answers a non-owner
+    /// session with.
+    const TERMINAL_TENANT_REFUSAL: &str =
+        "terminal sessions are not available for this gateway role";
+
+    /// The tenant bearer a local caller carries. A tunnel-origin request never
+    /// carries one: `auth_middleware` waves it through on the marker alone.
+    const TERMINAL_TENANT_BEARER: &str = "terminal-tenant-bearer";
+
+    /// A `TunnelOrigin` the gateway authenticated as somebody other than the
+    /// devserver's owner: the capability lane's nil subject, or a shared
+    /// session's grantee.
+    fn tunnel_guest() -> crate::TunnelOrigin {
+        crate::TunnelOrigin { caller: None }
+    }
+
+    /// A verified owner assertion; `is_owner` is `sub == owner_user_id`.
+    fn tunnel_owner() -> crate::TunnelOrigin {
+        crate::TunnelOrigin {
+            caller: Some(chan_tunnel_proto::gateway_assertion::Claims {
+                sub: "owner-user".to_string(),
+                owner_user_id: "owner-user".to_string(),
+                aud: "owner--abc.proxy.example".to_string(),
+                drv: "devserver".to_string(),
+                iat: 0,
+                exp: 0,
+            }),
+        }
+    }
+
+    /// The two authority states that must come through this tenant unchanged:
+    /// the gateway owner, and a local caller (desktop, `cs`) that carries no
+    /// tunnel marker at all and authenticates with the tenant bearer.
+    fn admitted_authorities() -> [(&'static str, Option<crate::TunnelOrigin>); 2] {
+        [("owner", Some(tunnel_owner())), ("local", None)]
+    }
+
+    /// Stamp one authority onto a request under construction. A `None` origin
+    /// is the local caller, which reaches these routes over the loopback bind
+    /// with the bearer and no `TunnelOrigin`.
+    fn with_authority(
+        builder: axum::http::request::Builder,
+        origin: Option<crate::TunnelOrigin>,
+    ) -> axum::http::request::Builder {
+        match origin {
+            Some(origin) => builder.extension(origin),
+            None => builder.header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {TERMINAL_TENANT_BEARER}"),
+            ),
+        }
+    }
+
+    async fn status_and_body(response: axum::response::Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// `GET /api/fs/{*path}` on this tenant re-roots its capture at `/`, so it
+    /// reads any file this uid can open. A gateway session that is not the
+    /// owner's must not reach it.
+    ///
+    /// The bearer is set here on purpose: it pins WHY the route layer has to
+    /// exist. `auth_middleware` returns early for anything carrying
+    /// `TunnelOrigin`, so a guest reaches the handler with no credential at
+    /// all, while the same request without the marker and without the bearer
+    /// is refused at 401.
+    #[tokio::test]
+    async fn a_non_owner_gateway_role_cannot_read_the_filesystem_of_a_terminal_tenant() {
+        use tower::ServiceExt;
+
+        let outside = tempfile::tempdir().expect("tempdir");
+        let secret = outside.path().join("owner-secret.txt");
+        std::fs::write(&secret, b"owner bytes").expect("write secret");
+        let uri = format!("/api/fs{}?download=1&root=filesystem", secret.display());
+
+        let state = crate::state::test_support::make_test_state_with_token(TERMINAL_TENANT_BEARER);
+        let app = terminal_router(state);
+
+        let request = |origin| {
+            with_authority(axum::http::Request::builder().uri(&uri), origin)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        let (status, body) = status_and_body(
+            app.clone()
+                .oneshot(request(Some(tunnel_guest())))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "guest read: {body}");
+        assert_eq!(body, TERMINAL_TENANT_REFUSAL);
+
+        for (label, origin) in admitted_authorities() {
+            let (status, body) =
+                status_and_body(app.clone().oneshot(request(origin)).await.unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{label} read refused: {body}");
+            assert_eq!(body, "owner bytes", "{label} read served the wrong bytes");
+        }
+
+        // No marker and no bearer: the tenant token still governs the local
+        // lane, which is the credential a tunnel origin skips.
+        let (status, _) = status_and_body(
+            app.oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// `POST /api/fs/upload` on this tenant writes to an absolute `dir`, so it
+    /// is an unrooted write over the whole uid. The refusal must precede the
+    /// write, not merely report one.
+    #[tokio::test]
+    async fn a_non_owner_gateway_role_cannot_write_the_filesystem_of_a_terminal_tenant() {
+        use tower::ServiceExt;
+
+        let target = tempfile::tempdir().expect("tempdir");
+        let dir = target.path().display().to_string();
+        let state = crate::state::test_support::make_test_state_with_token(TERMINAL_TENANT_BEARER);
+        let app = terminal_router(state);
+
+        let upload = |origin, filename: &str| {
+            let boundary = "terminal-tenant-owner-gate";
+            let body = format!(
+                "--{boundary}\r\n\
+                 Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+                 {dir}\r\n\
+                 --{boundary}\r\n\
+                 Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n\
+                 planted\r\n\
+                 --{boundary}--\r\n"
+            );
+            with_authority(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/fs/upload?root=filesystem")
+                    .header(
+                        axum::http::header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    ),
+                origin,
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap()
+        };
+
+        let (status, body) = status_and_body(
+            app.clone()
+                .oneshot(upload(Some(tunnel_guest()), "guest.bin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "guest upload: {body}");
+        assert_eq!(body, TERMINAL_TENANT_REFUSAL);
+        assert!(
+            !target.path().join("guest.bin").exists(),
+            "the refused upload still created its target"
+        );
+
+        for (label, origin) in admitted_authorities() {
+            let filename = format!("{label}.bin");
+            let (status, body) = status_and_body(
+                app.clone()
+                    .oneshot(upload(origin, &filename))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{label} upload refused: {body}");
+            assert_eq!(
+                std::fs::read(target.path().join(&filename)).unwrap(),
+                b"planted",
+                "{label} upload wrote nothing"
+            );
+        }
+    }
+
+    /// `POST /api/terminals` spawns a PTY. Gating only the transfer routes
+    /// would leave this reachable, which is why the layer covers the tenant
+    /// rather than two handlers.
+    #[tokio::test]
+    async fn a_non_owner_gateway_role_cannot_spawn_a_pty_on_a_terminal_tenant() {
+        use tower::ServiceExt;
+
+        let marks = tempfile::tempdir().expect("tempdir");
+        let state = crate::state::test_support::make_test_state_with_token(TERMINAL_TENANT_BEARER);
+        let app = terminal_router(state.clone());
+
+        let spawn = |origin, label: &str| {
+            let marker = marks.path().join(format!("{label}.txt"));
+            let body = serde_json::json!({
+                "name": format!("@@{label}"),
+                "command": format!("printf spawned > {}", marker.display()),
+            });
+            let request = with_authority(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/terminals")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                origin,
+            )
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+            (marker, request)
+        };
+
+        let (guest_marker, request) = spawn(Some(tunnel_guest()), "Guest");
+        let (status, body) = status_and_body(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "guest spawn: {body}");
+        assert_eq!(body, TERMINAL_TENANT_REFUSAL);
+
+        for (label, origin) in admitted_authorities() {
+            let (marker, request) = spawn(origin, label);
+            let (status, body) = status_and_body(app.clone().oneshot(request).await.unwrap()).await;
+            assert_eq!(status, StatusCode::CREATED, "{label} spawn refused: {body}");
+            let mut spawned = false;
+            for _ in 0..100 {
+                if std::fs::read(&marker).is_ok_and(|bytes| bytes == b"spawned") {
+                    spawned = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(spawned, "{label} spawn produced no PTY");
+        }
+
+        // The refused spawn never reached the registry, so its command never
+        // ran; the admitted ones above bound how long that takes to show.
+        assert!(
+            !guest_marker.exists(),
+            "the refused spawn still ran its command"
+        );
+        state
+            .terminal_sessions
+            .close_all(crate::terminal_sessions::CloseReason::Shutdown);
+    }
+
+    /// The gate is a route layer over the whole tenant API, not a per-handler
+    /// check, so routes that carry no filesystem or PTY authority of their own
+    /// are refused too. `/api/terminal/ws` is the attach lane onto a live
+    /// shell and `/api/health` is the cheapest probe on the router; both
+    /// answer the same refusal, and both stay reachable for the owner and the
+    /// local caller.
+    #[tokio::test]
+    async fn the_terminal_tenant_owner_gate_covers_the_whole_api_surface() {
+        use tower::ServiceExt;
+
+        let state = crate::state::test_support::make_test_state_with_token(TERMINAL_TENANT_BEARER);
+        let app = terminal_router(state);
+
+        // `/api/terminal/ws` without upgrade headers is a 400 from the
+        // WebSocket extractor: not an admission, but proof the layer let the
+        // request reach the route.
+        for (uri, admitted) in [
+            ("/api/terminal/ws", StatusCode::BAD_REQUEST),
+            ("/api/health", StatusCode::OK),
+        ] {
+            let request = |origin| {
+                with_authority(axum::http::Request::builder().uri(uri), origin)
+                    .body(axum::body::Body::empty())
+                    .unwrap()
+            };
+
+            let (status, body) = status_and_body(
+                app.clone()
+                    .oneshot(request(Some(tunnel_guest())))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "guest {uri}: {body}");
+            assert_eq!(body, TERMINAL_TENANT_REFUSAL, "guest {uri}");
+
+            for (label, origin) in admitted_authorities() {
+                let response = app.clone().oneshot(request(origin)).await.unwrap();
+                assert_eq!(response.status(), admitted, "{label} {uri}");
+            }
+        }
     }
 
     #[cfg(unix)]
