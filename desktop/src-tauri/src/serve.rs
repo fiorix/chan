@@ -86,8 +86,8 @@ impl WorkspaceOpenMode {
 /// only the persisted set, so a workspace whose windows were all closed stays
 /// windowless on boot. A buried or hidden window keeps its record, so the
 /// watcher restores it while honoring `should_show`'s `!hidden`.
-pub async fn start(
-    app: AppHandle,
+pub async fn start<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: Arc<AppState>,
     key: String,
     open_mode: WorkspaceOpenMode,
@@ -99,21 +99,22 @@ pub async fn start(
         return Err("embedded local server is unavailable".to_string());
     };
     let url = embedded.open_workspace(&key).await?;
-    let prefix = url_prefix_from_local_url(&url)?;
-    let duplicate = {
+    {
         let mut serves = state.serves.lock().unwrap();
         if serves.contains_key(&key) {
-            true
-        } else {
-            serves.insert(key.clone(), ServeHandle::embedded(url.clone()));
-            false
+            // A concurrent `start` for this key won the race across the mount
+            // await (the pre-check above guards only the pre-await instant).
+            // Both callers are holding the SAME tenant: the prefix is derived
+            // from the key alone and `open_or_get_registered_workspace` returns
+            // the EXISTING mount for an already-mounted root, so the loser
+            // mounted nothing of its own and has nothing to clean up. Closing
+            // the shared prefix here would tear down the tenant the winner just
+            // published and minted a window for, and a forced close skips the
+            // live-terminal refusal, so it would kill the user's running
+            // terminals too. Report the workspace as running, which it is.
+            return Ok(());
         }
-    };
-    if duplicate {
-        if let Err(e) = embedded.close_prefix(&prefix, true).await {
-            tracing::warn!(key = %key, error = %e, "closing duplicate embedded workspace failed");
-        }
-        return Ok(());
+        serves.insert(key.clone(), ServeHandle::embedded(url.clone()));
     }
     let _ = app.emit(SERVES_CHANGED, ());
     // A user-requested open always mints after the mount. Persisted rows became
@@ -133,19 +134,6 @@ pub async fn start(
         }
     }
     Ok(())
-}
-
-fn url_prefix_from_local_url(url: &str) -> Result<String, String> {
-    let parsed = url
-        .parse::<url::Url>()
-        .map_err(|e| format!("parsing embedded workspace URL: {e}"))?;
-    let path = parsed.path().trim_end_matches('/');
-    let path = path.strip_suffix("/index.html").unwrap_or(path);
-    if path.is_empty() {
-        Ok(String::new())
-    } else {
-        Ok(path.to_string())
-    }
 }
 
 /// Stop a running serve. No-op if the workspace isn't running. The live map
@@ -2442,6 +2430,87 @@ mod tests {
         assert!(!WorkspaceOpenMode::RestoreOnly.should_mint());
     }
 
+    /// Fresh `AppState` over a throwaway config store. The tempdir is leaked
+    /// so the store path outlives the test body.
+    fn empty_state() -> Arc<AppState> {
+        let dir = tempfile::tempdir().expect("config dir");
+        let store = std::sync::Arc::new(std::sync::Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        std::mem::forget(dir);
+        Arc::new(AppState::with_store(store))
+    }
+
+    /// Two `start` calls for one key, both past the `serves` pre-check before
+    /// either can mount.
+    ///
+    /// Determinism comes from the library's own in-process guard: while the
+    /// test holds an `Arc<Workspace>` for the root, every mount attempt fails
+    /// with `WorkspaceAlreadyOpen`, which `EmbeddedServer::open_workspace`
+    /// answers with a 150ms retry sleep. Both callers are therefore parked in
+    /// that loop, past the pre-check, with `serves` still empty -- the exact
+    /// interleaving the race needs. Dropping the handle releases both, the
+    /// host's `register_lock` serializes them onto ONE mount, and whichever
+    /// inserts second takes the duplicate branch.
+    #[tokio::test]
+    async fn a_lost_duplicate_open_leaves_the_shared_tenant_live() {
+        let config = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace root");
+        std::fs::write(root.path().join("note.md"), "# n\n").expect("seed note");
+        let library =
+            chan_workspace::Library::open_at(config.path().join("config.toml")).expect("library");
+        library.register_workspace(root.path()).expect("register");
+
+        let state = empty_state();
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library.clone()).await;
+        assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+        let app = tauri::test::mock_app();
+        let key = root.path().to_string_lossy().into_owned();
+
+        // Block every mount attempt so both callers park in the retry loop.
+        let blocker = library.open_workspace(root.path()).expect("hold the root");
+
+        let first = tokio::spawn(start(
+            app.handle().clone(),
+            Arc::clone(&state),
+            key.clone(),
+            WorkspaceOpenMode::RestoreOnly,
+        ));
+        let second = tokio::spawn(start(
+            app.handle().clone(),
+            Arc::clone(&state),
+            key.clone(),
+            WorkspaceOpenMode::RestoreOnly,
+        ));
+        // Long enough for both spawned tasks to run their (synchronous)
+        // pre-check and reach the first retry sleep, and far short of the
+        // loop's ~1.05s budget.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(
+            state.serves.lock().unwrap().is_empty(),
+            "neither caller can have published while the root is held",
+        );
+        drop(blocker);
+
+        first.await.expect("first join").expect("first start");
+        second.await.expect("second join").expect("second start");
+
+        let embedded = state.embedded.get().expect("embedded");
+        assert!(
+            embedded.is_root_mounted(root.path()),
+            "the loser must not close the tenant both callers share",
+        );
+        assert!(
+            state.serves.lock().unwrap().contains_key(&key),
+            "serves must agree with the live mount",
+        );
+
+        // And the recorded state is usable: a normal stop drains the tenant.
+        let outcome = stop(None, &state, &key, false).await.expect("stop");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
+        assert!(!embedded.is_root_mounted(root.path()));
+    }
+
     #[test]
     fn cli_handoff_mints_for_running_and_stopped_workspaces() {
         const MAIN_RS: &str = include_str!("main.rs");
@@ -3063,21 +3132,6 @@ mod tests {
             MAIN_RS.contains("main.set_menu(menu)"),
             "the launcher menu must be attached per-window on the main window",
         );
-    }
-
-    #[test]
-    fn embedded_url_prefix_parser_strips_query_and_trailing_slash() {
-        let prefix = url_prefix_from_local_url("http://127.0.0.1:1234/workspace-abcd/?t=token")
-            .expect("prefix");
-        assert_eq!(prefix, "/workspace-abcd");
-    }
-
-    #[test]
-    fn embedded_url_prefix_parser_strips_index_html() {
-        let prefix =
-            url_prefix_from_local_url("http://127.0.0.1:1234/workspace-abcd/index.html?t=token")
-                .expect("prefix");
-        assert_eq!(prefix, "/workspace-abcd");
     }
 
     #[test]

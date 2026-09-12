@@ -200,6 +200,29 @@ impl EmbeddedServer {
         })
     }
 
+    /// A host-only server for tests: a real `WorkspaceHost` over `library`,
+    /// with no loopback listener, no registries and no root fallback. Enough to
+    /// mount and unmount real tenants, which is what the serve-lifecycle tests
+    /// drive; anything that needs the HTTP surface is out of its reach.
+    #[cfg(test)]
+    pub async fn for_tests(library: chan_workspace::Library) -> Self {
+        let host = Arc::new(chan_server::WorkspaceHost::new(
+            library,
+            chan_server::route_builder(),
+        ));
+        host.install_self();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        Self {
+            host,
+            extension_runtime: chan_server::ExtensionRuntime::start().await,
+            addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            shutdown_tx,
+            terminal_url: tokio::sync::Mutex::new(None),
+            pending_window_ops: tokio::sync::Mutex::new(None),
+            launcher_token: String::new(),
+        }
+    }
+
     /// The shared window-title map the desktop writes (on window build /
     /// rename / destroy) and the server reads for `cs window list`.
     pub fn window_titles(&self) -> SharedWindowTitles {
@@ -311,17 +334,6 @@ impl EmbeddedServer {
     /// read this so they reflect the REAL mount, not a stale shadow.
     pub fn is_root_mounted(&self, root: &std::path::Path) -> bool {
         self.host.is_root_mounted(root)
-    }
-
-    pub async fn close_prefix(
-        &self,
-        prefix: &str,
-        force: bool,
-    ) -> Result<WorkspaceLifecycleOutcome, String> {
-        self.host
-            .close_workspace(prefix, force)
-            .await
-            .map_err(|e| format!("closing embedded route {prefix}: {e}"))
     }
 
     pub async fn close_workspace_root(
@@ -476,7 +488,7 @@ impl EmbeddedServer {
     /// row. Returns whether a row existed. Called on the control PTY exit (the
     /// desktop-triggered reap) and on disconnect/forget; idempotent. The host's
     /// `reap_control_window` removes the registry row and unmounts the tenant
-    /// directly (it does NOT route through the fragile `close_prefix` prune-task
+    /// directly (it does NOT route through the host's prefix-close prune-task
     /// drop race).
     pub async fn reap_control_window(&self, window_id: &str) -> bool {
         self.host.reap_control_window(window_id).await
