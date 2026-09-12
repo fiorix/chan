@@ -748,6 +748,32 @@ async fn stream_terminal_upload(
     }
 }
 
+/// Directory that a staged post-commit sync failure applies to.
+///
+/// Scoped to one directory rather than flipped globally: the upload tests run
+/// in the same process and in parallel, and a staged failure must not reach a
+/// neighbour's upload.
+#[cfg(test)]
+static FAIL_DIR_SYNC_FOR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// fsync the directory that just accepted the upload's rename.
+///
+/// Wrapped rather than called inline so a test can stage the failure: a
+/// directory that just accepted a rename from this process opens and flushes
+/// fine, so the failure arm is otherwise unreachable from a test.
+fn post_commit_sync_dir(abs_dir: &Path) -> chan_workspace::Result<()> {
+    #[cfg(test)]
+    {
+        let staged = FAIL_DIR_SYNC_FOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if staged.as_deref() == Some(abs_dir) {
+            return Err(chan_workspace::ChanError::Io("staged failure".into()));
+        }
+    }
+    chan_workspace::fs_ops::sync_dir(abs_dir)
+}
+
 fn terminal_upload_stream_sync(
     abs_dir: &Path,
     original_name: &str,
@@ -816,9 +842,20 @@ fn terminal_upload_stream_sync(
         .map_err(|error| chan_workspace::ChanError::Io(format!("fsync tmp: {error}")))?;
     temp.persist_noclobber(&target)
         .map_err(|error| chan_workspace::ChanError::Io(error.error.to_string()))?;
-    std::fs::File::open(abs_dir)
-        .and_then(|dir| dir.sync_all())
-        .map_err(|error| chan_workspace::ChanError::Io(format!("fsync dir: {error}")))?;
+    // Post-commit: `persist_noclobber` already renamed the file into place, so
+    // a failed directory fsync means the dirent may not survive a power loss,
+    // not that the upload did not happen. Failing the response here reports
+    // "nothing happened" about a file that is on disk, and the retry it invites
+    // is refused by the already-exists check above, leaving the user unable to
+    // redo an upload that in fact succeeded. Logged instead of discarded so a
+    // filesystem that cannot flush is still visible in the server log.
+    if let Err(error) = post_commit_sync_dir(abs_dir) {
+        tracing::warn!(
+            dir = %abs_dir.display(),
+            error = %error,
+            "terminal upload committed but its directory fsync failed"
+        );
+    }
     Ok(TerminalUploadResponse {
         path: target.display().to_string(),
         size: written,
@@ -894,6 +931,61 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("note.bin")).unwrap(),
             b"terminal-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_upload_reports_the_commit_when_its_directory_fsync_fails() {
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // The rename is the commit point; the directory fsync after it is
+        // durability, not success. Stage that fsync failing and the file is
+        // still on disk, so the caller must be told the upload happened.
+        *FAIL_DIR_SYNC_FOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir.path().to_path_buf());
+        let boundary = "terminal-upload-dirsync-boundary";
+        let rooted_dir = dir.path().display().to_string();
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             {rooted_dir}\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\r\n\
+             committed-bytes\r\n\
+             --{boundary}--\r\n"
+        );
+        let app = Router::new()
+            .route("/upload", post(api_terminal_upload_file))
+            .with_state(crate::state::test_support::make_test_state(false));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        *FAIL_DIR_SYNC_FOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(dir.path().join("note.bin")).unwrap(),
+            b"committed-bytes"
         );
     }
 
