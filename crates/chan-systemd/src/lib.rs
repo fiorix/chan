@@ -180,12 +180,28 @@ fn is_chan_devserver_exec(exec_start: &str) -> bool {
     {
         return false;
     }
-    arguments.split_whitespace().all(|argument| {
+    // `split_once` would also match `chan devserverrun`; the subcommand has to
+    // end the token, or a lookalike executable rides in on the verb below.
+    if !(arguments.is_empty() || arguments.starts_with(char::is_whitespace)) {
+        return false;
+    }
+    let mut arguments = arguments.split_whitespace().peekable();
+    // The renderer emits `<exe> devserver run [flags]` (both the plain and the
+    // tunnel branch of `devserver_systemd_unit_spec`), and units written before
+    // the verb existed carry the flags with no subcommand at all. Accept the
+    // one verb the renderer can emit, then require flags for the rest.
+    if arguments.peek() == Some(&DEVSERVER_EXEC_VERB) {
+        arguments.next();
+    }
+    arguments.all(|argument| {
         argument.starts_with("--bind=")
             || argument.starts_with("--port=")
             || argument.starts_with("--tunnel-url=")
     })
 }
+
+/// The only `chan devserver` subcommand chan's own unit renderer emits.
+const DEVSERVER_EXEC_VERB: &str = "run";
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -294,5 +310,40 @@ mod unit_tests {
             desired.classify_installed(&unrelated_exec),
             DevserverUnitClass::Foreign
         );
+    }
+
+    #[test]
+    fn devserver_unit_accepts_the_run_verb_but_no_other_command() {
+        // `<exe> devserver run [flags]` is the shape the renderer actually
+        // emits; a unit carrying it must stay chan-owned even when the
+        // installed address differs from the desired one. The end-to-end proof
+        // against the real renderer lives in the chan crate; this pins the
+        // allowlist itself.
+        let desired =
+            DevserverUnit::new("/usr/bin/chan devserver run --bind=127.0.0.1 --port=9000");
+        let installed =
+            DevserverUnit::new("/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787")
+                .render()
+                .replace("TimeoutStartSec=10min\n", "");
+        assert_eq!(
+            desired.classify_installed(&installed),
+            DevserverUnitClass::KnownLegacy
+        );
+
+        // Only `run`: no other subcommand and no second verb is chan-owned.
+        for exec in [
+            "/usr/bin/chan devserver start --bind=127.0.0.1 --port=8787",
+            "/usr/bin/chan devserver run run --bind=127.0.0.1 --port=8787",
+            "/usr/bin/chan devserverrun --bind=127.0.0.1 --port=8787",
+        ] {
+            let installed = DevserverUnit::new(exec)
+                .render()
+                .replace("TimeoutStartSec=10min\n", "");
+            assert_eq!(
+                desired.classify_installed(&installed),
+                DevserverUnitClass::Foreign,
+                "{exec} must not be treated as chan-owned"
+            );
+        }
     }
 }

@@ -10968,6 +10968,94 @@ mod tests {
         assert!(!update.changed, "identical unit must be a no-op");
     }
 
+    #[test]
+    fn chan_own_unit_is_updated_when_the_rendered_address_changes() {
+        // The installed unit and the desired one both come out of the real
+        // renderer: a hand-written ExecStart is exactly how the two spellings
+        // drifted apart in the first place.
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let installed = devserver_systemd_unit_spec(
+            Path::new("/usr/local/bin/chan"),
+            "127.0.0.1:8787".parse().unwrap(),
+            None,
+            None,
+        );
+        std::fs::write(&path, installed.render()).expect("seed the unit chan itself wrote");
+
+        // `chan devserver start --port=9000` over an installed unit: same
+        // renderer, different address, so the Current short-circuit does not
+        // apply and the ExecStart has to be recognized on its own.
+        let desired = devserver_systemd_unit_spec(
+            Path::new("/usr/local/bin/chan"),
+            "127.0.0.1:9000".parse().unwrap(),
+            None,
+            None,
+        );
+        let update = write_rendered_devserver_unit(&path, &desired, false)
+            .expect("chan must update a unit it wrote itself");
+        assert!(update.changed, "a new address must rewrite the unit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired.render());
+    }
+
+    #[test]
+    fn chan_own_unit_is_updated_when_the_binary_moves() {
+        // package -> AppImage -> ~/.local/bin: the ExecStart executable changes
+        // under the same renderer.
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let installed = devserver_systemd_unit_spec(Path::new("/usr/bin/chan"), addr, None, None);
+        std::fs::write(&path, installed.render()).expect("seed the packaged unit");
+
+        let desired =
+            devserver_systemd_unit_spec(Path::new("/home/dev/.local/bin/chan"), addr, None, None);
+        let update = write_rendered_devserver_unit(&path, &desired, false)
+            .expect("chan must update a unit it wrote itself");
+        assert!(update.changed, "a moved binary must rewrite the unit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired.render());
+    }
+
+    #[test]
+    fn chan_own_tunnel_unit_is_updated_when_the_rendered_address_changes() {
+        // The tunnel branch renders a different flag set through the same
+        // `devserver run` verb; it must be recognized too.
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let tunnel = SystemdTunnel {
+            token: "chan_pat_abc123".to_string(),
+            url: "https://proxy.chan.app/v1/tunnel".to_string(),
+            pinned_bind: None,
+            pinned_port: None,
+            pinned_name: None,
+        };
+        let installed = devserver_systemd_unit_spec(
+            Path::new("/usr/local/bin/chan"),
+            "127.0.0.1:8787".parse().unwrap(),
+            None,
+            Some(&tunnel),
+        );
+        std::fs::write(&path, installed.render()).expect("seed the tunnel unit");
+
+        let pinned = SystemdTunnel {
+            token: tunnel.token.clone(),
+            url: tunnel.url.clone(),
+            pinned_bind: None,
+            pinned_port: Some(9000),
+            pinned_name: None,
+        };
+        let desired = devserver_systemd_unit_spec(
+            Path::new("/usr/local/bin/chan"),
+            "127.0.0.1:9000".parse().unwrap(),
+            None,
+            Some(&pinned),
+        );
+        let update = write_rendered_devserver_unit(&path, &desired, true)
+            .expect("chan must update a tunnel unit it wrote itself");
+        assert!(update.changed, "a new pinned port must rewrite the unit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired.render());
+    }
+
     #[derive(Default)]
     struct FakeDevserverSystemdControl {
         commands: Vec<Vec<String>>,
