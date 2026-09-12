@@ -45,6 +45,8 @@ mod handover_bus;
 mod indexer;
 mod mcp_bridge;
 mod preferences;
+#[cfg(test)]
+mod route_authority;
 mod routes;
 mod scene_sessions;
 mod self_writes;

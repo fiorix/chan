@@ -3972,6 +3972,33 @@ mod tests {
         assert_eq!(routed.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn every_devserver_route_declares_its_authority() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        crate::route_authority::test_support::assert_table_matches(
+            "devserver",
+            &app,
+            crate::route_authority::DEVSERVER,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_meets_the_declared_authority_on_every_devserver_route() {
+        let home = tempfile::tempdir().expect("home");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let host = state.host.clone();
+        let (app, _serve_addr) = build_devserver_app(state, host);
+        crate::route_authority::test_support::assert_non_owner_meets_table(
+            "devserver",
+            app,
+            crate::route_authority::DEVSERVER,
+        )
+        .await;
+    }
+
     #[test]
     fn store_save_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();

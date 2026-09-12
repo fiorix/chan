@@ -346,6 +346,21 @@ pub(crate) mod test_support {
         settings_disabled: bool,
         transfer_max_bytes: Option<u64>,
     ) -> Arc<AppState> {
+        make_test_state_inner(settings_disabled, transfer_max_bytes, None)
+    }
+
+    /// Build a workspace-less test state whose `/api` surface is bearer-gated,
+    /// so a test can tell an admitted request apart from one the token check
+    /// never ran on. The tokenless builders leave `auth_middleware` a no-op.
+    pub fn make_test_state_with_token(token: &str) -> Arc<AppState> {
+        make_test_state_inner(false, None, Some(token.to_string()))
+    }
+
+    fn make_test_state_inner(
+        settings_disabled: bool,
+        transfer_max_bytes: Option<u64>,
+        token: Option<String>,
+    ) -> Arc<AppState> {
         // The TempDir's path is what Library::open_at uses for any
         // later registry writes (register_workspace, ...). Letting it
         // drop here would delete the directory and
@@ -378,7 +393,7 @@ pub(crate) mod test_support {
             library: lib,
             workspace_root: PathBuf::from("/dev/null"),
             workspace_cell: Arc::new(RwLock::new(None)),
-            token: None,
+            token,
             prefix: Arc::new(RwLock::new(String::new())),
             settings_disabled,
             events_tx,
