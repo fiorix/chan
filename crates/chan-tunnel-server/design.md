@@ -147,7 +147,7 @@ sequenceDiagram
 One task per registered tunnel owns the yamux `Connection`. Its concerns are merged into a single `poll_fn`:
 
 - Shutdown takes priority. The `oneshot::Receiver` resolves either on explicit `()` send or sender drop (the registry drops it on eviction). Either signal exits the loop and `poll_close`s yamux.
-- Drain pending `OpenRequest`s from the public side into a local queue and call `poll_new_outbound`; reply with the new substream over the oneshot in the request.
+- Drain pending `OpenRequest`s from the public side into a local queue and call `poll_new_outbound`; reply with the new substream over the oneshot in the request. The caller already holds a substream permit (see "Registry"), so the queue never grows past what yamux will hand out: `poll_new_outbound` refuses with `TooManyStreams` at `TUNNEL_YAMUX_MAX_STREAMS`, and that refusal has already put the connection into cleanup, so there is nothing left to salvage and the driver can only shut down.
 - Poll for the one client-opened control shape: admission-lease refresh. At most one refresh is pending; additional inbound streams are dropped. Refresh is handled outside the driver poll so identity validation does not stall public outbound stream allocation.
 
 On exit the driver replies `OpenError::Disconnected` to any open requests still queued, then deregisters itself if it still owns the registry slot.
@@ -195,7 +195,7 @@ The host supplies a `Validator`; this crate never issues or interprets tokens it
 
 The listener is the only path that inserts tunnels into the registry. It owns validate-before-200, Hello/HelloAck, per-user cap enforcement, and transition into the driver loop. Registration itself stays crate-private so embedders cannot mint handles that bypass validation.
 
-The registry is keyed by user plus token-resolved devserver id. It exposes lookup for public forwarding, sorted snapshots for dashboard/admin views, and explicit eviction. A `TunnelHandle` opens one yamux substream for one public request; its single failure category is disconnected, which public callers map to 502.
+The registry is keyed by user plus token-resolved devserver id. It exposes lookup for public forwarding, sorted snapshots for dashboard/admin views, and explicit eviction. A `TunnelHandle` opens one yamux substream for one public request, and `open` returns a `TunnelStream`: the substream plus the permit for the slot it occupies, released when the stream is dropped. Its single failure category is disconnected, which public callers map to 502.
 
 Public-side forwarding belongs to the gateway. This crate intentionally exposes no public router or public config; the gateway layers authentication, host routing, body caps, forwarded-header sanitation, rate limits, and upgrade bridging on top of `TunnelHandle::open`.
 
@@ -220,6 +220,7 @@ Server-specific notes:
 - **Public scope**: REMOVED. The tunnel is always authenticated; there is no anonymous-readable path, so `TUNNEL_PUBLIC_SCOPE` / `Hello.public` / `MissingPublicScope` are gone. The gateway authorizes a viewer with one `devserver_access(owner, devserver, caller)` check (a grant is the whole library); see the gateway's `devserver-proxy/design.md` and ADR-0001.
 - **Username validation** (`is_valid_username`): defense-in-depth. The username flows into public routing; if the upstream identity service ever emits `..`, slashes, or whitespace, the public side would mis-route. The handshake refuses any username that wouldn't be URL-safe.
 - **Workspace name validation** (`is_valid_workspace_name`): every Hello's `workspace` field is checked; clients pre-check too but we don't trust them.
+- **Per-tunnel substream budget**: `MAX_TUNNEL_SUBSTREAMS` (120) bounds how many substreams one tunnel holds open at once, and `TunnelHandle::open` waits for a slot rather than asking yamux for a stream past its own cap. The margin under `TUNNEL_YAMUX_MAX_STREAMS` (256) is wide on purpose: a dropped substream frees its permit at once but yamux only drops it from its stream map on the driver's next poll, so the worst case in flight is twice the permit count (240), and the 16 slots left over are for the streams the peer opens. Public callers bound their own wait with the request deadline (504) instead of taking the whole session down with one refused open.
 - **Per-user registration cap**: `max_workspaces_per_user` bounds how many distinct registrations (distinct `devserver_id`s) one user can keep. Checked best-effort in admission (clean refusal on the wire) and authoritatively under the registry lock at insert.
 - **Method / path gate**: 404 for anything other than `POST /v1/tunnel`. The drainer task rejects additional streams on the same connection with 409 and abrupt-shutdowns the connection (ENHANCE_YOUR_CALM) after 16 rejections.
 - **Bearer parsing**: scheme name is case-insensitive (RFC 6750); the scheme/token separator is one or more SP / HTAB (RFC 7230 BWS); empty / whitespace-only tokens are rejected.

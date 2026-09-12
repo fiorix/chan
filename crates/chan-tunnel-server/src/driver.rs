@@ -286,6 +286,12 @@ fn wall_delay(expires_at: chrono::DateTime<chrono::Utc>) -> Duration {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use futures::AsyncWriteExt;
+    use tokio::io::AsyncReadExt;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+    use yamux::Mode;
+
+    use crate::registry::MAX_TUNNEL_SUBSTREAMS;
 
     struct UnexpectedValidator;
 
@@ -320,5 +326,94 @@ mod tests {
         .is_err());
         assert!(started.elapsed() >= LEASE_REFRESH_TIMEOUT);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Drive one registered tunnel whose peer only drains the socket.
+    /// That is enough for `poll_new_outbound`: yamux creates the
+    /// stream from its own accounting, without waiting for the peer.
+    fn spawn_tunnel() -> (Arc<Registry>, TunnelHandle) {
+        let (server_io, mut peer_io) = tokio::io::duplex(1024 * 1024);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while peer_io.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let conn = yamux::Connection::new(
+            server_io.compat(),
+            crate::tunnel_yamux_config(),
+            Mode::Server,
+        );
+        let registry = Registry::new();
+        let (handle, open_rx, shutdown_rx) = registry
+            .register_with_cap("alice".into(), "ds".into(), None, None, 0)
+            .expect("register");
+        let validated = Validated {
+            user_id: uuid::Uuid::new_v4(),
+            username: "alice".into(),
+            devserver_id: "ds".into(),
+            scopes: vec!["tunnel".into()],
+            gateway_assertion_key: None,
+            admission_lease: None,
+            admission_lease_expires_at: None,
+        };
+        tokio::spawn(workspace_tunnel(
+            conn,
+            open_rx,
+            shutdown_rx,
+            registry.clone(),
+            handle.clone(),
+            Arc::new(UnexpectedValidator),
+            validated,
+        ));
+        (registry, handle)
+    }
+
+    /// An open past the substream budget is one caller's problem. It
+    /// waits for a slot; the tunnel stays registered and every
+    /// substream already open stays usable. Asking yamux for a stream
+    /// past `TUNNEL_YAMUX_MAX_STREAMS` instead returns an error that
+    /// has already put the connection into cleanup, which takes the
+    /// whole session and all its substreams down with it.
+    #[tokio::test]
+    async fn an_open_past_the_substream_budget_waits_instead_of_killing_the_tunnel() {
+        let (registry, handle) = spawn_tunnel();
+
+        let mut streams = Vec::new();
+        for i in 0..MAX_TUNNEL_SUBSTREAMS {
+            let stream = tokio::time::timeout(Duration::from_secs(10), handle.open())
+                .await
+                .unwrap_or_else(|_| panic!("open {i} timed out"))
+                .unwrap_or_else(|e| panic!("open {i} failed: {e}"));
+            streams.push(stream);
+        }
+
+        // One past the budget: the caller waits (its own deadline
+        // bounds that), and nothing else on the tunnel notices.
+        let extra = tokio::time::timeout(Duration::from_millis(250), handle.open()).await;
+        assert!(
+            extra.is_err(),
+            "an open past the budget must wait for a slot",
+        );
+        assert!(
+            registry.get("alice", "ds").is_some(),
+            "the tunnel was torn down by one refused open",
+        );
+        tokio::time::timeout(Duration::from_secs(10), streams[0].write_all(b"ping"))
+            .await
+            .expect("write timed out")
+            .expect("substreams opened earlier must still be usable");
+
+        // And the slot really does come back: a caller parked on the
+        // budget is served once a substream closes.
+        let waiting = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.open().await }
+        });
+        tokio::task::yield_now().await;
+        streams.pop();
+        let served = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the parked open was never served")
+            .expect("open task panicked");
+        assert!(served.is_ok(), "parked open failed: {:?}", served.err());
     }
 }

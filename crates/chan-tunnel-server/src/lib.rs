@@ -526,7 +526,10 @@ mod driver;
 mod registry;
 mod tunnel;
 
-pub use registry::{OpenError, Registry, RegistryEvent, TunnelHandle, TunnelInfo, WorkspaceInfo};
+pub use registry::{
+    OpenError, Registry, RegistryEvent, TunnelHandle, TunnelInfo, TunnelStream, WorkspaceInfo,
+    MAX_TUNNEL_SUBSTREAMS,
+};
 pub use tunnel::{serve_tunnel_listener, serve_tunnel_listener_with_admission};
 
 #[cfg(test)]

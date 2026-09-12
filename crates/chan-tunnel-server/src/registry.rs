@@ -16,13 +16,41 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use chan_tunnel_proto::gateway_assertion::AssertionKey;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
+
+/// Slots yamux's cap keeps for the streams the peer opens, which
+/// share the same map: the client's lease refresh holds one at a
+/// time, and the driver drops any beyond it, but a dropped stream is
+/// only reaped on the driver's next poll, so a couple can be counted
+/// at once.
+const PEER_STREAM_HEADROOM: usize = 16;
+
+/// How many substreams one tunnel may hold open at once.
+///
+/// yamux refuses `poll_new_outbound` with `TooManyStreams` once its
+/// own stream map reaches `TUNNEL_YAMUX_MAX_STREAMS`, and that
+/// refusal has already moved the connection into cleanup: the
+/// session is dead before the driver ever sees the error, so the
+/// count must never reach the cap in the first place. There is no
+/// recovering from a miss here, which is what the margin is for.
+///
+/// Half of what the peer's headroom leaves, because a dropped
+/// substream releases its permit immediately while yamux only removes
+/// it from the map when the driver next polls the connection, and the
+/// driver serves queued opens before that poll. A burst of
+/// completions can therefore leave one dropped stream still counted
+/// for every permit a waiting caller takes over in the same pass,
+/// putting twice this many outbound streams in the map at once.
+pub const MAX_TUNNEL_SUBSTREAMS: usize =
+    (chan_tunnel_proto::TUNNEL_YAMUX_MAX_STREAMS - PEER_STREAM_HEADROOM) / 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -151,6 +179,10 @@ pub(crate) type OpenRequest = OpenReply;
 #[derive(Clone)]
 pub struct TunnelHandle {
     open_tx: mpsc::Sender<OpenRequest>,
+    /// Admission for `open`: one permit per live substream, so the
+    /// driver never asks yamux for a stream its own accounting would
+    /// refuse. See `MAX_TUNNEL_SUBSTREAMS`.
+    substreams: Arc<Semaphore>,
     pub registration_id: Uuid,
     pub owner_user_id: Uuid,
     pub user: Arc<str>,
@@ -170,12 +202,64 @@ pub struct TunnelHandle {
 }
 
 impl TunnelHandle {
-    pub async fn open(&self) -> Result<yamux::Stream, OpenError> {
+    /// Open a substream, waiting for a free slot when the tunnel is
+    /// already at `MAX_TUNNEL_SUBSTREAMS`. Callers bound that wait
+    /// with their own request deadline; the alternative, asking yamux
+    /// for a stream past its cap, kills every other substream on the
+    /// tunnel with it.
+    pub async fn open(&self) -> Result<TunnelStream, OpenError> {
+        let permit = self
+            .substreams
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("substream semaphore is never closed");
         let (tx, rx) = oneshot::channel();
         if self.open_tx.send(tx).await.is_err() {
             return Err(OpenError::Disconnected);
         }
-        rx.await.map_err(|_| OpenError::Disconnected)?
+        let stream = rx.await.map_err(|_| OpenError::Disconnected)??;
+        Ok(TunnelStream {
+            stream,
+            _permit: permit,
+        })
+    }
+}
+
+/// One substream on a live tunnel, holding the slot it occupies in
+/// the tunnel's substream budget. Dropping it frees the slot, which
+/// is the same moment yamux learns the stream is gone, so the two
+/// counts cannot drift apart.
+pub struct TunnelStream {
+    stream: yamux::Stream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl futures::AsyncRead for TunnelStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl futures::AsyncWrite for TunnelStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_close(cx)
     }
 }
 
@@ -313,6 +397,7 @@ impl Registry {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = TunnelHandle {
             open_tx,
+            substreams: Arc::new(Semaphore::new(MAX_TUNNEL_SUBSTREAMS)),
             registration_id,
             owner_user_id,
             user: user.clone(),
