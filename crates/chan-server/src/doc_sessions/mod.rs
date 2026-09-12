@@ -1846,6 +1846,7 @@ async fn flush_session_locked(
         let ws = Arc::clone(workspace);
         let path = session.path.clone();
         let epoch = job.epoch;
+        let expected_mtime_ns = job.expected_mtime_ns;
         #[cfg(test)]
         let test_session = Arc::clone(session);
         let result = tokio::task::spawn_blocking(move || {
@@ -1874,14 +1875,29 @@ async fn flush_session_locked(
                 session.finish_flush(epoch, &stat, &flushed_content);
                 return true;
             }
-            Ok((false, Err(ChanError::WriteConflict { .. }))) if attempt == 0 => {
+            Ok((false, Err(ChanError::WriteConflict { current_mtime_ns }))) if attempt == 0 => {
                 self_writes.cancel(self_write);
                 // Disk changed since our token: reconcile it, then
                 // retry only if the state machine remains flushable.
                 // A fold-in deferred for corroboration is not a failure:
                 // the pending path owns convergence, so bail without
                 // fanning an error.
-                reconcile_session_locked(session, workspace).await;
+                //
+                // A conflict raised on a token that still MATCHES is the
+                // `expected_disk` guard firing: something rewrote the bytes
+                // without moving the timestamp (`rsync --times`, a restore
+                // from backup, a coarse-granularity filesystem). The
+                // reconcile's flush-echo guard reads that same matching
+                // token as our own echo and returns without reading the
+                // disk at all, so attempt 1 would replay the identical
+                // rejected job. Force the read for exactly that case, so
+                // the corroboration and merge path the conflict asked for
+                // actually runs. A `force_read` flag rather than a parked
+                // observation because only the read can say what to park.
+                // (`scene_sessions` has no such hole: its echo guard
+                // already reads and compares the bytes.)
+                let force_read = current_mtime_ns == expected_mtime_ns;
+                reconcile_session_locked(session, workspace, force_read).await;
                 if session.lock_state().session_state.has_observation() {
                     return false;
                 }
@@ -1916,13 +1932,21 @@ async fn flush_session_locked(
 /// retained conflict instead of risking authority loss.
 pub(crate) async fn reconcile_session(session: &Arc<DocSession>, workspace: &Arc<Workspace>) {
     let _io = session.io_lock.lock().await;
-    reconcile_session_locked(session, workspace).await;
+    reconcile_session_locked(session, workspace, false).await;
     if let Err(error) = session.persist_recovery_locked(workspace).await {
         tracing::warn!(error = %error, path = %session.path, "persist document recovery failed");
     }
 }
 
-async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Workspace>) {
+/// `force_read` skips the matching-token flush-echo guard below. Only the
+/// CAS-conflict arm sets it, and only when the refusal came back carrying the
+/// token the job wrote against: the bytes moved under a timestamp that did
+/// not, so the token proves nothing and the read has to happen.
+async fn reconcile_session_locked(
+    session: &Arc<DocSession>,
+    workspace: &Arc<Workspace>,
+    force_read: bool,
+) {
     if session.closed.load(Ordering::Relaxed) {
         return;
     }
@@ -2000,8 +2024,11 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         // and settling here would end the corroboration that folds an
         // honest truncation in once the guards lapse. A conflicted
         // session always reads: its token predates the conflict, and
-        // the retained disk side below must track the live disk.
-        if !matches!(st.session_state, SessionState::Conflicted(_))
+        // the retained disk side below must track the live disk. Nor
+        // when the caller already has proof the token is lying
+        // (`force_read`).
+        if !force_read
+            && !matches!(st.session_state, SessionState::Conflicted(_))
             && stat.mtime_ns.is_some()
             && stat.mtime_ns == st.flushed_mtime_ns
             && st.session_state.content_observation().is_none()
@@ -2461,6 +2488,27 @@ mod tests {
         fn external_write(&self, path: &str, content: &str) {
             self.workspace.write_text(path, content).unwrap();
             self.advance_mtime(path);
+        }
+
+        /// Stage an external edit that lands inside the window the
+        /// session's token names: the bytes move, the timestamp does not.
+        ///
+        /// That is what an mtime-preserving writer does (`rsync --times`,
+        /// a restore from backup, a tool that resets timestamps), and what
+        /// a filesystem whose timestamp granularity is coarser than the
+        /// gap between two writes does by itself. The session's CAS then
+        /// refuses on `expected_disk` while its token still matches, which
+        /// is the collision `expected_disk` exists to catch. Mirrored from
+        /// `scene_sessions/mod.rs`'s `external_write_keeping_mtime`.
+        fn external_write_keeping_mtime(&self, path: &str, content: &str, mtime_ns: i64) {
+            self.workspace.write_text(path, content).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.root.path().join(path))
+                .unwrap();
+            let stamp = UNIX_EPOCH + Duration::from_nanos(mtime_ns as u64);
+            file.set_times(std::fs::FileTimes::new().set_modified(stamp))
+                .unwrap();
         }
 
         /// Move `path`'s mtime strictly forward. Relative to the current
@@ -4023,6 +4071,81 @@ mod tests {
         assert_eq!(hb.session().authority_view().0, "two");
         assert_eq!(drain(&mut rxa).len(), 1, "merged session heard the update");
         assert_eq!(drain(&mut rxb).len(), 0, "untouched session stays silent");
+    }
+
+    #[tokio::test]
+    async fn flush_cas_conflict_on_a_matching_token_reads_the_disk_back() {
+        // An mtime-preserving external rewrite: the bytes diverge, the
+        // timestamp stays on the session's token. `write_text_if_unchanged`
+        // still refuses (that is what `expected_disk` is for), but the
+        // reconcile that answers the refusal used to see a token that
+        // matched, read nothing, and return -- so attempt 1 replayed the
+        // identical rejected job. `scene_sessions` never had this hole: its
+        // flush-echo guard reads the disk and compares bytes.
+        let fx = fixture(&[("a.md", "seed\n")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+
+        // Flush once: only a committed write leaves a verbatim baseline, and
+        // only a verbatim baseline is offered as `expected_disk`. The attach
+        // seed is newline-normalised, so it never is.
+        ha.session()
+            .apply_replace("c1", "one\ntwo\nthree\n")
+            .expect("seed the flushed baseline");
+        backdate_dirty(ha.session());
+        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
+        drain(&mut rxa);
+        let token = ha
+            .session()
+            .lock_state()
+            .flushed_mtime_ns
+            .expect("the flush stamps a token");
+
+        fx.external_write_keeping_mtime("a.md", "one\ntwo\nEXTERNAL\n", token);
+        ha.session()
+            .apply_replace("c1", "ONE\ntwo\nthree\n")
+            .expect("local edit");
+        drain(&mut rxa);
+        backdate_dirty(ha.session());
+
+        let settled = flush_session(ha.session(), &fx.workspace, &fx.self_writes).await;
+        assert!(!settled, "the CAS refuses while the disk diverges");
+        assert_eq!(
+            fx.workspace.read_text("a.md").unwrap(),
+            "one\ntwo\nEXTERNAL\n",
+            "the refused write must not have landed",
+        );
+        {
+            let st = ha.session().lock_state();
+            assert!(
+                st.session_state.content_observation().is_some(),
+                "the conflict must park an observation, not replay the job",
+            );
+            assert_eq!(
+                st.flush_failures, 0,
+                "the retry stops at the deferral; a second attempt would \
+                 have fanned a failure",
+            );
+        }
+
+        // The observation holds: the divergence reconciles through the
+        // ordinary three-way merge, which here is clean (the two edits
+        // touch different lines).
+        backdate_pending_fold(ha.session());
+        fx.registry.reconcile_pending(&fx.workspace).await;
+        assert_eq!(
+            ha.session().authority_view().0,
+            "ONE\ntwo\nEXTERNAL\n",
+            "the external line and the local line both survive",
+        );
+
+        // And the session is flushable again: the merged authority commits.
+        backdate_dirty(ha.session());
+        assert!(flush_session(ha.session(), &fx.workspace, &fx.self_writes).await);
+        assert_eq!(
+            fx.workspace.read_text("a.md").unwrap(),
+            "ONE\ntwo\nEXTERNAL\n"
+        );
     }
 
     #[tokio::test]
