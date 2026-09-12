@@ -520,9 +520,16 @@ impl DocSession {
         unreadable_disk: Option<(u64, Option<i64>)>,
         record: RecoveryRecord,
     ) -> Result<Self, String> {
-        let (disk_text, disk_stat) = match disk {
-            Some((text, stat)) => (normalize_lf(text), Some(stat)),
-            None => (String::new(), None),
+        // `normalize_lf` rewrites nothing exactly when the raw bytes hold no
+        // `\r`, so that one predicate also answers whether the normalized text
+        // is still byte-for-byte the file. Captured here because the raw string
+        // is consumed by the normalization.
+        let (disk_text, disk_stat, disk_verbatim) = match disk {
+            Some((text, stat)) => {
+                let verbatim = !text.contains('\r');
+                (normalize_lf(text), Some(stat), verbatim)
+            }
+            None => (String::new(), None, false),
         };
         let disk_mtime_ns = disk_stat
             .as_ref()
@@ -639,7 +646,7 @@ impl DocSession {
                 content_hash: disk_hash,
                 mtime_ns: disk_mtime_ns,
                 authority_version: version,
-                verbatim: true,
+                verbatim: disk_verbatim,
             }
         } else {
             baseline
@@ -941,16 +948,21 @@ impl DocSession {
     /// gate.
     #[cfg(test)]
     fn apply_merge_outcome(&self, disk_text: String, stat: &FileStat, outcome: MergeOutcome) {
+        let disk_verbatim = !disk_text.contains('\r');
         let disk_text = normalize_lf(disk_text);
         let mut st = self.lock_state();
-        self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
+        self.apply_merge_outcome_locked(&mut st, disk_text, stat, disk_verbatim, outcome);
     }
 
+    /// `disk_verbatim` is whether `disk_text` is still byte-for-byte what the
+    /// file holds; the normalization that produced it happens at the read, so
+    /// the answer has to be carried in rather than guessed from the argument.
     fn apply_merge_outcome_locked(
         &self,
         st: &mut DocState,
         disk_text: String,
         stat: &FileStat,
+        disk_verbatim: bool,
         outcome: MergeOutcome,
     ) {
         let disk_hash = content_hash(&disk_text);
@@ -968,7 +980,7 @@ impl DocSession {
                     content_hash: disk_hash,
                     mtime_ns: stat.mtime_ns,
                     authority_version: st.version,
-                    verbatim: true,
+                    verbatim: disk_verbatim,
                 };
                 st.write_budget = semantic_write_budget(Some(stat.size));
                 st.session_state = if st.text == st.baseline.content {
@@ -1023,14 +1035,19 @@ impl DocSession {
     /// Fold clean external disk content into the session. Dirty
     /// divergence runs a deterministic three-way merge from the
     /// durable baseline.
-    fn merge_disk(&self, disk_text: String, stat: &FileStat) {
+    /// `disk_verbatim` says whether `disk_text` is byte-for-byte what the file
+    /// holds. The reconciler normalizes at the read, so only the reader knows;
+    /// a baseline stamped verbatim over LF-folded CRLF bytes makes the next CAS
+    /// write compare an LF expectation against raw CRLF on disk, and that write
+    /// is then refused on every tick forever.
+    fn merge_disk(&self, disk_text: String, stat: &FileStat, disk_verbatim: bool) {
         let disk_text = normalize_lf(disk_text);
         let mut st = self.lock_state();
         if st.session_state.is_dirty() && disk_text != st.text {
             let outcome = merge_text_snapshots(&st.baseline.content, &st.text, &disk_text)
                 .map(MergeOutcome::Merged)
                 .unwrap_or(MergeOutcome::Conflict);
-            self.apply_merge_outcome_locked(&mut st, disk_text, stat, outcome);
+            self.apply_merge_outcome_locked(&mut st, disk_text, stat, disk_verbatim, outcome);
             return;
         }
         // Adopted disk content joins the echo ring: a stale read
@@ -1046,7 +1063,7 @@ impl DocSession {
             content_hash: disk_hash,
             mtime_ns: stat.mtime_ns,
             authority_version: st.version,
-            verbatim: true,
+            verbatim: disk_verbatim,
         };
         st.write_budget = semantic_write_budget(Some(stat.size));
         st.session_state = SessionState::Clean;
@@ -1120,6 +1137,7 @@ impl DocSession {
                 return true;
             }
         };
+        let disk_verbatim = !disk_text.contains('\r');
         let disk_text = normalize_lf(disk_text);
         let disk_hash = content_hash(&disk_text);
         let mut st = self.lock_state();
@@ -1135,7 +1153,7 @@ impl DocSession {
             content_hash: disk_hash,
             mtime_ns: disk_stat.mtime_ns,
             authority_version: st.version,
-            verbatim: true,
+            verbatim: disk_verbatim,
         };
         st.write_budget = semantic_write_budget(Some(disk_stat.size));
         st.session_state = SessionState::Clean;
@@ -2024,12 +2042,13 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
             }
             Err(_) => return,
         };
+    let disk_verbatim = !disk_text.contains('\r');
     let disk_text = normalize_lf(disk_text);
     let hash = content_hash(&disk_text);
     {
         let mut st = session.lock_state();
         if matches!(st.session_state, SessionState::Conflicted(_)) {
-            reconcile_conflicted_locked(&mut st, disk_text, &disk_stat, hash);
+            reconcile_conflicted_locked(&mut st, disk_text, &disk_stat, hash, disk_verbatim);
             return;
         }
         if st.disk_echo.contains(hash) {
@@ -2054,7 +2073,7 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
         if disk_text == st.text {
             // Equal content: merge_disk's silent-adopt branch.
             drop(st);
-            session.merge_disk(disk_text, &disk_stat);
+            session.merge_disk(disk_text, &disk_stat, disk_verbatim);
             return;
         }
         let dirty = st.session_state.is_dirty();
@@ -2102,7 +2121,7 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
             );
             if corroborated {
                 drop(st);
-                session.merge_disk(disk_text, &disk_stat);
+                session.merge_disk(disk_text, &disk_stat, disk_verbatim);
             } else if !same_observation {
                 st.session_state.observe_content(hash, disk_stat.mtime_ns);
             }
@@ -2112,7 +2131,7 @@ async fn reconcile_session_locked(session: &Arc<DocSession>, workspace: &Arc<Wor
     }
     // Clean session, non-empty divergent content: an ordinary external
     // edit; fold it in immediately, as before.
-    session.merge_disk(disk_text, &disk_stat);
+    session.merge_disk(disk_text, &disk_stat, disk_verbatim);
 }
 
 /// A conflicted session's reconcile: authority, baseline, and flushing
@@ -2128,6 +2147,7 @@ fn reconcile_conflicted_locked(
     disk_text: String,
     disk_stat: &FileStat,
     hash: u64,
+    disk_verbatim: bool,
 ) {
     let retained = match &st.session_state {
         SessionState::Conflicted(conflict) => conflict.disk_version,
@@ -2175,7 +2195,7 @@ fn reconcile_conflicted_locked(
             content_hash: hash,
             mtime_ns: disk_stat.mtime_ns,
             authority_version: st.version,
-            verbatim: true,
+            verbatim: disk_verbatim,
         };
         st.write_budget = semantic_write_budget(Some(disk_stat.size));
         st.session_state = SessionState::Clean;
@@ -2729,7 +2749,7 @@ mod tests {
 
         fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
-        ha.session().merge_disk(disk.to_string(), &stat);
+        ha.session().merge_disk(disk.to_string(), &stat, true);
 
         assert_eq!(
             ha.session().authority_view().0,
@@ -2791,7 +2811,7 @@ mod tests {
 
         fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
-        ha.session().merge_disk(disk.to_string(), &stat);
+        ha.session().merge_disk(disk.to_string(), &stat, true);
         {
             let st = ha.session().lock_state();
             let SessionState::Conflicted(conflict) = &st.session_state else {
@@ -2833,7 +2853,7 @@ mod tests {
         ha.session().apply_replace("c1", local).unwrap();
         fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
-        ha.session().merge_disk(disk.to_string(), &stat);
+        ha.session().merge_disk(disk.to_string(), &stat, true);
         assert!(matches!(
             ha.session().lock_state().session_state,
             SessionState::Conflicted(_)
@@ -3073,7 +3093,7 @@ mod tests {
         drain(&mut rx);
         fx.external_write("a.md", disk);
         let stat = fx.workspace.stat("a.md").unwrap();
-        ha.session().merge_disk(disk.to_string(), &stat);
+        ha.session().merge_disk(disk.to_string(), &stat, true);
         drain(&mut rx); // the conflict announcement
 
         assert!(
@@ -4222,6 +4242,46 @@ mod tests {
         assert_eq!(st.flushed_mtime_ns, new_token);
         drop(st);
         assert_eq!(drain(&mut rxa).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_crlf_fold_in_does_not_wedge_every_later_flush() {
+        let fx = fixture(&[("a.md", "one\r\ntwo\r\n")]);
+        let (ha, _rxa) = attach(&fx, "a.md", "w1", None).await;
+
+        // An external tool rewrites the file, still CRLF. The reconciler
+        // folds it in and re-stamps the durable baseline, which holds the
+        // LF-normalized text rather than the file's own bytes.
+        fx.external_write("a.md", "one\r\ntwo\r\nthree\r\n");
+        reconcile_session(ha.session(), &fx.workspace).await;
+
+        // The user types. A baseline stamped verbatim over that folded
+        // text offers itself as the CAS expectation on a matching mtime,
+        // `disk_still_holds` compares it against the raw CRLF bytes, and
+        // the refused write replays on every flush tick forever: the edit
+        // never lands, the clients keep a flush-error banner, and the
+        // dirty session is never reaped.
+        let (version, len16) = {
+            let st = ha.session().lock_state();
+            (st.version, st.len16)
+        };
+        ha.push(version, vec![update("c1", json!([len16, [0, "!"]]))])
+            .unwrap();
+        backdate_dirty(ha.session());
+        for _ in 0..3 {
+            fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        }
+
+        assert_eq!(
+            fx.workspace.read_text("a.md").unwrap(),
+            "one\ntwo\nthree\n!",
+            "the edit lands, and the first save converts the file to LF"
+        );
+        assert_eq!(
+            ha.session().lock_state().flush_failures,
+            0,
+            "no tick refused the write"
+        );
     }
 
     #[tokio::test]
