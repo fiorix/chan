@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::error::{ChanError, Result};
 use crate::index::config;
 use crate::library::Library;
+use crate::lock::WorkspaceLock;
 use crate::paths::WorkspacePaths;
 use crate::registry::KnownWorkspace;
 
@@ -271,6 +272,18 @@ fn import_metadata_archive(
         guard_scm_identity(&manifest, detect_scm_identity(&entry.root_path).as_ref())?;
     }
 
+    // The import replaces `index/`, `graph/`, `sessions/` and `report/`
+    // wholesale, the same directories `Library::reset_workspace_with` wipes,
+    // so it takes the same exclusion in the same order: the in-process check
+    // first, which names an undropped `Arc<Workspace>` in this process as
+    // `WorkspaceAlreadyOpen`, then the writer flock, which refuses a foreign
+    // holder as `WorkspaceLocked`. Without it a running devserver keeps
+    // reading and writing directories that have been unlinked under it, and
+    // the index and graph it leaves behind describe two different
+    // generations.
+    lib.refuse_if_live(root)?;
+    let lock = WorkspaceLock::acquire(&workspace_paths.lock, root)?;
+
     let staging = workspace_paths
         .root
         .join("staging")
@@ -287,20 +300,24 @@ fn import_metadata_archive(
         for subtree in INCLUDED_SUBTREES {
             replace_subtree(&workspace_paths, &payload, subtree)?;
         }
-        if opts.rescan {
-            let workspace = lib.open_workspace(root)?;
-            workspace.reindex(None)?;
-        }
-        Ok(MetadataImportReport {
-            manifest,
-            imported_subtrees: INCLUDED_SUBTREES.iter().map(|s| (*s).to_string()).collect(),
-            files,
-            bytes,
-            rescanned: opts.rescan,
-        })
+        Ok((files, bytes))
     });
     let _ = std::fs::remove_dir_all(&staging);
-    result
+    // Everything destructive is done. The rescan reopens the workspace,
+    // which takes this very lock, so release it first.
+    drop(lock);
+    let (files, bytes) = result?;
+    if opts.rescan {
+        let workspace = lib.open_workspace(root)?;
+        workspace.reindex(None)?;
+    }
+    Ok(MetadataImportReport {
+        manifest,
+        imported_subtrees: INCLUDED_SUBTREES.iter().map(|s| (*s).to_string()).collect(),
+        files,
+        bytes,
+        rescanned: opts.rescan,
+    })
 }
 
 fn registered_workspace(lib: &Library, root: &Path) -> Result<(KnownWorkspace, WorkspacePaths)> {
@@ -958,6 +975,137 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(paths.sessions.join("session.json")).unwrap(),
             "session"
+        );
+    }
+
+    #[test]
+    fn metadata_archive_import_is_refused_while_a_workspace_handle_is_live() {
+        let (lib, _cfg, root) = archive_fixture();
+        let opts = crate::workspace::SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        // Archive one indexed note, then add a second one through a handle
+        // that stays open, the way a running devserver holds one.
+        {
+            let ws = lib.open_workspace(root.path()).unwrap();
+            ws.write_text("alpha.md", "# alpha\nbody\n").unwrap();
+            ws.index_file("alpha.md").unwrap();
+        }
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "lock-test".into(),
+            },
+        )
+        .unwrap();
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.write_text("beta.md", "# beta\nbody\n").unwrap();
+        ws.index_file("beta.md").unwrap();
+
+        // The import would swap index/, graph/, sessions/ and report/ out
+        // from under that handle. Refused, and nothing is touched.
+        let err = lib
+            .import_metadata_archive(
+                root.path(),
+                &archive,
+                MetadataImportOptions {
+                    rescan: false,
+                    force_scm: false,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WorkspaceAlreadyOpen), "{err}");
+        assert_eq!(ws.search("beta", &opts).unwrap().hits.len(), 1);
+        assert_eq!(
+            ws.graph().unwrap().files().unwrap(),
+            vec!["alpha.md".to_string(), "beta.md".to_string()]
+        );
+        drop(ws);
+
+        // The sidecars survive the refusal intact: reopening reads them, it
+        // does not find an index half-replaced under a live writer.
+        let ws = lib.open_workspace(root.path()).unwrap();
+        assert_eq!(ws.search("alpha", &opts).unwrap().hits.len(), 1);
+        assert_eq!(ws.search("beta", &opts).unwrap().hits.len(), 1);
+        drop(ws);
+
+        // With no handle held, the same import goes through and the
+        // workspace is the archive's generation, whole.
+        lib.import_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataImportOptions {
+                rescan: false,
+                force_scm: false,
+            },
+        )
+        .unwrap();
+        // And the workspace still opens on a whole index afterwards, which
+        // is exactly what the unlocked import destroyed. `alpha.md` is in
+        // both generations, so this does not race the open-time reconcile
+        // that walks the tree back into the graph.
+        let ws = lib.open_workspace(root.path()).unwrap();
+        assert_eq!(ws.search("alpha", &opts).unwrap().hits.len(), 1);
+    }
+
+    #[test]
+    fn metadata_archive_import_is_refused_while_the_writer_lock_is_held() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        std::fs::write(paths.index.join("config.toml"), b"live").unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "lock-test".into(),
+            },
+        )
+        .unwrap();
+        std::fs::write(paths.index.join("config.toml"), b"newer").unwrap();
+
+        // No `Arc<Workspace>` exists, so the in-process check passes and the
+        // refusal has to come from the flock itself. A second holder in this
+        // process reports `WorkspaceAlreadyOpen` rather than the
+        // cross-process `WorkspaceLocked`; a foreign holder is the
+        // `WorkspaceLocked` arm, which needs a second process to exercise.
+        let held = WorkspaceLock::acquire(&paths.lock, root.path()).unwrap();
+        let err = lib
+            .import_metadata_archive(
+                root.path(),
+                &archive,
+                MetadataImportOptions {
+                    rescan: false,
+                    force_scm: false,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ChanError::WorkspaceAlreadyOpen), "{err}");
+        assert_eq!(
+            std::fs::read(paths.index.join("config.toml")).unwrap(),
+            b"newer",
+            "a refused import must not have replaced the live index"
+        );
+
+        drop(held);
+        lib.import_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataImportOptions {
+                rescan: false,
+                force_scm: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(paths.index.join("config.toml")).unwrap(),
+            b"live"
         );
     }
 

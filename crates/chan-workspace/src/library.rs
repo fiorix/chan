@@ -332,6 +332,25 @@ impl Library {
         Ok(workspace)
     }
 
+    /// Refuse when this process still holds a live `Arc<Workspace>` for
+    /// `root`. Every destructive operation over a workspace's sidecars runs
+    /// this before reaching for the writer lock: the flock reports the same
+    /// clash (a lock held by our own pid answers `WorkspaceAlreadyOpen`),
+    /// but the pre-check short-circuits before any slow or destructive work
+    /// starts and names the clash precisely. Cross-process safety (a foreign
+    /// holder => `WorkspaceLocked`) still rides on the flock.
+    pub(crate) fn refuse_if_live(&self, root: &Path) -> Result<()> {
+        let key = canonical_key(root);
+        let mut map = self.inner.live_workspaces.lock().unwrap();
+        gc_dead_entries(&mut map);
+        if let Some(weak) = map.get(&key) {
+            if weak.upgrade().is_some() {
+                return Err(ChanError::WorkspaceAlreadyOpen);
+            }
+        }
+        Ok(())
+    }
+
     /// Wipe per-workspace chan-managed state for `root`. The user's
     /// notes tree is never touched (chan-workspace never writes inside
     /// it). The trash is preserved (it holds user-deleted files,
@@ -380,24 +399,9 @@ impl Library {
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<ResetReport> {
         use crate::progress::{ProgressEvent, ProgressStage};
-        // In-process pre-check: a buggy caller might hold a Workspace
-        // and call reset_workspace from another thread, expecting the
-        // flock to serialize. It does -- and `WorkspaceLock::acquire`
-        // below now also reports `WorkspaceAlreadyOpen` for a lock held
-        // by our own pid, so the two agree -- but the pre-check
-        // short-circuits before touching the flock and names the clash
-        // precisely. Cross-process safety (a foreign holder ⇒
-        // `WorkspaceLocked`) still rides on the flock.
-        let key = canonical_key(root);
-        {
-            let mut map = self.inner.live_workspaces.lock().unwrap();
-            gc_dead_entries(&mut map);
-            if let Some(weak) = map.get(&key) {
-                if weak.upgrade().is_some() {
-                    return Err(ChanError::WorkspaceAlreadyOpen);
-                }
-            }
-        }
+        // A buggy caller might hold a Workspace and call reset_workspace
+        // from another thread, expecting the flock to serialize.
+        self.refuse_if_live(root)?;
         // Metadata identity comes from the registry's metadata key,
         // not the current filesystem path. An unregistered root has
         // no key in the registry, so there is nothing for this
@@ -480,16 +484,7 @@ impl Library {
         if !new.exists() {
             return Err(ChanError::WorkspaceRootMissing(new.to_path_buf()));
         }
-        let key = canonical_key(old);
-        {
-            let mut map = self.inner.live_workspaces.lock().unwrap();
-            gc_dead_entries(&mut map);
-            if let Some(weak) = map.get(&key) {
-                if weak.upgrade().is_some() {
-                    return Err(ChanError::WorkspaceAlreadyOpen);
-                }
-            }
-        }
+        self.refuse_if_live(old)?;
         let mut reg = self.inner.registry.lock().unwrap();
         let Some(old_entry) = reg.find(old) else {
             return Ok(false);
