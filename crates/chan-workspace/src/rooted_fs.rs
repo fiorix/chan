@@ -938,6 +938,13 @@ impl RootedFs {
     pub(crate) fn copy(&self, from: &str, to: &str) -> Result<CopyOutcome> {
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
+        // Before any mutation: the destination directory is created before
+        // the source is read, so a destination inside the source is
+        // enumerated as one of the source's own entries and the walk never
+        // ends. Same guard, same position in the sequence, as the tree lane.
+        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
+            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+        }
         let src_meta = self
             .dir()
             .symlink_metadata(&from_rel)
@@ -1273,6 +1280,23 @@ pub(crate) fn ensure_regular_file_in(dir: &cap_std::fs::Dir, rel: &std::path::Pa
 pub(crate) fn canonical_posix(p: &str) -> String {
     let s = p.strip_prefix("./").unwrap_or(p);
     s.trim_end_matches('/').to_string()
+}
+
+/// Whether `to` sits strictly inside `from`. Both facades create the
+/// destination before they read the source, so a destination inside the
+/// source is enumerated as one of its own entries and recurses without
+/// bound. Refused up front in preference to relying on the rename lane's
+/// `EINVAL`, which neither the cross-device fallback nor either copy lane
+/// reaches. `to == from` is deliberately not this rule's business: it
+/// terminates on its own and the existing already-exists refusal names it
+/// more accurately.
+///
+/// Both arguments must already be canonical, root-relative POSIX paths:
+/// `wire_rel` output on the tree lane, `posix_path(rel(..))` output on the
+/// workspace one.
+pub(crate) fn descends_into(from: &str, to: &str) -> bool {
+    to.strip_prefix(from)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Split a basename into `(stem, ext)` where `ext` includes the leading

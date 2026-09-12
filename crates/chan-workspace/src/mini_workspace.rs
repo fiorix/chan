@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{ChanError, Result};
 use crate::fs_ops::{self, AtomicWriteKind, AtomicWriteSink, PathClass};
-use crate::rooted_fs::{describe_cap_file_kind, ListPolicy, RootedFs};
+use crate::rooted_fs::{descends_into, describe_cap_file_kind, ListPolicy, RootedFs};
 use crate::workspace::{
     BoundedFileReader, DirEntry, FileStat, TextReadEvent, WorkspacePath, WritableFile,
 };
@@ -134,19 +134,6 @@ impl MiniWorkspace {
     /// the canonical start directory.
     fn is_protected(&self, rel: &str) -> bool {
         rel.is_empty() || rel == self.start_rel
-    }
-
-    /// Whether `to` sits strictly inside `from`. Both tree lanes create the
-    /// destination before they read the source, so a destination inside the
-    /// source is enumerated as one of its own entries and recurses without
-    /// bound. Refused up front in preference to relying on the rename lane's
-    /// `EINVAL`, which neither the cross-device fallback nor the copy lane
-    /// reaches. `to == from` is deliberately not this rule's business: it
-    /// terminates on its own and the existing already-exists refusal names
-    /// it more accurately.
-    fn descends_into(from: &str, to: &str) -> bool {
-        to.strip_prefix(from)
-            .is_some_and(|rest| rest.starts_with('/'))
     }
 
     /// One-level listing: every ordinary UTF-8 entry including dotfiles
@@ -373,7 +360,7 @@ impl MiniWorkspace {
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
-        if Self::descends_into(from, to) {
+        if descends_into(from, to) {
             return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
         let (dir, from_path) = self.fs.resolve_io(from)?;
@@ -419,7 +406,7 @@ impl MiniWorkspace {
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
-        if Self::descends_into(from, to) {
+        if descends_into(from, to) {
             return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
         let (dir, to_path) = self.fs.resolve_io(to)?;
@@ -523,7 +510,7 @@ impl MiniWorkspace {
     fn move_across_devices(&self, from: &str, to: &str) -> Result<()> {
         // Repeated from `move_plain` rather than assumed from it: this lane
         // is the one that actually recurses, and it is reachable on its own.
-        if Self::descends_into(from, to) {
+        if descends_into(from, to) {
             return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
         self.preflight_tree(from)?;

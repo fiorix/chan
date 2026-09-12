@@ -8908,6 +8908,55 @@ mod tests {
     }
 
     #[test]
+    fn a_destination_inside_the_source_is_refused_on_the_workspace_lane() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("proj/f.md", "f").unwrap();
+        workspace.write_text("proj/sub/g.md", "g").unwrap();
+
+        // The File Browser's own paste-into-itself: copy `proj`, enter it,
+        // paste. `fs_transfer_batch_sync` reaches `Workspace::copy` with
+        // exactly this pair and no containment check of its own. Without
+        // the guard the destination is created first, then read back as one
+        // of the source's entries, and the walk never ends.
+        let dest = workspace.resolve_free_name("proj/sub", "proj").unwrap();
+        assert_eq!(dest, "proj/sub/proj");
+        assert!(matches!(
+            workspace.copy("proj", &dest),
+            Err(ChanError::DestinationInsideSource(path)) if path == "proj/sub/proj"
+        ));
+        assert!(matches!(
+            workspace.copy("proj", "proj/deep/deeper"),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+
+        // Refused before anything is written: no partial destination, not
+        // even the destination's own parent.
+        assert!(!workspace.exists("proj/sub/proj"));
+        assert!(!workspace.exists("proj/deep"));
+        assert!(!root.path().join("proj/sub/proj").exists());
+        let mut kids: Vec<String> = std::fs::read_dir(root.path().join("proj"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        kids.sort();
+        assert_eq!(kids, vec!["f.md".to_string(), "sub".to_string()]);
+
+        // Copying onto itself is not this rule's case: it terminates on its
+        // own and the already-exists refusal names it more accurately.
+        assert!(matches!(
+            workspace.copy("proj", "proj"),
+            Err(ChanError::Io(_))
+        ));
+
+        // A sibling whose name merely shares the source's prefix is not a
+        // descendant, and still copies.
+        workspace.copy("proj", "projector").unwrap();
+        assert_eq!(workspace.read_text("projector/f.md").unwrap(), "f");
+        assert_eq!(workspace.read_text("projector/sub/g.md").unwrap(), "g");
+    }
+
+    #[test]
     fn copy_refuses_an_existing_destination() {
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("a.md", "x").unwrap();
