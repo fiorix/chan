@@ -304,6 +304,13 @@ pub struct ReconcileReport {
     /// Files that matched the graph and were skipped. Cardinality
     /// only; the path list would dwarf the diff on large workspaces.
     pub unchanged: usize,
+    /// Files the pass could not read, so they appear in neither
+    /// `upserted` nor `unchanged` and the counts do not add up to the
+    /// walk. A `.md` that is not valid UTF-8, a file the process
+    /// cannot open, or one removed between the walk and the index.
+    /// Sorted by path; each one is also logged at warn with the
+    /// underlying error.
+    pub failed: Vec<String>,
 }
 
 /// Monotonic tag for recovery and policy-convergence work.
@@ -3138,28 +3145,44 @@ impl Workspace {
     }
 
     fn index_file_serial(&self, rel: &str) -> Result<()> {
+        match self.index_file_serial_or_source_error(rel)? {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// `index_file_serial` with the two failure kinds held apart.
+    ///
+    /// `Ok(None)` indexed the file, or declined it by extension,
+    /// scope or size, which are not failures. `Ok(Some(error))` could
+    /// not read the user's own file: it is not valid UTF-8, the
+    /// process cannot open it, or it vanished under the caller's
+    /// walk. `Err` is the graph, the search index or the journal
+    /// failing, which skipping one file does not fix.
+    ///
+    /// A recovery pass needs that split. Aborting the pass on one
+    /// unreadable note leaves every file after it in the walk
+    /// unindexed and re-parks the pass, and the driver then re-walks
+    /// the whole tree and fails again with no cooldown. A failed read
+    /// also degrades this file's journal entry to a forget, so a file
+    /// that can never be read stops seeding a failing Replay pass on
+    /// every open.
+    fn index_file_serial_or_source_error(&self, rel: &str) -> Result<Option<ChanError>> {
         if !fs_ops::is_indexable_text(rel) {
-            return Ok(());
+            return Ok(None);
         }
         if !self.scope_policy().includes(rel, false) {
-            return self.forget_file_serial(rel);
+            self.forget_file_serial(rel)?;
+            return Ok(None);
         }
         let stat = self.stat(rel).ok();
         if stat
             .as_ref()
             .is_some_and(|stat| !stat.is_dir && stat.size > TEXT_WRITE_LIMIT)
         {
-            return Ok(());
+            return Ok(None);
         }
         self.journal_record(rel, PendingOp::Index)?;
-        let result = self.index_file_inner(rel, stat);
-        if result.is_ok() {
-            self.journal_clear_one(rel)?;
-        }
-        result
-    }
-
-    fn index_file_inner(&self, rel: &str, stat: Option<FileStat>) -> Result<()> {
         // Stat BEFORE read. If a concurrent writer lands between the
         // two calls, the graph then holds the older (mtime, size)
         // tuple alongside the newer content; reconcile compares the
@@ -3168,11 +3191,31 @@ impl Workspace {
         // would stamp the post-write (mtime, size) onto the pre-write
         // content, leaving graph.stat == disk.stat and the drift
         // invisible to reconcile.
-        let mtime = stat.as_ref().and_then(|s| s.mtime);
-        let size = stat.as_ref().map(|s| size_to_i64(s.size));
         #[cfg(test)]
         index_file_between_stat_and_read_hook();
-        let content = self.read_text(rel)?;
+        let content = match self.read_text(rel) {
+            Ok(content) => content,
+            Err(error) => {
+                // The journal entry says "index this rel", and that
+                // can never succeed while the file reads back as
+                // garbage or not at all. Degrade it to a forget so
+                // graph and index agree the file is not indexed, and
+                // so the entry stops seeding a Replay pass that dies
+                // here on every open.
+                self.forget_file_serial(rel)?;
+                return Ok(Some(error));
+            }
+        };
+        let result = self.index_file_inner(rel, stat, &content);
+        if result.is_ok() {
+            self.journal_clear_one(rel)?;
+        }
+        result.map(|()| None)
+    }
+
+    fn index_file_inner(&self, rel: &str, stat: Option<FileStat>, content: &str) -> Result<()> {
+        let mtime = stat.as_ref().and_then(|s| s.mtime);
+        let size = stat.as_ref().map(|s| size_to_i64(s.size));
         // Graph first, then search index. The graph is what the
         // editor consults for backlinks and link-autocomplete on
         // every keystroke; a stale graph is the more user-visible
@@ -3192,7 +3235,7 @@ impl Workspace {
         // `.md` renamed to `.txt`) so the graph never holds a `.txt`.
         if fs_ops::is_markdown_file(rel) {
             let (title, node_kind, headings, edges, emails, aliases) =
-                parse_for_graph(rel, &content);
+                parse_for_graph(rel, content);
             self.graph()?.replace_file(FileRecord {
                 rel,
                 title: title.as_deref(),
@@ -3215,7 +3258,7 @@ impl Workspace {
         let index = self.index()?;
         let guard_epoch = index.vectors_epoch();
         let include_vectors = self.semantic_enabled().unwrap_or(false);
-        index.index_one(rel, &content, include_vectors, guard_epoch)?;
+        index.index_one(rel, content, include_vectors, guard_epoch)?;
         Ok(())
     }
 
@@ -3403,10 +3446,19 @@ impl Workspace {
     ///     If it no longer exists, degrade to `forget_file`,
     ///     since the original mutation's intent (index this rel)
     ///     no longer makes sense against a missing file.
+    ///   - `Index` over a file that exists but cannot be read
+    ///     (not valid UTF-8, unreadable): degrade to `forget_file`
+    ///     too, log at warn, and carry on. The intent cannot be
+    ///     honoured and never will be, so failing the pass here
+    ///     would only re-park it and fail again on the next open.
     ///   - `Forget`: re-run `forget_file`. Idempotent against
     ///     already-cleaned backends.
     ///
-    /// Returns the number of entries successfully replayed.
+    /// A failure of the graph or the search index itself still
+    /// aborts the pass; only the user's own files are skipped.
+    ///
+    /// Returns the number of entries successfully replayed. An entry
+    /// resolved by the unreadable-file degradation is not counted.
     pub fn replay_pending_writes(&self) -> Result<usize> {
         let recovery = self.recovery_execution(RecoveryAction::Replay);
         let _serial = self.write_serial.lock().unwrap();
@@ -3426,7 +3478,18 @@ impl Workspace {
             match op {
                 PendingOp::Index => {
                     if self.exists(&rel) {
-                        self.index_file_serial(&rel)?;
+                        if let Some(error) = self.index_file_serial_or_source_error(&rel)? {
+                            // Resolved rather than replayed: the
+                            // entry has been degraded to a forget, so
+                            // a file that can never be read stops
+                            // failing this pass on every open.
+                            tracing::warn!(
+                                rel = %rel,
+                                ?error,
+                                "replay: file could not be read; dropped from graph and index",
+                            );
+                            continue;
+                        }
                     } else {
                         self.forget_file_serial(&rel)?;
                     }
@@ -3473,6 +3536,12 @@ impl Workspace {
     ///     backfills the size column.
     ///   - File on disk + matching `(mtime, size)` tuple -> skip.
     ///   - File in graph but missing from disk -> `forget_file`.
+    ///   - File on disk that cannot be read (not valid UTF-8,
+    ///     unreadable, or removed between the walk and the read) ->
+    ///     dropped from both backends, logged at warn, and listed in
+    ///     `ReconcileReport::failed`. The pass carries on, the way
+    ///     `rebuild_graph` already does for the same failures; a
+    ///     failure of the graph or the index itself still aborts it.
     ///
     /// Each emitted op runs through the journal-bracketed public
     /// API, so a crash during reconcile leaves a recoverable
@@ -3531,6 +3600,7 @@ impl Workspace {
 
         let mut upserted: Vec<String> = Vec::new();
         let mut forgotten: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
         let mut unchanged = 0usize;
 
         // Pass 1: every file currently on disk. New or modified
@@ -3551,8 +3621,21 @@ impl Workspace {
                 }
             };
             if needs_index {
-                self.index_file_serial(rel)?;
-                upserted.push(rel.clone());
+                match self.index_file_serial_or_source_error(rel)? {
+                    None => upserted.push(rel.clone()),
+                    Some(error) => {
+                        // Same policy `rebuild_graph` already applies
+                        // to the same failures: one unreadable note
+                        // must not strand every file after it in the
+                        // walk, nor stop pass 2 from running at all.
+                        tracing::warn!(
+                            rel = %rel,
+                            ?error,
+                            "reconcile: file could not be read; dropped from graph and index",
+                        );
+                        failed.push(rel.clone());
+                    }
+                }
             } else {
                 unchanged += 1;
             }
@@ -3569,10 +3652,12 @@ impl Workspace {
 
         upserted.sort();
         forgotten.sort();
+        failed.sort();
         let report = ReconcileReport {
             upserted,
             forgotten,
             unchanged,
+            failed,
         };
         recovery.complete()?;
         Ok(report)
@@ -5603,6 +5688,116 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f == "doomed.md"));
+    }
+
+    #[test]
+    fn reconcile_skips_an_unreadable_file_and_finishes_the_pass() {
+        // A `.md` that is not valid UTF-8 is an ordinary thing to
+        // find in an imported note tree, and it must not strand
+        // every other file in the walk.
+        let (_cfg, root, workspace) = fixture();
+        // A graph row whose file is gone. Pass 2 is what forgets it,
+        // and pass 2 is what an abort in pass 1 costs, so its
+        // presence in the graph afterwards is the deterministic
+        // proof the pass stopped early: pass 1 walks a HashMap, so
+        // which good files it reaches before the bad one is not.
+        workspace
+            .write_text("doomed.md", "# doomed\ngone-token\n")
+            .unwrap();
+        workspace.index_file("doomed.md").unwrap();
+        std::fs::remove_file(root.path().join("doomed.md")).unwrap();
+        workspace
+            .write_text("a-good.md", "# a\nalpha-token\n")
+            .unwrap();
+        workspace
+            .write_text("z-good.md", "# z\nzulu-token\n")
+            .unwrap();
+        std::fs::write(root.path().join("m-bad.md"), [0xffu8, 0xfe, 0xfd]).unwrap();
+
+        let report = workspace.reconcile().unwrap();
+
+        assert_eq!(
+            report.upserted,
+            vec!["a-good.md".to_string(), "z-good.md".to_string()]
+        );
+        assert_eq!(report.failed, vec!["m-bad.md".to_string()]);
+        assert_eq!(report.forgotten, vec!["doomed.md".to_string()]);
+        assert_eq!(report.unchanged, 0);
+
+        let files = workspace.graph().unwrap().files().unwrap();
+        assert!(files.contains(&"a-good.md".to_string()), "{files:?}");
+        assert!(files.contains(&"z-good.md".to_string()), "{files:?}");
+        assert!(!files.contains(&"doomed.md".to_string()), "{files:?}");
+        assert!(!files.contains(&"m-bad.md".to_string()), "{files:?}");
+
+        let opts = crate::workspace::SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        assert_eq!(
+            workspace.search("alpha-token", &opts).unwrap().hits.len(),
+            1
+        );
+        assert_eq!(workspace.search("zulu-token", &opts).unwrap().hits.len(), 1);
+        assert!(workspace
+            .search("gone-token", &opts)
+            .unwrap()
+            .hits
+            .is_empty());
+
+        // The pass has to converge. A pass left pending re-parks
+        // itself, and the chan-server driver re-walks the whole tree
+        // with no cooldown while readiness stays `Recovering`.
+        let status = workspace.recovery_status();
+        assert!(status.active.is_none(), "pass left active: {status:?}");
+        assert!(status.pending.is_none(), "pass left pending: {status:?}");
+        assert!(status.is_ready(), "workspace not ready: {status:?}");
+        assert!(workspace.pending_writes().is_empty());
+    }
+
+    #[test]
+    fn replay_resolves_an_unreadable_journal_entry() {
+        // A journal entry for a file that can never be read would
+        // otherwise fail the Replay pass on every open: the pass
+        // re-parks itself and the entry is still there next time.
+        let (_cfg, root, workspace) = fixture();
+        workspace
+            .write_text("good.md", "# good\nreplay-token\n")
+            .unwrap();
+        std::fs::write(root.path().join("bad.md"), [0xffu8, 0xfe, 0xfd]).unwrap();
+        // Exactly what a crash between the journal write and the
+        // index commit leaves behind.
+        {
+            let _serial = workspace.write_serial.lock().unwrap();
+            workspace
+                .journal_record("bad.md", PendingOp::Index)
+                .unwrap();
+            workspace
+                .journal_record("good.md", PendingOp::Index)
+                .unwrap();
+        }
+
+        let replayed = workspace.replay_pending_writes().unwrap();
+
+        assert_eq!(replayed, 1, "only the readable entry replays");
+        assert!(
+            workspace.pending_writes().is_empty(),
+            "journal still holds {:?}",
+            workspace.pending_writes()
+        );
+        assert!(!workspace.needs_replay_writes());
+        let opts = crate::workspace::SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        assert_eq!(
+            workspace.search("replay-token", &opts).unwrap().hits.len(),
+            1
+        );
+        let status = workspace.recovery_status();
+        assert!(status.is_ready(), "workspace not ready: {status:?}");
     }
 
     #[test]
