@@ -1691,9 +1691,14 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
         Ok(Err(_)) => {
             let ws = Arc::clone(workspace);
             let probe_path = session.path.clone();
-            let exists = tokio::task::spawn_blocking(move || ws.exists(&probe_path))
-                .await
-                .unwrap_or(true);
+            // `try_exists`, not `exists`: `exists` collapses every errno into
+            // false, so a stalled network mount answering ENOTCONN would read
+            // as "the user deleted this file" and mark the session removed.
+            // An unreachable root is unknown, and unknown holds.
+            let exists =
+                tokio::task::spawn_blocking(move || ws.try_exists(&probe_path).unwrap_or(true))
+                    .await
+                    .unwrap_or(true);
             let mut st = session.lock_state();
             if exists {
                 if st.session_state.removal_observation().is_some() {
@@ -3895,5 +3900,60 @@ mod tests {
         for f in drain(&mut rxa) {
             assert_ne!(f["type"], "removed");
         }
+    }
+
+    #[tokio::test]
+    async fn an_unanswerable_probe_does_not_fan_removed() {
+        let seed = body(json!([elem("x", 1, 1, "a1")]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        let scene = Scene::parse(&seed).unwrap();
+
+        // The production trigger is a stalled mount answering ENOTCONN,
+        // which no unit test can raise without a real broken filesystem.
+        // What the reconciler has to get right is narrower and stageable:
+        // a probe that answers with an ERROR rather than a value says
+        // nothing about the file, and must never be read as "the user
+        // deleted this". A path the workspace refuses to resolve is the
+        // one such error a test can produce in process; the errno half of
+        // the classification is chan-workspace's own
+        // `transport_errnos_are_not_not_found`.
+        let session = Arc::new(SceneSession::new(
+            "nope/../b.excalidraw",
+            &seed,
+            scene,
+            &stat,
+        ));
+        let mut handle = fx
+            .registry
+            .register_attach(Arc::clone(&session), "w1")
+            .expect("a fresh session accepts an attachment");
+        let mut rx = handle.take_frames();
+        drain(&mut rx);
+
+        reconcile_session(&session, &fx.workspace).await;
+        // Drive the corroborating re-check whichever way the first pass
+        // went, so the two sides of the fix run the identical sequence
+        // and only the fanned frames differ.
+        if session
+            .lock_state()
+            .session_state
+            .removal_observation()
+            .is_some()
+        {
+            session.test_backdate_pending_removal();
+        }
+        reconcile_session(&session, &fx.workspace).await;
+
+        for f in drain(&mut rx) {
+            assert_ne!(
+                f["type"], "removed",
+                "an unreachable probe is not a deletion"
+            );
+        }
+        assert!(
+            !matches!(session.lock_state().session_state, SessionState::Removed),
+            "the session holds while the probe cannot answer"
+        );
     }
 }
