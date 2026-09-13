@@ -596,6 +596,7 @@ pub(crate) mod test_support {
                     owner_user_id: Self::OWNER_ID.to_string(),
                     aud: "owner--probe.p1.proxy.example".to_string(),
                     drv: "probe".to_string(),
+                    client: chan_tunnel_proto::gateway_assertion::ClientType::Desktop,
                     iat: 0,
                     exp: 0,
                 },

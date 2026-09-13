@@ -3,6 +3,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chan_tunnel_proto::gateway_assertion::ClientType;
 use chrono::{DateTime, Utc};
 use devserver_control_proto::BrowserSessionRow;
 use rand::RngCore;
@@ -54,10 +55,20 @@ impl std::fmt::Debug for SessionPrincipal {
     }
 }
 
+/// One opaque proxy session.
+///
+/// The client type is an attribute of the session, not part of its
+/// principal: a user's desktop session and browser session on the same
+/// devserver are one principal, so they share the principal's session
+/// quota and extension bindings, and every revocation that reaches the
+/// principal reaches both.
 #[derive(Clone)]
 pub struct SessionRecord {
     pub admin_session_id: Uuid,
     pub principal: SessionPrincipal,
+    /// The client the entry credential that opened this session was minted
+    /// for, signed into every assertion made under it.
+    pub client: ClientType,
     pub created_at: Instant,
     pub expires_at: Instant,
     pub created_at_wall: DateTime<Utc>,
@@ -71,6 +82,7 @@ impl std::fmt::Debug for SessionRecord {
         f.debug_struct("SessionRecord")
             .field("admin_session_id", &self.admin_session_id)
             .field("principal", &self.principal)
+            .field("client", &self.client)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
             .field("cancelled", &self.cancellation.is_cancelled())
@@ -244,6 +256,12 @@ impl std::fmt::Debug for ExtensionTarget {
 struct ExtensionBinding {
     verifier: [u8; BINDING_VERIFIER_BYTES],
     principal: SessionPrincipal,
+    /// The client of the session whose frame navigation minted the binding.
+    /// A bound request carries it while that client holds a live session for
+    /// the principal, and [`ClientType::Unknown`] otherwise, so a binding kept
+    /// alive by another client's session never claims a client that neither
+    /// opened the frame nor still holds a session.
+    client: ClientType,
     target: ExtensionTarget,
     last_used: Instant,
     cancellation: CancellationToken,
@@ -261,8 +279,10 @@ impl ExtensionBinding {
 pub struct ResolvedBinding {
     pub target: ExtensionTarget,
     /// The principal's authority for this request: its identity and expiry
-    /// are the live session's, while cancellation and the operation registry
-    /// are the binding's own, so revoking the binding stops its transports.
+    /// are the live session's, its client is the binding's (see
+    /// [`ExtensionBinding::client`]), and cancellation and the operation
+    /// registry are the binding's own, so revoking the binding stops its
+    /// transports.
     pub authorization: SessionRecord,
 }
 
@@ -425,7 +445,11 @@ impl SessionStore {
         }
     }
 
-    pub fn issue(&self, principal: SessionPrincipal) -> Result<IssuedSession, IssueError> {
+    pub fn issue(
+        &self,
+        principal: SessionPrincipal,
+        client: ClientType,
+    ) -> Result<IssuedSession, IssueError> {
         let now = Instant::now();
         let wall_now = Utc::now();
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -463,6 +487,7 @@ impl SessionStore {
         let record = SessionRecord {
             admin_session_id: Uuid::new_v4(),
             principal,
+            client,
             created_at: now,
             expires_at: now + self.lifetime,
             created_at_wall: wall_now,
@@ -626,10 +651,12 @@ impl SessionStore {
     }
 
     /// Bind an extension link to `principal`, which must hold a live session,
-    /// and answer the token for the bound path.
+    /// for the client of the session that asked, and answer the token for the
+    /// bound path.
     pub fn bind_extension(
         &self,
         principal: &SessionPrincipal,
+        client: ClientType,
         target: ExtensionTarget,
     ) -> Result<String, BindError> {
         let now = Instant::now();
@@ -683,6 +710,7 @@ impl SessionStore {
             ExtensionBinding {
                 verifier,
                 principal: principal.clone(),
+                client,
                 target,
                 last_used: now,
                 cancellation: CancellationToken::new(),
@@ -712,6 +740,13 @@ impl SessionStore {
             }
             return None;
         };
+        let client = if live_sessions(&state, &binding.principal, now)
+            .any(|record| record.client == binding.client)
+        {
+            binding.client
+        } else {
+            ClientType::Unknown
+        };
         let binding = state.bindings.get_mut(selector)?;
         binding.last_used = now;
         Some(ResolvedBinding {
@@ -719,6 +754,7 @@ impl SessionStore {
             authorization: SessionRecord {
                 admin_session_id: session.admin_session_id,
                 principal: binding.principal.clone(),
+                client,
                 created_at: session.created_at,
                 expires_at: session.expires_at,
                 created_at_wall: session.created_at_wall,
@@ -864,13 +900,22 @@ fn live_session<'a>(
     principal: &SessionPrincipal,
     now: Instant,
 ) -> Option<&'a SessionRecord> {
+    live_sessions(state, principal, now).max_by_key(|record| record.expires_at)
+}
+
+/// Every session of the principal that is neither revoked nor expired.
+fn live_sessions<'a>(
+    state: &'a SessionState,
+    principal: &SessionPrincipal,
+    now: Instant,
+) -> impl Iterator<Item = &'a SessionRecord> {
     state
         .principal_sessions
-        .get(principal)?
-        .iter()
+        .get(principal)
+        .into_iter()
+        .flatten()
         .filter_map(|id| state.sessions.get(id))
-        .filter(|record| !record.cancellation.is_cancelled() && record.expires_at > now)
-        .max_by_key(|record| record.expires_at)
+        .filter(move |record| !record.cancellation.is_cancelled() && record.expires_at > now)
 }
 
 fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
@@ -1013,8 +1058,12 @@ mod tests {
     #[test]
     fn issue_uses_unguessable_opaque_ids_and_preserves_authority() {
         let store = SessionStore::new(2, Duration::from_secs(60));
-        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let second = store.issue(principal(2, 20, "dev-b")).expect("issue");
+        let first = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let second = store
+            .issue(principal(2, 20, "dev-b"), ClientType::Browser)
+            .expect("issue");
 
         assert_eq!(first.id().len(), SESSION_ID_BYTES * 2);
         assert!(first.id().bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -1028,10 +1077,14 @@ mod tests {
     #[test]
     fn capacity_refuses_without_evicting_a_live_session() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
 
         assert_eq!(
-            store.issue(principal(2, 20, "dev-b")).err(),
+            store
+                .issue(principal(2, 20, "dev-b"), ClientType::Browser)
+                .err(),
             Some(IssueError::AtCapacity)
         );
         assert!(store.lookup(issued.id()).is_some());
@@ -1040,13 +1093,19 @@ mod tests {
     #[test]
     fn one_subject_cannot_exhaust_global_session_capacity() {
         let store = SessionStore::with_quotas(6, Duration::from_secs(60), 2, 2);
-        let attacker = store.issue(principal(1, 10, "dev-a")).expect("first");
-        store.issue(principal(1, 10, "dev-a")).expect("second");
+        let attacker = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("first");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("second");
         assert_eq!(
-            store.issue(principal(1, 20, "dev-b")).err(),
+            store
+                .issue(principal(1, 20, "dev-b"), ClientType::Browser)
+                .err(),
             Some(IssueError::SubjectAtCapacity)
         );
-        let neighbor = store.issue(principal(2, 10, "dev-a"));
+        let neighbor = store.issue(principal(2, 10, "dev-a"), ClientType::Browser);
         assert!(neighbor.is_ok(), "neighbor retains reserved capacity");
         assert!(store.lookup(attacker.id()).is_some());
     }
@@ -1054,21 +1113,33 @@ mod tests {
     #[test]
     fn one_principal_cannot_consume_a_subjects_whole_quota() {
         let store = SessionStore::with_quotas(6, Duration::from_secs(60), 4, 2);
-        store.issue(principal(1, 10, "dev-a")).expect("first");
-        store.issue(principal(1, 10, "dev-a")).expect("second");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("first");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("second");
         assert_eq!(
-            store.issue(principal(1, 10, "dev-a")).err(),
+            store
+                .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+                .err(),
             Some(IssueError::PrincipalAtCapacity)
         );
-        assert!(store.issue(principal(1, 10, "dev-b")).is_ok());
+        assert!(store
+            .issue(principal(1, 10, "dev-b"), ClientType::Browser)
+            .is_ok());
     }
 
     #[tokio::test]
     async fn revocation_releases_subject_and_principal_quotas() {
         let store = SessionStore::with_quotas(6, Duration::from_secs(60), 1, 1);
-        store.issue(principal(1, 10, "dev-a")).expect("first");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("first");
         assert_eq!(
-            store.issue(principal(1, 10, "dev-a")).err(),
+            store
+                .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+                .err(),
             Some(IssueError::SubjectAtCapacity)
         );
         assert_eq!(
@@ -1079,13 +1150,17 @@ mod tests {
                 .await,
             Ok(1)
         );
-        assert!(store.issue(principal(1, 10, "dev-a")).is_ok());
+        assert!(store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .is_ok());
     }
 
     #[test]
     fn lookup_rejects_noncanonical_ids() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
 
         assert!(store.lookup("").is_none());
         assert!(store.lookup(&issued.id().to_ascii_uppercase()).is_none());
@@ -1096,7 +1171,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn expiry_fails_closed_and_cancels_active_streams() {
         let store = SessionStore::new(1, Duration::from_secs(30));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let cancellation = issued.record.cancellation.clone();
 
         tokio::time::advance(Duration::from_secs(31)).await;
@@ -1109,11 +1186,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn issue_prunes_only_due_expiry_index_entries_before_capacity_check() {
         let store = SessionStore::new(1, Duration::from_secs(30));
-        let expired = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let expired = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         tokio::time::advance(Duration::from_secs(31)).await;
 
         let replacement = store
-            .issue(principal(2, 20, "dev-b"))
+            .issue(principal(2, 20, "dev-b"), ClientType::Browser)
             .expect("expired capacity is reclaimed");
         assert!(expired.record.cancellation.is_cancelled());
         assert!(store.lookup(replacement.id()).is_some());
@@ -1123,7 +1202,9 @@ mod tests {
     #[tokio::test]
     async fn revocation_leaves_harmless_stale_expiry_index_entries() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let removed = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let removed = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         assert_eq!(
             store
                 .revoke(&Revocation::Subject {
@@ -1133,7 +1214,7 @@ mod tests {
             Ok(1)
         );
         let replacement = store
-            .issue(principal(2, 20, "dev-b"))
+            .issue(principal(2, 20, "dev-b"), ClientType::Browser)
             .expect("stale expiry entry does not consume capacity");
         assert!(removed.record.cancellation.is_cancelled());
         assert!(store.lookup(replacement.id()).is_some());
@@ -1142,9 +1223,15 @@ mod tests {
     #[tokio::test]
     async fn exact_revoke_cannot_cross_owner_or_devserver() {
         let store = SessionStore::new(4, Duration::from_secs(60));
-        let target = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let other_owner = store.issue(principal(1, 20, "dev-a")).expect("issue");
-        let other_devserver = store.issue(principal(1, 10, "dev-b")).expect("issue");
+        let target = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let other_owner = store
+            .issue(principal(1, 20, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let other_devserver = store
+            .issue(principal(1, 10, "dev-b"), ClientType::Browser)
+            .expect("issue");
 
         let revoked = store
             .revoke(&Revocation::Exact {
@@ -1166,9 +1253,15 @@ mod tests {
     #[tokio::test]
     async fn subject_revoke_cancels_every_matching_session_only() {
         let store = SessionStore::new(4, Duration::from_secs(60));
-        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let second = store.issue(principal(1, 20, "dev-b")).expect("issue");
-        let untouched = store.issue(principal(2, 10, "dev-a")).expect("issue");
+        let first = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let second = store
+            .issue(principal(1, 20, "dev-b"), ClientType::Browser)
+            .expect("issue");
+        let untouched = store
+            .issue(principal(2, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
 
         assert_eq!(
             store
@@ -1187,9 +1280,15 @@ mod tests {
     #[tokio::test]
     async fn admin_owner_and_all_revocations_target_redacted_inventory_ids() {
         let store = SessionStore::new(6, Duration::from_secs(60));
-        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let second = store.issue(principal(2, 10, "dev-b")).expect("issue");
-        let third = store.issue(principal(3, 20, "dev-c")).expect("issue");
+        let first = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let second = store
+            .issue(principal(2, 10, "dev-b"), ClientType::Browser)
+            .expect("issue");
+        let third = store
+            .issue(principal(3, 20, "dev-c"), ClientType::Browser)
+            .expect("issue");
         let cookie_id = first.id().to_string();
         let admin_id = first.record.admin_session_id;
 
@@ -1226,25 +1325,35 @@ mod tests {
     #[tokio::test]
     async fn clear_cancels_and_drains_every_session_for_fail_closed_control_loss() {
         let store = SessionStore::new(2, Duration::from_secs(60));
-        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let second = store.issue(principal(2, 20, "dev-b")).expect("issue");
+        let first = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let second = store
+            .issue(principal(2, 20, "dev-b"), ClientType::Browser)
+            .expect("issue");
 
         assert_eq!(store.clear().await, Ok(2));
         assert!(first.record.cancellation.is_cancelled());
         assert!(second.record.cancellation.is_cancelled());
         assert!(store.is_empty());
         assert_eq!(
-            store.issue(principal(3, 30, "dev-c")).err(),
+            store
+                .issue(principal(3, 30, "dev-c"), ClientType::Browser)
+                .err(),
             Some(IssueError::AuthoritySuspended)
         );
         store.resume_authority();
-        assert!(store.issue(principal(3, 30, "dev-c")).is_ok());
+        assert!(store
+            .issue(principal(3, 30, "dev-c"), ClientType::Browser)
+            .is_ok());
     }
 
     #[tokio::test(start_paused = true)]
     async fn control_loss_clear_retains_a_tombstone_until_transport_drain_is_proven() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let operation = issued
             .record
             .begin_operation()
@@ -1296,8 +1405,12 @@ mod tests {
     #[tokio::test]
     async fn exact_revoke_force_aborts_nonreading_http_bridge_before_ack() {
         let store = SessionStore::new(2, Duration::from_secs(60));
-        let target = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let untouched = store.issue(principal(2, 10, "dev-a")).expect("issue");
+        let target = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let untouched = store
+            .issue(principal(2, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
         blocked_transport(
             target.record.begin_operation().expect("active authority"),
@@ -1325,8 +1438,12 @@ mod tests {
     #[tokio::test]
     async fn subject_revoke_force_aborts_nonreading_websocket_bridges_before_ack() {
         let store = SessionStore::new(3, Duration::from_secs(60));
-        let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let second = store.issue(principal(1, 20, "dev-b")).expect("issue");
+        let first = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let second = store
+            .issue(principal(1, 20, "dev-b"), ClientType::Browser)
+            .expect("issue");
         let (first_tx, first_rx) = tokio::sync::oneshot::channel();
         let (second_tx, second_rx) = tokio::sync::oneshot::channel();
         blocked_transport(
@@ -1355,7 +1472,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn revoke_refuses_to_ack_when_an_operation_cannot_be_force_aborted() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let _unattached = issued
             .record
             .begin_operation()
@@ -1382,9 +1501,11 @@ mod tests {
     #[test]
     fn a_binding_resolves_to_its_principal_only_with_the_exact_token() {
         let store = SessionStore::new(4, Duration::from_secs(60));
-        let session = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let session = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let token = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
 
         assert_eq!(token.len(), EXTENSION_BINDING_HEX_LEN);
@@ -1420,14 +1541,16 @@ mod tests {
     fn a_principal_with_no_live_session_cannot_bind() {
         let store = SessionStore::new(4, Duration::from_secs(60));
         assert_eq!(
-            store.bind_extension(&principal(1, 10, "dev-a"), target('a')),
+            store.bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a')),
             Err(BindError::NoLiveSession)
         );
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         // A session for the same subject on another devserver is another
         // principal.
         assert_eq!(
-            store.bind_extension(&principal(1, 10, "dev-b"), target('a')),
+            store.bind_extension(&principal(1, 10, "dev-b"), ClientType::Browser, target('a')),
             Err(BindError::NoLiveSession)
         );
     }
@@ -1439,14 +1562,16 @@ mod tests {
     async fn a_binding_survives_the_principal_renewing_its_session() {
         let store = SessionStore::new(4, Duration::from_secs(60));
         store
-            .issue(principal(1, 10, "dev-a"))
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
             .expect("first session");
         let token = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
 
         tokio::time::advance(Duration::from_secs(40)).await;
-        let renewed = store.issue(principal(1, 10, "dev-a")).expect("renewal");
+        let renewed = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("renewal");
         tokio::time::advance(Duration::from_secs(30)).await;
 
         let resolved = store
@@ -1464,13 +1589,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_binding_dies_when_its_principal_goes_without_a_session() {
         let store = SessionStore::new(4, Duration::from_secs(30));
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let noticed_at_sign_in = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
         tokio::time::advance(Duration::from_secs(31)).await;
         store
-            .issue(principal(1, 10, "dev-a"))
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
             .expect("sign in again");
         assert!(store
             .resolve_extension_binding(&noticed_at_sign_in)
@@ -1478,7 +1605,7 @@ mod tests {
         assert_eq!(store.binding_count(), 0);
 
         let noticed_at_request = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('b'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('b'))
             .expect("bind under the new session");
         tokio::time::advance(Duration::from_secs(31)).await;
         assert!(store
@@ -1486,7 +1613,7 @@ mod tests {
             .is_none());
         assert_eq!(store.binding_count(), 0);
         store
-            .issue(principal(1, 10, "dev-a"))
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
             .expect("sign in again");
         assert!(store
             .resolve_extension_binding(&noticed_at_request)
@@ -1520,12 +1647,14 @@ mod tests {
         };
         for index in 0..5 {
             let store = SessionStore::new(8, Duration::from_secs(60));
-            let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
+            let first = store
+                .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+                .expect("issue");
             store
-                .issue(principal(1, 10, "dev-a"))
+                .issue(principal(1, 10, "dev-a"), ClientType::Browser)
                 .expect("second session");
             let token = store
-                .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+                .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
                 .expect("bind");
             let revocation = revocations(first.record.admin_session_id).remove(index);
             let authorization = store
@@ -1559,10 +1688,14 @@ mod tests {
     #[tokio::test]
     async fn a_revocation_that_misses_the_principal_leaves_its_binding() {
         let store = SessionStore::new(8, Duration::from_secs(60));
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
-        let other = store.issue(principal(2, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let other = store
+            .issue(principal(2, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let token = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
 
         for revocation in [
@@ -1592,13 +1725,17 @@ mod tests {
     #[tokio::test]
     async fn clearing_the_store_ends_every_binding() {
         let store = SessionStore::new(8, Duration::from_secs(60));
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
-        store.issue(principal(2, 20, "dev-b")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        store
+            .issue(principal(2, 20, "dev-b"), ClientType::Browser)
+            .expect("issue");
         let first = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
         let second = store
-            .bind_extension(&principal(2, 20, "dev-b"), target('b'))
+            .bind_extension(&principal(2, 20, "dev-b"), ClientType::Browser, target('b'))
             .expect("bind");
 
         assert_eq!(store.clear().await, Ok(2));
@@ -1610,9 +1747,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_binding_transport_that_will_not_drain_keeps_the_revocation_pending() {
         let store = SessionStore::new(4, Duration::from_secs(60));
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let token = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
         let operation = store
             .resolve_extension_binding(&token)
@@ -1645,10 +1784,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_principal_reloading_frames_evicts_its_least_recently_used_binding() {
         let store = SessionStore::with_binding_quotas(4, Duration::from_secs(600), 100, 2);
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let bind = |capability| {
             store
-                .bind_extension(&principal(1, 10, "dev-a"), target(capability))
+                .bind_extension(
+                    &principal(1, 10, "dev-a"),
+                    ClientType::Browser,
+                    target(capability),
+                )
                 .expect("bind")
         };
         let first = bind('a');
@@ -1668,17 +1813,21 @@ mod tests {
     #[test]
     fn a_full_binding_table_refuses_without_evicting_another_users_binding() {
         let store = SessionStore::with_binding_quotas(4, Duration::from_secs(60), 2, 32);
-        store.issue(principal(1, 10, "dev-a")).expect("issue");
-        store.issue(principal(2, 10, "dev-a")).expect("issue");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        store
+            .issue(principal(2, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let first = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('a'))
             .expect("bind");
         let second = store
-            .bind_extension(&principal(1, 10, "dev-a"), target('b'))
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('b'))
             .expect("bind");
 
         assert_eq!(
-            store.bind_extension(&principal(2, 10, "dev-a"), target('c')),
+            store.bind_extension(&principal(2, 10, "dev-a"), ClientType::Browser, target('c')),
             Err(BindError::AtCapacity)
         );
         assert!(store.resolve_extension_binding(&first).is_some());
@@ -1695,7 +1844,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retried_revoke_keeps_timed_out_transport_pending_until_it_drains() {
         let store = SessionStore::new(1, Duration::from_secs(60));
-        let issued = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
         let operation = issued
             .record
             .begin_operation()
@@ -1718,5 +1869,151 @@ mod tests {
         drop(operation);
         assert_eq!(store.revoke(&revocation).await, Ok(1));
         assert!(store.is_empty());
+    }
+
+    /// The client is an attribute of a session, not part of its principal. A
+    /// user's desktop session and browser session on one devserver share the
+    /// principal's quota, and every revocation form reaches the principal's
+    /// binding whichever of the two sessions minted it: exact, subject, owner
+    /// and all revoke both sessions, and an admin-session revocation of either
+    /// one ends the binding the other keeps alive.
+    #[tokio::test]
+    async fn a_users_desktop_and_browser_sessions_are_one_principal() {
+        let store = SessionStore::with_quotas(8, Duration::from_secs(60), 8, 2);
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Desktop)
+            .expect("desktop session");
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("browser session");
+        for client in [
+            ClientType::Desktop,
+            ClientType::Browser,
+            ClientType::Unknown,
+        ] {
+            assert_eq!(
+                store.issue(principal(1, 10, "dev-a"), client).err(),
+                Some(IssueError::PrincipalAtCapacity),
+                "{client:?}"
+            );
+        }
+
+        let revocations = |session: Uuid| {
+            vec![
+                Revocation::Exact {
+                    subject_user_id: Uuid::from_u128(1),
+                    owner_user_id: Uuid::from_u128(10),
+                    devserver_id: "dev-a".to_string(),
+                },
+                Revocation::Subject {
+                    subject_user_id: Uuid::from_u128(1),
+                },
+                Revocation::Owner {
+                    owner_user_id: Uuid::from_u128(10),
+                },
+                Revocation::All,
+                Revocation::SessionId {
+                    admin_session_id: session,
+                },
+            ]
+        };
+        for index in 0..5 {
+            for (named_client, other_client) in [
+                (ClientType::Desktop, ClientType::Browser),
+                (ClientType::Browser, ClientType::Desktop),
+            ] {
+                for binding_client in [named_client, other_client] {
+                    let store = SessionStore::new(8, Duration::from_secs(60));
+                    let named = store
+                        .issue(principal(1, 10, "dev-a"), named_client)
+                        .expect("named session");
+                    let other = store
+                        .issue(principal(1, 10, "dev-a"), other_client)
+                        .expect("other session");
+                    let token = store
+                        .bind_extension(&principal(1, 10, "dev-a"), binding_client, target('a'))
+                        .expect("bind");
+                    let revocation = revocations(named.record.admin_session_id).remove(index);
+                    let by_session = matches!(revocation, Revocation::SessionId { .. });
+                    let case = format!(
+                        "{revocation:?} naming the {named_client:?} session, binding minted by {binding_client:?}"
+                    );
+
+                    let revoked = store.revoke(&revocation).await.expect("revoke");
+                    assert_eq!(revoked, if by_session { 1 } else { 2 }, "{case}");
+                    assert!(store.lookup(named.id()).is_none(), "{case}");
+                    assert_eq!(store.lookup(other.id()).is_some(), by_session, "{case}");
+                    assert!(store.resolve_extension_binding(&token).is_none(), "{case}");
+                    assert_eq!(store.binding_count(), 0, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_keeps_the_client_its_credential_was_minted_for() {
+        let store = SessionStore::new(8, Duration::from_secs(60));
+        for client in [
+            ClientType::Desktop,
+            ClientType::Browser,
+            ClientType::Unknown,
+        ] {
+            let issued = store
+                .issue(principal(1, 10, "dev-a"), client)
+                .expect("issue");
+            assert_eq!(issued.record.client, client);
+            assert_eq!(store.lookup(issued.id()).expect("lookup").client, client);
+        }
+    }
+
+    /// A bound request is asserted as the client whose session minted the
+    /// binding while that client holds a live session for the principal. Once
+    /// only another client's session keeps the binding alive, it is asserted as
+    /// unknown, never as the other client and never as the one that left; a
+    /// fresh session of the minting client restores it.
+    #[tokio::test(start_paused = true)]
+    async fn a_bound_request_carries_the_minting_client_only_while_that_client_holds_a_session() {
+        let store = SessionStore::new(8, Duration::from_secs(60));
+        let desktop = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Desktop)
+            .expect("desktop session");
+        let desktop_token = store
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Desktop, target('a'))
+            .expect("desktop binding");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let browser = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("browser session");
+        let browser_token = store
+            .bind_extension(&principal(1, 10, "dev-a"), ClientType::Browser, target('b'))
+            .expect("browser binding");
+
+        let client_of = |token: &str| {
+            store
+                .resolve_extension_binding(token)
+                .expect("live binding")
+                .authorization
+                .client
+        };
+        assert_eq!(client_of(&desktop_token), ClientType::Desktop);
+        assert_eq!(client_of(&browser_token), ClientType::Browser);
+
+        // The desktop session lapses; the browser session keeps both bindings.
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(store.lookup(desktop.id()).is_none());
+        let resolved = store
+            .resolve_extension_binding(&desktop_token)
+            .expect("the browser session keeps the binding alive");
+        assert_eq!(resolved.authorization.client, ClientType::Unknown);
+        assert_eq!(
+            resolved.authorization.admin_session_id,
+            browser.record.admin_session_id
+        );
+        assert_eq!(client_of(&browser_token), ClientType::Browser);
+
+        store
+            .issue(principal(1, 10, "dev-a"), ClientType::Desktop)
+            .expect("the desktop signs in again");
+        assert_eq!(client_of(&desktop_token), ClientType::Desktop);
     }
 }

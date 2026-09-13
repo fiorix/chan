@@ -403,10 +403,29 @@ async fn exchange_entry(
 }
 
 fn mint_for_owner(sub: Uuid, owner_user_id: Uuid, drv: &str, aud: &str, next_path: &str) -> String {
+    mint_for_client(
+        sub,
+        owner_user_id,
+        devserver_gate::ClientType::Browser,
+        drv,
+        aud,
+        next_path,
+    )
+}
+
+fn mint_for_client(
+    sub: Uuid,
+    owner_user_id: Uuid,
+    client: devserver_gate::ClientType,
+    drv: &str,
+    aud: &str,
+    next_path: &str,
+) -> String {
     devserver_gate::encode_entry(
         &test_entry_signer(),
         sub,
         owner_user_id,
+        client,
         drv,
         aud,
         "p1",
@@ -462,14 +481,35 @@ fn opaque_session(
     workspace: &str,
     host: &str,
 ) -> String {
+    opaque_session_for_client(
+        app,
+        sub,
+        owner_user_id,
+        devserver_gate::ClientType::Browser,
+        workspace,
+        host,
+    )
+}
+
+fn opaque_session_for_client(
+    app: &TestApp,
+    sub: Uuid,
+    owner_user_id: Uuid,
+    client: devserver_gate::ClientType,
+    workspace: &str,
+    host: &str,
+) -> String {
     let issued = app
         .sessions
-        .issue(devserver_proxy::session_store::SessionPrincipal {
-            subject_user_id: sub,
-            owner_user_id,
-            devserver_id: workspace.to_string(),
-            audience: host.to_string(),
-        })
+        .issue(
+            devserver_proxy::session_store::SessionPrincipal {
+                subject_user_id: sub,
+                owner_user_id,
+                devserver_id: workspace.to_string(),
+                audience: host.to_string(),
+            },
+            client,
+        )
         .unwrap();
     issued.id().to_string()
 }
@@ -1154,8 +1194,17 @@ async fn entry_token_with_bad_signature_is_404() {
     let other_signer =
         devserver_gate::EntrySigner::from_base64("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
             .unwrap();
-    let bad = devserver_gate::encode_entry(&other_signer, uid, uid, "blog", &host, "p1", "/blog/")
-        .unwrap();
+    let bad = devserver_gate::encode_entry(
+        &other_signer,
+        uid,
+        uid,
+        devserver_gate::ClientType::Browser,
+        "blog",
+        &host,
+        "p1",
+        "/blog/",
+    )
+    .unwrap();
     let (s, _, _) = exchange_entry(&app.router, &host, &bad).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     app.cleanup().await;
@@ -3200,5 +3249,230 @@ async fn extension_capability_websocket_bridges_only_on_a_bound_path() {
     }
     let _ = client_ws.close(None).await;
     assert_eq!(*subjects.lock().unwrap(), vec![grantee.to_string()]);
+    app.cleanup().await;
+}
+
+/// The verified assertion a forwarded request carried.
+fn assertion_claims(
+    headers: &HeaderMap,
+    token: &str,
+    host: &str,
+    drv: &str,
+    owner: Uuid,
+) -> chan_tunnel_proto::gateway_assertion::Claims {
+    let assertion = headers
+        .get(chan_tunnel_proto::gateway_assertion::HEADER_NAME)
+        .expect("forwarded request carries the assertion")
+        .to_str()
+        .unwrap();
+    let key = chan_tunnel_proto::gateway_assertion::derive_assertion_key(token);
+    chan_tunnel_proto::gateway_assertion::verify(&key, assertion, host, drv, &owner.to_string())
+        .expect("assertion verifies at the devserver")
+}
+
+/// The `name=value` of the gate session cookie an exchange set.
+fn gate_cookie(headers: &HeaderMap) -> String {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .find(|v| v.starts_with("__Host-devserver_gate="))
+        .expect("session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// Wait until `seen` holds `len` entries.
+async fn seen_at_least<T: Clone>(seen: &StdMutex<Vec<T>>, len: usize) -> Vec<T> {
+    for _ in 0..200 {
+        if seen.lock().unwrap().len() >= len {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    seen.lock().unwrap().clone()
+}
+
+/// The client an entry credential was minted for rides the session the
+/// exchange opens and reaches the devserver, signed, on every lane: a cookie
+/// request, a cookie WebSocket upgrade, and a request on an extension link
+/// that session bound.
+#[tokio::test]
+async fn the_entry_credentials_client_reaches_the_devserver_on_every_lane() {
+    use chan_tunnel_proto::gateway_assertion::ClientType;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let app = TestApp::new().await;
+    let owner = Uuid::new_v4();
+    let token = format!("tok-{}", Uuid::new_v4().simple());
+    let host = host_for("alice");
+    let seen = Arc::new(StdMutex::new(Vec::<(String, ClientType, String)>::new()));
+    let upstream = {
+        let record = {
+            let seen = seen.clone();
+            let token = token.clone();
+            let host = host.clone();
+            move |path: String, headers: &HeaderMap| {
+                let claims = assertion_claims(headers, &token, &host, "blog", owner);
+                seen.lock().unwrap().push((path, claims.client, claims.sub));
+            }
+        };
+        let socket_record = record.clone();
+        Router::new()
+            .route(
+                "/blog/socket",
+                axum::routing::get(
+                    move |headers: HeaderMap, ws: axum::extract::WebSocketUpgrade| {
+                        socket_record("/blog/socket".to_string(), &headers);
+                        async move { ws.on_upgrade(|socket| async move { drop(socket) }) }
+                    },
+                ),
+            )
+            .fallback(move |req: AxRequest| {
+                record(req.uri().path().to_string(), req.headers());
+                async { "ok" }
+            })
+    };
+    app.register_tunnel_with_token(&token, "alice", "blog", owner, upstream)
+        .await;
+    let proxy_addr = serve_router_real(app.router.clone()).await;
+
+    for client in [ClientType::Desktop, ClientType::Browser] {
+        seen.lock().unwrap().clear();
+        let credential = mint_for_client(owner, owner, client, "blog", &host, "/blog/");
+        let (status, headers, _) = exchange_entry(&app.router, &host, &credential).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{client:?}");
+        let gate = gate_cookie(&headers);
+
+        let (status, _, _) = send_host(
+            &app.router,
+            Method::GET,
+            &host,
+            "/blog/page",
+            &[("cookie", gate.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{client:?} cookie request");
+
+        let bound = bind_extension_link(&app.router, &host, &ext_path("/"), &gate).await;
+        let (status, _, _) = frame_request(&app.router, Method::GET, &host, &bound, "").await;
+        assert_eq!(status, StatusCode::OK, "{client:?} bound request");
+
+        let mut request = format!("ws://{proxy_addr}/blog/socket")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::HOST, HeaderValue::from_str(&host).unwrap());
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_str(&format!("https://{host}")).unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert(header::COOKIE, HeaderValue::from_str(&gate).unwrap());
+        let (socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("cookie upgrade");
+
+        let seen = seen_at_least(&seen, 3).await;
+        drop(socket);
+        assert_eq!(
+            seen,
+            vec![
+                ("/blog/page".to_string(), client, owner.to_string()),
+                (ext_path("/"), client, owner.to_string()),
+                ("/blog/socket".to_string(), client, owner.to_string()),
+            ],
+            "{client:?}"
+        );
+    }
+    app.cleanup().await;
+}
+
+/// Re-sign an entry credential after editing its claims, under the test
+/// identity key, so a test can present claims `encode_entry` never mints.
+fn resign_entry(credential: &str, edit: impl FnOnce(&mut Value)) -> String {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut parts = credential.split('.');
+    let header = parts.next().unwrap();
+    let mut claims: Value =
+        serde_json::from_slice(&engine.decode(parts.next().unwrap()).unwrap()).unwrap();
+    edit(&mut claims);
+    let seed: [u8; 32] = engine
+        .decode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let signed = format!("{header}.{}", engine.encode(claims.to_string()));
+    let signature = ed25519_dalek::SigningKey::from_bytes(&seed).sign(signed.as_bytes());
+    format!("{signed}.{}", engine.encode(signature.to_bytes()))
+}
+
+/// An entry credential an identity signed before it stated the client, which
+/// can still be in flight while the gateway deploys, is exchanged like any
+/// other, and so is one naming a client this build does not know. The session
+/// it opens is not the desktop's: every request under it is asserted as
+/// unknown.
+#[tokio::test]
+async fn a_credential_without_a_known_client_is_exchanged_and_asserted_as_unknown() {
+    use chan_tunnel_proto::gateway_assertion::ClientType;
+
+    let app = TestApp::new().await;
+    let owner = Uuid::new_v4();
+    let token = format!("tok-{}", Uuid::new_v4().simple());
+    let captured = Captured::default();
+    app.register_tunnel_with_token(
+        &token,
+        "alice",
+        "blog",
+        owner,
+        capturing_router(captured.clone()),
+    )
+    .await;
+    let host = host_for("alice");
+
+    type Edit = fn(&mut Value);
+    let cases: [(&str, Edit, ClientType); 3] = [
+        ("re-signed unchanged", |_| {}, ClientType::Desktop),
+        (
+            "no client",
+            |claims| {
+                claims.as_object_mut().unwrap().remove("client");
+            },
+            ClientType::Unknown,
+        ),
+        (
+            "an unknown client",
+            |claims| claims["client"] = Value::from("cli"),
+            ClientType::Unknown,
+        ),
+    ];
+    for (case, edit, expected) in cases {
+        captured.requests.lock().unwrap().clear();
+        let minted = mint_for_client(owner, owner, ClientType::Desktop, "blog", &host, "/blog/");
+        let credential = resign_entry(&minted, edit);
+        let (status, headers, _) = exchange_entry(&app.router, &host, &credential).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{case}");
+        let (status, _, _) = send_host(
+            &app.router,
+            Method::GET,
+            &host,
+            "/blog/page",
+            &[("cookie", gate_cookie(&headers).as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case}");
+        let requests = captured.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{case}");
+        let claims = assertion_claims(&requests[0].headers, &token, &host, "blog", owner);
+        assert_eq!(claims.client, expected, "{case}");
+        assert!(claims.is_owner(), "{case}");
+    }
     app.cleanup().await;
 }

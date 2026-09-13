@@ -67,6 +67,58 @@ fn is_default_port(scheme: &str, port: &str) -> bool {
     )
 }
 
+/// Which client a gateway session was minted for.
+///
+/// Identity states it on every entry credential it mints: the desktop entry
+/// exchange, which takes a desktop PAT, mints for [`ClientType::Desktop`], and
+/// the browser share landings mint for [`ClientType::Browser`]. devserver-proxy
+/// records it on the session the credential opens and signs it into every
+/// assertion made under that session.
+///
+/// A credential or assertion signed before the field existed has no value,
+/// and a value this build does not recognise may come from a newer gateway;
+/// both read as [`ClientType::Unknown`] rather than failing the whole token,
+/// and neither is ever [`ClientType::Desktop`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientType {
+    Desktop,
+    Browser,
+    #[default]
+    Unknown,
+}
+
+impl ClientType {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Browser => "browser",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ClientType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("desktop") => Self::Desktop,
+            Some("browser") => Self::Browser,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 /// Signed claims for one proxied request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Claims {
@@ -78,6 +130,9 @@ pub struct Claims {
     pub aud: String,
     /// Token-resolved devserver id.
     pub drv: String,
+    /// The client the caller's gateway session was minted for.
+    #[serde(default)]
+    pub client: ClientType,
     pub iat: i64,
     pub exp: i64,
 }
@@ -86,6 +141,12 @@ impl Claims {
     /// True only for owner-level launcher access.
     pub fn is_owner(&self) -> bool {
         self.sub == self.owner_user_id
+    }
+
+    /// True only for the owner calling through a session minted for the
+    /// desktop app.
+    pub fn is_owner_desktop(&self) -> bool {
+        self.is_owner() && self.client == ClientType::Desktop
     }
 }
 
@@ -136,6 +197,7 @@ pub fn claims(
     owner_user_id: impl Into<String>,
     aud: &str,
     drv: &str,
+    client: ClientType,
 ) -> Claims {
     let now = now_unix();
     Claims {
@@ -143,13 +205,16 @@ pub fn claims(
         owner_user_id: owner_user_id.into(),
         aud: aud.to_string(),
         drv: drv.to_string(),
+        client,
         iat: now,
         exp: now + ASSERTION_LIFETIME_SECS,
     }
 }
 
-/// Sign claims as `<base64url-json>.<base64url-hmac>`.
-pub fn sign(key: &[u8], claims: &Claims) -> AssertionResult<String> {
+/// Sign claims as `<base64url-json>.<base64url-hmac>`. Any serializable
+/// claims shape signs, so a test can present what an older gateway sent;
+/// [`verify`] is what decides which shapes a devserver accepts.
+pub fn sign(key: &[u8], claims: &impl Serialize) -> AssertionResult<String> {
     let payload = serde_json::to_vec(claims).map_err(|e| AssertionError::Decode(e.to_string()))?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
     let sig = hmac_sha256(key, payload.as_bytes());
@@ -258,17 +323,100 @@ mod tests {
         let key = derive_assertion_key("chan_pat_secret");
         assert_eq!(devserver_id_from_token("abc").len(), 64);
         let owner = "11111111-1111-4111-8111-111111111111";
-        let c = claims(owner, owner, "a.dev", "drv");
+        let c = claims(owner, owner, "a.dev", "drv", ClientType::Desktop);
         let token = sign(&key, &c).unwrap();
         let got = verify(&key, &token, "a.dev", "drv", owner).unwrap();
         assert_eq!(got.sub, c.sub);
         assert!(got.is_owner());
+        assert_eq!(got.client, ClientType::Desktop);
+        assert!(got.is_owner_desktop());
+    }
+
+    /// Sign an arbitrary claims payload the way `sign` does, so a test can
+    /// present a shape `Claims` itself never serializes.
+    fn sign_raw(key: &[u8], payload: &serde_json::Value) -> String {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(hmac_sha256(key, payload.as_bytes()));
+        format!("{payload}.{sig}")
+    }
+
+    #[test]
+    fn each_client_type_round_trips_and_only_the_owner_on_the_desktop_is_the_owner_desktop() {
+        let key = derive_assertion_key("chan_pat_secret");
+        for (client, wire) in [
+            (ClientType::Desktop, "desktop"),
+            (ClientType::Browser, "browser"),
+            (ClientType::Unknown, "unknown"),
+        ] {
+            let owner = claims("owner", "owner", "a.dev", "drv", client);
+            assert_eq!(serde_json::to_value(&owner).unwrap()["client"], wire);
+            assert_eq!(client.to_string(), wire);
+            let got = verify(&key, &sign(&key, &owner).unwrap(), "a.dev", "drv", "owner").unwrap();
+            assert_eq!(got.client, client);
+            assert!(got.is_owner());
+            assert_eq!(got.is_owner_desktop(), client == ClientType::Desktop);
+
+            let grantee = claims("grantee", "owner", "a.dev", "drv", client);
+            let got = verify(
+                &key,
+                &sign(&key, &grantee).unwrap(),
+                "a.dev",
+                "drv",
+                "owner",
+            )
+            .unwrap();
+            assert_eq!(got.client, client);
+            assert!(!got.is_owner_desktop(), "{wire} grantee");
+        }
+    }
+
+    /// An assertion from a gateway that predates the claim carries no client,
+    /// and a newer gateway may send a value this build does not know. Both
+    /// verify, so every other route keeps working, and neither is the desktop.
+    #[test]
+    fn a_missing_or_unrecognised_client_verifies_as_unknown_and_never_as_the_desktop() {
+        let key = derive_assertion_key("chan_pat_secret");
+        let base = serde_json::to_value(claims(
+            "owner",
+            "owner",
+            "a.dev",
+            "drv",
+            ClientType::Desktop,
+        ))
+        .unwrap();
+        let mut missing = base.clone();
+        missing.as_object_mut().unwrap().remove("client");
+        let mut shapes = vec![missing];
+        for value in [
+            serde_json::json!("cli"),
+            serde_json::json!("Desktop"),
+            serde_json::json!("DESKTOP"),
+            serde_json::json!(" desktop"),
+            serde_json::json!(""),
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!(["desktop"]),
+            serde_json::json!({"desktop": true}),
+        ] {
+            let mut shape = base.clone();
+            shape["client"] = value;
+            shapes.push(shape);
+        }
+        for shape in shapes {
+            let got = verify(&key, &sign_raw(&key, &shape), "a.dev", "drv", "owner")
+                .unwrap_or_else(|e| panic!("{shape}: {e}"));
+            assert_eq!(got.client, ClientType::Unknown, "{shape}");
+            assert!(got.is_owner(), "{shape}");
+            assert!(!got.is_owner_desktop(), "{shape}");
+        }
     }
 
     #[test]
     fn assertion_contains_no_display_identity() {
         let key = derive_assertion_key("chan_pat_secret");
-        let c = claims("owner", "owner", "a.dev", "drv");
+        let c = claims("owner", "owner", "a.dev", "drv", ClientType::Desktop);
         let payload = serde_json::to_string(&c).unwrap();
         assert!(!payload.contains("\"name\""));
         assert!(!payload.contains("\"email\""));
@@ -279,7 +427,7 @@ mod tests {
     #[test]
     fn assertion_ignores_unknown_claims() {
         let key = derive_assertion_key("chan_pat_secret");
-        let c = claims("u", "owner", "a.dev", "drv");
+        let c = claims("u", "owner", "a.dev", "drv", ClientType::Desktop);
         let mut value = serde_json::to_value(&c).unwrap();
         value["future_claim"] = serde_json::Value::String("x".to_string());
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string());
@@ -292,7 +440,7 @@ mod tests {
     #[test]
     fn assertion_rejects_wrong_host() {
         let key = derive_assertion_key("chan_pat_secret");
-        let c = claims("u", "owner", "a.dev", "drv");
+        let c = claims("u", "owner", "a.dev", "drv", ClientType::Desktop);
         let token = sign(&key, &c).unwrap();
         assert_eq!(
             verify(&key, &token, "b.dev", "drv", "owner").unwrap_err(),
@@ -303,7 +451,7 @@ mod tests {
     #[test]
     fn assertion_rejects_tampering() {
         let key = derive_assertion_key("chan_pat_secret");
-        let c = claims("u", "owner", "a.dev", "drv");
+        let c = claims("u", "owner", "a.dev", "drv", ClientType::Desktop);
         let mut token = sign(&key, &c).unwrap();
         token.push('x');
         assert_eq!(
@@ -315,7 +463,7 @@ mod tests {
     #[test]
     fn assertion_rejects_wrong_owner() {
         let key = derive_assertion_key("chan_pat_secret");
-        let c = claims("caller", "owner-a", "a.dev", "drv");
+        let c = claims("caller", "owner-a", "a.dev", "drv", ClientType::Desktop);
         let token = sign(&key, &c).unwrap();
         assert_eq!(
             verify(&key, &token, "a.dev", "drv", "owner-b").unwrap_err(),
@@ -326,7 +474,7 @@ mod tests {
     #[test]
     fn assertion_rejects_future_issue_and_overlong_lifetime() {
         let key = derive_assertion_key("chan_pat_secret");
-        let mut future = claims("caller", "owner", "a.dev", "drv");
+        let mut future = claims("caller", "owner", "a.dev", "drv", ClientType::Desktop);
         future.iat = now_unix() + CLOCK_SKEW_SECS + 1;
         future.exp = future.iat + ASSERTION_LIFETIME_SECS;
         assert_eq!(
@@ -334,7 +482,7 @@ mod tests {
             AssertionError::FutureIssued
         );
 
-        let mut overlong = claims("caller", "owner", "a.dev", "drv");
+        let mut overlong = claims("caller", "owner", "a.dev", "drv", ClientType::Desktop);
         overlong.exp = overlong.iat + ASSERTION_LIFETIME_SECS + 1;
         assert_eq!(
             verify(

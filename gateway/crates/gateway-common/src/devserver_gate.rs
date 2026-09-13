@@ -18,6 +18,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use chan_tunnel_proto::gateway_assertion::ClientType;
+
 pub const ENTRY_PURPOSE: &str = "chan.devserver.entry";
 pub const ENTRY_EXCHANGE_PATH: &str = "/_chan/entry";
 pub const ENTRY_VERSION: u16 = 1;
@@ -116,6 +118,13 @@ pub struct Claims {
     pub sub: Uuid,
     /// Immutable owner of the exact devserver data plane.
     pub owner_user_id: Uuid,
+    /// The client this credential was minted for, stated by the identity
+    /// route that minted it. A credential signed before the claim existed
+    /// decodes as [`ClientType::Unknown`], so an exchange in flight across a
+    /// gateway deploy still succeeds and opens a session that is not the
+    /// desktop's.
+    #[serde(default)]
+    pub client: ClientType,
     /// Devserver id resolved from the live tunnel registration.
     pub drv: String,
     /// Exact tenant host the token is bound to.
@@ -170,10 +179,12 @@ pub enum DevserverGateError {
 pub type DevserverGateResult<T> = Result<T, DevserverGateError>;
 
 /// Mint an entry token (30s exp).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_entry(
     signer: &EntrySigner,
     sub: Uuid,
     owner_user_id: Uuid,
+    client: ClientType,
     drv: &str,
     aud: &str,
     proxy_id: &str,
@@ -187,6 +198,7 @@ pub fn encode_entry(
         iss: "chan-gateway-identity".to_string(),
         sub,
         owner_user_id,
+        client,
         drv: drv.to_string(),
         aud: aud.to_string(),
         typ: "entry".to_string(),
@@ -348,6 +360,7 @@ mod tests {
             &signer,
             sample_uuid(),
             sample_uuid(),
+            ClientType::Desktop,
             "blog",
             "alice--0123456789ab.p1.proxy.chan.app",
             "p1",
@@ -372,6 +385,103 @@ mod tests {
         assert_eq!(c.proxy_id, "p1");
         assert_eq!(c.purpose, ENTRY_PURPOSE);
         assert_eq!(c.version, ENTRY_VERSION);
+        assert_eq!(c.client, ClientType::Desktop);
+    }
+
+    /// Re-sign `payload` under the test key with the canonical header, so a
+    /// test can present claims `encode_entry` never produces.
+    fn sign_payload(signer: &EntrySigner, payload: &serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(payload.to_string());
+        let signed = format!("{header}.{payload}");
+        let signature = signer.0.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    fn decode_claims(token: &str) -> serde_json::Value {
+        let payload = token.split('.').nth(1).unwrap();
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn each_minted_client_type_decodes_as_itself() {
+        let (signer, ring) = entry_keys();
+        for (client, wire) in [
+            (ClientType::Desktop, "desktop"),
+            (ClientType::Browser, "browser"),
+        ] {
+            let t = encode_entry(
+                &signer,
+                sample_uuid(),
+                sample_uuid(),
+                client,
+                "blog",
+                "alice--0123456789ab.p1.proxy.chan.app",
+                "p1",
+                "/blog/",
+            )
+            .unwrap();
+            assert_eq!(decode_claims(&t)["client"], wire);
+            let c = decode_entry(
+                &ring,
+                &t,
+                "p1",
+                "alice--0123456789ab.p1.proxy.chan.app",
+                "blog",
+                sample_uuid(),
+            )
+            .unwrap();
+            assert_eq!(c.client, client);
+        }
+    }
+
+    /// An entry credential minted by an identity that predates the claim is
+    /// still exchanged during a gateway deploy, and a value this build does
+    /// not recognise does not fail the credential; both decode as unknown,
+    /// never as the desktop. The version stays the same, so either service
+    /// may deploy first.
+    #[test]
+    fn a_credential_without_a_recognised_client_decodes_as_unknown() {
+        let (signer, ring) = entry_keys();
+        let minted = encode_entry(
+            &signer,
+            sample_uuid(),
+            sample_uuid(),
+            ClientType::Desktop,
+            "blog",
+            "alice--0123456789ab.p1.proxy.chan.app",
+            "p1",
+            "/blog/",
+        )
+        .unwrap();
+        let base = decode_claims(&minted);
+        let mut missing = base.clone();
+        missing.as_object_mut().unwrap().remove("client");
+        let mut shapes = vec![missing];
+        for value in [
+            serde_json::json!("cli"),
+            serde_json::json!("Desktop"),
+            serde_json::Value::Null,
+            serde_json::json!(7),
+        ] {
+            let mut shape = base.clone();
+            shape["client"] = value;
+            shapes.push(shape);
+        }
+        for shape in shapes {
+            let token = sign_payload(&signer, &shape);
+            let c = decode_entry(
+                &ring,
+                &token,
+                "p1",
+                "alice--0123456789ab.p1.proxy.chan.app",
+                "blog",
+                sample_uuid(),
+            )
+            .unwrap_or_else(|e| panic!("{shape}: {e}"));
+            assert_eq!(c.client, ClientType::Unknown, "{shape}");
+            assert_eq!(c.version, ENTRY_VERSION);
+        }
     }
 
     #[test]
@@ -381,6 +491,7 @@ mod tests {
             &signer,
             sample_uuid(),
             sample_uuid(),
+            ClientType::Desktop,
             "blog",
             "alice--0123456789ab.p1.proxy.chan.app",
             "p1",
@@ -406,6 +517,7 @@ mod tests {
             &signer,
             sample_uuid(),
             sample_uuid(),
+            ClientType::Desktop,
             "blog",
             "alice--0123456789ab.p1.proxy.chan.app",
             "p1",

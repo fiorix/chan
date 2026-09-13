@@ -2207,12 +2207,15 @@ mod tests {
         proxy.wait_registration().await;
         proxy
             .sessions
-            .issue(crate::session_store::SessionPrincipal {
-                subject_user_id: Uuid::new_v4(),
-                owner_user_id: Uuid::new_v4(),
-                devserver_id: "ds-1".into(),
-                audience: "https://alice--0123456789ab.p1.proxy.chan.app".into(),
-            })
+            .issue(
+                crate::session_store::SessionPrincipal {
+                    subject_user_id: Uuid::new_v4(),
+                    owner_user_id: Uuid::new_v4(),
+                    devserver_id: "ds-1".into(),
+                    audience: "https://alice--0123456789ab.p1.proxy.chan.app".into(),
+                },
+                chan_tunnel_proto::gateway_assertion::ClientType::Browser,
+            )
             .unwrap();
         assert_eq!(proxy.sessions.len(), 1);
 

@@ -45,7 +45,7 @@ This crate owns:
 - Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers), plus `sanitize_workspace_name`.
 - `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
 - `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
-- The gateway caller assertion (`gateway_assertion`): per-tunnel key derivation, signed caller claims, `canonical_audience`, and the token-resolved devserver id (PAT SHA-256).
+- The gateway caller assertion (`gateway_assertion`): per-tunnel key derivation, signed caller claims, `canonical_audience`, and the token-resolved devserver id (PAT SHA-256). The claims include `ClientType`, the client the caller's gateway session was minted for; the gateway's entry credential reuses the same type. A missing or unrecognised value deserializes as `Unknown` instead of failing the token, and is never `Desktop`.
 
 Out of scope here, owned by the I/O crates:
 

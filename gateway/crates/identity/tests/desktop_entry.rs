@@ -451,6 +451,73 @@ async fn entry_token_carries_only_immutable_authority() {
     app.cleanup().await;
 }
 
+/// The desktop entry route is chan-desktop's way into a devserver, so every
+/// credential it mints is for the desktop client: the owner's own devserver
+/// with a per-devserver or an account PAT, and a devserver shared with the
+/// caller.
+#[tokio::test]
+async fn the_desktop_entry_mints_every_credential_for_the_desktop_client() {
+    let app = TestApp::new().await;
+    let uid = app.insert_user().await;
+    let username = placeholder_username(uid);
+    let dsid = "c".repeat(64);
+    mock_tunnels(&app, uid, &username, &[&dsid]).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}/devservers/{dsid}/access")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+        .mount(&app.profile)
+        .await;
+    for scopes in [&["desktop.connect"][..], &["desktop.account"][..]] {
+        let pat = app.pat_with_scopes(uid, scopes).await;
+        let (s, body) = post_entry(&app, &pat).await;
+        assert_eq!(s, StatusCode::OK, "{scopes:?}: {body}");
+        let credential = body["entry_credential"].as_str().unwrap();
+        let claims = decode_entry_credential(credential, &username, &dsid, uid);
+        assert_eq!(claims.sub, uid, "{scopes:?}");
+        assert_eq!(
+            claims.client,
+            devserver_gate::ClientType::Desktop,
+            "{scopes:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&claims).unwrap()["client"],
+            "desktop",
+            "{scopes:?}"
+        );
+    }
+
+    let grantee = app.insert_user().await;
+    let pat = app.pat_with_scopes(grantee, &["desktop.account"]).await;
+    let owner_uid = Uuid::new_v4();
+    let owner = "owner-handle";
+    let shared = "7".repeat(64);
+    mock_user_by_username(&app, owner_uid, owner).await;
+    mock_tunnels(&app, owner_uid, owner, &[&shared]).await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/users/{owner_uid}/devservers/{shared}/access"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+        .mount(&app.profile)
+        .await;
+    let (s, body) = post_entry_body(
+        &app,
+        &pat,
+        json!({"owner": owner, "owner_user_id": owner_uid, "devserver_id": shared}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "shared: {body}");
+    let claims = decode_entry_credential(
+        body["entry_credential"].as_str().unwrap(),
+        owner,
+        &shared,
+        owner_uid,
+    );
+    assert_eq!(claims.sub, grantee);
+    assert_eq!(claims.client, devserver_gate::ClientType::Desktop);
+    app.cleanup().await;
+}
+
 #[tokio::test]
 async fn entry_mint_does_not_fetch_display_identity() {
     let app = TestApp::new().await;

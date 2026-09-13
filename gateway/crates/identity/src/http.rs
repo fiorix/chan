@@ -1587,10 +1587,13 @@ async fn share_landing(
         tenant_url.scheme(),
         &tenant.authority,
     );
+    // A share landing is a browser navigation on the identity session, so
+    // the credential is for a browser.
     let token = gateway_common::devserver_gate::encode_entry(
         &state.cfg.entry_signer,
         uid,
         owner_user.id,
+        gateway_common::devserver_gate::ClientType::Browser,
         &devserver_id,
         &aud,
         &proxy_id,
@@ -1716,6 +1719,7 @@ async fn share_landing_root(
         &state.cfg.entry_signer,
         uid,
         owner_user.id,
+        gateway_common::devserver_gate::ClientType::Browser,
         &devserver_id,
         &aud,
         &proxy_id,
@@ -1984,10 +1988,14 @@ async fn desktop_devserver_entry(
         tenant_url.scheme(),
         &tenant.authority,
     );
+    // This route is how chan-desktop opens its gateway sessions: a
+    // desktop-scoped PAT presented by native code, which exchanges the
+    // credential itself. It is the only mint for the desktop client.
     let entry_token = gateway_common::devserver_gate::encode_entry(
         &state.cfg.entry_signer,
         validated.user_id,
         owner_id,
+        gateway_common::devserver_gate::ClientType::Desktop,
         &devserver_id,
         &aud,
         &proxy_id,

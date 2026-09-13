@@ -15,6 +15,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
+chan-tunnel-proto = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 mime_guess = { workspace = true }

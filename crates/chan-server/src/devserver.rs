@@ -2703,6 +2703,7 @@ pub(crate) mod tunnel_test_support {
             owner,
             aud,
             &assertion.devserver_id,
+            chan_tunnel_proto::gateway_assertion::ClientType::Desktop,
         );
         chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap()
     }
@@ -5970,6 +5971,7 @@ mod tests {
                 crate::route_authority::test_support::Caller::OWNER_ID,
                 TEST_AUD,
                 &assertion.devserver_id,
+                chan_tunnel_proto::gateway_assertion::ClientType::Desktop,
             );
             Some(chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap())
         };

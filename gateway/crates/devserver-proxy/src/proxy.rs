@@ -373,6 +373,7 @@ async fn handle_gated(
                 let caller = GatewayCaller {
                     sub: principal.subject_user_id,
                     owner_user_id: principal.owner_user_id,
+                    client: bound.authorization.client,
                 };
                 let rewrite = LocationRewrite {
                     capability_prefix: extension_prefix(
@@ -422,6 +423,7 @@ async fn handle_gated(
                         GatewayCaller {
                             sub: record.principal.subject_user_id,
                             owner_user_id: record.principal.owner_user_id,
+                            client: record.client,
                         },
                         record,
                     ),
@@ -587,6 +589,7 @@ fn exchange_entry(
             &state.sessions,
             claims.sub,
             claims.owner_user_id,
+            claims.client,
             &devserver_id,
             aud,
             &claims.next_path,
@@ -643,7 +646,10 @@ fn bind_extension_link(
             extension_id: lane.extension_id.clone(),
             capability: lane.credential.clone(),
         };
-        let token = match state.sessions.bind_extension(&record.principal, target) {
+        let token = match state
+            .sessions
+            .bind_extension(&record.principal, record.client, target)
+        {
             Ok(token) => token,
             Err(BindError::NoLiveSession) => return not_found_response(req.headers()),
             Err(BindError::AtCapacity) => {
@@ -866,6 +872,7 @@ fn query_flag_truthy(query: Option<&str>, name: &str) -> bool {
 struct GatewayCaller {
     sub: Uuid,
     owner_user_id: Uuid,
+    client: gateway_assertion::ClientType,
 }
 
 /// Outcome of the auth-gate decision.
@@ -1286,21 +1293,27 @@ fn apply_credentialed_response_policy(response: &mut Response, extension_frame: 
 /// session cookie identifies the right user for upstream attribution.
 /// `Path=/` is safe because the grant is whole-devserver: every path on
 /// this host is content the cookie-holder is authorized to reach, and
-/// user-to-user isolation stays on the host-only `aud` claim.
+/// user-to-user isolation stays on the host-only `aud` claim. The session
+/// keeps the entry credential's client type for every assertion made under
+/// it.
 fn issue_session_cookie(
     sessions: &crate::session_store::SessionStore,
     sub: Uuid,
     owner_user_id: Uuid,
+    client: gateway_assertion::ClientType,
     devserver_id: &str,
     aud: &str,
     next_path: &str,
 ) -> Response {
-    let issued = match sessions.issue(SessionPrincipal {
-        subject_user_id: sub,
-        owner_user_id,
-        devserver_id: devserver_id.to_string(),
-        audience: aud.to_string(),
-    }) {
+    let issued = match sessions.issue(
+        SessionPrincipal {
+            subject_user_id: sub,
+            owner_user_id,
+            devserver_id: devserver_id.to_string(),
+            audience: aud.to_string(),
+        },
+        client,
+    ) {
         Ok(issued) => issued,
         Err(error) => {
             tracing::warn!(?error, "proxy-local browser session capacity reached");
@@ -1866,6 +1879,7 @@ fn gateway_assertion_value(
         caller.owner_user_id.to_string(),
         aud,
         devserver_id,
+        caller.client,
     );
     let signed = gateway_assertion::sign(key, &claims)
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("sign gateway assertion: {e}")))?;

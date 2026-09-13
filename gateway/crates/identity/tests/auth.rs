@@ -1712,6 +1712,138 @@ async fn share_landing_grantee_minted_jwt_redirect() {
     app.cleanup().await;
 }
 
+/// GET `uri` with the client's session cookie and read the entry handoff
+/// page: the form action and the credential it POSTs.
+async fn entry_handoff_page(c: &Client<'_>, uri: &str) -> (url::Url, String) {
+    let mut builder = Request::builder().method(Method::GET).uri(uri);
+    if let Some(cookie) = &c.cookie {
+        builder = builder.header(header::COOKIE, cookie.clone());
+    }
+    let res = c
+        .app
+        .router
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "{uri}");
+    let page =
+        String::from_utf8(to_bytes(res.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+    let attribute = |prefix: &str| {
+        let (_, rest) = page
+            .split_once(prefix)
+            .unwrap_or_else(|| panic!("{uri}: no {prefix} in {page}"));
+        rest.split_once('"').unwrap().0.to_string()
+    };
+    let action = url::Url::parse(&attribute(r#"action=""#)).unwrap();
+    (action, attribute(r#"name="credential" value=""#))
+}
+
+/// Verify a handoff credential as the proxy named in its form action would.
+fn decode_handoff(
+    action: &url::Url,
+    credential: &str,
+    devserver_id: &str,
+    owner_user_id: Uuid,
+) -> gateway_common::devserver_gate::Claims {
+    use gateway_common::devserver_gate::{decode_entry, EntrySigner, EntryVerifierRing};
+    let signer = EntrySigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+    let ring = EntryVerifierRing::from_base64_list(&signer.verifying_key_base64()).unwrap();
+    decode_entry(
+        &ring,
+        credential,
+        "p1",
+        action.host_str().unwrap(),
+        devserver_id,
+        owner_user_id,
+    )
+    .expect("handoff credential verifies")
+}
+
+/// Mock one live devserver `dsid` of `owner-handle` that grants access, and
+/// sign `caller` in, the profile answering for the caller as `username`.
+async fn signed_in_with_a_shared_devserver<'a>(
+    app: &'a TestApp,
+    owner_uid: Uuid,
+    dsid: &str,
+    caller: Uuid,
+    username: &str,
+) -> Client<'a> {
+    Mock::given(method("GET"))
+        .and(path("/v1/users/by-username"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            owner_uid,
+            "owner@x.com",
+            "owner-handle",
+        )))
+        .mount(&app.profile)
+        .await;
+    mock_live_devserver(app, owner_uid, "owner-handle", dsid).await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/users/{owner_uid}/devservers/{dsid}/access"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+        .mount(&app.profile)
+        .await;
+    let mut c = Client::new(app);
+    happy_login(app, &mut c, caller, &format!("{username}@x.com")).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{caller}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            caller,
+            &format!("{username}@x.com"),
+            username,
+        )))
+        .mount(&app.profile)
+        .await;
+    c
+}
+
+/// Both share landings answer a signed-in browser's navigation, so every
+/// credential they mint is for the browser client, whether the caller is a
+/// grantee opening one workspace or the owner opening one workspace or the
+/// whole devserver.
+#[tokio::test]
+async fn share_landings_mint_every_credential_for_the_browser_client() {
+    let owner_uid = Uuid::new_v4();
+    let dsid = "b".repeat(64);
+
+    let app = TestApp::new().await;
+    let grantee_uid = fake_user_id();
+    let grantee =
+        signed_in_with_a_shared_devserver(&app, owner_uid, &dsid, grantee_uid, "grantee").await;
+    let (action, credential) = entry_handoff_page(&grantee, "/s/owner-handle/photos").await;
+    let claims = decode_handoff(&action, &credential, &dsid, owner_uid);
+    assert_eq!(claims.sub, grantee_uid);
+    assert_eq!(claims.next_path, "/photos/");
+    assert_eq!(
+        claims.client,
+        gateway_common::devserver_gate::ClientType::Browser
+    );
+    app.cleanup().await;
+
+    let app = TestApp::new().await;
+    let owner =
+        signed_in_with_a_shared_devserver(&app, owner_uid, &dsid, owner_uid, "owner-handle").await;
+    for uri in ["/s/owner-handle", "/s/owner-handle/photos"] {
+        let (action, credential) = entry_handoff_page(&owner, uri).await;
+        let claims = decode_handoff(&action, &credential, &dsid, owner_uid);
+        assert_eq!(claims.sub, owner_uid, "{uri}");
+        assert_eq!(
+            claims.client,
+            gateway_common::devserver_gate::ClientType::Browser,
+            "{uri}"
+        );
+        assert_eq!(
+            serde_json::to_value(&claims).unwrap()["client"],
+            "browser",
+            "{uri}"
+        );
+    }
+    app.cleanup().await;
+}
+
 #[tokio::test]
 async fn share_landing_root_unauthed_redirects_to_login() {
     // Whole-devserver open (/s/{owner}, no workspace) while signed out:
