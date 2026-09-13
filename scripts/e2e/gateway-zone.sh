@@ -3351,28 +3351,59 @@ TOML
         assert_fail "extension: catalog never listed the e2e extension (entry_path='$entry_path')"
     fi
 
-    # -- the live defect's exact probes, cookieless --
-    local h code
+    # -- no anonymous caller: the capability link alone reaches nothing --
+    local h code probe
+    for probe in "$entry_path" "${entry_path}app.js"; do
+        h="$WORK/ext-anon-headers.txt"
+        code="$(curl_node "$node" "$host" -o "$WORK/ext-anon.json" -w '%{http_code}' -D "$h" \
+            -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+            "https://$host:$PROXY_PORT/$prefix$probe")"
+        if [ "$code" = "404" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
+            grep -q '^{"error":"not found"}$' "$WORK/ext-anon.json"; then
+            assert_pass "extension: cookieless capability link /$prefix$probe is refused with a CORS-readable 404"
+        else
+            assert_fail "extension: cookieless capability link expected a readable 404, got $code: $(head -c 120 "$WORK/ext-anon.json")"
+        fi
+    done
+
+    ext_bind() { # ext_bind <tenant-relative capability path> -> the bound path the proxy redirects a signed-in frame navigation to
+        local bind_headers="$WORK/ext-bind-headers.txt" bind_code
+        bind_code="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -D "$bind_headers" \
+            -H "Cookie: $gate" -H "Sec-Fetch-Site: same-origin" \
+            -H "Sec-Fetch-Mode: navigate" -H "Sec-Fetch-Dest: iframe" \
+            "https://$host:$PROXY_PORT/$prefix$1")"
+        [ "$bind_code" = "303" ] || return 1
+        sed -n 's/^[Ll]ocation: \([^[:space:]]*\).*/\1/p' "$bind_headers" | head -1
+    }
+
+    # -- a signed-in frame navigation binds the link; the frame's cookieless
+    # requests then reach the extension on the bound path --
+    local bound=""
+    bound="$(ext_bind "$entry_path")" || assert_fail "extension: signed-in frame navigation was not redirected to a bound path"
+    case "$bound" in
+        "/$prefix/_chan/extensions/e2e/"*) ;;
+        *) assert_fail "extension: binding redirect named an unexpected path: '$bound'" ;;
+    esac
     h="$WORK/ext-entry-headers.txt"
     code="$(curl_node "$node" "$host" -o "$WORK/ext-entry.html" -w '%{http_code}' -D "$h" \
         -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
-        "https://$host:$PROXY_PORT/$prefix$entry_path")"
+        "https://$host:$PROXY_PORT$bound")"
     if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
         grep -q 'e2e extension' "$WORK/ext-entry.html"; then
-        assert_pass "extension: cookieless Origin:null entry doc serves through the gateway with ACAO null"
+        assert_pass "extension: cookieless Origin:null entry doc serves on the bound path with ACAO null"
     else
-        assert_fail "extension: entry doc expected 200 + ACAO null, got $code: $(head -c 120 "$WORK/ext-entry.html")"
+        assert_fail "extension: bound entry doc expected 200 + ACAO null, got $code: $(head -c 120 "$WORK/ext-entry.html")"
     fi
 
     h="$WORK/ext-appjs-headers.txt"
     code="$(curl_node "$node" "$host" -o "$WORK/ext-app.js" -w '%{http_code}' -D "$h" \
         -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
-        "https://$host:$PROXY_PORT/$prefix${entry_path}app.js")"
+        "https://$host:$PROXY_PORT${bound}app.js")"
     if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h" &&
         grep -q 'appModule' "$WORK/ext-app.js"; then
-        assert_pass "extension: cookieless module script app.js serves through the gateway with ACAO null"
+        assert_pass "extension: cookieless module script app.js serves on the bound path with ACAO null"
     else
-        assert_fail "extension: app.js expected 200 + ACAO null, got $code"
+        assert_fail "extension: bound app.js expected 200 + ACAO null, got $code"
     fi
 
     local bogus
@@ -3404,10 +3435,13 @@ TOML
         fi
     done
 
-    if ! grep -qF "$cap" "$LOGS/proxy-$node.log" && ! grep -qF "$cap" "$LOGS/ds-ext.log"; then
-        assert_pass "extension: capability segment absent from the proxy and devserver logs"
+    local binding="${bound#"/$prefix/_chan/extensions/e2e/"}"
+    binding="${binding%%/*}"
+    if ! grep -qF "$cap" "$LOGS/proxy-$node.log" && ! grep -qF "$cap" "$LOGS/ds-ext.log" &&
+        ! grep -qF "$binding" "$LOGS/proxy-$node.log" && ! grep -qF "$binding" "$LOGS/ds-ext.log"; then
+        assert_pass "extension: capability and binding segments absent from the proxy and devserver logs"
     else
-        assert_fail "extension: capability segment leaked into a service log"
+        assert_fail "extension: an extension credential segment leaked into a service log"
     fi
 
     # -- headless-Chrome phase: the true opaque-origin proof, then the
@@ -3479,20 +3513,31 @@ TOML
     h="$WORK/ext-stale-headers.txt"
     code="$(curl_node "$node" "$host" -o "$WORK/ext-stale.json" -w '%{http_code}' -D "$h" \
         -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
-        "https://$host:$PROXY_PORT/$prefix$entry_path")"
+        "https://$host:$PROXY_PORT$bound")"
     if [ "$code" = "404" ] && grep -qi '^access-control-allow-origin: null' "$h"; then
-        assert_pass "extension: the pre-restart capability now dies as a CORS-readable 404"
+        assert_pass "extension: the pre-restart capability now dies as a CORS-readable 404 on its bound path"
     else
         assert_fail "extension: stale capability expected readable 404, got $code"
     fi
-    h="$WORK/ext-fresh-headers.txt"
+    h="$WORK/ext-fresh-anon-headers.txt"
     code="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -D "$h" \
         -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
         "https://$host:$PROXY_PORT/$prefix${new_entry_path}app.js")"
-    if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h"; then
-        assert_pass "extension: the fresh capability serves the module script cookieless"
+    if [ "$code" = "404" ]; then
+        assert_pass "extension: the fresh capability link is refused cookieless"
     else
-        assert_fail "extension: fresh capability expected 200, got $code"
+        assert_fail "extension: fresh capability link expected a cookieless 404, got $code"
+    fi
+    local fresh_bound=""
+    fresh_bound="$(ext_bind "$new_entry_path")" || assert_fail "extension: signed-in navigation did not bind the fresh capability"
+    h="$WORK/ext-fresh-headers.txt"
+    code="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -D "$h" \
+        -H "Origin: null" -H "Sec-Fetch-Mode: cors" \
+        "https://$host:$PROXY_PORT${fresh_bound}app.js")"
+    if [ "$code" = "200" ] && grep -qi '^access-control-allow-origin: null' "$h"; then
+        assert_pass "extension: the fresh capability serves the module script on its bound path"
+    else
+        assert_fail "extension: fresh bound app.js expected 200, got $code"
     fi
 
     # Leave the stack as found.

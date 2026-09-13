@@ -1,11 +1,13 @@
 // Headless-Chrome half of the extension-capability scenario: proves
 // the opaque-origin story a curl probe cannot. A REAL sandboxed
-// iframe (allow-scripts, no allow-same-origin) loads the extension
-// entry doc through the gateway, its module script boots, its
-// cookieless fetches read TRUE statuses (a bogus capability is a
-// readable 404, not a CORS mask), and the tenant watch socket drops
-// when the devserver restarts -- the client-side trigger the SPA's
-// staleness recovery hangs off.
+// iframe (allow-scripts, no allow-same-origin) navigates to the
+// extension's capability link through the gateway with the tenant
+// session cookie, the proxy binds the link and redirects the frame to
+// its bound path, its module script boots, its cookieless fetches
+// read TRUE statuses (a bogus capability is a readable 404, not a
+// CORS mask), and the tenant watch socket drops when the devserver
+// restarts -- the client-side trigger the SPA's staleness recovery
+// hangs off.
 //
 // Env: CHROME_BIN, TENANT_BASE (https://host:port), NODE_IP, PREFIX
 // (workspace slug, no slashes), ENTRY_PATH (tenant-relative extension

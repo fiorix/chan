@@ -24,6 +24,8 @@ Public wildcard routing is deliberately small:
 
 - `/_chan/entry` validates method, exact Origin, exact Content-Type, and a form no larger than 8 KiB containing exactly one nonempty `credential` field before consulting the live registry;
 - `/api/devserver/*` is always 404 because that management API is local-only;
+- an extension capability link (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) is never forwarded, and a signed-in iframe navigation to it is answered with a redirect to a bound path (see [Extension links](#extension-links));
+- an extension bound path (`/{tenant}/_chan/extensions/{id}/{96-hex}/...`) requires a binding whose principal still holds a live session;
 - an ordinary path requires a valid opaque `__Host-devserver_gate` cookie;
 - unauthenticated bare `/` redirects to the identity dashboard; and
 - every other unauthenticated or mismatched request returns the same 404 shape.
@@ -49,7 +51,14 @@ flowchart TD
     M -->|yes| N
     M -->|no| B{entry exchange?}
     B -->|yes| X[verify Ed25519 and bindings; consume jti; issue opaque session]
-    B -->|no| C{valid opaque session?}
+    B -->|no| K{extension lane shape?}
+    K -->|capability link| G{same-origin iframe navigation with a valid opaque session?}
+    G -->|no| N
+    G -->|yes| Y[bind the link to the session's principal; 303 to the bound path]
+    K -->|bound path| Z{binding's principal holds a live session?}
+    Z -->|no| N
+    Z -->|yes| W[authorize operation; sign assertion as that principal; forward to the capability path]
+    K -->|neither| C{valid opaque session?}
     C -->|no| N
     C -->|yes| P[authorize operation; sign request assertion; forward full path]
 ```
@@ -120,6 +129,17 @@ A cookie-authenticated WebSocket additionally requires exactly one `Origin` equa
 
 Every credentialed response receives `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a CSP `frame-ancestors 'none'` directive. The sole framing exception is Chan's capability-scoped `/_chan/extensions/` proxy namespace, which receives `frame-ancestors 'self'` so the owning tenant can host it in an opaque sandboxed iframe; no other tenant content becomes frameable. Upstream cookies with a `Domain` attribute, or names reserved for the gateway session and CSRF cookies, are dropped.
 
+## Extension links
+
+A workspace tenant's extension tab is an iframe with `sandbox="allow-forms allow-scripts"`, so its document has an opaque origin and the requests it makes carry no cookie. chan-server gives each ready extension a 64-hex path capability, and the workspace app points the frame at `/{tenant}/_chan/extensions/{id}/{capability}/...`. The proxy never forwards that capability link, and nobody reaches an extension without signing in. It binds the link to the signed-in user on the frame's navigation instead, which needs nothing from the workspace app, so a devserver serving any version of it works behind this proxy:
+
+- A `GET` carrying exactly `Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: iframe`, plus a session cookie valid for the host, devserver and owner, mints a binding for that session's principal and is answered 303 to `/{tenant}/_chan/extensions/{id}/{binding}/...`, keeping the rest of the path and the query. The parent page starts that navigation, so the browser attaches the `SameSite=Lax` cookie despite the sandbox. Fetch Metadata cannot be set by page script, so the frame's own fetch, a subresource, a WebSocket, a top-level open, a navigation the sandboxed document starts itself (`cross-site`, and cookieless), a frame on a sibling tenant (`same-site`), and a browser that sends no Fetch Metadata all get the ordinary 404, cookie or not.
+- A binding token is 96 lowercase hex: a 128-bit selector the store looks up, then a 256-bit verifier compared in constant time. It resolves to the principal (subject, owner, devserver, audience), the tenant, the extension id and the devserver capability, and the path's tenant, extension id and host must match. A bound request, HTTP or WebSocket, is forwarded to the devserver's capability path with an assertion naming the principal's real subject. It needs no cookie, CSRF header or WebSocket Origin, none of which the frame can present. A `Location` the devserver answers on its capability path is rewritten back onto the bound path.
+- A binding belongs to its principal rather than to the session that minted it, so an open extension tab survives the user signing in again before the first session's hour ends. It lives only while the principal holds a live session without a gap: when the principal's last session is removed, by expiry or revocation, its bindings go with it, and a lapsed binding does not return with a later session. Every revocation that reaches the principal, an admin-session revocation of any one of its sessions included, deletes its bindings, cancels the transports admitted through them, and waits for those to drain before acknowledging, with the same tombstone-on-timeout rule as sessions. A bound request runs until the principal's latest-expiring live session expires.
+- A principal holds at most 32 bindings; minting another evicts its least recently used one, so reloading frames rotates rather than accumulates. The proxy holds at most four bindings per `SESSION_MAX_ACTIVE` slot, 40,000 by default, and answers 503 when that is full rather than evict another principal's binding.
+
+Every response on either shape carries the extension response policy (`Access-Control-Allow-Origin: null`, no-store, nosniff, no-referrer, no `Set-Cookie`), refusals included, so the frame reads true statuses. Both shapes keep the extension's path depth, so the frame's relative URLs resolve as they would on the capability path, and the trace span redacts either credential segment.
+
 ## Reverse-proxy hygiene
 
 The proxy strips the fixed RFC hop-by-hop set on both legs and every header named by every `Connection` field value. It removes inbound `Host`, `Cookie`, `Authorization`, `X-Chan-CSRF`, and any client-supplied gateway assertion. `X-Forwarded-Host` and `X-Forwarded-Proto` are recomputed from the routed host and configured edge scheme; inbound forwarded host/scheme headers are never routing authority.
@@ -144,7 +164,9 @@ The controller retains disconnected `(proxy_id, boot_id)` authority for 60 secon
 
 A proxy node is credential-poor relative to identity and profile, but it is still a data-plane trust boundary. A fully compromised assigned proxy can see a transient PAT during validation and can mint per-request assertions for tunnels currently assigned to it. The protocol prevents that node from joining as another provisioned proxy, fabricating an identity-signed admission or entry credential, or turning one node credential into fleet authority. Node isolation, deprovisioning, and PAT rotation remain the incident response for a compromised assigned node; this design is not a trusted execution environment.
 
-The replay cache, opaque sessions, registry, and controller fleet view are memory-only by design. Restart fails tunnels and sessions closed. Controller HA, durable fleet state, automatic DNS/certificate provisioning, and proxy-to-proxy traffic are outside this component.
+An extension bound path carries its binding in the URL, because the opaque-origin frame can present no cookie. A leaked bound path is therefore usable as that user, from any client, until the user holds no live session or a revocation reaches them. The capability link on its own grants nothing.
+
+The replay cache, opaque sessions, extension bindings, registry, and controller fleet view are memory-only by design. Restart fails tunnels and sessions closed. Controller HA, durable fleet state, automatic DNS/certificate provisioning, and proxy-to-proxy traffic are outside this component.
 
 ## Invariants
 
@@ -155,7 +177,8 @@ The replay cache, opaque sessions, registry, and controller fleet view are memor
 - Browser-session publication never contains the cookie id, replay id, audience, assertion, peer address, or cancellation internals.
 - Revocation acknowledgement means every registered matching transport has stopped; timeouts remain visible to retries.
 - Every tunnel-bound HTTP request and WebSocket carries a fresh per-tunnel gateway assertion; the client cannot supply one.
-- Unsafe browser methods require CSRF and cookie-authenticated WebSockets require exact Origin.
+- Unsafe browser methods require CSRF and cookie-authenticated WebSockets require exact Origin; the cookieless extension bound path is the one exception, and it requires a live binding instead.
+- No request reaches a tunnel without a signed-in principal, and every assertion names that principal's real subject: an extension capability link is never forwarded, and a bound path forwards only while its principal holds a live session.
 - The public wildcard never exposes `/api/devserver/*` or an admin route.
 - Request paths remain segment-preserving; chan-server is the sole workspace tenant router.
 - Control loss cannot retain data-plane authority past its hard deadline, and controller disconnected-authority markers outlive proxy retention.

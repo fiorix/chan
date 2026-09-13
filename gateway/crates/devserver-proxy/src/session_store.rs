@@ -1,11 +1,12 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use devserver_control_proto::BrowserSessionRow;
 use rand::RngCore;
+use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
@@ -15,6 +16,20 @@ use uuid::Uuid;
 const SESSION_ID_BYTES: usize = 32;
 const MAX_SESSIONS_PER_SUBJECT: usize = 64;
 const MAX_SESSIONS_PER_PRINCIPAL: usize = 16;
+/// An extension binding token is a selector, the lookup key, followed by a
+/// verifier compared in constant time, so a timing difference in the map
+/// lookup can reveal nothing about the 256 bits that authorize the request.
+const BINDING_SELECTOR_BYTES: usize = 16;
+const BINDING_VERIFIER_BYTES: usize = 32;
+/// Length of an extension binding token as it appears in a bound path.
+pub const EXTENSION_BINDING_HEX_LEN: usize = (BINDING_SELECTOR_BYTES + BINDING_VERIFIER_BYTES) * 2;
+/// Every frame load of an extension tab mints a binding, so a principal that
+/// reloads frames rotates through this many instead of accumulating them: the
+/// least recently used binding is evicted to make room.
+const MAX_BINDINGS_PER_PRINCIPAL: usize = 32;
+/// Proxy-wide bindings allowed per session slot. The total is refused, never
+/// evicted, when full, so one user's frames cannot push out another user's.
+const BINDINGS_PER_SESSION_SLOT: usize = 4;
 #[cfg(not(test))]
 const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -187,48 +202,68 @@ impl ActiveOperations {
     }
 }
 
-/// Absolute backstop on one extension-capability transport. The real
-/// bounds on that lane are the route body/deadline policy and the WS
-/// idle timeout; this only guarantees no transport is literally
-/// immortal should both fail to fire.
-const CAPABILITY_LANE_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
-
 impl SessionRecord {
     pub(crate) fn begin_operation(&self) -> Option<ActiveOperation> {
         self.operations.begin()
-    }
-
-    /// Detached authority for one extension-capability request. Never
-    /// registered in the store: the devserver's per-process path
-    /// capability is the credential, so there is no proxy session to
-    /// look up or revoke. The record only supplies the transport
-    /// bookkeeping (deadline anchor, cancellation, operation registry)
-    /// every forwarded request carries; its transports end with the
-    /// request deadline, the WS idle timeout, or the tunnel itself.
-    pub(crate) fn capability_lane(principal: SessionPrincipal) -> Self {
-        let now = Instant::now();
-        let wall_now = Utc::now();
-        Self {
-            admin_session_id: Uuid::nil(),
-            principal,
-            created_at: now,
-            expires_at: now + CAPABILITY_LANE_BACKSTOP,
-            created_at_wall: wall_now,
-            expires_at_wall: wall_now
-                .checked_add_signed(
-                    chrono::Duration::from_std(CAPABILITY_LANE_BACKSTOP)
-                        .unwrap_or(chrono::Duration::MAX),
-                )
-                .unwrap_or(DateTime::<Utc>::MAX_UTC),
-            cancellation: CancellationToken::new(),
-            operations: Arc::new(ActiveOperations::default()),
-        }
     }
 
     fn revoke_authority(&self) {
         self.cancellation.cancel();
         self.operations.revoke();
     }
+}
+
+/// The devserver extension a binding forwards to: the tenant and extension
+/// the frame was opened for, and the devserver's own path capability.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExtensionTarget {
+    pub tenant: String,
+    pub extension_id: String,
+    pub capability: String,
+}
+
+impl std::fmt::Debug for ExtensionTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionTarget")
+            .field("tenant", &self.tenant)
+            .field("extension_id", &self.extension_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A signed-in principal's extension link. The opaque-origin extension frame
+/// can send no cookie, so the bound path carries the token instead, and the
+/// binding stands in for the session cookie on every request the frame makes.
+///
+/// A binding belongs to its principal rather than to the session that minted
+/// it: an open extension tab keeps working when the same user signs in again
+/// before the minting session's hour runs out, just as the rest of that tab
+/// keeps working on the renewed cookie. It lives only while the principal has
+/// held a live session without a gap since it was minted, and any revocation
+/// that reaches the principal deletes it.
+struct ExtensionBinding {
+    verifier: [u8; BINDING_VERIFIER_BYTES],
+    principal: SessionPrincipal,
+    target: ExtensionTarget,
+    last_used: Instant,
+    cancellation: CancellationToken,
+    operations: Arc<ActiveOperations>,
+}
+
+impl ExtensionBinding {
+    fn revoke_authority(&self) {
+        self.cancellation.cancel();
+        self.operations.revoke();
+    }
+}
+
+/// A live binding resolved for one request.
+pub struct ResolvedBinding {
+    pub target: ExtensionTarget,
+    /// The principal's authority for this request: its identity and expiry
+    /// are the live session's, while cancellation and the operation registry
+    /// are the binding's own, so revoking the binding stops its transports.
+    pub authorization: SessionRecord,
 }
 
 pub struct IssuedSession {
@@ -285,6 +320,14 @@ pub enum RevokeError {
     DrainTimedOut,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BindError {
+    #[error("the principal holds no live proxy session")]
+    NoLiveSession,
+    #[error("extension binding capacity reached")]
+    AtCapacity,
+}
+
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<Mutex<SessionState>>,
@@ -292,6 +335,8 @@ pub struct SessionStore {
     max_sessions: usize,
     max_sessions_per_subject: usize,
     max_sessions_per_principal: usize,
+    max_bindings: usize,
+    max_bindings_per_principal: usize,
     lifetime: Duration,
 }
 
@@ -301,7 +346,12 @@ struct SessionState {
     sessions: HashMap<String, SessionRecord>,
     expiries: BinaryHeap<Reverse<(Instant, String)>>,
     subject_counts: HashMap<Uuid, usize>,
-    principal_counts: HashMap<SessionPrincipal, usize>,
+    /// Session ids per principal: the principal quota, and where a binding
+    /// looks for the live session it rides on.
+    principal_sessions: HashMap<SessionPrincipal, Vec<String>>,
+    /// Extension bindings keyed by selector.
+    bindings: HashMap<String, ExtensionBinding>,
+    principal_bindings: HashMap<SessionPrincipal, Vec<String>>,
 }
 
 impl std::fmt::Debug for SessionStore {
@@ -312,6 +362,11 @@ impl std::fmt::Debug for SessionStore {
             .field(
                 "max_sessions_per_principal",
                 &self.max_sessions_per_principal,
+            )
+            .field("max_bindings", &self.max_bindings)
+            .field(
+                "max_bindings_per_principal",
+                &self.max_bindings_per_principal,
             )
             .field("lifetime", &self.lifetime)
             .finish_non_exhaustive()
@@ -327,6 +382,8 @@ impl SessionStore {
             max_sessions,
             max_sessions_per_subject: max_sessions.min(MAX_SESSIONS_PER_SUBJECT),
             max_sessions_per_principal: max_sessions.min(MAX_SESSIONS_PER_PRINCIPAL),
+            max_bindings: max_sessions.saturating_mul(BINDINGS_PER_SESSION_SLOT),
+            max_bindings_per_principal: MAX_BINDINGS_PER_PRINCIPAL,
             lifetime,
         }
     }
@@ -338,14 +395,33 @@ impl SessionStore {
         max_sessions_per_subject: usize,
         max_sessions_per_principal: usize,
     ) -> Self {
-        let (events, _) = broadcast::channel(max_sessions.saturating_mul(2).clamp(128, 65_536));
         Self {
-            inner: Arc::new(Mutex::new(SessionState::default())),
-            events,
-            max_sessions,
             max_sessions_per_subject,
             max_sessions_per_principal,
-            lifetime,
+            ..Self::new(max_sessions, lifetime)
+        }
+    }
+
+    #[cfg(test)]
+    fn with_binding_quotas(
+        max_sessions: usize,
+        lifetime: Duration,
+        max_bindings: usize,
+        max_bindings_per_principal: usize,
+    ) -> Self {
+        Self {
+            max_bindings,
+            max_bindings_per_principal,
+            ..Self::new(max_sessions, lifetime)
+        }
+    }
+
+    fn expire_due(&self, state: &mut SessionState, now: Instant) {
+        for record in take_expired(state, now) {
+            record.revoke_authority();
+            let _ = self
+                .events
+                .send(SessionEvent::Down(record.admin_session_id));
         }
     }
 
@@ -356,13 +432,10 @@ impl SessionStore {
         if state.authority_suspended {
             return Err(IssueError::AuthoritySuspended);
         }
-        let expired = take_expired(&mut state, now);
-        for record in expired {
-            record.revoke_authority();
-            let _ = self
-                .events
-                .send(SessionEvent::Down(record.admin_session_id));
-        }
+        // Expiring first is also what keeps a binding from outliving a gap:
+        // a principal whose last session lapsed loses its bindings here,
+        // before a new session for it is inserted.
+        self.expire_due(&mut state, now);
         if state.sessions.len() >= self.max_sessions {
             return Err(IssueError::AtCapacity);
         }
@@ -375,11 +448,7 @@ impl SessionStore {
         {
             return Err(IssueError::SubjectAtCapacity);
         }
-        if state
-            .principal_counts
-            .get(&principal)
-            .copied()
-            .unwrap_or_default()
+        if state.principal_sessions.get(&principal).map_or(0, Vec::len)
             >= self.max_sessions_per_principal
         {
             return Err(IssueError::PrincipalAtCapacity);
@@ -410,10 +479,11 @@ impl SessionStore {
             .subject_counts
             .entry(record.principal.subject_user_id)
             .or_default() += 1;
-        *state
-            .principal_counts
+        state
+            .principal_sessions
             .entry(record.principal.clone())
-            .or_default() += 1;
+            .or_default()
+            .push(id.clone());
         state
             .expiries
             .push(Reverse((record.expires_at, id.clone())));
@@ -448,17 +518,37 @@ impl SessionStore {
         Some(record)
     }
 
+    /// Revoke every matching session and every extension binding of a
+    /// principal the revocation reaches. An admin-session revocation reaches
+    /// the principal of the session it names, so it also ends the bindings
+    /// that principal's other sessions keep alive: a revocation never leaves
+    /// an extension link usable.
     pub async fn revoke(&self, revocation: &Revocation) -> Result<usize, RevokeError> {
-        let revoked = {
+        let (revoked, bindings) = {
             let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-            state
+            let revoked = state
                 .sessions
                 .iter()
                 .filter(|(_, record)| revocation.matches(record))
                 .map(|(id, record)| (id.clone(), record.clone()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let principals = revoked
+                .iter()
+                .map(|(_, record)| &record.principal)
+                .collect::<HashSet<_>>();
+            let bindings = binding_handles(&state, |principal| {
+                revocation.matches_principal(principal) || principals.contains(principal)
+            });
+            (revoked, bindings)
         };
 
+        // Bindings first: a request resolving a binding between the two steps
+        // then meets a cancelled binding rather than one whose sessions just
+        // went dead, which it would discard instead of leaving the tombstone
+        // a retried command must find.
+        for binding in &bindings {
+            binding.revoke_authority();
+        }
         for (_, record) in &revoked {
             record.revoke_authority();
         }
@@ -468,8 +558,16 @@ impl SessionStore {
                 return Err(RevokeError::DrainTimedOut);
             }
         }
+        for binding in &bindings {
+            if !binding.operations.wait_drained(deadline).await {
+                return Err(RevokeError::DrainTimedOut);
+            }
+        }
 
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for binding in &bindings {
+            binding.remove_from(&mut state);
+        }
         for (id, _) in &revoked {
             if let Some(record) = remove_session(&mut state, id) {
                 let _ = self
@@ -481,19 +579,23 @@ impl SessionStore {
     }
 
     pub async fn clear(&self) -> Result<usize, RevokeError> {
-        let cleared = {
+        let (cleared, bindings) = {
             let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             // Grace expiry is an authority boundary. Suspending issuance in
             // the same critical section closes the race with an entry
             // exchange that captured a registry row before tunnel eviction.
             state.authority_suspended = true;
-            state
+            let cleared = state
                 .sessions
                 .iter()
                 .map(|(id, record)| (id.clone(), record.clone()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (cleared, binding_handles(&state, |_| true))
         };
 
+        for binding in &bindings {
+            binding.revoke_authority();
+        }
         for (_, record) in &cleared {
             record.revoke_authority();
         }
@@ -503,8 +605,16 @@ impl SessionStore {
                 return Err(RevokeError::DrainTimedOut);
             }
         }
+        for binding in &bindings {
+            if !binding.operations.wait_drained(deadline).await {
+                return Err(RevokeError::DrainTimedOut);
+            }
+        }
 
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for binding in &bindings {
+            binding.remove_from(&mut state);
+        }
         for (id, _) in &cleared {
             if let Some(record) = remove_session(&mut state, id) {
                 let _ = self
@@ -513,6 +623,119 @@ impl SessionStore {
             }
         }
         Ok(cleared.len())
+    }
+
+    /// Bind an extension link to `principal`, which must hold a live session,
+    /// and answer the token for the bound path.
+    pub fn bind_extension(
+        &self,
+        principal: &SessionPrincipal,
+        target: ExtensionTarget,
+    ) -> Result<String, BindError> {
+        let now = Instant::now();
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        self.expire_due(&mut state, now);
+        if live_session(&state, principal, now).is_none() {
+            return Err(BindError::NoLiveSession);
+        }
+        if self.max_bindings_per_principal == 0 {
+            return Err(BindError::AtCapacity);
+        }
+        let held = state.principal_bindings.get(principal).map_or(0, Vec::len);
+        if held >= self.max_bindings_per_principal {
+            let evicted = state
+                .principal_bindings
+                .get(principal)
+                .into_iter()
+                .flatten()
+                .filter_map(|selector| {
+                    state
+                        .bindings
+                        .get(selector)
+                        .map(|binding| (binding.last_used, selector.clone()))
+                })
+                .min();
+            if let Some((_, selector)) = evicted {
+                if let Some(binding) = remove_binding(&mut state, &selector) {
+                    binding.revoke_authority();
+                }
+            }
+        } else if state.bindings.len() >= self.max_bindings {
+            return Err(BindError::AtCapacity);
+        }
+
+        let selector = loop {
+            let candidate = random_hex(BINDING_SELECTOR_BYTES);
+            if !state.bindings.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let mut verifier = [0_u8; BINDING_VERIFIER_BYTES];
+        rand::rngs::OsRng.fill_bytes(&mut verifier);
+        let token = format!("{selector}{}", hex(&verifier));
+        state
+            .principal_bindings
+            .entry(principal.clone())
+            .or_default()
+            .push(selector.clone());
+        state.bindings.insert(
+            selector,
+            ExtensionBinding {
+                verifier,
+                principal: principal.clone(),
+                target,
+                last_used: now,
+                cancellation: CancellationToken::new(),
+                operations: Arc::new(ActiveOperations::default()),
+            },
+        );
+        Ok(token)
+    }
+
+    /// Resolve a bound path's token to its target and the principal's
+    /// authority for one request, or `None` when the token names no live
+    /// binding. A binding whose principal no longer holds a live session is
+    /// deleted here, so it cannot come back when that user signs in again.
+    pub fn resolve_extension_binding(&self, token: &str) -> Option<ResolvedBinding> {
+        let (selector, verifier) = split_binding_token(token)?;
+        let now = Instant::now();
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let binding = state.bindings.get(selector)?;
+        if !bool::from(binding.verifier[..].ct_eq(&verifier[..]))
+            || binding.cancellation.is_cancelled()
+        {
+            return None;
+        }
+        let Some(session) = live_session(&state, &binding.principal, now).cloned() else {
+            if let Some(binding) = remove_binding(&mut state, selector) {
+                binding.revoke_authority();
+            }
+            return None;
+        };
+        let binding = state.bindings.get_mut(selector)?;
+        binding.last_used = now;
+        Some(ResolvedBinding {
+            target: binding.target.clone(),
+            authorization: SessionRecord {
+                admin_session_id: session.admin_session_id,
+                principal: binding.principal.clone(),
+                created_at: session.created_at,
+                expires_at: session.expires_at,
+                created_at_wall: session.created_at_wall,
+                expires_at_wall: session.expires_at_wall,
+                cancellation: binding.cancellation.clone(),
+                operations: binding.operations.clone(),
+            },
+        })
+    }
+
+    #[cfg(test)]
+    fn binding_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .bindings
+            .len()
     }
 
     pub fn resume_authority(&self) {
@@ -566,23 +789,88 @@ impl SessionStore {
 impl Revocation {
     fn matches(&self, record: &SessionRecord) -> bool {
         match self {
+            Self::SessionId { admin_session_id } => record.admin_session_id == *admin_session_id,
+            _ => self.matches_principal(&record.principal),
+        }
+    }
+
+    /// Whether the revocation names `principal` by its own fields. An
+    /// admin-session revocation names a session, never a principal.
+    fn matches_principal(&self, principal: &SessionPrincipal) -> bool {
+        match self {
             Self::Exact {
                 subject_user_id,
                 owner_user_id,
                 devserver_id,
             } => {
-                record.principal.subject_user_id == *subject_user_id
-                    && record.principal.owner_user_id == *owner_user_id
-                    && record.principal.devserver_id == *devserver_id
+                principal.subject_user_id == *subject_user_id
+                    && principal.owner_user_id == *owner_user_id
+                    && principal.devserver_id == *devserver_id
             }
-            Self::Subject { subject_user_id } => {
-                record.principal.subject_user_id == *subject_user_id
-            }
-            Self::SessionId { admin_session_id } => record.admin_session_id == *admin_session_id,
-            Self::Owner { owner_user_id } => record.principal.owner_user_id == *owner_user_id,
+            Self::Subject { subject_user_id } => principal.subject_user_id == *subject_user_id,
+            Self::SessionId { .. } => false,
+            Self::Owner { owner_user_id } => principal.owner_user_id == *owner_user_id,
             Self::All => true,
         }
     }
+}
+
+/// What a revocation holds of a binding while it drains outside the lock.
+struct BindingHandle {
+    selector: String,
+    cancellation: CancellationToken,
+    operations: Arc<ActiveOperations>,
+}
+
+impl BindingHandle {
+    fn revoke_authority(&self) {
+        self.cancellation.cancel();
+        self.operations.revoke();
+    }
+
+    /// Remove the binding this handle was taken from, and not a different
+    /// binding that has since reused its selector.
+    fn remove_from(&self, state: &mut SessionState) {
+        if state
+            .bindings
+            .get(&self.selector)
+            .is_some_and(|binding| Arc::ptr_eq(&binding.operations, &self.operations))
+        {
+            remove_binding(state, &self.selector);
+        }
+    }
+}
+
+fn binding_handles(
+    state: &SessionState,
+    mut reached: impl FnMut(&SessionPrincipal) -> bool,
+) -> Vec<BindingHandle> {
+    state
+        .bindings
+        .iter()
+        .filter(|(_, binding)| reached(&binding.principal))
+        .map(|(selector, binding)| BindingHandle {
+            selector: selector.clone(),
+            cancellation: binding.cancellation.clone(),
+            operations: binding.operations.clone(),
+        })
+        .collect()
+}
+
+/// The principal's live session with the latest expiry, the one a bound
+/// request's transport is allowed to outlast least.
+fn live_session<'a>(
+    state: &'a SessionState,
+    principal: &SessionPrincipal,
+    now: Instant,
+) -> Option<&'a SessionRecord> {
+    state
+        .principal_sessions
+        .get(principal)?
+        .iter()
+        .filter_map(|id| state.sessions.get(id))
+        .filter(|record| !record.cancellation.is_cancelled() && record.expires_at > now)
+        .max_by_key(|record| record.expires_at)
 }
 
 fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
@@ -614,11 +902,44 @@ fn browser_session_row(record: &SessionRecord) -> BrowserSessionRow {
     }
 }
 
+/// Remove a session. When it was its principal's last, the principal's
+/// extension bindings go with it: a binding never survives a moment in which
+/// its user held no session.
 fn remove_session(state: &mut SessionState, id: &str) -> Option<SessionRecord> {
     let record = state.sessions.remove(id)?;
     decrement_count(&mut state.subject_counts, &record.principal.subject_user_id);
-    decrement_count(&mut state.principal_counts, &record.principal);
+    let last = match state.principal_sessions.get_mut(&record.principal) {
+        Some(ids) => {
+            ids.retain(|held| held != id);
+            ids.is_empty()
+        }
+        None => true,
+    };
+    if last {
+        state.principal_sessions.remove(&record.principal);
+        for selector in state
+            .principal_bindings
+            .get(&record.principal)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(binding) = remove_binding(state, &selector) {
+                binding.revoke_authority();
+            }
+        }
+    }
     Some(record)
+}
+
+fn remove_binding(state: &mut SessionState, selector: &str) -> Option<ExtensionBinding> {
+    let binding = state.bindings.remove(selector)?;
+    if let Some(selectors) = state.principal_bindings.get_mut(&binding.principal) {
+        selectors.retain(|held| held != selector);
+        if selectors.is_empty() {
+            state.principal_bindings.remove(&binding.principal);
+        }
+    }
+    Some(binding)
 }
 
 fn decrement_count<K>(counts: &mut HashMap<K, usize>, key: &K)
@@ -634,9 +955,17 @@ where
 }
 
 fn random_session_id() -> String {
-    let mut bytes = [0_u8; SESSION_ID_BYTES];
+    random_hex(SESSION_ID_BYTES)
+}
+
+fn random_hex(len: usize) -> String {
+    let mut bytes = vec![0_u8; len];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    let mut encoded = String::with_capacity(SESSION_ID_BYTES * 2);
+    hex(&bytes)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write;
         let _ = write!(encoded, "{byte:02x}");
@@ -645,10 +974,27 @@ fn random_session_id() -> String {
 }
 
 fn valid_session_id(id: &str) -> bool {
-    id.len() == SESSION_ID_BYTES * 2
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    id.len() == SESSION_ID_BYTES * 2 && is_lower_hex(id)
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Split a canonical binding token into its selector and decoded verifier.
+fn split_binding_token(token: &str) -> Option<(&str, [u8; BINDING_VERIFIER_BYTES])> {
+    if token.len() != EXTENSION_BINDING_HEX_LEN || !is_lower_hex(token) {
+        return None;
+    }
+    let (selector, verifier_hex) = token.split_at(BINDING_SELECTOR_BYTES * 2);
+    let mut verifier = [0_u8; BINDING_VERIFIER_BYTES];
+    for (byte, pair) in verifier.iter_mut().zip(verifier_hex.as_bytes().chunks(2)) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some((selector, verifier))
 }
 
 #[cfg(test)]
@@ -1023,6 +1369,327 @@ mod tests {
                 .await,
             Err(RevokeError::DrainTimedOut)
         );
+    }
+
+    fn target(capability: char) -> ExtensionTarget {
+        ExtensionTarget {
+            tenant: "notes".to_string(),
+            extension_id: "echo".to_string(),
+            capability: capability.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn a_binding_resolves_to_its_principal_only_with_the_exact_token() {
+        let store = SessionStore::new(4, Duration::from_secs(60));
+        let session = store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let token = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+
+        assert_eq!(token.len(), EXTENSION_BINDING_HEX_LEN);
+        assert!(is_lower_hex(&token));
+        let resolved = store.resolve_extension_binding(&token).expect("resolve");
+        assert_eq!(resolved.target, target('a'));
+        assert_eq!(resolved.authorization.principal, principal(1, 10, "dev-a"));
+        assert_eq!(
+            resolved.authorization.admin_session_id,
+            session.record.admin_session_id
+        );
+        assert_eq!(resolved.authorization.expires_at, session.record.expires_at);
+
+        let last = token.chars().last().unwrap();
+        let wrong_verifier = format!(
+            "{}{}",
+            &token[..token.len() - 1],
+            if last == '0' { '1' } else { '0' }
+        );
+        for wrong in [
+            wrong_verifier,
+            token.to_ascii_uppercase(),
+            token[..token.len() - 2].to_string(),
+            format!("{token}0"),
+            String::new(),
+        ] {
+            assert!(store.resolve_extension_binding(&wrong).is_none(), "{wrong}");
+        }
+        assert!(store.resolve_extension_binding(&token).is_some());
+    }
+
+    #[test]
+    fn a_principal_with_no_live_session_cannot_bind() {
+        let store = SessionStore::new(4, Duration::from_secs(60));
+        assert_eq!(
+            store.bind_extension(&principal(1, 10, "dev-a"), target('a')),
+            Err(BindError::NoLiveSession)
+        );
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        // A session for the same subject on another devserver is another
+        // principal.
+        assert_eq!(
+            store.bind_extension(&principal(1, 10, "dev-b"), target('a')),
+            Err(BindError::NoLiveSession)
+        );
+    }
+
+    /// The same user signing in again before the first session's hour runs
+    /// out keeps an open extension tab working: the binding rides the renewed
+    /// session and its transports take that session's expiry.
+    #[tokio::test(start_paused = true)]
+    async fn a_binding_survives_the_principal_renewing_its_session() {
+        let store = SessionStore::new(4, Duration::from_secs(60));
+        store
+            .issue(principal(1, 10, "dev-a"))
+            .expect("first session");
+        let token = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+
+        tokio::time::advance(Duration::from_secs(40)).await;
+        let renewed = store.issue(principal(1, 10, "dev-a")).expect("renewal");
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        let resolved = store
+            .resolve_extension_binding(&token)
+            .expect("the binding outlives the minting session");
+        assert_eq!(
+            resolved.authorization.admin_session_id,
+            renewed.record.admin_session_id
+        );
+        assert_eq!(resolved.authorization.expires_at, renewed.record.expires_at);
+    }
+
+    /// A moment with no live session ends a binding for good, whether the
+    /// store notices at the next sign-in or at the next bound request.
+    #[tokio::test(start_paused = true)]
+    async fn a_binding_dies_when_its_principal_goes_without_a_session() {
+        let store = SessionStore::new(4, Duration::from_secs(30));
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let noticed_at_sign_in = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+        tokio::time::advance(Duration::from_secs(31)).await;
+        store
+            .issue(principal(1, 10, "dev-a"))
+            .expect("sign in again");
+        assert!(store
+            .resolve_extension_binding(&noticed_at_sign_in)
+            .is_none());
+        assert_eq!(store.binding_count(), 0);
+
+        let noticed_at_request = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('b'))
+            .expect("bind under the new session");
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(store
+            .resolve_extension_binding(&noticed_at_request)
+            .is_none());
+        assert_eq!(store.binding_count(), 0);
+        store
+            .issue(principal(1, 10, "dev-a"))
+            .expect("sign in again");
+        assert!(store
+            .resolve_extension_binding(&noticed_at_request)
+            .is_none());
+    }
+
+    /// Every revocation form that reaches the principal deletes its binding
+    /// and stops a transport admitted through it before acknowledging. An
+    /// admin-session revocation reaches the principal of the session it
+    /// names even while that principal holds another live session.
+    #[tokio::test]
+    async fn every_revocation_that_reaches_the_principal_ends_its_bindings() {
+        let revocations = |session: Uuid| {
+            vec![
+                Revocation::Exact {
+                    subject_user_id: Uuid::from_u128(1),
+                    owner_user_id: Uuid::from_u128(10),
+                    devserver_id: "dev-a".to_string(),
+                },
+                Revocation::Subject {
+                    subject_user_id: Uuid::from_u128(1),
+                },
+                Revocation::Owner {
+                    owner_user_id: Uuid::from_u128(10),
+                },
+                Revocation::All,
+                Revocation::SessionId {
+                    admin_session_id: session,
+                },
+            ]
+        };
+        for index in 0..5 {
+            let store = SessionStore::new(8, Duration::from_secs(60));
+            let first = store.issue(principal(1, 10, "dev-a")).expect("issue");
+            store
+                .issue(principal(1, 10, "dev-a"))
+                .expect("second session");
+            let token = store
+                .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+                .expect("bind");
+            let revocation = revocations(first.record.admin_session_id).remove(index);
+            let authorization = store
+                .resolve_extension_binding(&token)
+                .expect("resolve")
+                .authorization;
+            let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+            blocked_transport(
+                authorization.begin_operation().expect("active binding"),
+                stopped_tx,
+            )
+            .await;
+
+            assert!(store.revoke(&revocation).await.is_ok(), "{revocation:?}");
+            // Bounded, so a revocation that misses the binding fails here
+            // instead of waiting forever on a transport nothing aborts.
+            tokio::time::timeout(Duration::from_secs(5), stopped_rx)
+                .await
+                .unwrap_or_else(|_| panic!("{revocation:?}: transport still running after ack"))
+                .unwrap_or_else(|_| panic!("{revocation:?}: transport stopped before ack"));
+            assert!(authorization.cancellation.is_cancelled(), "{revocation:?}");
+            assert!(authorization.begin_operation().is_none(), "{revocation:?}");
+            assert!(
+                store.resolve_extension_binding(&token).is_none(),
+                "{revocation:?}"
+            );
+            assert_eq!(store.binding_count(), 0, "{revocation:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revocation_that_misses_the_principal_leaves_its_binding() {
+        let store = SessionStore::new(8, Duration::from_secs(60));
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let other = store.issue(principal(2, 10, "dev-a")).expect("issue");
+        let token = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+
+        for revocation in [
+            Revocation::Exact {
+                subject_user_id: Uuid::from_u128(1),
+                owner_user_id: Uuid::from_u128(10),
+                devserver_id: "dev-b".to_string(),
+            },
+            Revocation::Subject {
+                subject_user_id: Uuid::from_u128(2),
+            },
+            Revocation::Owner {
+                owner_user_id: Uuid::from_u128(20),
+            },
+            Revocation::SessionId {
+                admin_session_id: other.record.admin_session_id,
+            },
+        ] {
+            store.revoke(&revocation).await.expect("revoke");
+            assert!(
+                store.resolve_extension_binding(&token).is_some(),
+                "{revocation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_the_store_ends_every_binding() {
+        let store = SessionStore::new(8, Duration::from_secs(60));
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store.issue(principal(2, 20, "dev-b")).expect("issue");
+        let first = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+        let second = store
+            .bind_extension(&principal(2, 20, "dev-b"), target('b'))
+            .expect("bind");
+
+        assert_eq!(store.clear().await, Ok(2));
+        assert!(store.resolve_extension_binding(&first).is_none());
+        assert!(store.resolve_extension_binding(&second).is_none());
+        assert_eq!(store.binding_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_binding_transport_that_will_not_drain_keeps_the_revocation_pending() {
+        let store = SessionStore::new(4, Duration::from_secs(60));
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let token = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+        let operation = store
+            .resolve_extension_binding(&token)
+            .expect("resolve")
+            .authorization
+            .begin_operation()
+            .expect("active operation without a task");
+        let revocation = Revocation::Subject {
+            subject_user_id: Uuid::from_u128(1),
+        };
+
+        assert_eq!(
+            store.revoke(&revocation).await,
+            Err(RevokeError::DrainTimedOut)
+        );
+        assert!(store.resolve_extension_binding(&token).is_none());
+        assert_eq!(
+            store.revoke(&revocation).await,
+            Err(RevokeError::DrainTimedOut),
+            "a retry must not confirm while the binding's transport is live"
+        );
+
+        drop(operation);
+        assert_eq!(store.revoke(&revocation).await, Ok(1));
+        assert_eq!(store.binding_count(), 0);
+    }
+
+    /// Reloading frames rotates a principal through its quota: the least
+    /// recently used binding goes, a binding in use stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_principal_reloading_frames_evicts_its_least_recently_used_binding() {
+        let store = SessionStore::with_binding_quotas(4, Duration::from_secs(600), 100, 2);
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        let bind = |capability| {
+            store
+                .bind_extension(&principal(1, 10, "dev-a"), target(capability))
+                .expect("bind")
+        };
+        let first = bind('a');
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let second = bind('b');
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(store.resolve_extension_binding(&first).is_some());
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let third = bind('c');
+        assert_eq!(store.binding_count(), 2);
+        assert!(store.resolve_extension_binding(&second).is_none());
+        assert!(store.resolve_extension_binding(&first).is_some());
+        assert!(store.resolve_extension_binding(&third).is_some());
+    }
+
+    #[test]
+    fn a_full_binding_table_refuses_without_evicting_another_users_binding() {
+        let store = SessionStore::with_binding_quotas(4, Duration::from_secs(60), 2, 32);
+        store.issue(principal(1, 10, "dev-a")).expect("issue");
+        store.issue(principal(2, 10, "dev-a")).expect("issue");
+        let first = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('a'))
+            .expect("bind");
+        let second = store
+            .bind_extension(&principal(1, 10, "dev-a"), target('b'))
+            .expect("bind");
+
+        assert_eq!(
+            store.bind_extension(&principal(2, 10, "dev-a"), target('c')),
+            Err(BindError::AtCapacity)
+        );
+        assert!(store.resolve_extension_binding(&first).is_some());
+        assert!(store.resolve_extension_binding(&second).is_some());
+    }
+
+    #[test]
+    fn the_default_binding_quotas_follow_the_session_capacity() {
+        let store = SessionStore::new(10_000, Duration::from_secs(60));
+        assert_eq!(store.max_bindings, 40_000);
+        assert_eq!(store.max_bindings_per_principal, 32);
     }
 
     #[tokio::test(start_paused = true)]

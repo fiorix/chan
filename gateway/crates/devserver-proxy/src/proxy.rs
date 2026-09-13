@@ -22,12 +22,18 @@
 //!     Ed25519 credential and exact bindings, atomically consume its `jti`,
 //!     mint an opaque proxy-local session, set host-only gate/CSRF cookies,
 //!     and 303 to the signed clean path
-//!   * the exact extension capability shape
-//!     (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) -> forwarded
-//!     without the session gate; the devserver's own per-process path
-//!     capability check is the authorization, and every response on
-//!     that namespace carries the extension response policy so the
-//!     opaque-origin frame can read the true status
+//!   * an extension capability link
+//!     (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) is never
+//!     forwarded: a same-origin iframe navigation carrying a valid
+//!     `__Host-devserver_gate` cookie binds it to that session's
+//!     principal and 303s to the bound path; anything else -> 404
+//!   * an extension bound path (`/{tenant}/_chan/extensions/{id}/{96-hex}/...`)
+//!     whose binding's principal still holds a live session -> forwarded
+//!     to the devserver's capability path as that principal, with no
+//!     cookie, CSRF or WS Origin check (the opaque-origin frame can send
+//!     none); anything else -> 404. Every response on either extension
+//!     shape carries the extension response policy so the frame can read
+//!     the true status
 //!   * request has a valid opaque `__Host-devserver_gate` cookie (aud + drv bound)
 //!     -> pass through
 //!   * anything else (no cookie, expired, wrong aud, wrong devserver)
@@ -84,7 +90,10 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use crate::http::AppState;
 use crate::registry::Entry;
-use crate::session_store::{ActiveOperation, SessionPrincipal, SessionRecord};
+use crate::session_store::{
+    ActiveOperation, BindError, ExtensionTarget, SessionPrincipal, SessionRecord,
+    EXTENSION_BINDING_HEX_LEN,
+};
 
 /// Wraps a response body with a hard deadline shared with the
 /// `proxy_http` send_request timeout. If the upstream goes silent or
@@ -245,14 +254,14 @@ fn connection_listed_headers(headers: &HeaderMap) -> Vec<HeaderName> {
 ///     A single live devserver keeps the pre-disc behavior; no
 ///     verifying credential -> 404.
 pub async fn handle(state: AppState, user: String, disc: Option<String>, req: Request) -> Response {
-    // Classify the extension capability lane up front: every response
-    // leaving that namespace, from the gate 404s through the proxied
-    // reply and the cancellation paths inside `proxy_http`, must carry
-    // the extension response policy or the opaque-origin frame reads
+    // Classify the extension lane up front: every response leaving that
+    // namespace, from the gate 404s and the binding redirect through the
+    // proxied reply and the cancellation paths inside `proxy_http`, must
+    // carry the extension response policy or the opaque-origin frame reads
     // the true status as a CORS violation.
-    let extension_capability = is_extension_capability_path(req.uri().path());
-    let mut response = handle_gated(state, user, disc, req, extension_capability).await;
-    if extension_capability {
+    let extension = extension_lane(req.uri().path()).is_some();
+    let mut response = handle_gated(state, user, disc, req).await;
+    if extension {
         apply_extension_capability_response_policy(&mut response);
     }
     response
@@ -263,7 +272,6 @@ async fn handle_gated(
     user: String,
     disc: Option<String>,
     mut req: Request,
-    extension_capability: bool,
 ) -> Response {
     let is_entry_exchange = req.uri().path() == devserver_gate::ENTRY_EXCHANGE_PATH;
     let entry_credential = if is_entry_exchange {
@@ -327,83 +335,121 @@ async fn handle_gated(
     }
 
     let is_ws = is_websocket_upgrade(req.headers());
+    let extension = extension_lane(req.uri().path()).map(OwnedExtensionLane::from);
 
-    let (devserver_id, entry, caller, authorization) = if extension_capability {
-        // Extension capability lane: the 256-bit path segment is the
-        // credential and the devserver's own capability check is the
-        // authorization (a miss produces its 404, CORS-readable under
-        // the extension response policy). The session gate, the CSRF
-        // check, and the WS Origin check all protect cookie-borne
-        // authority; the opaque-origin extension frame can never send
-        // that cookie, so none of them apply on this lane. The
-        // assertion carries a nil subject: capability callers stay
-        // non-owner, so the devserver's tunnel lane keeps them
-        // read-only exactly like any guest.
-        if candidates.len() != 1 {
-            // A bare host with several live devservers cannot bind a
-            // capability path to one tunnel; answer the same
-            // anti-enumeration shape as the session gate.
-            return not_found_response(req.headers());
-        }
-        let (devserver_id, entry) = candidates.into_iter().next().expect("one candidate");
-        let caller = GatewayCaller {
-            sub: Uuid::nil(),
-            owner_user_id: entry.owner_id,
-        };
-        let authorization = SessionRecord::capability_lane(SessionPrincipal {
-            subject_user_id: Uuid::nil(),
-            owner_user_id: entry.owner_id,
-            devserver_id: devserver_id.clone(),
-            audience: aud.clone(),
-        });
-        (devserver_id, entry, caller, authorization)
-    } else {
-        // The gate always runs: every devserver tunnel is authenticated,
-        // there is no un-gated pass-through. The first candidate whose
-        // credential verifies under (aud, drv) wins.
-        let mut resolved = None;
-        for (devserver_id, entry) in candidates {
-            match resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud) {
-                Gate::Reject => continue,
-                gate => {
-                    resolved = Some((devserver_id, entry, gate));
-                    break;
-                }
+    let (devserver_id, entry, caller, authorization, upstream_path_and_query, location_rewrite) =
+        match extension {
+            Some(lane) if lane.credential_kind == ExtensionCredential::Capability => {
+                return bind_extension_link(&state, &req, candidates, &aud, &lane);
             }
-        }
-        let Some((devserver_id, entry, gate)) = resolved else {
-            return not_found_response(req.headers());
+            Some(lane) => {
+                // Bound path: the binding stands in for the session cookie the
+                // opaque-origin frame cannot send, so the session gate, the
+                // CSRF check and the WS Origin check, which all protect
+                // cookie-borne authority, do not apply. The binding resolves
+                // to its principal only while that principal holds a live
+                // session, and the request is forwarded to the devserver's
+                // own capability path as that principal.
+                let Some(bound) = state.sessions.resolve_extension_binding(&lane.credential) else {
+                    return not_found_response(req.headers());
+                };
+                let principal = &bound.authorization.principal;
+                if bound.target.tenant != lane.tenant
+                    || bound.target.extension_id != lane.extension_id
+                    || principal.audience != aud
+                {
+                    return not_found_response(req.headers());
+                }
+                let Some((devserver_id, entry)) = candidates.into_iter().find(|(id, entry)| {
+                    *id == principal.devserver_id && entry.owner_id == principal.owner_user_id
+                }) else {
+                    return not_found_response(req.headers());
+                };
+                let caller = GatewayCaller {
+                    sub: principal.subject_user_id,
+                    owner_user_id: principal.owner_user_id,
+                };
+                let rewrite = LocationRewrite {
+                    capability_prefix: extension_prefix(
+                        &lane.tenant,
+                        &lane.extension_id,
+                        &bound.target.capability,
+                    ),
+                    bound_prefix: extension_prefix(
+                        &lane.tenant,
+                        &lane.extension_id,
+                        &lane.credential,
+                    ),
+                };
+                let mut upstream = format!("{}{}", rewrite.capability_prefix, lane.rest);
+                if let Some(query) = req.uri().query() {
+                    upstream.push('?');
+                    upstream.push_str(query);
+                }
+                (
+                    devserver_id,
+                    entry,
+                    caller,
+                    bound.authorization,
+                    upstream,
+                    Some(rewrite),
+                )
+            }
+            None => {
+                // The gate always runs: every devserver tunnel is
+                // authenticated, there is no un-gated pass-through. The first
+                // candidate whose credential verifies under (aud, drv) wins.
+                let mut resolved = None;
+                for (devserver_id, entry) in candidates {
+                    match resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud) {
+                        Gate::Reject => continue,
+                        gate => {
+                            resolved = Some((devserver_id, entry, gate));
+                            break;
+                        }
+                    }
+                }
+                let Some((devserver_id, entry, gate)) = resolved else {
+                    return not_found_response(req.headers());
+                };
+                let (caller, authorization) = match gate {
+                    Gate::Pass { record } => (
+                        GatewayCaller {
+                            sub: record.principal.subject_user_id,
+                            owner_user_id: record.principal.owner_user_id,
+                        },
+                        record,
+                    ),
+                    // The loop above filtered rejects; kept as the safe default.
+                    Gate::Reject => return not_found_response(req.headers()),
+                };
+                if is_ws
+                    && !websocket_origin_matches(req.headers(), &state.cfg.forwarded_proto, &aud)
+                {
+                    tracing::warn!(
+                        aud = %aud,
+                        devserver_id = %devserver_id,
+                        "gateway websocket origin check failed",
+                    );
+                    return (StatusCode::FORBIDDEN, "forbidden").into_response();
+                }
+                if requires_csrf(req.method()) && !csrf_header_matches_cookie(req.headers()) {
+                    tracing::warn!(
+                        aud = %aud,
+                        devserver_id = %devserver_id,
+                        method = %req.method(),
+                        "gateway csrf check failed",
+                    );
+                    return (StatusCode::FORBIDDEN, "forbidden").into_response();
+                }
+                // Segment-preserving forward: hand the devserver the full
+                // public `/{workspace}/...` path. Entry credentials are
+                // accepted only at the fixed body-only exchange endpoint, so
+                // tenant query parameters remain ordinary upstream data.
+                let upstream = forward_path(req.uri());
+                (devserver_id, entry, caller, authorization, upstream, None)
+            }
         };
-        let (caller, authorization) = match gate {
-            Gate::Pass { record } => (
-                GatewayCaller {
-                    sub: record.principal.subject_user_id,
-                    owner_user_id: record.principal.owner_user_id,
-                },
-                record,
-            ),
-            // The loop above filtered rejects; kept as the safe default.
-            Gate::Reject => return not_found_response(req.headers()),
-        };
-        if is_ws && !websocket_origin_matches(req.headers(), &state.cfg.forwarded_proto, &aud) {
-            tracing::warn!(
-                aud = %aud,
-                devserver_id = %devserver_id,
-                "gateway websocket origin check failed",
-            );
-            return (StatusCode::FORBIDDEN, "forbidden").into_response();
-        }
-        if requires_csrf(req.method()) && !csrf_header_matches_cookie(req.headers()) {
-            tracing::warn!(
-                aud = %aud,
-                devserver_id = %devserver_id,
-                method = %req.method(),
-                "gateway csrf check failed",
-            );
-            return (StatusCode::FORBIDDEN, "forbidden").into_response();
-        }
-        (devserver_id, entry, caller, authorization)
-    };
     // Every request entering a devserver tunnel must carry a signed gateway
     // assertion. A registration without a per-tunnel assertion key is an
     // invalid trust state, not a reason to downgrade to an unauthenticated
@@ -420,11 +466,6 @@ async fn handle_gated(
     let Some(operation) = authorization.begin_operation() else {
         return not_found_response(req.headers());
     };
-    // Segment-preserving forward: hand the devserver the full public
-    // `/{workspace}/...` path. Entry credentials are accepted only at the
-    // fixed body-only exchange endpoint, so tenant query parameters remain
-    // ordinary upstream application data.
-    let upstream_path_and_query = forward_path(req.uri());
     let extension_frame = is_extension_proxy_path(&upstream_path_and_query);
     let policy = route_body_policy(&state.cfg, req.method(), &upstream_path_and_query);
 
@@ -497,6 +538,9 @@ async fn handle_gated(
     match res {
         Ok(mut response) => {
             apply_credentialed_response_policy(&mut response, extension_frame);
+            if let Some(rewrite) = &location_rewrite {
+                rewrite.apply(response.headers_mut());
+            }
             response
         }
         Err(e) => e.into_response(),
@@ -546,6 +590,113 @@ fn exchange_entry(
         return response;
     }
     entry_not_found_response()
+}
+
+/// An extension lane path, owned so the request can be consumed.
+struct OwnedExtensionLane {
+    credential_kind: ExtensionCredential,
+    tenant: String,
+    extension_id: String,
+    credential: String,
+    rest: String,
+}
+
+impl From<ExtensionLane<'_>> for OwnedExtensionLane {
+    fn from(lane: ExtensionLane<'_>) -> Self {
+        Self {
+            credential_kind: lane.credential_kind,
+            tenant: lane.tenant.to_string(),
+            extension_id: lane.extension_id.to_string(),
+            credential: lane.credential.to_string(),
+            rest: lane.rest.to_string(),
+        }
+    }
+}
+
+/// A capability link is never forwarded. A signed-in browser's iframe
+/// navigation to it binds the link to that session's principal and sends
+/// the frame to the bound path, keeping the rest of the path and the query;
+/// anything else, an anonymous holder of the link included, meets the
+/// session gate's 404.
+fn bind_extension_link(
+    state: &AppState,
+    req: &Request,
+    candidates: Vec<(String, Entry)>,
+    aud: &str,
+    lane: &OwnedExtensionLane,
+) -> Response {
+    if !is_binding_navigation(req.method(), req.headers()) {
+        return not_found_response(req.headers());
+    }
+    for (devserver_id, entry) in candidates {
+        let Gate::Pass { record } = resolve_gate(state, req, &devserver_id, entry.owner_id, aud)
+        else {
+            continue;
+        };
+        let target = ExtensionTarget {
+            tenant: lane.tenant.clone(),
+            extension_id: lane.extension_id.clone(),
+            capability: lane.credential.clone(),
+        };
+        let token = match state.sessions.bind_extension(&record.principal, target) {
+            Ok(token) => token,
+            Err(BindError::NoLiveSession) => return not_found_response(req.headers()),
+            Err(BindError::AtCapacity) => {
+                tracing::warn!(
+                    devserver_id = %devserver_id,
+                    "proxy extension binding capacity reached",
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "extension binding capacity reached",
+                )
+                    .into_response();
+            }
+        };
+        let mut location = format!(
+            "{}{}",
+            extension_prefix(&lane.tenant, &lane.extension_id, &token),
+            lane.rest
+        );
+        if let Some(query) = req.uri().query() {
+            location.push('?');
+            location.push_str(query);
+        }
+        let Ok(location) = HeaderValue::from_str(&location) else {
+            return not_found_response(req.headers());
+        };
+        let mut response = StatusCode::SEE_OTHER.into_response();
+        response.headers_mut().insert(header::LOCATION, location);
+        return response;
+    }
+    not_found_response(req.headers())
+}
+
+/// chan-server answers an extension's same-origin redirect with a Location
+/// on the devserver's own capability path. A navigation the frame starts
+/// itself carries no cookie, so following that Location would meet the
+/// capability link's 404; the prefix is swapped back to the bound path.
+struct LocationRewrite {
+    capability_prefix: String,
+    bound_prefix: String,
+}
+
+impl LocationRewrite {
+    fn apply(&self, headers: &mut HeaderMap) {
+        let Some(rest) = headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| location.strip_prefix(self.capability_prefix.as_str()))
+        else {
+            return;
+        };
+        if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('?')) {
+            return;
+        }
+        if let Ok(value) = HeaderValue::from_str(&format!("{}{rest}", self.bound_prefix)) {
+            headers.insert(header::LOCATION, value);
+        }
+    }
 }
 
 fn entry_preflight(req: &Request, cfg: &crate::config::Config) -> Option<Response> {
@@ -889,65 +1040,120 @@ fn is_extension_proxy_path(path_and_query: &str) -> bool {
         .contains("/_chan/extensions/")
 }
 
-/// Exact extension capability shape:
-/// `/{tenant}/_chan/extensions/{id}/{64-hex}/...`. This is the ONLY
-/// path admitted without the session gate; anything looser stays
-/// behind it. The capability segment must be exactly 64 lowercase hex
-/// characters (the devserver mints it that way) and must be followed
-/// by a further `/` — the devserver routes only the slash-terminated
-/// entry root and deeper assets, so a slashless capability URL has
-/// nothing to reach and stays gated.
-fn is_extension_capability_path(path: &str) -> bool {
-    let mut segments = path.split('/');
-    if segments.next() != Some("") {
-        return false;
-    }
-    let Some(tenant) = segments.next() else {
-        return false;
-    };
-    if tenant.is_empty() {
-        return false;
-    }
-    if segments.next() != Some("_chan") || segments.next() != Some("extensions") {
-        return false;
-    }
-    let Some(id) = segments.next() else {
-        return false;
-    };
-    if id.is_empty() {
-        return false;
-    }
-    let Some(capability) = segments.next() else {
-        return false;
-    };
-    if capability.len() != 64
-        || !capability
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return false;
-    }
-    segments.next().is_some()
+/// Length of the devserver's own extension path capability: 32 random bytes
+/// as lowercase hex.
+const EXTENSION_CAPABILITY_HEX_LEN: usize = 64;
+
+/// The two credential shapes of the extension lane, which differ only in
+/// the credential segment of `/{tenant}/_chan/extensions/{id}/{credential}/...`:
+///
+///   * a capability link: the devserver's 64-hex path capability, the URL
+///     the workspace app points an extension frame at. The proxy never
+///     forwards it; a signed-in navigation to it mints a binding.
+///   * a bound path: a 96-hex binding token. The frame's document and every
+///     request it makes live here, and the binding supplies the session.
+///
+/// Both keep the extension's path depth, so the frame's relative URLs mean
+/// exactly what they mean on the devserver's own capability path. Anything
+/// looser, a slashless root included (the devserver routes only the
+/// slash-terminated entry root and deeper assets), is ordinary tenant content
+/// behind the session gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtensionCredential {
+    Capability,
+    Binding,
 }
 
-/// The capability segment is a bearer credential in the path. Trace
-/// spans record the request URI, so the dispatcher logs URIs through
-/// this instead: on the admitted shape the capability segment is
-/// replaced with a fixed marker, every other URI passes unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExtensionLane<'a> {
+    credential_kind: ExtensionCredential,
+    tenant: &'a str,
+    extension_id: &'a str,
+    credential: &'a str,
+    /// Byte offset of the credential segment in the path.
+    credential_start: usize,
+    /// Everything after the credential segment, starting with `/`.
+    rest: &'a str,
+}
+
+fn extension_lane(path: &str) -> Option<ExtensionLane<'_>> {
+    let mut segments = path.split('/');
+    if segments.next() != Some("") {
+        return None;
+    }
+    let tenant = segments.next().filter(|tenant| !tenant.is_empty())?;
+    if segments.next() != Some("_chan") || segments.next() != Some("extensions") {
+        return None;
+    }
+    let extension_id = segments.next().filter(|id| !id.is_empty())?;
+    let credential = segments.next()?;
+    let credential_kind = match credential.len() {
+        EXTENSION_CAPABILITY_HEX_LEN => ExtensionCredential::Capability,
+        EXTENSION_BINDING_HEX_LEN => ExtensionCredential::Binding,
+        _ => return None,
+    };
+    if !credential
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    segments.next()?;
+    let credential_start = 1 + tenant.len() + "/_chan/extensions/".len() + extension_id.len() + 1;
+    Some(ExtensionLane {
+        credential_kind,
+        tenant,
+        extension_id,
+        credential,
+        credential_start,
+        rest: &path[credential_start + credential.len()..],
+    })
+}
+
+/// The proxy's own prefix for an extension credential:
+/// `/{tenant}/_chan/extensions/{id}/{credential}`.
+fn extension_prefix(tenant: &str, extension_id: &str, credential: &str) -> String {
+    format!("/{tenant}/_chan/extensions/{extension_id}/{credential}")
+}
+
+/// Only a document navigation of an iframe, started by a page on this very
+/// tenant origin, turns a capability link into a binding. Fetch Metadata
+/// headers are set by the browser and cannot be forged by page script, so
+/// a `fetch`, a subresource, a WebSocket, a top-level open, a navigation a
+/// sandboxed frame starts itself (opaque initiator, `cross-site`), and a
+/// frame on a sibling tenant (`same-site`) all fail here, cookie or not. A
+/// browser that sends no Fetch Metadata fails too.
+fn is_binding_navigation(method: &Method, headers: &HeaderMap) -> bool {
+    let exactly = |name: &str, expected: &str| {
+        let mut values = headers.get_all(name).iter();
+        matches!(
+            (values.next(), values.next()),
+            (Some(value), None) if value.as_bytes() == expected.as_bytes()
+        )
+    };
+    method == Method::GET
+        && exactly("sec-fetch-mode", "navigate")
+        && exactly("sec-fetch-dest", "iframe")
+        && exactly("sec-fetch-site", "same-origin")
+}
+
+/// Both extension credentials are bearer secrets in the path. Trace spans
+/// record the request URI, so the dispatcher logs URIs through this instead:
+/// on either lane shape the credential segment is replaced with a fixed
+/// marker, and every other URI passes unchanged.
 pub(crate) fn loggable_uri(uri: &Uri) -> String {
     let path = uri.path();
-    if !is_extension_capability_path(path) {
+    let Some(lane) = extension_lane(path) else {
         return uri.to_string();
-    }
-    let capability_start = path
-        .match_indices('/')
-        .nth(4)
-        .map(|(at, _)| at + 1)
-        .expect("admitted shape has five slashes");
-    let mut redacted = String::with_capacity(uri.to_string().len());
-    redacted.push_str(&path[..capability_start]);
-    redacted.push_str("[capability]");
-    redacted.push_str(&path[capability_start + 64..]);
+    };
+    let marker = match lane.credential_kind {
+        ExtensionCredential::Capability => "[capability]",
+        ExtensionCredential::Binding => "[binding]",
+    };
+    let mut redacted = String::with_capacity(path.len());
+    redacted.push_str(&path[..lane.credential_start]);
+    redacted.push_str(marker);
+    redacted.push_str(lane.rest);
     if let Some(query) = uri.query() {
         redacted.push('?');
         redacted.push_str(query);
@@ -2115,44 +2321,65 @@ mod tests {
     const TEST_CAPABILITY: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    /// A well-formed 96-hex binding token.
+    const TEST_BINDING: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
     #[test]
     fn extension_capability_shape_is_exact() {
-        let admitted = |path: &str| is_extension_capability_path(path);
+        let lane = |path: &str| extension_lane(path).map(|lane| lane.credential_kind);
+        assert_eq!(TEST_BINDING.len(), EXTENSION_BINDING_HEX_LEN);
 
-        // The admitted shape: entry root and deeper assets.
-        assert!(admitted(&format!(
-            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/"
-        )));
-        assert!(admitted(&format!(
-            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/app.js"
-        )));
-        assert!(admitted(&format!(
-            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/assets/deep/x.wasm"
-        )));
+        // Both credential shapes: entry root and deeper assets.
+        for credential in [TEST_CAPABILITY, TEST_BINDING] {
+            let kind = if credential.len() == 64 {
+                ExtensionCredential::Capability
+            } else {
+                ExtensionCredential::Binding
+            };
+            for rest in ["/", "/app.js", "/assets/deep/x.wasm"] {
+                let path = format!("/notes/_chan/extensions/echo/{credential}{rest}");
+                assert_eq!(lane(&path), Some(kind), "{path}");
+                let parsed = extension_lane(&path).unwrap();
+                assert_eq!(parsed.tenant, "notes");
+                assert_eq!(parsed.extension_id, "echo");
+                assert_eq!(parsed.credential, credential);
+                assert_eq!(parsed.rest, rest);
+                assert_eq!(
+                    &path[parsed.credential_start..][..credential.len()],
+                    credential
+                );
+            }
+        }
 
         // Everything looser stays behind the session gate.
+        let binding_upper = TEST_BINDING.to_ascii_uppercase();
         for path in [
-            // No trailing slash after the capability.
+            // No trailing slash after the credential.
             &format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}") as &str,
-            // Capability too short / too long / non-hex / uppercase.
+            &format!("/notes/_chan/extensions/echo/{TEST_BINDING}"),
+            // Credential too short / between the shapes / too long / non-hex / uppercase.
             "/notes/_chan/extensions/echo/0123abc/",
             &format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}0/"),
+            &format!("/notes/_chan/extensions/echo/{}/", &TEST_BINDING[..95]),
+            &format!("/notes/_chan/extensions/echo/{TEST_BINDING}0/"),
             "/notes/_chan/extensions/echo/ZZ23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
             &format!(
                 "/notes/_chan/extensions/echo/{}/",
                 TEST_CAPABILITY.to_ascii_uppercase()
             ),
+            &format!("/notes/_chan/extensions/echo/{binding_upper}/"),
             // Missing pieces of the namespace.
             &format!("/_chan/extensions/echo/{TEST_CAPABILITY}/"),
             &format!("/notes/_chan/extension/echo/{TEST_CAPABILITY}/"),
             &format!("/notes/chan/extensions/echo/{TEST_CAPABILITY}/"),
             &format!("/notes/_chan/extensions//{TEST_CAPABILITY}/"),
+            &format!("/notes/_chan/extensions//{TEST_BINDING}/"),
             // Tenant root and ordinary tenant content.
             "/",
             "/notes/",
             "/notes/api/extensions",
         ] {
-            assert!(!admitted(path), "{path}");
+            assert_eq!(lane(path), None, "{path}");
         }
     }
 
@@ -2170,10 +2397,129 @@ mod tests {
             "/notes/_chan/extensions/echo/[capability]/app.js?v=1"
         );
 
+        // A bound path's token is as much a bearer credential.
+        let uri = u(&format!(
+            "/notes/_chan/extensions/echo/{TEST_BINDING}/api/state?v=1"
+        ));
+        let logged = loggable_uri(&uri);
+        assert!(!logged.contains(TEST_BINDING));
+        assert_eq!(
+            logged,
+            "/notes/_chan/extensions/echo/[binding]/api/state?v=1"
+        );
+
         // Ordinary URIs pass through unchanged, query included.
         for raw in ["/notes/api/graph?x=1", "/", "/blog/assets/app.js"] {
             assert_eq!(loggable_uri(&u(raw)), raw);
         }
+    }
+
+    /// Exactly a GET iframe navigation started by a same-origin page mints;
+    /// every other Fetch Metadata combination the spike observed for a
+    /// cookie-carrying or cookieless request does not, nor does a browser
+    /// that sends none, nor a duplicated header.
+    #[test]
+    fn only_a_same_origin_iframe_navigation_binds_an_extension_link() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.append(*name, HeaderValue::from_static(value));
+            }
+            headers
+        };
+        let navigation = [
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-dest", "iframe"),
+        ];
+        assert!(is_binding_navigation(&Method::GET, &headers(&navigation)));
+
+        for method in [Method::HEAD, Method::POST, Method::OPTIONS] {
+            assert!(
+                !is_binding_navigation(&method, &headers(&navigation)),
+                "{method}"
+            );
+        }
+        for pairs in [
+            // The parent page's own fetch of the link.
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-mode", "cors"),
+                ("sec-fetch-dest", "empty"),
+            ][..],
+            // A navigation the sandboxed frame starts itself.
+            &[
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+            // A frame on a sibling tenant host.
+            &[
+                ("sec-fetch-site", "same-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+            // A top-level open.
+            &[
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
+            ],
+            // A subresource of the frame.
+            &[
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "no-cors"),
+                ("sec-fetch-dest", "script"),
+            ],
+            // No Fetch Metadata at all.
+            &[],
+            // One header missing.
+            &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")],
+        ] {
+            assert!(
+                !is_binding_navigation(&Method::GET, &headers(pairs)),
+                "{pairs:?}"
+            );
+        }
+        let mut duplicated = headers(&navigation);
+        duplicated.append("sec-fetch-dest", HeaderValue::from_static("iframe"));
+        assert!(!is_binding_navigation(&Method::GET, &duplicated));
+    }
+
+    #[test]
+    fn a_redirect_onto_the_capability_path_is_sent_back_to_the_bound_path() {
+        let rewrite = LocationRewrite {
+            capability_prefix: format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}"),
+            bound_prefix: format!("/notes/_chan/extensions/echo/{TEST_BINDING}"),
+        };
+        let rewritten = |location: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::LOCATION, HeaderValue::from_str(location).unwrap());
+            rewrite.apply(&mut headers);
+            headers
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            rewritten(&format!(
+                "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/next?x=1"
+            )),
+            format!("/notes/_chan/extensions/echo/{TEST_BINDING}/next?x=1")
+        );
+        for untouched in [
+            "https://example.com/elsewhere".to_string(),
+            "/notes/api/graph".to_string(),
+            format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}0/next"),
+            format!("/blog/_chan/extensions/echo/{TEST_CAPABILITY}/next"),
+        ] {
+            assert_eq!(rewritten(&untouched), untouched);
+        }
+        let mut headers = HeaderMap::new();
+        rewrite.apply(&mut headers);
+        assert!(headers.get(header::LOCATION).is_none());
     }
 
     fn test_state() -> AppState {
@@ -2199,31 +2545,34 @@ mod tests {
     }
 
     /// With no live devserver both lanes 404, but only the extension
-    /// capability namespace answers CORS-readably; the tenant surface
-    /// keeps today's bare anti-enumeration shape byte for byte.
+    /// namespace, capability link and bound path alike, answers
+    /// CORS-readably; the tenant surface keeps today's bare
+    /// anti-enumeration shape byte for byte.
     #[tokio::test]
     async fn extension_namespace_404s_carry_the_policy_and_the_tenant_stays_bare() {
         let state = test_state();
-        let path = format!("/notes/_chan/extensions/echo/{TEST_CAPABILITY}/app.js");
-        let response = handle(
-            state.clone(),
-            "alice".to_string(),
-            Some("0123456789ab".to_string()),
-            tenant_request(&path),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                .expect("ACAO on the extension namespace 404"),
-            "null"
-        );
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "private, no-store"
-        );
+        for credential in [TEST_CAPABILITY, TEST_BINDING] {
+            let path = format!("/notes/_chan/extensions/echo/{credential}/app.js");
+            let response = handle(
+                state.clone(),
+                "alice".to_string(),
+                Some("0123456789ab".to_string()),
+                tenant_request(&path),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .expect("ACAO on the extension namespace 404"),
+                "null"
+            );
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "private, no-store"
+            );
+        }
 
         for bare in ["/notes/", "/notes/api/graph"] {
             let response = handle(
