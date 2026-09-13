@@ -429,6 +429,75 @@ refused_404() { # refused_404 <label> <code>: the session gate's 404, readable b
     && ! grep -qi '^location:' "$EXT_H" \
     || die "$1: expected the CORS-readable 404, got $2 ($(head -c 160 "$EXT_B"))"
 }
+ds_accepted_count() { # tunnel requests the devserver accepted, from any subject
+  ds_journal | grep -c 'gateway assertion accepted' || true
+}
+
+# Four climbs from a bound path land on the tenant's own /api/health, so a
+# layer that resolved any of these spellings would hand a leaked extension
+# link the owner's devserver. The encoded forms are the ones the devserver
+# itself turns into path structure (it decodes the capture once, then a
+# WHATWG parser splits on `\` and reads `%2e` as a dot).
+DOT_SEGMENT_CLIMBS=(
+  '../../../../api/health'
+  '%2e%2e/%2e%2e/%2e%2e/%2e%2e/api/health'
+  '%2E%2e/.%2E/%2e./../api/health'
+  '..%2f..%2f..%2f..%2fapi/health'
+  '..%5c..%5c..%5c..%5capi/health'
+  '%252e%252e/%252e%252e/%252e%252e/%252e%252e/api/health'
+)
+dot_segment_case() { # dot_segment_case <label> <bound url>: no dot segment leaves the proxy
+  local label="$1" bound="$2" climb method code seen rows before after last failure failures=()
+  local -a data
+  seen="$(ext_request_count)"
+  before="$(ds_accepted_count)"
+  for climb in "${DOT_SEGMENT_CLIMBS[@]}"; do
+    for method in GET POST; do
+      data=()
+      [ "$method" = POST ] && data=(-H 'Content-Type: text/plain' --data "climb")
+      # --path-as-is: curl would otherwise resolve the raw `..` itself.
+      code="$(proxy_curl -sS --path-as-is -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' -X "$method" \
+        "${FRAME_REQUEST[@]}" "${data[@]}" "$bound$climb" || echo 000)"
+      rows="$(ext_requests | tail -n "+$((seen + 1))")"
+      # The extension's own 404 comes back through the proxy with the same
+      # status and CORS header, so only the body tells the proxy's refusal
+      # from a forwarded request.
+      if [ "$code" != 404 ] || [ "$(cat "$EXT_B")" != '{"error":"not found"}' ] \
+        || ! grep -qi '^access-control-allow-origin: null' "$EXT_H" || grep -qi '^location:' "$EXT_H"; then
+        failures+=("$method $climb: expected the proxy's readable 404, got $code body '$(head -c 80 "$EXT_B")'")
+      fi
+      if [ -n "$rows" ]; then
+        failures+=("$method $climb: reached the extension as $(printf '%s' "$rows" | tr '\n' ' ')")
+      fi
+      seen="$(ext_request_count)"
+    done
+  done
+
+  # A near miss is an ordinary segment and still reaches the extension. It
+  # goes last so the devserver's line for it bounds the journal read below.
+  code="$(proxy_curl -sS --path-as-is -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' \
+    "${FRAME_REQUEST[@]}" "${bound}a..b" || echo 000)"
+  ext_requests | tail -n "+$((seen + 1))" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+assert rows == [{"method": "GET", "path": "/a..b", "body": ""}], rows
+' || failures+=("GET a..b: the near miss did not reach the extension as exactly GET /a..b (got $code)")
+  after="$before"; last=""
+  for _ in $(seq 1 20); do
+    after="$(ds_accepted_count)"
+    [ "$((after - before))" -ge 1 ] && [ "$after" = "$last" ] && break
+    last="$after"
+    sleep 0.5
+  done
+  [ "$((after - before))" = 1 ] \
+    || failures+=("the devserver accepted $((after - before)) tunnel requests during the climbs and the near miss; expected 1, the near miss")
+
+  if [ "${#failures[@]}" -gt 0 ]; then
+    for failure in "${failures[@]}"; do printf '   %s: %s\n' "$label" "$failure" >&2; done
+    die "$label: ${#failures[@]} dot-segment assertion(s) failed on the bound path"
+  fi
+  info "$label: ${#DOT_SEGMENT_CLIMBS[@]} climbs as GET and POST each got the proxy's 404, reached neither the extension nor the devserver; a..b still reached the extension"
+}
 
 SEEN="$(ext_request_count)"
 CODE_ANON="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_REQUEST[@]}" "$EXT_URL" || echo 000)"
@@ -441,8 +510,8 @@ refused_404 "capability link, cookieless POST" "$CODE_ANON"
 [ "$(ext_request_count)" = "$SEEN" ] || die "a request with no session reached the extension: $(ext_requests | tail -3)"
 info "no session cookie: the capability link answers 404 to a fetch, a navigation and a POST; the extension saw none of them"
 
-extension_link_case() { # extension_link_case <label> <gate cookie> <subject uuid>
-  local label="$1" gate="$2" subject="$3" code location bound seen before after revoke_json
+extension_link_case() { # extension_link_case <label> <gate cookie> <subject uuid> [climbs]
+  local label="$1" gate="$2" subject="$3" climbs="${4:-}" code location bound seen before after revoke_json
   code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_NAVIGATION[@]}" \
     -H "Cookie: __Host-devserver_gate=$gate" "$EXT_URL" || echo 000)"
   location="$(sed -n 's/^location: //ip' "$EXT_H" | head -1 | tr -d '\r')"
@@ -480,6 +549,7 @@ assert rows == expected, rows
   [ "$((after - before))" -ge 2 ] \
     || die "$label: the devserver did not accept the bound requests as subject $subject ($before -> $after)"
   info "$label: bound GET 200 and POST 200 reached the extension; the devserver accepted them as sub=$subject"
+  [ "$climbs" = climbs ] && dot_segment_case "$label" "$bound"
 
   revoke_json="$($SDME exec "$C_PROXY" -- /usr/bin/curl -fsS -X POST \
     -H "Authorization: Bearer $CONTROL_PROFILE_TOKEN" -H 'content-type: application/json' \
@@ -504,7 +574,7 @@ assert body["revoked"] >= 1 and body["proxies_confirmed"] == 1, body
   info "$label: after revoking the session the bound GET and POST and a new navigation answer 404; the extension saw none"
 }
 
-extension_link_case grantee "$GRANTEE_GATE" "$GRANTEE_USER_ID"
+extension_link_case grantee "$GRANTEE_GATE" "$GRANTEE_USER_ID" climbs
 extension_link_case owner "$OWNER_GATE" "$USER_ID"
 # Read the journal into a file first: a `grep -q` at the end of a pipeline
 # can SIGPIPE its writer, and under pipefail a match would then read as none.
