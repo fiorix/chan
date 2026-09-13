@@ -6,11 +6,15 @@
 //! control frame; after that, both sides hand the byte stream to
 //! yamux.
 //!
-//! This crate is pure data: framing helpers and serde types. No
-//! I/O, no async. Both client and server depend on it.
+//! This crate is mostly data: framing helpers and serde types, plus
+//! the small async transport pieces both ends of a tunnel and the
+//! gateway's control plane share (the framed reads and writes, the h2
+//! duplex, and the accept-failure policy). Both client and server
+//! depend on it.
 
 #![forbid(unsafe_code)]
 
+mod accept;
 mod control;
 mod frame;
 pub mod gateway_assertion;
@@ -19,6 +23,7 @@ mod io;
 mod lease_refresh;
 mod workspace_name;
 
+pub use accept::{accept_next, AcceptFailure, ACCEPT_RETRY_PAUSE};
 pub use control::{error_code, Hello, HelloAck, HelloAckErr, HelloAckOk, ProtocolVersion};
 pub use frame::{decode_frame, encode_frame, FrameError};
 pub use h2_duplex::H2Duplex;

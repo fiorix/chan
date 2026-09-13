@@ -337,11 +337,13 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "h2 0.4.14",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

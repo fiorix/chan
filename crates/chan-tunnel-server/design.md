@@ -124,7 +124,7 @@ sequenceDiagram
 
 `serve_tunnel_listener(listener, validator, registry, max_workspaces_per_user)`:
 
-1. `TcpListener::accept`. Try to acquire one permit from a per-listener `Semaphore::new(MAX_INFLIGHT_HANDSHAKES)` (1024). If the semaphore is empty, the TCP socket is dropped and the loop continues; this bounds memory against floods of half-open peers that have not yet hit a per-stage timeout. Otherwise spawn `handle_tunnel_conn` carrying the owned permit.
+1. `TcpListener::accept` through `chan_tunnel_proto::accept_next`: a failure that concerns one pending connection is retried at once, one that means the process is out of descriptors or memory (or is unrecognised) is logged at error and retried after one second, and only a failure that means the listening socket is unusable ends the loop (see the policy in [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md#accept-failures)). The embedding proxy treats the loop ending as the listener dying and stops every tunnel on the node, so a flood that exhausts descriptors must slow accepts, not end them. Try to acquire one permit from a per-listener `Semaphore::new(MAX_INFLIGHT_HANDSHAKES)` (1024). If the semaphore is empty, the TCP socket is dropped and the loop continues; this bounds memory against floods of half-open peers that have not yet hit a per-stage timeout. Otherwise spawn `handle_tunnel_conn` carrying the owned permit.
 2. The h2 server builder advertises the shared 16 MiB stream and 32 MiB connection receive windows, then handshakes under `H2_HANDSHAKE_TIMEOUT` (10s).
 3. First `conn.accept()` under `FIRST_STREAM_TIMEOUT` (10s).
 4. Reject `(method != POST) || (path != TUNNEL_PATH)` with 404.

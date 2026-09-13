@@ -16,7 +16,15 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+
+# Accept-failure classification (`accept.rs`) tells an exhausted process
+# (EMFILE, ENFILE, ENOBUFS) and a dead listener (EBADF, ENOTSOCK) apart
+# from a failed connection; `io::ErrorKind` has no stable variant for
+# those errnos, so the classification reads them.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 http = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

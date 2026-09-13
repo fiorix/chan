@@ -18,10 +18,11 @@
 //! `h2::server::Connection` has no idle timeout, so anything a
 //! refused peer can park on is something any peer that reaches the
 //! listener can exhaust.
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
+use chan_tunnel_proto::{accept_next, H2Duplex, TUNNEL_PATH};
 use h2::Reason;
 use http::{header, Method, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
@@ -95,8 +96,13 @@ const REJECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const MAX_DRAINER_REJECTIONS: u32 = 16;
 
 /// Accept loop for a TCP listener bound to a tunnel-only port.
-/// Returns only when the listener errors; per-connection failures
-/// are logged and never bubble up.
+/// Returns only when the listening socket itself is unusable
+/// (`chan_tunnel_proto::AcceptFailure::Listener`): an accept failure
+/// that concerns one pending connection is retried at once, and one
+/// that means the process is short of descriptors or memory is
+/// retried after a pause, so an embedder that treats the return as
+/// the listener dying only sees it when it has. Per-connection
+/// failures after accept are logged and never bubble up.
 ///
 /// `max_workspaces_per_user` caps the number of distinct workspaces a
 /// single user may have registered concurrently. `0` disables the
@@ -129,6 +135,30 @@ pub async fn serve_tunnel_listener_with_admission(
     registry: Arc<Registry>,
     max_workspaces_per_user: usize,
 ) -> std::io::Result<()> {
+    serve_accepted(
+        || listener.accept(),
+        validator,
+        admission,
+        registry,
+        max_workspaces_per_user,
+    )
+    .await
+}
+
+/// The accept loop over any source of accept results. The listener
+/// passes its own `accept`; a test passes one that injects the
+/// failures a real socket only produces under fd exhaustion.
+async fn serve_accepted<A, F>(
+    mut accept: A,
+    validator: Arc<dyn Validator>,
+    admission: Arc<dyn RegistrationAdmission>,
+    registry: Arc<Registry>,
+    max_workspaces_per_user: usize,
+) -> std::io::Result<()>
+where
+    A: FnMut() -> F,
+    F: Future<Output = std::io::Result<(TcpStream, SocketAddr)>>,
+{
     // Cap concurrent in-flight handshakes. The permit is held only
     // through the authenticate-and-handshake stages; once the
     // per-tunnel driver takes over (workspace_tunnel), the permit is
@@ -136,7 +166,7 @@ pub async fn serve_tunnel_listener_with_admission(
     // memory / task count against floods of half-open or slow peers.
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_HANDSHAKES));
     loop {
-        let (tcp, peer) = listener.accept().await?;
+        let (tcp, peer) = accept_next("tunnel", &mut accept).await?;
         let permit = match inflight.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
@@ -1131,5 +1161,80 @@ mod tests {
             .await
             .expect("PING timed out")
             .expect("PONG");
+    }
+
+    /// `accept(2)` fails for reasons that say nothing about the listening
+    /// socket: a peer that reset before it was accepted, or a process
+    /// out of descriptors under exactly the flood this listener exists to
+    /// absorb. The embedding proxy treats the loop returning as the
+    /// listener dying and takes every tunnel on the node down with it,
+    /// so neither failure may end the loop, and the next connection must
+    /// still be served.
+    #[tokio::test]
+    async fn a_transient_accept_failure_does_not_end_the_listener() {
+        let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.expect("bind"));
+        let addr = listener.local_addr().expect("local addr");
+        // Popped from the back: a failure for one connection, then one
+        // that means the process is out of a resource.
+        let injected = Arc::new(std::sync::Mutex::new(vec![
+            std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ]));
+        let accept = {
+            let injected = injected.clone();
+            move || {
+                let failure = injected.lock().expect("injected failures").pop();
+                let listener = listener.clone();
+                async move {
+                    match failure {
+                        Some(error) => Err(error),
+                        None => listener.accept().await,
+                    }
+                }
+            }
+        };
+        let serving = tokio::spawn(super::serve_accepted(
+            accept,
+            Arc::new(UnreachableValidator),
+            Arc::new(AllowAllAdmission),
+            Registry::new(),
+            0,
+        ));
+
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            let tcp = TcpStream::connect(addr).await?;
+            let (mut send_request, connection) = h2::client::handshake(tcp)
+                .await
+                .map_err(std::io::Error::other)?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("http://tunnel.test/not-the-tunnel")
+                .body(())
+                .expect("request");
+            let (response, _body) = send_request
+                .send_request(request, true)
+                .map_err(std::io::Error::other)?;
+            let response = response.await.map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(response.status())
+        })
+        .await;
+        if serving.is_finished() {
+            panic!(
+                "the accept loop ended on an injected failure: {:?}",
+                serving.await.expect("serving task")
+            );
+        }
+        assert!(
+            injected.lock().expect("injected failures").is_empty(),
+            "the loop did not consume both injected failures",
+        );
+        let status = status
+            .expect("the connection after the failures was never served")
+            .expect("h2 exchange");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        serving.abort();
     }
 }

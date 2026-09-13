@@ -45,6 +45,7 @@ This crate owns:
 - Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers), plus `sanitize_workspace_name`.
 - `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
 - `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
+- The accept-failure policy (`AcceptFailure`, `accept_next`) shared by the tunnel terminator's listener and devserver-control's proxy control listener. See [Accept failures](#accept-failures).
 - The gateway caller assertion (`gateway_assertion`): per-tunnel key derivation, signed caller claims, `canonical_audience`, and the token-resolved devserver id (PAT SHA-256). The claims include `ClientType`, the client the caller's gateway session was minted for; the gateway's entry credential reuses the same type. A missing or unrecognised value deserializes as `Unknown` instead of failing the token, and is never `Desktop`.
 
 Out of scope here, owned by the I/O crates:
@@ -68,7 +69,7 @@ The split between the sync codec (`BytesMut`-based `encode_frame` / `decode_fram
 
 ## 4. Contract surface
 
-This crate owns the stable tunnel path, the control-frame size cap, the Hello / HelloAck schemas, the refusal-code vocabulary, the shared identifier validators, the frame codec, and the h2 duplex adapter. Client and server crates may orchestrate I/O differently, but they must use these shared contracts for the bytes and validation rules.
+This crate owns the stable tunnel path, the control-frame size cap, the Hello / HelloAck schemas, the refusal-code vocabulary, the shared identifier validators, the frame codec, the h2 duplex adapter, and the accept-failure policy. Client and server crates may orchestrate I/O differently, but they must use these shared contracts for the bytes and validation rules.
 
 Control frames are owned serde values with plain strings and enums, no borrowed lifetimes. `Hello` carries protocol, client version for logs, workspace, and an optional display name; `HelloAck` is either success with the assigned prefix/user/workspace plus the immutable `owner_user_id` or refusal with a stable code plus safe message. `LeaseRefreshRequest` carries the PAT only for the duration of exact-registration revalidation and redacts it from `Debug`; its response is `Refreshed` or a safe refusal. Refusal codes are additive and machine-matchable.
 
@@ -132,6 +133,18 @@ Carried inside `Hello` as a transparent `u16`. The path (`/v1/tunnel`) is a stab
 Symmetric: server side's `RecvStream` is the request body and `SendStream` is the response body; client side is the reverse. The adapter doesn't care which.
 
 Both peers advertise a 16 MiB HTTP/2 stream window and a 32 MiB HTTP/2 connection window. The yamux peers cap the connection at 256 concurrent substreams and a 64 MiB aggregate receive window. These values are protocol-level transport invariants owned by this crate, even though they do not change the serialized control frames.
+
+### Accept failures
+
+`accept(2)` fails for reasons that say nothing about the listening socket, and both gateway services that run a raw accept loop (devserver-proxy's tunnel listener, devserver-control's proxy control listener) end the whole service when that loop returns. `AcceptFailure::classify` sorts a failure into one of three classes, and `accept_next` applies the policy:
+
+- **Connection**: one pending connection failed before it was handed over. `ECONNABORTED`, `ECONNRESET`, `EINTR`, `EAGAIN`, `EPERM` (a firewall hook), `ETIMEDOUT`, and the network errors Linux passes through from the new socket and says to retry like `EAGAIN` (`ENETDOWN`, `EPROTO`, `ENOPROTOOPT`, `EHOSTDOWN`, `ENONET`, `EHOSTUNREACH`, `EOPNOTSUPP`, `ENETUNREACH`). Logged at debug and retried at once; pausing here would let a flood of such connections throttle every other accept.
+- **Exhausted**: the process or the kernel is short of something a new socket needs (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`), plus any failure not listed here. Logged at error and retried after `ACCEPT_RETRY_PAUSE` (1s). The pending connection stays queued, so an immediate retry would fail the same way and spin; an unknown error costs a second of accepts rather than risking a spin. The one-second pause is the one hyper's `AddrIncoming` used and axum's `serve` uses, so the controller's admin listener and its proxy control listener behave alike.
+- **Listener**: the listening socket itself is unusable (`EBADF`, `ENOTSOCK`, `EINVAL`, `EFAULT`). `accept_next` returns the error and the loop ends, so the supervisor replaces the service.
+
+The errnos with a stable `io::ErrorKind` are matched by kind; the rest need `libc`, which is a unix-only dependency. On other targets only the kinds apply, so nothing there is classified `Listener` and every failure without a connection kind pauses.
+
+The policy lives here because it is the one crate both loops already depend on: devserver-control uses `H2Duplex` and the framed I/O helpers but not the terminator, and pulling chan-tunnel-server's yamux and hyper stack into the controller for one function would be the wrong trade.
 
 ## 6. Trust boundaries / validation
 
