@@ -37,7 +37,7 @@ describe("App.svelte keymap binding", () => {
     // Gate: KeyH + isTauriDesktop. macOS: Cmd+Shift+H. Non-macOS:
     // Ctrl+Shift+H. A user override supersedes the built-in chord.
     expect(app).toMatch(
-      /e\.code === "KeyH" && isTauriDesktop\(\)[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && e\.shiftKey[\s\S]*?e\.ctrlKey && !e\.metaKey && !e\.altKey && e\.shiftKey[\s\S]*?!builtInChordSuperseded\("app\.window\.hide"\)/,
+      /shortcutLetter\(e\) === "H" && isTauriDesktop\(\)[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && e\.shiftKey[\s\S]*?e\.ctrlKey && !e\.metaKey && !e\.altKey && e\.shiftKey[\s\S]*?!builtInChordSuperseded\("app\.window\.hide"\)/,
     );
     expect(app).toMatch(
       /if \(hideChord\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?void hideWindowFromCloseConfirm\(\);/,

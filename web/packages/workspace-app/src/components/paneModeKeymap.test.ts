@@ -170,7 +170,7 @@ describe("New terminal web chord + the chan:command bridge", () => {
     // Ctrl+Shift+T (every browser OS); it still routes through
     // spawnTerminalFromContext so resolveSpawnContext().dir threads as cwd.
     expect(app).toMatch(
-      /e\.ctrlKey && e\.shiftKey && !e\.metaKey && !e\.altKey && e\.code === "KeyT"[\s\S]*?spawnTerminalFromContext\(\)/,
+      /e\.ctrlKey && e\.shiftKey && !e\.metaKey && !e\.altKey && shortcutLetter\(e\) === "T"[\s\S]*?spawnTerminalFromContext\(\)/,
     );
   });
 
@@ -262,7 +262,7 @@ describe("Track C pane shortcut wiring", () => {
     // pin is that the branch body goes straight from the chord match to
     // the metaKey gate.
     const branch = sourceBetween(
-      'if (meta && !e.altKey && !e.shiftKey && e.code === "KeyW") {',
+      'if (meta && !e.altKey && !e.shiftKey && shortcutLetter(e) === "W") {',
       'if (e.altKey && e.shiftKey && !meta) {',
     );
     expect(branch).not.toContain("ui.terminalControl");

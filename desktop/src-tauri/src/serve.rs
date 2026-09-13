@@ -1728,7 +1728,11 @@ const KEY_BRIDGE_JS: &str = r#"
     if (!meta) return;
     const shift = e.shiftKey;
     const alt = e.altKey;
-    const code = e.code;
+    // Letter shortcuts follow the active layout (Colemak T has code KeyF).
+    // Option glyphs have no base letter in the event, so retain that fallback.
+    const letter = /^[a-z]$/i.test(e.key) ? e.key.toUpperCase() : null;
+    const code = letter ? 'Key' + letter
+      : /^Key[A-Z]$/.test(e.code) && !alt ? '' : e.code;
     if (alt) {
       // Windows delivers an AltGr keydown as ctrlKey+altKey, so on
       // layouts where AltGr composes text (US-International AltGr+W

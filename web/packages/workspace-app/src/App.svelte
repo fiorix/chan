@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLetter } from "@chan/web-shared/keyboard";
   import { onDestroy, onMount } from "svelte";
   import AppStatusBar from "./components/AppStatusBar.svelte";
   import TransferBubble from "./components/TransferBubble.svelte";
@@ -658,8 +659,8 @@
     const os = currentOS();
     const commandLauncherChord =
       isTauriDesktop() && os === "mac"
-        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyK"
-        : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyK";
+        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "K"
+        : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "K";
     if (commandLauncherChord) {
       e.preventDefault();
       showCommandLauncher("contextual");
@@ -684,8 +685,8 @@
     }
     const searchChord =
       os === "mac"
-        ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.code === "KeyS"
-        : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyS";
+        ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && shortcutLetter(e) === "S"
+        : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "S";
     if (searchChord && !builtInChordSuperseded("app.search.toggle")) {
       // Swallow the chord either way (the browser's Save dialog must not
       // open), but route the toggle through runCommand: its window-mode gate
@@ -886,7 +887,7 @@
     // Ctrl+Shift+T (off-mac) through KEY_BRIDGE_JS -> the app.terminal.toggle
     // command. On a browser Ctrl+Shift+T is the reopen-tab chord, so we
     // preventDefault and browser clients rebind if the browser wins.
-    if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && e.code === "KeyT") {
+    if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && shortcutLetter(e) === "T") {
       e.preventDefault();
       spawnTerminalFromContext();
       return;
@@ -898,7 +899,7 @@
     // browser Ctrl+Shift+P is the private-window chord, so we preventDefault
     // and browser clients rebind. Keep in sync with osChord's RICH_PROMPT_ID
     // branch. Also on the terminal right-click row and the launcher entry.
-    if (e.code === "KeyP") {
+    if (shortcutLetter(e) === "P") {
       const richPromptChord =
         currentOS() === "mac"
           ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey
@@ -917,7 +918,7 @@
     // desktop only (the registry mints no off-mac or web default; those
     // surfaces bind through user overrides, which fire in the override
     // path above). Keep in sync with osChord's BROADCAST_TOGGLE_ID branch.
-    if (e.code === "KeyI" && isTauriDesktop() && currentOS() === "mac") {
+    if (shortcutLetter(e) === "I" && isTauriDesktop() && currentOS() === "mac") {
       const broadcastChord =
         e.metaKey &&
         !e.ctrlKey &&
@@ -953,7 +954,7 @@
     // claimed here (off-mac tab close is Ctrl+Shift+W via the desktop
     // bridge; Ctrl+D is the alternate; the browser owns Ctrl+W), so it
     // falls through.
-    if (meta && !e.altKey && !e.shiftKey && e.code === "KeyW") {
+    if (meta && !e.altKey && !e.shiftKey && shortcutLetter(e) === "W") {
       if (e.metaKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -1007,8 +1008,8 @@
     // reloadWindow / the desktop IPC).
     const reloadChord =
       currentOS() === "mac"
-        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyR"
-        : e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && e.code === "KeyR";
+        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "R"
+        : e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && shortcutLetter(e) === "R";
     if (reloadChord) {
       e.preventDefault();
       void reloadWindow();
@@ -1020,7 +1021,7 @@
     // hidden and reopens from the launcher). Desktop-only: the IPC is an
     // explicit no-op in a plain browser, so no web chord is claimed.
     // Cmd+Shift+H on macOS, Ctrl+Shift+H on Linux / Windows.
-    if (e.code === "KeyH" && isTauriDesktop()) {
+    if (shortcutLetter(e) === "H" && isTauriDesktop()) {
       const hideChord =
         (currentOS() === "mac"
           ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey
@@ -1038,8 +1039,8 @@
     // app.editor.toggleMode = Mod+E).
     const toggleModeChord =
       currentOS() === "mac"
-        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "KeyE"
-        : e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.code === "KeyE";
+        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "E"
+        : e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "E";
     if (toggleModeChord) {
       e.preventDefault();
       toggleActiveFileTabMode();
@@ -1200,11 +1201,11 @@
   function onCtrlDCapture(e: KeyboardEvent): void {
     if (!e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     if (builtInChordSuperseded("app.tab.close")) return;
-    // e.key is lowercase "d" or uppercase "D" depending on
-    // caps-lock; e.code === "KeyD" is layout-agnostic and matches
-    // both. The keystroke we care about is the literal Ctrl + the
-    // physical D key, not a shifted variant or a Cmd-modified one.
-    if (e.code !== "KeyD") return;
+    // Match the layout-resolved letter, not the key's position, so this is
+    // the D the user typed on whatever layout is active, and Caps Lock does
+    // not change it. Shifted and Cmd-modified variants are already excluded
+    // above.
+    if (shortcutLetter(e) !== "D") return;
     // A full-window cover is up: swallow Ctrl+D entirely (capture phase, so
     // the terminal or editor behind the cover never sees it) rather than
     // closing a tab the user cannot act on or even see.

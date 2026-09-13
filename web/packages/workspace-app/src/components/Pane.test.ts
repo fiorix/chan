@@ -458,7 +458,7 @@ describe("Pane right-click menus", () => {
 
   test("reopen-tab listener matches the advertised Ctrl+Alt+Shift+T chord", () => {
     expect(paneSource).toMatch(
-      /e\.ctrlKey &&\s*e\.altKey &&\s*e\.shiftKey &&\s*!e\.metaKey &&\s*e\.code === "KeyT"[\s\S]{0,80}reopenClosedTab\(\)/,
+      /e\.ctrlKey &&\s*e\.altKey &&\s*e\.shiftKey &&\s*!e\.metaKey &&\s*shortcutLetter\(e\) === "T"[\s\S]{0,80}reopenClosedTab\(\)/,
     );
   });
 

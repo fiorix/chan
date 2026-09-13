@@ -32,7 +32,7 @@ describe("shortcut registry entry", () => {
 describe("keymap + runCommand routing", () => {
   test("Mod+E hotkey in onWindowKey calls toggleActiveFileTabMode (per-OS)", () => {
     expect(app).toMatch(
-      /const toggleModeChord =[\s\S]{1,80}currentOS\(\) === "mac"[\s\S]{1,120}e\.metaKey && !e\.ctrlKey[\s\S]{1,80}e\.code === "KeyE"[\s\S]{1,120}: e\.ctrlKey && !e\.metaKey[\s\S]{1,80}e\.code === "KeyE";[\s\S]{1,200}toggleActiveFileTabMode\(\);/,
+      /const toggleModeChord =[\s\S]{1,80}currentOS\(\) === "mac"[\s\S]{1,120}e\.metaKey && !e\.ctrlKey[\s\S]{1,80}shortcutLetter\(e\) === "E"[\s\S]{1,120}: e\.ctrlKey && !e\.metaKey[\s\S]{1,80}shortcutLetter\(e\) === "E";[\s\S]{1,200}toggleActiveFileTabMode\(\);/,
     );
   });
 

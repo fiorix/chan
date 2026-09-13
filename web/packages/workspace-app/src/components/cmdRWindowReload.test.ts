@@ -44,7 +44,7 @@ describe("App.svelte keymap binding", () => {
     // macOS: Cmd+R. Non-macOS: Ctrl+Shift+R (so plain Ctrl+R is left for
     // the terminal). preventDefault + void reloadWindow() on match.
     expect(app).toMatch(
-      /currentOS\(\) === "mac"[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && !e\.shiftKey && e\.code === "KeyR"[\s\S]*?e\.ctrlKey && e\.shiftKey && !e\.metaKey && !e\.altKey && e\.code === "KeyR"/,
+      /currentOS\(\) === "mac"[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && !e\.shiftKey && shortcutLetter\(e\) === "R"[\s\S]*?e\.ctrlKey && e\.shiftKey && !e\.metaKey && !e\.altKey && shortcutLetter\(e\) === "R"/,
     );
     expect(app).toMatch(
       /if \(reloadChord\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?void reloadWindow\(\);/,

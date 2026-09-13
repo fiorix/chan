@@ -6644,7 +6644,7 @@ const LAUNCHER_RELOAD_BRIDGE_JS: &str = r#"
     }
   }
   window.addEventListener('keydown', (e) => {
-    if (e.code !== 'KeyR' || e.altKey || e.shiftKey) return;
+    if (e.key.toLowerCase() !== 'r' || e.altKey || e.shiftKey) return;
     if (!(e.metaKey || e.ctrlKey)) return;
     e.preventDefault();
     e.stopImmediatePropagation();

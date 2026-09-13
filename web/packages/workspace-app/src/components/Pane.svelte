@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLetter } from "@chan/web-shared/keyboard";
   // One pane: a horizontal tab strip on top, an editor below.
 
   import {
@@ -712,7 +713,7 @@
       e.altKey &&
       e.shiftKey &&
       !e.metaKey &&
-      e.code === "KeyT"
+      shortcutLetter(e) === "T"
     ) {
       e.preventDefault();
       reopenClosedTab();
