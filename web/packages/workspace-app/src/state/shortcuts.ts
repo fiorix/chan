@@ -1,3 +1,4 @@
+import { shortcutLetter } from "@chan/web-shared/keyboard";
 // Central registry of every user-visible keyboard shortcut.
 //
 // One source of truth for:
@@ -703,16 +704,15 @@ export function chordFromEvent(e: KeyboardEvent): string | null {
   return parts.join("+");
 }
 
-/// Normalise a keydown to the registry's physical-key casing. App.svelte's
-/// global handlers match `code` so Option-mangled and non-US-layout glyphs
-/// still trigger their advertised chord; terminal escape must use the same
-/// identity or xterm/ghostty will consume the event before App sees it.
+/// Resolve letters through the same layout-aware matcher as App.svelte so
+/// terminal escape and global dispatch agree. Punctuation and digit chords
+/// retain their physical identity when Shift or Option changes the glyph.
 function canonicalKey(e: KeyboardEvent): string | null {
   const k = e.key;
   if (!k || k === "Shift" || k === "Alt" || k === "Control" || k === "Meta") {
     return null;
   }
-  const letter = e.code.match(/^Key([A-Z])$/)?.[1];
+  const letter = shortcutLetter(e);
   if (letter) return letter;
   const digit = e.code.match(/^Digit([0-9])$/)?.[1];
   if (digit) return digit;

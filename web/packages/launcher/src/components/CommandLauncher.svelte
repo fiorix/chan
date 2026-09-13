@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutLetter } from "@chan/web-shared/keyboard";
   // Computers provider for the shared command deck. The shared component owns
   // interaction and motion; this adapter owns only live library targets and the
   // approved actions that operate on them.
@@ -669,13 +670,13 @@
   function onWindowKey(event: KeyboardEvent): void {
     const macDesktop = hasDesktopBridge && hostOs === "macos";
     const contextual =
-      event.code === "KeyK" &&
+      shortcutLetter(event) === "K" &&
       (macDesktop
         ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
         : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey);
     const computers =
       hasDesktopBridge &&
-      event.code === "KeyK" &&
+      shortcutLetter(event) === "K" &&
       (hostOs === "macos"
         ? event.metaKey && !event.ctrlKey && !event.altKey && event.shiftKey
         : event.ctrlKey && event.altKey && !event.metaKey && event.shiftKey);
