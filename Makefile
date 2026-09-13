@@ -438,16 +438,30 @@ gateway-build: gateway-spa ## Build, but do not test, the gateway release crates
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
 
 .PHONY: gateway-version-pin-check
-gateway-version-pin-check: ## Check the gateway deb dependency pins against the workspace version.
+gateway-version-pin-check: ## Check the gateway deb dependency pins and the static packaging isolation contracts.
 	packaging/gateway/scripts/check-package-version-pins.sh
+	packaging/gateway/scripts/check-packaging-isolation.sh
+
+.PHONY: gateway-packaging-isolation-test
+gateway-packaging-isolation-test: gateway-version-pin-check ## Opt-in, not in pre-push: run the gateway postinsts in all 120 install orders and the sdme provisioner refusals.
+	$(LINUX_ONLY)
+	# The behavioural half of the packaging isolation checks. It executes
+	# the real postinst scripts against a scratch root and the provisioner
+	# against stubbed id/getent, which takes about half a minute, so it stays
+	# out of pre-push. Run it when a change touches a gateway postinst or
+	# packaging env file, configure.sh, check-database-ready.sh,
+	# generate-admission-keypair.py or packaging/sdme/chan-devserver-provision.sh,
+	# and before cutting a release that carries such a change.
+	packaging/gateway/scripts/test-packaging-isolation.sh
 
 .PHONY: gateway-lint
 gateway-lint: gateway-version-pin-check gateway-spa ## Clippy all gateway targets without executing tests.
 	$(LINUX_ONLY)
 	# The gateway is a separate Cargo workspace, so the root clippy run does
 	# not reach it. Depends on gateway-spa for the same rust-embed reason as
-	# gateway-build, and on gateway-version-pin-check first: it is a
-	# seconds-long static check, so a stale pin should not cost an SPA build
+	# gateway-build, and on gateway-version-pin-check first: the deb pins and
+	# the static packaging isolation contracts are sub-second checks, so a
+	# stale pin or a broken packaging contract should not cost an SPA build
 	# and a full clippy pass to discover.
 	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 

@@ -27,7 +27,7 @@ The gate runs, in order:
 7. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
 8. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
 9. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
-10. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it)
+10. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it). Its prerequisite `make gateway-version-pin-check` runs first and in well under a second: the gateway deb version pins (`check-package-version-pins.sh`) and the static packaging isolation contracts (`check-packaging-isolation.sh`, both in `packaging/gateway/scripts/`)
 11. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
 12. `make web-check` (svelte-check + vitest + production build)
 13. `make web-marketing-check` (marketing site build + smokes)
@@ -53,6 +53,12 @@ The gateway is a separate Cargo workspace and is NOT a member of the root worksp
 Run it by judgment after a session that touched the editor, the terminal, the launcher, or anything the SPA renders, exactly as the other `scripts/e2e/` suites are run. `make browser-smoke-deps` first in a fresh container, then `node scripts/e2e/browser-smoke/run.mjs`. It exits 2, not 1, when the environment cannot run it, so a caller can tell a missing browser from a real failure; treat that 2 as work to do, never as a pass.
 
 The editor's external-edit convergence path is the part this covers that nothing else does, and it is the part that keeps needing hardening. A change to `flushed_mtime_ns` or the doc-session reconciler is the clearest case for running the suite before pushing, gate or no gate.
+
+## The packaging isolation simulation is outside the gate
+
+`make gateway-packaging-isolation-test` (Linux) is the behavioural half of the packaging isolation checks, and it is not in `make pre-push`. It runs `packaging/gateway/scripts/test-packaging-isolation.sh`, which executes the five gateway package postinsts against a scratch root in all 120 install orders and checks the resulting modes, drives the database readiness check with invalid versions, the postinst refusals of a retained owner-URL or auto-migration conffile, and the admission keypair helper, and runs every sdme provisioner refusal path against stubbed `id` and `getent`. That is about half a minute, against a static step that takes a fraction of a second, so only the static half is gated. The target runs `gateway-version-pin-check` first, so one invocation covers both halves.
+
+Run it when a change touches a gateway package postinst or packaging env file, `packaging/gateway/scripts/configure.sh`, `check-database-ready.sh`, `generate-admission-keypair.py`, or `packaging/sdme/chan-devserver-provision.sh`, and before cutting a release that carries such a change.
 
 ## Discipline
 

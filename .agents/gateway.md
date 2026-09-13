@@ -63,6 +63,8 @@ cargo clippy --all-targets -- -D warnings
 
 The Rust toolchain is pinned in `rust-toolchain.toml`. The pre-push hook (`./scripts/install-hooks` to install) runs the same gate as CI; a passing local push will not fail in the cloud.
 
+The gate also runs the static packaging checks (`make gateway-version-pin-check`: deb version pins and packaging isolation contracts). The behavioural packaging test, the postinsts in every install order and the sdme provisioner refusals, is opt-in: run `make gateway-packaging-isolation-test` when a change touches a package postinst or packaging env file, `configure.sh`, `check-database-ready.sh`, `generate-admission-keypair.py` or the sdme provisioner (see the gate skill).
+
 Database setup for tests (both `profile` and `identity` open a pool against the same gateway database):
 
 ```bash
