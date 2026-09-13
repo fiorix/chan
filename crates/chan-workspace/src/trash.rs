@@ -18,6 +18,8 @@
 //                            the content out of the workspace, the meta
 //                            write failed, and putting it back failed
 //                            too, so this payload is the only copy.
+//                            Empty trash keeps it as well; purging it
+//                            by id is the only way to delete it.
 //
 // `<id>` is `unix_nanos`, with a `-N` suffix retry on the rare
 // same-nanosecond collision. Opaque to callers.
@@ -58,7 +60,8 @@ pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
 /// and putting the content back failed too. The sweep reclaims any
 /// meta-less entry as a crash leftover; this one is not, so the marker
 /// makes the sweep skip it and the body names the path it came from for
-/// a manual recovery.
+/// a manual recovery. Emptying the trash skips it too: only `purge_one`,
+/// asked for this entry's id, deletes it.
 const RECOVERY_MARKER: &str = "recover-me.txt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,23 +288,43 @@ pub fn purge_one(trash_dir: &Path, id: &str) -> Result<()> {
     }
 }
 
-/// Permanently delete every trash entry. Reports per-entry totals so
-/// the caller can distinguish "wiped clean" from "filesystem refused
-/// some entries". Previous behavior was to log-and-continue and
-/// return `Ok(())`, which made a fully-failed empty look identical
-/// to a successful one. We now bubble up an error when at least one
-/// entry remained AND nothing was successfully removed; partial
-/// success returns Ok with the failed entries logged.
-pub fn purge_all(trash_dir: &Path) -> Result<()> {
+/// What emptying a trash did.
+///
+/// Named counts rather than a tuple: both are `usize`, and a caller that
+/// swapped them would tell the user their only copy was deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashEmptyReport {
+    /// Entries permanently deleted.
+    pub removed: usize,
+    /// Entries left in place because they carry `RECOVERY_MARKER`: each
+    /// holds the only copy of a file, so it is deleted only by id through
+    /// `purge_one`.
+    pub kept_for_recovery: usize,
+}
+
+/// Permanently delete every trash entry except the ones marked for
+/// recovery, which an "empty trash" must not reach (see
+/// `RECOVERY_MARKER`).
+///
+/// Errs when nothing was removed and at least one entry refused, so a
+/// fully failed empty cannot read as a successful one. A partial failure
+/// returns Ok with the refused entries logged and counted in neither
+/// field.
+pub fn purge_all(trash_dir: &Path) -> Result<TrashEmptyReport> {
     let rd = match fs::read_dir(trash_dir) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(TrashEmptyReport::default()),
         Err(e) => return Err(e.into()),
     };
     let mut removed = 0usize;
+    let mut kept_for_recovery = 0usize;
     let mut failed = 0usize;
     let mut last_err: Option<std::io::Error> = None;
     for entry in rd.flatten() {
+        if is_marked_for_recovery(&entry.path()) {
+            kept_for_recovery += 1;
+            continue;
+        }
         match fs::remove_dir_all(entry.path()) {
             Ok(()) => removed += 1,
             Err(e) => {
@@ -321,7 +344,10 @@ pub fn purge_all(trash_dir: &Path) -> Result<()> {
                 .unwrap_or_else(|| "unknown".into()),
         )));
     }
-    Ok(())
+    Ok(TrashEmptyReport {
+        removed,
+        kept_for_recovery,
+    })
 }
 
 /// Best-effort sweep: drop entries whose `deleted_at + retention_secs`
@@ -337,8 +363,8 @@ pub fn sweep_expired(trash_dir: &Path, retention_secs: i64) -> Result<()> {
     for entry in rd.flatten() {
         let entry_dir = entry.path();
         // An entry holding the only copy of a user's file is never junk,
-        // however meta-less it looks. See `RECOVERY_MARKER`.
-        if entry_dir.join(RECOVERY_MARKER).exists() {
+        // however meta-less it looks.
+        if is_marked_for_recovery(&entry_dir) {
             continue;
         }
         let meta_path = entry_dir.join("meta.json");
@@ -402,6 +428,13 @@ pub(crate) fn hoist_nested_entries(trash_dir: &Path, bucket: &str) -> Result<()>
     // for the sweep, which reclaims it as the meta-less entry it is.
     let _ = fs::remove_dir(&bucket_dir);
     Ok(())
+}
+
+/// True for an entry whose payload is the only surviving copy of a file.
+/// Neither the sweep nor an "empty trash" may delete it; see
+/// `RECOVERY_MARKER`.
+fn is_marked_for_recovery(entry_dir: &Path) -> bool {
+    entry_dir.join(RECOVERY_MARKER).exists()
 }
 
 /// Flag an entry whose payload is the only surviving copy so the sweep
@@ -551,7 +584,7 @@ fn record_test_meta_write(entry_dir: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-fn inject_test_meta_write_failure(trash_dir: &Path, block_undo_at: Option<&Path>) {
+pub(crate) fn inject_test_meta_write_failure(trash_dir: &Path, block_undo_at: Option<&Path>) {
     TEST_META_PROBES.with(|probes| {
         probes.borrow_mut().insert(
             trash_dir.to_path_buf(),
@@ -561,6 +594,22 @@ fn inject_test_meta_write_failure(trash_dir: &Path, block_undo_at: Option<&Path>
             },
         );
     });
+}
+
+/// Ids of the entries carrying `RECOVERY_MARKER`, sorted. `list` cannot
+/// report them: a marked entry has no meta.json by construction.
+#[cfg(test)]
+pub(crate) fn recovery_marked_ids(trash_dir: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = match fs::read_dir(trash_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|entry| is_marked_for_recovery(&entry.path()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    ids.sort();
+    ids
 }
 
 #[cfg(test)]
@@ -683,7 +732,13 @@ mod tests {
             move_into(&trash, &src, &format!("f{i}.md"), false).unwrap();
         }
         assert_eq!(list(&trash).unwrap().len(), 3);
-        purge_all(&trash).unwrap();
+        assert_eq!(
+            purge_all(&trash).unwrap(),
+            TrashEmptyReport {
+                removed: 3,
+                kept_for_recovery: 0
+            }
+        );
         assert!(list(&trash).unwrap().is_empty());
     }
 
@@ -902,6 +957,54 @@ mod tests {
             b"the only copy",
             "sweep destroyed the only remaining copy"
         );
+    }
+
+    #[test]
+    fn purge_all_keeps_an_entry_marked_for_recovery() {
+        let workspace = TempDir::new().unwrap();
+        let (_t, trash) = ts();
+        let ordinary = workspace.path().join("ordinary.md");
+        std::fs::write(&ordinary, b"ordinary").unwrap();
+        move_into(&trash, &ordinary, "ordinary.md", false).unwrap();
+        let ordinary_id = list(&trash).unwrap()[0].id.clone();
+        // The undo-also-failed lane, so this payload is the only copy.
+        let keep = workspace.path().join("keep.md");
+        std::fs::write(&keep, b"the only copy").unwrap();
+        inject_test_meta_write_failure(&trash, Some(&keep));
+        move_into(&trash, &keep, "keep.md", false).unwrap_err();
+        let marked = recovery_marked_ids(&trash);
+        assert_eq!(marked.len(), 1, "trash holds {:?}", entry_dirs(&trash));
+        let payload = trash.join(&marked[0]).join("payload");
+
+        let report = purge_all(&trash).unwrap();
+
+        assert!(!trash.join(&ordinary_id).exists(), "ordinary entry removed");
+        assert_eq!(
+            std::fs::read(&payload).ok().as_deref(),
+            Some(&b"the only copy"[..]),
+            "empty trash destroyed the only remaining copy; trash holds {:?}",
+            entry_dirs(&trash)
+        );
+        assert_eq!(recovery_marked_ids(&trash), marked, "marker kept");
+        assert_eq!(
+            report,
+            TrashEmptyReport {
+                removed: 1,
+                kept_for_recovery: 1
+            }
+        );
+        // A second empty still keeps it.
+        assert_eq!(
+            purge_all(&trash).unwrap(),
+            TrashEmptyReport {
+                removed: 0,
+                kept_for_recovery: 1
+            }
+        );
+
+        // Deleting it takes its own explicit action, by id.
+        purge_one(&trash, &marked[0]).unwrap();
+        assert!(entry_dirs(&trash).is_empty());
     }
 
     #[test]

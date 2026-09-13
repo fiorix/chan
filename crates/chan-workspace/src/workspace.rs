@@ -25,7 +25,7 @@ use crate::paths::{ensure_workspace_metadata_dirs_in, WorkspacePaths};
 use crate::registry::KnownWorkspace;
 use crate::report::{ReportFanOut, ReportState};
 use crate::rooted_fs::{canonical_posix, describe_cap_file_kind, RootedFs};
-use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
+use crate::trash::{self, TrashEmptyReport, TrashEntry, TRASH_RETENTION_SECS};
 use crate::watch::{WatchCallback, WatchEvent, WatchHandle, WatchKind};
 use crate::{Report, ReportScope};
 
@@ -1859,8 +1859,10 @@ impl Workspace {
         trash::purge_one(&self.paths.trash, id)
     }
 
-    /// Permanently delete every trash entry for this workspace.
-    pub fn trash_empty(&self) -> Result<()> {
+    /// Permanently delete every trash entry for this workspace except the
+    /// ones holding the only copy of a file, which stay until purged by id
+    /// with `trash_purge`. The report counts both.
+    pub fn trash_empty(&self) -> Result<TrashEmptyReport> {
         trash::purge_all(&self.paths.trash)
     }
 
@@ -7304,8 +7306,52 @@ mod tests {
         assert_eq!(entries.len(), 2);
         workspace.trash_purge(&entries[0].id).unwrap();
         assert_eq!(workspace.trash_list().unwrap().len(), 1);
-        workspace.trash_empty().unwrap();
+        assert_eq!(
+            workspace.trash_empty().unwrap(),
+            TrashEmptyReport {
+                removed: 1,
+                kept_for_recovery: 0
+            }
+        );
         assert!(workspace.trash_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_empty_keeps_an_entry_marked_for_recovery() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("ordinary.md", "x").unwrap();
+        workspace.remove("ordinary.md").unwrap();
+        // The meta write fails and the undo is blocked, so the trash entry
+        // holds the only copy of keep.md and carries the recovery marker.
+        workspace.write_text("keep.md", "the only copy").unwrap();
+        trash::inject_test_meta_write_failure(
+            &workspace.paths.trash,
+            Some(&workspace.root().join("keep.md")),
+        );
+        workspace.remove("keep.md").unwrap_err();
+        let marked = trash::recovery_marked_ids(&workspace.paths.trash);
+        assert_eq!(marked.len(), 1);
+        let payload = workspace.paths.trash.join(&marked[0]).join("payload");
+
+        let report = workspace.trash_empty().unwrap();
+
+        assert_eq!(
+            report,
+            TrashEmptyReport {
+                removed: 1,
+                kept_for_recovery: 1
+            }
+        );
+        assert!(workspace.trash_list().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&payload).ok().as_deref(),
+            Some("the only copy"),
+            "empty trash destroyed the only remaining copy"
+        );
+
+        workspace.trash_purge(&marked[0]).unwrap();
+        assert!(!payload.exists());
+        assert!(trash::recovery_marked_ids(&workspace.paths.trash).is_empty());
     }
 
     // ---- drafts ----

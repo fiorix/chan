@@ -38,7 +38,7 @@ use std::sync::Mutex;
 use crate::drafts::{self, DraftInspection, DraftIssue, DraftPromoteReport, DraftRef};
 use crate::error::{ChanError, Result};
 use crate::fs_ops;
-use crate::trash::{self, TrashEntry, TRASH_RETENTION_SECS};
+use crate::trash::{self, TrashEmptyReport, TrashEntry, TRASH_RETENTION_SECS};
 
 /// User-visible drafts directory name under the injected store root.
 const DRAFTS_DIR_NAME: &str = "Drafts";
@@ -233,8 +233,10 @@ impl DraftStore {
         trash::purge_one(&self.trash_dir, id)
     }
 
-    /// Permanently delete every trash entry.
-    pub fn trash_empty(&self) -> Result<()> {
+    /// Permanently delete every trash entry except the ones holding the
+    /// only copy of a draft, which stay until purged by id with
+    /// `trash_purge`. The report counts both.
+    pub fn trash_empty(&self) -> Result<TrashEmptyReport> {
         let _serial = self.serial();
         trash::purge_all(&self.trash_dir)
     }
@@ -381,8 +383,58 @@ mod tests {
         assert_eq!(entries.len(), 2);
         store.trash_purge(&entries[0].id).unwrap();
         assert_eq!(store.trash_list().unwrap().len(), 1);
-        store.trash_empty().unwrap();
+        assert_eq!(
+            store.trash_empty().unwrap(),
+            TrashEmptyReport {
+                removed: 1,
+                kept_for_recovery: 0
+            }
+        );
         assert!(store.trash_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_empty_keeps_an_entry_marked_for_recovery() {
+        let (_t, store) = store();
+        store.create_draft_dir("ordinary").unwrap();
+        store.write_primary("ordinary", "draft.md", "x").unwrap();
+        store.discard("ordinary").unwrap();
+        // The meta write fails and the undo is blocked, so the trash entry
+        // holds the only copy of the draft and carries the recovery marker.
+        store.create_draft_dir("keep").unwrap();
+        store
+            .write_primary("keep", "draft.md", "the only copy")
+            .unwrap();
+        trash::inject_test_meta_write_failure(
+            &store.trash_dir,
+            Some(&store.drafts_dir().join("keep")),
+        );
+        store.discard("keep").unwrap_err();
+        let marked = trash::recovery_marked_ids(&store.trash_dir);
+        assert_eq!(marked.len(), 1);
+        let payload = store.trash_dir.join(&marked[0]).join("payload");
+
+        let report = store.trash_empty().unwrap();
+
+        assert_eq!(
+            report,
+            TrashEmptyReport {
+                removed: 1,
+                kept_for_recovery: 1
+            }
+        );
+        assert!(store.trash_list().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(payload.join("draft.md"))
+                .ok()
+                .as_deref(),
+            Some("the only copy"),
+            "empty trash destroyed the only remaining copy"
+        );
+
+        store.trash_purge(&marked[0]).unwrap();
+        assert!(!payload.exists());
+        assert!(trash::recovery_marked_ids(&store.trash_dir).is_empty());
     }
 
     #[test]
