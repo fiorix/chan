@@ -2270,6 +2270,7 @@ async fn mark_tunnel_origin(
     tracing::debug!(
         sub = %caller.sub,
         owner = caller.is_owner(),
+        client = %caller.client,
         aud = %caller.aud,
         "gateway assertion accepted",
     );
@@ -2682,28 +2683,34 @@ pub(crate) mod tunnel_test_support {
         }
     }
 
-    /// A signed assertion for `caller`: `"owner"`, `"nil"` (the nil UUID as
+    /// A signed assertion for `caller`: `"owner"` (the owner on a desktop
+    /// session), `"browser owner"`, `"unknown-client owner"` (a client the
+    /// gateway did not state), `"browser grantee"`, `"nil"` (the nil UUID as
     /// the subject), `"empty"` (an empty subject), or anything else for a
-    /// grantee. The gateway signs neither of the subjects that name no user;
-    /// they are here to prove the tunnel layer refuses them.
+    /// grantee on a desktop session. The gateway signs neither of the subjects
+    /// that name no user; they are here to prove the tunnel layer refuses them.
     pub(super) fn test_gateway_assertion(
         assertion: &TunnelAssertion,
         aud: &str,
         caller: &str,
     ) -> String {
+        use chan_tunnel_proto::gateway_assertion::ClientType;
         let owner = Caller::OWNER_ID;
-        let subject = match caller {
-            "owner" => owner,
-            "nil" => "00000000-0000-0000-0000-000000000000",
-            "empty" => "",
-            _ => Caller::GRANTEE_ID,
+        let (subject, client) = match caller {
+            "owner" => (owner, ClientType::Desktop),
+            "browser owner" => (owner, ClientType::Browser),
+            "unknown-client owner" => (owner, ClientType::Unknown),
+            "browser grantee" => (Caller::GRANTEE_ID, ClientType::Browser),
+            "nil" => ("00000000-0000-0000-0000-000000000000", ClientType::Desktop),
+            "empty" => ("", ClientType::Desktop),
+            _ => (Caller::GRANTEE_ID, ClientType::Desktop),
         };
         let claims = chan_tunnel_proto::gateway_assertion::claims(
             subject,
             owner,
             aud,
             &assertion.devserver_id,
-            chan_tunnel_proto::gateway_assertion::ClientType::Desktop,
+            client,
         );
         chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap()
     }
@@ -5706,7 +5713,8 @@ mod tests {
     /// A grant is all-or-nothing on the devserver: over the real tunnel layer,
     /// with signed assertions, a grantee adds, stops, starts and forgets a
     /// library workspace and gets the full launcher surface, exactly as the
-    /// owner and a local caller do. The reverse-tunnel legs stay the owner's.
+    /// owner and a local caller do, whichever client the owner is on. The
+    /// reverse-tunnel legs are the owner's desktop app's.
     /// An assertion whose subject names no user, the nil UUID or an empty
     /// subject, is refused with 401 at the tunnel layer on every one of those
     /// requests before the launcher sees it.
@@ -5817,7 +5825,7 @@ mod tests {
                 "{caller}: a refused caller registered a workspace"
             );
         }
-        for caller in ["local", "owner", "grantee"] {
+        for caller in ["local", "owner", "browser owner", "grantee"] {
             let ws = tempfile::tempdir().expect("workspace");
             let body = format!(r#"{{"path":{:?}}}"#, ws.path().to_string_lossy());
             let (status, row) = send(caller, "POST", "/api/library/workspaces", Some(body)).await;
@@ -5863,6 +5871,125 @@ mod tests {
                     "{caller} tunnel leg"
                 );
             }
+        }
+    }
+
+    /// Only the owner's desktop app opens a reverse tunnel. Over the real
+    /// tunnel layer with signed assertions, the owner on a desktop session and
+    /// a local caller reach both legs (the `WebSocketUpgrade` extractor then
+    /// rejects the plain GET). The owner on a browser session, the owner on a
+    /// session whose client the gateway did not state, the owner through a
+    /// gateway whose assertion has no client claim at all, and a grantee on
+    /// either client are refused with 403 before the upgrade. Each of those
+    /// callers still reaches an ordinary launcher route.
+    #[tokio::test]
+    async fn the_reverse_tunnel_legs_open_only_to_the_owners_desktop_through_the_tunnel() {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        /// The claims a gateway that predates the client claim signs.
+        #[derive(serde::Serialize)]
+        struct PreClientClaims<'a> {
+            sub: &'a str,
+            owner_user_id: &'a str,
+            aud: &'a str,
+            drv: &'a str,
+            iat: i64,
+            exp: i64,
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let state = test_state(home.path(), addr);
+        let host = state.host.clone();
+        let (app, serve_addr) = build_devserver_app(state, host);
+        serve_addr.set(addr).unwrap();
+        let assertion = test_tunnel_assertion();
+        let tunnel = app
+            .clone()
+            .layer(middleware::from_fn_with_state(
+                assertion.clone(),
+                mark_tunnel_origin,
+            ))
+            .layer(axum::Extension(test_tunnel_registration()));
+        let owner = crate::route_authority::test_support::Caller::OWNER_ID;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let pre_client = chan_tunnel_proto::gateway_assertion::sign(
+            &assertion.key,
+            &PreClientClaims {
+                sub: owner,
+                owner_user_id: owner,
+                aud: "owner.dev",
+                drv: &assertion.devserver_id,
+                iat: now,
+                exp: now + 30,
+            },
+        )
+        .unwrap();
+
+        let send = |caller: &str, uri: &str| {
+            let mut builder = HttpRequest::builder().method("GET").uri(uri);
+            let router = match caller {
+                "local" => {
+                    builder = builder.header(header::AUTHORIZATION, "Bearer test-token");
+                    app.clone()
+                }
+                "owner, pre-client gateway" => {
+                    builder = builder.header("x-forwarded-host", "owner.dev").header(
+                        chan_tunnel_proto::gateway_assertion::HEADER_NAME,
+                        &pre_client,
+                    );
+                    tunnel.clone()
+                }
+                caller => {
+                    builder = builder.header("x-forwarded-host", "owner.dev").header(
+                        chan_tunnel_proto::gateway_assertion::HEADER_NAME,
+                        test_gateway_assertion(&assertion, "owner.dev", caller),
+                    );
+                    tunnel.clone()
+                }
+            };
+            let request = builder.body(Body::empty()).unwrap();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+
+        for (caller, reaches) in [
+            ("local", true),
+            ("owner", true),
+            ("browser owner", false),
+            ("unknown-client owner", false),
+            ("owner, pre-client gateway", false),
+            ("grantee", false),
+            ("browser grantee", false),
+        ] {
+            for leg in [
+                "/api/library/tunnel/control?tunnel=tun-1",
+                "/api/library/tunnel/conn?tunnel=tun-1&conn=c0",
+            ] {
+                let (status, body) = send(caller, leg).await;
+                if reaches {
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{caller} {leg}: {body}");
+                } else {
+                    assert_eq!(
+                        (status, body.as_str()),
+                        (
+                            StatusCode::FORBIDDEN,
+                            "reverse tunnels are not available for this gateway role"
+                        ),
+                        "{caller} {leg}"
+                    );
+                }
+            }
+            let (status, body) = send(caller, "/api/library/workspaces").await;
+            assert_eq!(status, StatusCode::OK, "{caller} launcher route: {body}");
         }
     }
 

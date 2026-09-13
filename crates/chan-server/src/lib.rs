@@ -1545,7 +1545,8 @@ pub fn install_launcher_root_fallback(
 /// request that arrived over the gateway tunnel (not the loopback bind). It
 /// exists only with the caller devserver-proxy signed with this tunnel's
 /// assertion key, and that caller is always a signed-in user: the owner or a
-/// grantee.
+/// grantee, on a gateway session minted for the desktop app, a browser, or a
+/// client the gateway did not state.
 #[derive(Clone)]
 pub(crate) struct TunnelOrigin {
     pub caller: chan_tunnel_proto::gateway_assertion::Claims,
@@ -1554,6 +1555,12 @@ pub(crate) struct TunnelOrigin {
 impl TunnelOrigin {
     pub fn owner(&self) -> bool {
         self.caller.is_owner()
+    }
+
+    /// The owner, on a session minted for the desktop app. A client the
+    /// gateway did not state is never the desktop.
+    pub fn owner_desktop(&self) -> bool {
+        self.caller.is_owner_desktop()
     }
 }
 

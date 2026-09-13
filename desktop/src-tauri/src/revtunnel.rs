@@ -318,6 +318,146 @@ mod tests {
         );
     }
 
+    /// A gateway-attached tunnel presents the session the gateway's desktop
+    /// entry route minted for this connection's PAT, and no other: the
+    /// desktop dials the legs natively and never borrows a session from its
+    /// webviews. The devserver opens the legs only to the owner on a desktop
+    /// session, which is what that route mints, so a tunnel from any other
+    /// session source would be refused. A refreshed session comes from the
+    /// same route.
+    #[tokio::test]
+    async fn a_gateway_tunnel_presents_the_session_the_desktop_entry_route_minted() {
+        use axum::http::{HeaderMap, StatusCode};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let identity_origin = format!("http://127.0.0.1:{port}");
+        let proxy_origin = format!("http://alice--aaaaaaaaaaaa.p1.localtest.me:{port}");
+        let owner_user_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let mints = Arc::new(AtomicUsize::new(0));
+        let entry_bearers = Arc::new(Mutex::new(Vec::<String>::new()));
+        let exchanged = Arc::new(Mutex::new(Vec::<String>::new()));
+        let app = axum::Router::new()
+            .route(
+                "/desktop/v1/devserver/entry",
+                axum::routing::post({
+                    let mints = Arc::clone(&mints);
+                    let entry_bearers = Arc::clone(&entry_bearers);
+                    let proxy_origin = proxy_origin.clone();
+                    move |headers: HeaderMap| {
+                        let mint = mints.fetch_add(1, Ordering::SeqCst);
+                        entry_bearers.lock().unwrap().push(
+                            headers
+                                .get("authorization")
+                                .map(|value| value.to_str().unwrap().to_string())
+                                .unwrap_or_default(),
+                        );
+                        let proxy_origin = proxy_origin.clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "owner_user_id": owner_user_id,
+                                "username": "alice",
+                                "devserver_id": "a".repeat(64),
+                                "proxy_origin": proxy_origin,
+                                "entry_exchange_url": format!("{proxy_origin}/_chan/entry"),
+                                "entry_credential": format!("desktop-entry-credential-{mint}"),
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/_chan/entry",
+                axum::routing::post({
+                    let exchanged = Arc::clone(&exchanged);
+                    move |body: axum::body::Bytes| {
+                        let credential = url::form_urlencoded::parse(&body)
+                            .find(|(name, _)| name == "credential")
+                            .map(|(_, value)| value.into_owned())
+                            .unwrap_or_default();
+                        exchanged.lock().unwrap().push(credential.clone());
+                        async move {
+                            axum::response::Response::builder()
+                                .status(StatusCode::SEE_OTHER)
+                                .header("location", "/")
+                                .header(
+                                    "set-cookie",
+                                    format!("__Host-devserver_gate=gate-for-{credential}; Path=/; HttpOnly; Max-Age=3600"),
+                                )
+                                .header(
+                                    "set-cookie",
+                                    format!("__Host-devserver_csrf=csrf-for-{credential}; Path=/; Max-Age=3600"),
+                                )
+                                .body(axum::body::Body::empty())
+                                .unwrap()
+                        }
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let discovery = crate::devserver::GatewayDiscovery {
+            kind: "chan-gateway".into(),
+            api_version: 1,
+            identity_origin: identity_origin.clone(),
+            desktop_authorize_url: format!("{identity_origin}/desktop/authorize"),
+            desktop_entry_url: format!("{identity_origin}/desktop/v1/devserver/entry"),
+            devserver_proxy_origin: format!("http://localtest.me:{port}"),
+            devserver_proxy_host_depth: 2,
+            roster_url: None,
+        };
+        let gateway = crate::devserver::gateway_conn(
+            &discovery,
+            "desktop-pat".into(),
+            Some(crate::devserver::GatewayEntryTarget {
+                owner_user_id,
+                owner: "alice".into(),
+                devserver_id: "a".repeat(64),
+            }),
+        )
+        .await
+        .expect("desktop entry and exchange");
+        let conn = DevserverConn {
+            host: "alice--aaaaaaaaaaaa.p1.localtest.me".into(),
+            port,
+            token: "devserver-token".into(),
+            name: "alice".into(),
+            gateway: Some(Box::new(gateway)),
+        };
+
+        let cfg = client_config(&conn, "tun-1".into(), spec()).await.unwrap();
+        let first = "__Host-devserver_gate=gate-for-desktop-entry-credential-0; \
+                     __Host-devserver_csrf=csrf-for-desktop-entry-credential-0";
+        assert_eq!(cfg.cookie.as_deref(), Some(first));
+        assert_eq!(cfg.bearer, None);
+
+        crate::devserver::refresh_gateway_session_if_current(&conn, first)
+            .await
+            .expect("refresh through the desktop entry route");
+        let cfg = client_config(&conn, "tun-1".into(), spec()).await.unwrap();
+        assert_eq!(
+            cfg.cookie.as_deref(),
+            Some(
+                "__Host-devserver_gate=gate-for-desktop-entry-credential-1; \
+                 __Host-devserver_csrf=csrf-for-desktop-entry-credential-1"
+            )
+        );
+
+        assert_eq!(
+            *entry_bearers.lock().unwrap(),
+            vec!["Bearer desktop-pat".to_string(); 2],
+            "every session the legs present was minted by the desktop entry route"
+        );
+        assert_eq!(
+            *exchanged.lock().unwrap(),
+            vec![
+                "desktop-entry-credential-0".to_string(),
+                "desktop-entry-credential-1".to_string()
+            ]
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn a_direct_devserver_needs_no_gateway_session() {
         // The attach shape decides the credentials: this path must not reach

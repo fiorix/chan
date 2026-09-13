@@ -1069,7 +1069,7 @@ mod tests {
         use crate::route_authority::test_support::Caller;
 
         for method in [Method::POST, Method::PUT, Method::DELETE] {
-            for caller in [Caller::Local, Caller::Owner, Caller::Grantee] {
+            for caller in Caller::ALL {
                 let (status, body, _) = through_the_tenant(caller, method.clone()).await;
                 assert_eq!(
                     status,

@@ -43,14 +43,17 @@ pub(crate) enum Verb {
 /// - A **local** caller carries no `TunnelOrigin`: it came in on the loopback
 ///   bind, holding whatever bearer the router asks for.
 /// - The **owner** is a tunnel caller whose verified subject is the
-///   devserver's owner.
-/// - A **grantee** is a tunnel caller with any other verified subject. The
-///   gateway admits only the owner and a grantee to a devserver session, and a
-///   grant is all-or-nothing: one binary, shell-equivalent authority over the
-///   devserver (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). A
-///   grantee meets what the owner meets everywhere except the reverse-tunnel
-///   legs, which dial out through an addressed app window whose host can be
-///   the owner's own desktop, outside the devserver a grant covers.
+///   devserver's owner. The assertion also names the client the owner's
+///   gateway session was minted for: the owner's desktop app, a browser, or
+///   unknown (a gateway that does not state it).
+/// - A **grantee** is a tunnel caller with any other verified subject, on any
+///   client. The gateway admits only the owner and a grantee to a devserver
+///   session, and a grant is all-or-nothing: one binary, shell-equivalent
+///   authority over the devserver
+///   (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). A grantee
+///   meets what the owner meets everywhere except the reverse-tunnel legs,
+///   which dial out through an addressed app window whose host can be the
+///   owner's own machine, outside the devserver a grant covers.
 ///
 /// There is no anonymous tunnel caller. The gateway forwards nothing without a
 /// signed-in principal, extension frames included (it binds their links to the
@@ -67,11 +70,15 @@ pub(crate) enum Authority {
     /// dispatches into the tenants (whose own tables then apply).
     Public,
     /// Every caller reaches the handler: no gate on the route tells the owner
-    /// and a grantee apart.
+    /// and a grantee apart, or one client from another.
     NonOwner,
-    /// The owner and a local caller reach the handler; a grantee is refused
-    /// with 403.
-    Owner,
+    /// The owner calling from the desktop app and a local caller reach the
+    /// handler; the owner from a browser or an unknown client, and a grantee on
+    /// any client, are refused with 403. Only the desktop app serves a reverse
+    /// tunnel, so no other session needs these routes, and a session minted
+    /// for a browser (a browser tab, or its stolen cookie) cannot open a
+    /// listener on the owner's machine.
+    DesktopOwner,
     /// Only a local caller holding the devserver's bearer reaches the
     /// handler. The gateway strips client credentials, so no tunnel caller
     /// does, the owner included.
@@ -86,7 +93,7 @@ pub(crate) type RouteTable = &'static [(Verb, &'static str, Authority)];
 /// route path starts with `/`.
 pub(crate) const FALLBACK: &str = "{fallback}";
 
-use Authority::{Local, NonOwner, Owner, Public};
+use Authority::{DesktopOwner, Local, NonOwner, Public};
 use Verb::{Any, Connect, Delete, Get, Options, Patch, Post, Put, Trace};
 
 /// The workspace tenant: `router_with_extensions` in `lib.rs`.
@@ -324,10 +331,10 @@ pub(crate) static LAUNCHER: RouteTable = &[
     (Post, "/api/library/gateways/{id}/disconnect", NonOwner),
     (Post, "/api/library/fs/pick-folder", NonOwner),
     // The reverse-tunnel legs dial out through an addressed app window whose
-    // host can be the owner's own desktop, outside the devserver a grant
-    // covers, so they stay the owner's.
-    (Get, "/api/library/tunnel/control", Owner),
-    (Get, "/api/library/tunnel/conn", Owner),
+    // host can be the owner's own machine, outside the devserver a grant
+    // covers, and only the owner's desktop app dials them.
+    (Get, "/api/library/tunnel/control", DesktopOwner),
+    (Get, "/api/library/tunnel/conn", DesktopOwner),
     (Get, "/api/library/workspaces", NonOwner),
     (Post, "/api/library/workspaces", NonOwner),
     (Post, "/api/library/workspaces/{id}/on", NonOwner),
@@ -573,14 +580,26 @@ pub(crate) mod test_support {
     pub(crate) enum Caller {
         /// No `TunnelOrigin`: the loopback bind.
         Local,
-        /// A verified assertion whose subject is the devserver's owner.
-        Owner,
-        /// A verified assertion with a subject that is not the owner's.
+        /// A verified assertion whose subject is the devserver's owner, on a
+        /// session minted for the desktop app.
+        DesktopOwner,
+        /// A verified assertion whose subject is the devserver's owner, on a
+        /// session minted for a browser.
+        BrowserOwner,
+        /// A verified assertion with a subject that is not the owner's, on a
+        /// session minted for the desktop app: a desktop session is the most a
+        /// grantee can hold, so a route this caller is refused is refused to
+        /// every grantee.
         Grantee,
     }
 
     impl Caller {
-        pub(crate) const ALL: [Caller; 3] = [Caller::Local, Caller::Owner, Caller::Grantee];
+        pub(crate) const ALL: [Caller; 4] = [
+            Caller::Local,
+            Caller::DesktopOwner,
+            Caller::BrowserOwner,
+            Caller::Grantee,
+        ];
 
         /// The owner's user id, shared with the devserver tests' signed
         /// assertions.
@@ -590,21 +609,23 @@ pub(crate) mod test_support {
 
         /// The `TunnelOrigin` a request from this caller carries.
         pub(crate) fn origin(self) -> Option<crate::TunnelOrigin> {
-            let verified = |sub: &str| crate::TunnelOrigin {
+            use chan_tunnel_proto::gateway_assertion::ClientType;
+            let verified = |sub: &str, client| crate::TunnelOrigin {
                 caller: chan_tunnel_proto::gateway_assertion::Claims {
                     sub: sub.to_string(),
                     owner_user_id: Self::OWNER_ID.to_string(),
                     aud: "owner--probe.p1.proxy.example".to_string(),
                     drv: "probe".to_string(),
-                    client: chan_tunnel_proto::gateway_assertion::ClientType::Desktop,
+                    client,
                     iat: 0,
                     exp: 0,
                 },
             };
             match self {
                 Caller::Local => None,
-                Caller::Owner => Some(verified(Self::OWNER_ID)),
-                Caller::Grantee => Some(verified(Self::GRANTEE_ID)),
+                Caller::DesktopOwner => Some(verified(Self::OWNER_ID, ClientType::Desktop)),
+                Caller::BrowserOwner => Some(verified(Self::OWNER_ID, ClientType::Browser)),
+                Caller::Grantee => Some(verified(Self::GRANTEE_ID, ClientType::Desktop)),
             }
         }
 
@@ -650,8 +671,10 @@ pub(crate) mod test_support {
     fn expected(authority: Authority, caller: Caller) -> Outcome {
         match authority {
             Authority::Public | Authority::NonOwner => Outcome::Reach,
-            Authority::Owner if matches!(caller, Caller::Local | Caller::Owner) => Outcome::Reach,
-            Authority::Owner => Outcome::Refused,
+            Authority::DesktopOwner if matches!(caller, Caller::Local | Caller::DesktopOwner) => {
+                Outcome::Reach
+            }
+            Authority::DesktopOwner => Outcome::Refused,
             Authority::Local if caller == Caller::Local => Outcome::Reach,
             Authority::Local => Outcome::NoBearer,
         }

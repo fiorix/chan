@@ -896,35 +896,43 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
             chan_revtunnel::wire::CONN_PATH,
             get(super::tunnel::handle_tunnel_conn),
         )
-        .route_layer(middleware::from_fn(require_tunnel_owner))
+        .route_layer(middleware::from_fn(require_owner_desktop))
 }
 
-/// Restrict the tunnel legs to the devserver's owner.
+/// Restrict the tunnel legs to the devserver owner's desktop app.
 ///
 /// A grant is all-or-nothing over the devserver, and these are the only
 /// launcher routes a grantee does not share with the owner: a reverse tunnel
 /// dials out through an addressed app window, whose host can be the owner's
-/// own desktop, outside the devserver a grant covers. A tunnel-origin request bypasses the
-/// launcher bearer, which would leave the unguessable tunnel id as the only
-/// thing standing between any session holder and a listener on the owner's
-/// desktop. Local (non-tunnel) requests are unaffected: the launcher bearer
-/// already gates those.
+/// own machine, outside the devserver a grant covers. A tunnel-origin request
+/// bypasses the launcher bearer, which would leave the unguessable tunnel id
+/// as the only thing standing between a session holder and a listener on the
+/// owner's machine.
 ///
-/// TODO: tighten this from owner to the owner's DESKTOP. Gateway assertion
-/// claims carry only sub / owner_user_id / aud / drv / iat / exp, so the
-/// owner's desktop app and the owner's browser tab are indistinguishable here;
-/// the desktop authenticates through the same entry exchange a browser does.
-/// Carrying a client-type claim (and the desktop version, so a devserver can
-/// refuse a build too old to speak this protocol) means threading it from the
-/// identity service through the gateway session into the assertion.
-async fn require_tunnel_owner(req: Request<Body>, next: Next) -> Response {
-    let tunnel_origin = req.extensions().get::<crate::TunnelOrigin>();
-    if tunnel_origin.is_some_and(|origin| !origin.owner()) {
-        return (
-            StatusCode::FORBIDDEN,
-            "reverse tunnels are not available for this gateway role",
-        )
-            .into_response();
+/// Only the desktop app serves a reverse tunnel, dialing both legs natively
+/// on the session the gateway's desktop entry route minted, so the gateway
+/// assertion must name the owner on a desktop session. The owner's browser
+/// session is refused, which keeps a browser tab, or anyone holding its
+/// cookie, from opening a listener; so is a session whose client the gateway
+/// did not state, which is what a gateway too old to state one sends. Local
+/// (non-tunnel) requests are unaffected: the launcher bearer already gates
+/// those.
+async fn require_owner_desktop(req: Request<Body>, next: Next) -> Response {
+    if let Some(origin) = req.extensions().get::<crate::TunnelOrigin>() {
+        if !origin.owner_desktop() {
+            tracing::warn!(
+                sub = %origin.caller.sub,
+                owner = origin.owner(),
+                client = %origin.caller.client,
+                path = %req.uri().path(),
+                "reverse tunnel leg refused: not the owner's desktop app",
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                "reverse tunnels are not available for this gateway role",
+            )
+                .into_response();
+        }
     }
     next.run(req).await
 }
@@ -4136,13 +4144,14 @@ mod window_op_route_tests {
         }
     }
 
-    /// The reverse-tunnel legs stay the owner's: a tunnel dials out through an
-    /// addressed app window whose host can be the owner's own desktop, outside
-    /// the devserver a grant covers. A grantee is refused before the upgrade;
-    /// the owner and a local caller reach the `WebSocketUpgrade` extractor,
-    /// which rejects a plain GET.
+    /// The reverse-tunnel legs are the owner's desktop app's: a tunnel dials out
+    /// through an addressed app window whose host can be the owner's own
+    /// machine, outside the devserver a grant covers, and only the desktop app
+    /// dials the legs. The owner on a browser session and a grantee are refused
+    /// before the upgrade; the owner's desktop and a local caller reach the
+    /// `WebSocketUpgrade` extractor, which rejects a plain GET.
     #[tokio::test]
-    async fn a_grantee_is_refused_the_reverse_tunnel_legs() {
+    async fn only_the_owners_desktop_and_a_local_caller_reach_the_reverse_tunnel_legs() {
         let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
         let router = launcher_router(host, None, None);
         for uri in [
@@ -4151,7 +4160,7 @@ mod window_op_route_tests {
         ] {
             for caller in Caller::ALL {
                 let (status, body) = send_as(&router, caller, "GET", uri, None).await;
-                if matches!(caller, Caller::Local | Caller::Owner) {
+                if matches!(caller, Caller::Local | Caller::DesktopOwner) {
                     assert_eq!(status, StatusCode::BAD_REQUEST, "{caller:?} {uri}: {body}");
                 } else {
                     assert_eq!(status, StatusCode::FORBIDDEN, "{caller:?} {uri}");
