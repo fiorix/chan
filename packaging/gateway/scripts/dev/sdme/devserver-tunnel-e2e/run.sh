@@ -33,6 +33,7 @@ CHAN_BIN="$(readlink -f "$BIN_DIR/chan")"
 STUB_PY="$HERE/stub-identity.py"
 MINT_PY="$HERE/mint-signed-credential.py"
 TLS_FORWARD_PY="$HERE/tls-forward.py"
+EXTENSION_PY="$HERE/e2e-extension.py"
 KEYGEN_PY="$REPO/packaging/gateway/scripts/generate-admission-keypair.py"
 RFS_SDME="$HERE/chan-e2e-run.sdme"
 SDME="sudo -n sdme"
@@ -91,7 +92,7 @@ say "preflight"
 [ -x "$PROXY_BIN" ] || die "missing proxy binary $PROXY_BIN (build first)"
 [ -x "$CONTROL_BIN" ] || die "missing controller binary $CONTROL_BIN (build first)"
 [ -x "$CHAN_BIN" ]  || die "missing chan binary $CHAN_BIN (build first)"
-[ -f "$STUB_PY" ] && [ -x "$MINT_PY" ] && [ -f "$TLS_FORWARD_PY" ] \
+[ -f "$STUB_PY" ] && [ -x "$MINT_PY" ] && [ -f "$TLS_FORWARD_PY" ] && [ -f "$EXTENSION_PY" ] \
   && [ -x "$KEYGEN_PY" ] \
   || die "missing helper scripts in $HERE"
 command -v openssl >/dev/null || die "openssl is required"
@@ -157,6 +158,11 @@ $SDME exec "$C_DS" -- /usr/sbin/update-ca-certificates >/dev/null
 $SDME exec "$C_DS" -- /bin/chmod +x /root/chan
 $SDME exec "$C_DS" -- /bin/sh -c \
   "mkdir -p /root/$WS_NAME /run/chan && printf '# e2e notes\nhello-through-the-tunnel\n' > /root/$WS_NAME/README.md"
+# A declared local extension: chan starts it when the devserver starts.
+$SDME exec "$C_DS" -- /bin/mkdir -p /root/.chan/extensions
+$SDME cp "$EXTENSION_PY" "$C_DS:/root/.chan/extensions/e2e-extension.py"
+$SDME exec "$C_DS" -- /bin/sh -c \
+  "printf 'name = \"E2E extension\"\ncommand = \"python3\"\nargs = [\"e2e-extension.py\"]\n' > /root/.chan/extensions/e2e.toml"
 
 say "start scoped identity fixture (loopback) in $C_PROXY"
 $SDME exec "$C_PROXY" -- /usr/bin/systemd-run --unit=stub --collect \
@@ -241,7 +247,7 @@ say "start chan devserver in $C_DS (tunnel -> $C_PROXY:$PROXY_TUN_PORT, same zon
 TUNNEL_URL="https://$PROXY_IP:$TUNNEL_TLS_PORT/v1/tunnel"
 info "tunnel-url = $TUNNEL_URL"
 $SDME exec "$C_DS" -- /usr/bin/systemd-run --unit=chands --collect \
-  --setenv=RUST_LOG=info --setenv=HOME=/root --setenv=XDG_RUNTIME_DIR=/run/chan \
+  --setenv=RUST_LOG=info,chan_server::devserver=debug --setenv=HOME=/root --setenv=XDG_RUNTIME_DIR=/run/chan \
   --setenv=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
   --setenv=CHAN_TUNNEL_TOKEN=$PAT --setenv=CHAN_DEVSERVER_LISTEN=1 \
   /root/chan devserver run --bind 0.0.0.0 --port $DS_PORT --tunnel-url="$TUNNEL_URL" \
@@ -384,6 +390,136 @@ for METHOD in PUT DELETE; do
     || die "grantee $METHOD native-trust did not reach desktop bridge guard ($GRANTEE_MUT_CODE)"
   info "$METHOD native-trust: owner and grantee both reached route (409 no desktop)"
 done
+
+say "extension links: no anonymous caller, each link bound to the signed-in user"
+EXT_JSON=""; ENTRY_PATH=""
+for _ in $(seq 1 20); do
+  EXT_JSON="$(proxy_curl -fsS -H "Cookie: __Host-devserver_gate=$OWNER_GATE" \
+    "$PROXY_ORIGIN$PREFIX/api/extensions" || true)"
+  ENTRY_PATH="$(printf '%s' "$EXT_JSON" | python3 -c 'import json, sys
+try:
+    rows = [row for row in json.load(sys.stdin) if row.get("id") == "e2e"]
+    print(rows[0]["entry_path"] if rows else "")
+except Exception:
+    print("")')"
+  [ -n "$ENTRY_PATH" ] && break
+  sleep 1
+done
+[[ "$ENTRY_PATH" =~ ^/_chan/extensions/e2e/[0-9a-f]{64}/$ ]] \
+  || die "the extension catalog did not list the e2e extension (entry_path='$ENTRY_PATH', catalog: $EXT_JSON)"
+EXT_URL="$PROXY_ORIGIN$PREFIX$ENTRY_PATH"
+EXT_H="$(mktemp)"; EXT_B="$(mktemp)"
+FRAME_NAVIGATION=(-H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: iframe' -H 'Accept: text/html')
+FRAME_REQUEST=(-H 'Origin: null' -H 'Sec-Fetch-Site: cross-site' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty')
+info "catalog lists e2e at $PREFIX/_chan/extensions/e2e/[capability]/"
+
+ext_requests() { # the extension's own request log
+  $SDME exec "$C_DS" -- /bin/sh -c 'cat /root/e2e-extension-requests.log 2>/dev/null' || true
+}
+ext_request_count() { ext_requests | grep -c . || true; }
+ds_journal() { # the devserver's journal with the log formatter's ANSI colour codes removed
+  { $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -o cat 2>/dev/null || true; } \
+    | sed 's/\x1b\[[0-9;]*m//g'
+}
+ds_subject_count() { # ds_subject_count <uuid>: tunnel requests the devserver accepted as that subject
+  ds_journal | grep -c "gateway assertion accepted.*sub=$1" || true
+}
+refused_404() { # refused_404 <label> <code>: the session gate's 404, readable by the frame, no redirect
+  [ "$2" = 404 ] && grep -qi '^access-control-allow-origin: null' "$EXT_H" \
+    && ! grep -qi '^location:' "$EXT_H" \
+    || die "$1: expected the CORS-readable 404, got $2 ($(head -c 160 "$EXT_B"))"
+}
+
+SEEN="$(ext_request_count)"
+CODE_ANON="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_REQUEST[@]}" "$EXT_URL" || echo 000)"
+refused_404 "capability link, cookieless frame fetch" "$CODE_ANON"
+CODE_ANON="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_NAVIGATION[@]}" "$EXT_URL" || echo 000)"
+refused_404 "capability link, navigation with no session cookie" "$CODE_ANON"
+CODE_ANON="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' -X POST "${FRAME_REQUEST[@]}" \
+  -H 'Content-Type: text/plain' --data anonymous "${EXT_URL}echo" || echo 000)"
+refused_404 "capability link, cookieless POST" "$CODE_ANON"
+[ "$(ext_request_count)" = "$SEEN" ] || die "a request with no session reached the extension: $(ext_requests | tail -3)"
+info "no session cookie: the capability link answers 404 to a fetch, a navigation and a POST; the extension saw none of them"
+
+extension_link_case() { # extension_link_case <label> <gate cookie> <subject uuid>
+  local label="$1" gate="$2" subject="$3" code location bound seen before after revoke_json
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_NAVIGATION[@]}" \
+    -H "Cookie: __Host-devserver_gate=$gate" "$EXT_URL" || echo 000)"
+  location="$(sed -n 's/^location: //ip' "$EXT_H" | head -1 | tr -d '\r')"
+  [ "$code" = 303 ] && [[ "$location" =~ ^$PREFIX/_chan/extensions/e2e/[0-9a-f]{96}/$ ]] \
+    && grep -qi '^access-control-allow-origin: null' "$EXT_H" \
+    || die "$label: frame navigation with a session expected a 303 to a bound path, got $code location='$location'"
+  bound="$PROXY_ORIGIN$location"
+  info "$label: navigation with the session cookie -> 303 to $PREFIX/_chan/extensions/e2e/[binding]/"
+
+  seen="$(ext_request_count)"
+  before="$(ds_subject_count "$subject")"
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_REQUEST[@]}" "$bound" || echo 000)"
+  [ "$code" = 200 ] && grep -q 'e2e-extension-entry' "$EXT_B" \
+    && grep -qi '^access-control-allow-origin: null' "$EXT_H" \
+    || die "$label: cookieless GET on the bound path expected the entry document, got $code ($(head -c 160 "$EXT_B"))"
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' -X POST "${FRAME_REQUEST[@]}" \
+    -H 'Content-Type: text/plain' --data "from-$label" "${bound}echo" || echo 000)"
+  [ "$code" = 200 ] && grep -qx "e2e-extension-echo POST from-$label" "$EXT_B" \
+    || die "$label: cookieless, CSRF-less POST on the bound path expected the echo, got $code ($(head -c 160 "$EXT_B"))"
+  ext_requests | tail -n "+$((seen + 1))" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+expected = [
+    {"method": "GET", "path": "/", "body": ""},
+    {"method": "POST", "path": "/echo", "body": "from-" + sys.argv[1]},
+]
+assert rows == expected, rows
+' "$label" || die "$label: the extension did not see exactly the bound GET and POST: $(ext_requests | tail -n "+$((seen + 1))")"
+  after="$before"
+  for _ in $(seq 1 10); do
+    after="$(ds_subject_count "$subject")"
+    [ "$((after - before))" -ge 2 ] && break
+    sleep 0.5
+  done
+  [ "$((after - before))" -ge 2 ] \
+    || die "$label: the devserver did not accept the bound requests as subject $subject ($before -> $after)"
+  info "$label: bound GET 200 and POST 200 reached the extension; the devserver accepted them as sub=$subject"
+
+  revoke_json="$($SDME exec "$C_PROXY" -- /usr/bin/curl -fsS -X POST \
+    -H "Authorization: Bearer $CONTROL_PROFILE_TOKEN" -H 'content-type: application/json' \
+    --data "{\"scope\":\"exact\",\"subject_user_id\":\"$subject\",\"owner_user_id\":\"$USER_ID\",\"devserver_id\":\"$DEVSERVER_ID\"}" \
+    "http://127.0.0.1:$CONTROL_ADMIN_PORT/admin/v1/sessions/revoke")" \
+    || die "$label: session revocation through devserver-control failed"
+  printf '%s' "$revoke_json" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+assert body["revoked"] >= 1 and body["proxies_confirmed"] == 1, body
+' || die "$label: revocation did not confirm: $revoke_json"
+  seen="$(ext_request_count)"
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_REQUEST[@]}" "$bound" || echo 000)"
+  refused_404 "$label: bound GET after revocation" "$code"
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' -X POST "${FRAME_REQUEST[@]}" \
+    -H 'Content-Type: text/plain' --data "after-revoke" "${bound}echo" || echo 000)"
+  refused_404 "$label: bound POST after revocation" "$code"
+  code="$(proxy_curl -sS -o "$EXT_B" -D "$EXT_H" -w '%{http_code}' "${FRAME_NAVIGATION[@]}" \
+    -H "Cookie: __Host-devserver_gate=$gate" "$EXT_URL" || echo 000)"
+  refused_404 "$label: navigation with the revoked session cookie" "$code"
+  [ "$(ext_request_count)" = "$seen" ] || die "$label: a request after revocation reached the extension"
+  info "$label: after revoking the session the bound GET and POST and a new navigation answer 404; the extension saw none"
+}
+
+extension_link_case grantee "$GRANTEE_GATE" "$GRANTEE_USER_ID"
+extension_link_case owner "$OWNER_GATE" "$USER_ID"
+# Read the journal into a file first: a `grep -q` at the end of a pipeline
+# can SIGPIPE its writer, and under pipefail a match would then read as none.
+DS_JOURNAL="$(mktemp)"
+ds_journal > "$DS_JOURNAL"
+grep -q 'gateway assertion accepted' "$DS_JOURNAL" \
+  || die "the devserver journal has no accepted assertions to inspect"
+if grep -q 'gateway assertion names no user' "$DS_JOURNAL"; then
+  die "the devserver refused an assertion that named no user: the proxy signed an anonymous caller"
+fi
+if grep -qE 'gateway assertion accepted.*sub=(0{8}-0{4}-0{4}-0{4}-0{12}|0{32})?( |$)' "$DS_JOURNAL"; then
+  die "the devserver accepted a nil or empty subject"
+fi
+info "the devserver journal holds no nil or empty subject, accepted or refused"
+rm -f "$EXT_H" "$EXT_B" "$DS_JOURNAL"
 
 say "RESULT"
 echo "REQUEST : GET $PREFIX/api/health   Host: $HOSTHDR (authenticated owner entry)"

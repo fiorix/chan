@@ -22,6 +22,8 @@ The request `GET /notes-<hash8>/api/health` at the exact `{owner}--{disc}.{proxy
 
 With those authenticated sessions, the harness sends both `PUT` and `DELETE` to `/api/library/devservers/{id}/native-trust`. The caller whose subject UUID equals the immutable owner UUID gets the expected `409` no-desktop result, and so does the binary grantee; no viewer/editor role exists.
 
+The devserver also runs a declared local extension (`e2e-extension.py`, started by chan from `~/.chan/extensions/e2e.toml`), and the harness proves no caller reaches it without signing in. The extension's capability link from the tenant catalog answers the CORS-readable 404 to a cookieless fetch, a navigation with no session cookie, and a POST, and the extension's own request log stays untouched. Then for the grantee and for the owner in turn: an iframe navigation of that link carrying the session cookie gets a 303 to a 96-hex bound path; a cookieless GET and a cookieless, CSRF-less POST on the bound path reach the extension (its log records exactly those two requests) and the devserver's journal records both as accepted from that user's subject; after devserver-control revokes that user's sessions, the bound GET, the bound POST and a new navigation with the revoked cookie all answer 404 and reach nothing. The devserver journal must hold no nil or empty subject, accepted or refused.
+
 The controller, proxy, and chan binaries (including the tunnel-client/-proto crates) are real release builds. Two narrow pieces are fixtures because the rig does not stand up postgres-backed identity/profile or an edge TLS proxy:
 
 - **stub identity** (`stub-identity.py`): accepts one exact internal bearer and tunnel PAT, signs a controller-bound admission lease for the proxy-generated registration UUID, and exposes owner/grantee desktop entry responses. It runs on the proxy container's loopback.
@@ -73,6 +75,7 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 | `stub-identity.py`        | tunnel validation + authenticated entry stub     |
 | `mint-signed-credential.py` | mint Ed25519 admission and entry credentials   |
 | `tls-forward.py`            | exact-ALPN TLS edges for public HTTP and h2     |
+| `e2e-extension.py`          | declared local extension: entry doc, echo, log  |
 | `zone-isolation-probe.sh` | demonstrate same-zone OK / cross-zone BLOCKED    |
 
 ## Config the harness sets
@@ -85,5 +88,6 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 | proxy public / tunnel   | loopback `:7002` / `:7100`; TLS edge `:7443` / `:7444` |
 | `IDENTITY_URL`          | `http://127.0.0.1:7799` (loopback stub)            |
 | `CHAN_DEVSERVER_LISTEN` | `1` (bind mgmt API; host reads the mounted prefix) |
+| devserver `RUST_LOG`    | `info,chan_server::devserver=debug` (logs subjects) |
 | tenant                  | user `alice`, workspace `notes`                    |
 | desktop entry origins   | `alice--<id-prefix>.p1.proxy.localtest.me:7443` |
