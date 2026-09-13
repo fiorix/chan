@@ -29,6 +29,15 @@ const H2_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on one write to a proxy, and on the final frame plus the
+/// half-close that ends a session. The writer is an h2 stream, which
+/// stays pending until the proxy grants flow-control window, so a proxy
+/// that stops reading would otherwise park the write forever; and a
+/// write in a `select!` arm body stops every other arm of its session,
+/// deadlines included. A proxy that has not taken a frame for as long as
+/// the actor waits before declaring it dead is not coming back, and the
+/// session ends with its connection and in-flight permit.
+const CONTROL_WRITE_TIMEOUT: Duration = crate::SESSION_DEAD_AFTER;
 const MAX_EXTRA_STREAMS: usize = 16;
 const MAX_INFLIGHT_CONNECTIONS: usize = 128;
 // A full 2,048-row snapshot is 18 frames at the protocol chunk maximum.
@@ -373,7 +382,7 @@ where
         }
         Err(error) => return Err(error.into()),
     };
-    write_frame(
+    write_control(
         &mut writer,
         &ServerFrame::ServerHello {
             protocol_version: PROTOCOL_VERSION,
@@ -479,13 +488,13 @@ where
                     let resync = matches!(outgoing, ServerFrame::ResyncRequired { .. });
                     let shutdown = matches!(outgoing, ServerFrame::Shutdown { .. });
                     tracing::debug!(frame = ?outgoing, "sending proxy control frame");
-                    write_frame(writer, &outgoing).await?;
+                    if shutdown {
+                        write_final(writer, &outgoing).await?;
+                        return Ok(());
+                    }
+                    write_control(writer, &outgoing).await?;
                     if resync {
                         phase = Phase::awaiting_snapshot();
-                    }
-                    if shutdown {
-                        writer.shutdown().await.map_err(FrameError::Io)?;
-                        return Ok(());
                     }
                 }
                 incoming = incoming_rx.recv() => {
@@ -925,32 +934,61 @@ where
     Err(SessionError::Protocol(reason.into()))
 }
 
-async fn send_shutdown<W>(writer: &mut W, reason: &'static str) -> Result<(), FrameError>
+/// Every caller returns once this does, so a shutdown the proxy never
+/// reads still ends the session, as a `Timeout` instead of the reason.
+async fn send_shutdown<W>(writer: &mut W, reason: &'static str) -> Result<(), SessionError>
 where
     W: AsyncWrite + Unpin,
 {
-    write_frame(
+    write_final(
         writer,
         &ServerFrame::Shutdown {
             reason: reason.into(),
             retryable: true,
         },
     )
-    .await?;
-    writer.shutdown().await.map_err(FrameError::Io)
+    .await
 }
 
-async fn send_resync<W>(writer: &mut W, expected_generation: u64) -> Result<(), FrameError>
+async fn send_resync<W>(writer: &mut W, expected_generation: u64) -> Result<(), SessionError>
 where
     W: AsyncWrite + Unpin,
 {
-    write_frame(
+    write_control(
         writer,
         &ServerFrame::ResyncRequired {
             expected_generation,
         },
     )
     .await
+}
+
+async fn write_control<W>(writer: &mut W, frame: &ServerFrame) -> Result<(), SessionError>
+where
+    W: AsyncWrite + Unpin,
+{
+    bounded_write(write_frame(writer, frame)).await
+}
+
+/// Write the session's last frame and half-close, under one bound.
+async fn write_final<W>(writer: &mut W, frame: &ServerFrame) -> Result<(), SessionError>
+where
+    W: AsyncWrite + Unpin,
+{
+    bounded_write(async {
+        write_frame(writer, frame).await?;
+        writer.shutdown().await.map_err(FrameError::Io)
+    })
+    .await
+}
+
+async fn bounded_write(
+    write: impl Future<Output = Result<(), FrameError>>,
+) -> Result<(), SessionError> {
+    tokio::time::timeout(CONTROL_WRITE_TIMEOUT, write)
+        .await
+        .map_err(|_| SessionError::Timeout("proxy control write"))?
+        .map_err(SessionError::from)
 }
 
 async fn wait_deadline(deadline: Option<Instant>) {
@@ -1825,5 +1863,123 @@ mod tests {
             .expect("the loop did not stop on shutdown")
             .unwrap()
             .unwrap();
+    }
+
+    /// Open a controller session as a proxy with a 16-byte h2 stream
+    /// window, complete the handshake, send `then` if given, and from then
+    /// on read nothing. Returns once the connection task has ended, or
+    /// panics with what it still holds.
+    ///
+    /// A proxy that stops reading (a hung process, a stopped VM, a
+    /// half-dead path) never grants the stream more window, so a controller
+    /// write to it stays pending. Those writes sit in `select!` arm bodies,
+    /// where nothing else in the session is polled, so without a bound the
+    /// connection task, and the in-flight permit it holds, outlive the
+    /// session's heartbeat expiry for as long as TCP stays up.
+    async fn stalled_reader_ends(scenario: &str, then: Option<ClientFrame>) {
+        const STREAM_WINDOW: u32 = 16;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        // One slot, held by the connection exactly as the listener's loop
+        // holds it: moved into the task that runs `handle_connection`.
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = permits.clone().try_acquire_owned().unwrap();
+        let controller = crate::spawn_controller(100);
+        let mut proxies = controller.watch_proxies();
+        let credentials =
+            Arc::new(ProxyCredentials::parse(&format!("p1={TEST_PROXY_TOKEN}")).unwrap());
+        let (_, verifier) = admission_keys();
+        let template = ProxyOriginTemplate::parse("https://{proxy_id}.proxy.example.test").unwrap();
+        let server = tokio::spawn(async move {
+            let _permit = permit;
+            handle_connection(server_io, controller, credentials, verifier, template).await
+        });
+
+        let (mut client, connection) = h2::client::Builder::new()
+            .initial_window_size(STREAM_WINDOW)
+            .handshake::<_, bytes::Bytes>(client_io)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(CONNECT_PATH)
+            .header(header::AUTHORIZATION, format!("Bearer {TEST_PROXY_TOKEN}"))
+            .header(PROXY_ID_HEADER, "p1")
+            .header(header::CONTENT_TYPE, CONTENT_TYPE)
+            .body(())
+            .unwrap();
+        let (response, send) = client.send_request(request, false).unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = H2Duplex::new(send, response.into_body());
+        handshake(&mut stream).await;
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            proxies.wait_for(|proxies| proxies.len() == 1),
+        )
+        .await
+        .expect("the controller never listed the session")
+        .unwrap();
+        if let Some(frame) = then {
+            write_frame(&mut stream, &frame).await.unwrap();
+        }
+
+        // From here the proxy reads nothing. The first write that does not
+        // fit the window starts no later than the actor's first heartbeat
+        // ping, on its first one-second tick at or past
+        // `HEARTBEAT_INTERVAL`; a bounded write gives up
+        // `SESSION_DEAD_AFTER` after it started, and the connection then
+        // spends at most one second draining h2 before it returns. Two
+        // more seconds are slack.
+        let bound = crate::HEARTBEAT_INTERVAL + crate::SESSION_DEAD_AFTER + Duration::from_secs(4);
+        tokio::time::sleep(bound).await;
+        if !server.is_finished() {
+            tokio::time::sleep(crate::SESSION_DEAD_AFTER * 4).await;
+            panic!(
+                "{scenario}: the connection task is still running {:?} after the proxy \
+                 stopped reading (heartbeat expiry is {:?}); finished={}, permits \
+                 available={}, sessions the controller still lists={}",
+                started.elapsed(),
+                crate::SESSION_DEAD_AFTER,
+                server.is_finished(),
+                permits.available_permits(),
+                proxies.borrow().len(),
+            );
+        }
+        assert!(
+            proxies.borrow().is_empty(),
+            "{scenario}: the controller kept the session"
+        );
+        assert_eq!(
+            permits.available_permits(),
+            1,
+            "{scenario}: the permit did not return"
+        );
+        let result = server.await.unwrap();
+        assert!(
+            matches!(result, Err(SessionError::Timeout("proxy control write"))),
+            "{scenario}: {result:?}"
+        );
+        drop(stream);
+        driver.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_proxy_that_stops_reading_releases_its_connection_and_permit() {
+        // The actor's heartbeat ping is the write that parks.
+        stalled_reader_ends("a parked command write", None).await;
+        // A frame the controller refuses: the `Shutdown` it writes before
+        // ending the session is the write that parks, and the session must
+        // end anyway.
+        stalled_reader_ends(
+            "a parked shutdown write",
+            Some(hello(
+                PROTOCOL_VERSION,
+                env!("CARGO_PKG_VERSION"),
+                "https://p1.proxy.example.test",
+            )),
+        )
+        .await;
     }
 }
