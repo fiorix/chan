@@ -1586,6 +1586,14 @@ fn safe_upstream_set_cookie(value: &HeaderValue) -> bool {
 /// is cut. Every non-error teardown announces itself with a real WS
 /// Close frame to each half -- an abrupt FIN leaves browsers without a
 /// prompt `onclose` and the peer devserver with a dangling substream.
+///
+/// The same window bounds the bridge's setup, the substream open (which
+/// waits for a slot while the tunnel is at its substream budget) and the
+/// upstream WebSocket handshake, since no frame moves either way until
+/// both are done. The client already has its 101 by then, so a setup that
+/// outlasts the window, or meets revocation or expiry, ends the client
+/// socket with a Close: 1011 "upstream timed out", or the same 1008 the
+/// pump sends.
 struct BridgePolicy {
     assertion: HeaderValue,
     idle_timeout: std::time::Duration,
@@ -1600,9 +1608,6 @@ async fn bridge_ws(
     forwarded: &ForwardedHeaders,
     policy: BridgePolicy,
 ) -> anyhow::Result<()> {
-    let stream = handle.open().await?;
-    let io = stream.compat();
-
     let upstream_url = format!("ws://chan-tunnel{path_and_query}");
     let mut request = upstream_url
         .as_str()
@@ -1611,9 +1616,34 @@ async fn bridge_ws(
     apply_forwarded(request.headers_mut(), forwarded);
     apply_gateway_assertion(request.headers_mut(), policy.assertion);
 
-    let (upstream, _resp) = tokio_tungstenite::client_async(request, io)
-        .await
-        .map_err(|e| anyhow::anyhow!("ws handshake: {e}"))?;
+    let setup = async {
+        let stream = handle.open().await?;
+        tokio_tungstenite::client_async(request, stream.compat())
+            .await
+            .map_err(|e| anyhow::anyhow!("ws handshake: {e}"))
+    };
+    let setup_deadline = tokio::time::Instant::now() + policy.idle_timeout;
+    let (upstream, _resp) = tokio::select! {
+        biased;
+        _ = policy.cancellation.cancelled() => {
+            close_unbridged(client, 1008, "session revoked").await;
+            return Ok(());
+        }
+        _ = tokio::time::sleep_until(policy.expires_at) => {
+            close_unbridged(client, 1008, "session expired").await;
+            return Ok(());
+        }
+        set_up = tokio::time::timeout_at(setup_deadline, setup) => match set_up {
+            Ok(result) => result?,
+            Err(_) => {
+                close_unbridged(client, 1011, "upstream timed out").await;
+                anyhow::bail!(
+                    "ws bridge setup outlasted the idle window ({:?})",
+                    policy.idle_timeout
+                );
+            }
+        },
+    };
 
     let (mut up_tx, mut up_rx) = upstream.split();
     let (mut cl_tx, mut cl_rx) = client.split();
@@ -1725,6 +1755,16 @@ async fn bridge_ws(
         }
     }
     Ok(())
+}
+
+/// Close a client socket the bridge never connected upstream.
+async fn close_unbridged(mut client: WebSocket, code: u16, reason: &'static str) {
+    let _ = client
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
 }
 
 // axum and tungstenite each wrap ws text payloads in their own Utf8Bytes

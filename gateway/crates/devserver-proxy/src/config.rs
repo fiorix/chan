@@ -90,6 +90,8 @@ pub struct Config {
     /// proper Close frame to both halves) only after BOTH directions
     /// have been quiet this long; a frame either way resets the
     /// window, so a socket streaming one way never dies mid-stream.
+    /// It also bounds the bridge's setup (substream open and upstream
+    /// handshake), during which no frame moves.
     /// Always [`DEFAULT_WS_IDLE_TIMEOUT`] in production (not
     /// env-sourced); tests inject sub-second values via the struct.
     pub ws_idle_timeout: std::time::Duration,

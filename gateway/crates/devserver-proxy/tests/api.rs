@@ -22,6 +22,7 @@ use bytes::Bytes;
 use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
 use chan_tunnel_server::{
     serve_tunnel_listener_with_admission, AllowAllAdmission, ServerError, Validated, Validator,
+    MAX_TUNNEL_SUBSTREAMS,
 };
 use devserver_control_proto::{
     AdmissionLeaseSigner, AdmissionLeaseVerifier, CanonicalOrigin, ProxyId,
@@ -2339,6 +2340,129 @@ async fn ws_bridge_cuts_both_idle_socket_with_a_close_frame() {
         Ok(None) | Ok(Some(Err(_))) => {}
         other => panic!("socket should end after the Close, got {other:?}"),
     }
+    server.abort();
+    app.cleanup().await;
+}
+
+/// Read the client half until a Close frame arrives. Fails when the
+/// socket ends without one, or when nothing arrives within `within`,
+/// which is what a bridge still parked in its setup looks like.
+async fn expect_close_within(
+    ws: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+    within: std::time::Duration,
+    what: &str,
+) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    use tokio_tungstenite::tungstenite::Message as WsMsg;
+    let frame = tokio::time::timeout(within, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMsg::Close(frame))) => break frame,
+                Some(Ok(_)) => continue,
+                other => panic!("{what}: expected a Close frame, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}: no Close within {within:?}, the bridge is still waiting"));
+    frame.unwrap_or_else(|| panic!("{what}: the Close carries no code"))
+}
+
+/// The 101 is sent before the bridge opens its substream, so a tunnel at
+/// its substream budget, where the open waits for a slot, must end the
+/// socket within the bridge's bound with a Close the client can see.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_substream_open_outlasts_its_bound() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel("alice", "blog", uid, ws_upstream_router())
+        .await;
+    let handle = app
+        .registry
+        .get("alice", "blog")
+        .expect("registered tunnel")
+        .handle;
+    let mut held = Vec::with_capacity(MAX_TUNNEL_SUBSTREAMS);
+    for _ in 0..MAX_TUNNEL_SUBSTREAMS {
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(5), handle.open())
+            .await
+            .expect("an open within the budget is immediate")
+            .expect("substream open");
+        held.push(stream);
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), handle.open())
+            .await
+            .is_err(),
+        "the substream budget must be spent before the WebSocket dials",
+    );
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let started = tokio::time::Instant::now();
+    let mut ws = ws_connect(addr, &host, "/blog/ws-echo", &cookie).await;
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket against a saturated tunnel",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= WS_TEST_IDLE,
+        "the Close arrived before the bound: {elapsed:?}"
+    );
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream timed out");
+    drop(held);
+    server.abort();
+    app.cleanup().await;
+}
+
+/// A devserver that accepts the substream but never answers the
+/// WebSocket handshake parks the bridge after its open succeeded; the
+/// same bound ends it with the same Close.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_upstream_handshake_outlasts_its_bound() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let upstream = {
+        let reached = reached.clone();
+        Router::new().route(
+            "/blog/ws-stall",
+            axum::routing::get(move || {
+                let reached = reached.clone();
+                async move {
+                    reached.notify_one();
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        )
+    };
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let started = tokio::time::Instant::now();
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose upstream handshake never completes",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= WS_TEST_IDLE,
+        "the Close arrived before the bound: {elapsed:?}"
+    );
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream timed out");
     server.abort();
     app.cleanup().await;
 }
