@@ -16,7 +16,7 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -37,9 +37,22 @@ const tscBin = require.resolve("typescript/bin/tsc");
 const work = mkdtempSync(join(tmpdir(), "chan-shortcuts-"));
 try {
   const inFile = join(work, "shortcuts.ts");
-  writeFileSync(inFile, readFileSync(tsPath, "utf8"));
-  execSync(
-    `node ${JSON.stringify(tscBin)} --target es2022 --module es2022 --moduleResolution bundler --strict --outDir ${JSON.stringify(work)} ${JSON.stringify(inFile)}`,
+  // The temporary directory is outside the npm workspace, so compile the
+  // registry's shared helper beside it with a local module specifier.
+  writeFileSync(
+    join(work, "keyboard.ts"),
+    readFileSync(require.resolve("@chan/web-shared/keyboard"), "utf8"),
+  );
+  writeFileSync(
+    inFile,
+    readFileSync(tsPath, "utf8").replace(
+      'from "@chan/web-shared/keyboard"',
+      'from "./keyboard.js"',
+    ),
+  );
+  execFileSync(
+    process.execPath,
+    [tscBin, "--target", "es2022", "--module", "es2022", "--moduleResolution", "bundler", "--strict", "--outDir", work, inFile],
     { cwd: webDir, stdio: ["ignore", "ignore", "inherit"] },
   );
   const outFile = join(work, "shortcuts.js");
