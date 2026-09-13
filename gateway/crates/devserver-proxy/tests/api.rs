@@ -2668,6 +2668,83 @@ async fn a_session_cookie_without_a_frame_navigation_mints_no_binding() {
     app.cleanup().await;
 }
 
+/// A bound path whose remainder climbs out with dot segments, raw or
+/// encoded, is refused with the lane's readable 404 and never reaches the
+/// devserver, nor does a signed-in frame navigation of a capability link
+/// that carries them mint a binding. A segment that only contains dots is
+/// ordinary and is forwarded.
+#[tokio::test]
+async fn an_extension_path_with_a_dot_segment_is_refused_and_never_forwarded() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    let captured = Captured::default();
+    app.register_tunnel("alice", "blog", uid, capturing_router(captured.clone()))
+        .await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let bound = bind_extension_link(&app.router, &host, &ext_path("/"), &cookie).await;
+    for climb in [
+        "../../../../api/health",
+        "%2e%2e/%2E%2E/.%2e/%2E./api/health",
+        "..%2f..%2f..%2f..%2fapi/health",
+        "%252e%252e/%252e%252e/%252e%252e/%252e%252e/api/health",
+    ] {
+        for method in [Method::GET, Method::POST] {
+            let path = format!("{bound}{climb}");
+            let (status, headers, body) =
+                frame_request(&app.router, method.clone(), &host, &path, "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {climb}");
+            assert_eq!(
+                headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+                "null",
+                "{method} {climb}"
+            );
+            assert_eq!(
+                body.as_ref(),
+                br#"{"error":"not found"}"#,
+                "{method} {climb}"
+            );
+        }
+    }
+
+    let mut navigation: Vec<(&str, &str)> = FRAME_NAVIGATION.to_vec();
+    navigation.push(("cookie", cookie.as_str()));
+    let (status, headers, _) = send_host(
+        &app.router,
+        Method::GET,
+        &host,
+        &ext_path("/../../../../api/health"),
+        &navigation,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(headers.get(header::LOCATION).is_none());
+    assert!(
+        captured.requests.lock().unwrap().is_empty(),
+        "a dot-segment path reached the devserver"
+    );
+
+    let (status, _, _) = frame_request(
+        &app.router,
+        Method::GET,
+        &host,
+        &format!("{bound}.../a..b/.hidden"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let forwarded: Vec<String> = captured
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.uri.clone())
+        .collect();
+    assert_eq!(forwarded, vec![ext_path("/.../a..b/.hidden")]);
+    app.cleanup().await;
+}
+
 /// A stale or wrong capability is not the proxy's to judge: without a
 /// session it never leaves the proxy, and through a binding the
 /// devserver's miss comes back as a CORS-readable 404.

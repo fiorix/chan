@@ -22,6 +22,8 @@
 //!     Ed25519 credential and exact bindings, atomically consume its `jti`,
 //!     mint an opaque proxy-local session, set host-only gate/CSRF cookies,
 //!     and 303 to the signed clean path
+//!   * either extension shape below whose path holds a dot segment, raw or
+//!     percent-encoded -> 404, before any session or binding is consulted
 //!   * an extension capability link
 //!     (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) is never
 //!     forwarded: a same-origin iframe navigation carrying a valid
@@ -336,6 +338,9 @@ async fn handle_gated(
 
     let is_ws = is_websocket_upgrade(req.headers());
     let extension = extension_lane(req.uri().path()).map(OwnedExtensionLane::from);
+    if extension.is_some() && contains_dot_segment(req.uri().path()) {
+        return not_found_response(req.headers());
+    }
 
     let (devserver_id, entry, caller, authorization, upstream_path_and_query, location_rewrite) =
         match extension {
@@ -1114,6 +1119,62 @@ fn extension_lane(path: &str) -> Option<ExtensionLane<'_>> {
 /// `/{tenant}/_chan/extensions/{id}/{credential}`.
 fn extension_prefix(tenant: &str, extension_id: &str, credential: &str) -> String {
     format!("/{tenant}/_chan/extensions/{extension_id}/{credential}")
+}
+
+/// Percent-decoding rounds the dot-segment check undoes before it gives up
+/// and refuses the path anyway: no legitimate request encodes a path this
+/// deeply.
+const DOT_SEGMENT_DECODE_ROUNDS: usize = 4;
+
+/// Whether an extension lane path holds a dot segment, a segment that is
+/// exactly `.` or `..` (RFC 3986), however it is spelled. A browser resolves
+/// dot segments before it sends a URL, so only a hand-built request carries
+/// one. Refusing them keeps a bound path inside its extension on the proxy's
+/// own terms rather than on what the devserver does with them.
+///
+/// The check reads at least as much into a path as the devserver's
+/// extension route does. That route percent-decodes its path capture once
+/// and hands it to a WHATWG URL parser, which takes `%2e` for a dot and a
+/// backslash for a separator, so `..%2f`, `..%5c` and a double-encoded
+/// `%252e%252e` all end up as dot segments there. Each round therefore splits
+/// on `/` and `\` and looks for a dot segment, then percent-decodes the whole
+/// path, encoded separators included, until decoding changes nothing.
+/// `...`, `.hidden` and `a..b` are ordinary segments and pass.
+fn contains_dot_segment(path: &str) -> bool {
+    let mut path = path.as_bytes().to_vec();
+    for _ in 0..DOT_SEGMENT_DECODE_ROUNDS {
+        if path
+            .split(|byte| *byte == b'/' || *byte == b'\\')
+            .any(|segment| segment == b"." || segment == b"..")
+        {
+            return true;
+        }
+        let decoded = percent_decode(&path);
+        if decoded == path {
+            return false;
+        }
+        path = decoded;
+    }
+    true
+}
+
+/// Decode every `%XY` hex escape; a `%` that starts no escape stays as is.
+fn percent_decode(input: &[u8]) -> Vec<u8> {
+    let hex = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+    let mut out = Vec::with_capacity(input.len());
+    let mut at = 0;
+    while at < input.len() {
+        if input[at] == b'%' && at + 2 < input.len() {
+            if let (Some(high), Some(low)) = (hex(input[at + 1]), hex(input[at + 2])) {
+                out.push(high << 4 | low);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(input[at]);
+        at += 1;
+    }
+    out
 }
 
 /// Only a document navigation of an iframe, started by a page on this very
@@ -2381,6 +2442,79 @@ mod tests {
         ] {
             assert_eq!(lane(path), None, "{path}");
         }
+    }
+
+    /// A dot segment is refused however it is spelled: raw, percent-encoded
+    /// in either case or half-encoded, behind an encoded `/` or `\`, or
+    /// encoded twice. Segments that only contain dots are not dot segments.
+    #[test]
+    fn a_dot_segment_is_found_in_every_spelling_and_near_misses_pass() {
+        let lane = |rest: &str| format!("/notes/_chan/extensions/echo/{TEST_BINDING}/{rest}");
+        for rest in [
+            // Raw.
+            "..",
+            ".",
+            "../../../../api/health",
+            "./app.js",
+            "assets/../app.js",
+            "assets/./app.js",
+            "assets/..",
+            "assets/.",
+            // Percent-encoded, any case, and mixed with raw dots.
+            "%2e%2e/api/health",
+            "%2E%2E/api/health",
+            "%2e%2E/api/health",
+            "%2E%2e/api/health",
+            ".%2e/api/health",
+            ".%2E/api/health",
+            "%2e./api/health",
+            "%2E./api/health",
+            "%2e/app.js",
+            "%2E/app.js",
+            "assets/%2e%2e",
+            // Behind an encoded separator, which the devserver decodes.
+            "..%2f..%2fapi/health",
+            "..%2F..%2Fapi/health",
+            "assets%2f..%2fapp.js",
+            "%2e%2e%2fapi/health",
+            "..%5c..%5capi/health",
+            "assets%5C.%5Capp.js",
+            // Encoded twice.
+            "%252e%252e/api/health",
+            "%252E./api/health",
+            "..%252fapi/health",
+            // Deeper than any legitimate request.
+            "%25252525252e",
+        ] {
+            let path = lane(rest);
+            assert!(contains_dot_segment(&path), "{path}");
+        }
+
+        for rest in [
+            "",
+            "app.js",
+            ".../x",
+            "...",
+            ".hidden",
+            "a..b",
+            "..a",
+            "a..",
+            ".a.",
+            "%2e%2e%2e/x",
+            "%2ehidden",
+            "a%2e%2eb",
+            "assets//app.js",
+            "100%/app.js",
+            "%zz/app.js",
+            "%2/app.js",
+            "q%3fa=..",
+        ] {
+            let path = lane(rest);
+            assert!(!contains_dot_segment(&path), "{path}");
+        }
+        assert!(!contains_dot_segment(&format!(
+            "/notes/_chan/extensions/echo/{TEST_CAPABILITY}/"
+        )));
     }
 
     #[test]
