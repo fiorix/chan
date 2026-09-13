@@ -1,9 +1,11 @@
 use std::collections::{HashSet, VecDeque};
+use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chan_tunnel_proto::H2Duplex;
+use chan_tunnel_proto::{accept_next, H2Duplex};
 use devserver_control_proto::{
     read_frame, write_frame, AdmissionLease, AdmissionLeaseBinding, AdmissionLeaseVerifier,
     BrowserSessionRow, CanonicalOrigin, ClientFrame, FrameError, ProxyId, ProxyOriginTemplate,
@@ -13,7 +15,7 @@ use devserver_control_proto::{
 use h2::server::SendResponse;
 use http::{header, Method, Request, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -81,14 +83,44 @@ impl Drop for AbortOnDropTask {
     }
 }
 
+/// Serve proxy control connections until `shutdown` fires. Returns an
+/// error only when the listening socket itself is unusable
+/// (`chan_tunnel_proto::AcceptFailure::Listener`); `main` exits the
+/// process when this returns, and this is the fleet's only controller.
 pub async fn serve_control_listener(
     listener: TcpListener,
     controller: ControllerHandle,
     proxy_credentials: ProxyCredentials,
     admission_lease_verifier: AdmissionLeaseVerifier,
     origin_template: ProxyOriginTemplate,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    serve_accepted(
+        || listener.accept(),
+        controller,
+        proxy_credentials,
+        admission_lease_verifier,
+        origin_template,
+        shutdown,
+    )
+    .await
+}
+
+/// The accept loop over any source of accept results. The listener
+/// passes its own `accept`; a test passes one that injects the
+/// failures a real socket only produces under fd exhaustion.
+async fn serve_accepted<A, F>(
+    mut accept: A,
+    controller: ControllerHandle,
+    proxy_credentials: ProxyCredentials,
+    admission_lease_verifier: AdmissionLeaseVerifier,
+    origin_template: ProxyOriginTemplate,
+    mut shutdown: watch::Receiver<bool>,
+) -> io::Result<()>
+where
+    A: FnMut() -> F,
+    F: Future<Output = io::Result<(TcpStream, SocketAddr)>>,
+{
     let proxy_credentials = Arc::new(proxy_credentials);
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_CONNECTIONS));
     let mut connections = JoinSet::new();
@@ -106,7 +138,13 @@ pub async fn serve_control_listener(
                     return Err(io::Error::other(format!("control connection task failed: {error}")));
                 }
             }
-            accepted = listener.accept() => {
+            // `accept_next` retries a failure that concerns one connection
+            // at once and pauses after one that means the process is out of
+            // descriptors or memory, returning only when the listening socket
+            // is unusable. Racing it here is safe: an arm that wins mid-pause
+            // drops the pause, and a connection task ending is what frees
+            // the descriptors an exhausted accept is waiting for.
+            accepted = accept_next("proxy control", &mut accept) => {
                 let (stream, peer) = accepted?;
                 let Ok(permit) = inflight.clone().try_acquire_owned() else {
                     tracing::warn!(%peer, max = MAX_INFLIGHT_CONNECTIONS, "proxy control connection cap reached");
@@ -1598,5 +1636,107 @@ mod tests {
         assert!(snapshot_bytes_fit(MAX_SNAPSHOT_BYTES - 1, 1));
         assert!(!snapshot_bytes_fit(MAX_SNAPSHOT_BYTES, 1));
         assert!(!snapshot_bytes_fit(usize::MAX, 1));
+    }
+
+    /// Dial `addr` as a proxy that presents no credential and return the
+    /// status the controller answers its connect with. A 401 proves the
+    /// listener accepted the connection and a connection task served it.
+    async fn unauthenticated_connect_status(addr: SocketAddr) -> io::Result<StatusCode> {
+        let tcp = TcpStream::connect(addr).await?;
+        let (mut client, connection) =
+            h2::client::handshake(tcp).await.map_err(io::Error::other)?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://{addr}{CONNECT_PATH}"))
+            .header(header::CONTENT_TYPE, CONTENT_TYPE)
+            .body(())
+            .expect("request");
+        let (response, _send) = client
+            .send_request(request, true)
+            .map_err(io::Error::other)?;
+        Ok(response.await.map_err(io::Error::other)?.status())
+    }
+
+    fn listener_inputs() -> (
+        ProxyCredentials,
+        AdmissionLeaseVerifier,
+        ProxyOriginTemplate,
+    ) {
+        let (_, verifier) = admission_keys();
+        (
+            ProxyCredentials::parse(&format!("p1={TEST_PROXY_TOKEN}")).unwrap(),
+            verifier,
+            ProxyOriginTemplate::parse("https://{proxy_id}.proxy.example.test").unwrap(),
+        )
+    }
+
+    /// This controller is the fleet's only one, and `main` exits the
+    /// process when this loop returns, so an accept failure that concerns
+    /// one peer, or a moment out of descriptors, would stop admission for
+    /// every proxy. Neither may end the loop, and the next proxy
+    /// connection must still be served.
+    #[tokio::test]
+    async fn a_transient_accept_failure_does_not_end_the_control_listener() {
+        let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let addr = listener.local_addr().unwrap();
+        // Popped from the back: a failure for one connection, then one
+        // that means the process is out of a resource.
+        let injected = Arc::new(std::sync::Mutex::new(vec![
+            io::Error::from(io::ErrorKind::OutOfMemory),
+            io::Error::from(io::ErrorKind::ConnectionAborted),
+        ]));
+        let accept = {
+            let injected = injected.clone();
+            move || {
+                let failure = injected.lock().unwrap().pop();
+                let listener = listener.clone();
+                async move {
+                    match failure {
+                        Some(error) => Err(error),
+                        None => listener.accept().await,
+                    }
+                }
+            }
+        };
+        let (credentials, verifier, template) = listener_inputs();
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let serving = tokio::spawn(serve_accepted(
+            accept,
+            crate::spawn_controller(100),
+            credentials,
+            verifier,
+            template,
+            shutdown_rx,
+        ));
+
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            unauthenticated_connect_status(addr),
+        )
+        .await;
+        if serving.is_finished() {
+            panic!(
+                "the accept loop ended on an injected failure: {:?}",
+                serving.await.unwrap()
+            );
+        }
+        assert!(
+            injected.lock().unwrap().is_empty(),
+            "the loop did not consume both injected failures",
+        );
+        let status = status
+            .expect("the connection after the failures was never served")
+            .expect("h2 exchange");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .expect("the loop did not stop on shutdown")
+            .unwrap()
+            .unwrap();
     }
 }
