@@ -10,10 +10,10 @@ use chan_tunnel_server::{
     RegistrationAdmission, RegistrationPermit, RegistryEvent, ServerError, TunnelInfo,
 };
 use devserver_control_proto::{
-    read_frame, write_frame, AdmissionDecision, AdmissionLease, AdmissionLeaseVerifier,
-    ClientFrame, ServerFrame, SessionRevocation, TunnelRow, CONNECT_PATH, CONTENT_TYPE,
-    MAX_SNAPSHOT_CHUNK_ROWS, PROTOCOL_VERSION, PROXY_CONTROL_LOSS_GRACE_SECONDS,
-    PROXY_CONVERGENCE_GRACE_SECONDS,
+    read_frame, write_frame, AdmissionDecision, AdmissionLease, AdmissionLeaseBinding,
+    AdmissionLeaseVerifier, ClientFrame, ProxyId, ServerFrame, SessionRevocation, TunnelRow,
+    CONNECT_PATH, CONTENT_TYPE, MAX_SNAPSHOT_CHUNK_ROWS, PROTOCOL_VERSION,
+    PROXY_CONTROL_LOSS_GRACE_SECONDS, PROXY_CONVERGENCE_GRACE_SECONDS,
 };
 use rand::Rng;
 use tokio::net::TcpStream;
@@ -134,6 +134,7 @@ fn spawn_supervisor(
         readiness: readiness.clone(),
         admission_epoch: admission_epoch.clone(),
         admission_lease_verifier: config.admission_lease_verifier.clone(),
+        proxy_id: config.proxy_id.clone(),
     });
     let task = tokio::spawn(async move {
         supervise(
@@ -161,13 +162,19 @@ struct ControlAdmission {
     readiness: watch::Receiver<bool>,
     admission_epoch: Arc<AtomicU64>,
     /// The ring the control stream verifies every published row under. A
-    /// lease it cannot verify is refused here, before the controller
-    /// reserves capacity for a tunnel this proxy could never publish.
+    /// lease it cannot verify, or one bound to anything but the
+    /// registration being admitted on `proxy_id`, is refused here, before
+    /// the controller refuses it or reserves capacity for a tunnel this
+    /// proxy could never publish.
     admission_lease_verifier: AdmissionLeaseVerifier,
+    proxy_id: ProxyId,
 }
 
 #[async_trait]
 impl RegistrationAdmission for ControlAdmission {
+    /// A lease is bound to one registration id, and a fresh one here is
+    /// not it, so this refuses every leased registration; the tunnel
+    /// listener admits through `admit_registration`.
     async fn admit(
         &self,
         _hello: &chan_tunnel_proto::Hello,
@@ -196,15 +203,34 @@ impl RegistrationAdmission for ControlAdmission {
             .as_ref()
             .and_then(|lease| AdmissionLease::parse(lease.clone()).ok())
             .ok_or(ServerError::ControlUnavailable)?;
-        if let Err(error) = self
+        let claims = match self
             .admission_lease_verifier
             .verify(&admission_lease, chrono::Utc::now())
         {
+            Ok(claims) => claims,
+            Err(error) => {
+                tracing::warn!(
+                    %registration_id,
+                    user = %validated.username,
+                    %error,
+                    "refusing a registration whose admission lease this proxy cannot verify"
+                );
+                return Err(ServerError::ControlUnavailable);
+            }
+        };
+        // The controller compares exactly this binding with the request.
+        let expected = AdmissionLeaseBinding {
+            owner_user_id: validated.user_id,
+            user: validated.username.clone(),
+            devserver_id: validated.devserver_id.clone(),
+            registration_id,
+            proxy_id: self.proxy_id.clone(),
+        };
+        if claims.binding != expected {
             tracing::warn!(
                 %registration_id,
                 user = %validated.username,
-                %error,
-                "refusing a registration whose admission lease this proxy cannot verify"
+                "refusing a registration whose admission lease is bound to another registration, proxy, owner or devserver"
             );
             return Err(ServerError::ControlUnavailable);
         }
@@ -891,15 +917,30 @@ where
                         }
                         Ok(RegistryEvent::LeaseRefresh {
                             registration_id,
-                            owner_user_id: _,
+                            owner_user_id,
                             admission_lease,
                             admission_lease_expires_at: _,
                         }) => {
                             if unpublished.contains(&registration_id) {
                                 continue;
                             }
-                            let admission_lease = AdmissionLease::parse(admission_lease.to_string())
-                                .map_err(|error| AttemptError::Retry(format!("refreshed admission lease: {error}")))?;
+                            let admission_lease = match refreshed_lease(config, registration_id, owner_user_id, &admission_lease) {
+                                Ok(admission_lease) => admission_lease,
+                                Err(reason) => {
+                                    // The registration was published, so the
+                                    // eviction's TunnelDown is an ordinary delta:
+                                    // it is not added to `unpublished`.
+                                    let evicted = registry.tunnels().evict_registration(registration_id);
+                                    tracing::warn!(
+                                        proxy_id = config.proxy_id.as_str(),
+                                        %registration_id,
+                                        evicted,
+                                        %reason,
+                                        "evicted a local tunnel whose refreshed admission lease this proxy cannot verify"
+                                    );
+                                    continue;
+                                }
+                            };
                             write_active(
                                 &mut writer,
                                 &ClientFrame::LeaseRefresh {
@@ -1042,6 +1083,30 @@ fn tunnel_row(info: &TunnelInfo, config: &Config) -> Result<TunnelRow, Unpublish
         peer_addr: info.peer_addr,
         connected_at: info.connected_at,
     })
+}
+
+/// Check a refreshed lease the way the controller will before forwarding
+/// it: it must parse, verify under this proxy's ring, and name this
+/// registration, on this proxy, for the owner the registry holds it under.
+/// The controller compares the user and devserver with its row as well.
+fn refreshed_lease(
+    config: &Config,
+    registration_id: Uuid,
+    owner_user_id: Uuid,
+    raw: &str,
+) -> Result<AdmissionLease, String> {
+    let lease = AdmissionLease::parse(raw).map_err(|error| error.to_string())?;
+    let claims = config
+        .admission_lease_verifier
+        .verify(&lease, chrono::Utc::now())
+        .map_err(|error| error.to_string())?;
+    if claims.binding.registration_id != registration_id
+        || claims.binding.proxy_id != config.proxy_id
+        || claims.binding.owner_user_id != owner_user_id
+    {
+        return Err("admission lease is bound to another registration, proxy or owner".into());
+    }
+    Ok(lease)
 }
 
 /// Take one registration whose row cannot be published off this node,
@@ -1316,6 +1381,7 @@ mod tests {
             readiness: readiness.clone(),
             admission_epoch: Arc::new(AtomicU64::new(1)),
             admission_lease_verifier: config.admission_lease_verifier.clone(),
+            proxy_id: config.proxy_id.clone(),
         };
         let boot_id = Uuid::new_v4();
         let (proxy, mut controller) = duplex(64 * 1024);
@@ -1471,16 +1537,23 @@ mod tests {
             workspace: "devserver".into(),
             name: None,
         };
+        let registration_id = Uuid::new_v4();
         let validated = validated_with_lease(
             Uuid::new_v4(),
             "alice",
             "devserver-a",
-            Uuid::new_v4(),
+            registration_id,
             TEST_ADMISSION_SIGNING_KEY,
         );
-        let permit = admission.admit(&hello, &validated).await.unwrap();
+        let permit = admission
+            .admit_registration(&hello, &validated, registration_id)
+            .await
+            .unwrap();
         admission.cancel(permit).await;
-        let error = admission.admit(&hello, &validated).await.unwrap_err();
+        let error = admission
+            .admit_registration(&hello, &validated, registration_id)
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             ServerError::AdmissionAtCapacity { user } if user == "alice"
@@ -1614,23 +1687,11 @@ mod tests {
             admission_lease_verifier: test_config("127.0.0.1:1".parse().unwrap())
                 .admission_lease_verifier
                 .clone(),
+            proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
         };
+        let (hello, validated, registration_id) = admission_inputs();
         let error = admission
-            .admit(
-                &Hello {
-                    protocol: ProtocolVersion::V1,
-                    client_version: "test".into(),
-                    workspace: "devserver".into(),
-                    name: None,
-                },
-                &validated_with_lease(
-                    Uuid::new_v4(),
-                    "alice",
-                    "devserver-a",
-                    Uuid::new_v4(),
-                    TEST_ADMISSION_SIGNING_KEY,
-                ),
-            )
+            .admit_registration(&hello, &validated, registration_id)
             .await
             .unwrap_err();
         assert!(matches!(error, ServerError::ControlUnavailable));
@@ -1648,6 +1709,7 @@ mod tests {
             admission_lease_verifier: test_config("127.0.0.1:1".parse().unwrap())
                 .admission_lease_verifier
                 .clone(),
+            proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
         };
         let permit = RegistrationPermit {
             request_id: Uuid::new_v4(),
@@ -1958,28 +2020,47 @@ mod tests {
     /// `test_config` gives the proxy.
     const FOREIGN_ADMISSION_SIGNING_KEY: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
 
-    fn validated_with_lease(
+    fn lease_binding(
         user_id: Uuid,
         user: &str,
         devserver_id: &str,
         registration_id: Uuid,
+        proxy_id: &str,
+    ) -> devserver_control_proto::AdmissionLeaseBinding {
+        devserver_control_proto::AdmissionLeaseBinding {
+            owner_user_id: user_id,
+            user: user.into(),
+            devserver_id: devserver_id.into(),
+            registration_id,
+            proxy_id: devserver_control_proto::ProxyId::parse(proxy_id).unwrap(),
+        }
+    }
+
+    fn signed_lease(
+        binding: devserver_control_proto::AdmissionLeaseBinding,
+        signing_key: &str,
+    ) -> AdmissionLease {
+        AdmissionLeaseSigner::from_base64(signing_key)
+            .unwrap()
+            .sign(binding, 100, chrono::Utc::now(), 120)
+            .unwrap()
+    }
+
+    /// Validation of `user_id`, `user` and `devserver_id` carrying a lease
+    /// signed for `binding`, which need not be bound to them. One clock read
+    /// dates both the lease and the expiry reported beside it, so the two
+    /// agree to the second, as the controller requires of a published row.
+    fn validated_carrying(
+        user_id: Uuid,
+        user: &str,
+        devserver_id: &str,
+        binding: devserver_control_proto::AdmissionLeaseBinding,
         signing_key: &str,
     ) -> Validated {
         let now = chrono::Utc::now();
         let lease = AdmissionLeaseSigner::from_base64(signing_key)
             .unwrap()
-            .sign(
-                devserver_control_proto::AdmissionLeaseBinding {
-                    owner_user_id: user_id,
-                    user: user.into(),
-                    devserver_id: devserver_id.into(),
-                    registration_id,
-                    proxy_id: devserver_control_proto::ProxyId::parse("p1").unwrap(),
-                },
-                100,
-                now,
-                120,
-            )
+            .sign(binding, 100, now, 120)
             .unwrap();
         Validated {
             user_id,
@@ -1990,6 +2071,17 @@ mod tests {
             admission_lease: Some(lease.as_str().into()),
             admission_lease_expires_at: Some(now + chrono::Duration::seconds(120)),
         }
+    }
+
+    fn validated_with_lease(
+        user_id: Uuid,
+        user: &str,
+        devserver_id: &str,
+        registration_id: Uuid,
+        signing_key: &str,
+    ) -> Validated {
+        let binding = lease_binding(user_id, user, devserver_id, registration_id, "p1");
+        validated_carrying(user_id, user, devserver_id, binding, signing_key)
     }
 
     struct StubValidator;
@@ -2022,7 +2114,21 @@ mod tests {
                     registration_id,
                     FOREIGN_ADMISSION_SIGNING_KEY,
                 )),
-                _ => Err(ServerError::InvalidToken),
+                // `member-N`: owner N, user `member-N`, devserver `ds-N`,
+                // for tests that need several tunnels with good leases.
+                _ => match token
+                    .strip_prefix("member-")
+                    .and_then(|member| member.parse::<u128>().ok())
+                {
+                    Some(member) => Ok(validated_with_lease(
+                        Uuid::from_u128(member),
+                        token,
+                        &format!("ds-{member}"),
+                        registration_id,
+                        TEST_ADMISSION_SIGNING_KEY,
+                    )),
+                    None => Err(ServerError::InvalidToken),
+                },
             }
         }
     }
@@ -2197,7 +2303,11 @@ mod tests {
         }
     }
 
-    fn admission_inputs() -> (Hello, Validated) {
+    /// A handshake, and a validation whose lease is bound to the returned
+    /// registration id on this proxy, so admission refuses it only for the
+    /// reason a test names.
+    fn admission_inputs() -> (Hello, Validated, Uuid) {
+        let registration_id = Uuid::new_v4();
         (
             Hello {
                 protocol: ProtocolVersion::V1,
@@ -2209,9 +2319,10 @@ mod tests {
                 Uuid::new_v4(),
                 "alice",
                 "ds-9",
-                Uuid::new_v4(),
+                registration_id,
                 TEST_ADMISSION_SIGNING_KEY,
             ),
+            registration_id,
         )
     }
 
@@ -2321,8 +2432,12 @@ mod tests {
         // SnapshotAccepted cancels the eviction timer but does not make
         // the proxy ready or open admission: only FleetReady does.
         assert!(!*proxy.readiness.borrow());
-        let (hello, validated) = admission_inputs();
-        let error = proxy.admission.admit(&hello, &validated).await.unwrap_err();
+        let (hello, validated, registration_id) = admission_inputs();
+        let error = proxy
+            .admission
+            .admit_registration(&hello, &validated, registration_id)
+            .await
+            .unwrap_err();
         assert!(matches!(error, ServerError::ControlUnavailable));
 
         session.send(FakeCommand::FleetReady).await.unwrap();
@@ -2461,9 +2576,13 @@ mod tests {
     async fn control_disconnect_refuses_new_admission_and_stales_outstanding_permits() {
         let mut proxy = spawn_proxy().await;
         let session = proxy.become_ready().await;
-        let (hello, validated) = admission_inputs();
+        let (hello, validated, registration_id) = admission_inputs();
         // The fake controller auto-admits while the session is ready.
-        let permit = proxy.admission.admit(&hello, &validated).await.unwrap();
+        let permit = proxy
+            .admission
+            .admit_registration(&hello, &validated, registration_id)
+            .await
+            .unwrap();
         assert!(proxy.admission.permit_is_current(permit));
 
         proxy.control.set_online(false);
@@ -2474,7 +2593,11 @@ mod tests {
         // permit, and the readiness fast-path refuses fresh admissions
         // without queuing a request for a dead session.
         assert!(!proxy.admission.permit_is_current(permit));
-        let error = proxy.admission.admit(&hello, &validated).await.unwrap_err();
+        let error = proxy
+            .admission
+            .admit_registration(&hello, &validated, registration_id)
+            .await
+            .unwrap_err();
         assert!(matches!(error, ServerError::ControlUnavailable));
         proxy.stop().await;
     }
@@ -2939,23 +3062,22 @@ mod tests {
     async fn admission_refuses_a_lease_this_proxy_cannot_verify() {
         let mut proxy = spawn_proxy().await;
         let _session = proxy.become_ready().await;
-        let (hello, validated) = admission_inputs();
+        let (hello, validated, admitted_id) = admission_inputs();
 
         // The control case: a lease under the proxy's ring goes to the
         // controller, which admits it.
-        let admitted_id = Uuid::new_v4();
         let admitted = proxy
             .admission
             .admit_registration(&hello, &validated, admitted_id)
             .await;
+        let refused_id = Uuid::new_v4();
         let foreign = validated_with_lease(
             validated.user_id,
             "alice",
             "ds-9",
-            Uuid::new_v4(),
+            refused_id,
             FOREIGN_ADMISSION_SIGNING_KEY,
         );
-        let refused_id = Uuid::new_v4();
         let refused = proxy
             .admission
             .admit_registration(&hello, &foreign, refused_id)
@@ -2975,5 +3097,294 @@ mod tests {
              {requests_for_refused:?}"
         );
         proxy.stop().await;
+    }
+
+    /// A lease is authority for one registration on one proxy. One that
+    /// verifies but names another registration, proxy, owner or devserver
+    /// is refused here, before the controller would refuse it.
+    #[tokio::test(start_paused = true)]
+    async fn admission_refuses_a_lease_bound_to_another_registration() {
+        let mut proxy = spawn_proxy().await;
+        let _session = proxy.become_ready().await;
+        let (hello, _, _) = admission_inputs();
+        let owner = Uuid::new_v4();
+        // Every validation here is for alice's ds-9; only the lease varies.
+        let carrying = |binding| {
+            validated_carrying(owner, "alice", "ds-9", binding, TEST_ADMISSION_SIGNING_KEY)
+        };
+
+        // The control case: bound to exactly this registration.
+        let admitted_id = Uuid::new_v4();
+        let admitted = proxy
+            .admission
+            .admit_registration(
+                &hello,
+                &carrying(lease_binding(owner, "alice", "ds-9", admitted_id, "p1")),
+                admitted_id,
+            )
+            .await;
+
+        let [registration, proxy_case, owner_case, devserver_case] =
+            std::array::from_fn(|_| Uuid::new_v4());
+        let cases = [
+            (
+                "another registration",
+                registration,
+                lease_binding(owner, "alice", "ds-9", Uuid::new_v4(), "p1"),
+            ),
+            (
+                "another proxy",
+                proxy_case,
+                lease_binding(owner, "alice", "ds-9", proxy_case, "p2"),
+            ),
+            (
+                "another owner",
+                owner_case,
+                lease_binding(Uuid::new_v4(), "alice", "ds-9", owner_case, "p1"),
+            ),
+            (
+                "another devserver",
+                devserver_case,
+                lease_binding(owner, "alice", "ds-other", devserver_case, "p1"),
+            ),
+        ];
+        let mut refusals = Vec::new();
+        for (step, registration_id, binding) in cases {
+            let result = proxy
+                .admission
+                .admit_registration(&hello, &carrying(binding), registration_id)
+                .await;
+            refusals.push((step, registration_id, result));
+        }
+        settle().await;
+
+        let events = proxy.control.drain();
+        assert!(
+            admitted.is_ok() && !frames_naming(&events, admitted_id).is_empty(),
+            "the control case was not admitted through the controller: {admitted:?}"
+        );
+        let wrong: Vec<_> = refusals
+            .iter()
+            .filter_map(|(step, registration_id, result)| {
+                let sent = frames_naming(&events, *registration_id);
+                (!matches!(result, Err(ServerError::ControlUnavailable)) || !sent.is_empty())
+                    .then(|| format!("{step}: {result:?}, sent to the controller: {sent:?}"))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "leases bound to something else were not refused locally: {wrong:#?}"
+        );
+        proxy.stop().await;
+    }
+
+    /// A refreshed lease this proxy cannot verify, or one bound to another
+    /// registration, proxy or owner, means that registration's authority
+    /// can no longer be renewed here. It must cost that registration and
+    /// nothing else: the refresh is not forwarded (the controller would
+    /// refuse it), the registration is evicted, its TunnelDown goes out at
+    /// the next generation because the registration was published, and
+    /// the stream and every other tunnel stay up. Driven by hand in real
+    /// time, as `a_snapshot_row_this_proxy_cannot_verify_is_left_out_and_evicted`
+    /// is, so every frame is read in order and no dial outruns a lease.
+    #[tokio::test]
+    async fn a_lease_refresh_this_proxy_cannot_verify_evicts_only_that_registration() {
+        const MEMBERS: std::ops::RangeInclusive<u128> = 3..=8;
+        let registry = Registry::new();
+        let (port, listener) = spawn_tunnel_listener(
+            &registry,
+            Arc::new(chan_tunnel_server::AllowAllAdmission),
+            false,
+        )
+        .await;
+        let (_, _, mut registry_events) = registry.tunnels().snapshot_and_subscribe();
+        let mut clients = Vec::new();
+        let mut ids = Vec::new();
+        for member in MEMBERS {
+            let token = format!("member-{member}");
+            clients.push(dial_tunnel_as(port, axum::Router::new(), &token).await);
+            ids.push(next_registration_of(&mut registry_events, &token).await);
+        }
+        drop(registry_events);
+        let registered = |member: u128| {
+            registry
+                .tunnels()
+                .get(&format!("member-{member}"), &format!("ds-{member}"))
+                .is_some()
+        };
+
+        let config = test_config("127.0.0.1:1".parse().unwrap());
+        let sessions = SessionStore::new(100, Duration::from_secs(3600));
+        let (_requests_tx, mut requests_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness) = watch::channel(false);
+        let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(8);
+        let (proxy_stream, mut controller) = duplex(64 * 1024);
+        let stream = tokio::spawn({
+            let registry = registry.clone();
+            let sessions = sessions.clone();
+            async move {
+                run_stream(
+                    proxy_stream,
+                    config.as_ref(),
+                    Uuid::new_v4(),
+                    &registry,
+                    &sessions,
+                    &mut requests_rx,
+                    &readiness_tx,
+                    lifecycle_tx,
+                )
+                .await
+            }
+        });
+
+        let _: ClientFrame = read_frame(&mut controller).await.unwrap();
+        write_frame(
+            &mut controller,
+            &ServerFrame::ServerHello {
+                protocol_version: PROTOCOL_VERSION,
+                package_version: env!("CARGO_PKG_VERSION").into(),
+                heartbeat_seconds: 5,
+                dead_seconds: 15,
+                grace_seconds: 30,
+            },
+        )
+        .await
+        .unwrap();
+        let mut snapshot_rows = HashSet::new();
+        let base_generation = loop {
+            match read_frame::<_, ClientFrame>(&mut controller).await.unwrap() {
+                ClientFrame::SnapshotStart { .. } => {}
+                ClientFrame::SnapshotChunk { rows } => {
+                    snapshot_rows.extend(rows.iter().map(|row| row.registration_id));
+                }
+                ClientFrame::SnapshotEnd { base_generation } => break base_generation,
+                other => panic!("unexpected frame during the snapshot: {other:?}"),
+            }
+        };
+        assert_eq!(snapshot_rows, ids.iter().copied().collect::<HashSet<_>>());
+        write_frame(
+            &mut controller,
+            &ServerFrame::SnapshotAccepted { base_generation },
+        )
+        .await
+        .unwrap();
+        write_frame(&mut controller, &ServerFrame::FleetReady)
+            .await
+            .unwrap();
+        readiness.wait_for(|ready| *ready).await.unwrap();
+
+        let binding = |member: u128, registration_id, proxy_id| {
+            lease_binding(
+                Uuid::from_u128(member),
+                &format!("member-{member}"),
+                &format!("ds-{member}"),
+                registration_id,
+                proxy_id,
+            )
+        };
+        let refused = [
+            (
+                "a refresh signed outside the ring",
+                3,
+                signed_lease(binding(3, ids[0], "p1"), FOREIGN_ADMISSION_SIGNING_KEY)
+                    .as_str()
+                    .to_string(),
+            ),
+            (
+                "a refresh bound to another registration",
+                4,
+                signed_lease(binding(4, Uuid::new_v4(), "p1"), TEST_ADMISSION_SIGNING_KEY)
+                    .as_str()
+                    .to_string(),
+            ),
+            (
+                "a refresh bound to another proxy",
+                5,
+                signed_lease(binding(5, ids[2], "p2"), TEST_ADMISSION_SIGNING_KEY)
+                    .as_str()
+                    .to_string(),
+            ),
+            (
+                "a refresh bound to another owner",
+                6,
+                signed_lease(
+                    lease_binding(Uuid::new_v4(), "member-6", "ds-6", ids[3], "p1"),
+                    TEST_ADMISSION_SIGNING_KEY,
+                )
+                .as_str()
+                .to_string(),
+            ),
+            ("a refresh that does not parse", 7, String::new()),
+        ];
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(120);
+        let mut generation = base_generation;
+        for (step, member, lease) in refused {
+            let registration_id = ids[(member - 3) as usize];
+            assert!(
+                registry.tunnels().refresh_admission_lease(
+                    registration_id,
+                    Uuid::from_u128(member),
+                    lease.into(),
+                    expires_at,
+                ),
+                "{step}: the registry did not take the refresh"
+            );
+            generation += 1;
+            match read_frame::<_, ClientFrame>(&mut controller).await {
+                Ok(ClientFrame::TunnelDown {
+                    generation: sent,
+                    registration_id: down,
+                }) if sent == generation && down == registration_id => {}
+                Ok(other) => panic!(
+                    "{step}: expected TunnelDown {{ generation: {generation}, registration_id: \
+                     {registration_id} }}, got {other:?}; still registered: {}",
+                    registered(member)
+                ),
+                Err(error) => panic!(
+                    "{step}: the control stream ended ({error}); stream task finished: {}; \
+                     still registered: {}",
+                    stream.is_finished(),
+                    registered(member)
+                ),
+            }
+            assert!(
+                !registered(member),
+                "{step}: the registration was not evicted"
+            );
+        }
+
+        // The control case: a refresh that verifies is forwarded, and its
+        // tunnel stays.
+        let renewal = signed_lease(binding(8, ids[5], "p1"), TEST_ADMISSION_SIGNING_KEY);
+        assert!(registry.tunnels().refresh_admission_lease(
+            ids[5],
+            Uuid::from_u128(8),
+            renewal.as_str().into(),
+            expires_at,
+        ));
+        let forwarded = read_frame::<_, ClientFrame>(&mut controller).await.unwrap();
+        assert!(
+            matches!(
+                &forwarded,
+                ClientFrame::LeaseRefresh { registration_id, admission_lease }
+                    if *registration_id == ids[5] && *admission_lease == renewal
+            ),
+            "{forwarded:?}"
+        );
+        issue_browser_session(&sessions);
+        let next = read_frame::<_, ClientFrame>(&mut controller).await.unwrap();
+        assert!(
+            matches!(next, ClientFrame::BrowserSessionUp { generation: sent, .. } if sent == generation + 1),
+            "{next:?}"
+        );
+        assert!(registered(8));
+        assert!(!stream.is_finished());
+
+        drop(controller);
+        let _ = stream.await;
+        for client in clients {
+            client.stop().await;
+        }
+        listener.abort();
     }
 }
