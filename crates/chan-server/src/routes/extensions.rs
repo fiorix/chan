@@ -81,7 +81,7 @@ pub async fn proxy_extension_root(
 /// Namespace-wide response policy. Mounted as the outermost layer on
 /// both proxy routes in `lib.rs` (and mirrored by every test router
 /// here), so each response leaving the extension namespace (proxied
-/// reply, capability miss, proxy error, anonymous 403, preflight) carries
+/// reply, capability miss, proxy error, preflight) carries
 /// the policy without per-branch application. The requesting frame is
 /// opaque-origin: any response missing the policy surfaces in its
 /// console as a CORS violation that masks the true status. The WS 101
@@ -96,35 +96,6 @@ pub async fn extension_response_policy(
         apply_extension_response_policy(response.headers_mut());
     }
     response
-}
-
-/// Refuse an anonymous tunnel caller's POST, PUT and DELETE on the extension
-/// capability proxy. The gateway's capability lane forwards anyone holding an
-/// extension link, with no session, as a caller with the nil subject (see
-/// [`crate::TunnelOrigin::anonymous`]); that caller may load and read the
-/// extension but not drive its mutations. The owner, a grantee and a local
-/// caller pass, as does every other verb.
-pub async fn refuse_anonymous_mutation(
-    request: Request<Body>,
-    next: axum::middleware::Next,
-) -> Response {
-    let is_mutation = matches!(
-        *request.method(),
-        Method::POST | Method::PUT | Method::DELETE
-    );
-    if is_mutation
-        && request
-            .extensions()
-            .get::<crate::TunnelOrigin>()
-            .is_some_and(crate::TunnelOrigin::anonymous)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            "extension mutation is not available for this gateway role",
-        )
-            .into_response();
-    }
-    next.run(request).await
 }
 
 async fn proxy_extension_request(
@@ -630,8 +601,8 @@ mod tests {
         )])
     }
 
-    /// Mirror of the lib.rs mounting: both proxy routes behind the
-    /// anonymous mutation refusal, wrapped by the namespace response policy.
+    /// Mirror of the lib.rs mounting: both proxy routes wrapped by the
+    /// namespace response policy.
     fn extension_router(catalog: Arc<ExtensionCatalog>, tenant: ExtensionTenantContext) -> Router {
         Router::new()
             .route(
@@ -642,7 +613,6 @@ mod tests {
                 "/_chan/extensions/{id}/{capability}/{*path}",
                 any(proxy_extension),
             )
-            .route_layer(axum::middleware::from_fn(refuse_anonymous_mutation))
             .route_layer(axum::middleware::from_fn(extension_response_policy))
             .layer(Extension(tenant))
             .layer(Extension(catalog))
@@ -984,65 +954,79 @@ mod tests {
         }
     }
 
+    /// No anonymous caller reaches the proxy routes. A tunnel request whose
+    /// assertion names no user, the nil UUID or an empty subject, is refused
+    /// with 401 at the devserver's tunnel layer before any proxying, for a
+    /// GET, a WebSocket upgrade and a POST alike, as is a request with no
+    /// assertion. A grantee reaches the proxy like the owner, and a local
+    /// caller carries no `TunnelOrigin` at all.
     #[tokio::test]
-    async fn anonymous_callers_are_read_only_on_the_proxy_routes_and_grantees_are_not() {
+    async fn anonymous_callers_are_refused_on_the_proxy_routes_and_grantees_are_not() {
+        use crate::devserver::tunnel_test_support::{signed_as, through_the_tunnel};
+
         let (tenant, _shutdown_tx) = tenant();
         let app = extension_router(catalog(), tenant);
+        let tunnel = through_the_tunnel(app.clone());
+        let uri = format!("/_chan/extensions/echo/{CAPABILITY}/state");
+        let request = |method: Method, upgrade: bool| {
+            let builder = Request::builder()
+                .method(method)
+                .uri(&uri)
+                .header(header::ORIGIN, "null");
+            if upgrade {
+                builder
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::CONNECTION, "Upgrade")
+                    .header(header::SEC_WEBSOCKET_VERSION, "13")
+                    .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            } else {
+                builder
+            }
+        };
 
-        // An anonymous TunnelOrigin: mutations 403 before any proxying,
-        // and the namespace policy keeps the 403 readable from the
-        // opaque-origin frame.
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
-            .header(header::ORIGIN, "null")
-            .body(Body::empty())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(crate::TunnelOrigin { caller: None });
-        let response = app.clone().oneshot(request).await.expect("anonymous POST");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                .expect("ACAO on the anonymous 403"),
-            "null"
-        );
+        for (method, upgrade) in [
+            (Method::GET, false),
+            (Method::GET, true),
+            (Method::POST, false),
+        ] {
+            let unsigned = request(method.clone(), upgrade)
+                .body(Body::empty())
+                .unwrap();
+            let response = tunnel.clone().oneshot(unsigned).await.expect("unsigned");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "no assertion {method} upgrade={upgrade}"
+            );
+            for caller in ["nil", "empty"] {
+                let signed = signed_as(request(method.clone(), upgrade), caller)
+                    .body(Body::empty())
+                    .unwrap();
+                let response = tunnel.clone().oneshot(signed).await.expect("anonymous");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{caller} {method} upgrade={upgrade}"
+                );
+            }
+        }
 
-        // GETs, the WebSocket upgrade included, pass for an anonymous
-        // caller: the refused upstream connect proves the guard did not fire.
-        let mut request = Request::builder()
-            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
-            .body(Body::empty())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(crate::TunnelOrigin { caller: None });
-        let response = app.clone().oneshot(request).await.expect("anonymous GET");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-
-        // A grantee's POST reaches the proxy like the owner's.
-        let request = crate::route_authority::test_support::Caller::Grantee
-            .stamp(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state")),
-                None,
-            )
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(request).await.expect("grantee POST");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        // A grantee's GET and POST reach the proxy like the owner's.
+        for method in [Method::GET, Method::POST] {
+            let signed = signed_as(request(method.clone(), false), "grantee")
+                .body(Body::empty())
+                .unwrap();
+            let response = tunnel.clone().oneshot(signed).await.expect("grantee");
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "grantee {method}"
+            );
+        }
 
         // Local callers carry no TunnelOrigin and are unaffected.
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.expect("local POST");
+        let local = request(Method::POST, false).body(Body::empty()).unwrap();
+        let response = app.oneshot(local).await.expect("local POST");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
@@ -1096,32 +1080,55 @@ mod tests {
         }
     }
 
-    /// The anonymous capability lane reaches the proxy with a nil subject and
-    /// no session, so whoever holds the link may read through it but not
-    /// POST, PUT or DELETE; a `TunnelOrigin` with no verified caller is held
-    /// to the same line. The refusal carries the extension response policy,
-    /// so the opaque-origin frame reads the true 403.
+    /// The gateway forwards no caller without a session to the extension
+    /// proxy, and the devserver serves none: through the workspace tenant's
+    /// own router behind the tunnel layer, an assertion naming no user is
+    /// refused every verb with the tunnel layer's 401, the one a missing
+    /// assertion gets, while the same request signed by a grantee reaches the
+    /// proxy.
     #[tokio::test]
-    async fn an_anonymous_caller_may_read_but_not_mutate_through_the_extension_proxy() {
-        use crate::route_authority::test_support::Caller;
+    async fn an_anonymous_caller_is_refused_every_verb_through_the_extension_proxy() {
+        use crate::devserver::tunnel_test_support::{signed_as, through_the_tunnel};
 
-        for caller in [Caller::Anonymous, Caller::Unverified] {
-            for method in [Method::POST, Method::PUT, Method::DELETE] {
-                let (status, body, acao) = through_the_tenant(caller, method.clone()).await;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{caller:?} {method}");
-                assert!(
-                    body.ends_with("for this gateway role"),
-                    "{caller:?} {method}: {body}"
-                );
-                assert_eq!(
-                    acao.as_ref().map(HeaderValue::as_bytes),
-                    Some(&b"null"[..]),
-                    "{caller:?} {method}: the refusal lost the frame policy"
-                );
+        let tunnel = through_the_tunnel(crate::router_with_extensions(
+            crate::state::test_support::make_test_state(false),
+            catalog(),
+        ));
+        let send = |method: Method, caller: &'static str| {
+            let request = signed_as(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/_chan/extensions/echo/{CAPABILITY}/state"))
+                    .header(header::ORIGIN, "null"),
+                caller,
+            )
+            .body(Body::empty())
+            .unwrap();
+            let tunnel = tunnel.clone();
+            async move {
+                let response = tunnel.oneshot(request).await.expect("infallible router");
+                let status = response.status();
+                let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+                (status, String::from_utf8_lossy(&body).into_owned())
             }
-            let (status, body, _) = through_the_tenant(caller, Method::GET).await;
-            assert_eq!(status, StatusCode::BAD_GATEWAY, "{caller:?} GET: {body}");
+        };
+
+        for caller in ["nil", "empty"] {
+            for method in [
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ] {
+                let (status, body) = send(method.clone(), caller).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{caller} {method}");
+                assert_eq!(body, "unauthorized", "{caller} {method}");
+            }
         }
+        let (status, body) = send(Method::GET, "grantee").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "grantee GET: {body}");
     }
 
     #[tokio::test]

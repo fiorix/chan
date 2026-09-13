@@ -38,43 +38,39 @@ pub(crate) enum Verb {
     Any,
 }
 
-/// What each kind of caller meets on a route. There are four kinds:
+/// What each kind of caller meets on a route. There are three kinds:
 ///
 /// - A **local** caller carries no `TunnelOrigin`: it came in on the loopback
 ///   bind, holding whatever bearer the router asks for.
 /// - The **owner** is a tunnel caller whose verified subject is the
 ///   devserver's owner.
-/// - A **grantee** is a tunnel caller with any other real subject. The gateway
-///   admits only the owner and a grantee to a devserver session, and a grant
-///   is all-or-nothing: one binary, shell-equivalent authority over the
+/// - A **grantee** is a tunnel caller with any other verified subject. The
+///   gateway admits only the owner and a grantee to a devserver session, and a
+///   grant is all-or-nothing: one binary, shell-equivalent authority over the
 ///   devserver (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). A
 ///   grantee meets what the owner meets everywhere except the reverse-tunnel
 ///   legs, which dial out through an addressed app window whose host can be
 ///   the owner's own desktop, outside the devserver a grant covers.
-/// - An **anonymous** caller is a tunnel caller with no real subject: the nil
-///   subject the gateway signs on its extension capability lane, or no
-///   verified caller at all. The gateway path-gates that lane to
-///   `/_chan/extensions/...`, so in production an anonymous caller reaches
-///   the extension routes and nothing else, and there it may not POST, PUT or
-///   DELETE.
+///
+/// There is no anonymous tunnel caller. The gateway forwards nothing without a
+/// signed-in principal, extension frames included (it binds their links to the
+/// user who opened them), and the devserver's tunnel layer refuses an
+/// assertion whose subject names no user with 401 before any of these routers
+/// runs (`mark_tunnel_origin` in `devserver.rs`).
 ///
 /// A row records what the router does with each caller, not what the gateway
-/// forwards: a `NonOwner` row on a tenant `/api` route says no gate there
-/// would stop an anonymous caller, even though the gateway never sends one.
+/// forwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Authority {
     /// Answered before any caller authority is consulted: static assets, the
     /// devserver's liveness and identity probes, and the fallback that
     /// dispatches into the tenants (whose own tables then apply).
     Public,
-    /// Every caller reaches the handler: no gate on the route tells the
-    /// owner, a grantee and an anonymous caller apart.
+    /// Every caller reaches the handler: no gate on the route tells the owner
+    /// and a grantee apart.
     NonOwner,
-    /// The owner, a grantee and a local caller reach the handler; an
-    /// anonymous caller is refused with 403.
-    Grantee,
-    /// The owner and a local caller reach the handler; a grantee and an
-    /// anonymous caller are refused with 403.
+    /// The owner and a local caller reach the handler; a grantee is refused
+    /// with 403.
     Owner,
     /// Only a local caller holding the devserver's bearer reaches the
     /// handler. The gateway strips client credentials, so no tunnel caller
@@ -90,7 +86,7 @@ pub(crate) type RouteTable = &'static [(Verb, &'static str, Authority)];
 /// route path starts with `/`.
 pub(crate) const FALLBACK: &str = "{fallback}";
 
-use Authority::{Grantee, Local, NonOwner, Owner, Public};
+use Authority::{Local, NonOwner, Owner, Public};
 use Verb::{Any, Connect, Delete, Get, Options, Patch, Post, Put, Trace};
 
 /// The workspace tenant: `router_with_extensions` in `lib.rs`.
@@ -192,20 +188,23 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Get, "/api/index/reports/state", NonOwner),
     (Get, "/api/screensaver/state", NonOwner),
     (Post, "/api/screensaver/verify", NonOwner),
-    // The extension capability proxy answers every verb. Its
-    // `refuse_anonymous_mutation` layer refuses an anonymous caller's POST,
-    // PUT and DELETE and passes every other verb and every other caller.
+    // The extension capability proxy answers every verb, and like the rest of
+    // a grant no gate on it tells the owner and a grantee apart.
     (Get, "/_chan/extensions/{id}/{capability}/", NonOwner),
-    (Post, "/_chan/extensions/{id}/{capability}/", Grantee),
-    (Put, "/_chan/extensions/{id}/{capability}/", Grantee),
+    (Post, "/_chan/extensions/{id}/{capability}/", NonOwner),
+    (Put, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Patch, "/_chan/extensions/{id}/{capability}/", NonOwner),
-    (Delete, "/_chan/extensions/{id}/{capability}/", Grantee),
+    (Delete, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Options, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Trace, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Connect, "/_chan/extensions/{id}/{capability}/", NonOwner),
     (Get, "/_chan/extensions/{id}/{capability}/{*path}", NonOwner),
-    (Post, "/_chan/extensions/{id}/{capability}/{*path}", Grantee),
-    (Put, "/_chan/extensions/{id}/{capability}/{*path}", Grantee),
+    (
+        Post,
+        "/_chan/extensions/{id}/{capability}/{*path}",
+        NonOwner,
+    ),
+    (Put, "/_chan/extensions/{id}/{capability}/{*path}", NonOwner),
     (
         Patch,
         "/_chan/extensions/{id}/{capability}/{*path}",
@@ -214,7 +213,7 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (
         Delete,
         "/_chan/extensions/{id}/{capability}/{*path}",
-        Grantee,
+        NonOwner,
     ),
     (
         Options,
@@ -576,58 +575,35 @@ pub(crate) mod test_support {
         Local,
         /// A verified assertion whose subject is the devserver's owner.
         Owner,
-        /// A verified assertion with a real subject that is not the owner's.
+        /// A verified assertion with a subject that is not the owner's.
         Grantee,
-        /// A verified assertion with the nil subject, the one the gateway's
-        /// extension capability lane signs.
-        Anonymous,
-        /// A `TunnelOrigin` with no verified caller. `mark_tunnel_origin`
-        /// never builds one, and it must fail closed exactly as `Anonymous`
-        /// does.
-        Unverified,
     }
 
     impl Caller {
-        pub(crate) const ALL: [Caller; 5] = [
-            Caller::Local,
-            Caller::Owner,
-            Caller::Grantee,
-            Caller::Anonymous,
-            Caller::Unverified,
-        ];
+        pub(crate) const ALL: [Caller; 3] = [Caller::Local, Caller::Owner, Caller::Grantee];
 
         /// The owner's user id, shared with the devserver tests' signed
         /// assertions.
         pub(crate) const OWNER_ID: &str = "11111111-1111-4111-8111-111111111111";
         /// A grantee's user id: a real subject that is not the owner's.
         pub(crate) const GRANTEE_ID: &str = "22222222-2222-4222-8222-222222222222";
-        /// `Uuid::nil().to_string()`, the subject the gateway signs on its
-        /// extension capability lane.
-        pub(crate) const NIL_ID: &str = "00000000-0000-0000-0000-000000000000";
-
-        /// Both anonymous shapes.
-        pub(crate) fn is_anonymous(self) -> bool {
-            matches!(self, Caller::Anonymous | Caller::Unverified)
-        }
 
         /// The `TunnelOrigin` a request from this caller carries.
         pub(crate) fn origin(self) -> Option<crate::TunnelOrigin> {
             let verified = |sub: &str| crate::TunnelOrigin {
-                caller: Some(chan_tunnel_proto::gateway_assertion::Claims {
+                caller: chan_tunnel_proto::gateway_assertion::Claims {
                     sub: sub.to_string(),
                     owner_user_id: Self::OWNER_ID.to_string(),
                     aud: "owner--probe.p1.proxy.example".to_string(),
                     drv: "probe".to_string(),
                     iat: 0,
                     exp: 0,
-                }),
+                },
             };
             match self {
                 Caller::Local => None,
                 Caller::Owner => Some(verified(Self::OWNER_ID)),
                 Caller::Grantee => Some(verified(Self::GRANTEE_ID)),
-                Caller::Anonymous => Some(verified(Self::NIL_ID)),
-                Caller::Unverified => Some(crate::TunnelOrigin { caller: None }),
             }
         }
 
@@ -673,8 +649,6 @@ pub(crate) mod test_support {
     fn expected(authority: Authority, caller: Caller) -> Outcome {
         match authority {
             Authority::Public | Authority::NonOwner => Outcome::Reach,
-            Authority::Grantee if caller.is_anonymous() => Outcome::Refused,
-            Authority::Grantee => Outcome::Reach,
             Authority::Owner if matches!(caller, Caller::Local | Caller::Owner) => Outcome::Reach,
             Authority::Owner => Outcome::Refused,
             Authority::Local if caller == Caller::Local => Outcome::Reach,

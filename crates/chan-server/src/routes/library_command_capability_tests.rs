@@ -248,9 +248,7 @@ async fn capability_dies_with_its_invoking_window() {
 
 /// A grant is all-or-nothing: a grantee's mint yields the capability the
 /// owner's does, and the grantee inspects the library and acts on it with
-/// that capability. The launcher does not tell an anonymous caller from a
-/// grantee; the gateway forwards an anonymous caller only to extension
-/// capability paths, which never route here.
+/// that capability.
 #[tokio::test]
 async fn a_grantee_capability_inspects_and_acts_like_the_owner() {
     let fixture = fixture().await;

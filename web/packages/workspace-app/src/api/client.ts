@@ -1176,9 +1176,8 @@ export const api = {
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
   /// Ready local extensions for this process. The catalog is served to any
   /// authenticated client. Over the gateway tunnel the owner and a grantee
-  /// use the proxy alike; an anonymous capability caller gets read-only proxy
-  /// access (mutations 403) via the server-side refuse_anonymous_mutation
-  /// layer.
+  /// use the proxy alike, and the gateway binds each frame's capability link
+  /// to the signed-in user who opened it.
   extensions: () => req<ExtensionInfo[]>("GET", "/api/extensions"),
   /// Reset the workspace at one of three escalating levels. After a
   /// successful reset the caller should reload the window so cached

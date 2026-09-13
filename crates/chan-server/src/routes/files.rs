@@ -3364,9 +3364,7 @@ mod write_tests {
     /// `?root=filesystem` re-roots an upload at `/`, outside the workspace
     /// sandbox. A grant is shell-equivalent, so a grantee uploads there as the
     /// owner and a local caller do: the lane hands no caller anything its
-    /// terminal does not. The workspace tenant does not tell an anonymous
-    /// caller from a grantee; the gateway forwards an anonymous caller only to
-    /// extension capability paths, which never reach `/api`.
+    /// terminal does not.
     #[tokio::test]
     async fn a_grantee_can_upload_through_the_filesystem_root() {
         use crate::route_authority::test_support::Caller;
@@ -5494,9 +5492,7 @@ mod doc_divert_tests {
 
     /// `?root=filesystem&download=1` re-roots a read at `/`, outside the
     /// workspace sandbox. A grant is shell-equivalent, so a grantee reads there
-    /// as the owner and a local caller do. The workspace tenant does not tell
-    /// an anonymous caller from a grantee; the gateway forwards an anonymous
-    /// caller only to extension capability paths, which never reach `/api`.
+    /// as the owner and a local caller do.
     #[tokio::test]
     async fn a_grantee_can_download_through_the_filesystem_root() {
         use crate::route_authority::test_support::Caller;

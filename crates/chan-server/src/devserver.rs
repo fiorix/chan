@@ -2185,9 +2185,9 @@ async fn gate_tenant_during_startup(
 
 /// Middleware that stamps every request entering the tunnel-only app clone with
 /// [`crate::TunnelOrigin`], carrying the verified gateway caller. A request with
-/// a missing or unverifiable assertion is refused with 401 here. A local
-/// loopback request never passes through this layer, so it never carries the
-/// marker.
+/// a missing or unverifiable assertion, or one whose verified subject names no
+/// user, is refused with 401 here. A local loopback request never passes
+/// through this layer, so it never carries the marker.
 #[derive(Clone)]
 struct TunnelAssertion {
     key: chan_tunnel_proto::gateway_assertion::AssertionKey,
@@ -2256,15 +2256,31 @@ async fn mark_tunnel_origin(
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     };
+    // Every caller the gateway forwards is a signed-in user, and a user id is
+    // never nil (`users.id` is `gen_random_uuid()`). A nil or empty subject is
+    // a caller with no session, which no route here may serve.
+    if subject_names_no_user(&caller.sub) {
+        tracing::warn!(
+            aud = %aud,
+            devserver_id = %assertion.devserver_id,
+            "gateway assertion names no user",
+        );
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     tracing::debug!(
+        sub = %caller.sub,
         owner = caller.is_owner(),
         aud = %caller.aud,
         "gateway assertion accepted",
     );
-    req.extensions_mut().insert(crate::TunnelOrigin {
-        caller: Some(caller),
-    });
+    req.extensions_mut().insert(crate::TunnelOrigin { caller });
     next.run(req).await
+}
+
+/// The nil UUID in any spelling, with or without hyphens, and the empty
+/// subject.
+fn subject_names_no_user(subject: &str) -> bool {
+    subject.bytes().all(|byte| byte == b'0' || byte == b'-')
 }
 
 /// Handle one request from the local discovery endpoint.
@@ -2645,7 +2661,90 @@ fn canonical_root(root: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+pub(crate) mod tunnel_test_support {
+    //! The devserver's tunnel layer as tests elsewhere in the crate drive it:
+    //! a test tunnel's assertion key and registration, signed callers, and a
+    //! router wrapped the way `build_devserver_app` wraps its tunnel clone.
+
+    use axum::middleware;
+
+    use super::{mark_tunnel_origin, TunnelAssertion};
+    use crate::route_authority::test_support::Caller;
+
+    /// The audience every signed test assertion names.
+    pub(crate) const TEST_AUD: &str = "owner.dev";
+
+    pub(super) fn test_tunnel_assertion() -> TunnelAssertion {
+        let token = "chan_pat_test";
+        TunnelAssertion {
+            key: chan_tunnel_proto::gateway_assertion::derive_assertion_key(token),
+            devserver_id: chan_tunnel_proto::gateway_assertion::devserver_id_from_token(token),
+        }
+    }
+
+    /// A signed assertion for `caller`: `"owner"`, `"nil"` (the nil UUID as
+    /// the subject), `"empty"` (an empty subject), or anything else for a
+    /// grantee. The gateway signs neither of the subjects that name no user;
+    /// they are here to prove the tunnel layer refuses them.
+    pub(super) fn test_gateway_assertion(
+        assertion: &TunnelAssertion,
+        aud: &str,
+        caller: &str,
+    ) -> String {
+        let owner = Caller::OWNER_ID;
+        let subject = match caller {
+            "owner" => owner,
+            "nil" => "00000000-0000-0000-0000-000000000000",
+            "empty" => "",
+            _ => Caller::GRANTEE_ID,
+        };
+        let claims = chan_tunnel_proto::gateway_assertion::claims(
+            subject,
+            owner,
+            aud,
+            &assertion.devserver_id,
+        );
+        chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap()
+    }
+
+    pub(crate) fn test_tunnel_registration() -> chan_tunnel_client::Registration {
+        chan_tunnel_client::Registration {
+            prefix: "/devserver".into(),
+            user: "owner".into(),
+            workspace: test_tunnel_assertion().devserver_id,
+            owner_user_id: Caller::OWNER_ID.into(),
+        }
+    }
+
+    /// `router` behind the devserver's tunnel layer, carrying the test
+    /// tunnel's registration.
+    pub(crate) fn through_the_tunnel(router: axum::Router) -> axum::Router {
+        router
+            .layer(middleware::from_fn_with_state(
+                test_tunnel_assertion(),
+                mark_tunnel_origin,
+            ))
+            .layer(axum::Extension(test_tunnel_registration()))
+    }
+
+    /// Sign `builder` as `caller` (see [`test_gateway_assertion`]) the way
+    /// devserver-proxy forwards a request into the tunnel.
+    pub(crate) fn signed_as(
+        builder: axum::http::request::Builder,
+        caller: &str,
+    ) -> axum::http::request::Builder {
+        builder.header("x-forwarded-host", TEST_AUD).header(
+            chan_tunnel_proto::gateway_assertion::HEADER_NAME,
+            test_gateway_assertion(&test_tunnel_assertion(), TEST_AUD, caller),
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::tunnel_test_support::{
+        test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
+    };
     use super::*;
     use chan_library::workspace_slug;
     use std::sync::atomic::AtomicBool;
@@ -4270,43 +4369,6 @@ mod tests {
         assert_eq!(value["build"], crate::routes::TEST_DECLARED_BUILD_ID);
     }
 
-    fn test_tunnel_assertion() -> TunnelAssertion {
-        let token = "chan_pat_test";
-        TunnelAssertion {
-            key: chan_tunnel_proto::gateway_assertion::derive_assertion_key(token),
-            devserver_id: chan_tunnel_proto::gateway_assertion::devserver_id_from_token(token),
-        }
-    }
-
-    /// A signed assertion for `caller`: `"owner"`, `"anonymous"` (the nil
-    /// subject the gateway's extension capability lane signs), or anything
-    /// else for a grantee.
-    fn test_gateway_assertion(assertion: &TunnelAssertion, aud: &str, caller: &str) -> String {
-        use crate::route_authority::test_support::Caller;
-        let owner = Caller::OWNER_ID;
-        let subject = match caller {
-            "owner" => owner,
-            "anonymous" => Caller::NIL_ID,
-            _ => Caller::GRANTEE_ID,
-        };
-        let claims = chan_tunnel_proto::gateway_assertion::claims(
-            subject,
-            owner,
-            aud,
-            &assertion.devserver_id,
-        );
-        chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap()
-    }
-
-    fn test_tunnel_registration() -> chan_tunnel_client::Registration {
-        chan_tunnel_client::Registration {
-            prefix: "/devserver".into(),
-            user: "owner".into(),
-            workspace: test_tunnel_assertion().devserver_id,
-            owner_user_id: "11111111-1111-4111-8111-111111111111".into(),
-        }
-    }
-
     #[cfg(unix)]
     fn hold_foreign_lock(lib: &Library, root: &Path) -> chan_workspace::lock::WorkspaceLock {
         let paths = lib.workspace_paths_for(root).expect("workspace paths");
@@ -5386,6 +5448,25 @@ mod tests {
             .map(|r| r["on"].as_bool().unwrap())
     }
 
+    async fn launcher_workspace_count(app: &axum::Router) -> usize {
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/library/workspaces")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        rows.as_array().unwrap().len()
+    }
+
     #[tokio::test]
     async fn library_workspaces_crud_is_loopback_only() {
         use axum::body::to_bytes;
@@ -5625,9 +5706,9 @@ mod tests {
     /// with signed assertions, a grantee adds, stops, starts and forgets a
     /// library workspace and gets the full launcher surface, exactly as the
     /// owner and a local caller do. The reverse-tunnel legs stay the owner's.
-    /// The launcher does not tell an anonymous caller from a grantee; the
-    /// gateway signs the nil subject only on extension capability paths,
-    /// which never route here.
+    /// An assertion whose subject names no user, the nil UUID or an empty
+    /// subject, is refused with 401 at the tunnel layer on every one of those
+    /// requests before the launcher sees it.
     #[tokio::test]
     async fn a_grantee_manages_the_devserver_launcher_over_the_tunnel_like_the_owner() {
         use axum::body::to_bytes;
@@ -5686,7 +5767,56 @@ mod tests {
         if let Some(value) = &local_surface {
             assert_eq!(value, "devserver");
         }
-        for caller in ["local", "owner", "grantee", "anonymous"] {
+        for caller in ["nil", "empty"] {
+            let ws = tempfile::tempdir().expect("workspace");
+            let body = format!(r#"{{"path":{:?}}}"#, ws.path().to_string_lossy());
+            for (step, method, uri, body) in [
+                (
+                    "add",
+                    "POST",
+                    "/api/library/workspaces".to_string(),
+                    Some(body),
+                ),
+                (
+                    "off",
+                    "POST",
+                    "/api/library/workspaces/w/off".to_string(),
+                    None,
+                ),
+                (
+                    "on",
+                    "POST",
+                    "/api/library/workspaces/w/on".to_string(),
+                    None,
+                ),
+                (
+                    "remove",
+                    "DELETE",
+                    "/api/library/workspaces/w".to_string(),
+                    None,
+                ),
+                ("launcher page", "GET", "/".to_string(), None),
+                (
+                    "tunnel leg",
+                    "GET",
+                    "/api/library/tunnel/control?tunnel=tun-1".to_string(),
+                    None,
+                ),
+            ] {
+                let (status, response) = send(caller, method, &uri, body).await;
+                assert_eq!(
+                    (status, response.as_str()),
+                    (StatusCode::UNAUTHORIZED, "unauthorized"),
+                    "{caller} {step}"
+                );
+            }
+            assert_eq!(
+                launcher_workspace_count(&app).await,
+                0,
+                "{caller}: a refused caller registered a workspace"
+            );
+        }
+        for caller in ["local", "owner", "grantee"] {
             let ws = tempfile::tempdir().expect("workspace");
             let body = format!(r#"{{"path":{:?}}}"#, ws.path().to_string_lossy());
             let (status, row) = send(caller, "POST", "/api/library/workspaces", Some(body)).await;
@@ -5791,6 +5921,82 @@ mod tests {
         // A loopback request never carries it: local origin, so `local == true`.
         let local_body = body_of(app.oneshot(req()).await.unwrap()).await;
         assert_eq!(local_body, "true", "a loopback /ws is local (Leader)");
+    }
+
+    /// No route on the devserver serves a tunnel caller that is not a
+    /// signed-in user. An assertion that verifies but whose subject is the nil
+    /// UUID, in either spelling, or empty is refused exactly as a missing
+    /// assertion is, with the same 401 and body, before any route runs; the
+    /// owner and a grantee pass.
+    #[tokio::test]
+    async fn the_tunnel_layer_refuses_an_assertion_that_names_no_user() {
+        use super::tunnel_test_support::{through_the_tunnel, TEST_AUD};
+        use axum::body::to_bytes;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tunnel = {
+            let reached = reached.clone();
+            through_the_tunnel(axum::Router::new().route(
+                "/probe",
+                get(move || {
+                    reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { "reached" }
+                }),
+            ))
+        };
+        let send = |assertion: Option<String>| {
+            let mut builder = HttpRequest::builder()
+                .uri("/probe")
+                .header("x-forwarded-host", TEST_AUD);
+            if let Some(assertion) = assertion {
+                builder =
+                    builder.header(chan_tunnel_proto::gateway_assertion::HEADER_NAME, assertion);
+            }
+            let request = builder.body(Body::empty()).unwrap();
+            let tunnel = tunnel.clone();
+            async move {
+                let response = tunnel.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+        let signed = |subject: &str| {
+            let assertion = test_tunnel_assertion();
+            let claims = chan_tunnel_proto::gateway_assertion::claims(
+                subject,
+                crate::route_authority::test_support::Caller::OWNER_ID,
+                TEST_AUD,
+                &assertion.devserver_id,
+            );
+            Some(chan_tunnel_proto::gateway_assertion::sign(&assertion.key, &claims).unwrap())
+        };
+
+        let missing = send(None).await;
+        assert_eq!(
+            missing,
+            (StatusCode::UNAUTHORIZED, "unauthorized".to_string())
+        );
+        for subject in [
+            "00000000-0000-0000-0000-000000000000",
+            "00000000000000000000000000000000",
+            "",
+        ] {
+            assert_eq!(send(signed(subject)).await, missing, "subject {subject:?}");
+        }
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        for caller in ["owner", "grantee"] {
+            let assertion = test_gateway_assertion(&test_tunnel_assertion(), TEST_AUD, caller);
+            assert_eq!(
+                send(Some(assertion)).await,
+                (StatusCode::OK, "reached".to_string()),
+                "{caller}"
+            );
+        }
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

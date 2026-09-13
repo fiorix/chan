@@ -134,8 +134,8 @@ use routes::{
     api_storage_reset, api_survey_reply, api_team_config_read, api_team_config_write,
     api_terminal_next_name, api_terminal_shells, api_terminal_ws, api_terminals_roster,
     api_upload_file, api_window_reply, api_workspace_bootstrap, api_write_file,
-    extension_response_policy, proxy_extension, proxy_extension_root, refuse_anonymous_mutation,
-    spawn_roster_broadcaster, ws_upgrade,
+    extension_response_policy, proxy_extension, proxy_extension_root, spawn_roster_broadcaster,
+    ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -1542,35 +1542,18 @@ pub fn install_launcher_root_fallback(
 }
 
 /// Request-extension marker inserted by the devserver's tunnel layer on every
-/// request that arrived over the gateway tunnel (not the loopback bind).
-/// Verified gateway caller claims are present only when devserver-proxy signed
-/// the request with this tunnel's assertion key.
+/// request that arrived over the gateway tunnel (not the loopback bind). It
+/// exists only with the caller devserver-proxy signed with this tunnel's
+/// assertion key, and that caller is always a signed-in user: the owner or a
+/// grantee.
 #[derive(Clone)]
 pub(crate) struct TunnelOrigin {
-    pub caller: Option<chan_tunnel_proto::gateway_assertion::Claims>,
+    pub caller: chan_tunnel_proto::gateway_assertion::Claims,
 }
 
 impl TunnelOrigin {
     pub fn owner(&self) -> bool {
-        self.caller
-            .as_ref()
-            .is_some_and(chan_tunnel_proto::gateway_assertion::Claims::is_owner)
-    }
-
-    /// A caller with no real subject. The gateway's extension capability lane
-    /// signs its requests with the nil UUID as `sub`
-    /// (`gateway/crates/devserver-proxy/src/proxy.rs`, the
-    /// `extension_capability` branch of `handle_gated`), because a capability
-    /// link names no user. Every other caller's subject is its `users.id`, a
-    /// `gen_random_uuid()` that is never nil, so the nil subject is a sound
-    /// way to tell an anonymous caller from a grantee. This check reads the nil
-    /// UUID in any spelling, and an empty subject, as anonymous, erring toward
-    /// the caller with less; a missing caller, which `mark_tunnel_origin`
-    /// never produces, is anonymous as well.
-    pub fn anonymous(&self) -> bool {
-        self.caller
-            .as_ref()
-            .is_none_or(|claims| claims.sub.bytes().all(|byte| byte == b'0' || byte == b'-'))
+        self.caller.is_owner()
     }
 }
 
@@ -2098,12 +2081,10 @@ fn router_with_extensions(
         .route("/api/screensaver/state", get(api_screensaver_state))
         .route("/api/screensaver/verify", post(api_screensaver_verify));
     let api = api.merge(settings_writes);
-    // Extension capability proxy. The gateway forwards two kinds of caller
-    // here: a session holder (the owner or a grantee, who reach it as they
-    // reach every tenant route) and the anonymous capability lane, which
-    // carries no session at all. `refuse_anonymous_mutation` 403s the
-    // anonymous caller's POST/PUT/DELETE; its GETs, WebSocket upgrades
-    // included, pass, because the extension document itself loads by GET.
+    // Extension capability proxy. Over the gateway only the owner and a
+    // grantee reach it, as they reach every tenant route: the gateway binds
+    // an extension frame's link to the signed-in user who opened it and
+    // forwards the frame's requests as that user.
     let extension_proxy = Router::new()
         .route(
             "/_chan/extensions/{id}/{capability}/",
@@ -2113,11 +2094,9 @@ fn router_with_extensions(
             "/_chan/extensions/{id}/{capability}/{*path}",
             any(proxy_extension),
         )
-        .route_layer(middleware::from_fn(refuse_anonymous_mutation))
         // Outermost on the namespace: every response leaving these
-        // routes, the anonymous 403 included, carries the extension
-        // response policy so the opaque-origin frame reads true
-        // statuses instead of a CORS mask.
+        // routes carries the extension response policy so the
+        // opaque-origin frame reads true statuses instead of a CORS mask.
         .route_layer(middleware::from_fn(extension_response_policy));
     let api = api.merge(extension_proxy);
     Router::new()

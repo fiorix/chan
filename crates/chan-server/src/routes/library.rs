@@ -2722,10 +2722,7 @@ mod devserver_route_tests {
     }
 
     /// A grant is all-or-nothing: a grantee adds, edits and removes devserver
-    /// registry rows exactly as the owner and a local caller do. The launcher
-    /// does not tell an anonymous caller from a grantee; the gateway forwards
-    /// an anonymous caller only to extension capability paths, which never
-    /// route here.
+    /// registry rows exactly as the owner and a local caller do.
     #[tokio::test]
     async fn a_grantee_manages_the_devserver_registry_like_the_owner() {
         for caller in Caller::ALL {
@@ -3021,8 +3018,7 @@ mod devserver_route_tests {
     }
 
     /// The library's pane colour, theme and collapsed machines are settings a
-    /// grantee changes as the owner does. As for the registry, the launcher
-    /// does not tell an anonymous caller from a grantee.
+    /// grantee changes as the owner does.
     #[tokio::test]
     async fn a_grantee_sets_the_library_appearance_like_the_owner() {
         for caller in Caller::ALL {
@@ -3281,10 +3277,7 @@ mod gateway_route_tests {
     }
 
     /// A grant is all-or-nothing: a grantee adds, renames and removes gateway
-    /// registry rows exactly as the owner and a local caller do. The launcher
-    /// does not tell an anonymous caller from a grantee; the gateway forwards
-    /// an anonymous caller only to extension capability paths, which never
-    /// route here.
+    /// registry rows exactly as the owner and a local caller do.
     #[tokio::test]
     async fn a_grantee_manages_the_gateway_registry_like_the_owner() {
         for caller in Caller::ALL {
@@ -4020,7 +4013,11 @@ mod window_op_route_tests {
             let request = Request::builder()
                 .method("GET")
                 .uri(uri)
-                .extension(crate::TunnelOrigin { caller: None })
+                .extension(
+                    crate::route_authority::test_support::Caller::Grantee
+                        .origin()
+                        .expect("a tunnel caller"),
+                )
                 .body(Body::empty())
                 .unwrap();
             let response = router.clone().oneshot(request).await.unwrap();
@@ -4084,9 +4081,7 @@ mod window_op_route_tests {
     }
 
     /// A grantee manages the library's windows as the owner does: mint, label,
-    /// hide, show and discard. The launcher does not tell an anonymous caller
-    /// from a grantee; the gateway forwards an anonymous caller only to
-    /// extension capability paths, which never route here.
+    /// hide, show and discard.
     #[tokio::test]
     async fn a_grantee_manages_library_windows_like_the_owner() {
         for caller in Caller::ALL {
@@ -4143,9 +4138,9 @@ mod window_op_route_tests {
 
     /// The reverse-tunnel legs stay the owner's: a tunnel dials out through an
     /// addressed app window whose host can be the owner's own desktop, outside
-    /// the devserver a grant covers. A grantee and an anonymous caller are
-    /// refused before the upgrade; the owner and a local caller reach the
-    /// `WebSocketUpgrade` extractor, which rejects a plain GET.
+    /// the devserver a grant covers. A grantee is refused before the upgrade;
+    /// the owner and a local caller reach the `WebSocketUpgrade` extractor,
+    /// which rejects a plain GET.
     #[tokio::test]
     async fn a_grantee_is_refused_the_reverse_tunnel_legs() {
         let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
