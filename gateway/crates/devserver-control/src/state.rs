@@ -29,6 +29,10 @@ const MAX_OUTSTANDING_PINGS: usize = 8;
 /// authenticated proxy must not grow controller memory without bound;
 /// past the bound the eventual down simply costs one resync.
 const MAX_CONFIRMED_DOWNS: usize = 4096;
+/// Per-session bound on remembered refused registrations, for the same
+/// reason and with the same cost past it. A snapshot refuses at most
+/// `MAX_SNAPSHOT_ROWS`, so only refusals whose downs never arrive reach it.
+const MAX_REFUSED_REGISTRATIONS: usize = 4096;
 
 type TunnelKey = (Uuid, String);
 type PendingIdentity = (SessionKey, Uuid, Uuid);
@@ -145,6 +149,14 @@ struct ProxySession {
     /// this memory that expected down looks like corruption and forces a
     /// full resync that retracts every other row of the session.
     confirmed_downs: HashSet<Uuid>,
+    /// Registration ids the controller refused because it could not verify
+    /// their admission lease, each already commanded killed. A refused row
+    /// never enters `rows`; a refused refresh leaves its row there until
+    /// the kill or the tunnel's own down removes it. The proxy publishes a
+    /// `TunnelDown` for each either way, possibly before the kill's result,
+    /// so the refusal is remembered from the moment it is made rather than
+    /// from that result. A resync or a new session starts with none.
+    refused: HashSet<Uuid>,
     status: ProxyStatus,
     fleet_ready: bool,
     connected_at: DateTime<Utc>,
@@ -396,6 +408,7 @@ impl ControllerState {
                 browser_sessions: HashMap::new(),
                 browser_session_resident_bytes: 0,
                 confirmed_downs: HashSet::new(),
+                refused: HashSet::new(),
                 status: ProxyStatus::Joining,
                 fleet_ready: false,
                 connected_at: wall_now,
@@ -427,6 +440,12 @@ impl ControllerState {
     /// persisted timestamps read from different sources. Each argument is a
     /// distinct required input, so grouping them would hide the contract
     /// rather than simplify it.
+    ///
+    /// `refused` names the snapshot's tunnel rows whose leases the session
+    /// task could not verify. They never enter the session or the
+    /// aggregate, and they are commanded killed right after
+    /// `SnapshotAccepted`, since a proxy takes kills only once its snapshot
+    /// is accepted.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_snapshot(
         &mut self,
@@ -434,6 +453,7 @@ impl ControllerState {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        refused: Vec<Uuid>,
         browser_sessions: Vec<BrowserSessionRow>,
         now: Instant,
         wall_now: DateTime<Utc>,
@@ -441,8 +461,9 @@ impl ControllerState {
         if self.ready && self.reconciliation.is_some() {
             return Err(StateError::ReconciliationInProgress);
         }
-        if rows.len() > MAX_ROWS_PER_SESSION {
-            return Err(StateError::SnapshotTooLarge(rows.len()));
+        let published_rows = rows.len().saturating_add(refused.len());
+        if published_rows > MAX_ROWS_PER_SESSION {
+            return Err(StateError::SnapshotTooLarge(published_rows));
         }
         if browser_sessions.len() > MAX_BROWSER_SESSION_SNAPSHOT_ROWS {
             return Err(StateError::BrowserSessionSnapshotTooLarge(
@@ -483,6 +504,12 @@ impl ControllerState {
             let registration_id = row.registration_id;
             if by_id.insert(registration_id, row).is_some() {
                 return Err(StateError::DuplicateRegistration(registration_id));
+            }
+        }
+        let mut refused_ids = HashSet::with_capacity(refused.len());
+        for registration_id in &refused {
+            if by_id.contains_key(registration_id) || !refused_ids.insert(*registration_id) {
+                return Err(StateError::DuplicateRegistration(*registration_id));
             }
         }
         let mut browser_by_id = HashMap::with_capacity(browser_sessions.len());
@@ -538,6 +565,7 @@ impl ControllerState {
         session.generation = Some(base_generation);
         session.rows = by_id;
         session.resident_bytes = snapshot_bytes;
+        session.refused = refused_ids;
         session.browser_sessions = browser_by_id;
         session.browser_session_resident_bytes = browser_snapshot_bytes;
         session.status = if self.ready {
@@ -552,6 +580,10 @@ impl ControllerState {
             session: key.clone(),
             frame: ServerFrame::SnapshotAccepted { base_generation },
         }];
+        if !refused.is_empty() {
+            let (_, kill) = self.issue_kill(key.clone(), refused, CommandPurpose::Runtime, now);
+            effects.extend(kill);
+        }
         if self.ready {
             effects.extend(self.reconcile_joining(key, now)?);
         } else if self.convergence_deadline.is_none() {
@@ -589,11 +621,7 @@ impl ControllerState {
         if fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_RESIDENT_BYTES {
             return Err(StateError::FleetCapacity);
         }
-        if self
-            .proxies
-            .values()
-            .any(|session| session.rows.contains_key(&row.registration_id))
-        {
+        if self.publishes_registration(&key, row.registration_id) {
             return Ok(self.force_resync(&key, generation.saturating_add(1)));
         }
 
@@ -666,24 +694,67 @@ impl ControllerState {
             return Ok(effects);
         }
         self.touch(&key, now, wall_now)?;
-        let known = self
+        let session = self
             .proxies
-            .get(proxy_id.as_str())
-            .is_some_and(|session| session.rows.contains_key(&registration_id));
+            .get_mut(proxy_id.as_str())
+            .expect("key was validated");
+        // A registration is removed exactly once, so this is the last
+        // event naming it: forget it everywhere it may be remembered.
+        let refused = session.refused.remove(&registration_id);
+        let known = session.rows.contains_key(&registration_id);
         if !known {
-            let expected = self
-                .proxies
-                .get_mut(proxy_id.as_str())
-                .expect("key was validated")
-                .confirmed_downs
-                .remove(&registration_id);
-            if expected {
+            let confirmed = session.confirmed_downs.remove(&registration_id);
+            if refused || confirmed {
                 return Ok(Vec::new());
             }
             return Ok(self.force_resync(&key, generation.saturating_add(1)));
         }
         self.remove_registration(&key, registration_id);
         Ok(Vec::new())
+    }
+
+    /// A `TunnelUp` whose lease the session task could not verify. The
+    /// proxy spent a generation on it, so the generation advances exactly
+    /// as for a row that verifies, and a gap or a repeated id resyncs the
+    /// same way. The row itself never enters the session or the aggregate:
+    /// it carries no authority the controller can check, and counting it
+    /// would bypass the signed devserver limit.
+    pub fn refuse_tunnel_up(
+        &mut self,
+        proxy_id: &ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        registration_id: Uuid,
+        now: Instant,
+        wall_now: DateTime<Utc>,
+    ) -> Result<Vec<Effect>, StateError> {
+        let key = self.require_key(proxy_id, incarnation)?;
+        if let Some(effects) = self.advance_or_resync(&key, generation)? {
+            return Ok(effects);
+        }
+        self.touch(&key, now, wall_now)?;
+        if self.publishes_registration(&key, registration_id) {
+            return Ok(self.force_resync(&key, generation.saturating_add(1)));
+        }
+        Ok(self.refuse_registration(key, registration_id, now))
+    }
+
+    /// A `LeaseRefresh` whose lease the session task could not verify, or
+    /// whose binding names another registration or proxy. That
+    /// registration's authority can no longer be renewed, so it is killed;
+    /// its row, if the session holds one, keeps its previous lease until
+    /// the kill or the tunnel's own down removes it.
+    pub fn refuse_lease_refresh(
+        &mut self,
+        proxy_id: &ProxyId,
+        incarnation: SessionIncarnation,
+        registration_id: Uuid,
+        now: Instant,
+        wall_now: DateTime<Utc>,
+    ) -> Result<Vec<Effect>, StateError> {
+        let key = self.require_key(proxy_id, incarnation)?;
+        self.touch(&key, now, wall_now)?;
+        Ok(self.refuse_registration(key, registration_id, now))
     }
 
     pub fn browser_session_up(
@@ -955,17 +1026,29 @@ impl ControllerState {
         }
         let session_key = self.require_key(proxy_id, incarnation)?;
         self.touch(&session_key, now, wall_now)?;
-        let old = self
+        let session = self
             .proxies
             .get(proxy_id.as_str())
-            .and_then(|session| session.rows.get(&registration_id))
+            .expect("session key was validated");
+        // Its kill is already on the way; a refresh raced it.
+        if session.refused.contains(&registration_id) {
+            return Ok(Vec::new());
+        }
+        let old = session
+            .rows
+            .get(&registration_id)
             .cloned()
             .ok_or(StateError::StaleSession)?;
         if old.owner_user_id != owner_user_id
             || old.user != user
             || old.devserver_id != devserver_id
         {
-            return Err(StateError::StaleSession);
+            tracing::warn!(
+                proxy_id = proxy_id.as_str(),
+                %registration_id,
+                "killing a registration whose refreshed lease is bound to another owner or devserver"
+            );
+            return Ok(self.refuse_registration(session_key, registration_id, now));
         }
         let old_bytes = row_resident_bytes(&old).unwrap_or(0);
         let mut refreshed = old;
@@ -1627,6 +1710,7 @@ impl ControllerState {
             session.browser_sessions.clear();
             session.browser_session_resident_bytes = 0;
             session.confirmed_downs.clear();
+            session.refused.clear();
         }
         self.remove_tunnels_for_session(key);
         self.remove_browser_sessions_for_session(key);
@@ -2062,6 +2146,43 @@ impl ControllerState {
             });
         }
         self.replace_browser_sessions();
+        effects
+    }
+
+    /// Whether `registration_id` is already published up: a row held by any
+    /// session, or a refusal this session has not yet seen the down for.
+    /// Either way another `TunnelUp` for it is a duplicate id.
+    fn publishes_registration(&self, session: &SessionKey, registration_id: Uuid) -> bool {
+        self.proxies
+            .values()
+            .any(|proxy| proxy.rows.contains_key(&registration_id))
+            || self
+                .proxies
+                .get(&session.proxy_id)
+                .is_some_and(|proxy| proxy.refused.contains(&registration_id))
+    }
+
+    /// Command one registration killed for lack of verifiable authority and
+    /// remember that its down is expected. A registration already refused
+    /// has its kill outstanding, so a second refusal issues nothing.
+    fn refuse_registration(
+        &mut self,
+        session: SessionKey,
+        registration_id: Uuid,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let proxy = self
+            .proxies
+            .get_mut(&session.proxy_id)
+            .expect("session key was validated");
+        if proxy.refused.contains(&registration_id) {
+            return Vec::new();
+        }
+        if proxy.refused.len() < MAX_REFUSED_REGISTRATIONS {
+            proxy.refused.insert(registration_id);
+        }
+        let (_, effects) =
+            self.issue_kill(session, vec![registration_id], CommandPurpose::Runtime, now);
         effects
     }
 
@@ -2620,7 +2741,16 @@ mod tests {
         now: Instant,
     ) -> Vec<Effect> {
         state
-            .accept_snapshot(id, incarnation, 0, rows, Vec::new(), now, Utc::now())
+            .accept_snapshot(
+                id,
+                incarnation,
+                0,
+                rows,
+                Vec::new(),
+                Vec::new(),
+                now,
+                Utc::now(),
+            )
             .unwrap()
     }
 
@@ -2723,6 +2853,7 @@ mod tests {
                 changed_boot,
                 0,
                 vec![row("alice", "one", Uuid::new_v4())],
+                Vec::new(),
                 Vec::new(),
                 now + CONVERGENCE_WINDOW + Duration::from_millis(500),
                 Utc::now(),
@@ -2829,6 +2960,7 @@ mod tests {
                 incarnation,
                 0,
                 vec![row("bob", "novel", Uuid::new_v4())],
+                Vec::new(),
                 Vec::new(),
                 now,
                 Utc::now(),
@@ -3102,6 +3234,7 @@ mod tests {
                 0,
                 vec![expired],
                 Vec::new(),
+                Vec::new(),
                 now,
                 wall_now,
             ),
@@ -3118,6 +3251,7 @@ mod tests {
                 live_incarnation,
                 0,
                 vec![live],
+                Vec::new(),
                 Vec::new(),
                 now,
                 wall_now,
@@ -3218,6 +3352,7 @@ mod tests {
                 0,
                 vec![first, second],
                 Vec::new(),
+                Vec::new(),
                 now,
                 wall_now,
             )
@@ -3273,6 +3408,7 @@ mod tests {
                 &proxy_id,
                 incarnation,
                 0,
+                Vec::new(),
                 Vec::new(),
                 vec![browser_row(first_id, subject_user_id, owner_user_id, "one")],
                 now,
@@ -3335,6 +3471,7 @@ mod tests {
                 &p1,
                 p1_incarnation,
                 0,
+                Vec::new(),
                 Vec::new(),
                 vec![browser_row(
                     admin_session_id,
@@ -5103,6 +5240,175 @@ mod tests {
         assert_eq!(state.tunnel_views()[0].devserver_id, "two");
     }
 
+    /// The proxy publishes a down for every registration the controller
+    /// refuses, after the kill's result when the kill evicts it, or before
+    /// that result when the tunnel closed on its own first. Both orders
+    /// must extend the generation without a resync.
+    #[test]
+    fn a_refused_registration_down_is_expected_before_or_after_its_kill_result() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let mut state = ControllerState::new(100);
+        let good = Uuid::from_u128(1);
+        let held = Uuid::from_u128(2);
+        let refused_in_snapshot = Uuid::from_u128(3);
+        let refused_up = Uuid::from_u128(4);
+        let (p1, incarnation) = begin(&mut state, "p1", now);
+        let rows = || vec![row("alice", "one", good), row("carol", "three", held)];
+
+        assert!(matches!(
+            state.accept_snapshot(
+                &p1,
+                incarnation,
+                0,
+                rows(),
+                vec![good],
+                Vec::new(),
+                now,
+                wall_now
+            ),
+            Err(StateError::DuplicateRegistration(id)) if id == good
+        ));
+        let effects = state
+            .accept_snapshot(
+                &p1,
+                incarnation,
+                0,
+                rows(),
+                vec![refused_in_snapshot],
+                Vec::new(),
+                now,
+                wall_now,
+            )
+            .unwrap();
+        // A proxy takes a kill only once its snapshot is accepted.
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::Send {
+                frame: ServerFrame::SnapshotAccepted { base_generation: 0 },
+                ..
+            })
+        ));
+        let snapshot_kill = kill_command(&effects[1..], "p1", refused_in_snapshot);
+        assert!(!state.proxies["p1"].rows.contains_key(&refused_in_snapshot));
+
+        // Evicted by the kill: its result, then the eviction's down.
+        state
+            .command_result(
+                &p1,
+                incarnation,
+                snapshot_kill,
+                vec![refused_in_snapshot],
+                Vec::new(),
+                Vec::new(),
+                now,
+                wall_now,
+            )
+            .unwrap();
+        assert!(state
+            .tunnel_down(&p1, incarnation, 1, refused_in_snapshot, now, wall_now)
+            .unwrap()
+            .is_empty());
+
+        // A refused TunnelUp spends its generation and inserts nothing.
+        let effects = state
+            .refuse_tunnel_up(&p1, incarnation, 2, refused_up, now, wall_now)
+            .unwrap();
+        let up_kill = kill_command(&effects, "p1", refused_up);
+        assert_eq!(state.proxies["p1"].generation, Some(2));
+        assert!(!state.proxies["p1"].rows.contains_key(&refused_up));
+        // A refresh that raced the kill is dropped rather than read as a
+        // refresh for a registration the session does not hold.
+        assert!(state
+            .refresh_lease(
+                &p1,
+                incarnation,
+                refused_up,
+                legacy_owner_user_id("bob"),
+                "bob".into(),
+                "two".into(),
+                100,
+                devserver_control_proto::AdmissionLease::parse("refreshed").unwrap(),
+                wall_now + chrono::Duration::seconds(120),
+                now,
+                wall_now,
+            )
+            .unwrap()
+            .is_empty());
+        // Closed on its own before the kill landed: the down comes first,
+        // and the kill then finds the registration missing.
+        assert!(state
+            .tunnel_down(&p1, incarnation, 3, refused_up, now, wall_now)
+            .unwrap()
+            .is_empty());
+        state
+            .command_result(
+                &p1,
+                incarnation,
+                up_kill,
+                Vec::new(),
+                vec![refused_up],
+                Vec::new(),
+                now,
+                wall_now,
+            )
+            .unwrap();
+
+        // A refused refresh for a held row keeps the row until the kill or
+        // the down removes it, and a second refusal issues no second kill.
+        let effects = state
+            .refuse_lease_refresh(&p1, incarnation, held, now, wall_now)
+            .unwrap();
+        kill_command(&effects, "p1", held);
+        assert!(state.proxies["p1"].rows.contains_key(&held));
+        assert!(state
+            .refuse_lease_refresh(&p1, incarnation, held, now, wall_now)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .tunnel_down(&p1, incarnation, 4, held, now, wall_now)
+            .unwrap()
+            .is_empty());
+
+        assert!(state
+            .tunnel_down(&p1, incarnation, 5, good, now, wall_now)
+            .unwrap()
+            .is_empty());
+        let session = &state.proxies["p1"];
+        assert_eq!(session.generation, Some(5));
+        assert_eq!(session.status, ProxyStatus::Active);
+        assert!(session.rows.is_empty());
+        assert!(session.refused.is_empty());
+        assert!(session.confirmed_downs.is_empty());
+    }
+
+    #[test]
+    fn refusals_do_not_survive_a_resync() {
+        let now = Instant::now();
+        let wall_now = Utc::now();
+        let mut state = ControllerState::new(100);
+        let refused = Uuid::from_u128(1);
+        let (p1, incarnation) = begin(&mut state, "p1", now);
+        snapshot(&mut state, &p1, incarnation, Vec::new(), now);
+        state
+            .refuse_tunnel_up(&p1, incarnation, 1, refused, now, wall_now)
+            .unwrap();
+
+        let effects = state
+            .tunnel_down(&p1, incarnation, 3, Uuid::from_u128(2), now, wall_now)
+            .unwrap();
+        assert!(has_resync(&effects, 2));
+        assert!(state.proxies["p1"].refused.is_empty());
+
+        // After the fresh snapshot the refused registration is one this
+        // session never published, so its late down is an unknown down.
+        snapshot(&mut state, &p1, incarnation, Vec::new(), now);
+        let effects = state
+            .tunnel_down(&p1, incarnation, 1, refused, now, wall_now)
+            .unwrap();
+        assert!(has_resync(&effects, 2));
+    }
+
     #[test]
     fn joining_row_that_duplicates_a_pending_claim_loses() {
         let now = Instant::now();
@@ -5266,6 +5572,7 @@ mod tests {
                 &p0,
                 p0_incarnation,
                 0,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 now + CONVERGENCE_WINDOW,

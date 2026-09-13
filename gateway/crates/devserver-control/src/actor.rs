@@ -71,6 +71,7 @@ enum Command {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        refused: Vec<Uuid>,
         browser_sessions: Vec<BrowserSessionRow>,
         reply: StateReply,
     },
@@ -82,6 +83,13 @@ enum Command {
         reply: StateReply,
     },
     TunnelDown {
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        registration_id: Uuid,
+        reply: StateReply,
+    },
+    RefuseTunnelUp {
         proxy_id: ProxyId,
         incarnation: SessionIncarnation,
         generation: u64,
@@ -125,6 +133,12 @@ enum Command {
         max_connected_devservers: u32,
         admission_lease: AdmissionLease,
         admission_lease_expires_at: DateTime<Utc>,
+        reply: StateReply,
+    },
+    RefuseLeaseRefresh {
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        registration_id: Uuid,
         reply: StateReply,
     },
     CancelAdmission {
@@ -332,6 +346,7 @@ fn handle_command(
             incarnation,
             base_generation,
             rows,
+            refused,
             browser_sessions,
             reply,
         } => finish(
@@ -341,6 +356,7 @@ fn handle_command(
                 incarnation,
                 base_generation,
                 rows,
+                refused,
                 browser_sessions,
                 now,
                 wall_now,
@@ -365,6 +381,23 @@ fn handle_command(
         } => finish(
             reply,
             state.tunnel_down(
+                &proxy_id,
+                incarnation,
+                generation,
+                registration_id,
+                now,
+                wall_now,
+            ),
+        ),
+        Command::RefuseTunnelUp {
+            proxy_id,
+            incarnation,
+            generation,
+            registration_id,
+            reply,
+        } => finish(
+            reply,
+            state.refuse_tunnel_up(
                 &proxy_id,
                 incarnation,
                 generation,
@@ -455,6 +488,15 @@ fn handle_command(
                 now,
                 wall_now,
             ),
+        ),
+        Command::RefuseLeaseRefresh {
+            proxy_id,
+            incarnation,
+            registration_id,
+            reply,
+        } => finish(
+            reply,
+            state.refuse_lease_refresh(&proxy_id, incarnation, registration_id, now, wall_now),
         ),
         Command::CancelAdmission {
             proxy_id,
@@ -800,6 +842,7 @@ impl ControllerHandle {
         incarnation: SessionIncarnation,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        refused: Vec<Uuid>,
         browser_sessions: Vec<BrowserSessionRow>,
     ) -> Result<MutationStatus, ActorError> {
         self.state_request(|reply| Command::AcceptSnapshot {
@@ -807,6 +850,7 @@ impl ControllerHandle {
             incarnation,
             base_generation,
             rows,
+            refused,
             browser_sessions,
             reply,
         })
@@ -838,6 +882,23 @@ impl ControllerHandle {
         registration_id: Uuid,
     ) -> Result<MutationStatus, ActorError> {
         self.state_request(|reply| Command::TunnelDown {
+            proxy_id,
+            incarnation,
+            generation,
+            registration_id,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn refuse_tunnel_up(
+        &self,
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        generation: u64,
+        registration_id: Uuid,
+    ) -> Result<MutationStatus, ActorError> {
+        self.state_request(|reply| Command::RefuseTunnelUp {
             proxy_id,
             incarnation,
             generation,
@@ -959,6 +1020,21 @@ impl ControllerHandle {
             max_connected_devservers,
             admission_lease,
             admission_lease_expires_at,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn refuse_lease_refresh(
+        &self,
+        proxy_id: ProxyId,
+        incarnation: SessionIncarnation,
+        registration_id: Uuid,
+    ) -> Result<MutationStatus, ActorError> {
+        self.state_request(|reply| Command::RefuseLeaseRefresh {
+            proxy_id,
+            incarnation,
+            registration_id,
             reply,
         })
         .await
@@ -1237,7 +1313,14 @@ mod tests {
             .await
             .unwrap();
         actor
-            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new(), Vec::new())
+            .accept_snapshot(
+                proxy(),
+                session.incarnation,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -1325,7 +1408,14 @@ mod tests {
         proxies.changed().await.unwrap();
         assert_eq!(proxies.borrow().len(), 1);
         actor
-            .accept_snapshot(proxy(), session.incarnation, 0, Vec::new(), Vec::new())
+            .accept_snapshot(
+                proxy(),
+                session.incarnation,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .unwrap();
         keep_alive_until_ready(&actor, &mut session).await;
@@ -1467,6 +1557,7 @@ mod tests {
                     0,
                     vec![row("alice", devserver_id, registration_id)],
                     Vec::new(),
+                    Vec::new(),
                 )
                 .await
                 .unwrap();
@@ -1547,6 +1638,7 @@ mod tests {
                 0,
                 vec![row("alice", "one", registration_id)],
                 Vec::new(),
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1586,6 +1678,7 @@ mod tests {
                 session.incarnation,
                 0,
                 vec![row("alice", "one", registration_id)],
+                Vec::new(),
                 Vec::new(),
             )
             .await

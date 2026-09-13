@@ -703,7 +703,14 @@ mod tests {
             .await
             .unwrap();
         controller
-            .accept_snapshot(proxy_id.clone(), session.incarnation, 0, rows, Vec::new())
+            .accept_snapshot(
+                proxy_id.clone(),
+                session.incarnation,
+                0,
+                rows,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .unwrap();
         (proxy_id, session)

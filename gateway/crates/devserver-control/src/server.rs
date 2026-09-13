@@ -560,6 +560,7 @@ where
                     deadline: *deadline,
                     base_generation,
                     rows: Vec::new(),
+                    refused: Vec::new(),
                     registration_ids: HashSet::new(),
                     bytes: 0,
                     browser_sessions: Vec::new(),
@@ -579,6 +580,7 @@ where
             deadline: _,
             base_generation,
             rows,
+            refused,
             registration_ids,
             bytes,
             browser_sessions,
@@ -589,7 +591,9 @@ where
                 controller
                     .record_activity(proxy_id.clone(), incarnation)
                     .await?;
-                if !snapshot_rows_fit(rows.len(), chunk.len()) {
+                // Every row the proxy sent counts, refused or not: the
+                // limits bound what it may publish.
+                if !snapshot_rows_fit(registration_ids.len(), chunk.len()) {
                     send_shutdown(writer, "snapshot row limit exceeded").await?;
                     return Err(SessionError::SnapshotTooLarge);
                 }
@@ -597,9 +601,6 @@ where
                 if !snapshot_bytes_fit(*bytes, chunk_bytes) {
                     send_shutdown(writer, "snapshot byte limit exceeded").await?;
                     return Err(SessionError::SnapshotTooLarge);
-                }
-                for row in &chunk {
-                    verify_tunnel_row(admission_lease_verifier, proxy_id, row)?;
                 }
                 let mut chunk_ids = HashSet::with_capacity(chunk.len());
                 if chunk.iter().any(|row| {
@@ -612,7 +613,15 @@ where
                 }
                 registration_ids.extend(chunk_ids);
                 *bytes += chunk_bytes;
-                rows.extend(chunk);
+                for row in chunk {
+                    match verify_tunnel_row(admission_lease_verifier, proxy_id, &row) {
+                        Ok(()) => rows.push(row),
+                        Err(reason) => {
+                            log_refused_row(proxy_id, &row, &reason);
+                            refused.push(row.registration_id);
+                        }
+                    }
+                }
             }
             ClientFrame::BrowserSessionSnapshotChunk { rows: chunk } => {
                 controller
@@ -653,6 +662,7 @@ where
             } if end_generation == *base_generation => {
                 let base_generation = *base_generation;
                 let rows = std::mem::take(rows);
+                let refused = std::mem::take(refused);
                 let browser_sessions = std::mem::take(browser_sessions);
                 *phase = Phase::Active;
                 controller
@@ -661,6 +671,7 @@ where
                         incarnation,
                         base_generation,
                         rows,
+                        refused,
                         browser_sessions,
                     )
                     .await?;
@@ -676,10 +687,24 @@ where
         },
         Phase::Active => match frame {
             ClientFrame::TunnelUp { generation, row } => {
-                verify_tunnel_row(admission_lease_verifier, proxy_id, &row)?;
-                let status = controller
-                    .tunnel_up(proxy_id.clone(), incarnation, generation, row)
-                    .await?;
+                let status = match verify_tunnel_row(admission_lease_verifier, proxy_id, &row) {
+                    Ok(()) => {
+                        controller
+                            .tunnel_up(proxy_id.clone(), incarnation, generation, row)
+                            .await?
+                    }
+                    Err(reason) => {
+                        log_refused_row(proxy_id, &row, &reason);
+                        controller
+                            .refuse_tunnel_up(
+                                proxy_id.clone(),
+                                incarnation,
+                                generation,
+                                row.registration_id,
+                            )
+                            .await?
+                    }
+                };
                 if status == MutationStatus::Resyncing {
                     *phase = Phase::awaiting_snapshot();
                 }
@@ -727,7 +752,7 @@ where
                 devserver_id,
                 admission_lease,
             } => {
-                let claims = verify_lease(
+                let verified = verify_lease(
                     admission_lease_verifier,
                     &admission_lease,
                     AdmissionLeaseBinding {
@@ -737,7 +762,36 @@ where
                         registration_id,
                         proxy_id: proxy_id.clone(),
                     },
-                )?;
+                );
+                let claims = match verified {
+                    Ok(claims) => claims,
+                    Err(reason) => {
+                        // `Stale` rather than `ControlWarming`, which would
+                        // say the controller is not ready: what is not
+                        // current is this request's authority. The proxy
+                        // refuses the one client the same way for both.
+                        tracing::warn!(
+                            proxy_id = proxy_id.as_str(),
+                            %request_id,
+                            %registration_id,
+                            %reason,
+                            "refusing an admission request whose lease the controller cannot verify"
+                        );
+                        controller
+                            .record_activity(proxy_id.clone(), incarnation)
+                            .await?;
+                        write_control(
+                            writer,
+                            &ServerFrame::AdmissionDecision {
+                                request_id,
+                                registration_id,
+                                decision: devserver_control_proto::AdmissionDecision::Stale,
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
                 controller
                     .request_admission_authorized(
                         proxy_id.clone(),
@@ -759,18 +813,33 @@ where
                 registration_id,
                 admission_lease,
             } => {
-                let claims = admission_lease_verifier
+                let verified = admission_lease_verifier
                     .verify(&admission_lease, chrono::Utc::now())
-                    .map_err(|error| {
-                        SessionError::Protocol(format!("invalid lease refresh: {error}"))
-                    })?;
-                if claims.binding.proxy_id != *proxy_id
-                    || claims.binding.registration_id != registration_id
-                {
-                    return Err(SessionError::Protocol(
-                        "lease refresh binding mismatch".into(),
-                    ));
-                }
+                    .map_err(|error| format!("invalid admission lease: {error}"))
+                    .and_then(|claims| {
+                        if claims.binding.proxy_id != *proxy_id
+                            || claims.binding.registration_id != registration_id
+                        {
+                            Err("admission lease binding mismatch".to_string())
+                        } else {
+                            Ok(claims)
+                        }
+                    });
+                let claims = match verified {
+                    Ok(claims) => claims,
+                    Err(reason) => {
+                        tracing::warn!(
+                            proxy_id = proxy_id.as_str(),
+                            %registration_id,
+                            %reason,
+                            "killing a registration whose lease refresh the controller cannot verify"
+                        );
+                        controller
+                            .refuse_lease_refresh(proxy_id.clone(), incarnation, registration_id)
+                            .await?;
+                        return Ok(());
+                    }
+                };
                 controller
                     .refresh_lease(
                         proxy_id.clone(),
@@ -887,18 +956,20 @@ fn bounded_add(current: usize, incoming: usize, maximum: usize) -> bool {
         .is_some_and(|total| total <= maximum)
 }
 
+/// Verify one lease against the binding its frame claims. The error says
+/// why that one tunnel's authority is refused and is never a reason to end
+/// the session: the frame is well formed, and a reconnect would meet the
+/// same lease again.
 fn verify_lease(
     verifier: &AdmissionLeaseVerifier,
     lease: &AdmissionLease,
     expected: AdmissionLeaseBinding,
-) -> Result<devserver_control_proto::AdmissionLeaseClaims, SessionError> {
+) -> Result<devserver_control_proto::AdmissionLeaseClaims, String> {
     let claims = verifier
         .verify(lease, chrono::Utc::now())
-        .map_err(|error| SessionError::Protocol(format!("invalid admission lease: {error}")))?;
+        .map_err(|error| format!("invalid admission lease: {error}"))?;
     if claims.binding != expected {
-        return Err(SessionError::Protocol(
-            "admission lease binding mismatch".into(),
-        ));
+        return Err("admission lease binding mismatch".into());
     }
     Ok(claims)
 }
@@ -907,23 +978,29 @@ fn verify_tunnel_row(
     verifier: &AdmissionLeaseVerifier,
     proxy_id: &ProxyId,
     row: &TunnelRow,
-) -> Result<(), SessionError> {
+) -> Result<(), String> {
     let claims = verify_lease(
         verifier,
         &row.admission_lease,
         row.binding_for(proxy_id.clone()),
     )?;
     if row.admission_lease_expires_at.timestamp() != claims.expires_at {
-        return Err(SessionError::Protocol(
-            "admission lease expiry mismatch".into(),
-        ));
+        return Err("admission lease expiry mismatch".into());
     }
     if row.max_connected_devservers != claims.max_connected_devservers {
-        return Err(SessionError::Protocol(
-            "admission lease devserver limit mismatch".into(),
-        ));
+        return Err("admission lease devserver limit mismatch".into());
     }
     Ok(())
+}
+
+fn log_refused_row(proxy_id: &ProxyId, row: &TunnelRow, reason: &str) {
+    tracing::warn!(
+        proxy_id = proxy_id.as_str(),
+        registration_id = %row.registration_id,
+        user = %row.user,
+        reason,
+        "refusing a tunnel row whose admission lease the controller cannot verify"
+    );
 }
 
 async fn illegal_frame<W>(writer: &mut W, reason: &'static str) -> Result<(), SessionError>
@@ -1006,6 +1083,10 @@ enum Phase {
         deadline: Instant,
         base_generation: u64,
         rows: Vec<TunnelRow>,
+        /// Registration ids of rows whose leases did not verify. They are
+        /// left out of `rows` but still counted in `registration_ids`, so a
+        /// repeat is still a duplicate.
+        refused: Vec<Uuid>,
         registration_ids: HashSet<Uuid>,
         bytes: usize,
         browser_sessions: Vec<BrowserSessionRow>,
@@ -1049,11 +1130,16 @@ enum SessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devserver_control_proto::{AdmissionLeaseSigner, TunnelRow, MAX_SNAPSHOT_CHUNK_ROWS};
+    use devserver_control_proto::{
+        AdmissionDecision, AdmissionLeaseSigner, TunnelRow, MAX_SNAPSHOT_CHUNK_ROWS,
+    };
     use uuid::Uuid;
 
     const TEST_PROXY_TOKEN: &str = "0123456789abcdef0123456789abcdef";
     const TEST_SIGNING_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    /// A key outside the controller's verifying ring, as after a rotation
+    /// that reached identity or a proxy but not the controller.
+    const FOREIGN_SIGNING_KEY: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
 
     fn admission_keys() -> (AdmissionLeaseSigner, AdmissionLeaseVerifier) {
         let signer = AdmissionLeaseSigner::from_base64(TEST_SIGNING_KEY).unwrap();
@@ -1061,19 +1147,44 @@ mod tests {
         (signer, verifier)
     }
 
+    fn binding(
+        owner_user_id: Uuid,
+        user: &str,
+        devserver_id: &str,
+        registration_id: Uuid,
+    ) -> AdmissionLeaseBinding {
+        AdmissionLeaseBinding {
+            owner_user_id,
+            user: user.into(),
+            devserver_id: devserver_id.into(),
+            registration_id,
+            proxy_id: ProxyId::parse("p1").unwrap(),
+        }
+    }
+
+    fn lease_signed_with(signing_key: &str, binding: AdmissionLeaseBinding) -> AdmissionLease {
+        AdmissionLeaseSigner::from_base64(signing_key)
+            .unwrap()
+            .sign(binding, 3, chrono::Utc::now(), 120)
+            .unwrap()
+    }
+
     fn signed_row(user: &str, devserver_id: &str, registration_id: Uuid) -> TunnelRow {
+        row_signed_with(TEST_SIGNING_KEY, user, devserver_id, registration_id)
+    }
+
+    fn row_signed_with(
+        signing_key: &str,
+        user: &str,
+        devserver_id: &str,
+        registration_id: Uuid,
+    ) -> TunnelRow {
         let owner_user_id = Uuid::new_v4();
-        let (signer, _) = admission_keys();
+        let signer = AdmissionLeaseSigner::from_base64(signing_key).unwrap();
         let now = chrono::Utc::now();
         let admission_lease = signer
             .sign(
-                AdmissionLeaseBinding {
-                    owner_user_id,
-                    user: user.into(),
-                    devserver_id: devserver_id.into(),
-                    registration_id,
-                    proxy_id: ProxyId::parse("p1").unwrap(),
-                },
+                binding(owner_user_id, user, devserver_id, registration_id),
                 3,
                 now,
                 120,
@@ -1629,6 +1740,7 @@ mod tests {
             deadline: Instant::now() + SNAPSHOT_TIMEOUT,
             base_generation: 0,
             rows: Vec::new(),
+            refused: Vec::new(),
             registration_ids: HashSet::new(),
             bytes: 0,
             browser_sessions: Vec::new(),
@@ -1981,5 +2093,518 @@ mod tests {
             )),
         )
         .await;
+    }
+
+    /// The next frame the controller sends that is not a heartbeat,
+    /// answering each `Ping` on the way as a proxy does. A session that
+    /// ends instead fails the test with what the session task returned, and
+    /// so does one that sends only heartbeats for longer than any wait here
+    /// (the convergence window is six of them).
+    async fn next_command(opened: &mut Opened, step: &str) -> ServerFrame {
+        for _ in 0..16 {
+            let stream = opened.stream.as_mut().unwrap();
+            match read_frame::<_, ServerFrame>(stream).await {
+                Ok(ServerFrame::Ping { nonce }) => {
+                    // A failed pong surfaces as the next read's error.
+                    let _ = write_frame(stream, &ClientFrame::Pong { nonce }).await;
+                }
+                Ok(frame) => return frame,
+                Err(error) => {
+                    let session =
+                        tokio::time::timeout(Duration::from_secs(5), &mut opened.server).await;
+                    panic!(
+                        "{step}: the control session ended ({error}); session task: {session:?}"
+                    );
+                }
+            }
+        }
+        panic!("{step}: the controller sent only heartbeats for sixteen intervals");
+    }
+
+    /// Answer two heartbeats, failing on any other frame first. Paused
+    /// time moves only when every task is idle, so the second ping is
+    /// queued after the session task handled everything the test wrote
+    /// before this call, and a resync or kill those frames caused would
+    /// arrive ahead of it.
+    async fn only_heartbeats(opened: &mut Opened, step: &str) {
+        for _ in 0..2 {
+            let stream = opened.stream.as_mut().unwrap();
+            match read_frame::<_, ServerFrame>(stream).await {
+                Ok(ServerFrame::Ping { nonce }) => {
+                    write_frame(stream, &ClientFrame::Pong { nonce })
+                        .await
+                        .unwrap();
+                }
+                Ok(frame) => panic!("{step}: expected only heartbeats, got {frame:?}"),
+                Err(error) => {
+                    let session =
+                        tokio::time::timeout(Duration::from_secs(5), &mut opened.server).await;
+                    panic!(
+                        "{step}: the control session ended ({error}); session task: {session:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn send(opened: &mut Opened, frames: &[ClientFrame]) {
+        let stream = opened.stream.as_mut().unwrap();
+        for frame in frames {
+            write_frame(stream, frame).await.unwrap();
+        }
+    }
+
+    async fn publish_snapshot(opened: &mut Opened, rows: Vec<TunnelRow>) {
+        send(
+            opened,
+            &[
+                ClientFrame::SnapshotStart { base_generation: 0 },
+                ClientFrame::SnapshotChunk { rows },
+                ClientFrame::SnapshotEnd { base_generation: 0 },
+            ],
+        )
+        .await;
+    }
+
+    async fn expect_fleet_ready(opened: &mut Opened, step: &str) {
+        match next_command(opened, step).await {
+            ServerFrame::FleetReady => {}
+            frame => panic!("{step}: expected FleetReady, got {frame:?}"),
+        }
+    }
+
+    /// Require a kill naming exactly `registration_id`, then do what a
+    /// proxy does with it: evict, report the eviction, and publish the
+    /// eviction's own `TunnelDown` at `down_generation`.
+    async fn kill_then_down(
+        opened: &mut Opened,
+        step: &str,
+        registration_id: Uuid,
+        down_generation: u64,
+    ) {
+        let (command_id, registration_ids) = match next_command(opened, step).await {
+            ServerFrame::KillRegistrations {
+                command_id,
+                registration_ids,
+            } => (command_id, registration_ids),
+            frame => panic!("{step}: expected a kill, got {frame:?}"),
+        };
+        assert_eq!(
+            registration_ids,
+            vec![registration_id],
+            "{step}: the kill must name only the refused registration"
+        );
+        send(
+            opened,
+            &[
+                ClientFrame::CommandResult {
+                    command_id,
+                    killed: vec![registration_id],
+                    missing: Vec::new(),
+                    failed: Vec::new(),
+                },
+                ClientFrame::TunnelDown {
+                    generation: down_generation,
+                    registration_id,
+                },
+            ],
+        )
+        .await;
+    }
+
+    async fn aggregate_ids(controller: &ControllerHandle) -> Vec<Uuid> {
+        let mut ids: Vec<_> = controller
+            .tunnels()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|tunnel| tunnel.registration_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    async fn assert_session_active(controller: &ControllerHandle, step: &str) {
+        let proxies = controller.proxies().await.unwrap();
+        assert!(
+            matches!(
+                proxies.as_slice(),
+                [crate::ProxyView {
+                    status: crate::ProxyStatus::Active,
+                    ..
+                }]
+            ),
+            "{step}: {proxies:?}"
+        );
+    }
+
+    /// One row whose lease the controller cannot verify must not cost the
+    /// proxy its session: every reconnect's snapshot would carry the same
+    /// row, and the session would flap until the proxy's grace evicted
+    /// every tunnel on the node. The row here is the one the rig's stub
+    /// identity produced, an expiry one second off the one its lease signs.
+    #[tokio::test(start_paused = true)]
+    async fn a_snapshot_row_the_controller_cannot_verify_costs_only_that_tunnel() {
+        let controller = crate::spawn_controller(100);
+        let mut opened = connected(controller.clone()).await;
+        handshake(opened.stream.as_mut().unwrap()).await;
+        let good = signed_row("alice", "one", Uuid::new_v4());
+        let mut skewed = signed_row("bob", "two", Uuid::new_v4());
+        skewed.admission_lease_expires_at += chrono::Duration::seconds(1);
+
+        publish_snapshot(&mut opened, vec![good.clone(), skewed.clone()]).await;
+        match next_command(&mut opened, "snapshot with one unverifiable row").await {
+            ServerFrame::SnapshotAccepted { base_generation: 0 } => {}
+            frame => panic!("expected SnapshotAccepted, got {frame:?}"),
+        }
+        // The snapshot has no generation beyond its base, so the eviction's
+        // down is the first delta.
+        kill_then_down(
+            &mut opened,
+            "refused snapshot row",
+            skewed.registration_id,
+            1,
+        )
+        .await;
+        expect_fleet_ready(&mut opened, "convergence after the refused row's down").await;
+        assert_eq!(aggregate_ids(&controller).await, vec![good.registration_id]);
+        assert_session_active(&controller, "after the refused row's down").await;
+
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelDown {
+                generation: 2,
+                registration_id: good.registration_id,
+            }],
+        )
+        .await;
+        only_heartbeats(&mut opened, "the good row's down at the next generation").await;
+        assert!(aggregate_ids(&controller).await.is_empty());
+        assert_session_active(&controller, "after the good row's down").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_up_the_controller_cannot_verify_costs_only_that_tunnel() {
+        let controller = crate::spawn_controller(100);
+        let mut opened = connected(controller.clone()).await;
+        handshake(opened.stream.as_mut().unwrap()).await;
+        let good = signed_row("alice", "one", Uuid::new_v4());
+        publish_snapshot(&mut opened, vec![good.clone()]).await;
+        assert!(matches!(
+            next_command(&mut opened, "snapshot").await,
+            ServerFrame::SnapshotAccepted { base_generation: 0 }
+        ));
+        expect_fleet_ready(&mut opened, "snapshot").await;
+
+        let foreign = row_signed_with(FOREIGN_SIGNING_KEY, "bob", "two", Uuid::new_v4());
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelUp {
+                generation: 1,
+                row: foreign.clone(),
+            }],
+        )
+        .await;
+        kill_then_down(&mut opened, "refused TunnelUp", foreign.registration_id, 2).await;
+        assert_eq!(aggregate_ids(&controller).await, vec![good.registration_id]);
+
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelDown {
+                generation: 3,
+                registration_id: good.registration_id,
+            }],
+        )
+        .await;
+        only_heartbeats(&mut opened, "the good row's down at the next generation").await;
+        assert!(aggregate_ids(&controller).await.is_empty());
+        assert_session_active(&controller, "after both downs").await;
+    }
+
+    /// `Stale` and `ControlWarming` both refuse one client on the proxy.
+    /// `Stale` is the one that is true: the request's authority is not
+    /// current, while the controller is ready.
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_request_the_controller_cannot_verify_is_answered_stale() {
+        // A cap of two devservers per owner, so a refused request that
+        // reserved a slot would show as the next request's `AtCapacity`.
+        let controller = crate::spawn_controller(2);
+        let mut opened = connected(controller.clone()).await;
+        handshake(opened.stream.as_mut().unwrap()).await;
+        let good = signed_row("alice", "one", Uuid::new_v4());
+        let owner = good.owner_user_id;
+        publish_snapshot(&mut opened, vec![good]).await;
+        assert!(matches!(
+            next_command(&mut opened, "snapshot").await,
+            ServerFrame::SnapshotAccepted { base_generation: 0 }
+        ));
+        expect_fleet_ready(&mut opened, "snapshot").await;
+
+        let request = |devserver_id: &str, admission_lease: AdmissionLease, registration_id| {
+            ClientFrame::AdmissionRequest {
+                request_id: Uuid::new_v4(),
+                registration_id,
+                owner_user_id: owner,
+                user: "alice".into(),
+                devserver_id: devserver_id.into(),
+                admission_lease,
+            }
+        };
+        let foreign_registration = Uuid::new_v4();
+        let misbound_registration = Uuid::new_v4();
+        let admitted_registration = Uuid::new_v4();
+        let over_cap_registration = Uuid::new_v4();
+        let cases = [
+            (
+                "a lease signed outside the ring",
+                request(
+                    "two",
+                    lease_signed_with(
+                        FOREIGN_SIGNING_KEY,
+                        binding(owner, "alice", "two", foreign_registration),
+                    ),
+                    foreign_registration,
+                ),
+                AdmissionDecision::Stale,
+            ),
+            (
+                "a lease bound to another registration",
+                request(
+                    "three",
+                    lease_signed_with(
+                        TEST_SIGNING_KEY,
+                        binding(owner, "alice", "three", Uuid::new_v4()),
+                    ),
+                    misbound_registration,
+                ),
+                AdmissionDecision::Stale,
+            ),
+            (
+                "a verifiable request after both refusals",
+                request(
+                    "four",
+                    lease_signed_with(
+                        TEST_SIGNING_KEY,
+                        binding(owner, "alice", "four", admitted_registration),
+                    ),
+                    admitted_registration,
+                ),
+                AdmissionDecision::Admit,
+            ),
+            (
+                "a verifiable request past the cap",
+                request(
+                    "five",
+                    lease_signed_with(
+                        TEST_SIGNING_KEY,
+                        binding(owner, "alice", "five", over_cap_registration),
+                    ),
+                    over_cap_registration,
+                ),
+                AdmissionDecision::AtCapacity,
+            ),
+        ];
+        for (step, frame, expected) in cases {
+            let ClientFrame::AdmissionRequest {
+                request_id,
+                registration_id,
+                ..
+            } = frame
+            else {
+                unreachable!();
+            };
+            send(&mut opened, &[frame]).await;
+            match next_command(&mut opened, step).await {
+                ServerFrame::AdmissionDecision {
+                    request_id: answered,
+                    registration_id: answered_registration,
+                    decision,
+                } if answered == request_id && answered_registration == registration_id => {
+                    assert_eq!(decision, expected, "{step}");
+                }
+                frame => panic!("{step}: expected its admission decision, got {frame:?}"),
+            }
+        }
+        assert_session_active(&controller, "after the refusals").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_refresh_the_controller_cannot_verify_kills_only_that_registration() {
+        let controller = crate::spawn_controller(100);
+        let mut opened = connected(controller.clone()).await;
+        handshake(opened.stream.as_mut().unwrap()).await;
+        let foreign = signed_row("alice", "one", Uuid::new_v4());
+        let other_registration = signed_row("bob", "two", Uuid::new_v4());
+        let other_devserver = signed_row("carol", "three", Uuid::new_v4());
+        let renewed = signed_row("dave", "four", Uuid::new_v4());
+        publish_snapshot(
+            &mut opened,
+            vec![
+                foreign.clone(),
+                other_registration.clone(),
+                other_devserver.clone(),
+                renewed.clone(),
+            ],
+        )
+        .await;
+        assert!(matches!(
+            next_command(&mut opened, "snapshot").await,
+            ServerFrame::SnapshotAccepted { base_generation: 0 }
+        ));
+        expect_fleet_ready(&mut opened, "snapshot").await;
+
+        let refused = [
+            (
+                "a refresh signed outside the ring",
+                foreign.registration_id,
+                lease_signed_with(
+                    FOREIGN_SIGNING_KEY,
+                    foreign.binding_for(ProxyId::parse("p1").unwrap()),
+                ),
+            ),
+            (
+                "a refresh bound to another registration",
+                other_registration.registration_id,
+                lease_signed_with(
+                    TEST_SIGNING_KEY,
+                    binding(
+                        other_registration.owner_user_id,
+                        "bob",
+                        "two",
+                        Uuid::new_v4(),
+                    ),
+                ),
+            ),
+            (
+                "a refresh bound to another devserver",
+                other_devserver.registration_id,
+                lease_signed_with(
+                    TEST_SIGNING_KEY,
+                    binding(
+                        other_devserver.owner_user_id,
+                        "carol",
+                        "elsewhere",
+                        other_devserver.registration_id,
+                    ),
+                ),
+            ),
+        ];
+        for (generation, (step, registration_id, admission_lease)) in (1..).zip(refused) {
+            send(
+                &mut opened,
+                &[ClientFrame::LeaseRefresh {
+                    registration_id,
+                    admission_lease,
+                }],
+            )
+            .await;
+            kill_then_down(&mut opened, step, registration_id, generation).await;
+        }
+
+        let renewal = lease_signed_with(
+            TEST_SIGNING_KEY,
+            renewed.binding_for(ProxyId::parse("p1").unwrap()),
+        );
+        send(
+            &mut opened,
+            &[ClientFrame::LeaseRefresh {
+                registration_id: renewed.registration_id,
+                admission_lease: renewal.clone(),
+            }],
+        )
+        .await;
+        only_heartbeats(&mut opened, "a verifiable refresh and the three downs").await;
+        let tunnels = controller.tunnels().await.unwrap();
+        assert_eq!(tunnels.len(), 1, "{tunnels:?}");
+        assert_eq!(tunnels[0].registration_id, renewed.registration_id);
+        assert_eq!(tunnels[0].admission_lease, renewal.as_str());
+        assert_session_active(&controller, "after the refused refreshes").await;
+    }
+
+    /// Refusing a row's authority softens nothing structural: a repeated
+    /// id and a generation gap resync exactly as they do for rows that
+    /// verify, and they are checked before the lease is.
+    #[tokio::test(start_paused = true)]
+    async fn structural_violations_around_an_unverifiable_row_still_resync() {
+        let controller = crate::spawn_controller(100);
+        let mut opened = connected(controller.clone()).await;
+        handshake(opened.stream.as_mut().unwrap()).await;
+        let foreign = row_signed_with(FOREIGN_SIGNING_KEY, "bob", "two", Uuid::new_v4());
+
+        send(
+            &mut opened,
+            &[
+                ClientFrame::SnapshotStart { base_generation: 0 },
+                ClientFrame::SnapshotChunk {
+                    rows: vec![foreign.clone(), foreign.clone()],
+                },
+            ],
+        )
+        .await;
+        match next_command(&mut opened, "a snapshot repeating an unverifiable row").await {
+            ServerFrame::ResyncRequired {
+                expected_generation: 0,
+            } => {}
+            frame => panic!("expected ResyncRequired, got {frame:?}"),
+        }
+
+        let good = signed_row("alice", "one", Uuid::new_v4());
+        publish_snapshot(&mut opened, vec![good]).await;
+        assert!(matches!(
+            next_command(&mut opened, "snapshot").await,
+            ServerFrame::SnapshotAccepted { base_generation: 0 }
+        ));
+        expect_fleet_ready(&mut opened, "snapshot").await;
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelUp {
+                generation: 1,
+                row: foreign.clone(),
+            }],
+        )
+        .await;
+        match next_command(&mut opened, "refused TunnelUp").await {
+            ServerFrame::KillRegistrations {
+                registration_ids, ..
+            } if registration_ids == vec![foreign.registration_id] => {}
+            frame => panic!("expected the refused row's kill, got {frame:?}"),
+        }
+        // Published up again before its down: a duplicate registration id.
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelUp {
+                generation: 2,
+                row: foreign.clone(),
+            }],
+        )
+        .await;
+        match next_command(&mut opened, "the refused registration published again").await {
+            ServerFrame::ResyncRequired {
+                expected_generation: 3,
+            } => {}
+            frame => panic!("expected ResyncRequired, got {frame:?}"),
+        }
+
+        publish_snapshot(&mut opened, Vec::new()).await;
+        match next_command(&mut opened, "resnapshot").await {
+            ServerFrame::SnapshotAccepted { base_generation: 0 } => {}
+            frame => panic!("expected SnapshotAccepted, got {frame:?}"),
+        }
+        expect_fleet_ready(&mut opened, "resnapshot").await;
+        let gap = row_signed_with(FOREIGN_SIGNING_KEY, "carol", "three", Uuid::new_v4());
+        send(
+            &mut opened,
+            &[ClientFrame::TunnelUp {
+                generation: 2,
+                row: gap,
+            }],
+        )
+        .await;
+        match next_command(&mut opened, "an unverifiable row across a generation gap").await {
+            ServerFrame::ResyncRequired {
+                expected_generation: 1,
+            } => {}
+            frame => panic!("expected ResyncRequired, got {frame:?}"),
+        }
     }
 }

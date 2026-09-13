@@ -66,6 +66,15 @@ After the snapshot, the proxy publishes `TunnelUp`, `TunnelDown`, `BrowserSessio
 
 One relaxation exists: when the controller confirms a kill, it remembers the killed registration ids (bounded at 4096 per session), because the proxy still publishes its own contiguous `TunnelDown` for each confirmed eviction. Without that memory the expected down would look like corruption and force a resync that retracts every other row of the session. Past the bound the only cost is that resync.
 
+A lease the controller cannot verify costs that one tunnel, never the session. The session task verifies every tunnel row (in a snapshot chunk or a `TunnelUp`) and every `LeaseRefresh` against the verifying ring and the binding the frame claims, and a row also against its own expiry and devserver limit. Ending the session instead would not help: the proxy's reconnect snapshot carries the same row, so the session would flap until the proxy's grace evicted every tunnel on the node. What happens instead:
+
+- A refused row never enters the session or the aggregate: it carries no authority the controller can check, and counting it would bypass the signed limit. Its registration is commanded killed through the ordinary `KillRegistrations` path, right after `SnapshotAccepted` for a snapshot row (a proxy takes kills only once its snapshot is accepted) and in place of the insert for a `TunnelUp`. A refused `TunnelUp` still advances the generation, because the proxy spent one on it; a snapshot that leaves a row out still counts it against the snapshot's row limit and duplicate-id check.
+- A refresh that does not verify, or whose binding names another registration, proxy, owner, or devserver, means that registration's authority can no longer be renewed: it is killed the same way, and its row keeps its previous lease until the kill or its own down removes it.
+- The session remembers each refused registration id from the moment of refusal (bounded at 4096 per session, cleared by a resync). The proxy's `TunnelDown` for it is accepted and advances the generation whether it arrives after the kill's result or before it (a tunnel that closed on its own before the kill landed, which the kill then reports missing). A refresh for it that raced the kill is dropped. Past the bound the down costs one resync.
+- Structural checks run first and keep their meaning. A gap, a duplicate id (including a refused registration published up again before its down), a snapshot limit, or an illegal phase resyncs or closes the session exactly as for a row that verifies.
+
+An `AdmissionRequest` whose lease does not verify is answered `Stale` (see Fleet admission). The actor's own recheck that a lease has not expired by the time it applies a mutation (`ExpiredAdmissionLease`) still ends the session. It fires only for a lease that expires after the session task verified it (for a snapshot row, when its chunk arrived) and before the actor applies the frame, and it cannot flap: the proxy verifies expiry itself, so its reconnect evicts that tunnel instead of publishing it again.
+
 ## Fleet admission
 
 Admission is synchronous and controller-owned: the tunnel listener on the proxy holds the handshake after token validation while the control session asks, bounded by the tunnel server's 10s admission timeout, and the client sees `HelloAck::Ok` only after an `admit` decision. The decision vocabulary is `Admit`, `AtCapacity`, `ControlWarming`, `Stale`; the proxy maps `AtCapacity` to the `too_many_workspaces` tunnel error and the other refusals to `control_unavailable`.
@@ -79,7 +88,7 @@ The rules, in order:
 5. A different pending claim for the same `(user, devserver_id)` key is superseded: the old claim holder gets `Stale` and the new claim wins.
 6. On `Admit` the controller records a pending claim with a 15s TTL. The matching `TunnelUp` must arrive with that claim's registration id; a `TunnelUp` without a matching claim is killed through the unclaimed-row path. An `AdmissionCancel` (proxy-side handshake failure after the decision) drops the claim early.
 
-Each request also carries a short-lived identity-signed admission lease bound to `(owner_user_id, user, devserver_id, registration_id, proxy_id)` with a positive finite `max_connected_devservers` authorization claim. The controller verifies the lease before reserving capacity, again on snapshots/deltas, and at refresh. Mixed still-valid limits for one owner resolve to the minimum during admission and reconciliation. A live tunnel refreshes by re-presenting its PAT to identity over a dedicated yamux stream; the proxy forwards only the resulting signed lease to the controller. The controller never receives the PAT, and an expired or unrefreshable lease closes the tunnel.
+Each request also carries a short-lived identity-signed admission lease bound to `(owner_user_id, user, devserver_id, registration_id, proxy_id)` with a positive finite `max_connected_devservers` authorization claim. The controller verifies the lease before reserving capacity, again on snapshots/deltas, and at refresh. A request whose lease does not verify, or is bound to anything but the request, is answered `Stale` before the rules above run, reserves nothing, and leaves the session up. `Stale` rather than `ControlWarming`, which would say the controller is not ready: what is not current is that request's authority, and the proxy refuses the one client the same way for both. Mixed still-valid limits for one owner resolve to the minimum during admission and reconciliation. A live tunnel refreshes by re-presenting its PAT to identity over a dedicated yamux stream; the proxy forwards only the resulting signed lease to the controller. The controller never receives the PAT, and an expired or unrefreshable lease closes the tunnel.
 
 ## Tenant browser-session inventory
 
@@ -158,11 +167,11 @@ Admin reads and SSE watches are served from republished `watch` snapshots rather
 - Readiness implies at least one Active session; losing the last one retracts the whole aggregate.
 - The actor holds no locks and performs no blocking I/O; bounded queues (actor 1024, outbound session 1024, inbound session 64) and the 32-frame/s session limit close or retire the offender.
 - Bearer comparisons (admin token, proxy token) run at constant time.
-- Every frame and aggregate is bounded: 1 MiB per frame, 128 rows per chunk, 2,048 tunnel rows/2 MiB and 100,000 tenant-session rows/32 MiB per proxy snapshot, 16,384 tunnel rows/64 MiB and 500,000 tenant-session rows/128 MiB fleet state, 4,096 remembered confirmed-down ids per session, and 8 outstanding ping nonces.
+- Every frame and aggregate is bounded: 1 MiB per frame, 128 rows per chunk, 2,048 tunnel rows/2 MiB and 100,000 tenant-session rows/32 MiB per proxy snapshot, 16,384 tunnel rows/64 MiB and 500,000 tenant-session rows/128 MiB fleet state, 4,096 remembered confirmed-down ids and 4,096 refused registration ids per session, and 8 outstanding ping nonces.
 
 ## Error model
 
-`StateError` is session-scoped. Only `NotReady` and `AuthorityTemporarilyUnavailable` reach HTTP; the rest reject the offending frame and close or resync the control session.
+`StateError` is session-scoped. Only `NotReady` and `AuthorityTemporarilyUnavailable` reach HTTP; the rest reject the offending frame and close or resync the control session. A lease that fails verification is not among them: it costs its one tunnel (see Session lifecycle).
 
 | Variant                           | Surface | Effect                                     |
 |-----------------------------------|---------|--------------------------------------------|
