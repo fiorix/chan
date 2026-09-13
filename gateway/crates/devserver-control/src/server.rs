@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -95,35 +95,45 @@ pub async fn serve_control_listener(
     origin_template: ProxyOriginTemplate,
     shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    let proxy_credentials = Arc::new(proxy_credentials);
     serve_accepted(
         || listener.accept(),
-        controller,
-        proxy_credentials,
-        admission_lease_verifier,
-        origin_template,
+        move |stream| {
+            handle_connection(
+                stream,
+                controller.clone(),
+                proxy_credentials.clone(),
+                admission_lease_verifier.clone(),
+                origin_template.clone(),
+            )
+        },
         shutdown,
     )
     .await
 }
 
-/// The accept loop over any source of accept results. The listener
-/// passes its own `accept`; a test passes one that injects the
-/// failures a real socket only produces under fd exhaustion.
-async fn serve_accepted<A, F>(
+/// The accept loop over any source of accept results and any
+/// connection handler. The listener passes its own `accept` and
+/// `handle_connection`; tests pass an `accept` that injects the
+/// failures a real socket only produces under fd exhaustion, and a
+/// handler that panics, which nothing reachable in `handle_connection`
+/// does on demand.
+async fn serve_accepted<A, F, H, C>(
     mut accept: A,
-    controller: ControllerHandle,
-    proxy_credentials: ProxyCredentials,
-    admission_lease_verifier: AdmissionLeaseVerifier,
-    origin_template: ProxyOriginTemplate,
+    mut handle: H,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()>
 where
     A: FnMut() -> F,
     F: Future<Output = io::Result<(TcpStream, SocketAddr)>>,
+    H: FnMut(TcpStream) -> C,
+    C: Future<Output = Result<(), SessionError>> + Send + 'static,
 {
-    let proxy_credentials = Arc::new(proxy_credentials);
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_CONNECTIONS));
     let mut connections = JoinSet::new();
+    // Which peer each connection task serves, so a task that panics can
+    // still be named in the log.
+    let mut peers = HashMap::new();
     loop {
         tokio::select! {
             biased;
@@ -132,10 +142,25 @@ where
                     break;
                 }
             }
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    connections.shutdown().await;
-                    return Err(io::Error::other(format!("control connection task failed: {error}")));
+            joined = connections.join_next_with_id(), if !connections.is_empty() => {
+                match joined {
+                    Some(Ok((id, ()))) => {
+                        peers.remove(&id);
+                    }
+                    // Only `connections.shutdown()` below cancels a task, so
+                    // this is a panic in one proxy's session handler. The
+                    // unwind already dropped that connection, its permit and
+                    // its command receiver, and the actor retires a session
+                    // whose receiver is gone the next time it sends it a
+                    // frame. No other proxy's session is involved, so the
+                    // listener keeps serving them.
+                    Some(Err(error)) => match peers.remove(&error.id()) {
+                        Some(peer) => {
+                            tracing::error!(%peer, %error, "proxy control connection task failed");
+                        }
+                        None => tracing::error!(%error, "proxy control connection task failed"),
+                    },
+                    None => {}
                 }
             }
             // `accept_next` retries a failure that concerns one connection
@@ -150,22 +175,14 @@ where
                     tracing::warn!(%peer, max = MAX_INFLIGHT_CONNECTIONS, "proxy control connection cap reached");
                     continue;
                 };
-                let controller = controller.clone();
-                let proxy_credentials = proxy_credentials.clone();
-                let admission_lease_verifier = admission_lease_verifier.clone();
-                let origin_template = origin_template.clone();
-                connections.spawn(async move {
+                let connection = handle(stream);
+                let task = connections.spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_connection(
-                        stream,
-                        controller,
-                        proxy_credentials,
-                        admission_lease_verifier,
-                        origin_template,
-                    ).await {
+                    if let Err(error) = connection.await {
                         tracing::warn!(%peer, error = ?error, "proxy control connection closed");
                     }
                 });
+                peers.insert(task.id(), peer);
             }
         }
     }
@@ -1660,17 +1677,25 @@ mod tests {
         Ok(response.await.map_err(io::Error::other)?.status())
     }
 
-    fn listener_inputs() -> (
-        ProxyCredentials,
-        AdmissionLeaseVerifier,
-        ProxyOriginTemplate,
-    ) {
+    type BoxedConnection =
+        std::pin::Pin<Box<dyn Future<Output = Result<(), SessionError>> + Send + 'static>>;
+
+    /// The connection handler `serve_control_listener` builds, over the
+    /// test credentials, admission key and origin template.
+    fn serving_handler(controller: ControllerHandle) -> impl FnMut(TcpStream) -> BoxedConnection {
+        let credentials =
+            Arc::new(ProxyCredentials::parse(&format!("p1={TEST_PROXY_TOKEN}")).unwrap());
         let (_, verifier) = admission_keys();
-        (
-            ProxyCredentials::parse(&format!("p1={TEST_PROXY_TOKEN}")).unwrap(),
-            verifier,
-            ProxyOriginTemplate::parse("https://{proxy_id}.proxy.example.test").unwrap(),
-        )
+        let template = ProxyOriginTemplate::parse("https://{proxy_id}.proxy.example.test").unwrap();
+        move |stream| {
+            Box::pin(handle_connection(
+                stream,
+                controller.clone(),
+                credentials.clone(),
+                verifier.clone(),
+                template.clone(),
+            ))
+        }
     }
 
     /// This controller is the fleet's only one, and `main` exits the
@@ -1701,14 +1726,10 @@ mod tests {
                 }
             }
         };
-        let (credentials, verifier, template) = listener_inputs();
         let (shutdown, shutdown_rx) = watch::channel(false);
         let serving = tokio::spawn(serve_accepted(
             accept,
-            crate::spawn_controller(100),
-            credentials,
-            verifier,
-            template,
+            serving_handler(crate::spawn_controller(100)),
             shutdown_rx,
         ));
 
@@ -1729,6 +1750,72 @@ mod tests {
         );
         let status = status
             .expect("the connection after the failures was never served")
+            .expect("h2 exchange");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .expect("the loop did not stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A panic in one proxy's connection task ends that proxy's session
+    /// and nothing else. The loop must not answer it by shutting down
+    /// every other proxy's session and returning, which `main` turns into
+    /// the fleet's only controller exiting. Nothing reachable in
+    /// `handle_connection` panics on demand, so the first connection's
+    /// handler panics before it reads a byte; the second is the real one.
+    #[tokio::test]
+    async fn a_panicking_connection_task_does_not_end_the_control_listener() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut serve = serving_handler(crate::spawn_controller(100));
+        let mut first = true;
+        let handle = move |stream: TcpStream| -> BoxedConnection {
+            if std::mem::replace(&mut first, false) {
+                Box::pin(async move {
+                    let _stream = stream;
+                    panic!("injected connection task panic");
+                })
+            } else {
+                serve(stream)
+            }
+        };
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let serving =
+            tokio::spawn(
+                async move { serve_accepted(|| listener.accept(), handle, shutdown_rx).await },
+            );
+
+        // The panicking task drops the socket as it unwinds, inside the
+        // same poll that completes it, so this EOF means the loop's
+        // `JoinSet` already holds the panic when the next dial arrives.
+        let mut doomed = TcpStream::connect(addr).await.unwrap();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read(&mut doomed, &mut byte),
+        )
+        .await
+        .expect("the panicking connection was never closed");
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            unauthenticated_connect_status(addr),
+        )
+        .await;
+        if serving.is_finished() {
+            panic!(
+                "the accept loop ended after a connection task panicked: {:?}",
+                serving.await.unwrap()
+            );
+        }
+        let status = status
+            .expect("the connection after the panic was never served")
             .expect("h2 exchange");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
