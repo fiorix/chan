@@ -111,12 +111,16 @@ def admission(args: argparse.Namespace) -> str:
     now = int(time.time())
     claims = {
         "purpose": "chan.devserver.admission",
-        "protocol_version": 1,
+        # devserver-control-proto PROTOCOL_VERSION.
+        "protocol_version": 2,
         "owner_user_id": str(uuid.UUID(args.owner_user_id)),
         "user": args.user,
         "devserver_id": args.devserver_id,
         "registration_id": str(uuid.UUID(args.registration_id)),
         "proxy_id": args.proxy_id,
+        # Identity signs a positive per-user cap; the rig's control service
+        # runs with MAX_DEVSERVERS_PER_USER=2, so mint the same bound.
+        "max_connected_devservers": 2,
         "issued_at": now,
         "expires_at": now + 120,
     }
