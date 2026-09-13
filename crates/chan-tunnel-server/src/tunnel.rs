@@ -13,10 +13,11 @@
 //! else (additional streams, wrong method, wrong path, missing
 //! Authorization) gets a final-frame error response and the rest
 //! of the connection is treated as a keepalive driver until the
-//! peer closes. For a pre-auth refusal that keepalive driver is
-//! bounded and holds nothing: `h2::server::Connection` has no idle
-//! timeout, so anything an unauthenticated peer can park on is
-//! something any peer that reaches the listener can exhaust.
+//! peer closes. For a refused dial, at any stage before the tunnel
+//! registers, that keepalive driver is bounded and holds nothing:
+//! `h2::server::Connection` has no idle timeout, so anything a
+//! refused peer can park on is something any peer that reaches the
+//! listener can exhaust.
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
 use h2::Reason;
 use http::{header, Method, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
 
 use crate::driver::workspace_tunnel;
 use crate::registry::Registry;
@@ -78,8 +79,8 @@ impl RegistrationAdmission for LocalAdmission {
     }
 }
 
-/// How long a pre-auth refusal keeps polling the connection after
-/// its final response frame is queued. h2 writes nothing unless the
+/// How long a refused dial keeps polling the connection after its
+/// final response frame is queued. h2 writes nothing unless the
 /// connection is polled, so returning straight away would drop the
 /// 404 / 401 on the floor; and `h2::server::Connection` has no idle
 /// timeout of its own, so a peer that takes its refusal and then
@@ -252,32 +253,15 @@ async fn handle_tunnel_conn(
     // polling it; the validate call is potentially a network round
     // trip to the identity service, and without an active driver
     // the connection would stall (no PINGs, no frame parsing).
-    // The drainer also rejects any stream beyond the first one
-    // (clients should only ever open the tunnel POST). It counts
-    // those rejections and abrupt-shutdowns the connection above
-    // `MAX_DRAINER_REJECTIONS` so a misbehaving authenticated peer
-    // cannot indefinitely amplify load against the listener.
-    tokio::spawn(async move {
-        let mut rejections: u32 = 0;
-        while let Some(rs) = conn.accept().await {
-            if let Ok((_req, mut respond)) = rs {
-                let resp = Response::builder()
-                    .status(StatusCode::CONFLICT)
-                    .body(())
-                    .expect("constant response");
-                let _ = respond.send_response(resp, true);
-                rejections = rejections.saturating_add(1);
-                if rejections >= MAX_DRAINER_REJECTIONS {
-                    tracing::warn!(
-                        rejections,
-                        "tunnel peer opened too many streams; abrupt shutdown",
-                    );
-                    conn.abrupt_shutdown(Reason::ENHANCE_YOUR_CALM);
-                    break;
-                }
-            }
-        }
-    });
+    //
+    // `admitted` is sent only once the tunnel is registered, as the
+    // last step before the tunnel driver takes over. Every return
+    // above that point drops it unsent, which the h2 driver takes as
+    // a refusal: it flushes the refusal and closes the connection.
+    // A refusal path added later ends the h2 driver without having
+    // to remember to.
+    let (admitted, outcome) = oneshot::channel();
+    tokio::spawn(drive_tunnel_conn(conn, outcome));
 
     // Validate the token BEFORE sending 200. Every authentication
     // failure returns the same 401 on the wire so a candidate token
@@ -413,6 +397,7 @@ async fn handle_tunnel_conn(
     // Handshake is done; the in-flight slot belongs to the next
     // dialer. The per-tunnel driver runs without holding a permit.
     drop(inflight_permit);
+    let _ = admitted.send(());
 
     workspace_tunnel(
         yconn,
@@ -428,10 +413,67 @@ async fn handle_tunnel_conn(
     Ok(())
 }
 
+/// The h2 frame driver of a dial that got past the pre-auth checks.
+/// For an admitted tunnel it runs for the tunnel's whole life, so it
+/// has no bound of its own. `outcome` resolves once: a value means the
+/// tunnel registered and this loop carries on; a dropped sender means
+/// the handler refused and returned, and with nothing else owning the
+/// connection a peer holding the TCP open would keep this task and its
+/// socket alive, so the refusal is drained and the connection closed
+/// the way a pre-auth refusal is.
+///
+/// A correct client opens exactly one stream, so any further stream is
+/// answered 409, and above `MAX_DRAINER_REJECTIONS` the connection is
+/// shut down so a misbehaving peer cannot amplify load against the
+/// listener.
+async fn drive_tunnel_conn(
+    mut conn: h2::server::Connection<TcpStream, bytes::Bytes>,
+    mut outcome: oneshot::Receiver<()>,
+) {
+    let mut rejections: u32 = 0;
+    let mut admitted = false;
+    loop {
+        let next = if admitted {
+            conn.accept().await
+        } else {
+            tokio::select! {
+                next = conn.accept() => next,
+                verdict = &mut outcome => {
+                    if verdict.is_err() {
+                        drain_refused_conn(conn).await;
+                        return;
+                    }
+                    admitted = true;
+                    continue;
+                }
+            }
+        };
+        let Some(next) = next else {
+            return;
+        };
+        if let Ok((_req, mut respond)) = next {
+            let resp = Response::builder()
+                .status(StatusCode::CONFLICT)
+                .body(())
+                .expect("constant response");
+            let _ = respond.send_response(resp, true);
+            rejections = rejections.saturating_add(1);
+            if rejections >= MAX_DRAINER_REJECTIONS {
+                tracing::warn!(
+                    rejections,
+                    "tunnel peer opened too many streams; abrupt shutdown",
+                );
+                conn.abrupt_shutdown(Reason::ENHANCE_YOUR_CALM);
+                return;
+            }
+        }
+    }
+}
+
 /// Flush a refused connection's final response and let the peer close,
-/// bounded by `REJECTION_DRAIN_TIMEOUT`. The caller releases the
-/// in-flight permit before calling this: a refused peer gets the
-/// courtesy of a clean close, not a slot to sit in.
+/// bounded by `REJECTION_DRAIN_TIMEOUT`. The in-flight permit is
+/// released before this runs: a refused peer gets the courtesy of a
+/// clean close, not a slot to sit in.
 async fn drain_refused_conn<T, B>(mut conn: h2::server::Connection<T, B>)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -474,17 +516,25 @@ fn extract_bearer<B>(request: &http::Request<B>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bearer, handle_tunnel_conn, tunnel_h2_server_builder};
+    use super::{
+        extract_bearer, handle_tunnel_conn, tunnel_h2_server_builder, REJECTION_DRAIN_TIMEOUT,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
+    use chan_tunnel_client::{ClientConfig, ClientError};
+    use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
+    use h2::Ping;
     use http::header::AUTHORIZATION;
     use http::{Method, Request, StatusCode};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Semaphore;
 
-    use crate::{AllowAllAdmission, Registry, ServerError, Validated, Validator};
+    use crate::{
+        AllowAllAdmission, RegistrationAdmission, RegistrationPermit, Registry, ServerError,
+        Validated, Validator, TUNNEL_SCOPE, VALIDATE_TIMEOUT,
+    };
 
     /// Read one h2 frame as (frame type, stream id, payload).
     async fn read_h2_frame(stream: &mut TcpStream) -> (u8, u32, Vec<u8>) {
@@ -737,5 +787,349 @@ mod tests {
                 .await,
             "the 401 branch held the in-flight slot while the peer idled",
         );
+    }
+
+    /// How long a test gives the server to close a refused dial the peer
+    /// is holding open: the refusal drain plus a margin that dwarfs any
+    /// scheduling delay on a loaded test runner.
+    const CLOSE_WINDOW: Duration = REJECTION_DRAIN_TIMEOUT.saturating_add(Duration::from_secs(5));
+
+    #[derive(Clone, Copy)]
+    enum Verdict {
+        Admit,
+        InvalidToken,
+        NoTunnelScope,
+        IdentityDown,
+        Hang,
+    }
+
+    /// A validator that answers every token the same way, so each test
+    /// reaches exactly one branch past the h2 driver spawn.
+    struct ScriptedValidator(Verdict);
+
+    #[async_trait::async_trait]
+    impl Validator for ScriptedValidator {
+        async fn validate(&self, _token: &str) -> Result<Validated, ServerError> {
+            let scopes = match self.0 {
+                Verdict::Admit => vec![TUNNEL_SCOPE.to_string()],
+                Verdict::NoTunnelScope => Vec::new(),
+                Verdict::InvalidToken => return Err(ServerError::InvalidToken),
+                Verdict::IdentityDown => {
+                    return Err(ServerError::Identity("identity service down".into()))
+                }
+                Verdict::Hang => std::future::pending().await,
+            };
+            Ok(Validated {
+                user_id: uuid::Uuid::nil(),
+                username: "alice".into(),
+                devserver_id: "ds-1".into(),
+                scopes,
+                gateway_assertion_key: None,
+                admission_lease: None,
+                admission_lease_expires_at: None,
+            })
+        }
+    }
+
+    struct AtCapacityAdmission;
+
+    #[async_trait::async_trait]
+    impl RegistrationAdmission for AtCapacityAdmission {
+        async fn admit(
+            &self,
+            _hello: &chan_tunnel_proto::Hello,
+            validated: &Validated,
+        ) -> Result<RegistrationPermit, ServerError> {
+            Err(ServerError::AdmissionAtCapacity {
+                user: validated.username.clone(),
+            })
+        }
+    }
+
+    fn client_config() -> ClientConfig {
+        ClientConfig {
+            tunnel_url: url::Url::parse("http://tunnel.test/v1/tunnel").expect("constant url"),
+            token: "unused".into(),
+            workspace: "devsrv".into(),
+            name: None,
+            client_version: "chan/test".into(),
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_secs(1),
+            dial_timeout: Duration::from_secs(5),
+            events: None,
+            proxy: None,
+            max_concurrent_substreams: chan_tunnel_client::DEFAULT_MAX_CONCURRENT_SUBSTREAMS,
+        }
+    }
+
+    /// A peer that dialled the tunnel, took its answer, and then keeps
+    /// the TCP connection open: nothing in a test closes it, so only the
+    /// server can.
+    struct HeldDial {
+        status: StatusCode,
+        /// The tunnel stream when the answer was a 200.
+        tunnel: Option<H2Duplex>,
+        _request_body: Option<h2::SendStream<bytes::Bytes>>,
+        _send_request: h2::client::SendRequest<bytes::Bytes>,
+        ping_pong: h2::PingPong,
+        /// The client h2 connection: it finishes only when the server
+        /// closes the socket.
+        connection: tokio::task::JoinHandle<()>,
+        serving: tokio::task::JoinHandle<Result<(), ServerError>>,
+    }
+
+    async fn dial_and_hold(
+        validator: Arc<dyn Validator>,
+        admission: Arc<dyn RegistrationAdmission>,
+        registry: Arc<Registry>,
+    ) -> HeldDial {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let permit = Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("the pool starts with a free slot");
+        let serving = tokio::spawn(async move {
+            let (tcp, peer) = listener.accept().await.expect("accept");
+            handle_tunnel_conn(tcp, peer, validator, admission, registry, 0, permit).await
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let (mut send_request, mut connection) = h2::client::handshake(tcp)
+            .await
+            .expect("client h2 handshake");
+        let ping_pong = connection
+            .ping_pong()
+            .expect("a fresh connection hands out its PingPong");
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://tunnel.test{TUNNEL_PATH}"))
+            .header(AUTHORIZATION, "Bearer well-formed-but-bogus")
+            .body(())
+            .expect("request");
+        let (response, request_body) = send_request
+            .send_request(request, false)
+            .expect("send request");
+        let response = tokio::time::timeout(VALIDATE_TIMEOUT + Duration::from_secs(5), response)
+            .await
+            .expect("the dial was never answered")
+            .expect("h2 response");
+        let status = response.status();
+        let (tunnel, request_body) = if status == StatusCode::OK {
+            (
+                Some(H2Duplex::new(request_body, response.into_body())),
+                None,
+            )
+        } else {
+            (None, Some(request_body))
+        };
+        HeldDial {
+            status,
+            tunnel,
+            _request_body: request_body,
+            _send_request: send_request,
+            ping_pong,
+            connection,
+            serving,
+        }
+    }
+
+    /// The handler has refused and returned; the peer still holds the
+    /// TCP open. The server must close it within `CLOSE_WINDOW`. The
+    /// observation is the client connection finishing, which happens
+    /// only on EOF, a reset or a GOAWAY from the server, and never on
+    /// the client's own account because the test holds every client
+    /// handle. When it does not finish, a PING is sent so the failure
+    /// says whether a server task is still driving the connection.
+    async fn assert_the_server_closes_the_held_dial(
+        mut held: HeldDial,
+        expect: StatusCode,
+        what: &str,
+    ) {
+        assert_eq!(held.status, expect, "{what}: refusal status");
+        let handler = tokio::time::timeout(Duration::from_secs(5), &mut held.serving)
+            .await
+            .unwrap_or_else(|_| panic!("{what}: the handler did not return after refusing"))
+            .expect("handler task");
+        assert!(handler.is_err(), "{what}: the handler reported success");
+        let closed = tokio::time::timeout(CLOSE_WINDOW, &mut held.connection)
+            .await
+            .is_ok();
+        if !closed {
+            let pong =
+                tokio::time::timeout(Duration::from_secs(2), held.ping_pong.ping(Ping::opaque()))
+                    .await;
+            panic!(
+                "{what}: the handler returned, and {CLOSE_WINDOW:?} later the server still holds \
+                 the refused connection open (PING answered: {})",
+                matches!(pong, Ok(Ok(_))),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalid_token_refusal_closes_the_held_connection() {
+        let held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::InvalidToken)),
+            Arc::new(AllowAllAdmission),
+            Registry::new(),
+        )
+        .await;
+        assert_the_server_closes_the_held_dial(held, StatusCode::UNAUTHORIZED, "invalid token")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_missing_scope_refusal_closes_the_held_connection() {
+        let held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::NoTunnelScope)),
+            Arc::new(AllowAllAdmission),
+            Registry::new(),
+        )
+        .await;
+        assert_the_server_closes_the_held_dial(held, StatusCode::UNAUTHORIZED, "missing scope")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_identity_error_refusal_closes_the_held_connection() {
+        let held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::IdentityDown)),
+            Arc::new(AllowAllAdmission),
+            Registry::new(),
+        )
+        .await;
+        assert_the_server_closes_the_held_dial(held, StatusCode::BAD_GATEWAY, "identity error")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_validator_timeout_refusal_closes_the_held_connection() {
+        let held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::Hang)),
+            Arc::new(AllowAllAdmission),
+            Registry::new(),
+        )
+        .await;
+        assert_the_server_closes_the_held_dial(
+            held,
+            StatusCode::GATEWAY_TIMEOUT,
+            "validator timeout",
+        )
+        .await;
+    }
+
+    /// A refusal after the 200 (here admission, in the Hello exchange)
+    /// is a refusal all the same: nothing was registered.
+    #[tokio::test]
+    async fn an_admission_refusal_after_the_200_closes_the_held_connection() {
+        let mut held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::Admit)),
+            Arc::new(AtCapacityAdmission),
+            Registry::new(),
+        )
+        .await;
+        let tunnel = held
+            .tunnel
+            .take()
+            .expect("a validated dial gets its 200 before admission");
+        let refused = tokio::time::timeout(
+            Duration::from_secs(5),
+            chan_tunnel_client::handshake(&client_config(), tunnel),
+        )
+        .await
+        .expect("no HelloAck");
+        assert!(
+            matches!(refused, Err(ClientError::RemoteRefusal { .. })),
+            "admission must refuse in the HelloAck: {:?}",
+            refused.err(),
+        );
+        assert_the_server_closes_the_held_dial(held, StatusCode::OK, "admission refusal").await;
+    }
+
+    /// The task that ends a refused dial is also the admitted tunnel's
+    /// h2 driver for the tunnel's whole life, so an admitted tunnel must
+    /// stay up and carry traffic well past the point where a refused dial
+    /// is closed.
+    #[tokio::test]
+    async fn an_admitted_tunnel_stays_up_past_the_refusal_close_window() {
+        use futures::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let registry = Registry::new();
+        let mut held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::Admit)),
+            Arc::new(AllowAllAdmission),
+            registry.clone(),
+        )
+        .await;
+        assert_eq!(held.status, StatusCode::OK);
+        let tunnel = held.tunnel.take().expect("an admitted dial gets its 200");
+        let (_registration, mut yamux) = tokio::time::timeout(
+            Duration::from_secs(5),
+            chan_tunnel_client::handshake(&client_config(), tunnel),
+        )
+        .await
+        .expect("no HelloAck")
+        .expect("admitted handshake");
+        // The devserver side: echo every substream the gateway opens.
+        let _peer = tokio::spawn(async move {
+            while let Some(Ok(stream)) =
+                futures::future::poll_fn(|cx| yamux.poll_next_inbound(cx)).await
+            {
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = stream.split();
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = reader.read(&mut buf).await {
+                        if n == 0
+                            || writer.write_all(&buf[..n]).await.is_err()
+                            || writer.flush().await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let mut registered = false;
+        for _ in 0..100 {
+            if registry.get("alice", "ds-1").is_some() {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(registered, "the admitted tunnel never registered");
+
+        tokio::time::sleep(CLOSE_WINDOW).await;
+
+        assert!(
+            !held.connection.is_finished(),
+            "the server closed an admitted tunnel",
+        );
+        assert!(!held.serving.is_finished(), "the tunnel handler returned");
+        let handle = registry
+            .get("alice", "ds-1")
+            .expect("the admitted tunnel is still registered");
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), handle.open())
+            .await
+            .expect("substream open timed out")
+            .expect("substream open");
+        let echoed = tokio::time::timeout(Duration::from_secs(5), async {
+            stream.write_all(b"still up").await?;
+            stream.flush().await?;
+            let mut echoed = [0u8; 8];
+            stream.read_exact(&mut echoed).await?;
+            Ok::<_, std::io::Error>(echoed)
+        })
+        .await
+        .expect("substream echo timed out")
+        .expect("substream echo");
+        assert_eq!(&echoed, b"still up");
+        tokio::time::timeout(Duration::from_secs(5), held.ping_pong.ping(Ping::opaque()))
+            .await
+            .expect("PING timed out")
+            .expect("PONG");
     }
 }
