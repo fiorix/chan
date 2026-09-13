@@ -2716,6 +2716,8 @@ impl Workspace {
                 eta_secs: eta_secs_from(started, seen, total),
             });
             seen += 1;
+            #[cfg(test)]
+            derived_state_read_probe(self, &e.path);
             let content = match self.read_text(&e.path) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -3195,6 +3197,8 @@ impl Workspace {
         // invisible to reconcile.
         #[cfg(test)]
         index_file_between_stat_and_read_hook();
+        #[cfg(test)]
+        derived_state_read_probe(self, rel);
         let content = match self.read_text(rel) {
             Ok(content) => content,
             Err(error) => {
@@ -3953,6 +3957,40 @@ fn arm_open_recovery_probe(
 ) {
     let slot = OPEN_RECOVERY_PROBE.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap() = Some(OpenRecoveryProbe { root, tx });
+}
+
+/// Every file a workspace reads to feed the graph or the search index,
+/// for the roots a test has armed. Both lanes record here: the per-file
+/// `index_file` path that reconcile and replay drive, and the full graph
+/// rebuild, which reads every Markdown file before the search build does.
+/// A test can therefore tell a pass that skipped a file from one that read
+/// it again, whichever lane ran.
+#[cfg(test)]
+static DERIVED_STATE_READS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn derived_state_read_probe(workspace: &Workspace, rel: &str) {
+    let slot = DERIVED_STATE_READS.get_or_init(Default::default);
+    if let Some(reads) = slot.lock().unwrap().get_mut(workspace.root()) {
+        reads.push(rel.to_string());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn arm_derived_state_read_probe(root: std::path::PathBuf) {
+    let slot = DERIVED_STATE_READS.get_or_init(Default::default);
+    slot.lock().unwrap().insert(root, Vec::new());
+}
+
+/// Disarm the probe for `root` and return what it recorded, sorted.
+#[cfg(test)]
+pub(crate) fn take_derived_state_reads(root: &Path) -> Vec<String> {
+    let slot = DERIVED_STATE_READS.get_or_init(Default::default);
+    let mut reads = slot.lock().unwrap().remove(root).unwrap_or_default();
+    reads.sort();
+    reads
 }
 
 #[cfg(test)]

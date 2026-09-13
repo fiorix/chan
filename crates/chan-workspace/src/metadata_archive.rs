@@ -1250,4 +1250,118 @@ mod tests {
         assert_eq!(scm.head.as_deref(), Some("abc123"));
         assert_eq!(scm.remotes, vec!["github.com/fiorix/chan"]);
     }
+
+    /// An import without `rescan` leaves the sidecars on the archive's
+    /// generation. The next open has to bring graph and search back onto
+    /// the tree on disk together, and do it without reading again the files
+    /// the archive already describes, or the import is not cheap: a full
+    /// rebuild would converge too, but only by reading every file.
+    #[test]
+    fn metadata_import_without_rescan_converges_graph_and_search_on_the_next_open() {
+        use crate::index::vectors::{EmbeddedChunk, VectorStore};
+        use crate::index::{chunking, config as index_config};
+
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let opts = crate::workspace::SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let hits = |ws: &crate::workspace::Workspace, token: &str| -> Vec<String> {
+            ws.search(token, &opts)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect()
+        };
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        let keep = "# keep\nkeeptoken\n";
+        let workspace_root = {
+            let ws = lib.open_workspace(root.path()).unwrap();
+            ws.join_open_recovery();
+            ws.write_text("keep.md", keep).unwrap();
+            ws.write_text("gone.md", "# gone\ngonetoken\n").unwrap();
+            ws.reindex(None).unwrap();
+            ws.set_semantic_enabled(true).unwrap();
+            ws.root().to_path_buf()
+        };
+        // Stand in for keep.md's embeddings: no model is loaded in tests, and
+        // the shard only has to be recognisable byte for byte afterwards.
+        let cfg = index_config::load(&paths.index).unwrap();
+        let embedded: Vec<EmbeddedChunk> = chunking::chunk(keep, &cfg.chunking)
+            .iter()
+            .map(|c| EmbeddedChunk {
+                chunk_id: c.id.clone(),
+                heading: c.heading.clone(),
+                body: c.body.clone(),
+                start_line: c.start_line as u64,
+                end_line: c.end_line as u64,
+                depth: c.depth,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            })
+            .collect();
+        assert!(!embedded.is_empty());
+        VectorStore::open(&paths.index)
+            .unwrap()
+            .replace_file("keep.md", &cfg.model, 4, embedded)
+            .unwrap();
+        let shards = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+            let mut out: Vec<_> = std::fs::read_dir(dir.join("embeddings"))
+                .unwrap()
+                .flatten()
+                .map(|e| (e.path(), std::fs::read(e.path()).unwrap()))
+                .collect();
+            out.sort();
+            out
+        };
+        let imported_shards = shards(&paths.index);
+        assert_eq!(imported_shards.len(), 1);
+
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "rescan-test".into(),
+            },
+        )
+        .unwrap();
+        // The tree moves on after the export: one file the archive has never
+        // seen, one it has that is now gone.
+        std::fs::write(root.path().join("added.md"), "# added\naddedtoken\n").unwrap();
+        std::fs::remove_file(root.path().join("gone.md")).unwrap();
+
+        let report = lib
+            .import_metadata_archive(
+                root.path(),
+                &archive,
+                MetadataImportOptions {
+                    rescan: false,
+                    force_scm: false,
+                },
+            )
+            .unwrap();
+        assert!(!report.rescanned);
+
+        crate::workspace::arm_derived_state_read_probe(workspace_root.clone());
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
+        let reads = crate::workspace::take_derived_state_reads(&workspace_root);
+
+        // Both backends describe the tree on disk, and agree with each other.
+        let graph = ws.graph().unwrap().files().unwrap();
+        assert_eq!(graph, vec!["added.md".to_string(), "keep.md".to_string()]);
+        assert_eq!(ws.indexed_paths().unwrap(), graph);
+        assert_eq!(hits(&ws, "addedtoken"), vec!["added.md".to_string()]);
+        assert_eq!(hits(&ws, "keeptoken"), vec!["keep.md".to_string()]);
+        assert!(hits(&ws, "gonetoken").is_empty());
+        // Only the file the archive did not describe was read. keep.md is
+        // unchanged since the export, so it is neither read nor re-embedded,
+        // and its imported shard is still the one on disk.
+        assert_eq!(reads, vec!["added.md".to_string()]);
+        assert_eq!(shards(&paths.index), imported_shards);
+        assert!(ws.semantic_enabled().unwrap());
+    }
 }
