@@ -90,6 +90,9 @@ def entry(args: argparse.Namespace) -> str:
         "iss": "chan-gateway-identity",
         "sub": str(uuid.UUID(args.sub)),
         "owner_user_id": str(uuid.UUID(args.owner_user_id)),
+        # The client the credential is for: identity's desktop entry route
+        # mints "desktop", its browser share landings mint "browser".
+        "client": args.client,
         "drv": args.devserver_id,
         "aud": args.audience.lower(),
         "typ": "entry",
@@ -137,6 +140,7 @@ def main() -> None:
     entry_parser.add_argument("--secret", required=True)
     entry_parser.add_argument("--sub", required=True)
     entry_parser.add_argument("--owner-user-id", required=True)
+    entry_parser.add_argument("--client", required=True, choices=["desktop", "browser"])
     entry_parser.add_argument("--devserver-id", required=True)
     entry_parser.add_argument("--audience", required=True)
     entry_parser.add_argument("--proxy-id", required=True)

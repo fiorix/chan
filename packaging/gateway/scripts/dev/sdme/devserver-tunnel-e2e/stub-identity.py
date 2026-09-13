@@ -3,11 +3,16 @@
 
 The real proxy still verifies signed admission and entry credentials. This
 fixture owns only the omitted postgres-backed identity boundary: one exact PAT,
-one immutable devserver owner, and two binary callers (owner or grantee).
+one immutable devserver owner, and two binary callers (owner or grantee). Each
+caller can enter as the desktop, through the desktop entry route, or as a
+browser, through a share landing; the credential names which, as identity's
+does.
 """
 
 from datetime import datetime, timedelta, timezone
 import hmac
+from html import escape
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -26,6 +31,10 @@ TUNNEL_PAT = os.environ["STUB_TUNNEL_PAT"]
 INTERNAL_TOKEN = os.environ["STUB_IDENTITY_INTERNAL_TOKEN"]
 OWNER_PAT = os.environ["STUB_DESKTOP_OWNER_PAT"]
 GRANTEE_PAT = os.environ["STUB_DESKTOP_GRANTEE_PAT"]
+# Stand-ins for identity's browser session cookie, one per caller.
+OWNER_BROWSER_SESSION = os.environ["STUB_BROWSER_OWNER_SESSION"]
+GRANTEE_BROWSER_SESSION = os.environ["STUB_BROWSER_GRANTEE_SESSION"]
+BROWSER_SESSION_COOKIE = "stub_identity_session"
 ADMISSION_SIGNING_KEY = os.environ["STUB_ADMISSION_SIGNING_KEY"]
 ENTRY_SIGNING_KEY = os.environ["STUB_ENTRY_SIGNING_KEY"]
 MINT = "/root/mint-signed-credential.py"
@@ -127,6 +136,26 @@ class Handler(BaseHTTPRequestHandler):
             ).isoformat().replace("+00:00", "Z")
         self.json_response(200, response)
 
+    def mint_entry(self, subject: str, client: str, next_path: str) -> str:
+        return mint(
+            "entry",
+            f"--secret={ENTRY_SIGNING_KEY}",
+            "--sub",
+            subject,
+            "--owner-user-id",
+            USER_ID,
+            "--client",
+            client,
+            "--devserver-id",
+            DEVSERVER_ID,
+            "--audience",
+            AUDIENCE,
+            "--proxy-id",
+            PROXY_ID,
+            "--next-path",
+            next_path,
+        )
+
     def desktop_entry(self, body: dict):
         presented = bearer(self.headers)
         if hmac.compare_digest(presented, OWNER_PAT):
@@ -146,22 +175,7 @@ class Handler(BaseHTTPRequestHandler):
         ):
             return self.json_response(400, {"error": "invalid entry path"})
         try:
-            credential = mint(
-                "entry",
-                f"--secret={ENTRY_SIGNING_KEY}",
-                "--sub",
-                subject,
-                "--owner-user-id",
-                USER_ID,
-                "--devserver-id",
-                DEVSERVER_ID,
-                "--audience",
-                AUDIENCE,
-                "--proxy-id",
-                PROXY_ID,
-                "--next-path",
-                next_path,
-            )
+            credential = self.mint_entry(subject, "desktop", next_path)
         except Exception as error:
             sys.stderr.write(f"[stub-identity] entry mint failed: {error}\n")
             return self.json_response(503, {"error": "entry unavailable"})
@@ -180,9 +194,53 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def share_landing(self):
+        """`GET /s/{owner}` and `GET /s/{owner}/{workspace}`: identity's
+        browser handoff, a no-store page whose form POSTs a browser credential
+        to the proxy. The whole-devserver landing is the owner's alone."""
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        session = cookie[BROWSER_SESSION_COOKIE].value if BROWSER_SESSION_COOKIE in cookie else ""
+        if session and hmac.compare_digest(session, OWNER_BROWSER_SESSION):
+            subject = USER_ID
+        elif session and hmac.compare_digest(session, GRANTEE_BROWSER_SESSION):
+            subject = GRANTEE_USER_ID
+        else:
+            return self.json_response(401, {"error": "unauthorized"})
+        segments = self.path.split("?", 1)[0].split("/")[2:]
+        if not segments or segments[0] != USERNAME or len(segments) > 2:
+            return self.json_response(404, {"error": "not found"})
+        if len(segments) == 1:
+            if subject != USER_ID:
+                return self.json_response(404, {"error": "not found"})
+            next_path = "/"
+        elif segments[1] and "." not in segments[1]:
+            next_path = f"/{segments[1]}/"
+        else:
+            return self.json_response(404, {"error": "not found"})
+        try:
+            credential = self.mint_entry(subject, "browser", next_path)
+        except Exception as error:
+            sys.stderr.write(f"[stub-identity] entry mint failed: {error}\n")
+            return self.json_response(503, {"error": "entry unavailable"})
+        body = (
+            '<!doctype html><html><body><form method="post" action="'
+            + escape(f"{PROXY_ORIGIN}/_chan/entry")
+            + '"><input type="hidden" name="credential" value="'
+            + escape(credential)
+            + '"></form></body></html>'
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/healthz":
             return self.json_response(200, {"ok": True})
+        if self.path.startswith("/s/"):
+            return self.share_landing()
         return self.json_response(404, {"error": "not found"})
 
 

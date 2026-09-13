@@ -55,6 +55,8 @@ PAT="chan_pat_e2e_dummy_token"
 DEVSERVER_ID="$(printf '%s' "$PAT" | sha256sum | awk '{print $1}')"
 DESKTOP_OWNER_PAT="chan_pat_e2e_desktop_owner"
 DESKTOP_GRANTEE_PAT="chan_pat_e2e_desktop_grantee"
+BROWSER_OWNER_SESSION="e2e-stub-identity-browser-owner"
+BROWSER_GRANTEE_SESSION="e2e-stub-identity-browser-grantee"
 CONTROL_OPERATOR_TOKEN="e2e-control-operator-00000000000001"
 CONTROL_IDENTITY_TOKEN="e2e-control-identity-00000000000001"
 CONTROL_PROFILE_TOKEN="e2e-control-profile-000000000000001"
@@ -173,6 +175,8 @@ $SDME exec "$C_PROXY" -- /usr/bin/systemd-run --unit=stub --collect \
   --setenv=STUB_TUNNEL_PAT=$PAT --setenv=STUB_IDENTITY_INTERNAL_TOKEN=$IDENTITY_TOKEN \
   --setenv=STUB_DESKTOP_OWNER_PAT=$DESKTOP_OWNER_PAT \
   --setenv=STUB_DESKTOP_GRANTEE_PAT=$DESKTOP_GRANTEE_PAT \
+  --setenv=STUB_BROWSER_OWNER_SESSION=$BROWSER_OWNER_SESSION \
+  --setenv=STUB_BROWSER_GRANTEE_SESSION=$BROWSER_GRANTEE_SESSION \
   "--setenv=STUB_ADMISSION_SIGNING_KEY=$ADMISSION_SIGNING_KEY" \
   "--setenv=STUB_ENTRY_SIGNING_KEY=$ENTRY_SIGNING_KEY" \
   /usr/bin/python3 /root/stub-identity.py || die "systemd-run stub identity"
@@ -325,13 +329,14 @@ for index, row in enumerate(rows):
     claims = json.loads(base64.urlsafe_b64decode(payload))
     assert claims["sub"] == sys.argv[5 + index]
     assert claims["owner_user_id"] == sys.argv[2]
+    assert claims["client"] == "desktop"
     assert claims["next_path"] == sys.argv[7] + "/"
     assert not ({"name", "email", "role"} & claims.keys())
     assert row["expires_at"].endswith("Z")
 ' "$TENANT_USER" "$USER_ID" "$DEVSERVER_ID" "$PROXY_ORIGIN" \
   "$USER_ID" "$GRANTEE_USER_ID" "$PREFIX" \
   || die "desktop entry response identity/origin validation"
-info "entry handoff uses immutable owner binding, POST credential, and no role/PII claims"
+info "entry handoff uses immutable owner binding, POST credential, the desktop client, and no role/PII claims"
 
 entry_field() { printf '%s' "$1" | python3 -c 'import json,sys;print(json.load(sys.stdin)[sys.argv[1]])' "$2"; }
 OWNER_ENTRY_URL="$(entry_field "$OWNER_ENTRY_JSON" entry_exchange_url)"
@@ -391,6 +396,150 @@ for METHOD in PUT DELETE; do
   info "$METHOD native-trust: owner and grantee both reached route (409 no desktop)"
 done
 
+say "reverse-tunnel legs: only the owner's desktop session reaches them"
+# A browser session for the owner, through the stub's share landing: the same
+# no-store handoff page identity serves, whose credential names the browser.
+BROWSER_PAGE="$($SDME exec "$C_PROXY" -- /usr/bin/curl -fsS \
+  -H "Cookie: stub_identity_session=$BROWSER_OWNER_SESSION" \
+  "http://127.0.0.1:$STUB_PORT/s/$TENANT_USER$PREFIX")" \
+  || die "owner browser share landing"
+BROWSER_HANDOFF="$(printf '%s' "$BROWSER_PAGE" | python3 -c '
+import base64, html, json, re, sys
+page = sys.stdin.read()
+action = html.unescape(re.search(r"action=\"([^\"]+)\"", page).group(1))
+credential = html.unescape(re.search(r"name=\"credential\" value=\"([^\"]+)\"", page).group(1))
+payload = credential.split(".")[1]
+claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+assert action == sys.argv[1] + "/_chan/entry", action
+assert claims["client"] == "browser", claims
+assert claims["sub"] == sys.argv[2] and claims["owner_user_id"] == sys.argv[2], claims
+assert claims["next_path"] == sys.argv[3] + "/", claims
+print(action)
+print(credential)
+' "$PROXY_ORIGIN" "$USER_ID" "$PREFIX")" || die "the owner's share landing did not hand off a browser credential"
+BROWSER_ENTRY_URL="$(printf '%s\n' "$BROWSER_HANDOFF" | sed -n 1p)"
+BROWSER_ENTRY_CREDENTIAL="$(printf '%s\n' "$BROWSER_HANDOFF" | sed -n 2p)"
+BROWSER_ENTRY_H="$(mktemp)"
+BROWSER_ENTRY_CODE="$(proxy_curl -sS -o /dev/null -D "$BROWSER_ENTRY_H" -w '%{http_code}' \
+  -X POST -H "Origin: $IDENTITY_ORIGIN" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode "credential=$BROWSER_ENTRY_CREDENTIAL" "$BROWSER_ENTRY_URL" || echo 000)"
+[ "$BROWSER_ENTRY_CODE" = 303 ] || die "the owner's browser credential did not mint a session ($BROWSER_ENTRY_CODE)"
+BROWSER_OWNER_GATE="$(sed -n 's/^set-cookie: __Host-devserver_gate=\([^;]*\).*/\1/ip' "$BROWSER_ENTRY_H" | head -1 | tr -d '\r')"
+[ -n "$BROWSER_OWNER_GATE" ] || die "the browser exchange set no session cookie"
+LEG_B="$(mktemp)"
+code="$(proxy_curl -sS -o "$LEG_B" -w '%{http_code}' \
+  -H "Cookie: __Host-devserver_gate=$BROWSER_OWNER_GATE" "$PROXY_ORIGIN$PREFIX/api/health" || echo 000)"
+[ "$code" = 200 ] || die "the owner's browser session did not reach the workspace ($code)"
+info "the owner's share landing minted a browser credential; its session reaches the workspace (200)"
+
+ds_journal() { # the devserver's journal with the log formatter's ANSI colour codes removed
+  { $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -o cat 2>/dev/null || true; } \
+    | sed 's/\x1b\[[0-9;]*m//g'
+}
+ds_client_count() { # ds_client_count <uuid> <client>: tunnel requests the devserver accepted as that subject and client
+  ds_journal | grep -c "gateway assertion accepted.*sub=$1 .*client=$2" || true
+}
+ds_leg_refusals() { # reverse-tunnel legs the devserver refused as not the owner's desktop
+  ds_journal | grep -c 'reverse tunnel leg refused' || true
+}
+proxy_journal() {
+  { $SDME exec "$C_PROXY" -- /usr/bin/journalctl -u dsp --no-pager -o cat 2>/dev/null || true; } \
+    | sed 's/\x1b\[[0-9;]*m//g'
+}
+proxy_ws_upstream_count() { # proxy_ws_upstream_count <status>: WebSocket upstream handshakes the devserver answered with <status>
+  proxy_journal | grep -c "ws handshake: HTTP error: $1" || true
+}
+ws_upgrade() { # ws_upgrade <path> <gate>: a cookie WebSocket upgrade through the TLS edge; prints the proxy's status line
+  python3 - "$TLS_DIR/ca.crt" "$PROXY_IP" "$HOST_NAME" "$PROXY_TLS_PORT" "$1" "$2" "$PROXY_ORIGIN" <<'PY'
+import base64, os, socket, ssl, sys
+ca, ip, host, port, path, gate, origin = sys.argv[1:8]
+context = ssl.create_default_context(cafile=ca)
+# The per-run CA carries no keyUsage extension, which curl accepts and
+# Python's strict X.509 mode refuses; the chain and host are still verified.
+context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+stream = context.wrap_socket(socket.create_connection((ip, int(port)), timeout=10), server_hostname=host)
+key = base64.b64encode(os.urandom(16)).decode()
+stream.sendall((
+    f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+    f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+    f"Origin: {origin}\r\nCookie: __Host-devserver_gate={gate}\r\n\r\n"
+).encode())
+head = b""
+while b"\r\n\r\n" not in head:
+    chunk = stream.recv(4096)
+    if not chunk:
+        break
+    head += chunk
+print(head.split(b"\r\n", 1)[0].decode(errors="replace"))
+# The proxy answers 101 before it dials the devserver, and drops this socket
+# when the devserver refuses the upstream handshake. Wait for that end.
+try:
+    while stream.recv(4096):
+        pass
+except (OSError, ssl.SSLError):
+    pass
+PY
+}
+TUNNEL_ID="e2e-no-such-tunnel"
+LEGS=("/api/library/tunnel/control?tunnel=$TUNNEL_ID" "/api/library/tunnel/conn?tunnel=$TUNNEL_ID&conn=c0")
+wait_count() { # wait_count <function> <args...> <minimum>: poll a journal counter until it reaches minimum
+  local minimum="${*: -1}" got=0
+  for _ in $(seq 1 20); do
+    got="$("${@:1:$#-1}")"
+    [ "$got" -ge "$minimum" ] && break
+    sleep 0.5
+  done
+  printf '%s' "$got"
+}
+tunnel_leg_case() { # tunnel_leg_case <label> <gate> <subject uuid> <client> <reach|refuse>
+  local label="$1" gate="$2" subject="$3" client="$4" expected="$5" leg code line accepted refused upstream
+  accepted="$(ds_client_count "$subject" "$client")"
+  refused="$(ds_leg_refusals)"
+  for leg in "${LEGS[@]}"; do
+    code="$(proxy_curl -sS -o "$LEG_B" -w '%{http_code}' \
+      -H "Cookie: __Host-devserver_gate=$gate" "$PROXY_ORIGIN$leg" || echo 000)"
+    if [ "$expected" = reach ]; then
+      # Past the gate, the leg's WebSocket extractor refuses a plain GET.
+      [ "$code" = 400 ] && ! grep -q 'reverse tunnels' "$LEG_B" \
+        || die "$label ${leg%%\?*}: expected the leg's own 400 past the gate, got $code ($(head -c 120 "$LEG_B"))"
+    else
+      [ "$code" = 403 ] && [ "$(cat "$LEG_B")" = 'reverse tunnels are not available for this gateway role' ] \
+        || die "$label ${leg%%\?*}: expected the 403 refusal, got $code ($(head -c 120 "$LEG_B"))"
+    fi
+  done
+  [ "$(wait_count ds_client_count "$subject" "$client" $((accepted + 2)))" -ge $((accepted + 2)) ] \
+    || die "$label: the devserver did not accept the leg requests as sub=$subject client=$client"
+  if [ "$expected" = reach ]; then
+    [ "$(ds_leg_refusals)" = "$refused" ] || die "$label: the devserver logged a leg refusal"
+    upstream="$(proxy_ws_upstream_count '404 Not Found')"
+  else
+    [ "$(wait_count ds_leg_refusals $((refused + 2)))" -ge $((refused + 2)) ] \
+      || die "$label: the devserver did not log both leg refusals"
+    upstream="$(proxy_ws_upstream_count '403 Forbidden')"
+  fi
+  info "$label: GET on both legs -> $code; the devserver saw sub=$subject client=$client"
+
+  # The same through a real WebSocket upgrade: the proxy answers 101 and
+  # relays the devserver's answer to the upstream handshake into its journal.
+  # Reaching the control leg's handler means the registry's 404 for an
+  # unknown tunnel; the gate's refusal is a 403.
+  line="$(ws_upgrade "${LEGS[0]}" "$gate")"
+  [[ "$line" == 'HTTP/1.1 101'* ]] || die "$label: the proxy did not accept the cookie upgrade ($line)"
+  if [ "$expected" = reach ]; then
+    [ "$(wait_count proxy_ws_upstream_count '404 Not Found' $((upstream + 1)))" -ge $((upstream + 1)) ] \
+      || die "$label: the devserver's control leg handler did not answer the upgrade (no upstream 404 in the proxy journal)"
+    info "$label: WebSocket upgrade reached the control leg's handler (upstream 404, unknown tunnel)"
+  else
+    [ "$(wait_count proxy_ws_upstream_count '403 Forbidden' $((upstream + 1)))" -ge $((upstream + 1)) ] \
+      || die "$label: the devserver did not refuse the upgrade (no upstream 403 in the proxy journal)"
+    info "$label: WebSocket upgrade refused by the devserver (upstream 403)"
+  fi
+}
+tunnel_leg_case "owner, desktop session" "$OWNER_GATE" "$USER_ID" desktop reach
+tunnel_leg_case "owner, browser session" "$BROWSER_OWNER_GATE" "$USER_ID" browser refuse
+tunnel_leg_case "grantee, desktop session" "$GRANTEE_GATE" "$GRANTEE_USER_ID" desktop refuse
+
 say "extension links: no anonymous caller, each link bound to the signed-in user"
 EXT_JSON=""; ENTRY_PATH=""
 for _ in $(seq 1 20); do
@@ -417,10 +566,6 @@ ext_requests() { # the extension's own request log
   $SDME exec "$C_DS" -- /bin/sh -c 'cat /root/e2e-extension-requests.log 2>/dev/null' || true
 }
 ext_request_count() { ext_requests | grep -c . || true; }
-ds_journal() { # the devserver's journal with the log formatter's ANSI colour codes removed
-  { $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -o cat 2>/dev/null || true; } \
-    | sed 's/\x1b\[[0-9;]*m//g'
-}
 ds_subject_count() { # ds_subject_count <uuid>: tunnel requests the devserver accepted as that subject
   ds_journal | grep -c "gateway assertion accepted.*sub=$1" || true
 }
@@ -576,6 +721,12 @@ assert body["revoked"] >= 1 and body["proxies_confirmed"] == 1, body
 
 extension_link_case grantee "$GRANTEE_GATE" "$GRANTEE_USER_ID" climbs
 extension_link_case owner "$OWNER_GATE" "$USER_ID"
+# The client is not part of the principal: the exact revocation of the owner's
+# sessions above ended the owner's browser session as well as the desktop one.
+code="$(proxy_curl -sS -o "$LEG_B" -w '%{http_code}' \
+  -H "Cookie: __Host-devserver_gate=$BROWSER_OWNER_GATE" "$PROXY_ORIGIN$PREFIX/api/health" || echo 000)"
+[ "$code" = 404 ] || die "the owner's browser session outlived the revocation of the owner's sessions ($code)"
+info "revoking the owner's sessions ended the owner's browser session too (404)"
 # Read the journal into a file first: a `grep -q` at the end of a pipeline
 # can SIGPIPE its writer, and under pipefail a match would then read as none.
 DS_JOURNAL="$(mktemp)"
@@ -604,7 +755,7 @@ assert body["status"] == "ok"
 assert isinstance(body["instance"], str) and body["instance"]
 ' < "$RESP_B"; then
   printf '\n\033[1;32mPASS\033[0m: authenticated workspace health returned 200 through proxy+tunnel\n'
-  rm -f "$RESP_H" "$RESP_B" "$OWNER_ENTRY_H" "$GRANTEE_ENTRY_H" "$MUT_B"
+  rm -f "$RESP_H" "$RESP_B" "$OWNER_ENTRY_H" "$GRANTEE_ENTRY_H" "$BROWSER_ENTRY_H" "$MUT_B" "$LEG_B"
   info "leaving containers up; re-run with --clean to remove"
   exit 0
 fi
