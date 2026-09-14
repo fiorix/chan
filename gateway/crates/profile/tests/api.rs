@@ -918,6 +918,49 @@ async fn identity_pat_revoke_atomically_denies_audits_and_reserves() {
 }
 
 #[tokio::test]
+async fn admin_access_revoke_atomically_denies_audits_and_reserves() {
+    let app = TestApp::new().await;
+    let uid: Uuid = mk_user(&app, "access-revoke@x.com").await.parse().unwrap();
+    let token = insert_api_token(&app.pool, uid, "desktop").await;
+    let (status, body) = app
+        .admin(
+            Method::POST,
+            &format!("/v1/admin/users/{uid}/access/revoke"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pats_revoked"], 1);
+    let revoked: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM api_tokens WHERE id = $1")
+            .bind(token)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert!(revoked);
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_audit WHERE user_id = $1 AND action = 'access_revoked'",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1);
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM control_revocation_jobs WHERE job_key = $1")
+            .bind(format!("subject:{uid}"))
+            .fetch_optional(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        kind.as_deref(),
+        Some("subject"),
+        "durable subject cut is reserved"
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn write_auth_audit_round_trip() {
     let app = TestApp::new().await;
     let (_, u) = app

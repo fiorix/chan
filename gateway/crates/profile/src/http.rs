@@ -1033,6 +1033,7 @@ async fn admin_revoke_user_access(
         .execute(&mut *tx)
         .await?;
     }
+    crate::revocation::reserve_tx(&mut tx, &crate::revocation::RevocationJob::Subject(id)).await?;
     tx.commit().await?;
     Ok(Json(AccessRevocation {
         user_id: id,

@@ -138,7 +138,7 @@ User policy PUT is one lock-coupled upsert: it locks the canonical user row, ser
 
 Profile does not perform the product-facing drain inside policy PUT. Identity first persists through these routes, then confirms owner-session revocation and owner-tunnel eviction. A failed drain cannot roll policy back, and an equal stricter retry repeats the drain until the fleet converges.
 
-`POST /v1/admin/users/{id}/access/revoke` locks the user, revokes every live PAT, and writes one canonical `access_revoked` row. Identity adds OAuth-session, tenant-session, and tunnel cuts through its composite admin route.
+`POST /v1/admin/users/{id}/access/revoke` locks the user, revokes every live PAT, writes one canonical `access_revoked` row, and reserves a durable subject-revocation generation in the same transaction. Identity adds immediate OAuth-session, tenant-session, and tunnel cuts through its composite admin route; profile's worker confirms the post-commit cuts across the entry-credential quiet window.
 
 ### Block and delete use durable revocation
 
