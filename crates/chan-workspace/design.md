@@ -534,6 +534,7 @@ Registration and open operations coordinate through the registry mutex and the c
 
 Two distinct concurrency primitives:
 
+  - Acquisition and stale-lock stealing first take a non-blocking lock on the persistent `writer.admission` inode. It serializes opening/replacing `writer.lock` and publishing its record, so an unpublished acquirer or two concurrent stealers cannot create two writer inodes. Admission contention refuses immediately; the admission handle closes when acquire returns. Stealing still requires a body-sourced record for the same workspace and a provably dead pid; the Windows sidecar alone never authorizes it. Clean release removes the sidecar and truncates the body before unlocking.
   - `WorkspaceLock` (cross-process): held for the lifetime of `Workspace`. A second process opening the same workspace errors immediately with `ChanError::WorkspaceLocked`; we do NOT block. Callers handle the error explicitly (CLI prints a message and exits; desktop app falls back to opening another workspace).
   - `lock::is_locked_by_foreign_holder` is the non-blocking read-side probe for UI status. It does not acquire for ownership and does not steal; it reports foreign-locked only when the writer lock is contended by a live, indeterminate, torn-record, or path-mismatched holder. Free locks, this process's own holder, and provably dead holders stay actionable.
   - `Mutex<Registry>`, `Mutex<Connection>` (graph writer), and the r2d2 pool (graph readers): intra-process. Cheap.

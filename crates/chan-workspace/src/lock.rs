@@ -33,6 +33,21 @@ use crate::error::{ChanError, Result};
 /// a chan built before [`RECORD_FILE`] existed can still read one we write.
 const LOCK_FILE: &str = "writer.lock";
 
+/// Serializes acquisition, record publication and stealing. Never unlinked:
+/// contenders must agree on this inode even while replacing `writer.lock`.
+/// Held only during acquire, so it cannot pin a dead writer's lifetime lock.
+const ADMISSION_FILE: &str = "writer.admission";
+
+struct AdmissionLock(File);
+
+impl Drop for AdmissionLock {
+    fn drop(&mut self) {
+        // Explicit unlock also releases fork-inherited copies of this open
+        // description; closing our fd alone can leave admission pinned.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// The holder record, written beside the lock rather than only inside it.
 ///
 /// Windows needs the split. `LockFileEx` takes a MANDATORY byte-range lock, so
@@ -90,7 +105,8 @@ pub struct WorkspaceLock {
 ///
 /// The body of [`LOCK_FILE`] is rewritten by every acquirer, of every chan
 /// version, inside its own tenure, so a body-sourced record describes the
-/// current tenancy wherever the body is readable at all. The sidecar is
+/// current tenancy after publication. Acquisition and stealing serialize
+/// across that publication window through [`ADMISSION_FILE`]. The sidecar is
 /// maintained only by builds that know about it and, after a crash, survives
 /// until the next sidecar-aware acquire or release, so a sidecar-sourced
 /// record may describe a previous tenancy: good enough to name a holder,
@@ -99,6 +115,12 @@ pub struct WorkspaceLock {
 enum RecordSource {
     LockBody,
     Sidecar,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STEAL_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static ACQUIRE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl WorkspaceLock {
@@ -136,6 +158,23 @@ impl WorkspaceLock {
     /// a provably-dead holder is ever stolen from.
     pub fn acquire(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         fs::create_dir_all(lock_dir)?;
+        let admission = open_lock_file(&lock_dir.join(ADMISSION_FILE))?;
+        match FileExt::try_lock_exclusive(&admission) {
+            Ok(()) => {}
+            Err(e) if is_contended(&e) => {
+                let own_holder = read_lock_record(lock_dir).is_some_and(|record| {
+                    record.pid == std::process::id()
+                        && record.path == canonical_string(workspace_root)
+                });
+                return Err(if own_holder {
+                    ChanError::WorkspaceAlreadyOpen
+                } else {
+                    ChanError::WorkspaceLocked
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let _admission = AdmissionLock(admission);
         let path = lock_dir.join(LOCK_FILE);
         let file = open_lock_file(&path)?;
         match FileExt::try_lock_exclusive(&file) {
@@ -153,7 +192,8 @@ impl WorkspaceLock {
 
     /// Reclaim a contended lock iff the recorded holder is provably
     /// dead. Returns `WorkspaceLocked` whenever the steal isn't provably
-    /// safe (the conservative default).
+    /// safe (the conservative default). Caller holds the admission lock,
+    /// excluding another acquire or steal through record publication.
     fn try_steal(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         let path = lock_dir.join(LOCK_FILE);
         let record = read_record_for(lock_dir);
@@ -173,9 +213,9 @@ impl WorkspaceLock {
             }
         }
         let stealable = match &record {
-            // Only the lock body is rewritten by every acquirer inside its
-            // own tenure, so only a body-sourced record proves the CURRENT
-            // holder is dead. A sidecar-sourced record may be a crash
+            // Admission excludes acquisition/publication races, so a dead
+            // body record can identify a crashed holder with a pinned fd.
+            // A sidecar-sourced record may be a crash
             // leftover shadowing a live holder that predates the sidecar,
             // and unlinking a live holder's lock is two concurrent index
             // writers: the failure this module exists to prevent. Missing or
@@ -197,6 +237,12 @@ impl WorkspaceLock {
         // nameless inode; future acquirers contend on the new one. The
         // sidecar goes first so no window shows a fresh lockfile beside a
         // dead holder's record.
+        #[cfg(test)]
+        STEAL_TEST_HOOK.with(|hook| {
+            if let Some(hook) = hook.take() {
+                hook();
+            }
+        });
         let dead_pid = record.as_ref().map_or(0, |(r, _)| r.pid);
         let _ = fs::remove_file(lock_dir.join(RECORD_FILE));
         let _ = fs::remove_file(&path);
@@ -229,6 +275,11 @@ impl Drop for WorkspaceLock {
         // order keeps the leftover from shadowing anyone wherever the body
         // is readable.
         let _ = fs::remove_file(&self.record_path);
+        // A clean release must not leave an identity that later readers can
+        // mistake for a crashed holder before the next record is published.
+        if let Err(error) = self.file.set_len(0) {
+            tracing::warn!(?error, "failed to clear released writer lock record");
+        }
         let _ = FileExt::unlock(&self.file);
     }
 }
@@ -348,6 +399,12 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<File> {
 /// rename), so a reader racing the write sees either the previous record or
 /// this one, never a torn half.
 fn write_record(file: &File, lock_dir: &Path, workspace_root: &Path) -> Result<()> {
+    #[cfg(test)]
+    ACQUIRE_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
     let record = LockRecord {
         pid: std::process::id(),
         path: canonical_string(workspace_root),
@@ -502,6 +559,136 @@ mod tests {
         tmp.path().to_path_buf()
     }
 
+    fn reaped_child_pid() -> u32 {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = std::process::Command::new("true");
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("child did not exit within the bound");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(process_alive(pid), ProcessLiveness::Dead);
+        pid
+    }
+
+    #[test]
+    fn clean_release_cannot_steal_from_an_unpublished_holder() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let bound = Duration::from_secs(3);
+        let tmp = TempDir::new().unwrap();
+        let prior = WorkspaceLock::acquire(tmp.path(), tmp.path()).unwrap();
+        let dead = LockRecord {
+            pid: reaped_child_pid(),
+            path: canonical_string(tmp.path()),
+            started_at: "2000-01-01T00:00:00Z".into(),
+        };
+        // Stand in for the prior process exiting after a clean release.
+        write_record_body(&prior.file, &serde_json::to_vec(&dead).unwrap()).unwrap();
+        drop(prior);
+        let (ready_tx, ready) = mpsc::channel();
+        let (resume_tx, resume) = mpsc::channel();
+        let (result_tx, result) = mpsc::channel();
+        let dir = tmp.path().to_path_buf();
+        let contender = std::thread::spawn(move || {
+            ACQUIRE_TEST_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    ready_tx.send(()).unwrap();
+                    resume.recv_timeout(bound).unwrap();
+                }));
+            });
+            result_tx.send(WorkspaceLock::acquire(&dir, &dir)).unwrap();
+        });
+        ready.recv_timeout(bound).unwrap();
+        // A distinct open file description must contend even within this
+        // process; otherwise threads would not model independent writers.
+        let probe = open_lock_file(&tmp.path().join(LOCK_FILE)).unwrap();
+        assert!(is_contended(
+            &FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        drop(probe);
+        let other = WorkspaceLock::acquire(tmp.path(), tmp.path());
+        resume_tx.send(()).unwrap();
+        let first = result.recv_timeout(bound).unwrap();
+        contender.join().unwrap();
+        assert!(
+            first.is_ok(),
+            "the initial flock holder must remain the writer"
+        );
+        assert!(
+            other.is_err(),
+            "two live callers both reported holding the writer lock"
+        );
+        drop(other);
+        drop(first);
+        assert!(read_lock_record(tmp.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_stealers_cannot_both_hold_the_writer_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let bound = Duration::from_secs(3);
+        let tmp = TempDir::new().unwrap();
+        let pinned = open_lock_file(&tmp.path().join(LOCK_FILE)).unwrap();
+        FileExt::try_lock_exclusive(&pinned).unwrap();
+        let dead = LockRecord {
+            pid: reaped_child_pid(),
+            path: canonical_string(tmp.path()),
+            started_at: "2000-01-01T00:00:00Z".into(),
+        };
+        write_record_body(&pinned, &serde_json::to_vec(&dead).unwrap()).unwrap();
+        let (ready_tx, ready) = mpsc::channel();
+        let (resume_tx, resume) = mpsc::channel();
+        let (result_tx, result) = mpsc::channel();
+        let dir = tmp.path().to_path_buf();
+        let contender = std::thread::spawn(move || {
+            STEAL_TEST_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    ready_tx.send(()).unwrap();
+                    resume.recv_timeout(bound).unwrap();
+                }));
+            });
+            result_tx.send(WorkspaceLock::acquire(&dir, &dir)).unwrap();
+        });
+        ready.recv_timeout(bound).unwrap();
+        let other = WorkspaceLock::acquire(tmp.path(), tmp.path());
+        resume_tx.send(()).unwrap();
+        let first = result.recv_timeout(bound).unwrap();
+        contender.join().unwrap();
+        assert!(
+            first.is_ok(),
+            "dead holder's pinned inode must be reclaimable"
+        );
+        assert!(
+            other.is_err(),
+            "two stealers both reported holding the writer lock"
+        );
+        assert!(!is_free(tmp.path()));
+        drop(other);
+        drop(first);
+        assert!(
+            is_free(tmp.path()),
+            "the inherited fd pins only the orphan inode"
+        );
+        drop(pinned);
+    }
+
     #[test]
     fn acquire_and_release() {
         let tmp = TempDir::new().unwrap();
@@ -586,8 +773,8 @@ mod tests {
         // The sidecar must not outlive the tenancy that wrote it: a build
         // that predates it rewrites only the lock body on acquire, so a
         // leftover sidecar would shadow that holder's identity forever. The
-        // body keeps the last record after release; that is the pre-sidecar
-        // free-lock state the fast path has always overwritten.
+        // body is also cleared before unlock, so neither record describes a
+        // departed holder after a clean release.
         let tmp = TempDir::new().unwrap();
         let lock = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
         assert!(tmp.path().join(RECORD_FILE).is_file());
@@ -596,6 +783,7 @@ mod tests {
             !tmp.path().join(RECORD_FILE).exists(),
             "a released lock must take its sidecar with it"
         );
+        assert!(fs::read(tmp.path().join(LOCK_FILE)).unwrap().is_empty());
     }
 
     #[cfg(unix)]
