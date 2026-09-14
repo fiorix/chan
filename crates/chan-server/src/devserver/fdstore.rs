@@ -75,6 +75,8 @@ mod linux {
     struct RestartManifest {
         version: u32,
         library_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot_id: Option<String>,
         sessions: Vec<ManifestSession>,
     }
 
@@ -82,8 +84,54 @@ mod linux {
     struct ManifestSession {
         fd_name: String,
         meta: FdStoreSessionMeta,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_start_time: Option<u64>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         replay_b64: String,
+    }
+
+    #[derive(Default)]
+    struct RecordedChildren {
+        boot_id: Option<String>,
+        start_times: HashMap<String, u64>,
+    }
+
+    impl RecordedChildren {
+        fn from_manifest(manifest: &RestartManifest) -> Self {
+            Self {
+                boot_id: manifest.boot_id.clone(),
+                start_times: manifest
+                    .sessions
+                    .iter()
+                    .filter_map(|session| {
+                        // A start time belongs only to its own metadata-derived name.
+                        (session.fd_name
+                            == fdstore_fd_name(&session.meta.session_id, session.meta.child_pid))
+                        .then_some((session.fd_name.clone(), session.child_start_time?))
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    fn current_boot_id() -> Option<String> {
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let boot_id = boot_id.trim();
+        (!boot_id.is_empty()).then(|| boot_id.to_owned())
+    }
+
+    fn process_start_time(pid: u32) -> Option<u64> {
+        parse_process_start_time(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+    }
+
+    fn parse_process_start_time(stat: &str) -> Option<u64> {
+        // comm is parenthesized and can itself contain spaces and parentheses.
+        stat.rsplit_once(')')?
+            .1
+            .split_ascii_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
     }
 
     /// Parking lifecycle. Transitions are one-way:
@@ -174,10 +222,12 @@ mod linux {
             let manifest = RestartManifest {
                 version: MANIFEST_VERSION,
                 library_id: self.library_id.clone(),
+                boot_id: current_boot_id(),
                 sessions: entries
                     .into_iter()
                     .map(|entry| ManifestSession {
                         fd_name: entry.fd_name,
+                        child_start_time: entry.meta.child_pid.and_then(process_start_time),
                         meta: entry.meta,
                         replay_b64: BASE64.encode(&entry.replay),
                     })
@@ -372,6 +422,7 @@ mod linux {
         orphan_fd_names: Vec<String>,
         cleanup_all_terminal_windows: bool,
         manifest_library_id: Option<String>,
+        recorded_children: RecordedChildren,
         imports: Vec<FdStoreSessionImport>,
         skipped: Vec<String>,
         skipped_sessions: Vec<FdStoreSkippedSession>,
@@ -400,18 +451,19 @@ mod linux {
                 }
                 // Inherited fds without a readable manifest: no trustworthy
                 // session-to-window mapping is left.
-                let skipped = fd_names
+                let mut skipped = fd_names
                     .iter()
                     .map(|name| {
                         format!("inherited fd {name}: restart manifest missing or unreadable")
                     })
                     .collect();
-                cleanup_invalid_fds(&fd_names);
+                cleanup_invalid_fds(&fd_names, &RecordedChildren::default(), &mut skipped);
                 return Self {
                     manifest_path,
                     orphan_fd_names: Vec::new(),
                     cleanup_all_terminal_windows: true,
                     manifest_library_id: None,
+                    recorded_children: RecordedChildren::default(),
                     imports: Vec::new(),
                     skipped,
                     skipped_sessions: Vec::new(),
@@ -437,23 +489,22 @@ mod linux {
                         "restart manifest version is unsupported",
                     );
                 }
-                cleanup_invalid_fds(&fd_names);
+                cleanup_invalid_fds(&fd_names, &RecordedChildren::default(), &mut skipped);
                 return Self {
                     manifest_path,
                     orphan_fd_names: Vec::new(),
                     cleanup_all_terminal_windows: false,
                     manifest_library_id: Some(manifest.library_id),
+                    recorded_children: RecordedChildren::default(),
                     imports: Vec::new(),
                     skipped,
                     skipped_sessions,
                 };
             }
 
-            // A live manifest with ZERO inherited chan fds is the bare-stop
-            // case: systemd released the store, every session is gone. The
-            // not-inherited arm below classifies them all so apply() signals
-            // any recorded child a HUP could not kill and reaps the
-            // terminal-window rows.
+            // Without inherited masters, cleanup can still signal a recorded
+            // child whose boot and process start identity remain verifiable.
+            let recorded_children = RecordedChildren::from_manifest(&manifest);
             let mut imports = Vec::new();
             let mut skipped = Vec::new();
             let mut skipped_sessions = Vec::new();
@@ -462,6 +513,7 @@ mod linux {
                     fd_name,
                     meta,
                     replay_b64,
+                    ..
                 } = session;
                 if !fd_name.starts_with(FDSTORE_FD_PREFIX) {
                     push_skipped_session(
@@ -478,7 +530,11 @@ mod linux {
                 // because apply()'s meta-derived cleanup could not reach it.
                 if fd_name != fdstore_fd_name(&meta.session_id, meta.child_pid) {
                     if fd_by_name.remove(&fd_name).is_some() {
-                        cleanup_invalid_fds(std::slice::from_ref(&fd_name));
+                        cleanup_invalid_fds(
+                            std::slice::from_ref(&fd_name),
+                            &recorded_children,
+                            &mut skipped,
+                        );
                     }
                     push_skipped_session(
                         &mut skipped,
@@ -537,6 +593,7 @@ mod linux {
                 orphan_fd_names,
                 cleanup_all_terminal_windows: false,
                 manifest_library_id: Some(manifest.library_id),
+                recorded_children,
                 imports,
                 skipped,
                 skipped_sessions,
@@ -549,6 +606,7 @@ mod linux {
                 orphan_fd_names: Vec::new(),
                 cleanup_all_terminal_windows: false,
                 manifest_library_id: None,
+                recorded_children: RecordedChildren::default(),
                 imports: Vec::new(),
                 skipped: Vec::new(),
                 skipped_sessions: Vec::new(),
@@ -569,6 +627,7 @@ mod linux {
                 orphan_fd_names,
                 cleanup_all_terminal_windows,
                 manifest_library_id,
+                recorded_children,
                 imports,
                 mut skipped,
                 mut skipped_sessions,
@@ -594,9 +653,9 @@ mod linux {
             }
 
             if !orphan_fd_names.is_empty() {
-                signal_children_from_names(&orphan_fd_names);
+                signal_children_from_names(&orphan_fd_names, &recorded_children, &mut skipped);
             }
-            cleanup_skipped_session_children(&skipped_sessions);
+            cleanup_skipped_session_children(&skipped_sessions, &recorded_children, &mut skipped);
             if cleanup_all_terminal_windows {
                 skipped.extend(state.host.cleanup_fdstore_metadata_loss_terminal_windows());
             }
@@ -722,37 +781,75 @@ mod linux {
         skipped_sessions.push(FdStoreSkippedSession::from_meta(meta, reason));
     }
 
-    fn signal_child(pid: u32) {
-        let Ok(raw_pid) = i32::try_from(pid) else {
-            return;
-        };
-        let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
-            return;
-        };
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::HUP);
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    fn signal_child(
+        pid: u32,
+        recorded_boot: Option<&str>,
+        current_boot: Option<&str>,
+        recorded_start: Option<u64>,
+    ) -> Result<(), String> {
+        let recorded_boot = recorded_boot.ok_or("manifest boot id is missing")?;
+        if current_boot != Some(recorded_boot) {
+            return Err("manifest boot id does not match the current boot".into());
+        }
+        let recorded_start = recorded_start.ok_or("no recorded start time for this fd name")?;
+        let raw_pid = i32::try_from(pid).map_err(|_| "invalid child pid")?;
+        let process = rustix::process::Pid::from_raw(raw_pid).ok_or("invalid child pid")?;
+        // Pin the process before reading /proc so pid reuse between validation
+        // and either signal cannot redirect cleanup to a different process.
+        let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())
+            .map_err(|error| format!("cannot pin child identity: {error}"))?;
+        let current_start = process_start_time(pid).ok_or("cannot read child start time")?;
+        if current_start != recorded_start {
+            return Err("child start time does not match the manifest".into());
+        }
+        let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::HUP);
+        let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::TERM);
+        Ok(())
     }
 
-    fn signal_children_from_names(fd_names: &[String]) {
+    fn signal_children_from_names(
+        fd_names: &[String],
+        recorded: &RecordedChildren,
+        skipped: &mut Vec<String>,
+    ) {
+        let current_boot = current_boot_id();
         let mut seen = HashSet::new();
-        for pid in fd_names.iter().filter_map(|name| child_pid_from_name(name)) {
+        for name in fd_names {
+            let Some(pid) = child_pid_from_name(name) else {
+                continue;
+            };
             if seen.insert(pid) {
-                signal_child(pid);
+                if let Err(reason) = signal_child(
+                    pid,
+                    recorded.boot_id.as_deref(),
+                    current_boot.as_deref(),
+                    recorded.start_times.get(name).copied(),
+                ) {
+                    skipped.push(format!("pid {pid}: explicit signal skipped: {reason}"));
+                }
             }
         }
     }
 
-    fn cleanup_skipped_session_children(sessions: &[FdStoreSkippedSession]) {
-        let mut seen = HashSet::new();
-        for pid in sessions.iter().filter_map(|session| session.child_pid) {
-            if seen.insert(pid) {
-                signal_child(pid);
-            }
-        }
+    fn cleanup_skipped_session_children(
+        sessions: &[FdStoreSkippedSession],
+        recorded: &RecordedChildren,
+        skipped: &mut Vec<String>,
+    ) {
+        let names: Vec<_> = sessions
+            .iter()
+            .filter(|session| session.child_pid.is_some())
+            .map(|session| fdstore_fd_name(&session.session_id, session.child_pid))
+            .collect();
+        signal_children_from_names(&names, recorded, skipped);
     }
 
-    fn cleanup_invalid_fds(fd_names: &[String]) {
-        signal_children_from_names(fd_names);
+    fn cleanup_invalid_fds(
+        fd_names: &[String],
+        recorded: &RecordedChildren,
+        skipped: &mut Vec<String>,
+    ) {
+        signal_children_from_names(fd_names, recorded, skipped);
         chan_systemd::fdstore_remove_many(fd_names.iter().map(String::as_str));
     }
 
@@ -774,6 +871,7 @@ mod linux {
             let manifest = RestartManifest {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
+                boot_id: None,
                 sessions: Vec::new(),
             };
             write_manifest(&path, &manifest).unwrap();
@@ -800,6 +898,7 @@ mod linux {
             let manifest = RestartManifest {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
+                boot_id: None,
                 sessions: Vec::new(),
             };
             let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
@@ -830,6 +929,146 @@ mod linux {
                     0o600
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn orphan_fd_names_do_not_authorize_signals() {
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let name = fdstore_fd_name("orphan", child.id());
+            let mut skipped = Vec::new();
+            signal_children_from_names(
+                &[name],
+                &RecordedChildren {
+                    boot_id: current_boot_id(),
+                    ..RecordedChildren::default()
+                },
+                &mut skipped,
+            );
+            assert!(skipped
+                .iter()
+                .any(|reason| reason.contains("no recorded start time")));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "an orphan fd name killed an unverified child"
+            );
+        }
+
+        #[tokio::test]
+        async fn invalid_fd_names_do_not_authorize_signals() {
+            let mut child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let name = fdstore_fd_name("invalid", child.id());
+            let mut skipped = Vec::new();
+            cleanup_invalid_fds(&[name], &RecordedChildren::default(), &mut skipped);
+            assert!(skipped
+                .iter()
+                .any(|reason| reason.contains("manifest boot id is missing")));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "an invalid fd name killed an unverified child"
+            );
+        }
+
+        #[test]
+        fn process_start_time_parser_handles_parentheses_and_spaces() {
+            let mut fields = vec!["0"; 20];
+            fields[0] = "S";
+            fields[19] = "424242";
+            let stat = format!(
+                "123 (a ) name (with parentheses)) {} 99 88",
+                fields.join(" ")
+            );
+            assert_eq!(parse_process_start_time(&stat), Some(424242));
+            assert_eq!(parse_process_start_time("123 (truncated) S 0"), None);
+            assert_eq!(
+                parse_process_start_time(&stat.replace("424242", "invalid")),
+                None
+            );
+            assert_eq!(parse_process_start_time("malformed"), None);
+        }
+
+        #[tokio::test]
+        async fn releasing_the_last_pty_master_hangs_up_its_child() {
+            use std::io::Read;
+            let pair = portable_pty::native_pty_system()
+                .openpty(portable_pty::PtySize::default())
+                .unwrap();
+            let mut command = portable_pty::CommandBuilder::new("sh");
+            command.args(["-c", "printf ready; exec sleep 60"]);
+            let mut child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut ready = [0; 5];
+            reader.read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"ready");
+            drop(reader);
+            drop(pair.master);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            if status.is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+            assert!(
+                status.is_some(),
+                "last master close did not hang up its child"
+            );
+            eprintln!("last master close: {status:?}");
+            assert!(!status.unwrap().success());
+        }
+
+        #[test]
+        fn old_format_manifest_preserves_restore_metadata_and_replay() {
+            let name = fdstore_fd_name("legacy", None);
+            let legacy = serde_json::json!({
+                "version": 2, "library_id": "lib-test",
+                "sessions": [{
+                    "fd_name": name,
+                    "meta": {
+                        "tenant_prefix": "/t/terminals", "session_id": "legacy",
+                        "env": {}, "mcp_env": false, "child_pid": null,
+                        "size": { "rows": 24, "cols": 80, "pixel_width": 0, "pixel_height": 0 },
+                        "seq": 0, "generation": 0, "alt_screen": false, "private_modes": [],
+                    },
+                    "replay_b64": BASE64.encode(b"legacy replay"),
+                }],
+            });
+            let manifest: RestartManifest = serde_json::from_value(legacy).unwrap();
+            assert_eq!(manifest.version, MANIFEST_VERSION);
+            assert_eq!(manifest.sessions.len(), 1);
+            assert_eq!(manifest.sessions[0].fd_name, name);
+            assert_eq!(manifest.sessions[0].meta.session_id, "legacy");
+            assert_eq!(manifest.sessions[0].meta.size.rows, 24);
+            let mut skipped = Vec::new();
+            assert_eq!(
+                decode_replay(
+                    &manifest.sessions[0].replay_b64,
+                    &manifest.sessions[0].meta,
+                    &mut skipped
+                ),
+                b"legacy replay"
+            );
+            assert!(skipped.is_empty());
+            let recorded = RecordedChildren::from_manifest(&manifest);
+            assert!(recorded.boot_id.is_none());
+            assert!(recorded.start_times.is_empty());
         }
 
         #[derive(Default)]
@@ -1008,6 +1247,7 @@ mod linux {
             let manifest = RestartManifest {
                 version: MANIFEST_VERSION,
                 library_id: "lib-test".into(),
+                boot_id: None,
                 sessions: Vec::new(),
             };
             let bytes = serde_json::to_vec(&manifest).unwrap();

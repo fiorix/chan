@@ -6651,6 +6651,93 @@ mod tests {
             }
         }
 
+        struct RecordedChild(std::process::Child);
+
+        impl Drop for RecordedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        fn proc_start_time(pid: u32) -> u64 {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            stat.rsplit_once(')')
+                .unwrap()
+                .1
+                .split_ascii_whitespace()
+                .nth(19)
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+
+        async fn assert_recorded_child_identity(
+            boot_matches: bool,
+            start_matches: bool,
+            legacy: bool,
+        ) {
+            let home = tempfile::tempdir().unwrap();
+            let _env = FdstoreEnvGuard::set(home.path());
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let mut child = RecordedChild(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            );
+            let pid = child.0.id();
+            let current_boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+            let start_time = proc_start_time(pid);
+            let session = meta("identity", "window", Some(pid));
+            let mut manifest = serde_json::json!({
+                "version": 2, "library_id": "lib-test",
+                "boot_id": if boot_matches { current_boot.trim() } else { "another-boot" },
+                "sessions": [{
+                    "fd_name": fdstore_fd_name("identity", Some(pid)),
+                    "meta": session,
+                    "child_start_time": if start_matches { start_time } else { start_time + 1 },
+                }],
+            });
+            if legacy {
+                manifest.as_object_mut().unwrap().remove("boot_id");
+                manifest["sessions"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("child_start_time");
+            }
+            write_manifest_file(home.path(), &manifest);
+            fdstore::StartupRestore::take().apply(&state);
+            let should_signal = boot_matches && start_matches && !legacy;
+            if should_signal {
+                wait_child_dead(&mut child.0).await;
+                use std::os::unix::process::ExitStatusExt;
+                assert!(child.0.try_wait().unwrap().unwrap().signal().is_some());
+            } else {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let status = child.0.try_wait().unwrap();
+                assert!(status.is_none(), "unverified pid was signalled: {status:?}");
+            }
+            assert!(!manifest_file(home.path()).exists());
+        }
+
+        #[tokio::test]
+        async fn startup_restore_skips_a_child_from_another_boot() {
+            assert_recorded_child_identity(false, true, false).await;
+        }
+        #[tokio::test]
+        async fn startup_restore_skips_a_child_with_a_different_start_time() {
+            assert_recorded_child_identity(true, false, false).await;
+        }
+        #[tokio::test]
+        async fn startup_restore_signals_a_child_with_matching_identity() {
+            assert_recorded_child_identity(true, true, false).await;
+        }
+        #[tokio::test]
+        async fn startup_restore_skips_signalling_an_old_format_child() {
+            assert_recorded_child_identity(true, true, true).await;
+        }
+
         fn kill_by_cmdline_fragment(fragment: &str) {
             let Ok(entries) = std::fs::read_dir("/proc") else {
                 return;
@@ -6760,10 +6847,12 @@ mod tests {
                 home.path(),
                 &serde_json::json!({
                     "version": 2,
+                    "boot_id": std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim(),
                     "library_id": "lib-test",
                     "sessions": [
                         {
                             "fd_name": fdstore_fd_name("sess1", Some(pid)),
+                            "child_start_time": proc_start_time(pid),
                             "meta": serde_json::to_value(&good).unwrap(),
                             "replay_b64": "",
                         },
@@ -6798,9 +6887,8 @@ mod tests {
             );
         }
 
-        /// A v1 (prepare-era) manifest takes the full cleanup path: its
-        /// recorded child is signaled, its terminal row reaped, the file
-        /// removed. Hard swap, no shim.
+        /// An unsupported manifest cannot authorize a signal without process
+        /// identity, but its terminal row and manifest still need cleanup.
         #[tokio::test]
         async fn startup_restore_rejects_a_v1_manifest_via_cleanup() {
             let home = tempfile::tempdir().expect("home");
@@ -6815,11 +6903,13 @@ mod tests {
                 .host
                 .mint_window(WindowKind::Terminal, None)
                 .expect("window");
-            let mut child = std::process::Command::new("sleep")
-                .arg("300")
-                .spawn()
-                .expect("recorded child");
-            let pid = child.id();
+            let mut child = RecordedChild(
+                std::process::Command::new("sleep")
+                    .arg("300")
+                    .spawn()
+                    .expect("recorded child"),
+            );
+            let pid = child.0.id();
             let session = meta("old-sess", &row.window_id, Some(pid));
             write_manifest_file(
                 home.path(),
@@ -6839,7 +6929,11 @@ mod tests {
             let restore = fdstore::StartupRestore::take();
             restore.apply(&state);
 
-            wait_child_dead(&mut child).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "an unsupported manifest cannot identify the child"
+            );
             assert!(
                 !state
                     .host
@@ -6925,6 +7019,20 @@ mod tests {
                 .as_str()
                 .expect("fd_name")
                 .to_string();
+
+            assert_eq!(
+                manifest["boot_id"].as_str(),
+                Some(
+                    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                        .unwrap()
+                        .trim()
+                )
+            );
+            let pid = sessions[0]["meta"]["child_pid"].as_u64().unwrap() as u32;
+            assert_eq!(
+                sessions[0]["child_start_time"].as_u64(),
+                Some(proc_start_time(pid))
+            );
 
             let detached = parker.seal_flush_detach();
             assert_eq!(detached, 1, "the parked session is selected for detach");
