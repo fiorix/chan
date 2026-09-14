@@ -21,6 +21,7 @@
 //! prefix at restore.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,12 @@ impl PersistedWorkspace {
 pub struct WorkspaceOverlay {
     store_path: PathBuf,
     rows: Mutex<Vec<PersistedWorkspace>>,
+    // Allocated while holding the data lock; saves may acquire their lock in
+    // a different order, but only newer snapshots may reach disk.
+    next_save: AtomicU64,
+    latest_save: Mutex<u64>,
+    #[cfg(test)]
+    pre_save_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl WorkspaceOverlay {
@@ -77,6 +84,10 @@ impl WorkspaceOverlay {
         Self {
             store_path,
             rows: Mutex::new(rows),
+            next_save: AtomicU64::new(0),
+            latest_save: Mutex::new(0),
+            #[cfg(test)]
+            pre_save_hook: Mutex::new(None),
         }
     }
 
@@ -159,49 +170,38 @@ impl WorkspaceOverlay {
 
     /// Persist the current rows (sorted by path for a stable file) atomically.
     fn persist(&self) {
-        let snapshot = {
-            let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            rows.sort_by(|a, b| a.path.cmp(&b.path));
-            rows
+        let (generation, mut snapshot) = {
+            let rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let generation = self.next_save.fetch_add(1, Ordering::Relaxed) + 1;
+            (generation, rows.clone())
         };
+        snapshot.sort_by(|a, b| a.path.cmp(&b.path));
+        #[cfg(test)]
+        {
+            let hook = self.pre_save_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut latest_save = self.latest_save.lock().unwrap_or_else(|e| e.into_inner());
+        if generation <= *latest_save {
+            return;
+        }
+        // A directory-sync error can follow a successful rename, so exclude
+        // older snapshots before attempting publication.
+        *latest_save = generation;
         if let Err(e) = save_atomic(&self.store_path, &snapshot) {
             tracing::warn!("persisting workspace overlay: {e}");
         }
     }
 }
 
-/// Atomically persist `value` as pretty JSON: write a 0600 tmp, fsync it, rename
-/// over the target, then best-effort fsync the parent dir. Mirrors the window
-/// registry's discipline; renaming un-synced bytes is the partial-write risk on
-/// a crash.
+/// Persist pretty JSON through a unique temporary file with file and directory
+/// fsync, shared with the workspace filesystem's atomic-write implementation.
 fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let dir = match path.parent() {
-        Some(dir) => {
-            std::fs::create_dir_all(dir)?;
-            dir
-        }
-        None => Path::new("."),
-    };
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, path)?;
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-    Ok(())
+    chan_workspace::fs_ops::atomic_write(path, &bytes).map_err(std::io::Error::other)
 }
 
 /// A library's persisted pane-highlight colour: one hex string (or none), stored
@@ -215,6 +215,12 @@ fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
 pub struct FileLocalColor {
     store_path: PathBuf,
     color: Mutex<Option<String>>,
+    // Allocated while holding the data lock; saves may acquire their lock in
+    // a different order, but only newer snapshots may reach disk.
+    next_save: AtomicU64,
+    latest_save: Mutex<u64>,
+    #[cfg(test)]
+    pre_save_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FileLocalColor {
@@ -229,6 +235,10 @@ impl FileLocalColor {
         Self {
             store_path,
             color: Mutex::new(color),
+            next_save: AtomicU64::new(0),
+            latest_save: Mutex::new(0),
+            #[cfg(test)]
+            pre_save_hook: Mutex::new(None),
         }
     }
 }
@@ -239,13 +249,29 @@ impl crate::LocalColorStore for FileLocalColor {
     }
 
     fn set(&self, color: Option<String>) -> Result<(), String> {
-        let snapshot = {
+        let (generation, snapshot) = {
             let mut guard = self.color.lock().unwrap_or_else(|e| e.into_inner());
             *guard = color;
-            guard.clone()
+            let generation = self.next_save.fetch_add(1, Ordering::Relaxed) + 1;
+            (generation, guard.clone())
         };
+        #[cfg(test)]
+        {
+            let hook = self.pre_save_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut latest_save = self.latest_save.lock().unwrap_or_else(|e| e.into_inner());
+        if generation <= *latest_save {
+            return Ok(());
+        }
+        // A directory-sync error can follow a successful rename, so exclude
+        // older snapshots before attempting publication.
+        *latest_save = generation;
         save_atomic(&self.store_path, &snapshot)
-            .map_err(|e| format!("persisting local colour: {e}"))
+            .map_err(|e| format!("persisting local colour: {e}"))?;
+        Ok(())
     }
 }
 
@@ -257,6 +283,76 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let ov = WorkspaceOverlay::open(dir.path().join("workspaces.json"));
         (ov, dir)
+    }
+
+    #[test]
+    fn color_save_cannot_overwrite_a_newer_snapshot() {
+        use crate::LocalColorStore;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileLocalColor::open(dir.path().join("color.json"));
+        let store = std::sync::Arc::new(store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        *store.pre_save_hook.lock().unwrap() = Some(Box::new(move || {
+            entered_tx.send(()).expect("save entered");
+            release_rx.recv_timeout(wait).expect("release first save");
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let first = {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                store.set(Some("#123".into())).expect("first color");
+                done_tx.send(()).expect("first save done");
+            })
+        };
+        entered_rx
+            .recv_timeout(wait)
+            .expect("first snapshot captured");
+        store.set(Some("#abc".into())).expect("second color");
+        release_tx.send(()).expect("release stale snapshot");
+        done_rx.recv_timeout(wait).expect("first writer finishes");
+        first.join().expect("first writer");
+
+        assert_eq!(
+            FileLocalColor::open(dir.path().join("color.json")).get(),
+            store.get(),
+            "an older save must not replace the newer durable state"
+        );
+    }
+
+    #[test]
+    fn overlay_save_cannot_overwrite_a_newer_snapshot() {
+        let (store, dir) = overlay();
+        let store = std::sync::Arc::new(store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        *store.pre_save_hook.lock().unwrap() = Some(Box::new(move || {
+            entered_tx.send(()).expect("save entered");
+            release_rx.recv_timeout(wait).expect("release first save");
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let first = {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                store.set("/a", true);
+                done_tx.send(()).expect("first save done");
+            })
+        };
+        entered_rx
+            .recv_timeout(wait)
+            .expect("first snapshot captured");
+        store.set("/b", true);
+        release_tx.send(()).expect("release stale snapshot");
+        done_rx.recv_timeout(wait).expect("first writer finishes");
+        first.join().expect("first writer");
+
+        assert_eq!(
+            WorkspaceOverlay::open(dir.path().join("workspaces.json")).entries(),
+            store.entries(),
+            "an older save must not replace the newer durable state"
+        );
     }
 
     #[test]

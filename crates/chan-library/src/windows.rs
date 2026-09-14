@@ -26,6 +26,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rand::RngCore;
@@ -336,6 +337,14 @@ pub struct WindowRegistry {
     /// in the same library directory.
     state_path: PathBuf,
     windows: Mutex<Vec<PersistedWindow>>,
+    // Allocated while holding the data lock; saves may acquire their lock in
+    // a different order, but only newer snapshots may reach disk.
+    next_save: AtomicU64,
+    latest_save: Mutex<u64>,
+    #[cfg(test)]
+    pre_save_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    fail_after_save: std::sync::atomic::AtomicBool,
     /// Per-library state that is not a window (the first-open marker). Guarded
     /// independently of `windows` since the open path reads/sets it without
     /// touching the window set.
@@ -367,6 +376,12 @@ impl WindowRegistry {
             store_path,
             state_path,
             windows: Mutex::new(windows),
+            next_save: AtomicU64::new(0),
+            latest_save: Mutex::new(0),
+            #[cfg(test)]
+            pre_save_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_after_save: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(state),
             notify: Arc::new(Notify::new()),
         }
@@ -442,7 +457,7 @@ impl WindowRegistry {
                 origin,
             };
             windows.push(row.clone());
-            (row, windows.clone())
+            (row, self.save_snapshot(&windows))
         };
         self.save_best_effort(&snapshot);
         self.notify.notify_waiters();
@@ -495,7 +510,7 @@ impl WindowRegistry {
             let mut windows = self.lock();
             let before = windows.len();
             windows.retain(|w| w.window_id != window_id);
-            (windows.len() != before, windows.clone())
+            (windows.len() != before, self.save_snapshot(&windows))
         };
         if removed {
             self.save_best_effort(&snapshot);
@@ -517,7 +532,7 @@ impl WindowRegistry {
             windows.retain(|w| {
                 !(w.window_id == window_id && matches!(w.kind, WindowKind::Terminal) && !w.control)
             });
-            (windows.len() != before, windows.clone())
+            (windows.len() != before, self.save_snapshot(&windows))
         };
         if removed {
             self.save_best_effort(&snapshot);
@@ -546,7 +561,7 @@ impl WindowRegistry {
                     break;
                 }
             }
-            (matched, changed, windows.clone())
+            (matched, changed, self.save_snapshot(&windows))
         };
         if changed {
             self.save_best_effort(&snapshot);
@@ -574,7 +589,7 @@ impl WindowRegistry {
                     break;
                 }
             }
-            (matched, changed, windows.clone())
+            (matched, changed, self.save_snapshot(&windows))
         };
         if changed {
             self.save_best_effort(&snapshot);
@@ -608,14 +623,45 @@ impl WindowRegistry {
     /// Persist the window set, logging on failure rather than propagating: a
     /// failed save must not abort a window create/remove (the in-memory set is
     /// still correct; the on-disk copy catches up on the next change).
-    fn save_best_effort(&self, windows: &[PersistedWindow]) {
+    fn save_best_effort(&self, (generation, windows): &(u64, Vec<PersistedWindow>)) {
+        #[cfg(test)]
+        {
+            let hook = self.pre_save_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut latest_save = self.latest_save.lock().unwrap_or_else(|e| e.into_inner());
+        if *generation <= *latest_save {
+            return;
+        }
+        // A directory-sync error can follow a successful rename. Once a newer
+        // save starts, older snapshots must stay excluded even on an error.
+        *latest_save = *generation;
         // Control rows are transient/per-connection (in-memory only): never write
         // them, so a desktop crash can't strand a stale control window on the
         // next boot. Durable rows persist as before.
         let durable: Vec<&PersistedWindow> = windows.iter().filter(|w| !w.control).collect();
-        if let Err(e) = save_atomic(&self.store_path, &durable) {
+        let result = save_atomic(&self.store_path, &durable);
+        #[cfg(test)]
+        let result = result.and_then(|()| {
+            if self.fail_after_save.swap(false, Ordering::Relaxed) {
+                Err(std::io::Error::other("injected error after publication"))
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = result {
             tracing::warn!("persisting window registry: {e}");
         }
+    }
+
+    fn save_snapshot(
+        &self,
+        windows: &MutexGuard<'_, Vec<PersistedWindow>>,
+    ) -> (u64, Vec<PersistedWindow>) {
+        let generation = self.next_save.fetch_add(1, Ordering::Relaxed) + 1;
+        (generation, (*windows).clone())
     }
 
     /// Recover from a poisoned lock instead of propagating the panic: the
@@ -718,41 +764,12 @@ fn state_path_for(store_path: &Path) -> PathBuf {
     store_path.with_file_name(format!("{stem}-state.json"))
 }
 
-/// Atomically persist `value` as pretty JSON: write a 0600 tmp, fsync it,
-/// rename over the target, then fsync the parent dir. Renaming un-synced bytes
-/// is the partial-write risk on a crash. The dir fsync is inlined (no
-/// cross-crate dep) and best-effort: the rename already committed the data, so a
-/// failed dir sync is durability hardening, not a save failure. Shared by the
-/// window set and the sibling first-open state.
+/// Persist pretty JSON through a unique temporary file with file and directory
+/// fsync, shared with the workspace filesystem's atomic-write implementation.
 fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let dir = match path.parent() {
-        Some(dir) => {
-            std::fs::create_dir_all(dir)?;
-            dir
-        }
-        None => Path::new("."),
-    };
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, path)?;
-    // Best-effort parent-dir fsync so the new dirent survives a crash too.
-    if let Ok(dir_file) = std::fs::File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-    Ok(())
+    chan_workspace::fs_ops::atomic_write(path, &bytes).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
@@ -767,6 +784,80 @@ mod tests {
     }
 
     // --- wire byte pins -----------------------------------------------------
+
+    #[test]
+    fn window_save_cannot_overwrite_a_newer_snapshot() {
+        let (store, dir) = registry();
+        let store = std::sync::Arc::new(store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        *store.pre_save_hook.lock().unwrap() = Some(Box::new(move || {
+            entered_tx.send(()).expect("save entered");
+            release_rx.recv_timeout(wait).expect("release first save");
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let first = {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                store.create(WindowKind::Terminal, None);
+                done_tx.send(()).expect("first save done");
+            })
+        };
+        entered_rx
+            .recv_timeout(wait)
+            .expect("first snapshot captured");
+        store.create(WindowKind::Terminal, None);
+        release_tx.send(()).expect("release stale snapshot");
+        done_rx.recv_timeout(wait).expect("first writer finishes");
+        first.join().expect("first writer");
+
+        assert_eq!(
+            WindowRegistry::open(dir.path().join("windows.json")).snapshot(),
+            store.snapshot(),
+            "an older save must not replace the newer durable state"
+        );
+    }
+
+    #[test]
+    fn failed_save_after_publication_cannot_restore_a_stale_snapshot() {
+        let (store, dir) = registry();
+        let store = std::sync::Arc::new(store);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        *store.pre_save_hook.lock().unwrap() = Some(Box::new(move || {
+            entered_tx.send(()).expect("save entered");
+            release_rx.recv_timeout(wait).expect("release first save");
+        }));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let first = {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                store.create(WindowKind::Terminal, None);
+                done_tx.send(()).expect("first save done");
+            })
+        };
+        entered_rx
+            .recv_timeout(wait)
+            .expect("first snapshot captured");
+        store.fail_after_save.store(true, Ordering::Relaxed);
+        store.create(WindowKind::Terminal, None);
+        assert_eq!(
+            WindowRegistry::open(dir.path().join("windows.json")).snapshot(),
+            store.snapshot(),
+            "the newer snapshot was published before the save reported an error"
+        );
+        release_tx.send(()).expect("release stale snapshot");
+        done_rx.recv_timeout(wait).expect("first writer finishes");
+        first.join().expect("first writer");
+
+        assert_eq!(
+            WindowRegistry::open(dir.path().join("windows.json")).snapshot(),
+            store.snapshot(),
+            "an older save must not replace the newer durable state"
+        );
+    }
 
     #[test]
     fn window_kind_wire() {
