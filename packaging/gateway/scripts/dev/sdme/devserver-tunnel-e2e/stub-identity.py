@@ -9,6 +9,7 @@ browser, through a share landing; the credential names which, as identity's
 does.
 """
 
+import base64
 from datetime import datetime, timedelta, timezone
 import hmac
 from html import escape
@@ -51,6 +52,19 @@ def mint(*args: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip())
     return result.stdout.strip()
+
+
+def signed_expiry(lease: str) -> str:
+    """The expiry the admission lease itself signs, as identity reports it.
+
+    The minter reads its own clock, so an expiry computed here from a later
+    clock read disagrees with the lease by a second whenever a second
+    boundary falls between the two, and devserver-control refuses the row.
+    """
+    payload = lease.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    expires_at = datetime.fromtimestamp(claims["expires_at"], timezone.utc)
+    return expires_at.isoformat().replace("+00:00", "Z")
 
 
 def bearer(headers) -> str:
@@ -131,9 +145,7 @@ class Handler(BaseHTTPRequestHandler):
                 sys.stderr.write(f"[stub-identity] admission mint failed: {error}\n")
                 return self.json_response(503, {"error": "admission unavailable"})
             response["admission_lease"] = lease
-            response["admission_lease_expires_at"] = (
-                datetime.now(timezone.utc) + timedelta(seconds=120)
-            ).isoformat().replace("+00:00", "Z")
+            response["admission_lease_expires_at"] = signed_expiry(lease)
         self.json_response(200, response)
 
     def mint_entry(self, subject: str, client: str, next_path: str) -> str:
