@@ -757,21 +757,80 @@ mod linux {
     }
 
     fn write_manifest(path: &Path, manifest: &RestartManifest) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-
         let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
-        chan_workspace::fs_ops::atomic_write(path, &bytes).map_err(|e| e.to_string())?;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        if let Some(parent) = path.parent() {
-            let _ = chan_workspace::fs_ops::sync_dir(parent);
-        }
-        Ok(())
+        crate::atomic_file::write(path, &bytes, Some(0o600)).map_err(|e| e.to_string())
     }
 
     #[cfg(test)]
     mod parker_tests {
         use super::*;
         use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[test]
+        fn manifest_write_keeps_new_and_replaced_files_private() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fdstore-restart.json");
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: "lib-test".into(),
+                sessions: Vec::new(),
+            };
+            write_manifest(&path, &manifest).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_manifest(&path, &manifest).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let published: RestartManifest =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(published.library_id, manifest.library_id);
+        }
+
+        #[test]
+        fn manifest_atomic_writer_sets_mode_before_persist() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fdstore-restart.json");
+            let manifest = RestartManifest {
+                version: MANIFEST_VERSION,
+                library_id: "lib-test".into(),
+                sessions: Vec::new(),
+            };
+            let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+            for prior in [None, Some(b"prior manifest".as_slice())] {
+                if let Some(prior) = prior {
+                    std::fs::write(&path, prior).unwrap();
+                }
+                crate::atomic_file::write_with_pre_persist_hook(
+                    &path,
+                    &bytes,
+                    Some(0o600),
+                    |tmp| {
+                        assert_ne!(tmp, path);
+                        assert_eq!(std::fs::metadata(tmp)?.permissions().mode() & 0o777, 0o600);
+                        assert_eq!(std::fs::read(tmp)?, bytes);
+                        if let Some(prior) = prior {
+                            assert_eq!(std::fs::read(&path)?, prior);
+                        } else {
+                            assert!(!path.exists());
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
 
         #[derive(Default)]
         struct FakeStoreState {
