@@ -275,6 +275,7 @@ pub fn promote(
     let target_rel_str = posix_path(&target_rel_path);
     let target_abs =
         fs_ops::resolve_safe_strict_canon(workspace_root, workspace_root_canon, target_rel)?;
+    refuse_target_inside(drafts_dir, &target_abs, &target_rel_str)?;
     promote_scanned(scan, &target_abs, &target_rel_str)
 }
 
@@ -288,6 +289,7 @@ pub(crate) fn promote_scanned(
     target_abs: &Path,
     target_rel: &str,
 ) -> Result<DraftPromoteReport> {
+    refuse_target_inside(&scan.src, target_abs, target_rel)?;
     if !fs_ops::is_editable_text(target_rel) && !scan.inspection.has_attachments {
         return Err(ChanError::NotEditableText(target_rel.to_string()));
     }
@@ -297,6 +299,26 @@ pub(crate) fn promote_scanned(
     } else {
         promote_single_file(scan, target_abs, target_rel)
     }
+}
+
+fn refuse_target_inside(source: &Path, target: &Path, target_rel: &str) -> Result<()> {
+    let source = source.canonicalize()?;
+    // The leaf may be new. Resolve its deepest existing ancestor so aliases
+    // of either the drafts root or the target parent cannot hide containment.
+    let mut ancestor = target;
+    let target = loop {
+        match ancestor.canonicalize() {
+            Ok(path) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or(ChanError::PathEmpty)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    if target.starts_with(source) {
+        return Err(ChanError::DestinationInsideSource(target_rel.to_string()));
+    }
+    Ok(())
 }
 
 pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
@@ -679,6 +701,115 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn self_promotion_is_refused(attachments: bool) {
+        let root = TempDir::new().unwrap();
+        let drafts = root.path().join(".Drafts");
+        ensure_root(&drafts).unwrap();
+        let draft = create_dir(&drafts, "untitled-1").unwrap();
+        fs::write(draft.abs.join("draft.md"), "irreplaceable note").unwrap();
+        if attachments {
+            fs::write(draft.abs.join("image.png"), "image bytes").unwrap();
+        }
+        let target = draft.abs.join("note.md");
+        let scan = scan_draft(&drafts, "untitled-1").unwrap();
+        let result = promote_scanned(scan, &target, ".Drafts/untitled-1/note.md");
+        eprintln!(
+            "attachments={attachments}; promotion={result:?}; source={:?}; target exists={}",
+            fs::read_to_string(draft.abs.join("draft.md")),
+            target.exists()
+        );
+        assert!(matches!(result, Err(ChanError::DestinationInsideSource(_))));
+        assert_eq!(
+            fs::read_to_string(draft.abs.join("draft.md")).unwrap(),
+            "irreplaceable note"
+        );
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read_dir(&draft.abs).unwrap().count(),
+            if attachments { 2 } else { 1 }
+        );
+        if attachments {
+            assert_eq!(
+                fs::read_to_string(draft.abs.join("image.png")).unwrap(),
+                "image bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn promotion_refuses_its_own_single_file_draft() {
+        self_promotion_is_refused(false);
+    }
+
+    #[test]
+    fn promotion_refuses_its_own_attachment_draft() {
+        self_promotion_is_refused(true);
+    }
+
+    #[test]
+    fn workspace_promotion_refuses_other_drafts_and_parent_traversal() {
+        let root = TempDir::new().unwrap();
+        let drafts = root.path().join(".Drafts");
+        ensure_root(&drafts).unwrap();
+        let draft = create_dir(&drafts, "untitled-1").unwrap();
+        let other = create_dir(&drafts, "untitled-2").unwrap();
+        fs::write(draft.abs.join("draft.md"), "note").unwrap();
+        let canon = root.path().canonicalize().unwrap();
+        let result = promote(
+            &drafts,
+            root.path(),
+            &canon,
+            "untitled-1",
+            ".Drafts/untitled-2/note.md",
+        );
+        assert!(matches!(result, Err(ChanError::DestinationInsideSource(_))));
+        assert!(!other.abs.join("note.md").exists());
+        assert!(promote(
+            &drafts,
+            root.path(),
+            &canon,
+            "untitled-1",
+            "elsewhere/../.Drafts/untitled-1/note.md"
+        )
+        .is_err());
+        assert_eq!(
+            fs::read_to_string(draft.abs.join("draft.md")).unwrap(),
+            "note"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promotion_refuses_canonical_draft_aliases() {
+        let root = TempDir::new().unwrap();
+        let drafts = root.path().join("real-drafts");
+        ensure_root(&drafts).unwrap();
+        let draft = create_dir(&drafts, "untitled-1").unwrap();
+        fs::write(draft.abs.join("draft.md"), "note").unwrap();
+        let alias = root.path().join(".Drafts");
+        std::os::unix::fs::symlink(&drafts, &alias).unwrap();
+        let target = draft.abs.join("note.md");
+        let scan = scan_draft(&alias, "untitled-1").unwrap();
+        assert!(matches!(
+            promote_scanned(scan, &target, "real-drafts/untitled-1/note.md"),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+        let scan = scan_draft(&drafts, "untitled-1").unwrap();
+        assert!(matches!(
+            promote_scanned(
+                scan,
+                &alias.join("untitled-1/note.md"),
+                ".Drafts/untitled-1/note.md"
+            ),
+            Err(ChanError::DestinationInsideSource(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(draft.abs.join("draft.md")).unwrap(),
+            "note"
+        );
+        assert_eq!(fs::read_dir(&draft.abs).unwrap().count(), 1);
+    }
 
     #[test]
     fn list_returns_empty_when_root_missing() {
