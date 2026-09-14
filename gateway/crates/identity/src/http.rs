@@ -1537,6 +1537,16 @@ async fn share_landing(
         return Ok(Redirect::to("/").into_response());
     };
 
+    let caller = state
+        .cfg
+        .profile_client
+        .get_user(uid)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if caller.is_blocked() {
+        return Err(Error::NotFound);
+    }
+
     // Resolve the owner handle. 404 is the same shape as "no access" and
     // "unknown devserver", so a stranger cannot probe a handle's existence.
     let owner_user = state
@@ -1672,6 +1682,16 @@ async fn share_landing_root(
     // Whole-devserver launcher mutation is owner-only. Grantees keep the
     // per-workspace share landings (`/s/{owner}/{workspace}`).
     if uid != owner_user.id {
+        return Err(Error::NotFound);
+    }
+
+    let caller = state
+        .cfg
+        .profile_client
+        .get_user(uid)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if caller.is_blocked() {
         return Err(Error::NotFound);
     }
 

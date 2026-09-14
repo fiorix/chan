@@ -1829,6 +1829,59 @@ async fn signed_in_with_a_shared_devserver<'a>(
     c
 }
 
+async fn assert_share_landing_denies_inactive_caller(uri: &str, owner_uid: Uuid, caller_uid: Uuid) {
+    for missing in [false, true] {
+        let app = TestApp::new().await;
+        let dsid = "b".repeat(64);
+        let mut c =
+            signed_in_with_a_shared_devserver(&app, owner_uid, &dsid, caller_uid, "caller").await;
+        let response = if missing {
+            ResponseTemplate::new(404).set_body_json(json!({"error": "not found"}))
+        } else {
+            ResponseTemplate::new(200).set_body_json(blocked_user_body(caller_uid, "caller@x.com"))
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/users/{caller_uid}")))
+            .respond_with(response)
+            .with_priority(1)
+            .mount(&app.profile)
+            .await;
+
+        let cookie = c.cookie.clone();
+        let (status, headers, body, location) = c.send(Method::GET, uri, None).await;
+        if status == StatusCode::OK {
+            assert_entry_handoff(status, &headers, &location);
+            let (action, credential) = entry_handoff_page(&c, uri).await;
+            let claims = decode_handoff(&action, &credential, &dsid, owner_uid);
+            assert_eq!(claims.sub, caller_uid);
+            eprintln!("{uri}: inactive caller received a verified entry credential");
+        }
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}, missing={missing}");
+        assert_eq!(body, json!({"error": "not found"}));
+        assert_eq!(
+            c.cookie, cookie,
+            "navigation must preserve the identity cookie"
+        );
+        app.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn share_landing_denies_inactive_caller() {
+    assert_share_landing_denies_inactive_caller(
+        "/s/owner-handle/photos",
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn share_landing_root_denies_inactive_caller() {
+    let owner_uid = Uuid::new_v4();
+    assert_share_landing_denies_inactive_caller("/s/owner-handle", owner_uid, owner_uid).await;
+}
+
 /// Both share landings answer a signed-in browser's navigation, so every
 /// credential they mint is for the browser client, whether the caller is a
 /// grantee opening one workspace or the owner opening one workspace or the
