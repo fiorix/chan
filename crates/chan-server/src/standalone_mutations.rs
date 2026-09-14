@@ -13,15 +13,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use chan_workspace::WatchEvent;
 
 use crate::bus::ScopeRegistry;
 
-/// How long a ticket keeps suppressing raw echoes after its last activity
-/// (begin, a matched echo, or commit). Matches the window the workspace
+/// How long a committed ticket keeps suppressing raw echoes after its last
+/// activity (a matched echo or commit). Matches the window the workspace
 /// self-write dedupe uses: notify delivers a logical write's echoes well
 /// inside it, and anything later is treated as a genuine external change.
 const TICKET_WINDOW: Duration = Duration::from_millis(1500);
@@ -37,6 +37,22 @@ const ECHOES_PER_PATH: u32 = 3;
 #[derive(Debug)]
 pub struct MutationTicket {
     id: u64,
+    inner: Weak<Mutex<BusInner>>,
+}
+
+impl Drop for MutationTicket {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner
+                .tickets
+                .get(&self.id)
+                .is_some_and(|state| state.in_flight)
+            {
+                inner.tickets.remove(&self.id);
+            }
+        }
+    }
 }
 
 struct TicketState {
@@ -44,7 +60,8 @@ struct TicketState {
     source_w: String,
     /// Remaining raw-echo allowance per expected wire path.
     remaining: HashMap<String, u32>,
-    /// Last activity; the sweep drops tickets idle past [`TICKET_WINDOW`].
+    in_flight: bool,
+    /// Last activity; committed tickets expire after [`TICKET_WINDOW`].
     touched: Instant,
 }
 
@@ -58,7 +75,7 @@ struct BusInner {
 /// manager's event path.
 pub struct StandaloneMutationBus {
     next_id: AtomicU64,
-    inner: Mutex<BusInner>,
+    inner: Arc<Mutex<BusInner>>,
     registry: Arc<ScopeRegistry>,
 }
 
@@ -66,7 +83,7 @@ impl StandaloneMutationBus {
     pub fn new(registry: Arc<ScopeRegistry>) -> Self {
         Self {
             next_id: AtomicU64::new(1),
-            inner: Mutex::new(BusInner::default()),
+            inner: Arc::new(Mutex::new(BusInner::default())),
             registry,
         }
     }
@@ -88,10 +105,14 @@ impl StandaloneMutationBus {
             TicketState {
                 source_w: source_w.to_string(),
                 remaining,
+                in_flight: true,
                 touched: Instant::now(),
             },
         );
-        MutationTicket { id }
+        MutationTicket {
+            id,
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 
     /// The mutation succeeded: emit one deterministic attributed `fs` frame
@@ -106,6 +127,7 @@ impl StandaloneMutationBus {
                 return;
             };
             state.touched = Instant::now();
+            state.in_flight = false;
             state.source_w.clone()
         };
         for change in &changes {
@@ -186,9 +208,9 @@ impl StandaloneMutationBus {
 
     fn sweep(inner: &mut BusInner) {
         let now = Instant::now();
-        inner
-            .tickets
-            .retain(|_, state| now.duration_since(state.touched) < TICKET_WINDOW);
+        inner.tickets.retain(|_, state| {
+            state.in_flight || now.duration_since(state.touched) < TICKET_WINDOW
+        });
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BusInner> {
@@ -213,6 +235,55 @@ mod tests {
         let (id, rx) = registry.register();
         registry.subscribe(id, dir);
         (StandaloneMutationBus::new(registry), rx)
+    }
+
+    #[test]
+    fn an_aged_in_flight_ticket_still_attributes_its_commit() {
+        let (bus, mut rx) = bus_with_subscriber("home/u");
+        let ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
+        bus.lock().tickets.get_mut(&ticket.id).unwrap().touched =
+            Instant::now() - TICKET_WINDOW - Duration::from_secs(1);
+        // A neighbouring raw event sweeps tickets without refreshing ours.
+        assert!(!bus.suppress_raw(&modified("home/u/other.md")));
+        bus.commit(ticket, vec![modified("home/u/note.md")]);
+        let frame = rx.try_recv();
+        let suppressed = bus.suppress_raw(&modified("home/u/note.md"));
+        eprintln!("attributed frame={frame:?}, raw echo suppressed={suppressed}");
+        let frame: serde_json::Value =
+            serde_json::from_str(&frame.expect("attributed frame")).unwrap();
+        assert_eq!(frame["source_w"], "w-writer");
+        assert!(suppressed);
+        assert!(bus.suppress_raw(&WatchEvent::rename(
+            None,
+            Some("home/u/note.md".into()),
+            false,
+            None,
+            WorkspaceGeneration::default(),
+        )));
+    }
+
+    #[test]
+    fn dropping_an_abandoned_ticket_reclaims_it_immediately() {
+        let (bus, mut rx) = bus_with_subscriber("home/u");
+        let ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
+        let id = ticket.id;
+        assert!(bus.lock().tickets.contains_key(&id));
+        drop(ticket);
+        assert!(!bus.lock().tickets.contains_key(&id));
+        assert!(!bus.suppress_raw(&modified("home/u/note.md")));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn committed_tickets_expire_after_the_suppression_tail() {
+        let (bus, _rx) = bus_with_subscriber("home/u");
+        let ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
+        let id = ticket.id;
+        bus.commit(ticket, vec![modified("home/u/note.md")]);
+        bus.lock().tickets.get_mut(&id).unwrap().touched =
+            Instant::now() - TICKET_WINDOW - Duration::from_secs(1);
+        assert!(!bus.suppress_raw(&modified("home/u/note.md")));
+        assert!(!bus.lock().tickets.contains_key(&id));
     }
 
     #[test]
