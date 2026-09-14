@@ -95,19 +95,6 @@ pub async fn api_metadata_import(
         return err(StatusCode::BAD_REQUEST, "empty metadata archive".into());
     }
 
-    // Close every live doc session BEFORE the import's cell swap, for
-    // the same reason storage reset does: no cell swap with live doc
-    // sessions. Flush-all against the pre-swap workspace, fan
-    // `closed{import}`, drop the sessions.
-    let doc_workspace = state.try_workspace().ok();
-    state
-        .doc_sessions
-        .close_all("import", doc_workspace.as_ref(), &state.self_writes)
-        .await;
-    state
-        .scene_sessions
-        .close_all("import", doc_workspace.as_ref(), &state.self_writes)
-        .await;
     let state_clone = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         perform_metadata_import(&state_clone, bytes, rescan, force_scm)
@@ -233,7 +220,6 @@ fn perform_metadata_import(
         .workspace_cell
         .write()
         .map_err(|_| MetadataImportError::Poisoned("workspace cell lock"))?;
-    state.terminal_sessions.close_all(CloseReason::Workspace);
     let Some(mut cell) = cell_guard.take() else {
         return Err(MetadataImportError::Busy);
     };
@@ -250,6 +236,7 @@ fn perform_metadata_import(
         install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(MetadataImportError::Busy);
     }
+    close_workspace_sessions(state, &workspace_strong, "import");
     drop(workspace_strong);
 
     let import_result = state
@@ -270,6 +257,27 @@ fn perform_metadata_import(
 
     restore_result?;
     import_result
+}
+
+/// Run only after the old workspace has drained, while its cell write guard
+/// still excludes new handlers. These callers run on the blocking pool; the
+/// flush futures use the retained workspace directly and never read the cell.
+pub(super) fn close_workspace_sessions(
+    state: &AppState,
+    workspace: &Arc<Workspace>,
+    reason: &'static str,
+) {
+    futures::executor::block_on(async {
+        state
+            .doc_sessions
+            .close_all(reason, Some(workspace), &state.self_writes)
+            .await;
+        state
+            .scene_sessions
+            .close_all(reason, Some(workspace), &state.self_writes)
+            .await;
+    });
+    state.terminal_sessions.close_all(CloseReason::Workspace);
 }
 
 pub(super) fn workspace_search_aggression(

@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
 use crate::state::AppState;
-use crate::terminal_sessions::CloseReason;
 
 use super::metadata::{
-    install_workspace_cell, workspace_search_aggression, WorkspaceCellInstallError,
+    close_workspace_sessions, install_workspace_cell, workspace_search_aggression,
+    WorkspaceCellInstallError,
 };
 
 /// Body of `POST /api/storage/reset`. Two modes mirror the chan-
@@ -74,25 +74,9 @@ pub async fn api_storage_reset(
     // settings_disabled is enforced by `tunnel_guard::settings_guard`
     // at the router layer; no per-handler gate.
     let mode: ResetMode = body.mode.into();
-    // Close every live doc session BEFORE the workspace cell swap:
-    // flush-all against the pre-swap workspace, fan `closed{reset}` so
-    // attached editors detach cleanly, and drop the sessions so no
-    // stale authority text survives into the next workspace
-    // generation. Doc sessions hold no workspace Arc, so this also
-    // keeps them out of the reset drain count.
-    let doc_workspace = match state.try_workspace() {
-        Ok(workspace) => workspace,
-        Err(e) => return err_state(&e),
-    };
-    state
-        .doc_sessions
-        .close_all("reset", Some(&doc_workspace), &state.self_writes)
-        .await;
-    state
-        .scene_sessions
-        .close_all("reset", Some(&doc_workspace), &state.self_writes)
-        .await;
-    drop(doc_workspace);
+    if let Err(e) = state.try_workspace() {
+        return err_state(&e);
+    }
     // Run the reset on a blocking-thread: the drain spin-wait sleeps
     // and the chan-workspace wipe walks the filesystem; neither belongs
     // on the async runtime's worker thread.
@@ -210,7 +194,6 @@ fn perform_reset_with(
         .workspace_cell
         .write()
         .map_err(|_| ResetError::Poisoned("workspace cell lock"))?;
-    state.terminal_sessions.close_all(CloseReason::Workspace);
     let Some(mut cell) = cell_guard.take() else {
         return Err(ResetError::Busy);
     };
@@ -240,6 +223,9 @@ fn perform_reset_with(
         install_workspace_cell(state, &mut cell_guard, workspace_strong, search_aggression);
         return Err(ResetError::Busy);
     }
+    // Admission succeeded. Flush dirty authorities against the old workspace
+    // and close sessions before releasing its writer lock.
+    close_workspace_sessions(state, &workspace_strong, "reset");
     // Last strong ref is ours. Drop it so chan-workspace's flock releases
     // before `reset_workspace` tries to verify exclusive access.
     drop(workspace_strong);
@@ -428,6 +414,163 @@ mod tests {
         let status = response.into_response().into_parts().0.status;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn busy_reset_preserves_live_sessions_and_success_flushes_then_closes() {
+        check_busy_sessions_then_success(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn busy_import_preserves_live_sessions_and_success_flushes_then_closes() {
+        check_busy_sessions_then_success(true).await;
+    }
+
+    async fn session_operation(state: Arc<AppState>, archive: Option<&[u8]>) -> Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        if let Some(archive) = archive {
+            let mut body = b"--import\r\nContent-Disposition: form-data; name=\"rescan\"\r\n\r\nfalse\r\n--import\r\nContent-Disposition: form-data; name=\"file\"; filename=\"metadata.tar.zst\"\r\n\r\n".to_vec();
+            body.extend_from_slice(archive);
+            body.extend_from_slice(b"\r\n--import--\r\n");
+            axum::Router::new()
+                .route(
+                    "/import",
+                    axum::routing::post(super::super::metadata::api_metadata_import),
+                )
+                .with_state(state)
+                .oneshot(
+                    Request::post("/import")
+                        .header("content-type", "multipart/form-data; boundary=import")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        } else {
+            api_storage_reset(
+                State(state),
+                Json(ResetBody {
+                    mode: ResetModeView::Workspace,
+                }),
+            )
+            .await
+        }
+    }
+
+    async fn check_busy_sessions_then_success(import: bool) {
+        use crate::terminal_sessions::{CreateOptions, SessionEvent};
+        let test = reset_test_state();
+        let state = test.state.clone();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("live.md", "original").unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = if import {
+            let path = archive_dir.path().join("metadata.tar.zst");
+            state
+                .library
+                .export_metadata_archive(
+                    &state.workspace_root,
+                    &path,
+                    chan_workspace::MetadataExportOptions {
+                        chan_version: "test".into(),
+                    },
+                )
+                .unwrap();
+            Some(std::fs::read(path).unwrap())
+        } else {
+            None
+        };
+        let mut doc = state
+            .doc_sessions
+            .attach(&workspace, "live.md", "window", None)
+            .await
+            .unwrap();
+        let mut frames = doc.take_frames();
+        doc.session()
+            .apply_replace("writer", "dirty content")
+            .unwrap();
+        let mut terminal = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: portable_pty::PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some("live".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                profile: None,
+            })
+            .unwrap();
+        assert!(!state.terminal_sessions.live_child_pids().is_empty());
+        let busy = tokio::time::timeout(
+            Duration::from_secs(15),
+            session_operation(state.clone(), archive.as_deref()),
+        )
+        .await
+        .unwrap();
+        let doc_open = state.doc_sessions.get("live.md").is_some();
+        let terminal_open = state
+            .terminal_sessions
+            .roster()
+            .iter()
+            .any(|entry| entry.id == terminal.id());
+        let mut doc_closed = false;
+        while let Ok(frame) = frames.try_recv() {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            doc_closed |= frame["type"] == "closed";
+        }
+        let mut terminal_closed = false;
+        while let Ok(event) = terminal.rx.try_recv() {
+            terminal_closed |= matches!(event, SessionEvent::Closed(_) | SessionEvent::Exit(_));
+        }
+        eprintln!("import={import}, status={}, doc_open={doc_open}, terminal_open={terminal_open}, doc_closed={doc_closed}, terminal_closed={terminal_closed}", busy.status());
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        assert!(doc_open && terminal_open && !doc_closed && !terminal_closed);
+        assert!(Arc::ptr_eq(&workspace, &state.try_workspace().unwrap()));
+        let old_workspace = Arc::downgrade(&workspace);
+        drop(workspace);
+        let mut success = session_operation(state.clone(), archive.as_deref()).await;
+        for _ in 0..10 {
+            if success.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(success.status(), StatusCode::CONFLICT);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            success = session_operation(state.clone(), archive.as_deref()).await;
+        }
+        assert_eq!(success.status(), StatusCode::OK);
+        assert!(state.doc_sessions.get("live.md").is_none());
+        assert!(state.terminal_sessions.roster().is_empty());
+        assert!(old_workspace.upgrade().is_none());
+        assert_eq!(
+            state.try_workspace().unwrap().read_text("live.md").unwrap(),
+            "dirty content"
+        );
+        assert!(matches!(
+            doc.push(1, Vec::new()),
+            Err(crate::doc_sessions::PushError::Closed)
+        ));
+        assert!(std::iter::from_fn(|| frames.try_recv().ok()).any(|frame| {
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            frame["type"] == "closed" && frame["reason"] == if import { "import" } else { "reset" }
+        }));
+        assert!(
+            std::iter::from_fn(|| terminal.rx.try_recv().ok()).any(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Closed(crate::terminal_sessions::CloseReason::Workspace)
+                )
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
