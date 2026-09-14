@@ -2947,9 +2947,10 @@ impl Workspace {
     }
 
     /// Replace this workspace's blocklist additions. Persists the set, swaps
-    /// one new generated scope, and requests reconciliation; the caller
-    /// triggers the recovery off its async executor. Names are stored as
-    /// given; matching is
+    /// one new generated scope, requests reconciliation, and synchronously
+    /// rescans a warm report. Async callers must offload this entire call,
+    /// including its serialized config write. Names are stored as given;
+    /// matching is
     /// case-insensitive basename-at-any-depth, so the caller normalizes
     /// (trim / drop blanks / reject path separators / lower-case + dedupe).
     pub fn set_excluded_dirs(&self, dirs: Vec<String>) -> Result<()> {
