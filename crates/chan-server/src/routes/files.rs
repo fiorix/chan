@@ -1859,22 +1859,26 @@ async fn write_streamed_text(
 ) -> chan_workspace::Result<FileStat> {
     let (tx, mut rx) = mpsc::channel(8);
     let consumer = tokio::task::spawn_blocking(move || {
-        let writable = workspace.ensure_writable(&path)?;
-        let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
-        match check_write_preconditions(current_mtime_ns, None, false, preconditions) {
-            Ok(()) => {}
-            Err(WritePreconditionError::Conflict) => {
-                return Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns });
-            }
-            Err(WritePreconditionError::Required) => {
-                return Err(chan_workspace::ChanError::Io(
+        let check_disk = || {
+            let writable = workspace.ensure_writable(&path)?;
+            let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
+            match check_write_preconditions(current_mtime_ns, None, false, preconditions) {
+                Ok(()) => Ok(()),
+                Err(WritePreconditionError::Conflict) => {
+                    Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns })
+                }
+                Err(WritePreconditionError::Required) => Err(chan_workspace::ChanError::Io(
                     "disk write unexpectedly required an authority precondition".into(),
-                ));
+                )),
             }
-        }
+        };
+        check_disk()?;
         let mut reservation = None;
         let result = workspace.write_atomic_stream(&path, AtomicWriteKind::Text, |sink| {
             consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+            // Body transfer can outlive the open-time token. Refuse before
+            // publication and before reserving suppression for this write.
+            check_disk()?;
             reservation = Some(self_writes.reserve_after_preflight(&path));
             Ok(())
         });
@@ -5873,6 +5877,66 @@ mod doc_divert_tests {
             chunks_seen.load(Ordering::Relaxed) < 100,
             "the producer must stop when the bounded consumer rejects overflow"
         );
+        assert!(!state.self_writes.should_suppress("n.md"));
+    }
+
+    #[tokio::test]
+    async fn streamed_put_preserves_an_external_edit_during_the_body() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("n.md", "original\n").unwrap();
+        let token = workspace.stat("n.md").unwrap().mtime_ns.unwrap();
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let stream =
+            futures::stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"put")) })
+                .chain(futures::stream::iter(
+                    (0..9).map(|_| Ok::<_, Infallible>(Bytes::from_static(b" body"))),
+                ))
+                .chain(futures::stream::once(async move {
+                    // Ten chunks exceed the consumer channel's capacity. Reaching
+                    // this point proves the consumer passed its initial CAS check.
+                    paused_tx.send(()).unwrap();
+                    resume_rx.await.unwrap();
+                    Ok::<_, Infallible>(Bytes::from_static(b" end"))
+                }));
+        use futures::StreamExt;
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            raw_put_body(
+                State(request_state),
+                AxumPath("n.md".into()),
+                Body::from_stream(stream),
+                None,
+                Some(token.to_string()),
+                None,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), paused_rx)
+            .await
+            .expect("body reaches the pause")
+            .unwrap();
+        std::fs::write(root.path().join("n.md"), "external edit\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(root.path().join("n.md"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+            .unwrap();
+        let external_token = workspace.stat("n.md").unwrap().mtime_ns.unwrap();
+        assert_ne!(token, external_token);
+        resume_tx.send(()).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .expect("PUT completes")
+            .unwrap();
+        let content = workspace.read_text("n.md").unwrap();
+        eprintln!("PUT status={}, disk={content:?}", response.status());
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(content, "external edit\n");
+        let body = body_json(response).await;
+        assert_eq!(body["current_mtime_ns"], external_token.to_string());
         assert!(!state.self_writes.should_suppress("n.md"));
     }
 
