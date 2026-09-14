@@ -420,7 +420,9 @@ impl SessionRegistry {
             }
         }
         if armed {
-            self.reaper_wake.notify_waiters();
+            // The single reaper may still be between its scan and next wait;
+            // retain a permit so a last-socket drop in that gap wakes it too.
+            self.reaper_wake.notify_one();
         }
     }
 
@@ -1017,6 +1019,25 @@ mod tests {
         let later = t0 + GONE_GRACE + Duration::from_secs(1);
         reg.reap_due(later);
         assert_eq!(reg.leader(), None);
+    }
+
+    #[tokio::test]
+    async fn reaper_wake_retains_a_drop_before_waiting() {
+        let reg = Arc::new(SessionRegistry::new());
+        let guard = reg.join("w-a", true, None).guard;
+        assert_eq!(reg.reap_due(Instant::now()).next_deadline, None);
+        drop(guard);
+
+        let notify = reg.reaper_wake();
+        let mut notified = std::pin::pin!(notify.notified());
+        let ready = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(notified.as_mut(), cx).is_ready())
+        })
+        .await;
+        assert!(
+            ready,
+            "the last socket drop must leave a reaper wake permit"
+        );
     }
 
     #[test]
