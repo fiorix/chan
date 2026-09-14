@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
@@ -20,7 +21,15 @@ const PAYLOAD_ROOT: &str = "chan-metadata-v1/payload";
 const ARCHIVE_FORMAT_VERSION: u32 = 1;
 const PATH_KEY_SCHEME: &str = "canonical-absolute-path-slug-sha256-8hex";
 const INCLUDED_SUBTREES: &[&str] = &["index", "graph", "report", "sessions"];
-const EXCLUDED_SUBTREES: &[&str] = &["locks", "tokens", "trash", "staging", "temp", "*.shm"];
+const EXCLUDED_SUBTREES: &[&str] = &[
+    "locks",
+    "tokens",
+    "trash",
+    "staging",
+    "temp",
+    "*.shm",
+    "graph.sqlite-wal",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataExportOptions {
@@ -376,6 +385,26 @@ fn write_archive(
     manifest: &MetadataManifest,
     tmp: &Path,
 ) -> Result<(usize, u64)> {
+    let staging_root = workspace_paths.root.join("staging");
+    std::fs::create_dir_all(&staging_root)?;
+    let staging = tempfile::Builder::new()
+        .prefix("metadata-export-")
+        .tempdir_in(staging_root)?;
+    let mut snapshots = BTreeMap::new();
+    let graph = staging.path().join("graph.sqlite");
+    if snapshot_source_exists(&workspace_paths.graph_db, false)? {
+        snapshot_graph(&workspace_paths.graph_db, &graph)?;
+    }
+    // Retain substitutions for absent stores too: a store appearing during
+    // the walk must fail the export rather than fall back to a live copy.
+    snapshots.insert(workspace_paths.graph_db.clone(), graph);
+    let bm25 = workspace_paths.index.join("bm25");
+    let index = staging.path().join("bm25");
+    if snapshot_source_exists(&bm25, true)? {
+        snapshot_bm25(&bm25, &index)?;
+    }
+    snapshots.insert(bm25, index);
+    let graph_wal = workspace_paths.graph_dir.join("graph.sqlite-wal");
     let file = File::create(tmp)?;
     let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), 0)
         .map_err(|e| ChanError::Io(format!("create zstd encoder: {e}")))?;
@@ -398,7 +427,14 @@ fn write_archive(
         let archive_dir = PathBuf::from(PAYLOAD_ROOT).join(subtree);
         append_dir(&mut builder, &archive_dir, &mut stats)?;
         if source.exists() {
-            append_tree(&mut builder, &source, &archive_dir, &mut stats)?;
+            append_tree(
+                &mut builder,
+                &source,
+                &archive_dir,
+                &mut stats,
+                &snapshots,
+                &graph_wal,
+            )?;
         }
     }
 
@@ -407,6 +443,93 @@ fn write_archive(
         .finish()
         .map_err(|e| ChanError::Io(format!("finish zstd archive: {e}")))?;
     Ok((stats.files, stats.bytes))
+}
+
+fn snapshot_source_exists(path: &Path, directory: bool) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if (directory && meta.is_dir()) || (!directory && meta.is_file()) => Ok(true),
+        Ok(_) => Err(ChanError::Io(format!(
+            "metadata archive refuses special file: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn snapshot_graph(source: &Path, destination: &Path) -> Result<()> {
+    let conn =
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let destination = destination
+        .to_str()
+        .ok_or_else(|| ChanError::Io("graph snapshot path is not UTF-8".into()))?;
+    conn.execute("VACUUM INTO ?1", [destination])?;
+    Ok(())
+}
+
+fn snapshot_bm25(source: &Path, destination: &Path) -> Result<()> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 0..ATTEMPTS {
+        std::fs::create_dir(destination)?;
+        let result = snapshot_bm25_commit(source, destination);
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && attempt + 1 < ATTEMPTS =>
+            {
+                std::fs::remove_dir_all(destination)?;
+            }
+            Err(error) => {
+                return Err(ChanError::Io(format!(
+                    "snapshot search index (attempt {} of {ATTEMPTS}): {error}",
+                    attempt + 1
+                )))
+            }
+        }
+    }
+    unreachable!("the final snapshot attempt returns its result")
+}
+
+fn snapshot_bm25_commit(source: &Path, destination: &Path) -> std::io::Result<()> {
+    // Tantivy atomically replaces meta.json. Parse the captured bytes through
+    // Tantivy itself in the stage, without reopening the live metadata or
+    // acquiring its writer lock. Segment UUIDs and delete opstamps name
+    // immutable files; a missing one means GC won and the whole attempt retries.
+    let meta = std::fs::read(source.join("meta.json"))?;
+    std::fs::write(destination.join("meta.json"), meta)?;
+    #[cfg(test)]
+    snapshot_probe(&source.join("meta.json"));
+    let index = tantivy::Index::open_in_dir(destination).map_err(std::io::Error::other)?;
+    let meta = index.load_metas().map_err(std::io::Error::other)?;
+    let mut files = BTreeSet::new();
+    for segment in meta.segments {
+        let unused_delete = (!segment.has_deletes())
+            .then(|| segment.relative_path(tantivy::index::SegmentComponent::Delete));
+        files.extend(
+            segment
+                .list_files()
+                .into_iter()
+                .filter(|path| Some(path) != unused_delete.as_ref()),
+        );
+    }
+    for file in &files {
+        let path = source.join(file);
+        if !std::fs::symlink_metadata(&path)?.is_file() {
+            return Err(std::io::Error::other(format!(
+                "search segment is not a regular file: {}",
+                path.display()
+            )));
+        }
+        std::fs::copy(&path, destination.join(file))?;
+    }
+    // The imported writer must own exactly the archived files for its GC.
+    files.insert(PathBuf::from("meta.json"));
+    std::fs::write(
+        destination.join(".managed.json"),
+        serde_json::to_vec(&files)?,
+    )?;
+    Ok(())
 }
 
 fn source_subtree(paths: &WorkspacePaths, subtree: &str) -> PathBuf {
@@ -498,6 +621,8 @@ fn append_tree(
     source: &Path,
     archive_dir: &Path,
     stats: &mut ArchiveStats,
+    snapshots: &BTreeMap<PathBuf, PathBuf>,
+    graph_wal: &Path,
 ) -> Result<()> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(source)? {
@@ -508,17 +633,18 @@ fn append_tree(
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name();
-        if should_skip_entry_name(&name, &path) {
+        if path == graph_wal || should_skip_entry_name(&name, &path) {
             continue;
         }
-        let meta = std::fs::symlink_metadata(&path)?;
+        let path = snapshots.get(&path).unwrap_or(&path);
+        let meta = std::fs::symlink_metadata(path)?;
         let dest = archive_dir.join(&name);
         let file_type = meta.file_type();
         if file_type.is_dir() {
             append_dir(builder, &dest, stats)?;
-            append_tree(builder, &path, &dest, stats)?;
+            append_tree(builder, path, &dest, stats, snapshots, graph_wal)?;
         } else if file_type.is_file() {
-            append_file(builder, &path, &dest, meta.len(), stats)?;
+            append_file(builder, path, &dest, meta.len(), stats)?;
         } else {
             return Err(ChanError::Io(format!(
                 "metadata archive refuses special file: {}",
@@ -564,9 +690,28 @@ fn append_file(
     header.set_mtime(0);
     header.set_cksum();
     builder.append_data(&mut header, dest, &mut file)?;
+    #[cfg(test)]
+    snapshot_probe(source);
     stats.files += 1;
     stats.bytes += len;
     Ok(())
+}
+
+#[cfg(test)]
+type SnapshotProbe = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_PROBE: std::cell::RefCell<Option<SnapshotProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn snapshot_probe(path: &Path) {
+    SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe(path);
+        }
+    });
 }
 
 fn append_bytes(
@@ -769,6 +914,161 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    struct ProbeGuard;
+
+    impl Drop for ProbeGuard {
+        fn drop(&mut self) {
+            SNAPSHOT_PROBE.with_borrow_mut(|probe| *probe = None);
+        }
+    }
+
+    #[test]
+    fn metadata_archive_graph_snapshot_survives_wal_checkpoint() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let conn = rusqlite::Connection::open(&paths.graph_db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE snapshot_rows (body TEXT); PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO snapshot_rows VALUES ('committed in WAL');").unwrap();
+        assert!(
+            std::fs::metadata(paths.graph_dir.join("graph.sqlite-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let checkpointed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = checkpointed.clone();
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path.file_name() == Some(OsStr::new("graph.sqlite")) && !observed.replace(true) {
+                    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .unwrap();
+                }
+            }))
+        });
+        let output = TempDir::new().unwrap();
+        let archive = output.path().join("metadata.tar.zst");
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "test".into(),
+            },
+        )
+        .unwrap();
+        assert!(checkpointed.get());
+        let payload = output.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        let restored = rusqlite::Connection::open(payload.join("graph/graph.sqlite")).unwrap();
+        let rows: Vec<String> = restored
+            .prepare("SELECT body FROM snapshot_rows")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let wal = payload.join("graph/graph.sqlite-wal").exists();
+        eprintln!("archived rows={rows:?}; archived WAL={wal}");
+        assert_eq!(rows, ["committed in WAL"]);
+        assert!(!read_archive_paths(&archive)
+            .iter()
+            .any(|path| path.ends_with("graph.sqlite-wal")));
+    }
+
+    #[test]
+    fn metadata_archive_index_snapshot_survives_commit_and_gc() {
+        use tantivy::schema::{Schema, STORED, TEXT};
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let source = paths.index.join("bm25");
+        std::fs::create_dir(&source).unwrap();
+        let mut schema = Schema::builder();
+        let body = schema.add_text_field("body", TEXT | STORED);
+        let index = tantivy::Index::create_in_dir(&source, schema.build()).unwrap();
+        let mut writer: tantivy::IndexWriter =
+            index.writer_with_num_threads(1, 20_000_000).unwrap();
+        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        writer
+            .add_document(tantivy::doc!(body => "before"))
+            .unwrap();
+        writer.commit().unwrap();
+        let committed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = committed.clone();
+        let meta_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed_reads = meta_reads.clone();
+        let source_meta = source.join("meta.json");
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path == source_meta {
+                    observed_reads.set(observed_reads.get() + 1);
+                }
+                if (path.extension() == Some(OsStr::new("term"))
+                    || path.file_name() == Some(OsStr::new("meta.json")))
+                    && !observed.replace(true)
+                {
+                    writer.delete_all_documents().unwrap();
+                    writer
+                        .add_document(tantivy::doc!(body => "after one"))
+                        .unwrap();
+                    writer
+                        .add_document(tantivy::doc!(body => "after two"))
+                        .unwrap();
+                    writer.commit().unwrap();
+                    writer.garbage_collect_files().wait().unwrap();
+                }
+            }))
+        });
+        let output = TempDir::new().unwrap();
+        let archive = output.path().join("metadata.tar.zst");
+        let exported = lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "test".into(),
+            },
+        );
+        eprintln!("index export={exported:?}");
+        exported.unwrap();
+        assert!(committed.get());
+        assert_eq!(meta_reads.get(), 2, "GC forces one complete retry");
+        let payload = output.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        let index = tantivy::Index::open_in_dir(payload.join("index/bm25")).unwrap();
+        let reader = index
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::Manual)
+            .try_into();
+        eprintln!("archived index reader error={:?}", reader.as_ref().err());
+        let reader: tantivy::IndexReader = reader.unwrap();
+        let count = reader.searcher().num_docs();
+        assert!(matches!(count, 1 | 2), "one complete commit: {count}");
+        use tantivy::schema::Value;
+        let searcher = reader.searcher();
+        let hits = searcher
+            .search(
+                &tantivy::query::AllQuery,
+                &tantivy::collector::TopDocs::with_limit(10),
+            )
+            .unwrap();
+        let mut bodies: Vec<String> = hits
+            .into_iter()
+            .map(|(_, address)| {
+                let doc: tantivy::TantivyDocument = searcher.doc(address).unwrap();
+                doc.get_first(body).unwrap().as_str().unwrap().to_string()
+            })
+            .collect();
+        bodies.sort();
+        assert_eq!(bodies, ["after one", "after two"]);
+        let mut restored_writer: tantivy::IndexWriter =
+            index.writer_with_num_threads(1, 20_000_000).unwrap();
+        restored_writer
+            .add_document(tantivy::doc!(body => "imported write"))
+            .unwrap();
+        restored_writer.commit().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 3);
+    }
+
     fn read_archive_paths(path: &Path) -> Vec<String> {
         let file = File::open(path).unwrap();
         let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).unwrap();
@@ -785,6 +1085,109 @@ mod tests {
                     .into_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn metadata_archive_index_snapshot_bounds_retries_and_cleans_stage() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let bm25 = crate::index::bm25::Bm25Index::open(&paths.index).unwrap();
+        bm25.index_file("note.md", "body", &config::Chunking::WholeDoc)
+            .unwrap();
+        bm25.commit().unwrap();
+        let source = paths.index.join("bm25");
+        let segment = std::fs::read_dir(&source)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension() == Some(OsStr::new("term")))
+            .unwrap();
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = attempts.clone();
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path == source.join("meta.json") {
+                    observed.set(observed.get() + 1);
+                    if observed.get() == 1 {
+                        std::fs::remove_file(&segment).unwrap();
+                    }
+                }
+            }))
+        });
+        let output = TempDir::new().unwrap();
+        let archive = output.path().join("metadata.tar.zst");
+        let error = lib
+            .export_metadata_archive(
+                root.path(),
+                &archive,
+                MetadataExportOptions {
+                    chan_version: "test".into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(attempts.get(), 3);
+        assert!(error.to_string().contains("attempt 3 of 3"));
+        assert!(!archive.exists());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(paths.root.join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn metadata_archive_index_snapshot_keeps_committed_deletions() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let source = paths.index.join("bm25");
+        std::fs::create_dir(&source).unwrap();
+        let mut schema = tantivy::schema::Schema::builder();
+        let body = schema.add_text_field("body", tantivy::schema::TEXT);
+        let index = tantivy::Index::create_in_dir(&source, schema.build()).unwrap();
+        let mut writer: tantivy::IndexWriter =
+            index.writer_with_num_threads(1, 20_000_000).unwrap();
+        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        for name in ["keep", "remove"] {
+            writer.add_document(tantivy::doc!(body => name)).unwrap();
+        }
+        writer.commit().unwrap();
+        writer.delete_term(tantivy::Term::from_field_text(body, "remove"));
+        writer.commit().unwrap();
+        assert!(std::fs::read_dir(paths.index.join("bm25"))
+            .unwrap()
+            .any(|e| e.unwrap().path().extension() == Some(OsStr::new("del"))));
+        let output = TempDir::new().unwrap();
+        let archive = output.path().join("metadata.tar.zst");
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let payload = output.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        let restored = tantivy::Index::open_in_dir(payload.join("index/bm25")).unwrap();
+        let reader: tantivy::IndexReader = restored
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::Manual)
+            .try_into()
+            .unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 1);
+        for (term, expected) in [("keep", 1), ("remove", 0)] {
+            let query = tantivy::query::TermQuery::new(
+                tantivy::Term::from_field_text(body, term),
+                tantivy::schema::IndexRecordOption::Basic,
+            );
+            assert_eq!(
+                searcher.search(&query, &tantivy::collector::Count).unwrap(),
+                expected
+            );
+        }
     }
 
     fn archive_fixture() -> (Library, TempDir, TempDir) {
@@ -827,7 +1230,12 @@ mod tests {
         let (lib, _cfg, root) = archive_fixture();
         let paths = lib.workspace_paths_for(root.path()).unwrap();
         std::fs::write(paths.index.join("config.toml"), b"index").unwrap();
-        std::fs::write(paths.graph_dir.join("graph.sqlite"), b"graph").unwrap();
+        let graph = rusqlite::Connection::open(&paths.graph_db).unwrap();
+        graph
+            .execute_batch(
+                "CREATE TABLE fixture (value TEXT); INSERT INTO fixture VALUES ('graph');",
+            )
+            .unwrap();
         std::fs::write(
             paths.report.parent().unwrap().join("report.jsonl"),
             b"report",
