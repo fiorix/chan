@@ -1712,6 +1712,9 @@ async fn handle_add_workspace(
             })
             .into_response()
         }
+        Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
+            crate::error::err_from(&e)
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
@@ -1737,6 +1740,9 @@ async fn handle_workspace_on(
         Ok(_) => {
             set_overlay(&state.host, &root, true);
             StatusCode::NO_CONTENT.into_response()
+        }
+        Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
+            crate::error::err_from(&e)
         }
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => (
             StatusCode::CONFLICT,

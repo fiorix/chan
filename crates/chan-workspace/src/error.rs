@@ -42,6 +42,8 @@ pub enum ChanError {
     WorkspaceLocked,
     #[error("workspace is already open in this process; drop the existing handle first")]
     WorkspaceAlreadyOpen,
+    #[error("file-descriptor pressure: {active} open workspaces at capacity {capacity}; close a workspace or retry shortly")]
+    WorkspaceFdPressure { active: usize, capacity: usize },
     #[error("workspace is already registered at: {0}")]
     WorkspaceAlreadyRegistered(PathBuf),
     #[error("write conflict: file changed on disk (current mtime ns: {current_mtime_ns:?})")]

@@ -69,6 +69,7 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         C::WorkspaceNotRegistered(_) | C::WorkspaceRootMissing(_) => {
             (StatusCode::NOT_FOUND, e.to_string())
         }
+        C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
         C::WriteTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
@@ -80,7 +81,13 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    err(status, msg)
+    let mut response = err(status, msg);
+    if matches!(e, C::WorkspaceFdPressure { .. }) {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("3"));
+    }
+    response
 }
 
 #[cfg(test)]
@@ -106,6 +113,19 @@ mod tests {
             .expect("error field")
             .to_string();
         (parts.status, message)
+    }
+
+    #[tokio::test]
+    async fn err_from_maps_workspace_fd_pressure_to_retryable_503() {
+        let response = err_from(&chan_workspace::ChanError::WorkspaceFdPressure {
+            active: 4,
+            capacity: 4,
+        });
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "3");
+        let (status, message) = status_and_error(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(message.contains("file-descriptor pressure"));
+        assert!(message.contains("close a workspace or retry"));
     }
 
     #[tokio::test]

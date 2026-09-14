@@ -23,6 +23,8 @@ flowchart TB
   Feed --> Consumers["consumers: desktop, web-launcher, cs window list"]
 ```
 
+Registered workspace opens run `Library::open_workspace` on Tokio's blocking pool with an owned root and cloned library handle. Permit waits, writer-lock acquisition, canonicalization and trash cleanup therefore do not park a runtime worker. The optional registration mutex is asynchronous and stays on the caller; no synchronous host guard crosses the await. Tenant mounting resumes on the runtime after a successful open, and typed workspace failures remain `Error::Core`.
+
 ## Boundaries
 
 - No HTTP frontend bundle lives here. chan-library exposes the `root_fallback` *slot*; chan-server (the higher layer) fills it. Same dependency direction as the rest of the stack.

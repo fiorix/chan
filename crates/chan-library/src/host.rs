@@ -295,6 +295,8 @@ pub trait CollapsedMachinesStore: Send + Sync {
 /// and dispatches by URL prefix.
 pub struct WorkspaceHost {
     library: Library,
+    #[cfg(test)]
+    open_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Desktop integration shared by every tenant this host mounts: the
     /// window-ops channel and the title map. `DesktopBridge::default()`
@@ -547,6 +549,8 @@ impl WorkspaceHost {
             workspaces: RwLock::new(HashMap::new()),
             desktop,
             register_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            open_thread_probe: std::sync::Mutex::new(None),
             builder,
             self_weak: OnceLock::new(),
             window_registry: OnceLock::new(),
@@ -905,7 +909,19 @@ impl WorkspaceHost {
         root: &Path,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
-        let workspace = self.library.open_workspace(root)?;
+        let library = self.library.clone();
+        let root = root.to_path_buf();
+        #[cfg(test)]
+        let probe = self.open_thread_probe.lock().unwrap().take();
+        let workspace = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.send(std::thread::current().id()).unwrap();
+            }
+            library.open_workspace(&root)
+        })
+        .await
+        .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))??;
         self.open_workspace(workspace, config).await
     }
 
@@ -3342,6 +3358,28 @@ mod tests {
     use crate::terminal_sessions::CreateOptions;
     use axum::body::to_bytes;
     use portable_pty::PtySize;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registered_workspace_open_runs_off_runtime_thread() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let host = WorkspaceHost::new(library, fake_builder());
+        let (probe, observed) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(probe);
+        let runtime_thread = std::thread::current().id();
+        host.open_registered_workspace(root.path(), serve_config("/workspace"))
+            .await
+            .unwrap();
+        let open_thread = observed
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert_ne!(
+            open_thread, runtime_thread,
+            "blocking workspace open ran on the runtime thread"
+        );
+    }
 
     #[test]
     fn canonical_key_strips_verbatim_prefix() {

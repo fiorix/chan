@@ -405,6 +405,8 @@ Code is the source of truth for signatures; this section records the contracts c
 
 ### Library lifecycle
 
+Workspace and MiniWorkspace opens acquire a process-wide fd-budget permit before filesystem work. A saturated capacity waits up to three seconds in total, rechecking descriptor headroom at most every 100 ms and waking when a permit drops. Exhaustion returns `WorkspaceFdPressure { active, capacity }` with guidance to close a workspace or retry; it does not consume a permit. The three-second budget lets short close/open bursts settle while bounding interactive waits. Callers on an async runtime must offload the blocking open.
+
 `Library` is the registry boundary. It opens the platform config, resolves canonical roots, preserves metadata keys across moves, and holds machine-wide policy such as the walk filter and drafts directory name. Registering an already-known root is idempotent; unregister/reset require no live `Workspace` handle for the target and never touch user content. Orphan sweeping only reclaims sidecars with no registry row.
 
 ### Workspace content
@@ -565,6 +567,7 @@ Notable variants:
 
   - `WorkspaceLocked`: another process holds the writer lock.
   - `WorkspaceAlreadyOpen`: this process still holds a handle.
+  - `WorkspaceFdPressure`: the fd-budget permit wait expired; close a workspace or retry.
   - `WriteConflict { current_mtime_ns }`: CAS write lost the race.
   - `TrashOccupied`: restore would clobber a live entry.
   - `SpecialFile { kind, path }`: target is a symlink, FIFO, socket, or device.

@@ -7,7 +7,10 @@
 //! Tantivy worker fanout can exhaust the process table during first
 //! boot on a large workspace.
 
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use crate::error::{ChanError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FdSnapshot {
@@ -29,15 +32,16 @@ pub(crate) struct TantivyWriterBudget {
 
 #[derive(Debug)]
 pub(crate) struct WorkspacePermit {
-    _private: (),
+    gate: Arc<WorkspaceGate>,
 }
 
+#[derive(Debug)]
 struct WorkspaceGate {
     state: Mutex<WorkspaceGateState>,
     ready: Condvar,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct WorkspaceGateState {
     active: usize,
 }
@@ -55,6 +59,11 @@ const MAX_ACTIVE_WORKSPACES: usize = 64;
 const LOW_LIMIT_ACTIVE_WORKSPACES: usize = 8;
 const TIGHT_HEADROOM_ACTIVE_WORKSPACES: usize = 4;
 const MODEST_HEADROOM_ACTIVE_WORKSPACES: usize = 8;
+// Allow a closing workspace to release its handles during a short burst,
+// but surface sustained pressure promptly to interactive callers.
+const WORKSPACE_PERMIT_TIMEOUT: Duration = Duration::from_secs(3);
+// Descriptor headroom can recover without a workspace permit dropping.
+const WORKSPACE_PERMIT_RECHECK: Duration = Duration::from_millis(100);
 
 /// Descriptors a reindex pass keeps in reserve for interactive work
 /// (editor reads/writes, terminal PTYs + their pipes, watcher handles).
@@ -103,7 +112,7 @@ const REINDEX_BACKOFF_MAX_STEPS: u32 = 20;
 #[cfg(not(unix))]
 const REINDEX_TIMESLICE_FILES: u32 = 32;
 
-static WORKSPACE_GATE: OnceLock<WorkspaceGate> = OnceLock::new();
+static WORKSPACE_GATE: OnceLock<Arc<WorkspaceGate>> = OnceLock::new();
 
 pub(crate) fn snapshot() -> Option<FdSnapshot> {
     fd_snapshot()
@@ -133,19 +142,43 @@ pub(crate) fn tantivy_writer_budget(default_worker_threads: usize) -> TantivyWri
     }
 }
 
-pub(crate) fn acquire_workspace_permit() -> WorkspacePermit {
-    let gate = workspace_gate();
+pub(crate) fn acquire_workspace_permit() -> Result<WorkspacePermit> {
+    acquire_workspace_permit_with(
+        Arc::clone(workspace_gate()),
+        snapshot,
+        WORKSPACE_PERMIT_TIMEOUT,
+    )
+}
+
+fn acquire_workspace_permit_with(
+    gate: Arc<WorkspaceGate>,
+    mut probe: impl FnMut() -> Option<FdSnapshot>,
+    timeout: Duration,
+) -> Result<WorkspacePermit> {
+    let started = Instant::now();
     let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        let capacity = match snapshot() {
+        let capacity = match probe() {
             Some(snap) => active_workspace_capacity_for(snap),
             None => MAX_ACTIVE_WORKSPACES,
         };
         if state.active < capacity {
             state.active += 1;
-            return WorkspacePermit { _private: () };
+            drop(state);
+            return Ok(WorkspacePermit { gate });
         }
-        state = gate.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ChanError::WorkspaceFdPressure {
+                active: state.active,
+                capacity,
+            });
+        }
+        let (next, _) = gate
+            .ready
+            .wait_timeout(state, remaining.min(WORKSPACE_PERMIT_RECHECK))
+            .unwrap_or_else(|e| e.into_inner());
+        state = next;
     }
 }
 
@@ -324,16 +357,18 @@ fn active_workspace_capacity_for(snap: FdSnapshot) -> usize {
     }
 }
 
-fn workspace_gate() -> &'static WorkspaceGate {
-    WORKSPACE_GATE.get_or_init(|| WorkspaceGate {
-        state: Mutex::new(WorkspaceGateState::default()),
-        ready: Condvar::new(),
+fn workspace_gate() -> &'static Arc<WorkspaceGate> {
+    WORKSPACE_GATE.get_or_init(|| {
+        Arc::new(WorkspaceGate {
+            state: Mutex::new(WorkspaceGateState::default()),
+            ready: Condvar::new(),
+        })
     })
 }
 
 impl Drop for WorkspacePermit {
     fn drop(&mut self) {
-        let gate = workspace_gate();
+        let gate = &self.gate;
         let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active = state.active.saturating_sub(1);
         gate.ready.notify_one();
@@ -421,6 +456,168 @@ fn effective_nofile_limit(limit: Option<u64>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tight_snapshot() -> Option<FdSnapshot> {
+        Some(FdSnapshot {
+            open: 4090,
+            limit: 4096,
+        })
+    }
+
+    fn test_workspace_gate() -> std::sync::Arc<WorkspaceGate> {
+        std::sync::Arc::new(WorkspaceGate {
+            state: Mutex::new(WorkspaceGateState::default()),
+            ready: Condvar::new(),
+        })
+    }
+
+    #[test]
+    fn workspace_permit_wait_is_bounded() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let gate = test_workspace_gate();
+        let capacity = active_workspace_capacity_for(tight_snapshot().unwrap());
+        assert_eq!(capacity, 4);
+        let held: Vec<_> = (0..capacity)
+            .map(|_| {
+                acquire_workspace_permit_with(
+                    std::sync::Arc::clone(&gate),
+                    tight_snapshot,
+                    WORKSPACE_PERMIT_TIMEOUT,
+                )
+                .unwrap()
+            })
+            .collect();
+        let (done_tx, done) = mpsc::channel();
+        let waiting_gate = Arc::clone(&gate);
+        let started = Instant::now();
+        let waiting = std::thread::spawn(move || {
+            done_tx
+                .send(acquire_workspace_permit_with(
+                    waiting_gate,
+                    tight_snapshot,
+                    WORKSPACE_PERMIT_TIMEOUT,
+                ))
+                .unwrap();
+        });
+        let observed = done.recv_timeout(Duration::from_secs(5));
+        // Release capacity even on failure so an unbounded implementation
+        // cannot leave a parked worker behind in the test suite.
+        drop(held);
+        if observed.is_err() {
+            drop(done.recv_timeout(Duration::from_secs(3)).unwrap());
+        }
+        waiting.join().unwrap();
+        let error = observed
+            .expect("workspace permit wait parked the caller past the bound")
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ChanError::WorkspaceFdPressure {
+                active: 4,
+                capacity: 4
+            }
+        ));
+        assert!(started.elapsed() >= WORKSPACE_PERMIT_TIMEOUT);
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+    }
+
+    #[test]
+    fn workspace_permit_succeeds_when_a_holder_releases() {
+        use std::sync::mpsc;
+
+        let gate = test_workspace_gate();
+        let mut held: Vec<_> = (0..4)
+            .map(|_| {
+                acquire_workspace_permit_with(
+                    Arc::clone(&gate),
+                    tight_snapshot,
+                    WORKSPACE_PERMIT_TIMEOUT,
+                )
+                .unwrap()
+            })
+            .collect();
+        let (entered_tx, entered) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let waiting_gate = Arc::clone(&gate);
+        let waiting = std::thread::spawn(move || {
+            let mut entered = Some(entered_tx);
+            let result = acquire_workspace_permit_with(
+                waiting_gate,
+                || {
+                    if let Some(entered) = entered.take() {
+                        entered.send(()).unwrap();
+                    }
+                    tight_snapshot()
+                },
+                WORKSPACE_PERMIT_TIMEOUT,
+            );
+            done_tx.send(result).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(held.pop());
+        let permit = done.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        waiting.join().unwrap();
+        assert_eq!(gate.state.lock().unwrap().active, 4);
+        drop(permit);
+        drop(held);
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+    }
+
+    #[test]
+    fn workspace_permit_spurious_wakes_do_not_extend_deadline() {
+        use std::sync::mpsc;
+
+        let gate = test_workspace_gate();
+        let held: Vec<_> = (0..4)
+            .map(|_| {
+                acquire_workspace_permit_with(
+                    Arc::clone(&gate),
+                    tight_snapshot,
+                    WORKSPACE_PERMIT_TIMEOUT,
+                )
+                .unwrap()
+            })
+            .collect();
+        let (done_tx, done) = mpsc::channel();
+        let waiting_gate = Arc::clone(&gate);
+        let timeout = Duration::from_millis(80);
+        let started = Instant::now();
+        let waiting = std::thread::spawn(move || {
+            done_tx
+                .send(acquire_workspace_permit_with(
+                    waiting_gate,
+                    tight_snapshot,
+                    timeout,
+                ))
+                .unwrap();
+        });
+        let waking_gate = Arc::clone(&gate);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_waking = Arc::clone(&stop);
+        let waker = std::thread::spawn(move || {
+            while !stop_waking.load(std::sync::atomic::Ordering::Relaxed)
+                && started.elapsed() < Duration::from_secs(3)
+            {
+                waking_gate.ready.notify_all();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let observed = done.recv_timeout(Duration::from_secs(2));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(held);
+        if observed.is_err() {
+            drop(done.recv_timeout(Duration::from_secs(3)).unwrap());
+        }
+        waiting.join().unwrap();
+        waker.join().unwrap();
+        assert!(matches!(
+            observed.unwrap(),
+            Err(ChanError::WorkspaceFdPressure { .. })
+        ));
+        assert!(started.elapsed() >= timeout);
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+    }
 
     #[test]
     fn graph_pool_shrinks_on_low_soft_limit() {

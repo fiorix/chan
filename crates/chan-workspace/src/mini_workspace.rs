@@ -45,7 +45,7 @@ impl MiniWorkspace {
     /// real directories; `start` is canonicalized so the wire start path
     /// never travels through a symlink alias.
     pub fn open(root: &Path, start: &Path, transfer_max_bytes: u64) -> Result<Self> {
-        let fd_permit = crate::fd_budget::acquire_workspace_permit();
+        let fd_permit = crate::fd_budget::acquire_workspace_permit()?;
         let fs = RootedFs::open(root.to_path_buf(), transfer_max_bytes)?;
         let start_canon = start
             .canonicalize()

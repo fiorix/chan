@@ -95,6 +95,7 @@ Owns the per-tenant HTTP/WS runtime: launch-token auth, SPA fallback and embedde
 Stable contracts:
 
 - Async handlers treat `chan-workspace` as a synchronous filesystem boundary: they snapshot the live workspace, return retryable busy responses during metadata swaps, and move blocking filesystem/index/report/archive/transfer work off the async executor.
+- Registered workspace opens run through chan-library on the blocking pool. The core bounds fd-budget permit waits to three seconds; temporary exhaustion reaches launcher add/on callers as HTTP 503 with retry guidance.
 - Per-launch auth gates every `/api/*` and `/ws` route. SPA fallback must not mask `/api/*` or `/ws` misses.
 - Streaming reads use NDJSON on established `?stream=1` read/report/graph/backlink endpoints; clients must tolerate incremental records.
 - `/api/devserver/*` is reserved local-only management surface; the gateway tunnel must 404 it publicly.

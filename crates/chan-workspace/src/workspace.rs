@@ -812,7 +812,7 @@ impl Workspace {
         transfer_max_bytes: u64,
         chan_home: &Path,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
-        let fd_permit = crate::fd_budget::acquire_workspace_permit();
+        let fd_permit = crate::fd_budget::acquire_workspace_permit()?;
         let fs = RootedFs::open(entry.root_path.clone(), transfer_max_bytes)?;
         if entry.metadata_key.is_empty() {
             return Err(ChanError::Io(format!(
