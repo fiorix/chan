@@ -526,6 +526,21 @@ impl Drop for HostedWorkspaceRuntime {
     }
 }
 
+struct WorkspaceCloseGuard<'a> {
+    host: &'a WorkspaceHost,
+    root: PathBuf,
+    armed: bool,
+}
+
+impl Drop for WorkspaceCloseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.host.clear_mount_state(&self.root);
+            self.host.notify_window_change();
+        }
+    }
+}
+
 impl WorkspaceHost {
     /// Create an empty host backed by the caller's `Library`, with no
     /// desktop attached (window-lifecycle ops refuse; the title map stays
@@ -2555,8 +2570,10 @@ impl WorkspaceHost {
         };
         match prefix {
             Some(prefix) => {
-                let outcome = self.close_workspace(&prefix, force).await?;
-                if record_off && (outcome.completed() || outcome.not_found()) {
+                let outcome = self
+                    .close_workspace_impl(&prefix, force, record_off.then_some(target.as_path()))
+                    .await?;
+                if record_off && outcome.not_found() {
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set(&target.to_string_lossy(), false);
                     }
@@ -2653,6 +2670,15 @@ impl WorkspaceHost {
         prefix: &str,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        self.close_workspace_impl(prefix, force, None).await
+    }
+
+    async fn close_workspace_impl(
+        &self,
+        prefix: &str,
+        force: bool,
+        off_path: Option<&Path>,
+    ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
         let (root, active_terminals) = {
             let workspaces = self
@@ -2671,6 +2697,11 @@ impl WorkspaceHost {
             return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
         }
         self.mark_mount_closing(&root);
+        let mut closing = WorkspaceCloseGuard {
+            host: self,
+            root,
+            armed: true,
+        };
         let runtime = {
             let mut workspaces = self
                 .workspaces
@@ -2679,9 +2710,15 @@ impl WorkspaceHost {
             workspaces.remove(&prefix)
         };
         let Some(runtime) = runtime else {
-            self.clear_workspace_lifecycle(&root);
             return Ok(WorkspaceLifecycleOutcome::NotFound);
         };
+        // Detaching commits the close. Persist user intent before teardown can
+        // yield so cancellation cannot restore this workspace on the next boot.
+        if let Some(path) = off_path {
+            if let Some(overlay) = self.workspace_overlay() {
+                overlay.set(&path.to_string_lossy(), false);
+            }
+        }
         // Turning a workspace OFF (unmount) PRESERVES its persisted window records
         // so turning it back ON restores the same windows/panes/tabs (the PTYs
         // restart). The records are merely filtered out of the LIVE feed while the
@@ -2696,6 +2733,7 @@ impl WorkspaceHost {
         // close. No feed push here -- the `notify_window_change` below covers it.
         self.clear_mount_state(&runtime_root);
         self.notify_window_change();
+        closing.armed = false;
         Ok(WorkspaceLifecycleOutcome::Completed)
     }
 
@@ -4374,6 +4412,70 @@ mod tests {
         // Unmounted, but the desired-state row is still on for the next boot.
         assert!(host.mounted_prefixes().expect("prefixes").is_empty());
         assert_eq!(overlay.on_paths(), vec![key]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_clears_closing_and_persists_off() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let key = canonical_key(root.path()).to_string_lossy().into_owned();
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let overlay_path = cfg.path().join("workspaces.json");
+        let overlay = Arc::new(WorkspaceOverlay::open(overlay_path.clone()));
+        overlay.set(&key, true);
+        host.install_workspace_overlay(Arc::clone(&overlay));
+
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        host.workspaces.write().expect("host map").insert(
+            "/workspace".into(),
+            HostedWorkspaceRuntime {
+                root: root.path().to_path_buf(),
+                handle: ServeHandle {
+                    addr: ([127, 0, 0, 1], 0).into(),
+                    prefix: "/workspace".into(),
+                    token: None,
+                },
+                artifacts: fake_artifacts_with_gated_shutdown(
+                    entered_tx,
+                    Arc::new(tokio::sync::Semaphore::new(0)),
+                    Arc::clone(&completed),
+                ),
+            },
+        );
+        let mut close = Box::pin(host.close_workspace_for_root(root.path(), false));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::select! {
+                entered = entered_rx.recv() => entered.expect("tenant shutdown started"),
+                result = close.as_mut() => panic!("close finished before release: {result:?}"),
+            }
+        })
+        .await
+        .expect("close enters shutdown");
+        assert_eq!(
+            host.workspace_status(root.path()).0,
+            WorkspaceStatus::Closing
+        );
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+        let notify = host.library_change_notify();
+        let changed = notify.notified();
+        drop(close);
+
+        let persisted = WorkspaceOverlay::open(overlay_path).entries();
+        assert_eq!(
+            (
+                host.workspace_status(root.path()).0,
+                persisted[0].desired_on
+            ),
+            (WorkspaceStatus::Stopped, false),
+            "cancelled close must settle the status and retain the off intent"
+        );
+        assert!(!overlay.entries()[0].desired_on);
+        tokio::time::timeout(std::time::Duration::from_secs(3), changed)
+            .await
+            .expect("cancelled close notifies the feed");
+        assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
