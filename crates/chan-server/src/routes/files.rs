@@ -433,10 +433,10 @@ pub(crate) enum BinaryPlan {
 }
 
 /// What a workspace download resolves to: a bounded file plan, or a directory
-/// whose tree has been pre-flighted readable and is ready to stream.
+/// tree or inert symlink ready to archive.
 enum DownloadPayload {
     File(BinaryPlan),
-    Directory,
+    Archive,
 }
 
 fn download_path_sync(
@@ -445,7 +445,12 @@ fn download_path_sync(
     range_header: Option<&str>,
 ) -> chan_workspace::Result<DownloadPayload> {
     let stat = workspace.stat(path)?;
-    if stat.is_dir {
+    if stat.is_dir
+        || matches!(
+            workspace.classify_workspace_path(path)?,
+            chan_workspace::WorkspacePath::Special(chan_workspace::PathKind::Symlink)
+        )
+    {
         // Pre-flight the tree before streaming so an unreadable entry fails fast
         // with a clear "cannot read X" status instead of truncating a streamed
         // archive mid-flight.
@@ -458,7 +463,7 @@ fn download_path_sync(
                 limit,
             });
         }
-        Ok(DownloadPayload::Directory)
+        Ok(DownloadPayload::Archive)
     } else {
         binary_plan_sync(workspace, path, range_header).map(DownloadPayload::File)
     }
@@ -485,7 +490,7 @@ enum PlannedWorkspaceDownload {
     Unsatisfiable {
         stat: FileStat,
     },
-    Directory {
+    Archive {
         name: String,
     },
 }
@@ -553,13 +558,13 @@ async fn stream_planned_workspace_download_tracked(
                 let Some(reader) = reader else { return };
                 send_reader_into(&tx, cancel, reader);
             }
-            DownloadPayload::Directory => {
+            DownloadPayload::Archive => {
                 let limit = workspace.transfer_max_bytes();
                 let build_ws = workspace;
                 let build_path = path;
                 let build_name = archive_name;
                 if plan_tx
-                    .send(Ok(PlannedWorkspaceDownload::Directory {
+                    .send(Ok(PlannedWorkspaceDownload::Archive {
                         name: build_name.clone(),
                     }))
                     .is_err()
@@ -569,7 +574,7 @@ async fn stream_planned_workspace_download_tracked(
                 // Builds into this job's channel rather than through
                 // `stream_tar_response_tracked`, which would submit again.
                 crate::routes::transfer::build_tar_into(&tx, cancel, limit, move |builder| {
-                    append_dir_to_archive(builder, &build_ws, &build_path, &build_name)
+                    append_workspace_to_archive(builder, &build_ws, &build_path, &build_name)
                         .map_err(|e| std::io::Error::other(e.to_string()))
                 });
             }
@@ -659,7 +664,7 @@ fn send_reader_into(
 /// archive is named for the directory it wraps.
 fn path_for_headers(planned: &PlannedWorkspaceDownload, path: &str) -> String {
     match planned {
-        PlannedWorkspaceDownload::Directory { name } => name.clone(),
+        PlannedWorkspaceDownload::Archive { name } => name.clone(),
         _ => path.to_string(),
     }
 }
@@ -729,7 +734,7 @@ fn planned_workspace_download_response(
             );
             response
         }
-        PlannedWorkspaceDownload::Directory { name } => {
+        PlannedWorkspaceDownload::Archive { name } => {
             let mut response = Response::new(body);
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
@@ -922,39 +927,46 @@ fn bounded_reader_body(
 
 /// Pre-flight for a directory download: confirm every file in the tree we will
 /// tar is readable before any archive work. Walks via `Workspace::list` so it
-/// visits exactly the entries `append_dir_to_archive` will (same `.chan` /
+/// visits exactly the entries `append_workspace_to_archive` will (same `.chan` /
 /// `.git` filter), and opens each backing file through the same facade call
 /// the archive walk uses, so the two agree about what the archive contains.
 /// Returns the member bytes known at preflight so the plan can refuse a tree
 /// already past the ceiling.
 ///
-/// The open is `read_bytes_bounded`, not `std::fs::File::open`: `list`
-/// reports a symlink as a non-dir entry and `open(2)` follows it, which would
-/// count a target outside the workspace root and admit a download the walk
-/// then refuses mid-stream. The facade refuses anything that is not a regular
-/// file, and the size comes from the open handle, so no byte is read here.
+/// Regular files are opened through the bounded reader; symlinks contribute
+/// no payload bytes and only their stored target is read for the header.
 fn verify_readable_workspace_tree(
     workspace: &chan_workspace::Workspace,
     rel: &str,
 ) -> chan_workspace::Result<u64> {
-    let mut payload_bytes = 0u64;
-    for child in workspace
-        .list(rel)
+    match workspace
+        .classify_workspace_path(rel)
         .map_err(|e| name_preflight_path(rel, e))?
     {
-        let child_rel = join_rel(rel.trim_matches('/'), &child.name);
-        let child_bytes = if child.is_dir {
-            verify_readable_workspace_tree(workspace, &child_rel)?
-        } else {
+        chan_workspace::WorkspacePath::Special(chan_workspace::PathKind::Symlink) => {
             workspace
-                .read_bytes_bounded(&child_rel)
-                .map_err(|e| name_preflight_path(&child_rel, e))?
-                .stat()
-                .size
-        };
-        payload_bytes = payload_bytes.saturating_add(child_bytes);
+                .read_link_contents(rel)
+                .map_err(|e| name_preflight_path(rel, e))?;
+            Ok(0)
+        }
+        chan_workspace::WorkspacePath::Directory(_) => {
+            let mut payload_bytes = 0u64;
+            for child in workspace
+                .list(rel)
+                .map_err(|e| name_preflight_path(rel, e))?
+            {
+                let child_rel = join_rel(rel.trim_matches('/'), &child.name);
+                payload_bytes = payload_bytes
+                    .saturating_add(verify_readable_workspace_tree(workspace, &child_rel)?);
+            }
+            Ok(payload_bytes)
+        }
+        _ => Ok(workspace
+            .read_bytes_bounded(rel)
+            .map_err(|e| name_preflight_path(rel, e))?
+            .stat()
+            .size),
     }
-    Ok(payload_bytes)
 }
 
 /// Name the offending path in a preflight failure. The typed refusals carry
@@ -1009,26 +1021,38 @@ pub(crate) fn content_disposition_archive(path: &str) -> String {
     )
 }
 
-/// Append a workspace directory tree to a tar builder. Generic over the writer
+/// Append a workspace file, directory tree, or inert symlink to a tar builder. Generic over the writer
 /// so the same walk feeds both the on-the-fly download stream (a channel-backed
 /// writer) and tests (a `Vec`). Walks via `Workspace::list` to honor the
 /// workspace's `.chan`/`.git` filter.
-pub(crate) fn append_dir_to_archive<W: std::io::Write>(
+pub(crate) fn append_workspace_to_archive<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     workspace: &chan_workspace::Workspace,
     source_rel: &str,
     archive_rel: &str,
 ) -> chan_workspace::Result<()> {
-    append_archive_dir(builder, archive_rel)?;
-    for child in workspace.list(source_rel)? {
-        let child_source = join_rel(source_rel.trim_matches('/'), &child.name);
-        let child_archive = join_rel(archive_rel, &child.name);
-        if child.is_dir {
-            append_dir_to_archive(builder, workspace, &child_source, &child_archive)?;
-        } else {
-            let reader = workspace.read_bytes_bounded(&child_source)?;
-            append_archive_file(builder, &child_archive, reader)?;
+    match workspace.classify_workspace_path(source_rel)? {
+        chan_workspace::WorkspacePath::Special(chan_workspace::PathKind::Symlink) => {
+            let target = workspace.read_link_contents(source_rel)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            builder.append_link(&mut header, archive_rel, target)?;
         }
+        chan_workspace::WorkspacePath::Directory(_) => {
+            append_archive_dir(builder, archive_rel)?;
+            for child in workspace.list(source_rel)? {
+                let child_source = join_rel(source_rel.trim_matches('/'), &child.name);
+                let child_archive = join_rel(archive_rel, &child.name);
+                append_workspace_to_archive(builder, workspace, &child_source, &child_archive)?;
+            }
+        }
+        _ => append_archive_file(
+            builder,
+            archive_rel,
+            workspace.read_bytes_bounded(source_rel)?,
+        )?,
     }
     Ok(())
 }
@@ -2544,7 +2568,7 @@ pub(crate) fn upload_leaf_filename(original_name: &str) -> chan_workspace::Resul
 #[cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 mod file_browser_listing_tests {
     use super::{
-        append_dir_to_archive, create_target_exists, download_path_sync, list_dir_entries,
+        append_workspace_to_archive, create_target_exists, download_path_sync, list_dir_entries,
         list_files_sync, replace_file_sync, upload_file_sync, upload_leaf_filename,
         verify_readable_workspace_tree, workspace_path_writable, DownloadPayload, ListFilesQuery,
     };
@@ -2690,26 +2714,22 @@ mod file_browser_listing_tests {
         workspace.write_bytes("docs/b.txt", b"b").unwrap();
 
         // The readability pre-flight passes for an ordinary tree; the stream
-        // then builds the tar via the same append_dir_to_archive walk.
+        // then builds the tar via the same append_workspace_to_archive walk.
         let payload = download_path_sync(&workspace, "docs", None).unwrap();
-        assert!(matches!(payload, DownloadPayload::Directory));
+        assert!(matches!(payload, DownloadPayload::Archive));
         let mut bytes = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut bytes);
-            append_dir_to_archive(&mut builder, &workspace, "docs", "docs").unwrap();
+            append_workspace_to_archive(&mut builder, &workspace, "docs", "docs").unwrap();
             builder.finish().unwrap();
         }
         assert!(!bytes.is_empty());
     }
 
-    /// The preflight and the archive walk have to agree about what is in the
-    /// archive. `Workspace::list` reports a symlink as a non-dir entry, so a
-    /// preflight that opens the root-joined path with `std::fs` follows the
-    /// link, counts the target's bytes, and admits a download the streaming
-    /// walk then refuses mid-flight.
+    /// Preflight and archive both treat link targets as inert header data.
     #[cfg(unix)]
     #[test]
-    fn download_path_sync_refuses_a_symlink_the_archive_walk_cannot_carry() {
+    fn download_path_sync_archives_symlinks_without_reading_targets() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let outside = tempfile::TempDir::new().unwrap();
@@ -2722,36 +2742,36 @@ mod file_browser_listing_tests {
         workspace.write_bytes("docs/a.txt", b"a").unwrap();
         std::os::unix::fs::symlink(&target, root.path().join("docs/escape.txt")).unwrap();
 
-        // The walk that actually streams refuses the link, which is what the
-        // preflight has to match.
+        assert_eq!(
+            verify_readable_workspace_tree(&workspace, "docs").unwrap(),
+            1
+        );
+        assert!(matches!(
+            download_path_sync(&workspace, "docs", None).unwrap(),
+            DownloadPayload::Archive
+        ));
         let mut bytes = Vec::new();
-        let mut builder = tar::Builder::new(&mut bytes);
-        let walk = append_dir_to_archive(&mut builder, &workspace, "docs", "docs");
-        assert!(walk.is_err(), "the archive walk accepted a symlink");
-
-        let counted = verify_readable_workspace_tree(&workspace, "docs");
-        assert!(
-            counted.is_err(),
-            "the preflight counted {:?} bytes through a symlink",
-            counted.ok()
-        );
-        let error = match download_path_sync(&workspace, "docs", None) {
-            Ok(_) => panic!("the preflight admitted a tree the walk cannot archive"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, chan_workspace::ChanError::SpecialFile { .. }),
-            "expected a non-regular-file refusal: {error}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains("escape.txt"),
-            "the refusal should name the link: {message}"
-        );
-        assert!(
-            crate::error::err_from(&error).status().is_client_error(),
-            "a refused archive must answer 4xx before any byte streams"
-        );
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            append_workspace_to_archive(&mut builder, &workspace, "docs", "docs").unwrap();
+            builder.finish().unwrap();
+        }
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut found = false;
+        let mut payload = 0;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            payload += entry.size();
+            if entry.path().unwrap().as_ref() == std::path::Path::new("docs/escape.txt") {
+                assert!(entry.header().entry_type().is_symlink());
+                assert_eq!(entry.size(), 0);
+                assert_eq!(entry.link_name().unwrap().unwrap().as_ref(), target);
+                found = true;
+            }
+        }
+        assert!(found);
+        assert_eq!(payload, 1);
+        assert!(workspace.read_bytes_bounded("docs/escape.txt").is_err());
     }
 
     #[cfg(unix)]
@@ -3143,7 +3163,7 @@ mod write_tests {
                 assert_eq!(chunks.unwrap().concat(), b"hello\n");
             }
             DownloadPayload::File(_) => panic!("expected a full-file download"),
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         }
     }
 
@@ -3652,7 +3672,7 @@ mod write_tests {
         workspace.write_bytes("large.bin", &expected).unwrap();
         let plan = match download_path_sync(&workspace, "large.bin", None).unwrap() {
             DownloadPayload::File(plan) => plan,
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         };
 
         let response = stream_binary_download("large.bin", plan);
@@ -3696,7 +3716,7 @@ mod write_tests {
         ] {
             let plan = match download_path_sync(&workspace, "resume.bin", Some(range)).unwrap() {
                 DownloadPayload::File(plan) => plan,
-                DownloadPayload::Directory => panic!("expected file download"),
+                DownloadPayload::Archive => panic!("expected file download"),
             };
             let response = stream_binary_download("resume.bin", plan);
             assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
@@ -3721,7 +3741,7 @@ mod write_tests {
 
         let first = match download_path_sync(&workspace, "resume.bin", None).unwrap() {
             DownloadPayload::File(plan) => stream_binary_download("resume.bin", plan),
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         };
         let first_etag = first.headers()[header::ETAG].clone();
         assert!(!first_etag.to_str().unwrap().starts_with("W/"));
@@ -3732,7 +3752,7 @@ mod write_tests {
             .unwrap();
         let second = match download_path_sync(&workspace, "resume.bin", None).unwrap() {
             DownloadPayload::File(plan) => stream_binary_download("resume.bin", plan),
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         };
         assert_ne!(second.headers()[header::ETAG], first_etag);
     }
@@ -3962,7 +3982,7 @@ mod write_tests {
         let reader = match download_path_sync(&workspace, "disconnect.bin", None).unwrap() {
             DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
             DownloadPayload::File(_) => panic!("expected a full-file download"),
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         };
         let (response, completed) =
             stream_binary_download_with_completion("disconnect.bin", reader);
@@ -4501,7 +4521,7 @@ mod write_tests {
             .unwrap();
         let plan = match download_path_sync(&workspace, "shrinking.bin", None).unwrap() {
             DownloadPayload::File(plan) => plan,
-            DownloadPayload::Directory => panic!("expected file download"),
+            DownloadPayload::Archive => panic!("expected file download"),
         };
         let response = stream_binary_download("shrinking.bin", plan);
         assert_eq!(
@@ -4538,9 +4558,13 @@ mod write_tests {
 
         assert!(matches!(
             download_path_sync(&workspace, "dir", None).unwrap(),
-            DownloadPayload::Directory
+            DownloadPayload::Archive
         ));
-        assert!(download_path_sync(&workspace, "link.bin", None).is_err());
+        assert!(matches!(
+            download_path_sync(&workspace, "link.bin", None).unwrap(),
+            DownloadPayload::Archive
+        ));
+        assert!(super::binary_plan_sync(&workspace, "link.bin", None).is_err());
     }
 
     #[test]
@@ -4561,14 +4585,14 @@ mod write_tests {
             .unwrap();
 
         let payload = download_path_sync(&workspace, "notes", None).unwrap();
-        assert!(matches!(payload, DownloadPayload::Directory));
+        assert!(matches!(payload, DownloadPayload::Archive));
 
-        // The stream builds the archive via append_dir_to_archive; assert its
+        // The stream builds the archive via append_workspace_to_archive; assert its
         // contents through the same walk.
         let mut bytes = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut bytes);
-            append_dir_to_archive(&mut builder, &workspace, "notes", "notes").unwrap();
+            append_workspace_to_archive(&mut builder, &workspace, "notes", "notes").unwrap();
             builder.finish().unwrap();
         }
         let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
@@ -5878,6 +5902,71 @@ mod doc_divert_tests {
             "the producer must stop when the bounded consumer rejects overflow"
         );
         assert!(!state.self_writes.should_suppress("n.md"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn workspace_symlinks_download_as_links() {
+        const CAP: u64 = 4096;
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_cfg, root, state) = divert_app_with_tenant(bulk, Some(CAP));
+        let workspace = state.try_workspace().unwrap();
+        workspace.create_dir("docs").unwrap();
+        workspace.write_bytes("docs/a.txt", b"a").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let large = outside.path().join("large.bin");
+        std::fs::write(&large, vec![b'x'; CAP as usize * 2]).unwrap();
+        let targets = [
+            ("large", large),
+            ("dangling", outside.path().join("missing")),
+            ("directory", outside.path().to_path_buf()),
+        ];
+        for (name, target) in &targets {
+            std::os::unix::fs::symlink(target, root.path().join("docs").join(name)).unwrap();
+        }
+        for path in ["docs", "docs/large", "docs/dangling", "docs/directory"] {
+            let response = super::stream_planned_workspace_download_tracked(
+                &state.bulk_transfer,
+                None,
+                None,
+                workspace.clone(),
+                path.into(),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/x-tar"
+            );
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                to_bytes(response.into_body(), CAP as usize),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut archive = tar::Archive::new(bytes.as_ref());
+            let mut links = 0;
+            let mut payload = 0;
+            for entry in archive.entries().unwrap() {
+                let entry = entry.unwrap();
+                payload += entry.size();
+                if entry.header().entry_type().is_symlink() {
+                    let name = entry.path().unwrap();
+                    let name = name.file_name().unwrap().to_str().unwrap();
+                    let target = targets
+                        .iter()
+                        .find(|(expected, _)| *expected == name)
+                        .unwrap();
+                    assert_eq!(entry.link_name().unwrap().unwrap().as_ref(), target.1);
+                    assert_eq!(entry.size(), 0);
+                    links += 1;
+                }
+            }
+            assert_eq!(links, if path == "docs" { 3 } else { 1 });
+            assert_eq!(payload, u64::from(path == "docs"));
+        }
     }
 
     #[tokio::test]

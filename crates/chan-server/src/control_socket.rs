@@ -4144,7 +4144,7 @@ fn download_path_standalone(
     requested: &Path,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<String, String> {
-    let meta = std::fs::metadata(requested)
+    let meta = std::fs::symlink_metadata(requested)
         .map_err(|e| format!("cannot access {}: {e}", requested.display()))?;
     // Same lexical-`.` hazard as `upload_path_standalone`, with one more
     // reason to stay lexical: the SPA names the saved download after the
@@ -4156,7 +4156,7 @@ fn download_path_standalone(
         window_id,
         WindowCommand::Download {
             path: strip_leading_slash(&requested),
-            is_dir: meta.is_dir(),
+            is_dir: meta.is_dir() || meta.file_type().is_symlink(),
             root: TransferRoot::Filesystem,
         },
         events_tx,
@@ -5777,6 +5777,29 @@ mod tests {
         let frame = rx.try_recv().expect("download window command broadcast");
         assert!(frame.contains(&stripped), "frame: {frame}");
         assert!(!frame.contains("/.\""), "dot component survived: {frame}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_download_symlinks_signal_archive_names_without_dereferencing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = broadcast::channel(8);
+        for name in ["dangling", "directory"] {
+            let target = if name == "dangling" {
+                dir.path().join("missing")
+            } else {
+                dir.path().to_path_buf()
+            };
+            let link = dir.path().join(name);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            download_path_standalone("window", &link, &tx).unwrap();
+            let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+            assert_eq!(frame["path"], strip_leading_slash(&link));
+            assert_eq!(
+                frame["is_dir"], true,
+                "the saved filename must use the archive suffix"
+            );
+        }
     }
 
     #[cfg(unix)]

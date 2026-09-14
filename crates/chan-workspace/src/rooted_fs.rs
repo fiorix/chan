@@ -808,6 +808,14 @@ impl RootedFs {
         }
     }
 
+    /// Read only the stored link target through the capability sandbox.
+    pub(crate) fn read_link_contents(&self, rel: &str) -> Result<std::path::PathBuf> {
+        self.ensure_root_available()?;
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        dir.read_link_contents(&rel_path)
+            .map_err(|e| map_cap_err(e, &rel_path))
+    }
+
     /// Lstat `rel` into a `FileStat`.
     pub(crate) fn stat(&self, rel: &str) -> Result<FileStat> {
         let (dir, rel_path) = self.resolve_io(rel)?;

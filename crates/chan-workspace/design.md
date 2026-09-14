@@ -514,7 +514,7 @@ Foreign-language boundary: exported data is owned (no lifetimes) and `Send + Syn
 The Workspace entry points enforce three rules so the layer never accidentally hangs on, follows, or mutates a non-regular file:
 
 1. **Mid-path symlinks**: rejected when their canonical target leaves the workspace. In-workspace symlinks (`alias -> ./real`) pass the path-resolve leg.
-2. **Final-component symlinks**: rejected by every read / write op. Atomic rename would otherwise replace the link with a regular file (silently breaking the user's intentional alias), and reads would traverse the link off-disk. Users who want to write through a symlink delete the link first.
+2. **Final-component symlinks**: rejected by every content read / write op. `Workspace::read_link_contents` reads only the stored link target through the capability handle for archive headers; it never resolves or opens that target. Atomic rename would otherwise replace the link with a regular file (silently breaking the user's intentional alias), and reads would traverse the link off-disk. Users who want to write through a symlink delete the link first.
 3. **FIFOs, sockets, char/block devices**: rejected by every op via the `lstat`-based gate. These types can't appear in a note workflow; if they do, it's either a misconfiguration or abuse of the read/write API. Without the gate, opening a FIFO blocks waiting for a writer; opening `/dev/zero` never returns; opening a device sends ioctl-shaped reads.
 
 Walker invariants:

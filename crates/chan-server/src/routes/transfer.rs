@@ -62,7 +62,7 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 
 /// Pre-flight for download: every file under `abs` is openable for read and
 /// every directory is listable. Fails fast on the first inaccessible entry so a
-/// download never starts a tarball it cannot finish. The workspace path uses a
+/// stable source is checked before response headers. The workspace path uses a
 /// sibling guard in `files.rs` that walks via `Workspace::list` to match the
 /// workspace tarball's `.chan`/`.git` filtering. Returns the member bytes known
 /// at preflight so the plan can refuse a tree already past the ceiling.
@@ -198,6 +198,7 @@ pub(crate) fn build_tar_into<F>(
         limit,
         written: 0,
     });
+    builder.follow_symlinks(false);
     let result = build(&mut builder).and_then(|()| builder.finish());
     if let Err(e) = result {
         if e.kind() != std::io::ErrorKind::BrokenPipe {
@@ -220,7 +221,7 @@ pub(crate) struct TerminalDownloadQuery {
 /// headers can be chosen while the same job goes on to stream the body.
 enum PlannedDownload {
     File { name: String },
-    Directory { name: String },
+    Archive { name: String },
 }
 
 /// Plan and stream one terminal download inside a SINGLE lane job.
@@ -291,19 +292,20 @@ async fn stream_planned_download_tracked(
                     }
                 }
             }
-            TerminalDownload::Directory { name } => {
+            TerminalDownload::Archive { name, is_dir } => {
                 let build_name = name.clone();
                 let build_abs = abs.clone();
-                if plan_tx
-                    .send(Ok(PlannedDownload::Directory { name }))
-                    .is_err()
-                {
+                if plan_tx.send(Ok(PlannedDownload::Archive { name })).is_err() {
                     return;
                 }
                 // Builds into this job's channel rather than through
                 // `stream_tar_response_tracked`, which would submit again.
                 build_tar_into(&tx, cancel, limit, move |builder| {
-                    builder.append_dir_all(&build_name, &build_abs)
+                    if is_dir {
+                        builder.append_dir_all(&build_name, &build_abs)
+                    } else {
+                        builder.append_path_with_name(&build_abs, &build_name)
+                    }
                 });
             }
         }
@@ -343,7 +345,7 @@ async fn stream_planned_download_tracked(
             content_type_for(name).to_string(),
             content_disposition_attachment(name),
         ),
-        PlannedDownload::Directory { name } => (
+        PlannedDownload::Archive { name } => (
             "application/x-tar".to_string(),
             content_disposition_archive(name),
         ),
@@ -502,14 +504,15 @@ impl Iterator for AbsoluteFileReader {
 
 /// What a terminal download resolves to: an open-file reader already inside the
 /// ceiling and carrying it, or a directory whose tree has been pre-flighted
-/// readable and is ready to stream.
+/// readable, or an inert symlink, ready to archive.
 enum TerminalDownload {
     File {
         reader: AbsoluteFileReader,
         name: String,
     },
-    Directory {
+    Archive {
         name: String,
+        is_dir: bool,
     },
 }
 
@@ -546,11 +549,11 @@ impl DownloadRefusal {
 }
 
 fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, DownloadRefusal> {
-    let meta = std::fs::metadata(abs).map_err(|e| {
+    let meta = std::fs::symlink_metadata(abs).map_err(|e| {
         DownloadRefusal::unreadable(format!("cannot access {}: {e}", abs.display()))
     })?;
     let name = download_filename(&abs.to_string_lossy());
-    if meta.is_dir() {
+    if meta.is_dir() || meta.file_type().is_symlink() {
         // Pre-flight the whole tree before streaming so an unreadable entry
         // fails fast with a clear status instead of truncating a streamed
         // archive mid-flight.
@@ -561,7 +564,10 @@ fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, Do
         if payload_bytes > limit {
             return Err(DownloadRefusal::over_ceiling(payload_bytes, limit));
         }
-        Ok(TerminalDownload::Directory { name })
+        Ok(TerminalDownload::Archive {
+            name,
+            is_dir: meta.is_dir(),
+        })
     } else {
         // Opening happens before headers are sent. The returned reader keeps
         // the exact file handle and bounded producer alive.
@@ -1435,13 +1441,13 @@ mod tests {
                 assert_eq!(chunks.concat(), content);
                 assert_eq!(name, "one.txt");
             }
-            TerminalDownload::Directory { .. } => panic!("expected a file payload"),
+            TerminalDownload::Archive { .. } => panic!("expected a file payload"),
         }
         // A directory pre-flights readable and is marked for streaming; the
         // stream builds a real tar via the same `append_dir_all` the download
         // job hands `build_tar_into`.
         match terminal_download_plan(dir.path(), u64::MAX).unwrap() {
-            TerminalDownload::Directory { name } => {
+            TerminalDownload::Archive { name, .. } => {
                 let mut buf = Vec::new();
                 {
                     let mut b = tar::Builder::new(&mut buf);
@@ -1865,6 +1871,111 @@ mod tests {
         );
 
         drop(releases);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn terminal_dangling_symlinks_download_as_links() {
+        check_symlink_archive(false).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn terminal_oversized_symlink_targets_download_as_links() {
+        check_symlink_archive(true).await;
+    }
+
+    #[cfg(unix)]
+    async fn check_symlink_archive(oversized: bool) {
+        const CAP: u64 = 4096;
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("ordinary.txt"), b"hello").unwrap();
+        let target = if oversized {
+            let target = root.path().join("large.bin");
+            std::fs::write(&target, vec![b'x'; CAP as usize * 2]).unwrap();
+            target
+        } else {
+            root.path().join("missing")
+        };
+        std::os::unix::fs::symlink(&target, tree.join("link")).unwrap();
+        assert_eq!(verify_readable_fs(&tree).unwrap(), 5);
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let response = stream_planned_download_tracked(&bulk, None, None, tree, CAP).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        use futures::StreamExt;
+        let mut stream = response.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        let mut failure = None;
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+        {
+            match chunk {
+                Ok(chunk) => bytes.extend_from_slice(&chunk),
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        eprintln!(
+            "oversized={oversized}, status=200, streamed={}, body_error={failure:?}",
+            bytes.len()
+        );
+        assert!(failure.is_none(), "archive must complete");
+        assert!(bytes.len() as u64 <= CAP);
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut found = false;
+        let mut payload = 0;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            payload += entry.size();
+            if entry.path().unwrap().as_ref() == Path::new("tree/link") {
+                assert!(entry.header().entry_type().is_symlink());
+                assert_eq!(entry.link_name().unwrap().unwrap().as_ref(), target);
+                assert_eq!(entry.size(), 0);
+                found = true;
+            }
+        }
+        assert!(found);
+        assert_eq!(payload, 5);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_top_level_symlinks_download_as_links() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        let large = directory.join("large.bin");
+        std::fs::write(&large, vec![0; 8192]).unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        for (name, target) in [
+            ("dangling", root.path().join("missing")),
+            ("file", large),
+            ("dir", directory),
+        ] {
+            let link = root.path().join(name);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(verify_readable_fs(&link).unwrap(), 0);
+            let response = stream_planned_download_tracked(&bulk, None, None, link, 4096).await;
+            assert_eq!(response.status(), StatusCode::OK, "top-level {name}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/x-tar"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let mut archive = tar::Archive::new(bytes.as_ref());
+            let entries: Vec<_> = archive.entries().unwrap().map(Result::unwrap).collect();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].header().entry_type().is_symlink());
+            assert_eq!(entries[0].link_name().unwrap().unwrap().as_ref(), target);
+        }
     }
 
     #[tokio::test]

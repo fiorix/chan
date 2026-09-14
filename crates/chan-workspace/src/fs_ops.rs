@@ -2895,6 +2895,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn read_link_contents_keeps_targets_inert_and_sandboxed() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("missing");
+        std::os::unix::fs::symlink(&target, root.path().join("link")).unwrap();
+        assert_eq!(workspace.read_link_contents("link").unwrap(), target);
+        assert!(workspace.read("link").is_err());
+        assert!(matches!(
+            workspace.read_link_contents("../escape"),
+            Err(ChanError::PathEscape)
+        ));
+        workspace.write_bytes("regular.txt", b"ordinary").unwrap();
+        assert!(workspace.read_link_contents("regular.txt").is_err());
+    }
+
+    #[test]
     fn exclusive_byte_publication_never_replaces_an_existing_file() {
         let root = TempDir::new().unwrap();
         let dir =

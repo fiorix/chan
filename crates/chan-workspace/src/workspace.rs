@@ -1553,6 +1553,15 @@ impl Workspace {
         self.fs.create_bytes(rel, content)
     }
 
+    /// Read a symbolic link's stored target without resolving or opening it.
+    ///
+    /// The link itself must be inside the capability sandbox. Its target may
+    /// be dangling or outside that sandbox; the returned path is inert data
+    /// for archive headers and must not be used to bypass facade resolution.
+    pub fn read_link_contents(&self, rel: &str) -> Result<std::path::PathBuf> {
+        self.fs.read_link_contents(rel)
+    }
+
     /// True iff the path resolves under the workspace and refers to a
     /// regular file. Matches the gate `read` / `read_text` apply,
     /// so a `true` return is a strong signal that a read will
