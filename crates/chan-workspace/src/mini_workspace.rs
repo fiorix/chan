@@ -413,18 +413,18 @@ impl MiniWorkspace {
         if dir.symlink_metadata(&to_path).is_ok() {
             return Err(ChanError::PathAlreadyExists(to.to_string()));
         }
-        self.preflight_tree(from)?;
-        let tmp = self.temp_sibling_name(to)?;
+        self.fs.preflight_tree(from, false)?;
+        let tmp = self.fs.temp_sibling_name(to)?;
         match self.copy_tree_plain(from, &tmp) {
             Ok(()) => {}
             Err(error) => {
-                self.remove_tree_best_effort(&tmp);
+                self.fs.remove_tree_best_effort(&tmp);
                 return Err(error);
             }
         }
         let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
         if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
-            self.remove_tree_best_effort(&tmp);
+            self.fs.remove_tree_best_effort(&tmp);
             return Err(ChanError::Io(e.to_string()));
         }
         Ok(())
@@ -513,61 +513,26 @@ impl MiniWorkspace {
         if descends_into(from, to) {
             return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
-        self.preflight_tree(from)?;
-        let tmp = self.temp_sibling_name(to)?;
+        self.fs.preflight_tree(from, false)?;
+        let tmp = self.fs.temp_sibling_name(to)?;
         match self.copy_tree_plain(from, &tmp) {
             Ok(()) => {}
             Err(error) => {
-                self.remove_tree_best_effort(&tmp);
+                self.fs.remove_tree_best_effort(&tmp);
                 return Err(error);
             }
         }
         let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
         let (_, to_path) = self.fs.resolve_io(to)?;
         if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
-            self.remove_tree_best_effort(&tmp);
+            self.fs.remove_tree_best_effort(&tmp);
             return Err(ChanError::Io(e.to_string()));
         }
-        if let Err(error) = self.remove_tree(from) {
+        if let Err(error) = self.fs.remove_tree(from) {
             return Err(ChanError::Io(format!(
                 "cross-device move copied {from} to {to}, but removing the source failed: \
                  {error}; both source and destination remain"
             )));
-        }
-        Ok(())
-    }
-
-    /// Verify every node under `rel` is a readable regular file or
-    /// directory before any mutation starts, so a failure cannot strand a
-    /// half-copied destination.
-    fn preflight_tree(&self, rel: &str) -> Result<()> {
-        let (dir, rel_path) = self.fs.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        let ft = meta.file_type();
-        if ft.is_symlink() || !(ft.is_file() || ft.is_dir()) {
-            return Err(ChanError::SpecialFile {
-                kind: describe_cap_file_kind(&ft).to_string(),
-                path: rel_path,
-            });
-        }
-        if ft.is_file() {
-            dir.open(&rel_path)
-                .map_err(|e| ChanError::Io(format!("unreadable source {rel}: {e}")))?;
-            return Ok(());
-        }
-        for entry in dir
-            .read_dir(&rel_path)
-            .map_err(|e| ChanError::Io(format!("unreadable source directory {rel}: {e}")))?
-        {
-            let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                return Err(ChanError::Io(format!(
-                    "source tree under {rel} contains a non-UTF-8 name"
-                )));
-            };
-            self.preflight_tree(&format!("{rel}/{name}"))?;
         }
         Ok(())
     }
@@ -611,61 +576,6 @@ impl MiniWorkspace {
                 Ok(())
             })?;
         Ok(())
-    }
-
-    /// Remove the tree at `rel` (regular files and directories only; the
-    /// preflight already refused everything else).
-    fn remove_tree(&self, rel: &str) -> Result<()> {
-        let (dir, rel_path) = self.fs.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
-        if meta.is_dir() {
-            dir.remove_dir_all(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))
-        } else {
-            dir.remove_file(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))
-        }
-    }
-
-    fn remove_tree_best_effort(&self, rel: &str) {
-        if let Err(error) = self.remove_tree(rel) {
-            tracing::warn!(rel, %error, "cleaning up temporary copy tree failed");
-        }
-    }
-
-    /// A uniquely named sibling of `to` for the in-flight tree: same
-    /// parent (so the final rename never crosses filesystems), dot-hidden,
-    /// suffixed from a clock-plus-counter source and existence-checked so
-    /// concurrent operations cannot collide.
-    fn temp_sibling_name(&self, to: &str) -> Result<String> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let (parent, leaf) = match to.rsplit_once('/') {
-            Some((parent, leaf)) => (parent, leaf),
-            None => ("", to),
-        };
-        for _ in 0..16 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(0);
-            let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let name = format!(".{leaf}.chan-copy-{nanos:08x}{seq:04x}");
-            let candidate = if parent.is_empty() {
-                name
-            } else {
-                format!("{parent}/{name}")
-            };
-            let (dir, candidate_path) = self.fs.resolve_io(&candidate)?;
-            if dir.symlink_metadata(&candidate_path).is_err() {
-                return Ok(candidate);
-            }
-        }
-        Err(ChanError::Io(format!(
-            "could not allocate a temporary sibling for {to}"
-        )))
     }
 }
 

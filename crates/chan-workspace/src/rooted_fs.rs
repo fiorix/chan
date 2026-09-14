@@ -984,24 +984,140 @@ impl RootedFs {
         // Refuse to clobber: paste-collision resolution happens in the
         // server (it picks a free name); a bare copy onto an existing
         // path is a programming error, not a silent overwrite.
-        if self.dir().symlink_metadata(&to_rel).is_ok() {
-            return Err(ChanError::Io(format!(
-                "copy destination already exists: {to}"
-            )));
-        }
+        self.ensure_copy_destination_absent(&to_rel)?;
         let to_canon = canonical_posix(to);
         let mut created = Vec::new();
         if src_ft.is_file() {
             self.copy_one_file(&from_rel, &to_rel, &to_canon, &mut created)?;
         } else {
-            // Create the destination root dir, then walk descendants.
-            self.dir()
-                .create_dir_all(&to_rel)
-                .map_err(|e| ChanError::Io(e.to_string()))?;
-            self.copy_subtree(&from_rel, &to_rel, &to_canon, &mut created)?;
+            self.preflight_tree(&posix_path(&from_rel), true)?;
+            let stage = self.temp_sibling_name(&to_canon)?;
+            let stage_rel = self.rel(&stage)?;
+            if let Some(parent) = to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                self.dir().create_dir_all(parent)?;
+            }
+            self.dir().create_dir(&stage_rel)?;
+            let result = (|| {
+                self.copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)?;
+                self.ensure_copy_destination_absent(&to_rel)?;
+                self.dir().rename(&stage_rel, &self.dir(), &to_rel)?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if let Err(cleanup) = self.remove_tree(&stage) {
+                    return Err(ChanError::Io(format!(
+                        "{error}; failed to remove temporary copy {stage}: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
         }
         created.sort();
         Ok(CopyOutcome { created })
+    }
+
+    fn ensure_copy_destination_absent(&self, rel: &std::path::Path) -> Result<()> {
+        match self.dir().symlink_metadata(rel) {
+            Ok(_) => Err(ChanError::Io(format!(
+                "copy destination already exists: {}",
+                rel.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(map_cap_err(error, rel)),
+        }
+    }
+
+    /// Verify every node under `rel` is a readable regular file or
+    /// directory before any mutation starts, so a failure cannot strand a
+    /// half-copied destination.
+    pub(crate) fn preflight_tree(&self, rel: &str, skip_control_dirs: bool) -> Result<()> {
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        let meta = dir
+            .symlink_metadata(&rel_path)
+            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let ft = meta.file_type();
+        if ft.is_symlink() || !(ft.is_file() || ft.is_dir()) {
+            return Err(ChanError::SpecialFile {
+                kind: describe_cap_file_kind(&ft).to_string(),
+                path: rel_path,
+            });
+        }
+        if ft.is_file() {
+            dir.open(&rel_path)
+                .map_err(|e| ChanError::Io(format!("unreadable source {rel}: {e}")))?;
+            return Ok(());
+        }
+        for entry in dir
+            .read_dir(&rel_path)
+            .map_err(|e| ChanError::Io(format!("unreadable source directory {rel}: {e}")))?
+        {
+            let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                return Err(ChanError::Io(format!(
+                    "source tree under {rel} contains a non-UTF-8 name"
+                )));
+            };
+            if skip_control_dirs && matches!(name.as_str(), ".chan" | ".git" | ".hg") {
+                continue;
+            }
+            self.preflight_tree(&format!("{rel}/{name}"), skip_control_dirs)?;
+        }
+        Ok(())
+    }
+
+    /// Remove the tree at `rel` (regular files and directories only; the
+    /// preflight already refused everything else).
+    pub(crate) fn remove_tree(&self, rel: &str) -> Result<()> {
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        let meta = dir
+            .symlink_metadata(&rel_path)
+            .map_err(|e| ChanError::Io(e.to_string()))?;
+        if meta.is_dir() {
+            dir.remove_dir_all(&rel_path)
+                .map_err(|e| ChanError::Io(e.to_string()))
+        } else {
+            dir.remove_file(&rel_path)
+                .map_err(|e| ChanError::Io(e.to_string()))
+        }
+    }
+
+    pub(crate) fn remove_tree_best_effort(&self, rel: &str) {
+        if let Err(error) = self.remove_tree(rel) {
+            tracing::warn!(rel, %error, "cleaning up temporary copy tree failed");
+        }
+    }
+
+    /// A uniquely named sibling of `to` for the in-flight tree: same
+    /// parent (so the final rename never crosses filesystems), dot-hidden,
+    /// suffixed from a clock-plus-counter source and existence-checked so
+    /// collisions are unlikely. Directory callers reserve it with create_dir.
+    pub(crate) fn temp_sibling_name(&self, to: &str) -> Result<String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let (parent, leaf) = match to.rsplit_once('/') {
+            Some((parent, leaf)) => (parent, leaf),
+            None => ("", to),
+        };
+        for _ in 0..16 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let name = format!(".{leaf}.chan-copy-{nanos:08x}{seq:04x}");
+            let candidate = if parent.is_empty() {
+                name
+            } else {
+                format!("{parent}/{name}")
+            };
+            let (dir, candidate_path) = self.resolve_io(&candidate)?;
+            if dir.symlink_metadata(&candidate_path).is_err() {
+                return Ok(candidate);
+            }
+        }
+        Err(ChanError::Io(format!(
+            "could not allocate a temporary sibling for {to}"
+        )))
     }
 
     /// Copy one regular file from `src_rel` to `dst_rel` (both relative
@@ -1014,13 +1130,17 @@ impl RootedFs {
         dst_canon: &str,
         created: &mut Vec<String>,
     ) -> Result<()> {
-        let src_str = src_rel.to_string_lossy();
-        let dst_str = dst_rel.to_string_lossy();
-        let mut reader = self.read_bytes_bounded(&src_str)?;
+        let src_str = src_rel
+            .to_str()
+            .ok_or_else(|| ChanError::Io("source contains a non-UTF-8 name".into()))?;
+        let dst_str = dst_rel
+            .to_str()
+            .ok_or_else(|| ChanError::Io("destination contains a non-UTF-8 name".into()))?;
+        let mut reader = self.read_bytes_bounded(src_str)?;
         // The semantic sink supplies the real binary budget, incremental UTF-8
         // validation for editable destinations, same-directory atomic commit,
         // and temp cleanup for every source-read or sink failure.
-        self.write_atomic_stream(&dst_str, AtomicWriteKind::Bytes, |sink| {
+        self.write_atomic_stream(dst_str, AtomicWriteKind::Bytes, |sink| {
             if reader.stat().size > sink.limit() {
                 return Err(ChanError::WriteTooLarge {
                     kind: "bytes",
@@ -1054,9 +1174,14 @@ impl RootedFs {
         for entry in read {
             let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
             let name = entry.file_name();
-            let name_str = name.to_string_lossy().to_string();
+            let name_str = name.to_str().ok_or_else(|| {
+                ChanError::Io(format!(
+                    "source tree under {} contains a non-UTF-8 name",
+                    src_rel.display()
+                ))
+            })?;
             // Skip VCS / app control dirs: never duplicate them.
-            if matches!(name_str.as_str(), ".chan" | ".git" | ".hg") {
+            if matches!(name_str, ".chan" | ".git" | ".hg") {
                 continue;
             }
             let ft = entry
@@ -1348,6 +1473,100 @@ fn posix_path(path: &std::path::Path) -> String {
 mod mutation_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn directory_copy_cleans_stage_after_transfer_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 16).unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            fs::write(source.join(name), "source bytes").unwrap();
+        }
+        // Choose the final enumerated child so earlier copies really land.
+        let last = fs::read_dir(&source)
+            .unwrap()
+            .last()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(&last, [b'x'; 17]).unwrap();
+        let result = rooted.copy("source", "target");
+        let partial = fs::read_dir(root.path().join("target")).map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        });
+        eprintln!("copy={result:?}; partial destination={partial:?}");
+        assert!(matches!(result, Err(ChanError::WriteTooLarge { .. })));
+        assert!(!root.path().join("target").exists());
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "no stage remains"
+        );
+        assert_eq!(fs::read(&last).unwrap(), [b'x'; 17]);
+        assert_eq!(fs::read_dir(&source).unwrap().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_preflights_non_utf8_names_and_symlinks() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        for non_utf8 in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+            let source = root.path().join("source");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("a.md"), "note").unwrap();
+            if non_utf8 {
+                fs::write(
+                    source.join(std::ffi::OsStr::from_bytes(b"bad\xff")),
+                    "opaque",
+                )
+                .unwrap();
+            } else {
+                symlink("a.md", source.join("link")).unwrap();
+            }
+            let result = rooted.copy("source", "target");
+            eprintln!(
+                "non_utf8={non_utf8}; copy={result:?}; target exists={}",
+                root.path().join("target").exists()
+            );
+            assert!(result.is_err());
+            if non_utf8 {
+                assert!(result.unwrap_err().to_string().contains("non-UTF-8"));
+            }
+            assert!(!root.path().join("target").exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+            assert_eq!(fs::read_to_string(source.join("a.md")).unwrap(), "note");
+            assert_eq!(fs::read_dir(&source).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn directory_copy_records_final_paths_and_skips_control_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        for dir in ["sub", ".chan", ".git", ".hg"] {
+            let path = root.path().join("source").join(dir);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("note.md"), "note").unwrap();
+        }
+        let copied = rooted.copy("source", "new/target").unwrap();
+        assert_eq!(copied.created, ["new/target/sub/note.md"]);
+        assert_eq!(
+            fs::read_to_string(root.path().join(&copied.created[0])).unwrap(),
+            "note"
+        );
+        assert_eq!(
+            fs::read_dir(root.path().join("new/target"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(fs::read_dir(root.path().join("new")).unwrap().count(), 1);
+    }
 
     #[test]
     fn rename_refuses_to_overwrite_existing_file() {

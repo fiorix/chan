@@ -128,6 +128,8 @@ Behaviour by class:
 
 Workspace renames refuse an occupied destination with `PathAlreadyExists` before mutation. A destination that identifies the source itself remains valid for case-only renames: Unix compares device/inode identity, and Windows compares native canonical paths after the capability-relative metadata checks. This preflight does not exclude an external process creating the destination before the rename syscall.
 
+Directory copies preflight every included source entry for readable regular files, directories, and UTF-8 names, then copy into a temporary sibling and rename it to the final destination only when complete. Failure removes the stage, reporting any cleanup failure; the source is untouched. The returned created-file list names final paths. Both facades share preflight, temporary-name, and cleanup helpers; the workspace copy skips `.chan`, `.git`, and `.hg`, while standalone copies retain ordinary control directories.
+
 Typed markdown frontmatter is resolved through a nested `chan.kind` registry. The only supported entry today is `contact`, which stamps a graph node as `Contact` and gives server/web callers the `contact` renderer hint; unknown kinds stay ordinary markdown files. Semantic reference tokens are markdown-only: `#tag` and `@@mention` graph edges are extracted from `.md` files and intentionally ignored in `.txt`, so plain notes remain searchable/editable without turning incidental prose into graph entities.
 
 Extension matching is ASCII case-insensitive. Files whose extension is unknown fall back to a basename check against well-known textual filenames (Makefile, Dockerfile, LICENSE, ...), then to the content sniff on the read/write path.
