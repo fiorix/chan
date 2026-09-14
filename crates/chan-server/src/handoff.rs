@@ -886,6 +886,62 @@ pub enum Outcome {
     CloseRefused { active_terminals: usize },
 }
 
+#[cfg(unix)]
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
+#[cfg(unix)]
+const IO_TIMEOUT: Duration = Duration::from_millis(3000);
+#[cfg(unix)]
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+// Updater checks may need a network round-trip on the desktop.
+#[cfg(unix)]
+const UPGRADE_IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(unix)]
+enum EndpointError {
+    NoDesktop,
+    NoReply,
+}
+
+/// Shared gate for request clients and the connect-only liveness probe.
+#[cfg(unix)]
+async fn connect_endpoint(socket_path: &Path, timeout: Duration) -> Option<tokio::net::UnixStream> {
+    if !socket_is_owner_controlled(socket_path) {
+        return None;
+    }
+    tokio::time::timeout(timeout, tokio::net::UnixStream::connect(socket_path))
+        .await
+        .ok()?
+        .ok()
+}
+
+#[cfg(unix)]
+async fn request_endpoint(
+    socket_path: &Path,
+    req: &Request,
+    budget: Duration,
+) -> Result<String, EndpointError> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let stream = connect_endpoint(socket_path, CONNECT_TIMEOUT)
+        .await
+        .ok_or(EndpointError::NoDesktop)?;
+    let mut payload = serde_json::to_vec(req).map_err(|_| EndpointError::NoDesktop)?;
+    payload.push(b'\n');
+    let (read, mut write) = stream.into_split();
+    let io = async {
+        write.write_all(&payload).await?;
+        write.flush().await?;
+        let mut line = String::new();
+        BufReader::new(read).read_line(&mut line).await?;
+        Ok::<String, std::io::Error>(line)
+    };
+    match tokio::time::timeout(budget, io).await {
+        Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
+        Ok(_) => Err(EndpointError::NoDesktop),
+        Err(_) => Err(EndpointError::NoReply),
+    }
+}
+
 /// Report whether the same-user desktop endpoint accepts a local connection.
 /// The probe is connect-only: it sends no request, cannot dispatch a desktop
 /// action, and drops the connection immediately. Missing, stale, busy, or
@@ -903,17 +959,7 @@ pub async fn desktop_is_live() -> bool {
 
 #[cfg(unix)]
 async fn desktop_is_live_at(socket_path: &Path) -> bool {
-    if !socket_path.exists() {
-        return false;
-    }
-    matches!(
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            tokio::net::UnixStream::connect(socket_path),
-        )
-        .await,
-        Ok(Ok(_))
-    )
+    connect_endpoint(socket_path, PROBE_TIMEOUT).await.is_some()
 }
 
 /// Windows counterpart to the connect-only Unix desktop probe. A busy pipe is
@@ -976,49 +1022,13 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
 /// the ownership gate is testable without steering the process environment.
 #[cfg(unix)]
 async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
-    // The node must be a real socket this euid owns (lstat, so a symlink
-    // never passes) BEFORE any bytes are sent: a squatter's endpoint must
-    // not receive the workspace path. A missing node is the common
-    // no-desktop case and resolves the same way.
-    if !socket_is_owner_controlled(socket_path) {
-        return Outcome::NoDesktop;
-    }
-
-    let connect = UnixStream::connect(socket_path);
-    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
-        Ok(Ok(s)) => s,
-        // Refused / stale socket / timeout -> no live desktop.
-        Ok(Err(_)) | Err(_) => return Outcome::NoDesktop,
-    };
-
     let req = Request::OpenWorkspace {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         workspace_path: workspace_path.display().to_string(),
     };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        // Write/read error, empty reply, or timeout: treat as no
-        // usable desktop and fall back rather than hang or error.
-        _ => return Outcome::NoDesktop,
+    let Ok(line) = request_endpoint(socket_path, &req, IO_TIMEOUT).await else {
+        return Outcome::NoDesktop;
     };
 
     match serde_json::from_str::<Response>(&line) {
@@ -1147,46 +1157,26 @@ pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
 /// absent. Mirrors `try_handoff`'s framing + timeouts.
 #[cfg(unix)]
 pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
     let Some(socket_path) = existing_well_known_socket_path() else {
         return Outcome::NoDesktop;
     };
-    if !socket_path.exists() {
-        return Outcome::NoDesktop;
-    }
+    try_close_workspace_at(&socket_path, workspace_path, remove).await
+}
 
-    let connect = UnixStream::connect(&socket_path);
-    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) | Err(_) => return Outcome::NoDesktop,
-    };
-
+#[cfg(unix)]
+async fn try_close_workspace_at(
+    socket_path: &Path,
+    workspace_path: &Path,
+    remove: bool,
+) -> Outcome {
     let req = Request::CloseWorkspace {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         workspace_path: workspace_path.display().to_string(),
         remove,
     };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return Outcome::NoDesktop,
+    let Ok(line) = request_endpoint(socket_path, &req, IO_TIMEOUT).await else {
+        return Outcome::NoDesktop;
     };
 
     map_close_response(&line)
@@ -1300,22 +1290,19 @@ fn map_close_response(line: &str) -> Outcome {
 /// the URL as `?t=...`.
 #[cfg(unix)]
 pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&str>) -> Outcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
     let Some(socket_path) = existing_well_known_socket_path() else {
         return Outcome::NoDesktop;
     };
-    if !socket_path.exists() {
-        return Outcome::NoDesktop;
-    }
+    try_open_devserver_at(&socket_path, url, name, script).await
+}
 
-    let connect = UnixStream::connect(&socket_path);
-    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) | Err(_) => return Outcome::NoDesktop,
-    };
-
+#[cfg(unix)]
+async fn try_open_devserver_at(
+    socket_path: &Path,
+    url: &str,
+    name: Option<&str>,
+    script: Option<&str>,
+) -> Outcome {
     let req = Request::OpenDevserver {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
@@ -1323,24 +1310,8 @@ pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&s
         name: name.map(str::to_string),
         script: script.map(str::to_string),
     };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return Outcome::NoDesktop,
+    let Ok(line) = request_endpoint(socket_path, &req, IO_TIMEOUT).await else {
+        return Outcome::NoDesktop;
     };
 
     map_devserver_response(&line)
@@ -1431,42 +1402,19 @@ pub enum DevserverControlOutcome {
 /// failure, stale socket, or malformed line maps to `NoDesktop`.
 #[cfg(unix)]
 pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
     let Some(socket_path) = existing_well_known_socket_path() else {
         return DevserverControlOutcome::NoDesktop;
     };
-    if !socket_path.exists() {
-        return DevserverControlOutcome::NoDesktop;
-    }
+    try_devserver_control_at(&socket_path, req).await
+}
 
-    let connect = UnixStream::connect(&socket_path);
-    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) | Err(_) => return DevserverControlOutcome::NoDesktop,
-    };
-
+#[cfg(unix)]
+async fn try_devserver_control_at(socket_path: &Path, req: Request) -> DevserverControlOutcome {
     let budget = req.reply_budget();
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return DevserverControlOutcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
-    let line = match tokio::time::timeout(budget, io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        Ok(_) => return DevserverControlOutcome::NoDesktop,
-        Err(_) => return DevserverControlOutcome::NoReply { budget },
+    let line = match request_endpoint(socket_path, &req, budget).await {
+        Ok(line) => line,
+        Err(EndpointError::NoDesktop) => return DevserverControlOutcome::NoDesktop,
+        Err(EndpointError::NoReply) => return DevserverControlOutcome::NoReply { budget },
     };
 
     match serde_json::from_str::<Response>(line.trim()) {
@@ -1602,48 +1550,21 @@ pub enum UpgradeOutcome {
 /// `UpgradeOutcome::NoDesktop` so the caller can launch a desktop and retry.
 #[cfg(unix)]
 pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
     let Some(socket_path) = existing_well_known_socket_path() else {
         return UpgradeOutcome::NoDesktop;
     };
-    if !socket_path.exists() {
-        return UpgradeOutcome::NoDesktop;
-    }
+    try_upgrade_at(&socket_path, check_only).await
+}
 
-    let connect = UnixStream::connect(&socket_path);
-    let stream = match tokio::time::timeout(Duration::from_millis(1500), connect).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) | Err(_) => return UpgradeOutcome::NoDesktop,
-    };
-
+#[cfg(unix)]
+async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome {
     let req = Request::Upgrade {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         check_only,
     };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return UpgradeOutcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
-    };
-    // A `check_only` round-trip hits the network on the desktop side
-    // (updater.check), so allow a longer read window than the open-workspace
-    // path; the install kickoff (check_only=false) still returns promptly.
-    let line = match tokio::time::timeout(Duration::from_secs(15), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return UpgradeOutcome::NoDesktop,
+    let Ok(line) = request_endpoint(socket_path, &req, UPGRADE_IO_TIMEOUT).await else {
+        return UpgradeOutcome::NoDesktop;
     };
 
     map_upgrade_response(&line)
@@ -1763,6 +1684,184 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[derive(Clone, Copy, Debug)]
+    enum ClientVerb {
+        Open,
+        Close,
+        Devserver,
+        Control,
+        Upgrade,
+        Probe,
+    }
+
+    #[cfg(unix)]
+    async fn invoke_client(verb: ClientVerb, path: &Path) -> bool {
+        let outcome = match verb {
+            ClientVerb::Open => try_handoff_at(path, Path::new("/private/notes")).await,
+            ClientVerb::Close => {
+                try_close_workspace_at(path, Path::new("/private/notes"), true).await
+            }
+            ClientVerb::Devserver => {
+                try_open_devserver_at(
+                    path,
+                    "http://localhost:8787?t=private",
+                    Some("label"),
+                    Some("script"),
+                )
+                .await
+            }
+            ClientVerb::Control => {
+                return match try_devserver_control_at(
+                    path,
+                    Request::ListDevservers {
+                        protocol: PROTOCOL_VERSION,
+                        cli_version: CHAN_VERSION.into(),
+                    },
+                )
+                .await
+                {
+                    DevserverControlOutcome::NoDesktop => false,
+                    DevserverControlOutcome::Reply(Response::Devservers { .. }) => true,
+                    other => panic!("unexpected control outcome: {other:?}"),
+                }
+            }
+            ClientVerb::Upgrade => {
+                return match try_upgrade_at(path, true).await {
+                    UpgradeOutcome::NoDesktop => false,
+                    UpgradeOutcome::Started { .. } => true,
+                    other => panic!("unexpected upgrade outcome: {other:?}"),
+                }
+            }
+            ClientVerb::Probe => return desktop_is_live_at(path).await,
+        };
+        match outcome {
+            Outcome::NoDesktop => false,
+            Outcome::HandedOff => true,
+            other => panic!("unexpected handoff outcome: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_client_socket_gate(verb: ClientVerb) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.sock");
+        let link = dir.path().join("link.sock");
+        let listener = tokio::net::UnixListener::bind(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut observed = Vec::new();
+        for path in [&link, &real] {
+            let server = async {
+                let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
+                else {
+                    return None;
+                };
+                if matches!(verb, ClientVerb::Probe) {
+                    let mut line = String::new();
+                    BufReader::new(stream).read_line(&mut line).await.unwrap();
+                    assert!(line.is_empty(), "liveness is connect-only");
+                    return Some(line);
+                }
+                let (read, mut write) = stream.split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let request: Request = serde_json::from_str(&line).unwrap();
+                let reply = match (verb, request) {
+                    (ClientVerb::Open, Request::OpenWorkspace { workspace_path, .. }) => {
+                        assert_eq!(workspace_path, "/private/notes");
+                        Response::Opened {
+                            desktop_version: CHAN_VERSION.into(),
+                            capabilities: Capabilities {
+                                open_local_workspace: true,
+                            },
+                        }
+                    }
+                    (
+                        ClientVerb::Close,
+                        Request::CloseWorkspace {
+                            workspace_path,
+                            remove,
+                            ..
+                        },
+                    ) => {
+                        assert_eq!(workspace_path, "/private/notes");
+                        assert!(remove);
+                        Response::Closed {
+                            desktop_version: CHAN_VERSION.into(),
+                        }
+                    }
+                    (
+                        ClientVerb::Devserver,
+                        Request::OpenDevserver {
+                            url, name, script, ..
+                        },
+                    ) => {
+                        assert_eq!(url, "http://localhost:8787?t=private");
+                        assert_eq!(name.as_deref(), Some("label"));
+                        assert_eq!(script.as_deref(), Some("script"));
+                        Response::DevserverRegistered {
+                            desktop_version: CHAN_VERSION.into(),
+                        }
+                    }
+                    (ClientVerb::Control, Request::ListDevservers { .. }) => Response::Devservers {
+                        desktop_version: CHAN_VERSION.into(),
+                        devservers: Vec::new(),
+                    },
+                    (ClientVerb::Upgrade, Request::Upgrade { check_only, .. }) => {
+                        assert!(check_only);
+                        Response::UpgradeStarted {
+                            desktop_version: CHAN_VERSION.into(),
+                        }
+                    }
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                let mut payload = serde_json::to_vec(&reply).unwrap();
+                payload.push(b'\n');
+                write.write_all(&payload).await.unwrap();
+                Some(line)
+            };
+            let (success, received) = tokio::join!(invoke_client(verb, path), server);
+            eprintln!(
+                "{verb:?} {}: success={success}, received={received:?}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            observed.push((success, received.is_some()));
+        }
+        assert_eq!(observed, vec![(false, false), (true, true)]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_workspace_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Open).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_workspace_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Close).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_devserver_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Devserver).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn devserver_control_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Control).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upgrade_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Upgrade).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn liveness_client_requires_an_owned_socket() {
+        assert_client_socket_gate(ClientVerb::Probe).await;
+    }
     use super::*;
 
     #[test]
