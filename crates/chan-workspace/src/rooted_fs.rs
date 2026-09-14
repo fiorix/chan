@@ -900,6 +900,7 @@ impl RootedFs {
 
     /// Rename within the root through the capability handle.
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.ensure_root_available()?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
         // Source must exist as a regular file or directory; refuse
@@ -917,7 +918,32 @@ impl RootedFs {
                 path: self.root_path.join(&from_rel),
             });
         }
-        self.ensure_writable(to)?;
+        let same_file = match self.dir().symlink_metadata(&to_rel) {
+            Ok(dst_meta) => {
+                if dst_meta.file_type().is_symlink() {
+                    return Err(ChanError::PathAlreadyExists(to.to_string()));
+                }
+                #[cfg(unix)]
+                let same = {
+                    use cap_std::fs::MetadataExt;
+                    src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino()
+                };
+                // Native canonical paths resolve Windows case aliases;
+                // cap-std's manual canonicalization preserves input casing.
+                #[cfg(not(unix))]
+                let same = self.root_path.join(&from_rel).canonicalize()?
+                    == self.root_path.join(&to_rel).canonicalize()?;
+                if !same {
+                    return Err(ChanError::PathAlreadyExists(to.to_string()));
+                }
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(map_cap_err(error, &to_rel)),
+        };
+        if !(same_file && src_ft.is_dir()) {
+            self.ensure_writable(to)?;
+        }
         if let Some(parent) = to_rel.parent() {
             if !parent.as_os_str().is_empty() {
                 self.dir()
@@ -925,9 +951,8 @@ impl RootedFs {
                     .map_err(|e| ChanError::Io(e.to_string()))?;
             }
         }
-        // cap-std rename within the same Dir is TOCTOU-free: source
-        // and destination resolve through the dir handle, no
-        // path-walk through swappable ancestors.
+        // Both paths resolve through the capability handle. The destination
+        // check still assumes no concurrent external creator before rename.
         self.dir()
             .rename(&from_rel, &self.dir(), &to_rel)
             .map_err(|e| ChanError::Io(e.to_string()))?;
@@ -1317,6 +1342,81 @@ pub(crate) fn split_name_ext(name: &str) -> (String, String) {
 
 fn posix_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn rename_refuses_to_overwrite_existing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("a.md"), "source content").unwrap();
+        fs::write(root.path().join("b.md"), "destination content").unwrap();
+        let result = rooted.rename("a.md", "b.md");
+        eprintln!(
+            "rename={result:?}; source={:?}; destination={:?}",
+            fs::read_to_string(root.path().join("a.md")),
+            fs::read_to_string(root.path().join("b.md"))
+        );
+        assert!(matches!(result, Err(ChanError::PathAlreadyExists(path)) if path == "b.md"));
+        assert_eq!(
+            fs::read_to_string(root.path().join("a.md")).unwrap(),
+            "source content"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("b.md")).unwrap(),
+            "destination content"
+        );
+    }
+
+    #[test]
+    fn rename_to_missing_and_case_only_paths_preserves_content() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("notes.md"), "note").unwrap();
+        rooted.rename("notes.md", "Notes.md").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("Notes.md")).unwrap(),
+            "note"
+        );
+        rooted.rename("Notes.md", "new/parent/note.md").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("new/parent/note.md")).unwrap(),
+            "note"
+        );
+        assert!(!root.path().join("Notes.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_allows_same_file_hard_link() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("notes.md"), "note").unwrap();
+        fs::hard_link(root.path().join("notes.md"), root.path().join("Notes.md")).unwrap();
+        rooted.rename("notes.md", "Notes.md").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("Notes.md")).unwrap(),
+            "note"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("a.md"), "note").unwrap();
+        fs::create_dir(root.path().join("target")).unwrap();
+        assert!(rooted.rename("a.md", "target").is_err());
+        assert_eq!(
+            fs::read_to_string(root.path().join("a.md")).unwrap(),
+            "note"
+        );
+        assert!(root.path().join("target").is_dir());
+    }
 }
 
 #[cfg(test)]

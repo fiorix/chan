@@ -126,6 +126,8 @@ Behaviour by class:
 
 `rename`, `copy`, and `remove` operate on every class. Link rewriting in `rename_with_link_rewrite` only touches `EditableText` bodies (Text-class files, images, and other binaries have no markdown links to rewrite); the graph edge `dst` gets updated regardless of target class. `resolve_free_name` computes a collision-free destination name for copy / promote flows.
 
+Workspace renames refuse an occupied destination with `PathAlreadyExists` before mutation. A destination that identifies the source itself remains valid for case-only renames: Unix compares device/inode identity, and Windows compares native canonical paths after the capability-relative metadata checks. This preflight does not exclude an external process creating the destination before the rename syscall.
+
 Typed markdown frontmatter is resolved through a nested `chan.kind` registry. The only supported entry today is `contact`, which stamps a graph node as `Contact` and gives server/web callers the `contact` renderer hint; unknown kinds stay ordinary markdown files. Semantic reference tokens are markdown-only: `#tag` and `@@mention` graph edges are extracted from `.md` files and intentionally ignored in `.txt`, so plain notes remain searchable/editable without turning incidental prose into graph entities.
 
 Extension matching is ASCII case-insensitive. Files whose extension is unknown fall back to a basename check against well-known textual filenames (Makefile, Dockerfile, LICENSE, ...), then to the content sniff on the read/write path.
