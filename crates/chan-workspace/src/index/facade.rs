@@ -200,6 +200,21 @@ impl std::fmt::Debug for Index {
     }
 }
 
+#[cfg(all(test, feature = "embeddings"))]
+thread_local! {
+    static MODEL_SNAPSHOT_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static LOCK_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "embeddings"))]
+fn run_lock_test_hook() {
+    LOCK_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+}
+
 impl Index {
     /// Open (or create) the index for `workspace_root`, with storage
     /// rooted at `index_dir`. The two directories are decoupled:
@@ -396,14 +411,40 @@ impl Index {
     /// path through hf-hub's cache lookup with no network.
     #[cfg(feature = "embeddings")]
     fn embedder(&self) -> Result<Arc<Embedder>, IndexError> {
-        let mut guard = self.embedder.lock().unwrap();
+        self.embedder_with(|model_id| {
+            let _ = embeddings::resolve_model(model_id)?;
+            let cache_dir = embeddings::global_models_dir();
+            Ok(Arc::new(Embedder::open(model_id, &cache_dir)?))
+        })
+    }
+
+    #[cfg(feature = "embeddings")]
+    fn embedder_with(
+        &self,
+        open: impl FnOnce(&str) -> Result<Arc<Embedder>, IndexError>,
+    ) -> Result<Arc<Embedder>, IndexError> {
+        let (model_id, mut guard) = loop {
+            let epoch = self.vectors_epoch.load(Ordering::SeqCst);
+            let model_id = self.config.lock().unwrap().model.clone();
+            #[cfg(test)]
+            MODEL_SNAPSHOT_TEST_HOOK.with(|hook| {
+                if let Some(hook) = hook.take() {
+                    hook();
+                }
+            });
+            let guard = self.embedder.lock().unwrap();
+            #[cfg(test)]
+            run_lock_test_hook();
+            // A model switch can clear the cache between the config snapshot
+            // and this lock. Retry rather than restoring the invalidated model.
+            if self.vectors_epoch.load(Ordering::SeqCst) == epoch {
+                break (model_id, guard);
+            }
+        };
         if let Some(e) = guard.as_ref() {
             return Ok(Arc::clone(e));
         }
-        let model_id = self.config.lock().unwrap().model.clone();
-        let _ = embeddings::resolve_model(&model_id)?;
-        let cache_dir = embeddings::global_models_dir();
-        let e = Arc::new(Embedder::open(&model_id, &cache_dir)?);
+        let e = open(&model_id)?;
         *guard = Some(Arc::clone(&e));
         Ok(e)
     }
@@ -809,11 +850,19 @@ impl Index {
         #[cfg(feature = "embeddings")]
         if do_vectors {
             if self.vectors_epoch.load(Ordering::SeqCst) == build_epoch {
+                #[cfg(test)]
+                run_lock_test_hook();
+                let dim = self
+                    .embedder
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|e| e.dim() as u32);
                 let to_save = {
                     let mut cfg = self.config.lock().unwrap();
                     cfg.vectors_model = Some(model_at_start.clone());
-                    if let Some(e) = self.embedder.lock().unwrap().as_ref() {
-                        cfg.vectors_dim = Some(e.dim() as u32);
+                    if let Some(dim) = dim {
+                        cfg.vectors_dim = Some(dim);
                     }
                     cfg.clone()
                 };
@@ -1440,6 +1489,100 @@ fn list_indexable(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<String>,
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn embedder_retries_model_snapshot_after_vector_clear() {
+        let tmp = make_workspace();
+        let idx = Arc::new(Index::open(tmp.path(), &idx_dir(&tmp)).unwrap());
+        let switching = Arc::clone(&idx);
+        MODEL_SNAPSHOT_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                switching.set_model("BAAI/bge-base-en-v1.5".into()).unwrap();
+            }));
+        });
+        // Inject the loader so the observed model is deterministic and no
+        // test needs to download or initialize model weights.
+        let error = idx
+            .embedder_with(|model| Err(IndexError::UnknownModel(model.into())))
+            .unwrap_err();
+        let IndexError::UnknownModel(observed) = error else {
+            panic!("unexpected loader error");
+        };
+        assert_eq!(
+            observed, "BAAI/bge-base-en-v1.5",
+            "loaded a stale model after its vectors were cleared"
+        );
+        assert_eq!(idx.vectors_epoch(), 1);
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn embedder_and_build_stamp_do_not_deadlock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let bound = Duration::from_secs(3);
+        let tmp = make_workspace();
+        let idx = Arc::new(Index::open(tmp.path(), &idx_dir(&tmp)).unwrap());
+        // An unknown model exercises lazy initialization without model files.
+        idx.config.lock().unwrap().model = "missing-test-model".into();
+        let (build_ready_tx, build_ready) = mpsc::channel();
+        let (build_go, build_go_rx) = mpsc::channel();
+        let (embed_ready_tx, embed_ready) = mpsc::channel();
+        let (embed_go, embed_go_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let build = {
+            let idx = Arc::clone(&idx);
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                LOCK_TEST_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        build_ready_tx.send(()).unwrap();
+                        build_go_rx.recv_timeout(bound).unwrap();
+                    }));
+                });
+                let result =
+                    idx.build_all(BuildOptions::default(), &crate::progress::NoProgress, None);
+                done.send(()).unwrap();
+                result.unwrap();
+            })
+        };
+        build_ready
+            .recv_timeout(bound)
+            .expect("build did not reach stamp");
+        let embed = {
+            let idx = Arc::clone(&idx);
+            std::thread::spawn(move || {
+                LOCK_TEST_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        embed_ready_tx.send(()).unwrap();
+                        embed_go_rx.recv_timeout(bound).unwrap();
+                    }));
+                });
+                let result = idx.embedder();
+                done_tx.send(()).unwrap();
+                assert!(result.is_err());
+            })
+        };
+        embed_ready
+            .recv_timeout(bound)
+            .expect("embedder did not acquire its lock");
+        build_go.send(()).unwrap();
+        embed_go.send(()).unwrap();
+        // Only join threads that completed: a lock regression must fail the
+        // test within this bound instead of hanging the test runner.
+        done.recv_timeout(bound)
+            .expect("deadlocked: neither operation completed");
+        done.recv_timeout(bound)
+            .expect("deadlocked: one operation remained blocked");
+        build.join().unwrap();
+        embed.join().unwrap();
+        assert_eq!(
+            idx.config().vectors_model.as_deref(),
+            Some("missing-test-model")
+        );
+    }
 
     fn make_workspace() -> TempDir {
         TempDir::new().unwrap()
