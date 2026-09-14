@@ -29,6 +29,8 @@ A user-intent close commits when it detaches the runtime and records off in the 
 
 The window registry, workspace overlay, and local color store stamp save snapshots under their data locks and serialize disk writes separately. A snapshot older than the latest attempted save is skipped, even if that save reports a directory-sync error after publication, so delayed writers cannot roll persisted state back while readers remain independent of disk I/O. JSON saves use `chan_workspace::fs_ops::atomic_write` for unique temporary files and file/directory fsync.
 
+Each hosted runtime stores its normalized canonical root before publication. By-root lookups canonicalize only the caller's target, outside the workspace-map lock, and compare it with those stored keys so a mounted root's filesystem cannot block lookup while the shared routing map is locked.
+
 ## Boundaries
 
 - No HTTP frontend bundle lives here. chan-library exposes the `root_fallback` *slot*; chan-server (the higher layer) fills it. Same dependency direction as the rest of the stack.

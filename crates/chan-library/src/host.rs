@@ -476,6 +476,9 @@ enum MountState {
 
 struct HostedWorkspaceRuntime {
     root: PathBuf,
+    /// Normalized before publication so by-root lookups do no filesystem work
+    /// while holding the shared routing map's lock.
+    canonical_root: PathBuf,
     /// Launch handle captured at mount time (addr, prefix, token). Lets the
     /// host hand back the existing mount on an idempotent re-register and
     /// list every tenant without rebuilding one.
@@ -979,7 +982,7 @@ impl WorkspaceHost {
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
         Ok(workspaces
             .values()
-            .find(|runtime| canonical_key(&runtime.root) == target)
+            .find(|runtime| runtime.canonical_root == target)
             .map(hosted_from_runtime))
     }
 
@@ -1054,6 +1057,7 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
         let runtime = HostedWorkspaceRuntime {
+            canonical_root: canonical_key(&root),
             root,
             handle,
             artifacts,
@@ -1256,6 +1260,7 @@ impl WorkspaceHost {
             handle: handle.clone(),
         };
         let runtime = HostedWorkspaceRuntime {
+            canonical_root: canonical_key(&root),
             root,
             handle,
             artifacts,
@@ -1755,15 +1760,16 @@ impl WorkspaceHost {
     /// the shared launcher bearer), so it double-enforces a UI affordance rather
     /// than proving identity.
     pub fn tenant_leader(&self, kind: WindowKind, workspace_path: Option<&str>) -> Option<String> {
+        let target = match kind {
+            WindowKind::Terminal => None,
+            WindowKind::Workspace => Some(canonical_key(Path::new(workspace_path?))),
+        };
         let workspaces = self.workspaces.read().ok()?;
-        let runtime = match kind {
-            WindowKind::Terminal => workspaces.get(self.terminal_tenant_prefix.get()?)?,
-            WindowKind::Workspace => {
-                let target = canonical_key(Path::new(workspace_path?));
-                workspaces
-                    .values()
-                    .find(|runtime| canonical_key(&runtime.root) == target)?
-            }
+        let runtime = match target {
+            None => workspaces.get(self.terminal_tenant_prefix.get()?)?,
+            Some(target) => workspaces
+                .values()
+                .find(|runtime| runtime.canonical_root == target)?,
         };
         runtime.artifacts.session_registry.leader()
     }
@@ -2441,7 +2447,7 @@ impl WorkspaceHost {
         if let Ok(workspaces) = self.workspaces.read() {
             if let Some(runtime) = workspaces
                 .values()
-                .find(|runtime| canonical_key(&runtime.root) == target)
+                .find(|runtime| runtime.canonical_root == target)
             {
                 let connected = runtime
                     .artifacts
@@ -2565,7 +2571,7 @@ impl WorkspaceHost {
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
             workspaces
                 .values()
-                .find(|runtime| canonical_key(&runtime.root) == target)
+                .find(|runtime| runtime.canonical_root == target)
                 .map(|runtime| runtime.handle.prefix.clone())
         };
         match prefix {
@@ -2866,7 +2872,7 @@ impl WorkspaceHost {
         let workspaces = self.workspaces.read().ok()?;
         let runtime = workspaces
             .values()
-            .find(|runtime| canonical_key(&runtime.root) == target)?;
+            .find(|runtime| runtime.canonical_root == target)?;
         runtime.artifacts.cell.workspace()
     }
 
@@ -2889,7 +2895,7 @@ impl WorkspaceHost {
         let workspaces = self.workspaces.read().ok()?;
         workspaces
             .iter()
-            .find(|(_, runtime)| canonical_key(&runtime.root) == target)
+            .find(|(_, runtime)| runtime.canonical_root == target)
             .map(|(prefix, _)| prefix.clone())
     }
 
@@ -3338,6 +3344,13 @@ fn window_command_frame(
     .ok()
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static CANONICAL_KEY_PROBE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Canonical-form key for matching a caller path against a mounted
 /// runtime's root, via [`chan_workspace::paths::canonicalize_normalized`]:
 /// it strips any Windows `\\?\` verbatim prefix so a path the caller resolved
@@ -3347,6 +3360,12 @@ fn window_command_frame(
 /// when the filesystem can't canonicalize (workspace root missing or asleep).
 /// Mirrors the private `canonical_key` in `chan_workspace::library`.
 fn canonical_key(root: &Path) -> PathBuf {
+    #[cfg(test)]
+    CANONICAL_KEY_PROBE.with(|probe| {
+        if let Some(probe) = probe.borrow().as_ref() {
+            probe();
+        }
+    });
     chan_workspace::paths::canonicalize_normalized(root)
 }
 
@@ -3417,6 +3436,92 @@ mod tests {
             open_thread, runtime_thread,
             "blocking workspace open ran on the runtime thread"
         );
+    }
+
+    #[test]
+    fn by_root_lookups_canonicalize_only_the_target_outside_the_host_lock() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        for index in 0..3 {
+            let root = cfg.path().join(format!("root-{index}"));
+            std::fs::create_dir(&root).expect("workspace root");
+            let prefix = format!("/workspace-{index}");
+            let runtime = HostedWorkspaceRuntime {
+                canonical_root: canonical_key(&root),
+                root,
+                handle: ServeHandle {
+                    addr: ([127, 0, 0, 1], 0).into(),
+                    prefix: prefix.clone(),
+                    token: None,
+                },
+                artifacts: fake_artifacts(Router::new(), Arc::new(FakeTerminalCell)),
+            };
+            host.workspaces
+                .write()
+                .expect("host map")
+                .insert(prefix, runtime);
+        }
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        CANONICAL_KEY_PROBE.with(|probe| {
+            let host = Arc::clone(&host);
+            let observed = std::rc::Rc::clone(&observed);
+            *probe.borrow_mut() = Some(Box::new(move || {
+                observed
+                    .borrow_mut()
+                    .push(host.workspaces.try_write().is_err());
+            }));
+        });
+        struct ResetProbe;
+        impl Drop for ResetProbe {
+            fn drop(&mut self) {
+                CANONICAL_KEY_PROBE.with(|probe| *probe.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetProbe;
+        let check = |name: &str, lookup: &dyn Fn()| {
+            observed.borrow_mut().clear();
+            lookup();
+            assert_eq!(
+                *observed.borrow(),
+                vec![false],
+                "{name} must canonicalize only the target without the host lock"
+            );
+        };
+        let missing = cfg.path().join("unmounted");
+        check("live_workspace", &|| {
+            assert!(host.live_workspace(&missing).is_none());
+        });
+        check("hosted_for_root", &|| {
+            assert!(host.hosted_for_root(&missing).expect("lookup").is_none());
+        });
+        check("mounted_prefix_for_root", &|| {
+            assert!(host.mounted_prefix_for_root(&missing).is_none());
+        });
+        check("tenant_leader", &|| {
+            assert!(host
+                .tenant_leader(WindowKind::Workspace, Some(&missing.to_string_lossy()))
+                .is_none());
+        });
+        check("workspace_window_live", &|| {
+            let _ = host.workspace_window_live(Some(&missing.to_string_lossy()), "w-a");
+        });
+        let mounted = cfg.path().join("root-0");
+        check("mounted prefix match", &|| {
+            assert_eq!(
+                host.mounted_prefix_for_root(&mounted).as_deref(),
+                Some("/workspace-0")
+            );
+        });
+        check("hosted root match", &|| {
+            assert_eq!(
+                host.hosted_for_root(&mounted)
+                    .expect("lookup")
+                    .expect("mounted")
+                    .prefix,
+                "/workspace-0"
+            );
+        });
     }
 
     #[test]
@@ -4418,7 +4523,8 @@ mod tests {
     async fn cancelled_close_clears_closing_and_persists_off() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
-        let key = canonical_key(root.path()).to_string_lossy().into_owned();
+        let canonical_root = canonical_key(root.path());
+        let key = canonical_root.to_string_lossy().into_owned();
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = WorkspaceHost::new(library, fake_builder());
         let overlay_path = cfg.path().join("workspaces.json");
@@ -4432,6 +4538,7 @@ mod tests {
             "/workspace".into(),
             HostedWorkspaceRuntime {
                 root: root.path().to_path_buf(),
+                canonical_root: canonical_root.clone(),
                 handle: ServeHandle {
                     addr: ([127, 0, 0, 1], 0).into(),
                     prefix: "/workspace".into(),
@@ -4482,7 +4589,8 @@ mod tests {
     async fn host_wide_shutdown_drains_all_tenant_kinds_concurrently_and_preserves_overlay() {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
-        let key = canonical_key(root.path()).to_string_lossy().into_owned();
+        let canonical_root = canonical_key(root.path());
+        let key = canonical_root.to_string_lossy().into_owned();
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
         let host = WorkspaceHost::new(library, fake_builder());
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
@@ -4500,6 +4608,7 @@ mod tests {
                     prefix.to_string(),
                     HostedWorkspaceRuntime {
                         root: root.path().to_path_buf(),
+                        canonical_root: canonical_root.clone(),
                         handle: ServeHandle {
                             addr: ([127, 0, 0, 1], 0).into(),
                             prefix: prefix.to_string(),
@@ -6015,10 +6124,12 @@ mod tests {
             let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
             let artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
             let registry = artifacts.terminal_sessions.clone();
+            let canonical_root = canonical_key(Path::new("/"));
             host.workspaces.write().expect("host map").insert(
                 "/terminal".to_string(),
                 HostedWorkspaceRuntime {
                     root: PathBuf::from("/"),
+                    canonical_root,
                     handle: ServeHandle {
                         addr: ([127, 0, 0, 1], 0).into(),
                         prefix: "/terminal".to_string(),
