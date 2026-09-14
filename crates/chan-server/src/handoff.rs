@@ -35,6 +35,9 @@
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use crate::local_socket::{effective_uid, socket_is_owner_controlled};
+
 use serde::{Deserialize, Serialize};
 #[cfg(any(unix, windows))]
 use std::path::Path;
@@ -417,11 +420,6 @@ fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
-#[cfg(unix)]
-fn effective_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
 /// The no-XDG desktop socket directory: `<tmp>/chan-desktop-<uid>`. Per-uid
 /// name so two users cannot collide in a shared /tmp; the ensure/existing
 /// pair below makes it owner-only by construction, like the devserver
@@ -524,19 +522,6 @@ fn not_owner_controlled(dir: &Path) -> std::io::Error {
             dir.display()
         ),
     )
-}
-
-/// Whether the node at `path` is a real socket owned by this euid, read via
-/// lstat so a symlink never passes. The client-side gate before any request
-/// bytes are written to the well-known endpoint.
-#[cfg(unix)]
-fn socket_is_owner_controlled(path: &Path) -> bool {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata.file_type().is_socket() && metadata.uid() == effective_uid(),
-        Err(_) => false,
-    }
 }
 
 /// True when a GUI session is present, i.e. it makes sense to hand a

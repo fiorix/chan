@@ -43,6 +43,8 @@ mod extensions;
 pub mod handoff;
 mod handover_bus;
 mod indexer;
+#[cfg(unix)]
+mod local_socket;
 mod mcp_bridge;
 mod preferences;
 #[cfg(test)]

@@ -121,11 +121,11 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    match transport::connect(socket).await {
+    match connect_owner_socket(socket).await {
         Ok(client) => Ok(client),
         Err(primary) if should_try_mcp_socket_fallback(&primary) => {
             for candidate in mcp_socket_fallback_candidates_in(fallback_dirs, socket) {
-                if let Ok(client) = transport::connect(&candidate).await {
+                if let Ok(client) = connect_owner_socket(&candidate).await {
                     tracing::warn!(
                         configured = %socket.display(),
                         fallback = %candidate.display(),
@@ -138,6 +138,12 @@ where
         }
         Err(primary) => Err(primary),
     }
+}
+
+#[cfg(unix)]
+async fn connect_owner_socket(socket: &Path) -> std::io::Result<transport::Client> {
+    crate::local_socket::owner_socket_metadata(socket, crate::local_socket::effective_uid())?;
+    transport::connect(socket).await
 }
 
 #[cfg(unix)]
@@ -172,6 +178,19 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    mcp_socket_fallback_candidates_for_uid(dirs, preferred, crate::local_socket::effective_uid())
+}
+
+#[cfg(unix)]
+fn mcp_socket_fallback_candidates_for_uid<I, P>(
+    dirs: I,
+    preferred: &Path,
+    euid: u32,
+) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let mut out = Vec::new();
     let mut seen_dirs = Vec::new();
     for dir in dirs {
@@ -195,9 +214,9 @@ where
                 if !name.starts_with("chan-mcp-") || !name.ends_with(".sock") {
                     return None;
                 }
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
+                let metadata = crate::local_socket::owner_socket_metadata(&path, euid).ok()?;
+                let modified = metadata
+                    .modified()
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 Some((modified, path))
             })
@@ -297,6 +316,58 @@ mod tests {
         let client = connect_mcp_in(&preferred, [dir.path()]).await.unwrap();
         drop(client);
         accept.await.unwrap();
+    }
+
+    #[test]
+    fn fallback_candidates_require_owned_socket_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferred = dir.path().join("chan-mcp-stale.sock");
+        let real = dir.path().join("chan-mcp-real.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        let file = dir.path().join("chan-mcp-file.sock");
+        std::fs::write(&file, "not a socket").unwrap();
+        let link = dir.path().join("chan-mcp-link.sock");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            mcp_socket_fallback_candidates_in([dir.path()], &preferred),
+            vec![real]
+        );
+    }
+
+    #[test]
+    fn fallback_candidates_reject_a_different_owner_without_chown() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferred = dir.path().join("chan-mcp-stale.sock");
+        let real = dir.path().join("chan-mcp-real.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        assert_eq!(
+            mcp_socket_fallback_candidates_for_uid([dir.path()], &preferred, uid),
+            vec![real.clone()]
+        );
+        assert_eq!(
+            mcp_socket_fallback_candidates_for_uid([dir.path()], &preferred, uid ^ 1),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_primary_requires_an_owned_socket_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("chan-mcp-real.sock");
+        let listener = tokio::net::UnixListener::bind(&real).unwrap();
+        let link = dir.path().join("chan-mcp-link.sock");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let client = connect_mcp_in(&real, [dir.path()]).await.unwrap();
+        let _ = listener.accept().await.unwrap();
+        drop(client);
+        let result = connect_mcp_in(&link, [dir.path()]).await;
+        assert!(result.is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
