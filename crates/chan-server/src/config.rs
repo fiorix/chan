@@ -43,6 +43,40 @@ pub struct ServerConfig {
     pub search: SearchConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub transfer: TransferConfig,
+}
+
+/// File-only transfer policy, captured when a tenant starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferConfig {
+    /// Maximum time without channel progress. Zero selects the default,
+    /// matching the terminal idle timeout's zero-value policy.
+    #[serde(default = "default_stall_timeout_secs")]
+    pub stall_timeout_secs: u64,
+}
+
+fn default_stall_timeout_secs() -> u64 {
+    300
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            stall_timeout_secs: default_stall_timeout_secs(),
+        }
+    }
+}
+
+impl TransferConfig {
+    pub(crate) fn stall_timeout(&self) -> std::time::Duration {
+        let secs = if self.stall_timeout_secs == 0 {
+            default_stall_timeout_secs()
+        } else {
+            self.stall_timeout_secs
+        };
+        std::time::Duration::from_secs(secs)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +99,7 @@ impl Default for ServerConfig {
             attachments_dir: default_attachments_dir(),
             search: SearchConfig::default(),
             terminal: TerminalConfig::default(),
+            transfer: TransferConfig::default(),
         }
     }
 }
@@ -79,7 +114,9 @@ impl ServerConfig {
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
-        crate::store::load_toml(path)
+        let mut config: Self = crate::store::load_toml(path)?;
+        config.transfer.stall_timeout_secs = config.transfer.stall_timeout().as_secs();
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<(), Error> {
@@ -128,6 +165,9 @@ mod tests {
         let p = tmp.path().join("server.toml");
         let cfg = ServerConfig {
             attachments_dir: "media/2026".into(),
+            transfer: TransferConfig {
+                stall_timeout_secs: 45,
+            },
             search: SearchConfig {
                 aggression: SearchAggression::Aggressive,
             },
@@ -171,6 +211,41 @@ mod tests {
         cfg.save_to(&p).unwrap();
         let loaded = ServerConfig::load_from(&p).unwrap();
         assert_eq!(cfg, loaded);
+    }
+
+    #[test]
+    fn transfer_config_defaults_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nidle_timeout_secs = 600\n").unwrap();
+        let config = ServerConfig::load_from(&path).unwrap();
+        assert_eq!(config.transfer.stall_timeout_secs, 300);
+        assert_eq!(
+            config.transfer.stall_timeout(),
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn transfer_config_hand_edited_timeout_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[transfer]\nstall_timeout_secs = 42\n").unwrap();
+        let config = ServerConfig::load_from(&path).unwrap();
+        assert_eq!(config.transfer.stall_timeout_secs, 42);
+        config.save_to(&path).unwrap();
+        assert_eq!(ServerConfig::load_from(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn transfer_config_zero_timeout_uses_default() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        for (value, expected) in [(0, 300), (1, 1), (90_000, 90_000)] {
+            std::fs::write(&path, format!("[transfer]\nstall_timeout_secs = {value}\n")).unwrap();
+            let config = ServerConfig::load_from(&path).unwrap();
+            assert_eq!(config.transfer.stall_timeout_secs, expected);
+        }
     }
 
     #[test]

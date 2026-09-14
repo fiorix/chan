@@ -608,14 +608,7 @@ async fn stream_planned_workspace_download_tracked(
             )
         }
     };
-    let body = Body::from_stream(stream::unfold(
-        (rx, job, alive_tx),
-        |(mut rx, job, alive_tx)| async move {
-            rx.recv()
-                .await
-                .map(|message| (message, (rx, job, alive_tx)))
-        },
-    ));
+    let body = crate::routes::transfer::download_body(rx, job, alive_tx);
     planned_workspace_download_response(&path_for_headers(&planned, &header_path), planned, body)
 }
 
@@ -623,20 +616,9 @@ async fn stream_planned_workspace_download_tracked(
 /// is the lane worker. Handing the reader to a pool task instead would cost a
 /// slot AND a task for one request.
 ///
-/// Cancellation is checked once per chunk, so an abandoned download releases
-/// its slot after at most one chunk's work rather than after the whole file.
-///
-/// Neither a read error nor a cancellation may end this stream cleanly. The
-/// declared length is already on the wire, so a clean end answers with fewer
-/// bytes than promised, which is the silent truncation the length exists to
-/// prevent. A read error, which is what a mid-read shrink produces, is
-/// forwarded; so is a cancellation, because cancel does not mean the client is
-/// gone: `BulkTransferLane`'s Drop cancels every active job at process
-/// shutdown, and a client mid-download then is still connected and draining.
-/// Forwarding is never worse than returning. With the client gone the send
-/// fails on the dropped receiver and nothing happens, exactly as a silent
-/// return would; with the client live the body fails instead of completing
-/// short.
+/// Cancellation and stalled sends stop the worker. Read errors travel in the
+/// byte channel; the response also checks the job outcome so cancellation
+/// cannot become a clean end when a full channel refuses an error item.
 fn send_reader_into(
     tx: &mpsc::Sender<std::io::Result<Bytes>>,
     cancel: &crate::bulk_transfer::BulkCancel,
@@ -644,7 +626,7 @@ fn send_reader_into(
 ) {
     for next in reader.by_ref() {
         if cancel.is_cancelled() {
-            let _ = tx.blocking_send(Err(std::io::Error::other(
+            let _ = tx.try_send(Err(std::io::Error::other(
                 "transfer cancelled before the declared length was streamed",
             )));
             return;
@@ -653,7 +635,7 @@ fn send_reader_into(
             .map(Bytes::from)
             .map_err(|error| std::io::Error::other(error.to_string()));
         let terminal = message.is_err();
-        if tx.blocking_send(message).is_err() || terminal {
+        if cancel.send(tx, message).is_err() || terminal {
             return;
         }
     }
@@ -4294,6 +4276,64 @@ mod write_tests {
     }
 
     #[test]
+    fn stalled_workspace_reader_aborts_without_a_reader() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(root.path().join("stalled.bin"), b"data").unwrap();
+        let reader = match download_path_sync(&workspace, "stalled.bin", None).unwrap() {
+            DownloadPayload::File(BinaryPlan::Full(reader)) => reader,
+            _ => panic!("expected a file"),
+        };
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(Bytes::from_static(b"full"))).unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let observed = cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            send_reader_into(&tx, &cancel, reader);
+            let _ = done_tx.send(());
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(rx);
+        result.expect("workspace reader stayed blocked on a full channel");
+        thread.join().unwrap();
+        assert!(observed.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stalled_workspace_download_releases_its_slot_and_errors() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::create_dir(root.path().join("tree")).unwrap();
+        std::fs::write(
+            root.path().join("tree/large.bin"),
+            vec![0x44; chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16],
+        )
+        .unwrap();
+        for path in ["tree/large.bin", "tree"] {
+            let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(250));
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stream_planned_workspace_download_tracked(
+                    &bulk,
+                    None,
+                    None,
+                    workspace.clone(),
+                    path.into(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+            crate::bulk_transfer::test_support::assert_stalled_download_releases_slot(
+                &bulk, response,
+            )
+            .await;
+        }
+    }
+
+    #[test]
     fn send_reader_into_forwards_a_read_error_instead_of_ending_the_stream() {
         // The shrink path at the seam: the error must arrive as an item, not
         // as the end of the stream. A bridge that dropped it would leave the
@@ -4453,7 +4493,7 @@ mod write_tests {
     ///
     /// Asserting only that the stream ended does NOT discriminate: it ends
     /// under both shapes. The assertion has to be that an error item reaches
-    /// the channel, which is what makes the body fail instead of complete.
+    /// the body, including the job outcome when the byte channel is full.
     #[tokio::test]
     async fn cancelled_length_declaring_stream_fails_rather_than_ending_clean() {
         const CHUNKS: usize = 64;
@@ -4483,24 +4523,26 @@ mod write_tests {
 
         job.cancel();
 
-        // The client is still draining here, which is the shutdown case.
-        let mut saw_error = false;
+        let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel();
+        let body = crate::routes::transfer::download_body(rx, job, alive_tx);
+        let mut stream = body.into_data_stream();
         let mut delivered = 1;
-        while let Some(message) = rx.recv().await {
-            delivered += 1;
-            if message.is_err() {
-                saw_error = true;
+        let mut saw_error = false;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(message) = stream.next().await {
+                delivered += 1;
+                saw_error |= message.is_err();
             }
-        }
+        })
+        .await
+        .unwrap();
         assert!(
             delivered < CHUNKS,
             "the cancel must stop the stream well before the file ends"
         );
         assert!(
             saw_error,
-            "a cancelled transfer on a length-declaring response must fail the \
-             body with an error item; ending cleanly answers 200 with fewer \
-             bytes than the declared Content-Length promised"
+            "a cancelled transfer must fail its body even when the byte channel was full"
         );
     }
 

@@ -785,6 +785,9 @@ async fn build_app_with_extensions(
         settings_disabled: config.settings_disabled,
         events_tx,
         index_events_tx,
+        bulk_transfer: bulk_transfer
+            .tenant()
+            .with_stall_timeout(server_config.transfer.stall_timeout()),
         server_config: Mutex::new(server_config),
         editor_prefs: Mutex::new(editor_prefs),
         config_revision: AtomicU64::new(1),
@@ -807,7 +810,6 @@ async fn build_app_with_extensions(
         pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
-        bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
         standalone_files: None,
     });
@@ -1109,6 +1111,9 @@ async fn build_terminal_app(
         settings_disabled: config.settings_disabled,
         events_tx,
         index_events_tx,
+        bulk_transfer: bulk_transfer
+            .tenant()
+            .with_stall_timeout(server_config.transfer.stall_timeout()),
         server_config: Mutex::new(server_config),
         editor_prefs: Mutex::new(editor_prefs),
         config_revision: AtomicU64::new(1),
@@ -1133,7 +1138,6 @@ async fn build_terminal_app(
         pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
-        bulk_transfer: bulk_transfer.tenant(),
         instance_id: random_token(),
         standalone_files: standalone_files.clone(),
     });

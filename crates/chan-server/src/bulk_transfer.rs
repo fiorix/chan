@@ -14,10 +14,13 @@
 //! last owner can drop on a worker thread that is then asked to join itself.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 
@@ -88,11 +91,101 @@ pub enum BulkOutcome<T> {
 /// Cloneable because the check usually happens inside a writer or reader the
 /// job hands to a library, not in the job closure itself.
 #[derive(Clone)]
-pub struct BulkCancel(Arc<AtomicBool>);
+pub struct BulkCancel(Arc<AtomicBool>, Duration);
+
+#[derive(Default)]
+struct ChannelWake {
+    notified: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl ChannelWake {
+    fn wait(&self, timeout: Duration) -> bool {
+        let notified = self.notified.lock().unwrap_or_else(|e| e.into_inner());
+        // Retain a wake delivered between Poll::Pending and parking. The
+        // predicate also keeps spurious notifications from consuming the wait.
+        let (mut notified, _) = self
+            .ready
+            .wait_timeout_while(notified, timeout, |notified| !*notified)
+            .unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *notified)
+    }
+}
+
+impl Wake for ChannelWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        *self.notified.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready.notify_one();
+    }
+}
 
 impl BulkCancel {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+
+    fn check_cancelled(&self) -> std::io::Result<()> {
+        if self.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "transfer cancelled",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Park until channel readiness, cancellation or the no-progress bound.
+    /// Each successful operation starts a fresh budget.
+    fn wait_for_progress<F: Future>(&self, future: F) -> std::io::Result<F::Output> {
+        let started = std::time::Instant::now();
+        let wake = Arc::new(ChannelWake::default());
+        let waker = Waker::from(wake.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            self.check_cancelled()?;
+            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+                return Ok(result);
+            }
+            let remaining = self.1.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                self.0.store(true, Ordering::SeqCst);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "transfer stalled without channel progress",
+                ));
+            }
+            // Lane Drop cancels and joins these threads synchronously, even
+            // from a current-thread runtime. A std-clock wait observes cancel
+            // without needing that runtime's timer driver to make progress.
+            wake.wait(remaining.min(Duration::from_millis(100)));
+        }
+    }
+
+    pub(crate) fn send<T>(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<T>,
+        value: T,
+    ) -> std::io::Result<()> {
+        self.check_cancelled()?;
+        match tx.try_send(value) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(value)) => {
+                let permit = self.wait_for_progress(tx.reserve())?.map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
+                })?;
+                permit.send(value);
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "client disconnected",
+            )),
+        }
     }
 }
 
@@ -106,6 +199,7 @@ struct QueuedJob {
     id: u64,
     tenant: TenantId,
     cancel: Arc<AtomicBool>,
+    stall_timeout: Duration,
     work: WorkFn,
 }
 
@@ -194,9 +288,15 @@ impl SharedLane {
 pub struct BulkTransferTenant {
     shared: Arc<SharedLane>,
     tenant: TenantId,
+    stall_timeout: Duration,
 }
 
 impl BulkTransferTenant {
+    pub(crate) fn with_stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
+        self
+    }
+
     /// Submit bulk work. One call consumes one admission whether or not the
     /// job runs, so a refusal happens before any large body is read.
     pub fn submit<T, F>(&self, job: F) -> Result<BulkJob<T>, BulkFull>
@@ -240,6 +340,7 @@ impl BulkTransferTenant {
             id,
             tenant: self.tenant,
             cancel: cancel.clone(),
+            stall_timeout: self.stall_timeout,
             work,
         });
         drop(inner);
@@ -398,6 +499,7 @@ impl BulkTransferLane {
         BulkTransferTenant {
             shared: self.shared.clone(),
             tenant,
+            stall_timeout: crate::config::TransferConfig::default().stall_timeout(),
         }
     }
 }
@@ -445,7 +547,7 @@ fn worker_main(shared: Arc<SharedLane>) {
         };
 
         let id = job.id;
-        let signal = BulkCancel(job.cancel.clone());
+        let signal = BulkCancel(job.cancel.clone(), job.stall_timeout);
         let work = job.work;
         // First boundary: a panicking transfer must not take the worker with
         // it, or one bad job would permanently halve the lane.
@@ -478,11 +580,15 @@ pub(crate) mod test_support {
     use super::*;
 
     pub(crate) fn uncancelled() -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(false)))
+        BulkCancel(Arc::new(AtomicBool::new(false)), Duration::from_secs(300))
+    }
+
+    pub(crate) fn with_stall_timeout(timeout: Duration) -> BulkCancel {
+        BulkCancel(Arc::new(AtomicBool::new(false)), timeout)
     }
 
     pub(crate) fn cancelled() -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(true)))
+        BulkCancel(Arc::new(AtomicBool::new(true)), Duration::from_secs(300))
     }
 
     /// A signal a test can flip while a writer or reader is mid-stream.
@@ -494,7 +600,7 @@ pub(crate) mod test_support {
     /// needs a flag that changes after the work is underway.
     pub(crate) fn cancel_switch() -> (BulkCancel, Arc<AtomicBool>) {
         let flag = Arc::new(AtomicBool::new(false));
-        (BulkCancel(flag.clone()), flag)
+        (BulkCancel(flag.clone(), Duration::from_secs(300)), flag)
     }
 
     /// A tenant on its OWN lane. Tests that saturate admission must not use
@@ -505,6 +611,54 @@ pub(crate) mod test_support {
         let lane = BulkTransferLane::new();
         let tenant = lane.tenant();
         (lane, tenant)
+    }
+
+    /// Hold a response unpolled while the rest of its private lane is full.
+    pub(crate) async fn assert_stalled_download_releases_slot(
+        tenant: &BulkTransferTenant,
+        response: axum::response::Response,
+    ) {
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let mut releases = Vec::new();
+        let mut held = Vec::new();
+        loop {
+            let (release, park) = std::sync::mpsc::channel::<()>();
+            match tenant.submit(move |_| {
+                let _ = park.recv_timeout(Duration::from_secs(5));
+            }) {
+                Ok(job) => {
+                    releases.push(release);
+                    held.push(job);
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(held.len(), ACTIVE_CAPACITY + WAITING_CAPACITY - 1);
+        assert!(tenant.submit(|_| ()).is_err());
+        let released = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(job) = tenant.submit(|_| ()) {
+                    drop(job);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        // Cleanup also unblocks the unfixed sender before the lane joins it.
+        if released.is_err() {
+            drop(response);
+            drop(releases);
+            panic!("unpolled download kept its lane slot past the stall bound");
+        }
+        let body = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .unwrap();
+        drop(releases);
+        assert!(body.is_err(), "an aborted download must fail its body");
     }
 
     /// Hold every admission slot on `tenant`'s lane. Dropping the returned
@@ -534,6 +688,71 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn channel_wake_retains_notification_before_parking() {
+        let wake = Arc::new(ChannelWake::default());
+        wake.wake_by_ref();
+        assert!(wake.wait(Duration::from_millis(25)));
+        assert!(!wake.wait(Duration::ZERO), "the notification is consumed");
+    }
+
+    fn assert_runtime_drop_cancels_channel_wait<F: Future + Send + 'static, P>(future: F, peer: P) {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let lane = BulkTransferLane::new();
+                let tenant = lane.tenant().with_stall_timeout(Duration::from_secs(5));
+                let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+                let job = tenant
+                    .submit(move |cancel| {
+                        let mut future = std::pin::pin!(future);
+                        let mut pending_tx = Some(pending_tx);
+                        cancel
+                            .wait_for_progress(std::future::poll_fn(|context| {
+                                let result = future.as_mut().poll(context);
+                                if result.is_pending() {
+                                    if let Some(tx) = pending_tx.take() {
+                                        tx.send(()).unwrap();
+                                    }
+                                }
+                                result
+                            }))
+                            .map(|_| ())
+                    })
+                    .unwrap();
+                pending_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                // The worker has registered its channel waker. Drop now joins
+                // it on the only runtime thread, where timers cannot advance.
+                drop(lane);
+                assert!(matches!(job.outcome().await, BulkOutcome::Cancelled));
+            });
+            drop(runtime);
+            done_tx.send(()).unwrap();
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        // Closing the peer wakes a faulty waiter before the failure is raised.
+        drop(peer);
+        if completed.is_err() {
+            let _ = done_rx.recv_timeout(Duration::from_secs(2));
+        }
+        assert!(
+            completed.is_ok(),
+            "lane Drop must cancel the channel wait without a running timer driver"
+        );
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn runtime_drop_cancels_a_full_download_channel_wait() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(()).unwrap();
+        assert_runtime_drop_cancels_channel_wait(async move { tx.reserve().await.map(|_| ()) }, rx);
+    }
 
     /// The item's central claim, in the only form that is decidable rather
     /// than a stopwatch reading: a fully saturated lane must leave the

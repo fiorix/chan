@@ -93,9 +93,10 @@ pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
 }
 
 /// A `std::io::Write` that forwards each tar chunk to a streaming HTTP body
-/// over an mpsc channel. `blocking_send` provides backpressure (it blocks until
-/// the response reader drains). The writer stops with a body error after exactly
-/// `limit` bytes, and a dropped receiver stops the build on the next write.
+/// over an mpsc channel. Sends wait for capacity while checking cancellation
+/// and abort when the configured no-progress timeout expires. The writer stops
+/// with a body error after exactly `limit` bytes, and a dropped receiver stops
+/// the build on the next write.
 /// Nothing is staged on disk, so a bounded or cancelled download leaves no
 /// artifact to clean up.
 pub(crate) struct TarChannelWriter {
@@ -130,11 +131,8 @@ impl Write for TarChannelWriter {
         let allowed = usize::try_from(remaining)
             .map(|remaining| remaining.min(buf.len()))
             .unwrap_or(buf.len());
-        self.tx
-            .blocking_send(Ok(Bytes::copy_from_slice(&buf[..allowed])))
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
-            })?;
+        self.cancel
+            .send(&self.tx, Ok(Bytes::copy_from_slice(&buf[..allowed])))?;
         self.written = self
             .written
             .saturating_add(u64::try_from(allowed).unwrap_or(u64::MAX));
@@ -144,6 +142,30 @@ impl Write for TarChannelWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// The job outcome carries aborts even when a full byte channel cannot accept
+/// an error. Hyper may resume polling long after the worker released its slot.
+pub(crate) fn download_body(
+    rx: mpsc::Receiver<std::io::Result<Bytes>>,
+    job: crate::bulk_transfer::BulkJob<()>,
+    alive_tx: tokio::sync::oneshot::Sender<std::convert::Infallible>,
+) -> Body {
+    Body::from_stream(stream::unfold(
+        (rx, Some(job), alive_tx),
+        |(mut rx, mut job, alive_tx)| async move {
+            if let Some(message) = rx.recv().await {
+                return Some((message, (rx, job, alive_tx)));
+            }
+            match job.take()?.outcome().await {
+                BulkOutcome::Done(()) => None,
+                BulkOutcome::Cancelled => Some((
+                    Err(std::io::Error::other("transfer aborted before completion")),
+                    (rx, job, alive_tx),
+                )),
+            }
+        },
+    ))
 }
 
 /// Client-supplied tracking identity for one transfer. Both headers must be
@@ -202,7 +224,7 @@ pub(crate) fn build_tar_into<F>(
     let result = build(&mut builder).and_then(|()| builder.finish());
     if let Err(e) = result {
         if e.kind() != std::io::ErrorKind::BrokenPipe {
-            let _ = tx.blocking_send(Err(e));
+            let _ = cancel.send(tx, Err(e));
         }
     }
 }
@@ -269,25 +291,15 @@ async fn stream_planned_download_tracked(
                 // The lane worker does the reading itself. Handing the reader
                 // to a pool task would cost a slot and a task for one request.
                 //
-                // A cancellation is forwarded rather than ending the stream.
-                // Cancel does not mean the client is gone: `BulkTransferLane`'s
-                // Drop cancels every active job at process shutdown, and a
-                // client mid-download then is still connected and draining.
-                // This response declares no length, so there is no promise to
-                // fall short of, but a clean end is indistinguishable from a
-                // complete transfer and hands the client a truncated file it
-                // believes is whole. Forwarding is never worse: with the client
-                // gone the send fails on the dropped receiver and nothing
-                // happens, exactly as a silent return would.
                 for next in reader.by_ref() {
                     if cancel.is_cancelled() {
-                        let _ = tx.blocking_send(Err(std::io::Error::other(
+                        let _ = tx.try_send(Err(std::io::Error::other(
                             "transfer cancelled before the file was fully streamed",
                         )));
                         return;
                     }
                     let terminal = next.is_err();
-                    if tx.blocking_send(next.map(Bytes::from)).is_err() || terminal {
+                    if cancel.send(&tx, next.map(Bytes::from)).is_err() || terminal {
                         return;
                     }
                 }
@@ -350,14 +362,7 @@ async fn stream_planned_download_tracked(
             content_disposition_archive(name),
         ),
     };
-    let body = Body::from_stream(stream::unfold(
-        (rx, job, alive_tx),
-        |(mut rx, job, alive_tx)| async move {
-            rx.recv()
-                .await
-                .map(|message| (message, (rx, job, alive_tx)))
-        },
-    ));
+    let body = download_body(rx, job, alive_tx);
     (
         [
             (header::CONTENT_TYPE, content_type),
@@ -1805,6 +1810,91 @@ mod tests {
         };
         let e = writer.write(b"data").unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn stalled_tar_writer_aborts_without_a_reader() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(Bytes::from_static(b"full"))).unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let observed = cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut writer = TarChannelWriter {
+                tx,
+                cancel,
+                limit: u64::MAX,
+                written: 0,
+            };
+            let _ = done_tx.send(writer.write(b"blocked"));
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(rx);
+        let error = result
+            .expect("tar writer stayed blocked on a full channel")
+            .unwrap_err();
+        thread.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(observed.is_cancelled());
+    }
+
+    #[test]
+    fn stalled_file_send_aborts_without_a_reader() {
+        let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(1);
+        tx.try_send(Ok(Bytes::from_static(b"full"))).unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let observed = cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = done_tx.send(cancel.send(&tx, Ok(Bytes::from_static(b"blocked"))));
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(rx);
+        let error = result
+            .expect("file send stayed blocked on a full channel")
+            .unwrap_err();
+        thread.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(observed.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stalled_terminal_download_releases_its_slot_and_errors() {
+        for archive in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("large.bin");
+            std::fs::write(
+                &path,
+                vec![0x44; chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16],
+            )
+            .unwrap();
+            let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(250));
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stream_planned_download_tracked(
+                    &bulk,
+                    None,
+                    None,
+                    if archive {
+                        dir.path().to_path_buf()
+                    } else {
+                        path
+                    },
+                    u64::MAX,
+                ),
+            )
+            .await
+            .unwrap();
+            crate::bulk_transfer::test_support::assert_stalled_download_releases_slot(
+                &bulk, response,
+            )
+            .await;
+        }
     }
 
     #[test]

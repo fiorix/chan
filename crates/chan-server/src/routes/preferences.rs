@@ -682,6 +682,31 @@ mod tests {
     }
 
     #[test]
+    fn config_patch_preserves_file_only_transfer_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[transfer]\nstall_timeout_secs = 42\n").unwrap();
+        let state = make_test_state(false);
+        *state.server_config.lock().unwrap() = ServerConfig::load_from(&path).unwrap();
+        let body = serde_json::from_value(serde_json::json!({
+            "expected_revision": 1,
+            "preferences": { "attachments_dir": "media" }
+        }))
+        .unwrap();
+        let view = patch_config_with_saves(&state, body, noop_save_editor, |config| {
+            config.save_to(&path)
+        })
+        .unwrap();
+        assert_eq!(view.preferences.attachments_dir, "media");
+        assert!(serde_json::to_value(view).unwrap()["preferences"]
+            .get("transfer")
+            .is_none());
+        let saved = ServerConfig::load_from(&path).unwrap();
+        assert_eq!(saved.attachments_dir, "media");
+        assert_eq!(saved.transfer.stall_timeout_secs, 42);
+    }
+
+    #[test]
     fn broadcast_config_changed_emits_a_config_changed_frame_on_the_ws_bus() {
         // Cross-window settings sync: the SPA's /ws event store keys on a
         // frame whose `kind` is exactly "config_changed" (it then re-fetches

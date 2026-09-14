@@ -7934,6 +7934,10 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         kind: ConfigValueKind::Enum(&["conservative", "balanced", "aggressive"]),
     },
     ConfigKeySpec {
+        key: "server.transfer.stall_timeout_secs",
+        kind: ConfigValueKind::U64NonZero,
+    },
+    ConfigKeySpec {
         key: "server.terminal.idle_timeout_secs",
         kind: ConfigValueKind::U64NonZero,
     },
@@ -11998,6 +12002,36 @@ mod tests {
         assert!(err
             .to_string()
             .contains("expected conservative|balanced|aggressive"));
+    }
+
+    #[test]
+    fn config_transfer_stall_timeout_is_typed_and_nonzero() {
+        let editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+        let key = "server.transfer.stall_timeout_secs";
+        assert_eq!(
+            read_config_key(&editor, &server, key).unwrap(),
+            serde_json::json!(300)
+        );
+
+        for timeout in [1, 42, u64::from(u32::MAX) + 1] {
+            write_server_config_key(&mut server, key, &timeout.to_string()).unwrap();
+            assert_eq!(server.transfer.stall_timeout_secs, timeout);
+            assert_eq!(
+                read_config_key(&editor, &server, key).unwrap(),
+                serde_json::json!(timeout)
+            );
+        }
+
+        let timeout = server.transfer.stall_timeout_secs;
+        for invalid in ["0", "-1", "1.5", "not-a-number"] {
+            let err = write_server_config_key(&mut server, key, invalid).unwrap_err();
+            assert!(err.to_string().contains(key));
+            if invalid == "0" {
+                assert!(err.to_string().contains("greater than 0"));
+            }
+            assert_eq!(server.transfer.stall_timeout_secs, timeout);
+        }
     }
 
     #[test]
