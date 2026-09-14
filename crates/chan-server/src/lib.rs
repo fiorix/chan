@@ -176,10 +176,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
 use tower_http::trace::TraceLayer;
 
-/// The default make-span records the raw URI, and an extension
-/// capability path carries a bearer credential in it. Both tenant
-/// routers log through the redacting formatter; every other URI is
-/// recorded unchanged.
+/// Both tenant routers hide extension path capabilities and query bearers
+/// from the request span through the redacting formatter.
 fn redacted_request_span(request: &axum::http::Request<axum::body::Body>) -> tracing::Span {
     tracing::debug_span!(
         "request",

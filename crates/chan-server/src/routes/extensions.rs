@@ -515,13 +515,30 @@ fn targets_loopback(url: &url::Url) -> bool {
     }
 }
 
-/// The capability segment is a bearer credential in the path, and
-/// trace spans record request URIs. The tenant routers' make-span logs
-/// through this instead: wherever an extension proxy path carries a
-/// 64-hex capability segment — tenant-prefixed through the tunnel or
-/// bare on loopback — that segment is replaced with a fixed marker;
-/// every other URI passes unchanged.
+/// Trace spans must hide both extension path capabilities and every `t=`
+/// query bearer accepted by tenant auth. Other query bytes retain their order
+/// and spelling, including empty parameters and percent escapes.
 pub(crate) fn loggable_uri(uri: &axum::http::Uri) -> String {
+    let mut redacted = redact_extension_capability(uri);
+    if let Some(query) = uri.query() {
+        if query.split('&').any(|param| param.starts_with("t=")) {
+            redacted.truncate(redacted.len() - query.len());
+            for (index, param) in query.split('&').enumerate() {
+                if index != 0 {
+                    redacted.push('&');
+                }
+                redacted.push_str(if param.starts_with("t=") {
+                    "t=[bearer]"
+                } else {
+                    param
+                });
+            }
+        }
+    }
+    redacted
+}
+
+fn redact_extension_capability(uri: &axum::http::Uri) -> String {
     let path = uri.path();
     let Some(prefix_at) = path.find(EXTENSION_PROXY_PREFIX) else {
         return uri.to_string();
@@ -1164,6 +1181,40 @@ mod tests {
         // Shaped like the gateway session gate's anti-enumeration 404.
         let body = to_bytes(response.into_body(), 1024).await.expect("body");
         assert_eq!(body.as_ref(), br#"{"error":"not found"}"#);
+    }
+
+    #[test]
+    fn loggable_uri_redacts_every_query_bearer() {
+        let cases = [
+            ("/ws?t=secret".to_owned(), "/ws?t=[bearer]".to_owned()),
+            (
+                "/notes/ws?a=1&t=secret&b=%2f+".to_owned(),
+                "/notes/ws?a=1&t=[bearer]&b=%2f+".to_owned(),
+            ),
+            (
+                "/ws?t=first&&t=second&t=&last".to_owned(),
+                "/ws?t=[bearer]&&t=[bearer]&t=[bearer]&last".to_owned(),
+            ),
+            (
+                format!("/_chan/extensions/echo/{CAPABILITY}/app.js?t=secret"),
+                "/_chan/extensions/echo/[capability]/app.js?t=[bearer]".to_owned(),
+            ),
+            (
+                "/ws?a=%2f+&token=keep&t&xt=keep&&".to_owned(),
+                "/ws?a=%2f+&token=keep&t&xt=keep&&".to_owned(),
+            ),
+            ("/ws?".to_owned(), "/ws?".to_owned()),
+            (
+                "https://localhost/ws?t=secret".to_owned(),
+                "https://localhost/ws?t=[bearer]".to_owned(),
+            ),
+        ];
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|(raw, _)| loggable_uri(&raw.parse().unwrap()))
+            .collect();
+        let expected: Vec<_> = cases.iter().map(|(_, expected)| expected.clone()).collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
