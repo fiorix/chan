@@ -2705,6 +2705,185 @@ async fn admin_delete_finalizes_only_after_confirmed_settlement() {
 }
 
 #[tokio::test]
+async fn exhausted_account_delete_rearms_and_finalizes_after_recovery() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let healthy = Arc::new(AtomicBool::new(false));
+    let control_health = healthy.clone();
+    let control = Router::new().fallback(move || {
+        let healthy = control_health.clone();
+        async move {
+            let status = if healthy.load(Ordering::SeqCst) {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            (
+                status,
+                axum::Json(json!({
+                    "killed": 0,
+                    "revoked": 0,
+                    "proxies_confirmed": 1,
+                    "proxies_expected": 1,
+                })),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    let app = TestApp::new_with_control(&control_url).await;
+    let uid: Uuid = mk_user(&app, "exhausted-delete@x.com")
+        .await
+        .parse()
+        .unwrap();
+    let token = insert_api_token(&app.pool, uid, "desktop").await;
+    let (status, _) = app
+        .req(Method::DELETE, &format!("/v1/users/{uid}"), None)
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let key = format!("subject:{uid}");
+    let generation: i64 = sqlx::query_scalar(
+        "UPDATE control_revocation_jobs SET phase = 'settling', \
+         first_cut_confirmed_at = now() - interval '2 minutes', \
+         settle_not_before = now() - interval '1 minute', \
+         deadline = now() - interval '1 second', next_attempt_at = now(), attempts = 7 \
+         WHERE job_key = $1 RETURNING generation",
+    )
+    .bind(&key)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    let client = gateway_common::devserver_control_client::DevserverControlClient::new(
+        control_url.parse().unwrap(),
+        "test-profile-admin-token".into(),
+    )
+    .unwrap();
+    profile::revocation::process_once(&app.pool, &client)
+        .await
+        .unwrap();
+
+    let row: Option<(String, i32, i64, bool)> = sqlx::query_as(
+        "SELECT phase, attempts, generation, \
+         kind = 'account_delete' AND deadline IS NULL \
+         AND first_cut_confirmed_at IS NULL AND settle_not_before IS NULL \
+         AND next_attempt_at = updated_at + interval '60 seconds' \
+         FROM control_revocation_jobs WHERE job_key = $1",
+    )
+    .bind(&key)
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap();
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_audit WHERE user_id = $1 AND action = 'session_revoke_failed'",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    let (unblock, _) = app
+        .admin(
+            Method::POST,
+            &format!("/v1/admin/users/{uid}/unblock"),
+            None,
+        )
+        .await;
+    eprintln!("after exhaustion: job={row:?}, exhaustion_audits={audits}, unblock={unblock}");
+    assert_eq!(audits, 1);
+    assert_eq!(unblock, StatusCode::CONFLICT);
+    assert_eq!(
+        row,
+        Some(("pending_first_cut".into(), 0, generation + 1, true))
+    );
+    let blocked: bool =
+        sqlx::query_scalar("SELECT blocked_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(uid)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert!(blocked);
+    assert_eq!(
+        profile::revocation::process_once(&app.pool, &client)
+            .await
+            .unwrap(),
+        0
+    );
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_audit WHERE user_id = $1 AND action = 'session_revoke_failed'",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1, "the re-armed job waits without auditing again");
+
+    healthy.store(true, Ordering::SeqCst);
+    sqlx::query("UPDATE control_revocation_jobs SET next_attempt_at = now() WHERE job_key = $1")
+        .bind(&key)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    profile::revocation::process_once(&app.pool, &client)
+        .await
+        .unwrap();
+    let (phase, first_cut, settle, deadline): RevocationScheduleRow = sqlx::query_as(
+        "SELECT phase, first_cut_confirmed_at, settle_not_before, deadline \
+         FROM control_revocation_jobs WHERE job_key = $1",
+    )
+    .bind(&key)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(phase, "settling");
+    assert_eq!(
+        settle.unwrap() - first_cut.unwrap(),
+        chrono::Duration::seconds(40)
+    );
+    assert!(deadline.unwrap() > first_cut.unwrap());
+    assert_eq!(
+        app.req(Method::GET, &format!("/v1/users/{uid}"), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    sqlx::query(
+        "UPDATE control_revocation_jobs SET settle_not_before = now() - interval '1 second', \
+         next_attempt_at = now() WHERE job_key = $1",
+    )
+    .bind(&key)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    profile::revocation::process_once(&app.pool, &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.req(Method::GET, &format!("/v1/users/{uid}"), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens WHERE id = $1")
+        .bind(token)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0, "confirmed deletion cascades to the PAT");
+    let jobs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM control_revocation_jobs WHERE job_key = $1")
+            .bind(&key)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(jobs, 0);
+    app.cleanup().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn coalesced_reservation_resets_a_due_generation_to_first_cut_phase() {
     let app = TestApp::new().await;
     let user_id: Uuid = mk_user(&app, "supersede@x.com").await.parse().unwrap();

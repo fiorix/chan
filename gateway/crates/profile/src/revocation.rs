@@ -1,4 +1,4 @@
-//! Durable, bounded second-cut settlement for authorization mutations.
+//! Durable second-cut settlement for authorization mutations.
 //!
 //! Postgres is the source of truth. The in-process worker only accelerates due
 //! rows; a crash during the entry-credential quiet period leaves a resumable
@@ -407,11 +407,28 @@ async fn exhaust(pool: &PgPool, row: &JobRow, note: &str) -> sqlx::Result<()> {
     .bind(note)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM control_revocation_jobs WHERE job_key = $1 AND generation = $2")
+    if row.kind == "account_delete" {
+        // Retain the deletion intent and unblock guard across control outages.
+        // A new generation fences out workers holding the exhausted claim.
+        sqlx::query(
+            "UPDATE control_revocation_jobs SET phase = 'pending_first_cut', \
+             first_cut_confirmed_at = NULL, settle_not_before = NULL, deadline = NULL, \
+             attempts = 0, next_attempt_at = now() + make_interval(secs => $3), \
+             generation = generation + 1, updated_at = now() \
+             WHERE job_key = $1 AND generation = $2",
+        )
         .bind(&row.job_key)
         .bind(row.generation)
+        .bind(retry_delay(row.attempts.saturating_add(1)).as_secs_f64())
         .execute(&mut *tx)
         .await?;
+    } else {
+        sqlx::query("DELETE FROM control_revocation_jobs WHERE job_key = $1 AND generation = $2")
+            .bind(&row.job_key)
+            .bind(row.generation)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await
 }
 
