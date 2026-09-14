@@ -111,6 +111,8 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 
 PAT minting uses the same policy projection. The insert locks the canonical user and fleet singleton, so concurrent block, suspend, or pause has a linear serialization point. Public mint returns 403 `devserver_access_disabled`; admin mint returns 409 with the same stable reason. Listing and revoking existing PATs remain available.
 
+SPA and operator PAT expiry arithmetic is checked: a positive lifetime that cannot be represented as a duration or UTC expiry returns 400 `invalid expires_in`. There is no lifetime cap on these routes; absent or non-positive `expires_in` (and absent or zero operator `expires_days`) means no expiry. Desktop authorize retains its separate 90-day clamp.
+
 ### OAuth-session and product control plane
 
 Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent. Logout removes its own index row.

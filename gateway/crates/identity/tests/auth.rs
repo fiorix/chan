@@ -1314,6 +1314,35 @@ async fn blocked_user_rename_is_403() {
 }
 
 #[tokio::test]
+async fn token_create_rejects_overflowing_expiry() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = fake_user_id();
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            uid,
+            "octo@example.com",
+            "octocat",
+        )))
+        .mount(&app.profile)
+        .await;
+
+    let (s, _, body, _) = c
+        .send(
+            Method::POST,
+            "/api/tokens",
+            Some(json!({"label": "cli", "expires_in": i64::MAX})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid expires_in");
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn blocked_user_token_create_is_403() {
     let app = TestApp::new().await;
     let mut c = Client::new(&app);

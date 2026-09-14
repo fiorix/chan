@@ -7,7 +7,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use gateway_common::validators::{valid_username, MAX_USERNAME_EDITS};
 use oauth2::PkceCodeVerifier;
 use rustrict::CensorStr;
@@ -1142,6 +1142,12 @@ struct CreatedTokenView {
     secret: String,
 }
 
+fn token_expires_at(now: DateTime<Utc>, lifetime: Option<TimeDelta>) -> Result<DateTime<Utc>> {
+    lifetime
+        .and_then(|duration| now.checked_add_signed(duration))
+        .ok_or_else(|| Error::BadRequest("invalid expires_in".into()))
+}
+
 async fn tokens_create(
     State(state): State<AppState>,
     session: Session,
@@ -1152,7 +1158,8 @@ async fn tokens_create(
     let expires_at = body
         .expires_in
         .filter(|s| *s > 0)
-        .map(|s| Utc::now() + chrono::Duration::seconds(s));
+        .map(|s| token_expires_at(Utc::now(), TimeDelta::try_seconds(s)))
+        .transpose()?;
 
     let scopes: Vec<String> = match body.scopes {
         Some(ref s) if !s.is_empty() => s.clone(),
@@ -2734,7 +2741,8 @@ async fn admin_tokens_create(
     let expires_at = body
         .expires_days
         .filter(|d| *d > 0)
-        .map(|d| Utc::now() + chrono::Duration::days(i64::from(d)));
+        .map(|d| token_expires_at(Utc::now(), TimeDelta::try_days(i64::from(d))))
+        .transpose()?;
     let CreatedToken { token, secret } = state
         .api_tokens
         .create(
@@ -2968,6 +2976,32 @@ pub(crate) fn user_agent(headers: &HeaderMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_expiry_checks_duration_and_instant_bounds() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        for duration in [
+            TimeDelta::try_seconds(i64::MAX),
+            TimeDelta::try_seconds(9_000_000_000_000),
+            TimeDelta::try_days(i64::MAX),
+            TimeDelta::try_days(i64::from(u32::MAX)),
+        ] {
+            assert!(matches!(
+                token_expires_at(now, duration),
+                Err(Error::BadRequest(message)) if message == "invalid expires_in"
+            ));
+        }
+        for seconds in [1, 3600, 30 * 86400, 365 * 86400] {
+            assert_eq!(
+                token_expires_at(now, TimeDelta::try_seconds(seconds)).unwrap(),
+                DateTime::from_timestamp(now.timestamp() + seconds, 0).unwrap()
+            );
+        }
+        assert_eq!(
+            token_expires_at(now, TimeDelta::try_days(365)).unwrap(),
+            DateTime::from_timestamp(now.timestamp() + 365 * 86400, 0).unwrap()
+        );
+    }
 
     #[test]
     fn client_ip_accepts_only_a_well_formed_leftmost_address() {

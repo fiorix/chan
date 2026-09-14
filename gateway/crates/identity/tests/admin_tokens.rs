@@ -292,6 +292,23 @@ async fn admin_mint_happy_path_secret_validates_and_audits() {
 }
 
 #[tokio::test]
+async fn admin_mint_rejects_overflowing_expiry() {
+    let app = TestApp::new(ADMIN_TOKEN).await;
+    app.insert_user(Uuid::new_v4(), "overflow@example.com")
+        .await;
+
+    let (status, body) = post_tokens(
+        &app,
+        Some(ADMIN_TOKEN),
+        json!({"email": "overflow@example.com", "expires_days": u32::MAX}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid expires_in");
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn admin_mint_defaults_to_tunnel_scope_and_no_expiry() {
     let app = TestApp::new(ADMIN_TOKEN).await;
     let uid = Uuid::new_v4();
