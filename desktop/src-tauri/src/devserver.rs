@@ -1329,7 +1329,7 @@ async fn gateway_get(conn: &DevserverConn, path: &str) -> Result<reqwest::Respon
         .gateway
         .as_ref()
         .ok_or_else(|| "not a gateway connection".to_string())?;
-    gateway_request(gw, reqwest::Method::GET, path).await
+    gateway_request(gw, reqwest::Method::GET, path, None).await
 }
 
 fn gateway_auth_shaped(status: reqwest::StatusCode) -> bool {
@@ -1357,10 +1357,14 @@ async fn gateway_request(
     gw: &GatewayConn,
     method: reqwest::Method,
     path: &str,
+    timeout: Option<Duration>,
 ) -> Result<reqwest::Response, String> {
+    let timeout = timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS));
     let session = gateway_session(gw).await?;
     let resp = apply_gateway_session(
-        http_client()?.request(method.clone(), gateway_url(gw, path)),
+        http_client()?
+            .request(method.clone(), gateway_url(gw, path))
+            .timeout(timeout),
         &method,
         &session,
     )
@@ -1372,7 +1376,9 @@ async fn gateway_request(
     }
     let session = refresh_gateway_session_after(gw, &session.cookie_header).await?;
     apply_gateway_session(
-        http_client()?.request(method.clone(), gateway_url(gw, path)),
+        http_client()?
+            .request(method.clone(), gateway_url(gw, path))
+            .timeout(timeout),
         &method,
         &session,
     )
@@ -1386,12 +1392,15 @@ async fn gateway_request_json<T: Serialize + ?Sized>(
     method: reqwest::Method,
     path: &str,
     body: &T,
+    timeout: Option<Duration>,
 ) -> Result<reqwest::Response, String> {
+    let timeout = timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS));
     let session = gateway_session(gw).await?;
     let resp = apply_gateway_session(
         http_client()?
             .request(method.clone(), gateway_url(gw, path))
-            .json(body),
+            .json(body)
+            .timeout(timeout),
         &method,
         &session,
     )
@@ -1405,7 +1414,8 @@ async fn gateway_request_json<T: Serialize + ?Sized>(
     apply_gateway_session(
         http_client()?
             .request(method.clone(), gateway_url(gw, path))
-            .json(body),
+            .json(body)
+            .timeout(timeout),
         &method,
         &session,
     )
@@ -1848,8 +1858,14 @@ pub async fn mint_library_window(
             origin: chan_server::WindowOrigin::Native,
             acting_window_id: None,
         };
-        let resp =
-            gateway_request_json(gw, reqwest::Method::POST, "/api/library/windows", &body).await?;
+        let resp = gateway_request_json(
+            gw,
+            reqwest::Method::POST,
+            "/api/library/windows",
+            &body,
+            None,
+        )
+        .await?;
         if !resp.status().is_success() {
             return Err(format!(
                 "gateway library window mint returned HTTP {}",
@@ -1901,6 +1917,7 @@ pub async fn discard_library_window(conn: &DevserverConn, window_id: &str) -> Re
             gw,
             reqwest::Method::DELETE,
             &format!("/api/library/windows/{window_id}"),
+            None,
         )
         .await?;
         if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
@@ -1959,9 +1976,14 @@ pub async fn forget_workspace(
         if force {
             path.push_str("?force=true");
         }
-        let resp = gateway_request(gw, reqwest::Method::DELETE, &path)
-            .await
-            .map_err(SetWorkspaceOnError::other)?;
+        let resp = gateway_request(
+            gw,
+            reqwest::Method::DELETE,
+            &path,
+            Some(REMOTE_SERVE_HTTP_BUDGET),
+        )
+        .await
+        .map_err(SetWorkspaceOnError::other)?;
         if !resp.status().is_success() {
             return Err(SetWorkspaceOnError::other(format!(
                 "gateway workspace delete returned HTTP {}",
@@ -1974,6 +1996,7 @@ pub async fn forget_workspace(
     let resp = http_client()
         .map_err(SetWorkspaceOnError::other)?
         .delete(&url)
+        .timeout(REMOTE_SERVE_HTTP_BUDGET)
         .bearer_auth(&conn.token)
         .send()
         .await
@@ -2011,6 +2034,7 @@ pub async fn set_window_visibility(
             reqwest::Method::POST,
             &format!("/api/library/windows/{window_id}/visibility"),
             &serde_json::json!({ "hidden": hidden }),
+            None,
         )
         .await?;
         if !resp.status().is_success() {
@@ -2056,6 +2080,7 @@ pub async fn set_window_label(
             reqwest::Method::PUT,
             &path,
             &serde_json::json!({ "label": label }),
+            None,
         )
         .await?;
         if !resp.status().is_success() {
@@ -2083,10 +2108,9 @@ pub async fn set_window_label(
     Ok(())
 }
 
-/// How long the desktop waits for the devserver to confirm a mount it asked
-/// for on the CLI's behalf. Above the server's own 60 s mount timeout, so the
-/// server's error, not a desktop deadline, is what a slow mount reports; below
-/// the CLI's 75 s reply budget, so the CLI always gets an answer.
+/// Allow lifecycle requests to mount or drain a tenant. Above the server's
+/// own 60 s mount timeout, so slow mounts can return their server error.
+/// The mount also uses this as an outer bound below the CLI's 75 s reply budget.
 const REMOTE_SERVE_HTTP_BUDGET: Duration = Duration::from_secs(70);
 
 /// `POST /api/devserver/workspaces {path}`: mount the workspace rooted at
@@ -2104,6 +2128,7 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
                 reqwest::Method::POST,
                 "/api/library/workspaces",
                 &serde_json::json!({ "path": path }),
+                Some(REMOTE_SERVE_HTTP_BUDGET),
             )
             .await?;
             let status = resp.status();
@@ -2126,6 +2151,7 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
         );
         let resp = http_client()?
             .post(&url)
+            .timeout(REMOTE_SERVE_HTTP_BUDGET)
             .bearer_auth(&conn.token)
             .json(&chan_server::devserver_api::OpenWorkspaceRequest {
                 path: path.to_string(),
@@ -2205,11 +2231,14 @@ pub async fn set_workspace_on(
     on: bool,
     force: bool,
 ) -> Result<(), SetWorkspaceOnError> {
+    let timeout = (on || force).then_some(REMOTE_SERVE_HTTP_BUDGET);
     if let Some(gw) = &conn.gateway {
         let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
         let resp = match &body {
-            Some(body) => gateway_request_json(gw, reqwest::Method::POST, &path, body).await,
-            None => gateway_request(gw, reqwest::Method::POST, &path).await,
+            Some(body) => {
+                gateway_request_json(gw, reqwest::Method::POST, &path, body, timeout).await
+            }
+            None => gateway_request(gw, reqwest::Method::POST, &path, timeout).await,
         }
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
@@ -2232,6 +2261,7 @@ pub async fn set_workspace_on(
     let resp = http_client()
         .map_err(SetWorkspaceOnError::other)?
         .post(&url)
+        .timeout(timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS)))
         .bearer_auth(&conn.token)
         .json(&SetWorkspaceOnRequest { on, force })
         .send()
@@ -3270,6 +3300,93 @@ mod tests {
                 format!("{}/{}/index.html", gw.proxy_origin, &prefix[1..])
             );
         }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_requests_outlast_the_poll_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(|| async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            axum::Json(serde_json::json!({
+                "prefix": "workspace-test", "workspace_id": "workspace-test",
+                "path": "/test", "label": "test", "on": true,
+            }))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let direct = DevserverConn {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+            token: "test".into(),
+            name: "test".into(),
+            gateway: None,
+        };
+        let mut gateway = direct.clone();
+        gateway.gateway = Some(Box::new(GatewayConn::new(
+            format!("http://{addr}"),
+            format!("http://{addr}/entry"),
+            format!("http://{addr}"),
+            "pat".into(),
+        )));
+        *gateway.gateway.as_ref().unwrap().session.lock().unwrap() = Some(GatewaySession {
+            gate: "opaque".into(),
+            cookie_header: "gate=opaque".into(),
+            csrf: "csrf".into(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        });
+        // All classes share one six-second wait; real sockets must use real time.
+        let mut requests = Vec::new();
+        for conn in [direct, gateway] {
+            for operation in ["add", "on", "forced-off", "forget"] {
+                let conn = conn.clone();
+                requests.push(async move {
+                    let result = match operation {
+                        "add" => add_workspace(&conn, "/test")
+                            .await
+                            .map(|prefix| assert_eq!(prefix, "workspace-test")),
+                        "on" => set_workspace_on(&conn, "/workspace-test", true, false)
+                            .await
+                            .map_err(|e| format!("{e:?}")),
+                        "forced-off" => set_workspace_on(&conn, "/workspace-test", false, true)
+                            .await
+                            .map_err(|e| format!("{e:?}")),
+                        "forget" => forget_workspace(&conn, "/workspace-test", true)
+                            .await
+                            .map_err(|e| format!("{e:?}")),
+                        _ => unreachable!(),
+                    };
+                    (conn.gateway.is_some(), operation, result)
+                });
+            }
+        }
+        let polling = async {
+            http_client()
+                .unwrap()
+                .get(format!("http://{addr}/poll"))
+                .send()
+                .await
+                .expect_err("ordinary requests retain the five-second timeout")
+                .is_timeout()
+        };
+        let (results, poll_timed_out) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(futures::future::join_all(requests), polling)
+        })
+        .await
+        .expect("lifecycle fixture must finish");
+        server.abort();
+        assert!(poll_timed_out);
+        let failures: Vec<_> = results
+            .into_iter()
+            .filter_map(|(gateway, operation, result)| {
+                result
+                    .err()
+                    .map(|error| format!("gateway={gateway} {operation}: {error}"))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "lifecycle requests failed: {failures:?}"
+        );
     }
 
     #[tokio::test]
