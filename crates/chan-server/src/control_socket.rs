@@ -1144,8 +1144,7 @@ pub(crate) mod transport {
 }
 // The transport split ends here; the request handlers below are platform-neutral.
 
-// Async because of the one blocking variant (`TermSurvey`); every other
-// arm returns synchronously without awaiting.
+// Long-running requests await their reply or offload filesystem work.
 async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlResponse {
     let ControlSocketCtx {
         workspace_cell,
@@ -1579,7 +1578,14 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Ok(workspace) => workspace,
                 Err(message) => return ControlResponse::Error { message },
             };
-            into_response(workspace_search_json(&workspace, &request))
+            match tokio::task::spawn_blocking(move || workspace_search_json(&workspace, &request))
+                .await
+            {
+                Ok(result) => into_response(result),
+                Err(error) => ControlResponse::Error {
+                    message: format!("workspace search task failed: {error}"),
+                },
+            }
         }
         ControlRequest::Export { path, format, out } => {
             handle_export(path, format, out, session_registry, events_tx, window_bus).await
@@ -5588,6 +5594,35 @@ mod tests {
             }
             other => panic!("unexpected non-error response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn workspace_search_runs_off_runtime_thread() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (_cfg, _root, cell) = bound_empty_cell();
+            let ctx = test_ctx(cell, ControlTenant::Workspace);
+            let response = crate::state::test_support::assert_uses_blocking_pool(handle_request(
+                ControlRequest::WorkspaceSearch {
+                    request: chan_workspace::WorkspaceSearchRequest {
+                        query: Some("needle".into()),
+                        domains: vec![chan_workspace::WorkspaceSearchDomain::Content],
+                        ..Default::default()
+                    },
+                },
+                &ctx,
+            ))
+            .await;
+            let ControlResponse::Ok { message } = response else {
+                panic!("search failed: {response:?}");
+            };
+            let result: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert!(result.is_object());
+        });
     }
 
     #[tokio::test]

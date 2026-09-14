@@ -321,6 +321,34 @@ pub(crate) mod test_support {
     use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
     use crate::{EditorPrefs, ServerConfig};
 
+    /// Poll a handler while the runtime's sole blocking worker is occupied.
+    /// The caller must use a runtime with `max_blocking_threads(1)`.
+    pub async fn assert_uses_blocking_pool<F: std::future::Future>(future: F) -> F::Output {
+        use futures::FutureExt;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        tokio::pin!(future);
+        let first_poll = future.as_mut().now_or_never();
+        release_tx.send(()).unwrap();
+        assert!(
+            first_poll.is_none(),
+            "blocking handler completed on the runtime thread while the blocking pool was occupied"
+        );
+        tokio::time::timeout(Duration::from_secs(5), blocker)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("handler did not complete after the blocking pool was released")
+    }
+
     /// A distinct tenant handle over one lane shared by the whole test
     /// binary. Per-call lanes would spawn two OS threads for every test that
     /// builds an `AppState` and never join them, since a test state has no
