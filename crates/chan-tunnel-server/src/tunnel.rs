@@ -55,10 +55,11 @@ fn tunnel_h2_server_builder() -> h2::server::Builder {
 
 #[async_trait::async_trait]
 impl RegistrationAdmission for LocalAdmission {
-    async fn admit(
+    async fn admit_registration(
         &self,
         _hello: &chan_tunnel_proto::Hello,
         validated: &Validated,
+        registration_id: uuid::Uuid,
     ) -> Result<RegistrationPermit, ServerError> {
         if self.max_workspaces_per_user > 0 {
             let registered = self.registry.list_workspaces_for(&validated.username);
@@ -74,7 +75,7 @@ impl RegistrationAdmission for LocalAdmission {
         }
         Ok(RegistrationPermit {
             request_id: uuid::Uuid::new_v4(),
-            registration_id: uuid::Uuid::new_v4(),
+            registration_id,
             admission_epoch: 0,
         })
     }
@@ -865,10 +866,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RegistrationAdmission for AtCapacityAdmission {
-        async fn admit(
+        async fn admit_registration(
             &self,
             _hello: &chan_tunnel_proto::Hello,
             validated: &Validated,
+            _registration_id: uuid::Uuid,
         ) -> Result<RegistrationPermit, ServerError> {
             Err(ServerError::AdmissionAtCapacity {
                 user: validated.username.clone(),

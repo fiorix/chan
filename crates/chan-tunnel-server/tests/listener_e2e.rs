@@ -109,10 +109,11 @@ struct CapacityAdmission;
 
 #[async_trait]
 impl RegistrationAdmission for CapacityAdmission {
-    async fn admit(
+    async fn admit_registration(
         &self,
         _hello: &chan_tunnel_proto::Hello,
         validated: &Validated,
+        _registration_id: Uuid,
     ) -> Result<RegistrationPermit, ServerError> {
         Err(ServerError::AdmissionAtCapacity {
             user: validated.username.clone(),
@@ -362,7 +363,7 @@ async fn controller_capacity_denial_is_a_stable_pre_registration_refusal() {
     assert!(h.registry.list_workspaces_for("alice").is_empty());
 }
 
-/// Admission that blocks inside `admit` until the test releases it.
+/// Admission that blocks inside `admit_registration` until the test releases it.
 /// This makes the admit-to-HelloAck ordering observable: while the
 /// gate is held the client cannot have received `HelloAck::Ok`.
 struct GatedAdmission {
@@ -373,15 +374,6 @@ struct GatedAdmission {
 
 #[async_trait]
 impl RegistrationAdmission for GatedAdmission {
-    async fn admit(
-        &self,
-        _hello: &chan_tunnel_proto::Hello,
-        _validated: &Validated,
-    ) -> Result<RegistrationPermit, ServerError> {
-        self.admit_registration(_hello, _validated, Uuid::new_v4())
-            .await
-    }
-
     async fn admit_registration(
         &self,
         _hello: &chan_tunnel_proto::Hello,
@@ -452,10 +444,11 @@ struct UnavailableAdmission;
 
 #[async_trait]
 impl RegistrationAdmission for UnavailableAdmission {
-    async fn admit(
+    async fn admit_registration(
         &self,
         _hello: &chan_tunnel_proto::Hello,
         _validated: &Validated,
+        _registration_id: Uuid,
     ) -> Result<RegistrationPermit, ServerError> {
         Err(ServerError::ControlUnavailable)
     }

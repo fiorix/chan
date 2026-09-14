@@ -211,22 +211,14 @@ pub struct RegistrationPermit {
 
 #[async_trait]
 pub trait RegistrationAdmission: Send + Sync + 'static {
-    async fn admit(
-        &self,
-        hello: &Hello,
-        validated: &Validated,
-    ) -> Result<RegistrationPermit, ServerError>;
-
+    /// Admit the registration whose id was supplied to identity validation.
+    /// Admission leases and the returned permit must name that same id.
     async fn admit_registration(
         &self,
         hello: &Hello,
         validated: &Validated,
         registration_id: uuid::Uuid,
-    ) -> Result<RegistrationPermit, ServerError> {
-        let mut permit = self.admit(hello, validated).await?;
-        permit.registration_id = registration_id;
-        Ok(permit)
-    }
+    ) -> Result<RegistrationPermit, ServerError>;
 
     /// Synchronous fence checked immediately before and after the registry
     /// insert. Controller-backed implementations invalidate an epoch when
@@ -243,14 +235,15 @@ pub struct AllowAllAdmission;
 
 #[async_trait]
 impl RegistrationAdmission for AllowAllAdmission {
-    async fn admit(
+    async fn admit_registration(
         &self,
         _hello: &Hello,
         _validated: &Validated,
+        registration_id: uuid::Uuid,
     ) -> Result<RegistrationPermit, ServerError> {
         Ok(RegistrationPermit {
             request_id: uuid::Uuid::new_v4(),
-            registration_id: uuid::Uuid::new_v4(),
+            registration_id,
             admission_epoch: 0,
         })
     }

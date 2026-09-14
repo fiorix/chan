@@ -172,18 +172,6 @@ struct ControlAdmission {
 
 #[async_trait]
 impl RegistrationAdmission for ControlAdmission {
-    /// A lease is bound to one registration id, and a fresh one here is
-    /// not it, so this refuses every leased registration; the tunnel
-    /// listener admits through `admit_registration`.
-    async fn admit(
-        &self,
-        _hello: &chan_tunnel_proto::Hello,
-        validated: &chan_tunnel_server::Validated,
-    ) -> Result<RegistrationPermit, ServerError> {
-        self.admit_registration(_hello, validated, Uuid::new_v4())
-            .await
-    }
-
     async fn admit_registration(
         &self,
         _hello: &chan_tunnel_proto::Hello,
@@ -2606,25 +2594,17 @@ mod tests {
 
     #[async_trait]
     impl RegistrationAdmission for FixedPermitAdmission {
-        async fn admit(
+        async fn admit_registration(
             &self,
             _hello: &Hello,
             _validated: &Validated,
+            _registration_id: Uuid,
         ) -> Result<RegistrationPermit, ServerError> {
             Ok(RegistrationPermit {
                 request_id: Uuid::new_v4(),
                 registration_id: self.0,
                 admission_epoch: 0,
             })
-        }
-
-        async fn admit_registration(
-            &self,
-            hello: &Hello,
-            validated: &Validated,
-            _registration_id: Uuid,
-        ) -> Result<RegistrationPermit, ServerError> {
-            self.admit(hello, validated).await
         }
     }
 
