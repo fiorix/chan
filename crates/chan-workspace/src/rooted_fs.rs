@@ -750,6 +750,25 @@ impl RootedFs {
         .map(|_| ())
     }
 
+    pub(crate) fn create_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
+        self.ensure_root_available()?;
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        match dir.symlink_metadata(&rel_path) {
+            Ok(_) => return Err(ChanError::PathAlreadyExists(rel.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(map_cap_err(e, &rel_path)),
+        }
+        let result = fs_ops::atomic_create_in(
+            &dir,
+            &rel_path,
+            content,
+            self.transfer_max_bytes,
+            fs_ops::is_editable_text(rel),
+        );
+        self.ensure_root_available()?;
+        result
+    }
+
     /// True iff `rel` resolves under the root to a regular file.
     pub(crate) fn exists(&self, rel: &str) -> bool {
         self.try_exists(rel).unwrap_or(false)

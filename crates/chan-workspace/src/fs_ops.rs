@@ -1490,6 +1490,48 @@ fn utf8_sequence_width(first: u8) -> Option<usize> {
     }
 }
 
+/// Publish complete bytes without replacing any existing destination entry.
+pub(crate) fn atomic_create_in(
+    dir: &cap_std::fs::Dir,
+    rel: &Path,
+    content: &[u8],
+    limit: u64,
+    validate_utf8: bool,
+) -> Result<()> {
+    let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
+    let parent_dir;
+    let target_dir = match parent {
+        Some(parent) => {
+            dir.create_dir_all(parent).map_err(|e| map_cap(e, rel))?;
+            parent_dir = dir.open_dir(parent).map_err(|e| map_cap(e, rel))?;
+            &parent_dir
+        }
+        None => dir,
+    };
+    let leaf = rel.file_name().ok_or(ChanError::PathEmpty)?;
+    // A private same-filesystem stage gives the shared atomic writer a name
+    // we can hard-link through directory capabilities. hard_link refuses an
+    // occupied destination atomically, including symlinks and directories.
+    let stage = cap_tempfile::TempDir::new_in(target_dir)?;
+    atomic_write_stream_in(
+        &stage,
+        Path::new("payload"),
+        AtomicWriteKind::Bytes,
+        limit,
+        validate_utf8,
+        |sink| sink.write_chunk(content),
+    )?;
+    stage.hard_link("payload", target_dir, leaf).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            ChanError::PathAlreadyExists(rel.to_string_lossy().into_owned())
+        } else {
+            map_cap(e, rel)
+        }
+    })?;
+    stage.close()?;
+    sync_dir_handle(target_dir)
+}
+
 pub(crate) fn atomic_write_stream_in<F>(
     dir: &cap_std::fs::Dir,
     rel: &Path,
@@ -2849,6 +2891,62 @@ mod tests {
         assert_eq!(
             semantic_write_budget(Some(crate::TEXT_WRITE_LIMIT + 1)),
             crate::TEXT_WRITE_LIMIT + 1
+        );
+    }
+
+    #[test]
+    fn exclusive_byte_publication_never_replaces_an_existing_file() {
+        let root = TempDir::new().unwrap();
+        let dir =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        atomic_create_in(&dir, Path::new("image.png"), b"first", 64, false).unwrap();
+        let error =
+            atomic_create_in(&dir, Path::new("image.png"), b"second", 64, false).unwrap_err();
+        assert!(matches!(error, ChanError::PathAlreadyExists(_)));
+        assert_eq!(
+            std::fs::read(root.path().join("image.png")).unwrap(),
+            b"first"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn exclusive_byte_publication_cleans_up_invalid_or_oversized_payloads() {
+        let root = TempDir::new().unwrap();
+        let dir =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        assert!(atomic_create_in(&dir, Path::new("bad.md"), &[0xff], 64, true).is_err());
+        assert!(matches!(
+            atomic_create_in(&dir, Path::new("large.png"), b"123", 2, false),
+            Err(ChanError::WriteTooLarge { .. })
+        ));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn create_bytes_keeps_the_workspace_sandbox_and_text_gate() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        assert!(matches!(
+            workspace.create_bytes("../escape.png", b"bytes"),
+            Err(ChanError::PathEscape)
+        ));
+        assert!(workspace.create_bytes("bad.md", &[0xff]).is_err());
+        workspace.create_dir("occupied").unwrap();
+        assert!(matches!(
+            workspace.create_bytes("occupied", b"bytes"),
+            Err(ChanError::PathAlreadyExists(_))
+        ));
+        workspace.create_bytes("images/one.png", b"first").unwrap();
+        assert!(matches!(
+            workspace.create_bytes("images/one.png", b"second"),
+            Err(ChanError::PathAlreadyExists(_))
+        ));
+        assert_eq!(workspace.read("images/one.png").unwrap(), b"first");
+        assert_eq!(
+            std::fs::read_dir(root.path().join("images"))
+                .unwrap()
+                .count(),
+            1
         );
     }
 

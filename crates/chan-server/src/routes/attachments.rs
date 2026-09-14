@@ -1,9 +1,9 @@
 //! POST /api/attachments: multipart upload from the editor.
 //!
 //! The frontend sends one part named `file`; we slugify the original
-//! filename, prefix with the unix timestamp (collision resistance),
-//! and write via Workspace::write_bytes (so the path sandbox + special-
-//! file refusal apply). Returns the workspace-relative path the file
+//! filename and publish via Workspace::create_bytes, retrying occupied
+//! names with numbered suffixes. The sandbox and exclusive publication
+//! protect existing entries. Returns the workspace-relative path the file
 //! landed at, matching the frontend's `uploadAttachment` contract.
 //!
 //! Optional `dir` form field overrides the configured
@@ -118,13 +118,8 @@ pub async fn api_post_attachment(
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
     };
-    // Record the self-write inside the blocking task, before the
-    // bytes hit disk. The fs watcher runs on its own thread and can
-    // observe the write the instant it lands; noting after the
-    // spawn_blocking await (the old behavior) leaves a window where
-    // the watcher reaches should_suppress() before the path is
-    // recorded, so an image paste surfaces as a phantom "external
-    // edit". Cloning the Arc handle in lets us close that window.
+    // Reserve suppression before publication so the watcher cannot race
+    // the write's attribution. Failed attempts cancel their reservation.
     let self_writes = Arc::clone(&state.self_writes);
     let result = tokio::task::spawn_blocking(move || {
         let join_filename = |name: &str| -> String {
@@ -145,30 +140,33 @@ pub async fn api_post_attachment(
                 format!("{base}.{ext}")
             }
         };
-        let mut rel = join_filename(&build_name(None));
-        let mut attempt: u32 = 1;
-        // Hard cap on retries: if a thousand suffixes are taken the
-        // user has bigger problems than this loop; bail to a unique
-        // timestamp fallback rather than spinning forever.
-        while workspace.exists(&rel) {
-            if attempt > 1000 {
-                let ts = now_unix_secs();
-                let base = format!("{stem_or_default}-{ts}");
-                let name = if ext.is_empty() {
+        for attempt in 0..=1001 {
+            let rel = if attempt == 1001 {
+                let base = format!("{stem_or_default}-{}", now_unix_secs());
+                join_filename(&if ext.is_empty() {
                     base
                 } else {
                     format!("{base}.{ext}")
-                };
-                rel = join_filename(&name);
-                break;
+                })
+            } else {
+                join_filename(&build_name((attempt > 0).then_some(attempt)))
+            };
+            #[cfg(test)]
+            tests::pause_before_publish(workspace.root(), bytes[0]);
+            let reservation = self_writes.reserve_after_preflight(&rel);
+            match workspace.create_bytes(&rel, &bytes) {
+                Ok(()) => return Ok(rel),
+                Err(error) => {
+                    self_writes.cancel(reservation);
+                    if !matches!(error, chan_workspace::ChanError::PathAlreadyExists(_))
+                        || attempt == 1001
+                    {
+                        return Err(error);
+                    }
+                }
             }
-            rel = join_filename(&build_name(Some(attempt)));
-            attempt += 1;
         }
-
-        self_writes.note(&rel);
-        workspace.write_bytes(&rel, &bytes)?;
-        Ok::<_, chan_workspace::ChanError>(rel)
+        unreachable!("the final exclusive publication returns success or an error")
     })
     .await;
     let rel = match result {
@@ -183,4 +181,121 @@ pub async fn api_post_attachment(
         }
     };
     Json(serde_json::json!({ "path": rel })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    struct Pause {
+        ready: tokio::sync::oneshot::Sender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<(PathBuf, u8), Pause>> {
+        static PAUSES: OnceLock<Mutex<HashMap<(PathBuf, u8), Pause>>> = OnceLock::new();
+        PAUSES.get_or_init(Mutex::default)
+    }
+
+    pub(super) fn pause_before_publish(root: &Path, marker: u8) {
+        let pause = pauses().lock().unwrap().remove(&(root.into(), marker));
+        if let Some(pause) = pause {
+            pause.ready.send(()).unwrap();
+            pause.resume.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    async fn upload(state: Arc<AppState>, bytes: &str) -> (StatusCode, String) {
+        let app = axum::Router::new()
+            .route("/api/attachments", axum::routing::post(api_post_attachment))
+            .with_state(state);
+        let body = format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"dir\"\r\n\r\n\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n\r\n{bytes}\r\n--upload--\r\n"
+        );
+        let response = app
+            .oneshot(
+                Request::post("/api/attachments")
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, value["path"].as_str().unwrap().to_owned())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_attachment_uploads_keep_both_payloads() {
+        let state = crate::state::test_support::make_test_state(false);
+        let root = tempfile::tempdir().unwrap();
+        state.library.register_workspace(root.path()).unwrap();
+        let workspace = state.library.open_workspace(root.path()).unwrap();
+        let indexer = Arc::new(crate::indexer::Indexer::spawn(
+            workspace.clone(),
+            state.index_events_tx.subscribe(),
+            false,
+            chan_workspace::SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        ));
+        *state.workspace_cell.write().unwrap() = Some(crate::state::WorkspaceCell {
+            workspace: workspace.clone(),
+            watch_handle: None,
+            indexer,
+        });
+        let mut controls = Vec::new();
+        for marker in [b'f', b's'] {
+            let (ready, arrived) = tokio::sync::oneshot::channel();
+            let (resume, receiver) = mpsc::channel();
+            pauses().lock().unwrap().insert(
+                (workspace.root().into(), marker),
+                Pause {
+                    ready,
+                    resume: receiver,
+                },
+            );
+            controls.push((arrived, resume));
+        }
+        let first = tokio::spawn(upload(state.clone(), "first"));
+        let second = tokio::spawn(upload(state, "second"));
+        let (first_ready, first_resume) = controls.remove(0);
+        let (second_ready, second_resume) = controls.remove(0);
+        for ready in [first_ready, second_ready] {
+            tokio::time::timeout(Duration::from_secs(5), ready)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(!workspace.exists("image.png"));
+        first_resume.send(()).unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .unwrap()
+            .unwrap();
+        second_resume.send(()).unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+        let first_bytes = workspace.read(&first.1).unwrap();
+        let second_bytes = workspace.read(&second.1).unwrap();
+        eprintln!(
+            "first={first:?} bytes={first_bytes:?}; second={second:?} bytes={second_bytes:?}"
+        );
+        assert_eq!((first.0, second.0), (StatusCode::OK, StatusCode::OK));
+        assert_ne!(first.1, second.1);
+        assert_eq!(first_bytes, b"first");
+        assert_eq!(second_bytes, b"second");
+    }
 }

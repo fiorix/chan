@@ -528,6 +528,8 @@ What's NOT closed today:
 
 ### Atomic writes
 
+`Workspace::create_bytes` exclusively publishes a new file and returns `PathAlreadyExists` on collision. `RootedFs` applies the sandbox and creation budget; `fs_ops::atomic_create_in` uses the shared atomic stream writer in a same-directory capability temporary directory, then `Dir::hard_link` publishes the completed file without replacing any existing entry. The stage is removed and the target directory synced. Editable-text destinations require UTF-8; filesystems without hard links fail safely.
+
 Anything chan-workspace-managed (registry, sessions, blob storage, graph control records, atomic-write user files) routes through `fs_ops::atomic_write` or the cap-std streaming core shared by `atomic_write_in` and `Workspace::write_atomic_stream`: tmpfile in the same directory, progressive writes, fsync the file, rename into place, fsync the directory. Mode + xattrs (Finder tags on macOS, SELinux labels and capabilities on Linux) are captured from the existing target before the rename and restored on the new file. Never `std::fs::write` directly to the target. A crash mid-write must produce zero state for the writer plus an intact previous version.
 
 ### Locking model

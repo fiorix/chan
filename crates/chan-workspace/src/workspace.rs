@@ -1544,6 +1544,15 @@ impl Workspace {
         self.fs.write_bytes(rel, content)
     }
 
+    /// Atomically publish raw bytes only if the destination is absent.
+    ///
+    /// Returns `PathAlreadyExists` on collision without replacing the entry.
+    /// Applies the path sandbox, transfer ceiling, and editable-text UTF-8
+    /// gate. Filesystems without hard-link support return an I/O error.
+    pub fn create_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
+        self.fs.create_bytes(rel, content)
+    }
+
     /// True iff the path resolves under the workspace and refers to a
     /// regular file. Matches the gate `read` / `read_text` apply,
     /// so a `true` return is a strong signal that a read will
