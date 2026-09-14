@@ -1520,11 +1520,15 @@ mod mutation_tests {
             fs::create_dir(&source).unwrap();
             fs::write(source.join("a.md"), "note").unwrap();
             if non_utf8 {
-                fs::write(
+                if let Err(error) = fs::write(
                     source.join(std::ffi::OsStr::from_bytes(b"bad\xff")),
                     "opaque",
-                )
-                .unwrap();
+                ) {
+                    eprintln!(
+                        "skipping non-UTF-8 case: filesystem refused the fixture name: {error}"
+                    );
+                    continue;
+                }
             } else {
                 symlink("a.md", source.join("link")).unwrap();
             }
@@ -1612,15 +1616,24 @@ mod mutation_tests {
     #[cfg(unix)]
     #[test]
     fn rename_allows_same_file_hard_link() {
+        use std::os::unix::fs::MetadataExt;
+
         let root = tempfile::tempdir().unwrap();
         let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
         fs::write(root.path().join("notes.md"), "note").unwrap();
-        fs::hard_link(root.path().join("notes.md"), root.path().join("Notes.md")).unwrap();
-        rooted.rename("notes.md", "Notes.md").unwrap();
-        assert_eq!(
-            fs::read_to_string(root.path().join("Notes.md")).unwrap(),
-            "note"
-        );
+        fs::hard_link(root.path().join("notes.md"), root.path().join("alias.md")).unwrap();
+        let original = fs::metadata(root.path().join("notes.md")).unwrap();
+        let identity = (original.dev(), original.ino());
+        rooted.rename("notes.md", "alias.md").unwrap();
+        let destination = root.path().join("alias.md");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "note");
+        let metadata = fs::metadata(&destination).unwrap();
+        assert_eq!((metadata.dev(), metadata.ino()), identity);
+        // Case-insensitive macOS filesystems may remove the source name.
+        match fs::metadata(root.path().join("notes.md")) {
+            Ok(metadata) => assert_eq!((metadata.dev(), metadata.ino()), identity),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
     }
 
     #[test]
