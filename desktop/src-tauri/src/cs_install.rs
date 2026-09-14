@@ -29,8 +29,8 @@
 //! Posture: best-effort + idempotent + self-healing. A failure is logged, never
 //! fatal. A shim WE wrote self-heals on the next launch when it goes stale (the
 //! binary moved, the AppImage updated). A `chan` / `cs` the user installed
-//! themselves -- a real binary from install.sh, a hand-made symlink -- is never
-//! clobbered.
+//! themselves is never clobbered. An AppImage install replaces a link only
+//! when it resolves to our own wrapper in the same bin directory.
 
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -283,21 +283,47 @@ fn install_one(kind: &InstallKind, bin_dir: &Path, name: &str) -> std::io::Resul
     match kind {
         InstallKind::None => Ok(false),
         InstallKind::AppImage(appimage) => {
-            // Read the existing wrapper as text. An entry that exists but is not
-            // readable UTF-8 (a binary, a symlink to one) is foreign -> skip.
-            let existing = match std::fs::read_to_string(&path) {
-                Ok(content) => Some(content),
-                Err(_) if path.symlink_metadata().is_ok() => return Ok(false),
-                Err(_) => None,
+            let (existing, executable) = match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let Ok(target) = path.canonicalize() else {
+                        return Ok(false);
+                    };
+                    let bin = bin_dir.canonicalize()?;
+                    if target.parent() != Some(bin.as_path()) || !target.is_file() {
+                        return Ok(false);
+                    }
+                    if !std::fs::read_to_string(&target)
+                        .is_ok_and(|content| content.contains(WRAPPER_OWNS))
+                    {
+                        return Ok(false);
+                    }
+                    // Replace the directory entry, even if the target's script
+                    // is current. Writing through it would clobber its argv[0].
+                    (None, false)
+                }
+                Ok(meta) if meta.is_file() => {
+                    let Ok(content) = std::fs::read_to_string(&path) else {
+                        return Ok(false);
+                    };
+                    (Some(content), meta.permissions().mode() & 0o777 == 0o755)
+                }
+                Ok(_) => return Ok(false),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, false),
+                Err(e) => return Err(e),
             };
-            match plan_wrapper(name, appimage, existing.as_deref()) {
+            let plan = match plan_wrapper(name, appimage, existing.as_deref()) {
+                WrapperPlan::Skip
+                    if !executable
+                        && existing.as_ref().is_some_and(|s| s.contains(WRAPPER_OWNS)) =>
+                {
+                    WrapperPlan::Write(wrapper_script(name, appimage))
+                }
+                plan => plan,
+            };
+            match plan {
                 WrapperPlan::Skip => Ok(false),
                 WrapperPlan::Write(script) => {
-                    std::fs::create_dir_all(bin_dir)?;
-                    std::fs::write(&path, script)?;
-                    let mut perms = std::fs::metadata(&path)?.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&path, perms)?;
+                    write_shim(&path, &script)?;
                     Ok(true)
                 }
             }
@@ -317,6 +343,38 @@ fn install_one(kind: &InstallKind, bin_dir: &Path, name: &str) -> std::io::Resul
             }
         },
     }
+}
+
+/// Publish a complete shim without truncating a live file or following the
+/// destination link. Set executable mode before the rename, so a failed chmod
+/// leaves the previous shim usable.
+fn write_shim(path: &std::path::Path, script: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("shim has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".chan-shim-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(script.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        }
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// The directory the unix shim install resolves to -- `local_bin_dir()`, which is
@@ -656,6 +714,11 @@ mod windows_shim {
     /// dir on demand. An entry that exists but is not readable UTF-8 is
     /// foreign -> skip.
     fn install_shim_file(path: &Path, desired: &str, owns: &str) -> std::io::Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !meta.is_file() => return Ok(false),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         let existing = match std::fs::read_to_string(path) {
             Ok(content) => Some(content),
             Err(_) if path.symlink_metadata().is_ok() => return Ok(false),
@@ -664,10 +727,7 @@ mod windows_shim {
         match plan_shim(desired, owns, existing.as_deref()) {
             WrapperPlan::Skip => Ok(false),
             WrapperPlan::Write(script) => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(path, script)?;
+                super::write_shim(path, &script)?;
                 Ok(true)
             }
         }
@@ -1172,6 +1232,80 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appimage_install_replaces_sibling_wrapper_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = InstallKind::AppImage(PathBuf::from("/opt/Chan.AppImage"));
+        assert!(install_one(&kind, dir.path(), "chan").unwrap());
+        std::os::unix::fs::symlink("chan", dir.path().join("cs")).unwrap();
+        assert!(install_one(&kind, dir.path(), "cs").unwrap());
+        assert!(std::fs::read_to_string(dir.path().join("chan"))
+            .unwrap()
+            .contains("exec -a chan "));
+        assert!(dir.path().join("cs").symlink_metadata().unwrap().is_file());
+        assert!(std::fs::read_to_string(dir.path().join("cs"))
+            .unwrap()
+            .contains("exec -a cs "));
+    }
+
+    #[test]
+    fn appimage_install_preserves_foreign_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let kind = InstallKind::AppImage(PathBuf::from("/opt/Chan.AppImage"));
+        for (target, content) in [
+            (
+                dir.path().join("foreign"),
+                "#!/bin/sh\necho foreign\n".to_string(),
+            ),
+            (
+                outside.path().join("wrapper"),
+                wrapper_script("chan", Path::new("/old.AppImage")),
+            ),
+        ] {
+            std::fs::write(&target, &content).unwrap();
+            let link = dir.path().join("cs");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(!install_one(&kind, dir.path(), "cs").unwrap());
+            assert_eq!(std::fs::read_link(&link).unwrap(), target);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), content);
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+
+    #[test]
+    fn appimage_install_replaces_live_wrapper_with_executable_file() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chan");
+        let old = wrapper_script("chan", Path::new("/old.AppImage"));
+        std::fs::write(&path, &old).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut live = std::fs::File::open(&path).unwrap();
+        let kind = InstallKind::AppImage(PathBuf::from("/new.AppImage"));
+        assert!(install_one(&kind, dir.path(), "chan").unwrap());
+        let mut still_old = String::new();
+        live.read_to_string(&mut still_old).unwrap();
+        assert_eq!(still_old, old);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            wrapper_script("chan", Path::new("/new.AppImage"))
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(install_one(&kind, dir.path(), "chan").unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!install_one(&kind, dir.path(), "chan").unwrap());
+    }
 
     #[test]
     fn classify_appimage_takes_precedence() {
