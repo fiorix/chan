@@ -13,7 +13,7 @@
 // normalized vectors, so cosine == dot product and we skip the
 // re-normalize at write time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -217,6 +217,33 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Reclaim shards whose sources were absent from a complete walk. The
+    /// disk pass uses hashed filenames so undecodable shards are included.
+    pub(super) fn prune_orphans(&self, visited: &HashSet<&str>) -> Result<(), VectorError> {
+        for rel in self.known_paths() {
+            if !visited.contains(rel.as_str()) {
+                if let Err(error) = self.delete_file(&rel) {
+                    tracing::warn!(%rel, ?error, "vector shard cleanup failed");
+                }
+            }
+        }
+        let keep: HashSet<PathBuf> = visited
+            .iter()
+            .map(|rel| file_for(&self.embeddings_dir, rel))
+            .collect();
+        for entry in std::fs::read_dir(&self.embeddings_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("bin") && !keep.contains(&path) {
+                if let Err(error) = std::fs::remove_file(&path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(?path, ?error, "vector shard cleanup failed");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Snapshot of every rel_path currently held in memory. Used by
     /// reconciliation passes (e.g. build_all) that need to compute
     /// the set of orphan shards without round-tripping disk.
@@ -356,7 +383,10 @@ fn load_all(dir: &Path) -> Result<BTreeMap<String, ShardMeta>, VectorError> {
         let (decoded, _): (FileEmbeddings, _) =
             match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
                 Ok(v) => v,
-                Err(source) => return Err(VectorError::Decode { path, source }),
+                Err(source) => {
+                    tracing::warn!(?path, ?source, "skipping undecodable vector file");
+                    continue;
+                }
             };
         if decoded.version != FORMAT_VERSION {
             // v1 shards predate `body_hash` so there's no way to
@@ -428,6 +458,35 @@ mod tests {
             depth: 1,
             vector: vec,
         }
+    }
+
+    #[test]
+    fn corrupt_shard_preserves_healthy_vectors_and_can_be_replaced() {
+        let (tmp, store) = fresh();
+        for rel in ["bad.md", "healthy.md"] {
+            store
+                .replace_file(rel, "model", 2, vec![make_chunk(rel, vec![1.0, 0.0])])
+                .unwrap();
+        }
+        let bad = file_for(&embeddings_dir(tmp.path()), "bad.md");
+        std::fs::write(&bad, b"garbage").unwrap();
+        drop(store);
+        let store = VectorStore::open(tmp.path()).unwrap();
+        assert_eq!(store.known_paths(), ["healthy.md"]);
+        assert_eq!(store.search(&[1.0, 0.0], 10)[0].path, "healthy.md");
+        store
+            .replace_file(
+                "bad.md",
+                "model",
+                2,
+                vec![make_chunk("fixed", vec![1.0, 0.0])],
+            )
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            VectorStore::open(tmp.path()).unwrap().known_paths(),
+            ["bad.md", "healthy.md"]
+        );
     }
 
     #[test]

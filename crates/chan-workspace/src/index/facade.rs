@@ -803,15 +803,8 @@ impl Index {
         // in semantic search as a hit pointing at a missing file,
         // but the next reindex will retry the cleanup.
         let visited: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
-        #[cfg(feature = "embeddings")]
-        if do_vectors {
-            for rel in self.vectors.known_paths() {
-                if !visited.contains(rel.as_str()) {
-                    if let Err(e) = self.vectors.delete_file(&rel) {
-                        tracing::warn!(rel = %rel, ?e, "vector shard cleanup failed");
-                    }
-                }
-            }
+        if let Err(e) = self.vectors.prune_orphans(&visited) {
+            tracing::warn!(?e, "vector orphan enumeration failed");
         }
         // BM25 symmetric cleanup: any path the prior commit indexed
         // that's not in the current `files` list (deleted, renamed,
@@ -1696,6 +1689,68 @@ mod tests {
             assert_eq!(cfg.excluded_dirs, ["private"]);
             assert!(cfg.vectors_model.is_none());
         }
+    }
+
+    #[test]
+    fn corrupt_vector_shard_keeps_bm25_available_and_rebuild_reclaims_it() {
+        use super::super::vectors::{pair, VectorStore};
+
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        let source = "# lexical\nneedle survives cache damage\n";
+        std::fs::write(tmp.path().join("note.md"), source).unwrap();
+        {
+            let idx = Index::open(tmp.path(), &dir).unwrap();
+            idx.build_all(no_vectors(), &crate::progress::NoProgress, None)
+                .unwrap();
+            let chunks = chunking::chunk(source, &idx.config().chunking);
+            idx.vectors
+                .replace_file(
+                    "note.md",
+                    &idx.config().model,
+                    2,
+                    pair(&chunks, vec![vec![1.0, 0.0]; chunks.len()]),
+                )
+                .unwrap();
+            assert!(!idx
+                .search("needle", Mode::Bm25, 10)
+                .unwrap()
+                .hits
+                .is_empty());
+        }
+        let shard = std::fs::read_dir(dir.join("embeddings"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&shard, b"garbage").unwrap();
+        let idx = Index::open(tmp.path(), &dir)
+            .expect("one corrupt vector shard must not take down lexical search");
+        assert_eq!(idx.vectors.chunk_count(), 0);
+        assert!(!idx
+            .search("needle", Mode::Bm25, 10)
+            .unwrap()
+            .hits
+            .is_empty());
+        // The lexical rebuild must stay usable without an installed model.
+        idx.build_all(no_vectors(), &crate::progress::NoProgress, None)
+            .unwrap();
+        assert!(!idx
+            .search("needle", Mode::Bm25, 10)
+            .unwrap()
+            .hits
+            .is_empty());
+        // With the source gone, orphan cleanup must find even an undecodable
+        // shard, whose rel_path never entered the in-memory store.
+        std::fs::remove_file(tmp.path().join("note.md")).unwrap();
+        idx.build_all(BuildOptions::default(), &crate::progress::NoProgress, None)
+            .unwrap();
+        assert!(
+            !shard.exists(),
+            "rebuild left the undecodable orphan on disk"
+        );
+        assert_eq!(VectorStore::open(&dir).unwrap().chunk_count(), 0);
     }
 
     fn make_workspace() -> TempDir {
