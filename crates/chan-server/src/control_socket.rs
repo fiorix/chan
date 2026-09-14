@@ -15,7 +15,7 @@ use portable_pty::PtySize;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::desktop_window_ops::DesktopWindowOp;
 use crate::handover_bus::{HandoverBus, HandoverReply};
@@ -317,7 +317,7 @@ impl Drop for ControlHandle {
         self.accept_loop.abort();
         // A Unix-domain socket leaves a filesystem node that must be
         // unlinked; a Windows named pipe is reclaimed by the OS once the
-        // last handle (the accept loop's idle instance) drops, so only the
+        // last listener or connection handle drops, so only the
         // unix path has anything to clean up.
         #[cfg(unix)]
         let _ = std::fs::remove_file(&self.socket_path);
@@ -927,17 +927,20 @@ pub(crate) fn take_stable_lock(socket_path: &Path) -> std::io::Result<std::fs::F
 
 fn spawn_accept_loop(mut listener: transport::Listener, ctx: ControlSocketCtx) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut connections = JoinSet::new();
         loop {
-            let conn = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::warn!("control socket accept: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-            let ctx = ctx.clone();
-            tokio::spawn(serve_connection(conn, ctx));
+            tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(conn) => {
+                        connections.spawn(serve_connection(conn, ctx.clone()));
+                    }
+                    Err(error) => {
+                        tracing::warn!("control socket accept: {error}");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                },
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
         }
     })
 }
@@ -993,6 +996,25 @@ async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
                     devserver_port,
                 },
             )
+            .await;
+            return;
+        }
+        Ok(ControlRequest::Close { path, remove }) => {
+            // Unmount drops this tenant's accept task and its connection set.
+            // The lifecycle operation must still finish and acknowledge its
+            // caller. Retain only the teardown scope and reply half, with no
+            // tenant context, and bound the final write to a stalled client.
+            let scope = ctx.unserve.clone();
+            drop(ctx);
+            drop(reader);
+            let _ = tokio::spawn(async move {
+                let response = handle_unserve(&scope, &path, remove).await;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    write_response(&mut write, &response),
+                )
+                .await;
+            })
             .await;
             return;
         }
@@ -5420,6 +5442,86 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn control_unmount_ends_a_parked_handover() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+            let _leader = ctx.session_registry.join("leader", true, None).guard;
+            let _follower = ctx.session_registry.join("follower", false, None).guard;
+            let mut events = ctx.events_tx.subscribe();
+            let handle = start(dir.path().join("control.sock"), ctx).unwrap();
+            let mut client = tokio::net::UnixStream::connect(handle.socket_path())
+                .await
+                .unwrap();
+            let mut request = serde_json::to_vec(&ControlRequest::SessionHandover {
+                window_id: "follower".into(),
+                to: None,
+                accept: false,
+                reject: false,
+                timeout_secs: 600,
+            })
+            .unwrap();
+            request.push(b'\n');
+            client.write_all(&request).await.unwrap();
+            let prompt: serde_json::Value =
+                serde_json::from_str(&events.recv().await.unwrap()).unwrap();
+            assert_eq!(prompt["command"], "handover_prompt");
+            drop(handle);
+            let mut line = String::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                BufReader::new(client).read_line(&mut line),
+            )
+            .await;
+            assert_eq!(
+                read.expect("unmounted control connection remained parked")
+                    .unwrap(),
+                0
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_close_reply_survives_its_own_unmount() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let dir = tempfile::tempdir().unwrap();
+            let fake = Arc::new(FakeHost::new(0));
+            let host: Arc<dyn chan_library::HostControl> = fake.clone();
+            let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+            ctx.unserve = UnserveScope::Host(Arc::downgrade(&host));
+            let handle = start(dir.path().join("control.sock"), ctx).unwrap();
+            let mut client = tokio::net::UnixStream::connect(handle.socket_path())
+                .await
+                .unwrap();
+            *fake.control.lock().unwrap() = Some(handle);
+            let mut request = serde_json::to_vec(&ControlRequest::Close {
+                path: dir.path().to_path_buf(),
+                remove: false,
+            })
+            .unwrap();
+            request.push(b'\n');
+            client.write_all(&request).await.unwrap();
+            let mut line = String::new();
+            assert!(
+                BufReader::new(client).read_line(&mut line).await.unwrap() > 0,
+                "unmount dropped its own close reply"
+            );
+            let response: ControlResponse = serde_json::from_str(&line).unwrap();
+            assert!(
+                matches!(response, ControlResponse::Ok { .. }),
+                "{response:?}"
+            );
+            assert!(fake.control.lock().unwrap().is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn stable_bind_takes_over_a_dead_servers_node_and_serves_old_clients() {
         // A crashed server leaves its socket node behind (Drop never ran) and
         // holds no flock. The next boot must take the path over, and a client
@@ -6997,6 +7099,7 @@ mod tests {
     struct FakeHost {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
+        control: std::sync::Mutex<Option<ControlHandle>>,
         tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
         /// What `open_outside_workspace` answers: `None` stands for a host
         /// with no filesystem surface to route to.
@@ -7008,6 +7111,7 @@ mod tests {
             Self {
                 live,
                 discarded: std::sync::atomic::AtomicBool::new(false),
+                control: std::sync::Mutex::new(None),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
                 outside: None,
             }
@@ -7021,7 +7125,16 @@ mod tests {
             _root: &std::path::Path,
             _force: bool,
         ) -> Result<chan_library::WorkspaceLifecycleOutcome, chan_library::Error> {
-            Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)
+            let handle = self.control.lock().unwrap().take();
+            if let Some(handle) = handle {
+                drop(handle);
+                // Teardown yields before returning to the connection that
+                // requested it, so reply survival cannot depend on scheduling.
+                tokio::task::yield_now().await;
+                Ok(chan_library::WorkspaceLifecycleOutcome::Completed)
+            } else {
+                Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)
+            }
         }
         async fn remove_workspace_for_root(
             &self,
