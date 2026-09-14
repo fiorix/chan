@@ -516,13 +516,33 @@ fn copy_draft_into_existing_dir(
     target_abs: &Path,
     target_rel: &str,
 ) -> Result<DraftPromoteReport> {
+    copy_draft_into_existing_dir_with(scan, target_abs, target_rel, |from, to| {
+        fs::rename(from, to)
+    })
+}
+
+fn copy_draft_into_existing_dir_with(
+    scan: DraftScan,
+    target_abs: &Path,
+    target_rel: &str,
+    rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<DraftPromoteReport> {
     let stage = unique_temp_sibling(target_abs)?;
     if let Err(e) = copy_dir_checked(&scan.src, &stage, &scan.inspection.name) {
         let _ = fs::remove_dir_all(&stage);
         return Err(e);
     }
-    fs_ops::sync_tree(&stage)?;
-    move_children(&stage, target_abs, target_rel)?;
+    let result = fs_ops::sync_tree(&stage)
+        .and_then(|()| move_children(&stage, target_abs, target_rel, rename));
+    if let Err(error) = result {
+        if let Err(cleanup) = fs::remove_dir_all(&stage) {
+            return Err(ChanError::Io(format!(
+                "{error}; failed to remove draft stage {}: {cleanup}",
+                stage.display()
+            )));
+        }
+        return Err(error);
+    }
     let _ = fs::remove_dir(&stage);
     remove_promoted_source(&scan, target_rel)?;
     Ok(DraftPromoteReport {
@@ -575,24 +595,46 @@ fn copy_dir_checked(src: &Path, dst: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn move_children(stage: &Path, target_abs: &Path, target_rel: &str) -> Result<()> {
-    for entry in fs::read_dir(stage)? {
-        let entry = entry?;
-        let dest = target_abs.join(entry.file_name());
-        if dest.exists() || fs::symlink_metadata(&dest).is_ok() {
-            return Err(ChanError::PathAlreadyExists(format!(
-                "{target_rel}/{}",
-                entry.file_name().to_string_lossy()
+fn move_children(
+    stage: &Path,
+    target_abs: &Path,
+    target_rel: &str,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let mut moved = Vec::new();
+    let result = (|| {
+        for entry in fs::read_dir(stage)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let dest = target_abs.join(&name);
+            ensure_absent(&dest, &format!("{target_rel}/{}", name.to_string_lossy()))?;
+            rename(&entry.path(), &dest).map_err(|e| {
+                ChanError::Io(format!(
+                    "failed to move draft entry into {}: {e}",
+                    dest.display()
+                ))
+            })?;
+            moved.push(name);
+        }
+        fs_ops::sync_tree(target_abs)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let mut unrestored = Vec::new();
+        for name in moved.iter().rev() {
+            let dest = target_abs.join(name);
+            if let Err(restore) = rename(&dest, &stage.join(name)) {
+                unrestored.push(format!("{}: {restore}", dest.display()));
+            }
+        }
+        if !unrestored.is_empty() {
+            return Err(ChanError::Io(format!(
+                "{error}; could not restore draft entries from target: {}",
+                unrestored.join("; ")
             )));
         }
-        fs::rename(entry.path(), &dest).map_err(|e| {
-            ChanError::Io(format!(
-                "failed to move draft entry into {}: {e}",
-                dest.display()
-            ))
-        })?;
+        return Err(error);
     }
-    fs_ops::sync_tree(target_abs)?;
     Ok(())
 }
 
@@ -701,6 +743,98 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn draft_merge_reports_unrestored_children_and_reverses_rollback() {
+        let root = TempDir::new().unwrap();
+        let drafts = root.path().join(".Drafts");
+        ensure_root(&drafts).unwrap();
+        let draft = create_dir(&drafts, "untitled-1").unwrap();
+        for name in ["draft.md", "a.bin", "b.bin"] {
+            fs::write(draft.abs.join(name), name).unwrap();
+        }
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let scan = scan_draft(&drafts, "untitled-1").unwrap();
+        let mut calls = Vec::new();
+        let error = copy_draft_into_existing_dir_with(scan, &target, "target", |from, to| {
+            calls.push((from.to_path_buf(), to.to_path_buf()));
+            if matches!(calls.len(), 3 | 4) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[3], (calls[1].1.clone(), calls[1].0.clone()));
+        assert_eq!(calls[4], (calls[0].1.clone(), calls[0].0.clone()));
+        assert!(error.to_string().contains("could not restore"));
+        assert!(error
+            .to_string()
+            .contains(&calls[1].1.display().to_string()));
+        assert!(calls[1].1.is_file());
+        assert!(!calls[0].1.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        for name in ["draft.md", "a.bin", "b.bin"] {
+            assert_eq!(fs::read_to_string(draft.abs.join(name)).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn draft_merge_rolls_back_second_child_failure_and_retries() {
+        let root = TempDir::new().unwrap();
+        let drafts = root.path().join(".Drafts");
+        ensure_root(&drafts).unwrap();
+        let draft = create_dir(&drafts, "untitled-1").unwrap();
+        for name in ["draft.md", "a.bin", "b.bin"] {
+            fs::write(draft.abs.join(name), name).unwrap();
+        }
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep.txt"), "existing content").unwrap();
+        let scan = scan_draft(&drafts, "untitled-1").unwrap();
+        preflight_draft_merge(&scan, &target, "target").unwrap();
+        let mut calls = 0;
+        let result = copy_draft_into_existing_dir_with(scan, &target, "target", |from, to| {
+            calls += 1;
+            if calls == 2 {
+                return Err(std::io::Error::other("injected second rename failure"));
+            }
+            fs::rename(from, to)
+        });
+        let landed = fs::read_dir(&target)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let siblings = fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        eprintln!("merge={result:?}; target entries={landed:?}; stage siblings={siblings:?}");
+        assert!(result.is_err());
+        assert_eq!(landed, ["keep.txt"]);
+        assert_eq!(siblings.len(), 2, "no stage remains");
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "existing content"
+        );
+        for name in ["draft.md", "a.bin", "b.bin"] {
+            assert_eq!(fs::read_to_string(draft.abs.join(name)).unwrap(), name);
+        }
+        let result = promote(
+            &drafts,
+            root.path(),
+            &root.path().canonicalize().unwrap(),
+            "untitled-1",
+            "target",
+        )
+        .unwrap();
+        assert_eq!(result.mode, DraftPromoteMode::DirectoryMerged);
+        assert!(!draft.abs.exists());
+        for name in ["draft.md", "a.bin", "b.bin"] {
+            assert_eq!(fs::read_to_string(target.join(name)).unwrap(), name);
+        }
+    }
 
     fn self_promotion_is_refused(attachments: bool) {
         let root = TempDir::new().unwrap();
