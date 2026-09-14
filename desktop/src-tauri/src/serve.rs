@@ -359,6 +359,7 @@ pub(crate) fn open_watched_local_window(
     app: &AppHandle,
     addr: SocketAddr,
     record: &WindowRecord,
+    completion: WindowBuildCompletion,
 ) -> Result<(), String> {
     let label = crate::window_watcher::native_label(record);
     let url = format!(
@@ -367,7 +368,7 @@ pub(crate) fn open_watched_local_window(
     );
     let title = watched_window_base_title(record, None);
     let kind = watched_window_kind(record);
-    build_workspace_window(
+    build_workspace_window_with_completion(
         app,
         WindowSpec {
             label: &label,
@@ -383,6 +384,7 @@ pub(crate) fn open_watched_local_window(
             connecting: None,
             kind,
         },
+        completion,
     )
 }
 
@@ -398,11 +400,12 @@ pub(crate) fn open_watched_remote_window(
     url: &str,
     devserver_name: &str,
     record: &WindowRecord,
+    completion: WindowBuildCompletion,
 ) -> Result<(), String> {
     let label = crate::window_watcher::native_label(record);
     let title = watched_window_base_title(record, Some(devserver_name));
     let kind = watched_window_kind(record);
-    build_workspace_window(
+    build_workspace_window_with_completion(
         app,
         WindowSpec {
             label: &label,
@@ -418,6 +421,7 @@ pub(crate) fn open_watched_remote_window(
             connecting: Some(url),
             kind,
         },
+        completion,
     )
 }
 
@@ -549,37 +553,66 @@ pub async fn spawn_control_terminal_window(
     let Some(embedded) = state.embedded.get() else {
         return Err("embedded local server is unavailable".to_string());
     };
-    let (url, prefix) = embedded.open_terminal_with_command(script).await?;
     let label = control_terminal_label(devserver_id);
     let title = if display_name.trim().is_empty() {
         "Control Terminal".to_string()
     } else {
         format!("Control Terminal - {}", display_name.trim())
     };
-    build_workspace_window(
-        &app,
-        WindowSpec {
-            label: &label,
-            session_id: &label,
-            // The control terminal runs on the local embedded library's shared
-            // terminal tenant, so it belongs to the `local` library.
-            library_id: "local",
-            title: &title,
-            ordinal: None,
-            caption: "",
-            url: &url,
-            url_hash_seed: "",
-            config_key: String::new(),
-            zoom_seed: 1.0,
-            connecting: None,
-            // `control` (not `terminal`) puts the SPA in the singleton
-            // control sub-mode: terminal-only, but with the tab strip / pane
-            // chrome hidden and Cmd+T / splits disabled so it never spawns a
-            // second tab. It also tags the window kind in `cs window list`,
-            // keeping it distinct from persisted standalone terminals.
-            kind: Some("control"),
-        },
-    )?;
+    build_control_terminal(embedded, script, |url| async move {
+        let (built_tx, built_rx) = tokio::sync::oneshot::channel();
+        build_workspace_window_with_completion(
+            &app,
+            WindowSpec {
+                label: &label,
+                session_id: &label,
+                // The control terminal runs on the local embedded library's shared
+                // terminal tenant, so it belongs to the `local` library.
+                library_id: "local",
+                title: &title,
+                ordinal: None,
+                caption: "",
+                url: &url,
+                url_hash_seed: "",
+                config_key: String::new(),
+                zoom_seed: 1.0,
+                connecting: None,
+                // `control` (not `terminal`) puts the SPA in the singleton
+                // control sub-mode: terminal-only, but with the tab strip / pane
+                // chrome hidden and Cmd+T / splits disabled so it never spawns a
+                // second tab. It also tags the window kind in `cs window list`,
+                // keeping it distinct from persisted standalone terminals.
+                kind: Some("control"),
+            },
+            Box::new(move |result| {
+                let _ = built_tx.send(result);
+            }),
+        )?;
+        built_rx
+            .await
+            .map_err(|_| "control window build was cancelled".to_string())??;
+        Ok(())
+    })
+    .await
+}
+
+/// Keep ownership of the tenant until its native window has been built.
+async fn build_control_terminal<F, Fut>(
+    embedded: &crate::embedded::EmbeddedServer,
+    script: String,
+    build: F,
+) -> Result<ControlTerminal, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let (url, prefix) = embedded.open_terminal_with_command(script).await?;
+    if let Err(error) = build(url).await {
+        if let Err(cleanup_error) = embedded.close_terminal_tenant(&prefix).await {
+            tracing::warn!(%prefix, %cleanup_error, "closing a failed control window's tenant failed");
+        }
+        return Err(error);
+    }
     Ok(ControlTerminal { prefix })
 }
 
@@ -967,6 +1000,8 @@ struct WindowSpec<'a> {
     kind: Option<&'a str>,
 }
 
+pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
+
 /// Build and show a chan-style workspace webview window on the main
 /// thread. Internal: call `open_watched_local_window` (the watcher path) /
 /// `spawn_remote_workspace_window` from outside. Centralising the
@@ -976,6 +1011,32 @@ struct WindowSpec<'a> {
 /// windows are born menu-less (only the launcher carries a menubar);
 /// their chords ride KEY_BRIDGE_JS.
 fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), String> {
+    let (built_tx, mut built_rx) = tokio::sync::oneshot::channel();
+    build_workspace_window_with_completion(
+        app,
+        spec,
+        Box::new(move |result| {
+            let _ = built_tx.send(result);
+        }),
+    )?;
+    // Tauri executes inline when called on its main thread. Preserve that
+    // build's actual result for synchronous callers such as imperative reopen.
+    match built_rx.try_recv() {
+        Ok(result) => result,
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => Ok(()),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            Err("window build was cancelled".to_string())
+        }
+    }
+}
+
+/// The scheduling result does not describe native window creation. Completion
+/// runs after the main-thread builder has either installed the window or failed.
+fn build_workspace_window_with_completion(
+    app: &AppHandle,
+    spec: WindowSpec<'_>,
+    completion: WindowBuildCompletion,
+) -> Result<(), String> {
     let WindowSpec {
         label: window_label,
         session_id,
@@ -1141,7 +1202,7 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
         } else {
             builder
         };
-        match builder.build() {
+        let result = match builder.build() {
             Ok(window) => {
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
@@ -1437,6 +1498,7 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                     }
                     _ => {}
                 });
+                Ok(())
             }
             Err(e) => {
                 // Build failed: hand the just-assigned number back so it
@@ -1444,9 +1506,11 @@ fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), S
                 app_owned
                     .state::<Arc<AppState>>()
                     .release_window_number(&label_owned);
-                tracing::warn!(label = %label_owned, error = %e, "opening workspace window failed")
+                tracing::warn!(label = %label_owned, error = %e, "opening workspace window failed");
+                Err(format!("opening workspace window {label_owned}: {e}"))
             }
-        }
+        };
+        completion(result);
     });
     res.map_err(|e| format!("scheduling workspace window for {window_label}: {e}"))
 }
@@ -2430,6 +2494,52 @@ mod tests {
         assert!(!WorkspaceOpenMode::RestoreOnly.should_mint());
     }
 
+    #[tokio::test]
+    async fn failed_control_window_build_reaps_unregistered_tenant() {
+        let config = tempfile::tempdir().expect("config dir");
+        let library =
+            chan_workspace::Library::open_at(config.path().join("config.toml")).expect("library");
+        let embedded = crate::embedded::EmbeddedServer::for_tests(library).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for build_fails in [true, false] {
+                let mut mounted_prefix = String::new();
+                let result = build_control_terminal(&embedded, "true".to_string(), |url| {
+                    mounted_prefix = url::Url::parse(&url)
+                        .expect("launch URL")
+                        .path()
+                        .strip_suffix("/index.html")
+                        .expect("prefixed launch path")
+                        .to_string();
+                    std::future::ready(if build_fails {
+                        Err("injected native build error".to_string())
+                    } else {
+                        Ok(())
+                    })
+                })
+                .await;
+                // The real host returns true only if this test removed a tenant
+                // still owned by the failed/successful build. Also clean up the
+                // fixture before asserting, including on the failing baseline.
+                let retained = embedded
+                    .close_terminal_tenant(&mounted_prefix)
+                    .await
+                    .expect("close fixture tenant");
+                if build_fails {
+                    assert_eq!(result.err().as_deref(), Some("injected native build error"));
+                    assert!(!retained, "failed build retained its unregistered tenant");
+                } else {
+                    assert_eq!(result.expect("built window").prefix, mounted_prefix);
+                    assert!(
+                        retained,
+                        "successful build must retain its tenant for tracking"
+                    );
+                }
+            }
+        })
+        .await
+        .expect("control tenant lifecycle must finish");
+    }
+
     /// Fresh `AppState` over a throwaway config store. The tempdir is leaked
     /// so the store path outlives the test body.
     fn empty_state() -> Arc<AppState> {
@@ -2653,9 +2763,9 @@ mod tests {
         // Bounded before the test module, or this test's own source would
         // satisfy the assertion.
         let build = SERVE_RS
-            .split("fn build_workspace_window")
+            .split("fn build_workspace_window_with_completion(")
             .nth(1)
-            .expect("build_workspace_window exists")
+            .expect("build_workspace_window_with_completion exists")
             .split("#[cfg(test)]")
             .next()
             .expect("build section ends before the tests");
@@ -2855,7 +2965,7 @@ mod tests {
         assert!(pre_spawn.contains("RemoteLaunchKey::from_record"));
         // Open-path cancellation: a close() during the mint removes the
         // in-flight marker and the task must bail instead of building.
-        assert!(navigator.contains("if !in_flight.lock().unwrap().contains(&label)"));
+        assert!(navigator.contains("if !builds.contains(&label)"));
         // Vanished-retarget arm bails without a rebuild.
         let vanished = navigator
             .split("Ok(false) => {")

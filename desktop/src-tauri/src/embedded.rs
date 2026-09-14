@@ -446,6 +446,14 @@ impl EmbeddedServer {
         Ok((hosted.handle.launch_url(), prefix))
     }
 
+    /// Close an unregistered control tenant when its native window cannot open.
+    pub async fn close_terminal_tenant(&self, prefix: &str) -> Result<bool, String> {
+        self.host
+            .close_terminal_tenant(prefix)
+            .await
+            .map_err(|e| format!("closing a command terminal tenant: {e}"))
+    }
+
     /// Raw output (replay-ring scrollback) of the control-terminal tenant
     /// mounted at `prefix`, decoded lossily. Lets the connect flow scrape a
     /// token the connect script printed; empty when no such tenant exists.

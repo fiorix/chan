@@ -138,21 +138,82 @@ impl WindowFeed for LocalWindowFeed {
     }
 }
 
+const RETRY_NUDGE: Duration = Duration::from_secs(15);
+
+type BuildCompletion = serve::WindowBuildCompletion;
+
+/// Tracks builds between dispatch and the native window becoming observable.
+#[derive(Clone)]
+struct WindowBuilds {
+    pending: Arc<Mutex<HashSet<String>>>,
+    nudge: Arc<Notify>,
+}
+
+impl WindowBuilds {
+    fn new(nudge: Arc<Notify>) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashSet::new())),
+            nudge,
+        }
+    }
+
+    fn begin(&self, label: String) {
+        self.pending.lock().unwrap().insert(label);
+    }
+
+    fn remove(&self, label: &str) {
+        self.pending.lock().unwrap().remove(label);
+    }
+
+    fn contains(&self, label: &str) -> bool {
+        self.pending.lock().unwrap().contains(label)
+    }
+
+    fn open_labels(&self, prefix: &str, mut built: HashSet<String>) -> HashSet<String> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.retain(|label| !built.contains(label));
+        built.extend(
+            pending
+                .iter()
+                .filter(|label| label.starts_with(prefix))
+                .cloned(),
+        );
+        built
+    }
+
+    fn retry(&self) {
+        let nudge = Arc::clone(&self.nudge);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(RETRY_NUDGE).await;
+            // The local feed shares this signal with WebSocket subscribers.
+            nudge.notify_waiters();
+        });
+    }
+
+    fn complete(&self, label: &str, result: Result<(), String>) {
+        self.remove(label);
+        match result {
+            Ok(()) => self.nudge.notify_waiters(),
+            Err(error) => {
+                tracing::warn!(window = %label, %error, "window watcher: opening a window failed");
+                self.retry();
+            }
+        }
+    }
+
+    fn completion(&self, label: String) -> BuildCompletion {
+        let builds = self.clone();
+        Box::new(move |result| builds.complete(&label, result))
+    }
+}
+
 /// The Tauri native-window surface: opens windows via the shared SPA builder,
 /// closes them by destroying the OS window, and enumerates the open native
 /// windows for a library by their `{library_id}::` label prefix.
 struct TauriNativeSurface {
     app: AppHandle,
     opener: WindowOpener,
-    /// Labels whose build was dispatched to the Tauri main thread but may not yet
-    /// be in `webview_windows()` -- the build is async (`open` returns before
-    /// `build_workspace_window`'s `run_on_main_thread` closure runs). Tracked and
-    /// folded into `open_labels` so a reconcile in the dispatch→build gap treats
-    /// the window as already open and does NOT double-`open` the same label (the
-    /// TOCTOU that produced "webview label already exists" + a stuck/duplicate
-    /// window during the multi-notify boot burst). Self-cleaning: a label that
-    /// has landed in `webview_windows` is dropped from the set.
-    in_flight: Arc<Mutex<HashSet<String>>>,
+    builds: WindowBuilds,
     /// Last launch-only state used for remote devserver windows. A devserver
     /// restart keeps the same `{library_id}::{window_id}` label but rotates the
     /// tenant token in the URL, so an existing webview may need an in-place
@@ -165,11 +226,6 @@ struct TauriNativeSurface {
     /// "nothing changed" case without one. Populated only from an observed or
     /// applied title, so it cannot claim a title the window does not have.
     applied_titles: Arc<Mutex<HashMap<String, String>>>,
-    /// The watch loop's change signal (remote watchers only): settled
-    /// navigation tasks nudge it so a follow-up reconcile validates their
-    /// outcome, and failed ones nudge it after a delay as a bounded retry
-    /// driver. `None` for the local watcher, whose opens have no async gap.
-    nudge: Option<Arc<Notify>>,
 }
 
 impl TauriNativeSurface {
@@ -191,7 +247,6 @@ impl TauriNativeSurface {
     /// on failure (a bounded retry driver for transient mint failures, since
     /// the feed only pushes on real changes).
     fn navigate_remote(&self, record: &WindowRecord, retarget: bool) {
-        const RETRY_NUDGE: Duration = Duration::from_secs(15);
         let WindowOpener::Remote { conn } = &self.opener else {
             return;
         };
@@ -199,9 +254,9 @@ impl TauriNativeSurface {
         let conn = conn.clone();
         let record = record.clone();
         let gateway = self.opener.is_gateway();
-        let in_flight = Arc::clone(&self.in_flight);
+        let builds = self.builds.clone();
         let remote_launches = Arc::clone(&self.remote_launches);
-        let nudge = self.nudge.clone();
+        let nudge = Arc::clone(&self.builds.nudge);
         let label = native_label(&record);
         // Dispatch-time remember: refreshes during the gap compare equal and
         // skip; rolled back on failure so a retry pass can fire again.
@@ -210,23 +265,19 @@ impl TauriNativeSurface {
             RemoteLaunchKey::from_record(&record, gateway),
         );
         tauri::async_runtime::spawn(async move {
-            let fail = |e: String| {
-                remote_launches.lock().unwrap().remove(&label);
-                if !retarget {
-                    // Only the open path owns an in-flight marker; a failed
-                    // retarget must not strip a concurrent open's marker.
-                    in_flight.lock().unwrap().remove(&label);
-                }
-                tracing::warn!(
-                    window = %record.window_id,
-                    error = %e,
-                    "window watcher: opening a window failed",
-                );
-                if let Some(nudge) = nudge.clone() {
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(RETRY_NUDGE).await;
-                        nudge.notify_one();
-                    });
+            let fail = {
+                let remote_launches = Arc::clone(&remote_launches);
+                let builds = builds.clone();
+                let label = label.clone();
+                move |error: String| {
+                    remote_launches.lock().unwrap().remove(&label);
+                    if retarget {
+                        // A retarget does not own a concurrent open's marker.
+                        tracing::warn!(window = %label, %error, "window watcher: retargeting a window failed");
+                        builds.retry();
+                    } else {
+                        builds.complete(&label, Err(error));
+                    }
                 }
             };
             let url = match crate::devserver::window_navigation_url(&conn, &record).await {
@@ -247,9 +298,7 @@ impl TauriNativeSurface {
                     // wants a window, the nudged reconcile below reopens it.
                     Ok(false) => {
                         remote_launches.lock().unwrap().remove(&label);
-                        if let Some(nudge) = &nudge {
-                            nudge.notify_one();
-                        }
+                        nudge.notify_one();
                         return;
                     }
                     Ok(true) => Ok(()),
@@ -259,18 +308,24 @@ impl TauriNativeSurface {
                 // Cancellation check: a close()/disconnect during the mint
                 // removed the marker; building now would resurrect a window
                 // the user just closed.
-                if !in_flight.lock().unwrap().contains(&label) {
+                if !builds.contains(&label) {
                     remote_launches.lock().unwrap().remove(&label);
                     return;
                 }
-                serve::open_watched_remote_window(&app, &url, &conn.name, &record)
+                let completion = {
+                    let builds = builds.clone();
+                    let label = label.clone();
+                    let fail = fail.clone();
+                    Box::new(move |result| match result {
+                        Ok(()) => builds.complete(&label, Ok(())),
+                        Err(error) => fail(error),
+                    })
+                };
+                serve::open_watched_remote_window(&app, &url, &conn.name, &record, completion)
             };
             match result {
-                Ok(()) => {
-                    if let Some(nudge) = &nudge {
-                        nudge.notify_one();
-                    }
-                }
+                Ok(()) if retarget => nudge.notify_one(),
+                Ok(()) => {}
                 Err(e) => fail(e),
             }
         });
@@ -342,37 +397,29 @@ impl TauriNativeSurface {
 impl NativeSurface for TauriNativeSurface {
     fn open_labels(&self, library_id: &str) -> HashSet<String> {
         let prefix = format!("{library_id}::");
-        let mut labels: HashSet<String> = self
+        let labels = self
             .app
             .webview_windows()
             .into_keys()
             .filter(|label| label.starts_with(&prefix))
             .collect();
-        // A dispatched build that has now landed in `webview_windows` is no
-        // longer in-flight; drop it, then fold the still-pending ones in so the
-        // reconcile sees them as open.
-        let mut in_flight = self.in_flight.lock().unwrap();
-        in_flight.retain(|label| !labels.contains(label));
-        labels.extend(in_flight.iter().filter(|l| l.starts_with(&prefix)).cloned());
-        labels
+        self.builds.open_labels(&prefix, labels)
     }
 
     fn open(&self, record: &WindowRecord) {
         // Mark the label in-flight BEFORE dispatching the (async) build, so a
         // reconcile that runs before the build lands won't re-open it.
         let label = native_label(record);
-        self.in_flight.lock().unwrap().insert(label.clone());
+        self.builds.begin(label.clone());
         match &self.opener {
             // The local builder dispatches to the Tauri main thread
             // internally, so this returns promptly.
             WindowOpener::Local { addr } => {
-                if let Err(e) = serve::open_watched_local_window(&self.app, *addr, record) {
-                    self.in_flight.lock().unwrap().remove(&label);
-                    tracing::warn!(
-                        window = %record.window_id,
-                        error = %e,
-                        "window watcher: opening a window failed",
-                    );
+                let completion = self.builds.completion(label.clone());
+                if let Err(error) =
+                    serve::open_watched_local_window(&self.app, *addr, record, completion)
+                {
+                    self.builds.complete(&label, Err(error));
                 }
             }
             // Remote builds resolve their navigation URL asynchronously
@@ -400,7 +447,7 @@ impl NativeSurface for TauriNativeSurface {
 
     fn close(&self, label: &str) {
         // No longer in-flight (also covers a close before the build landed).
-        self.in_flight.lock().unwrap().remove(label);
+        self.builds.remove(label);
         self.remote_launches.lock().unwrap().remove(label);
         // A rebuilt window at this label starts from whatever the build path
         // composes, so a remembered title must not outlive the window.
@@ -431,15 +478,14 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
     let change = embedded.library_change_notify();
     let feed = LocalWindowFeed {
         state: Arc::clone(&state),
-        change,
+        change: Arc::clone(&change),
     };
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Local { addr },
-        in_flight: Arc::new(Mutex::new(HashSet::new())),
+        builds: WindowBuilds::new(Arc::clone(&change)),
         remote_launches: Arc::new(Mutex::new(HashMap::new())),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
-        nudge: None,
     };
     let view = Arc::new(WatcherViewState::default());
     // Share the view state so the desktop close handlers can bury/unbury
@@ -1020,10 +1066,9 @@ pub(crate) async fn spawn_devserver_window_watcher(
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Remote { conn },
-        in_flight: Arc::new(Mutex::new(HashSet::new())),
+        builds: WindowBuilds::new(Arc::clone(&change)),
         remote_launches: Arc::new(Mutex::new(HashMap::new())),
         applied_titles: Arc::new(Mutex::new(HashMap::new())),
-        nudge: Some(Arc::clone(&change)),
     };
     let feed = DevserverWindowFeed { snapshot, change };
     let view = Arc::new(WatcherViewState::with_pending_deletes(pending_deletes));
@@ -1069,6 +1114,88 @@ mod tests {
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }
+    }
+
+    struct BuildSurface {
+        builds: WindowBuilds,
+        opens: std::cell::Cell<usize>,
+        completion: std::cell::RefCell<Option<BuildCompletion>>,
+    }
+
+    impl NativeSurface for BuildSurface {
+        fn open_labels(&self, library_id: &str) -> HashSet<String> {
+            self.builds
+                .open_labels(&format!("{library_id}::"), HashSet::new())
+        }
+        fn open(&self, record: &WindowRecord) {
+            let label = native_label(record);
+            self.builds.begin(label.clone());
+            self.opens.set(self.opens.get() + 1);
+            *self.completion.borrow_mut() = Some(self.builds.completion(label));
+        }
+        fn close(&self, label: &str) {
+            self.builds.remove(label);
+        }
+    }
+
+    #[test]
+    fn failed_window_build_reopens_on_next_reconcile() {
+        let surface = BuildSurface {
+            builds: WindowBuilds::new(Arc::new(Notify::new())),
+            opens: std::cell::Cell::new(0),
+            completion: std::cell::RefCell::new(None),
+        };
+        let record = rec();
+        let label = native_label(&record);
+        let reconcile = || {
+            crate::window_watcher::reconcile(
+                &record.library_id,
+                std::slice::from_ref(&record),
+                &HashSet::new(),
+                &surface,
+            )
+        };
+        reconcile();
+        reconcile();
+        assert_eq!(surface.opens.get(), 1, "a pending build is not duplicated");
+        surface.completion.borrow_mut().take().unwrap()(Err("native builder failed".into()));
+        assert!(
+            !surface.builds.contains(&label),
+            "a failed native build must release the pending label"
+        );
+        reconcile();
+        assert_eq!(surface.opens.get(), 2, "the desired window must be retried");
+        // A successful retry leaves only the observed native window in the set.
+        surface.completion.borrow_mut().take().unwrap()(Ok(()));
+        assert!(!surface.builds.contains(&label));
+        assert_eq!(
+            surface
+                .builds
+                .open_labels("lib-test::", HashSet::from([label.clone()])),
+            HashSet::from([label])
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_window_build_nudges_feed_after_retry_delay() {
+        let nudge = Arc::new(Notify::new());
+        let builds = WindowBuilds::new(Arc::clone(&nudge));
+        // The local watcher shares this signal with WebSocket feed subscribers.
+        // An older subscriber must not consume the native watcher's retry.
+        let subscriber = nudge.notified();
+        tokio::pin!(subscriber);
+        subscriber.as_mut().enable();
+        let feed_changed = nudge.notified();
+        tokio::pin!(feed_changed);
+        feed_changed.as_mut().enable();
+        let label = native_label(&rec());
+        builds.begin(label.clone());
+        let started = std::time::Instant::now();
+        builds.completion(label)(Err("native builder failed".into()));
+        tokio::time::timeout(RETRY_NUDGE + Duration::from_secs(5), feed_changed)
+            .await
+            .expect("a failed build must wake the feed without a record change");
+        assert!(started.elapsed() >= RETRY_NUDGE);
     }
 
     #[test]

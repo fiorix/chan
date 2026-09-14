@@ -4779,7 +4779,9 @@ fn reload_devserver_window_from_feed(
         }
         let result = match serve::retarget_watched_remote_window(&app, &url, &record) {
             Ok(true) => Ok(()),
-            Ok(false) => serve::open_watched_remote_window(&app, &url, &conn.name, &record),
+            Ok(false) => {
+                serve::open_watched_remote_window(&app, &url, &conn.name, &record, Box::new(|_| {}))
+            }
             Err(e) => Err(e),
         };
         if let Err(e) = result {
