@@ -219,8 +219,18 @@ pub fn load(index_dir: &Path) -> Result<IndexConfig, ConfigError> {
     })
 }
 
+#[cfg(test)]
+type SaveTestHook = Box<dyn FnOnce() -> Result<(), ConfigError>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SAVE_TEST_HOOK: std::cell::RefCell<Option<SaveTestHook>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Persist the config. Creates the parent directory if needed.
 pub fn save(index_dir: &Path, cfg: &IndexConfig) -> Result<(), ConfigError> {
+    #[cfg(test)]
+    SAVE_TEST_HOOK.with(|hook| hook.take().map_or(Ok(()), |hook| hook()))?;
     let path = config_path(index_dir);
     let body = toml::to_string_pretty(cfg)?;
     crate::fs_ops::atomic_write(&path, body.as_bytes())?;

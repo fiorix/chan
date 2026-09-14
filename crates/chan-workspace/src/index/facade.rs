@@ -158,6 +158,9 @@ pub struct Index {
     /// embed pass. Reads in hot paths take a single lock per build,
     /// not per chunk: each pass snapshots the config once at the top.
     config: Mutex<IndexConfig>,
+    /// Serializes config transactions without holding the readers' mutex
+    /// across persistence. Every writer, including vector stamps, takes it.
+    config_write: Mutex<()>,
     bm25: Bm25Index,
     vectors: VectorStore,
     /// Lazily loaded: opening the embedder mmaps the safetensors
@@ -264,6 +267,7 @@ impl Index {
             workspace_root: workspace_root.to_path_buf(),
             index_dir: index_dir.to_path_buf(),
             config: Mutex::new(config),
+            config_write: Mutex::new(()),
             bm25,
             vectors,
             #[cfg(feature = "embeddings")]
@@ -309,16 +313,13 @@ impl Index {
     /// filter is re-derived on the next reindex (union with the global
     /// baseline), so callers trigger a rebuild after this to re-walk.
     pub fn set_excluded_dirs(&self, dirs: Vec<String>) -> Result<(), IndexError> {
-        let to_save = {
-            let mut cfg = self.config.lock().unwrap();
-            if cfg.excluded_dirs == dirs {
-                return Ok(());
-            }
-            cfg.excluded_dirs = dirs;
-            cfg.clone()
-        };
-        config::save(&self.index_dir, &to_save)?;
-        Ok(())
+        let _write = self.config_write.lock().unwrap();
+        let mut candidate = self.config();
+        if candidate.excluded_dirs == dirs {
+            return Ok(());
+        }
+        candidate.excluded_dirs = dirs;
+        self.persist_config(candidate)
     }
 
     /// Persist a (possibly mutated) config. Used by the CLI when
@@ -328,20 +329,25 @@ impl Index {
     pub fn set_model(&self, model: String) -> Result<(), IndexError> {
         let _ = config::embedding_model(&model)
             .ok_or_else(|| IndexError::UnknownModel(model.clone()))?;
-        let to_save = {
-            let mut cfg = self.config.lock().unwrap();
-            if model == cfg.model {
-                return Ok(());
-            }
-            cfg.model = model;
-            cfg.clone()
-        };
-        config::save(&self.index_dir, &to_save)?;
+        let _write = self.config_write.lock().unwrap();
+        let mut candidate = self.config();
+        if model == candidate.model {
+            return Ok(());
+        }
+        candidate.model = model;
+        self.persist_config(candidate)?;
         // The vectors on disk were produced by the previous model, so wipe
         // them. `clear_vectors` also clears the `vectors_*` stamp so the next
         // Index::open's model-mismatch check (and any human reading the TOML)
         // cannot conclude we trust the empty store.
-        self.clear_vectors()
+        self.clear_vectors_inner()
+    }
+
+    /// Caller holds `config_write` through snapshot, persistence and adoption.
+    fn persist_config(&self, candidate: IndexConfig) -> Result<(), IndexError> {
+        config::save(&self.index_dir, &candidate)?;
+        *self.config.lock().unwrap() = candidate;
+        Ok(())
     }
 
     /// Bin every embedding shard, drop the loaded embedder, and clear the
@@ -351,6 +357,11 @@ impl Index {
     /// scratch). Idempotent: wiping an already-empty store is a no-op beyond
     /// rewriting the (already-cleared) stamp.
     pub fn clear_vectors(&self) -> Result<(), IndexError> {
+        let _write = self.config_write.lock().unwrap();
+        self.clear_vectors_inner()
+    }
+
+    fn clear_vectors_inner(&self) -> Result<(), IndexError> {
         // Bump the epoch before touching anything so a concurrent `build_all`
         // or per-file `write_file` that started under the old epoch treats every
         // vector write it issues from here on as void. This is what makes a
@@ -374,14 +385,10 @@ impl Index {
         // For the opt-out caller the model is unchanged, so a failed wipe is
         // surfaced to the caller (logged, best-effort) rather than self-healed,
         // an accepted filesystem-fault residual, not a normal-operation path.
-        let to_save = {
-            let mut cfg = self.config.lock().unwrap();
-            cfg.vectors_model = None;
-            cfg.vectors_dim = None;
-            cfg.clone()
-        };
-        config::save(&self.index_dir, &to_save)?;
-        Ok(())
+        let mut candidate = self.config();
+        candidate.vectors_model = None;
+        candidate.vectors_dim = None;
+        self.persist_config(candidate)
     }
 
     /// Current vector-store generation. `Workspace::reindex_with_aggression`
@@ -849,6 +856,7 @@ impl Index {
         // build that actually produces vectors.
         #[cfg(feature = "embeddings")]
         if do_vectors {
+            let _write = self.config_write.lock().unwrap();
             if self.vectors_epoch.load(Ordering::SeqCst) == build_epoch {
                 #[cfg(test)]
                 run_lock_test_hook();
@@ -858,15 +866,12 @@ impl Index {
                     .unwrap()
                     .as_ref()
                     .map(|e| e.dim() as u32);
-                let to_save = {
-                    let mut cfg = self.config.lock().unwrap();
-                    cfg.vectors_model = Some(model_at_start.clone());
-                    if let Some(dim) = dim {
-                        cfg.vectors_dim = Some(dim);
-                    }
-                    cfg.clone()
-                };
-                if let Err(e) = config::save(&self.index_dir, &to_save) {
+                let mut candidate = self.config();
+                candidate.vectors_model = Some(model_at_start.clone());
+                if let Some(dim) = dim {
+                    candidate.vectors_dim = Some(dim);
+                }
+                if let Err(e) = self.persist_config(candidate) {
                     // Non-fatal: BM25 + tantivy commits already
                     // succeeded. A missed stamp means the next open
                     // sees vectors_model=None (or the previous value)
@@ -1582,6 +1587,115 @@ mod tests {
             idx.config().vectors_model.as_deref(),
             Some("missing-test-model")
         );
+    }
+
+    fn fail_next_config_save() {
+        config::SAVE_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|| {
+                Err(std::io::Error::other("injected config save failure").into())
+            }));
+        });
+    }
+
+    #[test]
+    fn failed_model_save_keeps_live_and_persisted_config() {
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        let idx = Index::open(tmp.path(), &dir).unwrap();
+        let before = idx.config();
+        let bytes = std::fs::read(config::config_path(&dir)).unwrap();
+        fail_next_config_save();
+        let error = idx.set_model("BAAI/bge-base-en-v1.5".into()).unwrap_err();
+        assert!(error.to_string().contains("injected config save failure"));
+        assert_eq!(std::fs::read(config::config_path(&dir)).unwrap(), bytes);
+        assert_eq!(
+            idx.config().model,
+            before.model,
+            "failed save changed the live model"
+        );
+        assert_eq!(idx.vectors_epoch(), 0);
+    }
+
+    #[test]
+    fn failed_exclusions_save_keeps_live_and_persisted_config() {
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        let idx = Index::open(tmp.path(), &dir).unwrap();
+        let before = idx.config();
+        let bytes = std::fs::read(config::config_path(&dir)).unwrap();
+        fail_next_config_save();
+        let error = idx.set_excluded_dirs(vec!["private".into()]).unwrap_err();
+        assert!(error.to_string().contains("injected config save failure"));
+        assert_eq!(std::fs::read(config::config_path(&dir)).unwrap(), bytes);
+        assert_eq!(
+            idx.config().excluded_dirs,
+            before.excluded_dirs,
+            "failed save changed the live filter"
+        );
+    }
+
+    #[test]
+    fn concurrent_config_setters_preserve_both_changes_and_allow_readers() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let bound = Duration::from_secs(3);
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        let idx = Arc::new(Index::open(tmp.path(), &dir).unwrap());
+        let (saving_tx, saving) = mpsc::channel();
+        let (resume, resume_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let first = {
+            let idx = Arc::clone(&idx);
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                config::SAVE_TEST_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        saving_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(bound).unwrap();
+                        Ok(())
+                    }));
+                });
+                let result = idx.set_excluded_dirs(vec!["private".into()]);
+                done.send(()).unwrap();
+                result.unwrap();
+            })
+        };
+        saving.recv_timeout(bound).unwrap();
+        let (read_tx, read) = mpsc::channel();
+        let reader = {
+            let idx = Arc::clone(&idx);
+            std::thread::spawn(move || read_tx.send(idx.config()).unwrap())
+        };
+        let snapshot = read
+            .recv_timeout(bound)
+            .expect("save blocked a config reader");
+        assert!(
+            snapshot.excluded_dirs.is_empty(),
+            "unpersisted config was visible"
+        );
+        reader.join().unwrap();
+        let second = {
+            let idx = Arc::clone(&idx);
+            std::thread::spawn(move || {
+                let result = idx.set_model("BAAI/bge-base-en-v1.5".into());
+                done_tx.send(()).unwrap();
+                result.unwrap();
+            })
+        };
+        resume.send(()).unwrap();
+        done.recv_timeout(bound).unwrap();
+        done.recv_timeout(bound).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        let live = idx.config();
+        let disk = config::load(&dir).unwrap();
+        for cfg in [live, disk] {
+            assert_eq!(cfg.model, "BAAI/bge-base-en-v1.5");
+            assert_eq!(cfg.excluded_dirs, ["private"]);
+            assert!(cfg.vectors_model.is_none());
+        }
     }
 
     fn make_workspace() -> TempDir {
