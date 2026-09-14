@@ -717,7 +717,10 @@ pub async fn connect_gateway<R: tauri::Runtime>(
         RosterFetch::Unauthorized => {
             // Dead or under-scoped PAT (a desktop.connect-era credential
             // cannot read the roster): self-heal into one re-sign-in.
-            auth::clear_gateway_pat(&discovery.identity_origin)?;
+            if let Err(error) = auth::clear_gateway_pat(&discovery.identity_origin) {
+                park_failed_connect(&app, &state, &gateway_id, &error);
+                return Err(error);
+            }
             signin_leg(&app, &state, &gateway_id, &label, &discovery, interactive)
         }
         fetch => {
@@ -775,6 +778,32 @@ fn upsert_disconnected(state: &AppState, gateway_id: &str, error: &str) {
         rt.status = GatewayStatus::Disconnected;
         rt.pending_signin = false;
         rt.last_error = Some(error.to_string());
+    }
+}
+
+/// A connect with no remaining work must not look like an attempt in flight.
+/// Preserve a runtime that has already connected or owns a browser sign-in.
+fn park_failed_connect<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    gateway_id: &str,
+    error: &str,
+) {
+    let changed = {
+        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+        if let Some(rt) = runtimes
+            .get_mut(gateway_id)
+            .filter(|rt| rt.status == GatewayStatus::Connecting && !rt.pending_signin)
+        {
+            rt.status = GatewayStatus::Disconnected;
+            rt.last_error = Some(error.to_string());
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
+        signal_rows_changed(app, state);
     }
 }
 
@@ -843,6 +872,7 @@ fn signin_leg<R: tauri::Runtime>(
         .any_pending_signin_other_than(gateway_id)
     {
         let msg = "another gateway sign-in is waiting on the browser - finish it first".to_string();
+        park_failed_connect(app, state, gateway_id, &msg);
         emit_notice(
             app,
             "info",
@@ -854,12 +884,15 @@ fn signin_leg<R: tauri::Runtime>(
         );
         return Ok(());
     }
-    auth::open_gateway_signin(
+    if let Err(error) = auth::open_gateway_signin(
         app,
         &discovery.identity_origin,
         &discovery.desktop_authorize_url,
         gateway_id,
-    )?;
+    ) {
+        park_failed_connect(app, state, gateway_id, &error);
+        return Err(error);
+    }
     let stamp = config::now_millis();
     {
         let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
@@ -1824,8 +1857,8 @@ mod tests {
     /// advertised, proxy origin inside the static grant scope so the
     /// capability mint no-ops under the mock runtime) plus a one-row
     /// roster.
-    async fn spawn_gateway_stub() -> (String, tokio::task::JoinHandle<()>) {
-        use axum::routing::get;
+    async fn spawn_gateway_stub(unauthorized: bool) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{response::IntoResponse, routing::get};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let disc_origin = origin.clone();
@@ -1850,7 +1883,10 @@ mod tests {
             )
             .route(
                 "/desktop/v1/devservers",
-                get(|| async {
+                get(move || async move {
+                    if unauthorized {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    }
                     axum::Json(serde_json::json!({
                         "user_id": "11111111-1111-1111-1111-111111111111",
                         "username": "alice",
@@ -1863,6 +1899,7 @@ mod tests {
                             "proxy_origin": "https://alice--a1.p1.proxy.chan.app"
                         }]
                     }))
+                    .into_response()
                 }),
             );
         let handle = tokio::spawn(async move {
@@ -1871,13 +1908,136 @@ mod tests {
         (origin, handle)
     }
 
+    #[tokio::test]
+    async fn rejected_pat_with_busy_signin_parks_and_allows_retry() {
+        let (origin, server) = spawn_gateway_stub(true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let mut cfg = config::Config::default();
+        cfg.gateways.push(Gateway {
+            id: "gw-busy".into(),
+            url: origin.clone(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+        });
+        store.lock().unwrap().save(&cfg).unwrap();
+        let state = Arc::new(crate::AppState::with_store(store));
+        let app = tauri::test::mock_app();
+        let discovery = devserver::discover_gateway(&origin).await.unwrap();
+        let mut other = new_runtime(discovery);
+        other.pending_signin = true;
+        state
+            .gateway_manager
+            .runtimes
+            .lock()
+            .unwrap()
+            .insert("gw-other".into(), other);
+        for _ in 0..2 {
+            crate::auth::test_gateway_pats().lock().unwrap().insert(
+                origin.clone(),
+                crate::auth::StoredPat {
+                    id: "revoked".into(),
+                    secret: "revoked-secret".into(),
+                    label: "test".into(),
+                    expires_at: String::new(),
+                },
+            );
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                connect_gateway(
+                    app.handle().clone(),
+                    Arc::clone(&state),
+                    "gw-busy".into(),
+                    true,
+                ),
+            )
+            .await
+            .expect("connect must finish")
+            .unwrap();
+            let view = state.gateway_manager.view("gw-busy").unwrap();
+            assert_eq!(
+                view.status,
+                GatewayStatus::Disconnected,
+                "a finished connect must not coalesce later clicks"
+            );
+            assert!(!view.pending_signin);
+            assert!(view
+                .last_error
+                .as_deref()
+                .is_some_and(|s| s.contains("another gateway sign-in")));
+            assert!(
+                !crate::auth::test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .contains_key(&origin),
+                "the retry must fetch the roster and clear the rejected PAT"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn busy_signin_preserves_connected_and_pending_runtimes() {
+        let (origin, server) = spawn_gateway_stub(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(crate::AppState::with_store(store));
+        let app = tauri::test::mock_app();
+        let discovery = devserver::discover_gateway(&origin).await.unwrap();
+        let mut other = new_runtime(discovery.clone());
+        other.pending_signin = true;
+        state
+            .gateway_manager
+            .runtimes
+            .lock()
+            .unwrap()
+            .insert("gw-other".into(), other);
+        for (status, pending_signin) in [
+            (GatewayStatus::Connected, false),
+            (GatewayStatus::Connecting, true),
+        ] {
+            let mut rt = new_runtime(discovery.clone());
+            rt.status = status;
+            rt.pending_signin = pending_signin;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            rt.poll_cancel = Some(cancel.clone());
+            state
+                .gateway_manager
+                .runtimes
+                .lock()
+                .unwrap()
+                .insert("gw-active".into(), rt);
+            signin_leg(
+                app.handle(),
+                &state,
+                "gw-active",
+                "active",
+                &discovery,
+                true,
+            )
+            .unwrap();
+            let view = state.gateway_manager.view("gw-active").unwrap();
+            assert_eq!(view.status, status);
+            assert_eq!(view.pending_signin, pending_signin);
+            assert!(view.last_error.is_none());
+            assert!(!cancel.is_cancelled());
+        }
+        server.abort();
+    }
+
     /// The blocker regression: park -> callback -> roster fetched -> poll
     /// running. The resume must make the parked runtime resumable before
     /// re-entering connect_gateway, or the coalesce guard reads the park
     /// as an attempt in flight and the gateway sticks Connecting forever.
     #[tokio::test]
     async fn resume_after_signin_fetches_roster_and_starts_poll() {
-        let (origin, server) = spawn_gateway_stub().await;
+        let (origin, server) = spawn_gateway_stub(false).await;
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
             dir.path().join("config.json"),

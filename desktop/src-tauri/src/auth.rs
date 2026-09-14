@@ -383,6 +383,15 @@ pub fn load_gateway_pat(identity_origin: &str) -> Result<Option<StoredPat>, Stri
 /// next connect attempt falls into the browser sign-in instead of replaying
 /// a dead credential.
 pub fn clear_gateway_pat(identity_origin: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if test_gateway_pats()
+        .lock()
+        .unwrap()
+        .remove(identity_origin)
+        .is_some()
+    {
+        return Ok(());
+    }
     let account = gateway_account(identity_origin);
     match entry_for(&account)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
