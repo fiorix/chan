@@ -561,7 +561,7 @@ chan-workspace keeps user content and machine-local state separate. The registry
 
 The metadata key is the path slug plus an 8-hex hash of the canonical path at first registration. `Library::move_workspace` preserves it when the local path moves, so sidecars follow the workspace logically without moving files on disk.
 
-Desktop targets (macOS, Linux, Windows) use `~/.chan` or the home-equivalent for config, state, and cache alike: one visible directory, easy to inspect and delete. iOS and Android collapse `config_dir` onto the app-sandbox state dir because the home dir inside the sandbox is not user-writable and the "brand-visible" argument for `~/.chan/` does not apply on mobile.
+Every target uses `.chan` under the OS-provided home directory for config, state, and cache alike, including the app sandbox home on iOS and Android. `CHAN_HOME` overrides the directory directly. If no home directory resolves, Unix uses `/var/tmp/chan-<uid>` and Windows uses `C:\ProgramData\chan`. One platform-independent selector derives the home-relative path or invokes that fallback; `state_dir` and `cache_dir` delegate to `config_dir`.
 
 Drafts are the deliberate exception to "no chan state in the workspace root." They live in-tree as a real hidden directory named by `Registry::drafts_dir` (default `.Drafts`), created lazily on first Cmd+N, and are indexed/graphed like ordinary content. The walker still hard-skips `.git` and `.chan` and honors the effective excluded-dirs set; `.Drafts` is not on the skip list.
 

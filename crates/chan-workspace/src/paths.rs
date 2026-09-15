@@ -21,9 +21,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// Per-user config dir. Holds the global `config.toml` (workspace
-/// registry + default-workspace). `~/.chan/` on desktop targets;
-/// co-located under the data dir on iOS / Android where the home
-/// dir isn't user-writable.
+/// registry + default-workspace). Uses `.chan` under the OS-provided home
+/// on every platform, including the app sandbox home on iOS / Android.
 ///
 /// `CHAN_HOME` overrides this with the directory to use IN PLACE OF `~/.chan`
 /// (CARGO_HOME / GNUPGHOME semantics -- the dir itself, not a parent): set
@@ -50,18 +49,14 @@ fn config_dir_with_sources(override_dir: Option<PathBuf>, home: Option<PathBuf>)
 /// explicit makes the unavailable-home branch testable without mutating the
 /// process environment.
 fn config_dir_with_home(home: Option<PathBuf>) -> PathBuf {
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    {
-        return state_dir();
-    }
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
-        home.map(|p| p.join(".chan"))
-            .unwrap_or_else(home_unavailable_config_dir)
-    }
+    default_config_dir(home, home_unavailable_config_dir)
 }
 
-#[cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))]
+fn default_config_dir(home: Option<PathBuf>, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    home.map(|path| path.join(".chan")).unwrap_or_else(fallback)
+}
+
+#[cfg(unix)]
 fn home_unavailable_config_dir() -> PathBuf {
     PathBuf::from(format!(
         "/var/tmp/chan-{}",
@@ -69,7 +64,7 @@ fn home_unavailable_config_dir() -> PathBuf {
     ))
 }
 
-#[cfg(all(windows, not(any(target_os = "ios", target_os = "android"))))]
+#[cfg(windows)]
 fn home_unavailable_config_dir() -> PathBuf {
     PathBuf::from(r"C:\ProgramData\chan")
 }
@@ -518,7 +513,6 @@ mod tests {
         assert_eq!(default, home.join(".chan"));
     }
 
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[test]
     fn config_dir_without_os_home_uses_named_absolute_fallback() {
         let fallback = config_dir_with_sources(None, None);
@@ -527,6 +521,22 @@ mod tests {
             "fallback must be absolute: {fallback:?}"
         );
         assert_eq!(fallback, home_unavailable_config_dir());
+    }
+
+    #[test]
+    fn default_config_dir_uses_home_and_absolute_fallback() {
+        let home = test_home();
+        let fallback = home_unavailable_config_dir();
+        let resolved = [
+            default_config_dir(Some(home.clone()), || fallback.clone()),
+            default_config_dir(None, || fallback.clone()),
+        ];
+        assert_eq!(resolved, [home.join(".chan"), fallback]);
+        assert!(resolved.iter().all(|path| path.is_absolute()));
+        assert_eq!(
+            default_config_dir(Some(home.clone()), || panic!("home must bypass fallback")),
+            home.join(".chan"),
+        );
     }
 
     #[test]
