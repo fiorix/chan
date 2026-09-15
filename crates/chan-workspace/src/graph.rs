@@ -127,7 +127,7 @@ pub struct FileRecord<'a> {
     pub mtime: Option<i64>,
     pub size: Option<i64>,
     /// Tags the file as a regular note or as an imported contact;
-    /// the contact tag workspaces the editor `@` picker and lets graph
+    /// the contact tag drives the editor `@` picker and lets graph
     /// consumers filter without re-parsing frontmatter.
     pub node_kind: NodeKind,
     pub outgoing: &'a [Edge],
@@ -1479,7 +1479,7 @@ impl GraphView {
         }
     }
 
-    /// Link-autocomplete lookup. Workspaces the `[[` typeahead in the
+    /// Link-autocomplete lookup. Drives the `[[` typeahead in the
     /// editor: the user types a fragment and gets back files and
     /// headings to link to.
     ///

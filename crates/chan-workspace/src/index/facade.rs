@@ -735,7 +735,7 @@ impl Index {
                             // per chunk, so a rate-based ETA across batches
                             // would track GPU step time and not give the UI
                             // anything actionable. Leave it to the
-                            // IndexFile ticks to workspace the bar.
+                            // IndexFile ticks to drive the bar.
                             eta_secs: None,
                         });
                         match self.flush_embed_batch(

@@ -3889,7 +3889,7 @@ impl Workspace {
     /// Start the built-in graph indexer on this workspace. Returns a
     /// handle; drop or `stop()` to tear down. The indexer attaches
     /// its own watcher, debounces per-path with `debounce_ms`, and
-    /// workspaces `index_file` / `forget_file` / `reconcile` so the
+    /// drives `index_file` / `forget_file` / `reconcile` so the
     /// consumer (CLI, chan-server, FFI shells) doesn't need to
     /// write its own indexing loop.
     pub fn start_graph_indexer(
@@ -6202,7 +6202,7 @@ mod tests {
         // Sleep past the 1-second mtime granularity floor of HFS+
         // / older ext4 so the modify is observable via stat. APFS
         // and modern ext4 are nanosecond, but the lowest common
-        // denominator workspaces the test sleep.
+        // denominator drives the test sleep.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(
             workspace_dir.path().join("a.md"),
@@ -9142,7 +9142,7 @@ mod tests {
         assert!(workspace.resolve_link("../etc/passwd").is_none());
     }
 
-    /// The graph row workspaces the kind. An unindexed file still
+    /// The graph row drives the kind. An unindexed file still
     /// resolves (we found it on disk) but the kind defaults to
     /// `File` so the editor can render a generic doc pill while the
     /// indexer catches up.
@@ -9155,7 +9155,7 @@ mod tests {
 
     /// After indexing a contact-frontmatter file, resolve_link's kind
     /// matches what the picker put in the graph. This is the path
-    /// that workspaces the editor's kind-aware pill rendering.
+    /// that drives the editor's kind-aware pill rendering.
     #[test]
     fn resolve_link_returns_contact_kind_for_contact_node() {
         let (_cfg, root, workspace) = link_fixture();

@@ -1,5 +1,5 @@
 // Built-in graph indexer. Owns a watcher subscription, debounces
-// per-path events, and workspaces `Workspace::index_file` / `forget_file`
+// per-path events, and drives `Workspace::index_file` / `forget_file`
 // / `reconcile` so consumers (the CLI, chan-server, and the future
 // Swift / Kotlin shells) do not each reinvent the same queue.
 //
@@ -726,18 +726,10 @@ mod tests {
         // re-index, which is exactly the kind of churn the debounce
         // exists to prevent.
         //
-        // This workspaces the debounce decision logic directly with an
-        // INJECTED clock instead of a real watcher + wall-clock
-        // sleeps. The earlier version wrote the file five times with
-        // `sleep(DEBOUNCE_TEST_MS/3)` between writes and asserted
-        // `indexed_total <= 3`; that invariant only holds if the
-        // writes genuinely arrive faster than the debounce matures,
-        // which the full parallel `cargo test` (CI) breaks: under
-        // 12-way CPU contention the sub-30ms sleeps and the indexer
-        // thread's scheduling both stretch, so the window matures
-        // mid-burst and the test flaked. Modeling the burst against a
-        // controlled `Instant` proves the SAME coalescing property
-        // deterministically, with no FS, no watcher, and no sleep.
+        // This drives the debounce decision logic with a controlled
+        // Instant. Event timestamps stay inside the debounce window
+        // regardless of thread scheduling, so the test proves coalescing
+        // without filesystem access, a watcher, or sleeps.
         let debounce = Duration::from_millis(DEBOUNCE_TEST_MS);
         let mut pending: HashMap<String, Instant> = HashMap::new();
         let base = Instant::now();

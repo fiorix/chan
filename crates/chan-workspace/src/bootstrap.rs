@@ -17,7 +17,7 @@
 //     hardcoded `.git/` / `.chan/` invariants. The editor-visible
 //     on-demand APIs (`Workspace::list`, `Workspace::list_tree`) stay
 //     unfiltered so a user can still open a file inside an ignored
-//     directory on purpose; the bootstrap spine workspaces the DEFAULT
+//     directory on purpose; the bootstrap spine drives the DEFAULT
 //     rendered tree and the paced jobs, so it honors the filter.
 //   * The root response is the first level fully (root's immediate
 //     files + dirs, each dir carrying its recursive subtree stats),
@@ -61,7 +61,7 @@ pub struct BootstrapDir {
     /// Basename (not a path).
     pub name: String,
     /// Recursive counts/sizes for everything under this directory
-    /// (filtered). Workspaces the collapsed-directory affordance.
+    /// (filtered). Drives the collapsed-directory affordance.
     pub subtree: SubtreeStats,
     /// Immediate-child directory count, so the UI can render
     /// "12 files, 3 folders" without expanding.

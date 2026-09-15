@@ -170,7 +170,7 @@ impl Default for EditorPrefs {
     }
 }
 
-/// Editor theme. Workspaces the markdown renderer + source view
+/// Editor theme. Drives the markdown renderer + source view
 /// typography and chrome (headings, body, code blocks, blockquotes,
 /// tables). Light/dark variants are picked from the active
 /// `ThemeChoice`; density from `LineSpacing`. App chrome

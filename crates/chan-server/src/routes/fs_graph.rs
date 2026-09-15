@@ -14,7 +14,7 @@
 //! The walker uses `symlink_metadata` everywhere (lstat semantics) so
 //! a symlink is never confused with the file it points at. Symlink
 //! targets are classified but never traversed: their existence and
-//! whether they land inside the workspace root workspaces the node kind, and
+//! whether they land inside the workspace root drive the node kind, and
 //! traversal only follows `contains` edges (parent -> child) under
 //! real directories.
 //!

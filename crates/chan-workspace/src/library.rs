@@ -557,7 +557,7 @@ impl Library {
 
 /// Inner workhorse for `Library::sweep_orphans`: walk each metadata
 /// parent in `parents` and remove any immediate subdirectory whose
-/// name is not in `known`. Pure in its arguments so tests can workspace
+/// name is not in `known`. Pure in its arguments so tests can drive
 /// it against a TempDir tree without mutating the host's real
 /// metadata root.
 ///

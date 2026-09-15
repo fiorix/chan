@@ -1651,7 +1651,7 @@ fn build_graph_view(
         contact_rows.iter().map(|c| c.rel_path.clone()).collect();
     // `graph_file_set` is the indexed-only view; `file_set` is the
     // full link-resolution oracle (graph + all on-disk files). Keep
-    // both: graph_file_set workspaces the "is this a real graph node?"
+    // both: graph_file_set drives the "is this a real graph node?"
     // gate used when synthesizing referenced-disk-file nodes, while
     // file_set is what resolve_link_dst and ghost classification
     // consult.
@@ -3164,7 +3164,7 @@ mod tests {
         // ignore-consistency-spec.md: a workspace pointed at a source tree
         // must not plot node_modules/target/venv/.git in the graph. The
         // default registry index_excluded_dirs is sane, so this holds
-        // with no config. Workspaces the runaway-node-count fix.
+        // with no config. Guards against a runaway node count.
         let (_cfg, root, workspace) = open_workspace();
         put(root.path(), "top.md", b"# Top\n");
         put(root.path(), "notes/today.md", b"# Today\n");

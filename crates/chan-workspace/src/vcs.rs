@@ -89,7 +89,7 @@ pub fn is_vcs_control_path(rel: &str) -> bool {
 }
 
 /// Test helper: the same algorithm as [`detect_parent_vcs`], but with
-/// an explicit `home` override so tests can workspace the `$HOME` stop
+/// an explicit `home` override so tests can drive the `$HOME` stop
 /// without touching the developer's real home directory.
 pub(crate) fn detect_parent_vcs_with_home(path: &Path, home: Option<PathBuf>) -> Option<VcsParent> {
     let start = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

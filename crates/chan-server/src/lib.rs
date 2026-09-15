@@ -570,7 +570,7 @@ async fn build_app_with_extensions(
     // Progress fan-out: every `Workspace::reindex_with` tick (per-file
     // index, graph rebuild, embed batch) lands on the same /ws
     // stream as watch + LLM frames, with `type: "progress"`. The
-    // status bar in the web app subscribes to workspace the live
+    // status bar in the web app subscribes to drive the live
     // indexer pill. On a cold start we also tee that progress to stderr
     // so the background build isn't silent in the terminal.
     let broadcast_sink = make_progress_broadcast(&events_tx);
