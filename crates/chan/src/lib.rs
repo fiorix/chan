@@ -1362,9 +1362,7 @@ enum IndexAction {
 /// uniformly across the surface (`chan workspace index enable-semantic` /
 /// `chan workspace reports enable`).
 ///
-/// Default state for both features is OFF (lean-workspace
-/// baseline); explicit opt-in via this CLI / the
-/// pre-flight UI / Settings flips them on.
+/// Reports default on for new workspaces; semantic search defaults off. This CLI, the preflight UI, and Settings expose the toggles.
 #[derive(Subcommand, Debug)]
 enum ReportsAction {
     /// Enable code reports for a workspace
