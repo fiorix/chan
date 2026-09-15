@@ -77,6 +77,40 @@ fn collect_for(rx: &mpsc::Receiver<WatchEvent>, timeout: Duration) -> Vec<WatchE
 }
 
 #[test]
+fn reconcile_forgets_txt_in_newly_excluded_directory() {
+    let cfg = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root.path()).unwrap();
+    let workspace = lib.open_workspace(root.path()).unwrap();
+    seed_junk(root.path(), "generated/notes.txt", "excludedtexttoken\n");
+    workspace.reindex(None).unwrap();
+    let opts = SearchOpts {
+        mode: chan_workspace::SearchMode::Bm25,
+        ..SearchOpts::default()
+    };
+    assert_eq!(
+        workspace
+            .search("excludedtexttoken", &opts)
+            .unwrap()
+            .hits
+            .len(),
+        1
+    );
+    workspace
+        .set_excluded_dirs(vec!["generated".to_string()])
+        .unwrap();
+    let report = workspace.reconcile().unwrap();
+    let hits = workspace.search("excludedtexttoken", &opts).unwrap().hits;
+    assert!(
+        hits.is_empty(),
+        "excluded text remains searchable: {hits:?}; {report:?}"
+    );
+    assert_eq!(report.forgotten, ["generated/notes.txt"]);
+    assert!(root.path().join("generated/notes.txt").is_file());
+}
+
+#[test]
 fn ignored_dirs_absent_from_index_and_graph_by_default() {
     let cfg = TempDir::new().unwrap();
     let workspace_root = TempDir::new().unwrap();

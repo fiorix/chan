@@ -624,6 +624,18 @@ impl GraphView {
             tx.execute_batch("PRAGMA user_version = 6;")?;
             tx.commit()?;
         }
+        if v < 7 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS text_files (
+                    rel_path TEXT PRIMARY KEY,
+                    mtime INTEGER,
+                    size INTEGER
+                );
+                PRAGMA user_version = 7;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -935,6 +947,27 @@ impl GraphView {
         Ok(())
     }
 
+    /// Stamp a non-Markdown text file without making it a graph document.
+    /// Inbound edges belong to their source notes and remain intact.
+    pub(crate) fn stamp_text_file(
+        &self,
+        rel: &str,
+        mtime: Option<i64>,
+        size: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM edges WHERE src = ?", params![rel])?;
+        tx.execute("DELETE FROM headings WHERE rel_path = ?", params![rel])?;
+        tx.execute("DELETE FROM nodes WHERE rel_path = ?", params![rel])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO text_files(rel_path, mtime, size) VALUES (?, ?, ?)",
+            params![rel, mtime, size],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Drop a file from the graph entirely. Edges with `rel` as
     /// either endpoint go too; no dangling references.
     pub fn forget_file(&self, rel: &str) -> Result<()> {
@@ -947,6 +980,7 @@ impl GraphView {
         )?;
         tx.execute("DELETE FROM headings WHERE rel_path = ?", params![rel])?;
         tx.execute("DELETE FROM nodes WHERE rel_path = ?", params![rel])?;
+        tx.execute("DELETE FROM text_files WHERE rel_path = ?", params![rel])?;
         tx.commit()?;
         Ok(())
     }
@@ -988,6 +1022,11 @@ impl GraphView {
         )?;
         tx.execute(
             "DELETE FROM nodes WHERE rel_path = ?1 \
+             OR rel_path LIKE ?2 ESCAPE '\\'",
+            params![prefix, subtree_like],
+        )?;
+        tx.execute(
+            "DELETE FROM text_files WHERE rel_path = ?1 \
              OR rel_path LIKE ?2 ESCAPE '\\'",
             params![prefix, subtree_like],
         )?;
@@ -1169,6 +1208,10 @@ impl GraphView {
     /// a crash mid-swap leaves either the old live state intact
     /// (transaction rolled back) or the new one fully committed.
     pub fn swap_staging(&self) -> Result<()> {
+        self.swap_staging_with_text_files(&[])
+    }
+
+    pub(crate) fn swap_staging_with_text_files(&self, text_files: &[FileStatRow]) -> Result<()> {
         tracing::debug!("graph::swap_staging");
         let conn = self.writer.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
@@ -1199,6 +1242,14 @@ impl GraphView {
         tx.execute("DELETE FROM staging_edges", [])?;
         tx.execute("DELETE FROM staging_headings", [])?;
         tx.execute("DELETE FROM staging_nodes", [])?;
+        tx.execute("DELETE FROM text_files", [])?;
+        {
+            let mut insert = tx
+                .prepare_cached("INSERT INTO text_files(rel_path, mtime, size) VALUES (?, ?, ?)")?;
+            for (rel, mtime, size) in text_files {
+                insert.execute(params![rel, mtime, size])?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1212,6 +1263,7 @@ impl GraphView {
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM headings", [])?;
         tx.execute("DELETE FROM nodes", [])?;
+        tx.execute("DELETE FROM text_files", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -1235,6 +1287,7 @@ impl GraphView {
         tx.execute("DELETE FROM edges", [])?;
         tx.execute("DELETE FROM headings", [])?;
         tx.execute("DELETE FROM nodes", [])?;
+        tx.execute("DELETE FROM text_files", [])?;
         {
             let mut ins_node = tx.prepare_cached(
                 "INSERT OR REPLACE INTO nodes(rel_path, kind, mtime, title, basename, emails, size) \
@@ -1302,11 +1355,11 @@ impl GraphView {
         Ok(out)
     }
 
-    /// All files known to the graph with their last-seen
+    /// All indexed files, including non-document text files, with their last-seen
     /// `(mtime, size)` tuple. Either component is `None` when the
     /// indexer couldn't stat the file or the row predates the v5
     /// migration (size column NULL). Sorted by path. Used by
-    /// `Workspace::reconcile` to workspace a strictly tighter diff than
+    /// `Workspace::reconcile` to compute a strictly tighter diff than
     /// mtime alone: a same-mtime-different-content rewrite no
     /// longer slips past the reconcile.
     pub fn files_with_stat(&self) -> Result<Vec<FileStatRow>> {
@@ -1314,7 +1367,8 @@ impl GraphView {
         let conn = self.reader()?;
         let mut stmt = conn.prepare_cached(
             "SELECT rel_path, mtime, size FROM nodes \
-             WHERE kind IN ('file', 'contact') ORDER BY rel_path",
+             WHERE kind IN ('file', 'contact') \
+             UNION ALL SELECT rel_path, mtime, size FROM text_files ORDER BY rel_path",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -1701,11 +1755,45 @@ mod tests {
     }
 
     #[test]
+    fn migration_v6_preserves_graph_and_adds_text_stamps() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("graph.sqlite");
+        {
+            let g = GraphView::open(&db).unwrap();
+            let conn = g.writer.lock().unwrap();
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS text_files;
+                INSERT INTO nodes(rel_path, kind, mtime, size) VALUES ('source.md', 'file', 1, 20);
+                INSERT INTO edges(src, dst, kind) VALUES ('source.md', 'notes.txt', 'link');
+                PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        }
+        let g = GraphView::open(&db).unwrap();
+        assert_eq!(count(&g, "PRAGMA user_version"), 7);
+        assert_eq!(g.files().unwrap(), ["source.md"]);
+        assert_eq!(g.backlinks("notes.txt").unwrap().len(), 1);
+        assert_eq!(count(&g, "SELECT COUNT(*) FROM text_files"), 0);
+        {
+            let conn = g.writer.lock().unwrap();
+            conn.execute(
+                "INSERT INTO text_files(rel_path, mtime, size) VALUES ('notes.txt', 2, 10)",
+                [],
+            )
+            .unwrap();
+        }
+        drop(g);
+        let g = GraphView::open(&db).unwrap();
+        assert_eq!(count(&g, "SELECT COUNT(*) FROM text_files"), 1);
+        assert_eq!(g.backlinks("notes.txt").unwrap().len(), 1);
+    }
+
+    #[test]
     fn open_creates_schema() {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("graph.sqlite");
         let g = GraphView::open(&db).unwrap();
-        assert_eq!(count(&g, "PRAGMA user_version"), 6);
+        assert_eq!(count(&g, "PRAGMA user_version"), 7);
     }
 
     #[test]
@@ -2468,7 +2556,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
     }
 
     #[test]
@@ -2533,7 +2621,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
     }
 
     /// Stages a few files into the staging tables, verifies the

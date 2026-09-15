@@ -2656,11 +2656,8 @@ impl Workspace {
         // additions, so the graph rebuild skips the same subtrees the index
         // build does (both re-derive it per reindex).
         let entries = fs_ops::list_tree_scoped(self.root(), policy)?;
-        // The graph is Markdown-only: only `.md` files become document
-        // nodes (and contribute wikilink / heading / token edges). `.txt`
-        // stays editable + BM25-searchable (the search pass in `build_all`
-        // still keys off the wider `is_indexable_text`) but is not a graph
-        // document, so the staging walk filters on `is_markdown_file`.
+        // Only Markdown files become graph documents. Plain text gets stat
+        // rows for reconcile, replaced atomically with the staged graph.
         let total: u64 = entries
             .iter()
             .filter(|e| !e.is_dir && fs_ops::is_markdown_file(&e.path))
@@ -2709,6 +2706,7 @@ impl Workspace {
         let cursor: Option<String> = graph.staging_cursor()?;
 
         let mut seen: u64 = 0;
+        let mut text_files = Vec::new();
         let started = std::time::Instant::now();
         for e in &entries {
             if let Some(c) = cancel {
@@ -2716,7 +2714,13 @@ impl Workspace {
                     return Err(ChanError::Cancelled);
                 }
             }
-            if e.is_dir || !fs_ops::is_markdown_file(&e.path) {
+            if e.is_dir || !fs_ops::is_indexable_text(&e.path) {
+                continue;
+            }
+            if !fs_ops::is_markdown_file(&e.path) {
+                if self.read_text(&e.path).is_ok() {
+                    text_files.push((e.path.clone(), e.mtime, Some(size_to_i64(e.size))));
+                }
                 continue;
             }
             // Resume skip: the walk is sorted, so a strictly-
@@ -2765,7 +2769,7 @@ impl Workspace {
         // Swap staging into the live tables in one atomic txn.
         // Past this commit the previous live state is gone and the
         // new one is visible to readers.
-        graph.swap_staging()?;
+        graph.swap_staging_with_text_files(&text_files)?;
         Ok(())
     }
 
@@ -3257,9 +3261,8 @@ impl Workspace {
         // path re-runs both so an asymmetric crash converges.
         //
         // Graph is Markdown-only: only `.md` becomes a document node.
-        // A non-Markdown indexable file (`.txt`) is still BM25-indexed
-        // below but carries no graph node; evict any stale node (e.g. a
-        // `.md` renamed to `.txt`) so the graph never holds a `.txt`.
+        // Plain text has a separate stat row for reconcile. Its outgoing
+        // graph data is removed; other notes still own links pointing to it.
         if fs_ops::is_markdown_file(rel) {
             let (title, node_kind, headings, edges, emails, aliases) =
                 parse_for_graph(rel, content);
@@ -3275,7 +3278,7 @@ impl Workspace {
                 aliases: aliases.as_deref(),
             })?;
         } else {
-            self.graph()?.forget_file(rel)?;
+            self.graph()?.stamp_text_file(rel, mtime, size)?;
         }
         // Hand the already-read content to the index so the read goes through
         // the Workspace sandbox exactly once. Snapshot the vector epoch BEFORE
@@ -3531,11 +3534,10 @@ impl Workspace {
         Ok(replayed)
     }
 
-    /// Diff the live filesystem against the graph and emit per-file
-    /// index_file / forget_file calls only for the files that
-    /// actually changed. Cheaper than a full `reindex` because
-    /// unchanged files are skipped entirely; matches a clean reindex
-    /// in end state when the diff is correct.
+    /// Diff live files against graph documents, text stamps and index entries.
+    /// Emit journaled `index_file` / `forget_file` calls for changed or missing
+    /// entries. Unchanged indexed files are skipped, making this cheaper than
+    /// a full `reindex`; it converges to that end state when the diff is correct.
     ///
     /// Use cases:
     ///   - Cold open after edits while the process was down: the
@@ -3550,7 +3552,7 @@ impl Workspace {
     ///     touched outside the journaled set.
     ///
     /// Diff policy compares the `(mtime, size)` tuple stamped on the
-    /// graph row against the live `stat()` snapshot:
+    /// graph document or text stamp row against the live `stat()` snapshot:
     ///   - File on disk but not in graph -> `index_file`.
     ///   - File on disk + graph row with different mtime -> `index_file`.
     ///   - File on disk + graph row with same mtime but a different
@@ -3561,9 +3563,16 @@ impl Workspace {
     ///   - Legacy rows (size = NULL, predating the v5 migration) fall
     ///     back to mtime-only; the first `index_file` after upgrade
     ///     backfills the size column.
-    ///   - File on disk + matching `(mtime, size)` tuple -> skip.
-    ///   - File in graph but missing from disk -> `forget_file`.
-    ///   - File on disk that cannot be read (not valid UTF-8,
+    ///   - File on disk + matching `(mtime, size)` tuple -> skip, except
+    ///     a text file missing from the index is read to check whether the
+    ///     active chunker would emit entries within the incremental size ceiling.
+    ///     If so, `index_file` repairs it. Empty, whitespace-only and
+    ///     frontmatter-only text stays skipped.
+    ///     A failed repair probe is left for a later pass.
+    ///   - Graph document, text stamp or index-only path missed by the walk ->
+    ///     `forget_file` only if current policy excludes it or capability-relative
+    ///     metadata confirms NotFound. Other outcomes retain the derived data.
+    ///   - File on disk that needs indexing but cannot be read (not valid UTF-8,
     ///     unreadable, or removed between the walk and the read) ->
     ///     dropped from both backends, logged at warn, and listed in
     ///     `ReconcileReport::failed`. The pass carries on, the way
@@ -3585,6 +3594,8 @@ impl Workspace {
         let _serial = self.write_serial.lock().unwrap();
         #[cfg(test)]
         open_recovery_probe(self);
+        #[cfg(test)]
+        let walk_skip = RECONCILE_WALK_SKIP.with(|skip| skip.borrow_mut().take());
         // Snapshot the graph's view of the world: per-file
         // (mtime, size) tuples. Graph stores mtime as Unix
         // seconds and size as bytes (None for either component
@@ -3594,6 +3605,16 @@ impl Workspace {
             .files_with_stat()?
             .into_iter()
             .map(|(rel, mtime, size)| (rel, (mtime, size)))
+            .collect();
+        let index = self.index()?;
+        let indexed_paths: std::collections::HashSet<String> =
+            index.known_paths()?.into_iter().collect();
+        let chunking = index.config().chunking;
+        // Index-only paths include orphaned text entries without a stat row.
+        let known_paths: std::collections::HashSet<String> = graph_snapshot
+            .keys()
+            .chain(indexed_paths.iter())
+            .cloned()
             .collect();
 
         // Walk the workspace applying the same filter the reindex uses
@@ -3615,6 +3636,10 @@ impl Workspace {
             if !fs_ops::is_indexable_text(&rel) {
                 continue;
             }
+            #[cfg(test)]
+            if walk_skip.as_deref() == Some(&rel) {
+                continue;
+            }
             let meta = entry.metadata().ok();
             let mtime = meta
                 .as_ref()
@@ -3634,7 +3659,7 @@ impl Workspace {
         // entries trigger an index_file; the journal in PR5 covers
         // crash recovery for each per-file commit pair.
         for (rel, (disk_mtime, disk_size)) in &disk_files {
-            let needs_index = match graph_snapshot.get(rel) {
+            let mut needs_index = match graph_snapshot.get(rel) {
                 None => true,
                 Some((graph_mtime, graph_size)) => {
                     // Tighter diff than mtime alone: a file rewritten
@@ -3647,6 +3672,28 @@ impl Workspace {
                         || (graph_size.is_some() && disk_size.is_some() && graph_size != disk_size)
                 }
             };
+            if !needs_index
+                && !fs_ops::is_markdown_file(rel)
+                && !indexed_paths.contains(rel)
+                && disk_size.is_none_or(|size| (1..=size_to_i64(TEXT_WRITE_LIMIT)).contains(&size))
+            {
+                // A rebuild can stamp text before its index read fails. A matching
+                // stamp then needs repair unless the content legitimately has no
+                // chunks. Respect the incremental indexer's existing size ceiling.
+                match self.read_text(rel) {
+                    Ok(content) => {
+                        needs_index =
+                            !crate::index::chunking::chunk(&content, &chunking).is_empty();
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            rel = %rel,
+                            ?error,
+                            "reconcile: could not probe text for a missing index entry; will retry",
+                        );
+                    }
+                }
+            }
             if needs_index {
                 match self.index_file_serial_or_source_error(rel)? {
                     None => upserted.push(rel.clone()),
@@ -3668,10 +3715,34 @@ impl Workspace {
             }
         }
 
-        // Pass 2: every file in graph but not on disk. These are
-        // deletions the watcher missed (or a downtime deletion).
-        for rel in graph_snapshot.keys() {
-            if !disk_files.contains_key(rel) {
+        // Pass 2 also reclaims index-only entries and files excluded by policy.
+        for rel in &known_paths {
+            if disk_files.contains_key(rel) {
+                continue;
+            }
+            let should_forget = if !policy.includes(rel, false) {
+                true
+            } else {
+                match self.fs.dir().symlink_metadata(rel) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                    Ok(_) => {
+                        tracing::debug!(
+                            rel = %rel,
+                            "reconcile: walk missed an existing path; keeping graph and index",
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            rel = %rel,
+                            ?error,
+                            "reconcile: could not confirm missing path; keeping graph and index",
+                        );
+                        false
+                    }
+                }
+            };
+            if should_forget {
                 self.forget_file_serial(rel)?;
                 forgotten.push(rel.clone());
             }
@@ -4080,6 +4151,14 @@ fn arm_open_rebuild_probe(
 #[cfg(test)]
 thread_local! {
     static INDEX_FILE_STAT_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// The next reconcile on this thread omits one path from its disk snapshot,
+// simulating a walk error or a file beneath a filesystem boundary.
+#[cfg(test)]
+thread_local! {
+    static RECONCILE_WALK_SKIP: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -5667,6 +5746,220 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f == "doomed.md"));
+    }
+
+    #[test]
+    fn reconcile_repairs_txt_with_stamp_but_no_index_entry() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("notes.txt", "repairtoken\n").unwrap();
+        workspace.reindex(None).unwrap();
+        let stamps = workspace.graph().unwrap().files_with_stat().unwrap();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].0, "notes.txt");
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert_eq!(
+            workspace.search("repairtoken", &opts).unwrap().hits.len(),
+            1
+        );
+        workspace.index().unwrap().forget("notes.txt").unwrap();
+        assert!(workspace
+            .search("repairtoken", &opts)
+            .unwrap()
+            .hits
+            .is_empty());
+        assert_eq!(
+            workspace.graph().unwrap().files_with_stat().unwrap(),
+            stamps
+        );
+
+        let report = workspace.reconcile().unwrap();
+        let hits = workspace.search("repairtoken", &opts).unwrap().hits;
+        assert_eq!(
+            hits.len(),
+            1,
+            "missing index entry was not repaired: {report:?}"
+        );
+        assert_eq!(hits[0].path, "notes.txt");
+        assert_eq!(report.upserted, ["notes.txt"]);
+        assert!(workspace.reconcile().unwrap().upserted.is_empty());
+    }
+
+    #[test]
+    fn reconcile_is_noop_for_txt_without_chunks() {
+        let (_cfg, _root, workspace) = fixture();
+        for (rel, text) in [
+            ("empty.txt", ""),
+            ("whitespace.txt", " \t\r\n\n"),
+            ("frontmatter.txt", "---\ntitle: Metadata only\n---\n\n"),
+        ] {
+            workspace.write_text(rel, text).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+        assert!(workspace.index().unwrap().known_paths().unwrap().is_empty());
+        assert_eq!(
+            workspace.graph().unwrap().files_with_stat().unwrap().len(),
+            3
+        );
+        for _ in 0..2 {
+            let report = workspace.reconcile().unwrap();
+            assert!(report.upserted.is_empty(), "{report:?}");
+            assert!(report.forgotten.is_empty(), "{report:?}");
+            assert!(report.failed.is_empty(), "{report:?}");
+            assert_eq!(report.unchanged, 3);
+        }
+    }
+
+    fn assert_reconcile_retains_existing_file_missed_by_walk(rel: &str) {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text(rel, "walkgaptoken\n").unwrap();
+        workspace
+            .write_text("source.md", &format!("[target]({rel})\n"))
+            .unwrap();
+        workspace.reindex(None).unwrap();
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert_eq!(
+            workspace.search("walkgaptoken", &opts).unwrap().hits.len(),
+            1
+        );
+        assert_eq!(workspace.graph().unwrap().backlinks(rel).unwrap().len(), 1);
+
+        RECONCILE_WALK_SKIP.with(|skip| *skip.borrow_mut() = Some(rel.to_owned()));
+        let report = workspace.reconcile().unwrap();
+        assert!(root.path().join(rel).is_file());
+        let hits = workspace.search("walkgaptoken", &opts).unwrap().hits;
+        let backlinks = workspace.graph().unwrap().backlinks(rel).unwrap();
+        assert_eq!(
+            (hits.len(), backlinks.len()),
+            (1, 1),
+            "existing file lost derived data: {hits:?}; {backlinks:?}; {report:?}"
+        );
+        assert_eq!(hits[0].path, rel);
+        assert!(report.forgotten.is_empty(), "{report:?}");
+        assert!(report.upserted.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn reconcile_retains_existing_txt_missed_by_walk() {
+        assert_reconcile_retains_existing_file_missed_by_walk("nested/notes.txt");
+    }
+
+    #[test]
+    fn reconcile_retains_existing_markdown_missed_by_walk() {
+        assert_reconcile_retains_existing_file_missed_by_walk("nested/notes.md");
+    }
+
+    #[test]
+    fn reconcile_is_noop_for_unchanged_txt() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("notes.txt", "plain text\n").unwrap();
+        workspace.reindex(None).unwrap();
+        for _ in 0..2 {
+            let report = workspace.reconcile().unwrap();
+            assert!(report.upserted.is_empty(), "{report:?}");
+            assert!(report.forgotten.is_empty(), "{report:?}");
+            assert_eq!(report.unchanged, 1);
+        }
+        assert!(workspace.graph().unwrap().files().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_forgets_txt_removed_offline() {
+        let (_cfg, root, workspace) = fixture();
+        workspace
+            .write_text("notes.txt", "vanishedtoken\n")
+            .unwrap();
+        workspace.reindex(None).unwrap();
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert_eq!(
+            workspace.search("vanishedtoken", &opts).unwrap().hits.len(),
+            1
+        );
+        std::fs::remove_file(root.path().join("notes.txt")).unwrap();
+        let report = workspace.reconcile().unwrap();
+        let hits = workspace.search("vanishedtoken", &opts).unwrap().hits;
+        assert!(
+            hits.is_empty(),
+            "deleted text remains searchable: {hits:?}; {report:?}"
+        );
+        assert_eq!(report.forgotten, ["notes.txt"]);
+    }
+
+    #[test]
+    fn reconcile_forgets_txt_orphaned_in_index() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("orphan.txt", "orphantoken\n").unwrap();
+        workspace.index_file("orphan.txt").unwrap();
+        workspace
+            .graph()
+            .unwrap()
+            .forget_file("orphan.txt")
+            .unwrap();
+        std::fs::remove_file(root.path().join("orphan.txt")).unwrap();
+        let report = workspace.reconcile().unwrap();
+        assert!(
+            workspace.index().unwrap().known_paths().unwrap().is_empty(),
+            "{report:?}"
+        );
+        assert_eq!(report.forgotten, ["orphan.txt"]);
+    }
+
+    #[test]
+    fn reconcile_picks_up_modified_txt() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("notes.txt", "oldtoken\n").unwrap();
+        workspace.reindex(None).unwrap();
+        std::fs::write(
+            root.path().join("notes.txt"),
+            "replacementtoken with a new size\n",
+        )
+        .unwrap();
+        let report = workspace.reconcile().unwrap();
+        assert_eq!(report.upserted, ["notes.txt"]);
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert!(workspace.search("oldtoken", &opts).unwrap().hits.is_empty());
+        assert_eq!(
+            workspace.search("replacementtoken", &opts).unwrap().hits[0].path,
+            "notes.txt"
+        );
+        assert!(workspace.reconcile().unwrap().upserted.is_empty());
+    }
+
+    #[test]
+    fn txt_reindex_keeps_inbound_markdown_backlinks() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text("source.md", "[notes](notes.txt)\n")
+            .unwrap();
+        workspace.write_text("notes.txt", "plain text\n").unwrap();
+        workspace.reindex(None).unwrap();
+        let graph = workspace.graph().unwrap();
+        assert_eq!(graph.backlinks("notes.txt").unwrap().len(), 1);
+        workspace.reconcile().unwrap();
+        let after_reconcile = graph.backlinks("notes.txt").unwrap();
+        // Restore the source edge so the save check independently observes loss.
+        workspace.index_file("source.md").unwrap();
+        workspace
+            .write_text("notes.txt", "saved plain text\n")
+            .unwrap();
+        workspace.index_file("notes.txt").unwrap();
+        let after_save = graph.backlinks("notes.txt").unwrap();
+        assert_eq!(
+            (after_reconcile.len(), after_save.len()),
+            (1, 1),
+            "backlinks after reconcile: {after_reconcile:?}; after save: {after_save:?}"
+        );
     }
 
     #[test]
