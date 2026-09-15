@@ -176,10 +176,10 @@ async fn run(
                 Err(e) => {
                     // Never fatal to the tunnel: only the foreground command,
                     // the devserver, or the control socket may end it, and an
-                    // accept error names none of those. A transient EMFILE
-                    // here used to close the control socket, which the
-                    // devserver rightly reported to the blocked `cs tunnel`
-                    // as the desktop dying. The devserver end of this same
+                    // accept error names none of those. Ending on a transient
+                    // EMFILE here would close the control socket, which the
+                    // devserver reports to the blocked `cs tunnel` as the
+                    // desktop dying. The devserver end of this same
                     // feature rides axum's serve loop, which retries every
                     // accept error; mirror that policy, paced for the
                     // resource-pressure class. The pause runs inline, so a
