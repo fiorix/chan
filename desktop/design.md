@@ -134,7 +134,7 @@ For an external `chan serve` the registry only records that the workspace exists
 
 The desktop avoids inventing durable validation rules. It defers to chan-workspace where that surface already owns a contract, so anything the desktop accepts is also accepted by every other chan surface.
 
-- **Workspace name**: not validated by the desktop at all. Names are written at add time through the library add route; chan-server enforces `chan_tunnel_proto::is_valid_workspace_name`.
+- **Workspace display name**: an optional label stored by the library add route through `register_workspace_with_name`. It is separate from the path-derived route prefix and is not checked with the tunnel protocol's workspace-name validator.
 - **Path**: canonicalised via `std::fs::canonicalize` before being registered or opened, so the registry key the desktop uses matches what the user sees. When canonicalisation fails (broken symlink, asleep network mount), the literal path is used.
 
 ## 5. Self-contained runtime
