@@ -297,7 +297,7 @@ Source: `desktop/src-tauri/src/config.rs`.
 
 ## Layout pointers
 
-* Per-user config dir: `~/.chan/` on desktop targets; co-located under the data dir on iOS / Android where the home dir isn't user-writable. Holds the global `config.toml` (workspace registry). The state and cache roots resolve to the same `~/.chan/`.
+* Per-user config dir: `.chan` under the OS-provided home on every platform, so `~/.chan/` in practice. Where Unix resolves no home directory chan uses `/var/tmp/chan-<uid>`, rather than resolving state against the process working directory, and Windows falls back to `C:\ProgramData\chan`. Holds the global `config.toml` (workspace registry). The state and cache roots resolve to the same directory.
 * `CHAN_HOME=/path/to/chan-home` replaces `~/.chan` for the whole process. The override is the chan home directory itself, not a parent. It carries the workspace registry, devserver config, per-workspace metadata, locks, tokens, and the desktop-installed `chan`/`cs` shims under `CHAN_HOME/.local/bin`.
 
 Two Chan processes that share one chan home also share one workspace registry and one per-workspace writer lock. If `chan-desktop` is serving a registered workspace and a foreground `chan devserver run` is started from the same `~/.chan`, the devserver launcher lists that workspace as locked rather than off. This is expected: the workspace is open in another Chan process and cannot be turned on by the devserver until the desktop releases it. Run the devserver with a separate `CHAN_HOME` when you want an independent library:
