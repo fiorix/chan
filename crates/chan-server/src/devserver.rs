@@ -722,6 +722,44 @@ impl Drop for MountAttemptSettlement<'_> {
     }
 }
 
+/// Persists off when request cancellation follows the host's detach commit.
+struct WorkspaceOffSettlement<'a> {
+    state: &'a DevserverState,
+    prefix: &'a str,
+    root: &'a Path,
+    generation: u64,
+    armed: bool,
+}
+
+impl Drop for WorkspaceOffSettlement<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        {
+            let mut workspaces = self
+                .state
+                .workspaces
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(record) = workspaces.get_mut(self.prefix) else {
+                return;
+            };
+            // A newer intent owns its own settlement, and a refused close
+            // leaves the tenant mounted with its desired-on state intact.
+            if record.generation != self.generation
+                || record.root.as_path() != self.root
+                || self.state.host.is_root_mounted(self.root)
+            {
+                return;
+            }
+            record.turn_off();
+        }
+        self.state.host.clear_workspace_lifecycle(self.root);
+        self.state.persist_state();
+    }
+}
+
 impl DevserverState {
     /// Register the workspace at `root` and mount it (on). Allocates the
     /// stable prefix, mounts via [`mount_at`](Self::mount_at), persists, and
@@ -967,12 +1005,12 @@ impl DevserverState {
             workspaces
                 .get(prefix)
                 .filter(|record| record.desired != DesiredMount::Forgotten)
-                .map(|record| (record.root.clone(), record.phase.clone()))
+                .map(|record| (record.root.clone(), record.phase.clone(), record.generation))
         };
-        let (root, phase) = match current {
+        let (root, phase, generation) = match current {
             Some(current) => current,
             None => match self.library_root_for_prefix(prefix) {
-                Some(root) => (root, MountPhase::Stopped),
+                Some(root) => (root, MountPhase::Stopped, 0),
                 None => return Ok(SetWorkspaceOnResult::Updated(None)),
             },
         };
@@ -983,12 +1021,21 @@ impl DevserverState {
             // completion can publish. A mounted row can first run the existing
             // terminal-refusal guard because no attempt is outstanding.
             if phase == MountPhase::Mounted {
+                let mut settlement = WorkspaceOffSettlement {
+                    state: self,
+                    prefix,
+                    root: &root,
+                    generation,
+                    armed: true,
+                };
                 match self.host.close_workspace(prefix, force).await? {
                     WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
                     WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                        settlement.armed = false;
                         return Ok(SetWorkspaceOnResult::Refused { active_terminals });
                     }
                 }
+                settlement.armed = false;
             }
             {
                 let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -3070,6 +3117,96 @@ mod tests {
         startup
             .advance(StartupPhase::Ready)
             .expect("fdstore -> ready");
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_off_persists_after_host_detachment() {
+        let _env = chan_home_env_read();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let home = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let prefix = state.register_workspace(workspace.path()).await.unwrap();
+            let live = state.host.live_workspace(workspace.path()).unwrap();
+            let released = Arc::downgrade(&live);
+            let lock_dir = live.paths().lock.clone();
+            drop(live);
+            let overlay_path = home.path().join("devserver").join("workspaces.json");
+            assert!(WorkspaceOverlay::open(overlay_path.clone()).entries()[0].desired_on);
+            let mut off = Box::pin(state.set_workspace_on(&prefix, false, false));
+            assert!(futures::poll!(off.as_mut()).is_pending(), "teardown must yield after host detachment");
+            assert!(!state.host.is_root_mounted(workspace.path()));
+            drop(off);
+            let persisted = WorkspaceOverlay::open(overlay_path).entries();
+            assert_eq!(persisted.len(), 1);
+            assert!(!persisted[0].desired_on, "cancelled off left the restart overlay desired-on");
+            let row = state.entry_for(&prefix).unwrap();
+            assert!(!row.on);
+            assert_eq!(row.status, WorkspaceStatus::Stopped);
+            assert!(row.token.is_empty());
+            {
+                let records = state.workspaces.lock().unwrap();
+                let record = records.get(&prefix).unwrap();
+                assert_eq!(record.desired, DesiredMount::Off);
+                assert_eq!(record.phase, MountPhase::Stopped);
+                assert!(record.token.is_empty());
+            }
+            // A cancelled close aborts tasks without joining their handle release.
+            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                tokio::task::yield_now().await;
+            }
+            let result = state.set_workspace_on(&prefix, true, false).await.unwrap();
+            assert!(matches!(result, SetWorkspaceOnResult::Updated(Some(row)) if row.on && row.status == WorkspaceStatus::Running));
+            state.set_workspace_on(&prefix, false, false).await.unwrap();
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_off_preserves_a_newer_on_attempt() {
+        let _env = chan_home_env_read();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let home = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let prefix = state.register_workspace(workspace.path()).await.unwrap();
+            let live = state.host.live_workspace(workspace.path()).unwrap();
+            let released = Arc::downgrade(&live);
+            let lock_dir = live.paths().lock.clone();
+            drop(live);
+            let mut off = Box::pin(state.set_workspace_on(&prefix, false, false));
+            assert!(futures::poll!(off.as_mut()).is_pending());
+            assert!(!state.host.is_root_mounted(workspace.path()));
+            let attempt = state
+                .begin_mount(workspace.path(), &prefix)
+                .unwrap()
+                .unwrap();
+            state.persist_state();
+            drop(off);
+            {
+                let records = state.workspaces.lock().unwrap();
+                let record = records.get(&prefix).unwrap();
+                assert_eq!(record.generation, attempt.generation);
+                assert_eq!(record.desired, DesiredMount::On);
+                assert_eq!(record.phase, MountPhase::Starting);
+            }
+            let overlay =
+                WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
+            assert!(
+                overlay.entries()[0].desired_on,
+                "older cancelled off overwrote newer on intent"
+            );
+            while released.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                tokio::task::yield_now().await;
+            }
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .unwrap();
+            assert!(state.entry_for(&prefix).unwrap().on);
+            state.set_workspace_on(&prefix, false, false).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
