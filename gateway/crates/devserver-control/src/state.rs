@@ -1913,12 +1913,6 @@ impl ControllerState {
                 losers.extend(rows);
                 continue;
             }
-            rows.sort_by(|a, b| {
-                a.session
-                    .proxy_id
-                    .cmp(&b.session.proxy_id)
-                    .then_with(|| a.row.registration_id.cmp(&b.row.registration_id))
-            });
             let winner = rows.remove(0);
             desired.insert(key, winner);
             losers.extend(rows);
@@ -1958,9 +1952,10 @@ impl ControllerState {
     /// available and a joining snapshot must never outrank it. Joining rows
     /// that duplicate a live key lose, each user's live rows are reserved
     /// against the capacity limit first, and only novel joining keys that
-    /// fit the remaining slots are admitted. Competing rows inside one
-    /// snapshot resolve by registration id, an ordering local to that
-    /// snapshot; proxy id is never treated as recency on a routine join.
+    /// fit the remaining slots are admitted. A key with multiple rows in
+    /// one joining snapshot is a conflict: every row in the group loses,
+    /// as in initial reconciliation. Neither proxy nor registration id
+    /// establishes recency among conflicting rows.
     fn joining_plan(
         &self,
         joining: &SessionKey,
@@ -2026,8 +2021,7 @@ impl ControllerState {
         }
 
         let mut losers = Vec::new();
-        for (key, mut rows) in grouped {
-            rows.sort_by_key(|row| row.registration_id);
+        for (key, rows) in grouped {
             let mut rows = rows.into_iter().map(|row| OwnedTunnel {
                 session: joining.clone(),
                 proxy_base_url: self
