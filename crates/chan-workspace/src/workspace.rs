@@ -1936,10 +1936,7 @@ impl Workspace {
         })?;
         self.fs.dir().create_dir(&rel).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                ChanError::Io(format!(
-                    "draft `{name}` already exists at {}",
-                    abs.display()
-                ))
+                ChanError::PathAlreadyExists(format!("{}/{name}", self.drafts_dir_name))
             } else {
                 ChanError::io_with_context(
                     error,
@@ -7665,6 +7662,17 @@ mod tests {
         let after = workspace.list_drafts().unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].name, "scratch-2");
+    }
+
+    #[test]
+    fn draft_collision_workspace_is_typed() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.create_draft_dir("occupied").unwrap();
+        let error = workspace.create_draft_dir("occupied").unwrap_err();
+        assert!(
+            matches!(error, ChanError::PathAlreadyExists(ref path) if path == ".Drafts/occupied"),
+            "unexpected collision: {error:?}"
+        );
     }
 
     #[test]

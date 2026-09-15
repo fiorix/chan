@@ -276,6 +276,17 @@ mod tests {
     }
 
     #[test]
+    fn draft_collision_standalone_is_typed() {
+        let (_root, store) = store();
+        store.create_draft_dir("occupied").unwrap();
+        let error = store.create_draft_dir("occupied").unwrap_err();
+        assert!(
+            matches!(error, ChanError::PathAlreadyExists(ref path) if path == "occupied"),
+            "unexpected collision: {error:?}"
+        );
+    }
+
+    #[test]
     fn open_creates_and_canonicalizes_the_root_lazily_leaving_subdirs_alone() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("state");

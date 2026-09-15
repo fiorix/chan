@@ -107,6 +107,8 @@ async fn create_with_retry(
         let task_name = name.clone();
         let task_leaf = leaf.clone();
         let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            tests::collide_next_name(&store.store, &task_name);
             store.store.create_draft_dir(&task_name)?;
             store.store.write_primary(&task_name, &task_leaf, seed)
         })
@@ -127,7 +129,7 @@ async fn create_with_retry(
                 })
                 .into_response();
             }
-            Ok(Err(ChanError::Io(message))) if message.contains("already exists") => {
+            Ok(Err(ChanError::PathAlreadyExists(_))) => {
                 cancel_mutation(files, ticket);
                 continue;
             }
@@ -359,6 +361,39 @@ mod tests {
             Body::empty()
         };
         router(fx).oneshot(req.body(body).unwrap()).await.unwrap()
+    }
+
+    static COLLIDE_NEXT_NAME: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn collide_next_name(store: &chan_workspace::DraftStore, name: &str) {
+        let mut pending = COLLIDE_NEXT_NAME.lock().unwrap();
+        if let Some(index) = pending.iter().position(|root| root == store.drafts_dir()) {
+            pending.swap_remove(index);
+            store.create_draft_dir(name).unwrap();
+            store
+                .write_primary(name, "draft.md", "# occupied\n")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_collision_retries_standalone_note() {
+        let fx = files_fixture();
+        let (_, draft_state) = super::drafts_state(&fx.state).unwrap();
+        let drafts = draft_state.store.drafts_dir().to_path_buf();
+        COLLIDE_NEXT_NAME.lock().unwrap().push(drafts.clone());
+        let response = post(&fx, "/api/drafts/new", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["name"], "untitled-1");
+        assert_eq!(
+            std::fs::read_to_string(drafts.join("untitled/draft.md")).unwrap(),
+            "# occupied\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(drafts.join("untitled-1/draft.md")).unwrap(),
+            NEW_DRAFT_CONTENT
+        );
     }
 
     #[tokio::test]

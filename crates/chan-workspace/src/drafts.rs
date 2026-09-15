@@ -168,10 +168,7 @@ pub fn create_dir(drafts_dir: &Path, name: &str) -> Result<DraftRef> {
     validate_name(name)?;
     let abs = drafts_dir.join(name);
     if abs.exists() {
-        return Err(ChanError::Io(format!(
-            "draft `{name}` already exists at {}",
-            abs.display()
-        )));
+        return Err(ChanError::PathAlreadyExists(name.to_string()));
     }
     fs::create_dir_all(&abs).map_err(|e| {
         ChanError::io_with_context(

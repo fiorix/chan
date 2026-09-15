@@ -225,13 +225,15 @@ fn create_diagram_sync(
 ) -> Result<(String, String), chan_workspace::ChanError> {
     for _ in 0..2 {
         let name = workspace.next_untitled_draft_name()?;
+        #[cfg(test)]
+        tests::collide_next_name(workspace, &name);
         match workspace.create_draft_dir(&name) {
             Ok(_) => {
                 let path = format!("{}/{name}/{name}.excalidraw", workspace.drafts_dir_name());
                 workspace.write_text(&path, NEW_DIAGRAM_CONTENT)?;
                 return Ok((name, path));
             }
-            Err(chan_workspace::ChanError::Io(msg)) if msg.contains("already exists") => {
+            Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
                 continue;
             }
             Err(e) => return Err(e),
@@ -248,13 +250,15 @@ fn create_draft_sync(
 ) -> Result<String, chan_workspace::ChanError> {
     for _ in 0..2 {
         let name = workspace.next_untitled_draft_name()?;
+        #[cfg(test)]
+        tests::collide_next_name(workspace, &name);
         match workspace.create_draft_dir(&name) {
             Ok(_) => {
                 let path = format!("{}/{name}/draft.md", workspace.drafts_dir_name());
                 workspace.write_text(&path, seed)?;
                 return Ok(name);
             }
-            Err(chan_workspace::ChanError::Io(msg)) if msg.contains("already exists") => {
+            Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
                 continue;
             }
             Err(e) => return Err(e),
@@ -389,6 +393,73 @@ mod tests {
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
         (cfg, root, workspace)
+    }
+
+    static COLLIDE_NEXT_NAME: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+    pub(super) fn collide_next_name(workspace: &chan_workspace::Workspace, name: &str) {
+        let mut pending = COLLIDE_NEXT_NAME.lock().unwrap();
+        if let Some(index) = pending.iter().position(|root| root == workspace.root()) {
+            pending.swap_remove(index);
+            workspace.create_draft_dir(name).unwrap();
+            workspace
+                .write_text(
+                    &format!("{}/{name}/draft.md", workspace.drafts_dir_name()),
+                    "# occupied\n",
+                )
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn draft_collision_retries_workspace_note() {
+        assert_collision_retry("/api/drafts/new", "draft.md", NEW_DRAFT_CONTENT).await;
+    }
+
+    #[tokio::test]
+    async fn draft_collision_retries_workspace_diagram() {
+        assert_collision_retry(
+            "/api/diagrams/new",
+            "untitled-1.excalidraw",
+            NEW_DIAGRAM_CONTENT,
+        )
+        .await;
+    }
+
+    async fn assert_collision_retry(uri: &str, leaf: &str, seed: &str) {
+        let app = route_test_app();
+        let workspace = app.state.try_workspace().unwrap();
+        COLLIDE_NEXT_NAME
+            .lock()
+            .unwrap()
+            .push(workspace.root().to_path_buf());
+        let response = crate::router(app.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["name"], "untitled-1");
+        assert_eq!(
+            workspace.read_text(".Drafts/untitled/draft.md").unwrap(),
+            "# occupied\n"
+        );
+        assert_eq!(
+            workspace
+                .read_text(&format!(".Drafts/untitled-1/{leaf}"))
+                .unwrap(),
+            seed
+        );
     }
 
     #[test]
