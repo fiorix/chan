@@ -287,6 +287,12 @@ pub trait CollapsedMachinesStore: Send + Sync {
     fn set(&self, collapsed: Vec<String>) -> Result<(), String>;
 }
 
+#[cfg(test)]
+struct RootCheckProbe {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
 /// In-process multi-workspace host.
 ///
 /// This is intentionally a thin owner around the existing per-workspace
@@ -297,6 +303,8 @@ pub struct WorkspaceHost {
     library: Library,
     #[cfg(test)]
     open_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+    #[cfg(test)]
+    root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Desktop integration shared by every tenant this host mounts: the
     /// window-ops channel and the title map. `DesktopBridge::default()`
@@ -575,6 +583,8 @@ impl WorkspaceHost {
             register_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            root_check_probe: std::sync::Mutex::new(None),
             builder,
             self_weak: OnceLock::new(),
             window_registry: OnceLock::new(),
@@ -1069,33 +1079,62 @@ impl WorkspaceHost {
             artifacts,
         };
 
-        let mut workspaces = self
-            .workspaces
-            .write()
-            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-        // Workspace::open validates the root before the asynchronous tenant
-        // build starts. Validate it again at the publication boundary: on Unix
-        // the capability dir + writer lock stay alive after `rm -rf`, so a
-        // builder that was awaiting could otherwise publish a deleted root as
-        // a healthy running tenant. The host map lock makes this check and
-        // insertion one synchronous publication step.
-        let root_available = workspace.ensure_root_available();
+        #[cfg(test)]
+        let probe = self.root_check_probe.lock().unwrap().take();
+        // Revalidate after the asynchronous tenant build, without holding the
+        // routing map lock across filesystem work.
+        let checking_workspace = Arc::clone(&workspace);
         drop(workspace);
+        let root_available = match tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                probe.entered.send(()).unwrap();
+                probe
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            }
+            checking_workspace.ensure_root_available()
+        })
+        .await
+        {
+            Ok(result) => result.map_err(Error::from),
+            Err(error) => Err(std::io::Error::other(format!(
+                "workspace root check task failed: {error}"
+            ))
+            .into()),
+        };
         if let Err(error) = root_available {
-            drop(workspaces);
             runtime.shutdown().await;
-            return Err(error.into());
+            return Err(error);
         }
-        if workspaces.contains_key(&prefix) {
-            return Err(Error::Config(format!(
-                "workspace prefix already mounted: {}",
-                display_prefix(&prefix)
-            )));
-        }
-        workspaces.insert(prefix, runtime);
-        drop(workspaces);
-        self.notify_window_change();
-        Ok(hosted)
+        let insertion_error = {
+            let mut workspaces = self
+                .workspaces
+                .write()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            if workspaces.contains_key(&prefix) {
+                Error::Config(format!(
+                    "workspace prefix already mounted: {}",
+                    display_prefix(&prefix)
+                ))
+            } else if workspaces
+                .values()
+                .any(|existing| existing.canonical_root == runtime.canonical_root)
+            {
+                Error::Config(format!(
+                    "workspace already mounted: {}",
+                    runtime.root.display()
+                ))
+            } else {
+                workspaces.insert(prefix, runtime);
+                drop(workspaces);
+                self.notify_window_change();
+                return Ok(hosted);
+            }
+        };
+        runtime.shutdown().await;
+        Err(insertion_error)
     }
 
     /// Mount a workspace-less "terminal-only" tenant whose terminals run
@@ -4326,6 +4365,150 @@ mod tests {
             registry.snapshot().is_empty(),
             "forget purges the window record"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mount_root_check_leaves_routing_unlocked() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *host.root_check_probe.lock().unwrap() = Some(RootCheckProbe {
+                entered: entered_tx,
+                release: release_rx,
+            });
+            let mounting_host = host.clone();
+            let mounting_root = root.path().to_path_buf();
+            let mount = tokio::spawn(async move {
+                mounting_host
+                    .open_registered_workspace(mounting_root, serve_config("/workspace"))
+                    .await
+            });
+            entered_rx.await.unwrap();
+            let readable = host.workspaces.try_read().is_ok();
+            if readable {
+                assert!(host.mounted_prefixes().unwrap().is_empty());
+            }
+            release_tx.send(()).unwrap();
+            mount.await.unwrap().unwrap();
+            assert!(readable, "root validation holds the routing map write lock");
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    struct RacingWorkspaceBuilder {
+        barrier: tokio::sync::Barrier,
+        stopped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TenantBuilder for RacingWorkspaceBuilder {
+        async fn build_workspace(
+            &self,
+            _library: Library,
+            _workspace: Arc<Workspace>,
+            _config: &ServeConfig,
+            _desktop: DesktopBridge,
+            _unserve: UnserveMode,
+            _control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+            let stopped = self.stopped.clone();
+            let task = tokio::spawn(async move {
+                shutdown_rx.changed().await.unwrap();
+                stopped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            let mut artifacts = fake_artifacts(Router::new(), Arc::new(FakeTerminalCell));
+            artifacts.tasks = TenantTaskOwner::new(Arc::new(shutdown_tx), vec![task]);
+            self.barrier.wait().await;
+            Ok(artifacts)
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: DesktopBridge,
+            _unserve: UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            unreachable!("workspace-only test")
+        }
+    }
+
+    async fn mount_publication_race(same_root: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let first_root = tempfile::tempdir().unwrap();
+            let second_root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(first_root.path()).unwrap();
+            library.register_workspace(second_root.path()).unwrap();
+            let first_workspace = library.open_workspace(first_root.path()).unwrap();
+            let second_workspace = if same_root {
+                first_workspace.clone()
+            } else {
+                library.open_workspace(second_root.path()).unwrap()
+            };
+            let stopped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let host = WorkspaceHost::new(
+                library,
+                Arc::new(RacingWorkspaceBuilder {
+                    barrier: tokio::sync::Barrier::new(2),
+                    stopped: stopped.clone(),
+                }),
+            );
+            let (first, second) = tokio::join!(
+                host.open_workspace(first_workspace, serve_config("/first")),
+                host.open_workspace(
+                    second_workspace,
+                    serve_config(if same_root { "/second" } else { "/first" })
+                ),
+            );
+            assert_eq!(
+                usize::from(first.is_ok()) + usize::from(second.is_ok()),
+                1,
+                "one mount must lose the publication race"
+            );
+            let failure = first.as_ref().err().or(second.as_ref().err()).unwrap();
+            assert!(
+                failure.to_string().contains(if same_root {
+                    "workspace already mounted"
+                } else {
+                    "workspace prefix already mounted"
+                }),
+                "{failure}"
+            );
+            assert_eq!(
+                stopped.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "losing runtime must finish shutdown before returning"
+            );
+            let mounted = first.or(second).unwrap();
+            host.close_workspace(&mounted.prefix, false).await.unwrap();
+            assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 2);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mount_publication_rechecks_prefix_and_joins_the_loser() {
+        mount_publication_race(false).await;
+    }
+
+    #[tokio::test]
+    async fn mount_publication_rechecks_canonical_root() {
+        mount_publication_race(true).await;
     }
 
     #[tokio::test]
