@@ -2351,13 +2351,6 @@ async fn workspace_upload_response(
     )
 }
 
-/// Admit one workspace upload and write it inside a SINGLE lane job.
-///
-/// Mirrors the terminal upload: the job is the writer, admitted before the
-/// first body byte is pulled, so a refusal has read nothing and resolved no
-/// destination, and the async half only moves the multipart field into the
-/// job's bounded channel. Returning early drops the job, which cancels it and
-/// releases its slot.
 /// Where one upload lands, as the multipart parts named it and before the
 /// target is resolved. Grouped so the admitted path stays inside clippy's
 /// argument budget without an allow.
@@ -2367,6 +2360,13 @@ pub(crate) struct UploadDestination {
     pub(crate) filename: String,
 }
 
+/// Admit one workspace upload and write it inside a SINGLE lane job.
+///
+/// Mirrors the terminal upload: the job is the writer, admitted before the
+/// first body byte is pulled, so a refusal has read nothing and resolved no
+/// destination, and the async half only moves the multipart field into the
+/// job's bounded channel. Returning early drops the job, which cancels it and
+/// releases its slot.
 async fn stream_workspace_upload(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
