@@ -336,24 +336,7 @@ pub struct DevserverWorkspaceRow {
     pub url: String,
 }
 
-/// One process-wide `reqwest::Client`, reused across every devserver request.
-///
-/// Building a fresh `Client` per call (the old body of this fn) defeated
-/// reqwest's keep-alive connection pool: the 5s workspace/colour poll
-/// (`main.rs`) opens two requests per cycle, and a per-call Client never reuses
-/// a connection, so the devserver held each one ESTABLISHED waiting for a reuse
-/// that never came -- ~22 leaked conns/min until it hit its 1024-fd cap (~40 min)
-/// and started failing every accept with "Too many open files"
-/// (`dev/devserver-bug/analysis.md`). A single cached Client shares one
-/// connection pool across all callers (the pool keys on host:port, so each
-/// devserver endpoint still gets its own pooled connection), collapsing
-/// ESTABLISHED from ~967 to ~1. `Client` is internally `Arc`-backed, so the
-/// per-call `.clone()` is cheap and every clone shares that one pool.
-///
-/// The signature is unchanged so the ~9 call sites stay as they are. The build
-/// result (success OR the rare TLS-backend init failure) is memoized: a failure
-/// here is deterministic, so caching it avoids re-attempting a build that cannot
-/// succeed.
+/// Reuse one process-wide HTTP client so devserver polls and requests share keep-alive connection pools. Cloning the client shares its pool rather than opening an independent one. Memoize the build result, including TLS initialization failures, so every caller sees the same initialization outcome without repeated build attempts.
 fn http_client() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
