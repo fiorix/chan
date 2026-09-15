@@ -495,18 +495,35 @@ fn sanitize_filename(filename: &str) -> String {
     let cleaned: String = base
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control()
+                || matches!(character, ':' | '<' | '>' | '"' | '|' | '?' | '*')
+            {
                 '_'
             } else {
                 character
             }
         })
         .collect();
-    if cleaned.is_empty() || matches!(cleaned.as_str(), "." | "..") {
-        "download".to_string()
-    } else {
-        cleaned
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
+    if cleaned.is_empty() {
+        return "download".to_string();
     }
+    // Windows recognizes device names even with an extension. Inspect the
+    // first dot so a multi-part extension cannot hide a reserved stem.
+    let stem_end = cleaned.find('.').unwrap_or(cleaned.len());
+    let stem = &cleaned[..stem_end];
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(
+            upper
+                .strip_prefix("COM")
+                .or_else(|| upper.strip_prefix("LPT")),
+            Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        );
+    if reserved {
+        return format!("{stem}_{}", &cleaned[stem_end..]);
+    }
+    cleaned.to_string()
 }
 
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
@@ -652,6 +669,56 @@ mod tests {
         assert_eq!(sanitize_filename(""), "download");
         assert_eq!(sanitize_filename("   "), "download");
         assert_eq!(sanitize_filename(".."), "download");
+    }
+
+    const WINDOWS_FILENAME_CASES: &[(&str, &str)] = &[
+        ("C:foo", "C_foo"),
+        ("a:b", "a_b"),
+        ("name:stream", "name_stream"),
+        (r"C:\x", "x"),
+        (r"\\server\share", "share"),
+        ("<a>|b?.txt", "_a__b_.txt"),
+        ("\"a*b\".txt", "_a_b_.txt"),
+        ("CON", "CON_"),
+        ("con.txt", "con_.txt"),
+        ("PRN.tar.gz", "PRN_.tar.gz"),
+        ("aux", "aux_"),
+        ("NuL.txt", "NuL_.txt"),
+        ("COM1", "COM1_"),
+        ("com9.log", "com9_.log"),
+        ("LPT1", "LPT1_"),
+        ("lpt9.log", "lpt9_.log"),
+        ("COM0.txt", "COM0.txt"),
+        ("LPT10.txt", "LPT10.txt"),
+        ("report. ", "report"),
+        ("..", "download"),
+        (". . ", "download"),
+        ("a\nb.txt", "a_b.txt"),
+    ];
+
+    #[test]
+    fn sanitize_windows_filename_characters_and_devices() {
+        for &(input, expected) in WINDOWS_FILENAME_CASES {
+            let safe = sanitize_filename(input);
+            assert_eq!(safe, expected, "sanitizing {input:?}");
+            assert!(!safe.contains([':', '\\', '/', '<', '>', '"', '|', '?', '*']));
+            assert!(!safe.chars().any(char::is_control));
+            assert!(!safe.ends_with(['.', ' ']));
+            assert!(!matches!(safe.as_str(), "." | ".." | ""));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sanitized_windows_downloads_stay_in_downloads_directory() {
+        let downloads = Path::new(r"C:\Downloads");
+        for &(input, _) in WINDOWS_FILENAME_CASES {
+            let joined = downloads.join(sanitize_filename(input));
+            assert!(
+                joined.starts_with(downloads),
+                "{input:?} escaped to {joined:?}"
+            );
+        }
     }
 
     #[test]
