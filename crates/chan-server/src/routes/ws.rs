@@ -33,23 +33,8 @@ pub struct WsQuery {
     w: Option<String>,
 }
 
-/// The target window id of a `window_command` broadcast frame, or `None` for
-/// any other frame (which is genuinely broadcast to every socket).
-///
-/// window_command frames serialize compactly with fields in declaration order
-/// as `{"type":"window_command","window_id":"<id>",...}` (see
-/// `WindowCommandFrame` in `control_socket`), so the id reads off that fixed
-/// prefix without parsing the rest of the command -- for `clipboard_write`
-/// that tail is a multi-MB base64 payload we must not re-parse on every
-/// connection. A format drift just makes this return `None`, so the frame is
-/// forwarded and the SPA's own `window_id` gate still filters it: it fails safe.
+/// The target window id of a compact `window_command` or `transfer_queue` frame, or `None` for other frames. Both put `type` and `window_id` first, so the id can be read without parsing the remaining payload, which can include multi-MB clipboard data. An unrecognized prefix broadcasts the frame. The SPA re-checks `window_id` only for `window_command`; it matches `transfer_queue` frames by transfer id.
 fn window_command_target(frame: &str) -> Option<&str> {
-    // Both targeted frame types put `type` then `window_id` first, so the id
-    // reads off a fixed prefix without parsing the tail. For window_command
-    // that tail can be a multi-MB base64 payload we must not re-parse on every
-    // connection; for transfer_queue it is small but the shape is shared.
-    // A format drift just yields None, so the frame broadcasts rather than
-    // being dropped, and the ordering is pinned by tests on both sides.
     const PREFIXES: [&str; 2] = [
         "{\"type\":\"window_command\",\"window_id\":\"",
         "{\"type\":\"transfer_queue\",\"window_id\":\"",
@@ -360,12 +345,7 @@ async fn pump_loop(
             },
             recv = rx.recv() => match recv {
                 Ok(frame) => {
-                    // A window_command is addressed to ONE window: forward it
-                    // only to the socket serving that window (an untagged
-                    // socket is never a target). This keeps request_ids and
-                    // clipboard payloads off other windows' sockets server-side,
-                    // hardening the reply-hijack surface beyond the SPA's gate.
-                    // All other frame types stay broadcast to every socket.
+                    // Window commands and transfer-queue updates go only to their addressed window. Untagged sockets receive neither; other frame types remain broadcast.
                     if let Some(target) = window_command_target(&frame) {
                         if window_id != Some(target) {
                             continue;
