@@ -1274,8 +1274,8 @@ fn build_workspace_window_with_completion(
                         // gesture, not a red-dot: consume its one-shot flag here
                         // and, once the transfer guards below clear, bury directly,
                         // skipping the prompt. A genuine red-dot finds no flag and
-                        // asks. Read (not act) first so the guards still run for a
-                        // silent hide, exactly as before -- a hide mid-transfer must
+                        // asks. Read (not act) first so the transfer guards below
+                        // still run for a silent hide -- a hide mid-transfer must
                         // not tear the transfer down without the prompt.
                         let silent_hide = state.take_silent_hide(&label_for_close);
                         // Active-transfer guard (BEFORE any bury/close path): a
