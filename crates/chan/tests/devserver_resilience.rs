@@ -70,21 +70,18 @@ impl Sandbox {
         root
     }
 
-    /// A `chan` command preloaded with the sandbox env. The inherited
-    /// `CHAN_*` terminal-session vars are stripped so a test launched from
-    /// inside a chan terminal doesn't accidentally drive handoff.
+    /// A `chan` command with ambient chan settings removed before applying
+    /// the sandbox environment, including its isolated homes and handoff policy.
     fn command(&self) -> Command {
         let mut cmd = Command::new(CHAN);
-        cmd.env("CHAN_HOME", self.chan_home.path())
+        cmd.env_clear()
+            .envs(chan::test_env::scrubbed_process_env())
+            .env("CHAN_HOME", self.chan_home.path())
             .env("HOME", self.home.path())
             .env("XDG_RUNTIME_DIR", self.runtime.path())
             .env("TMPDIR", self.runtime.path())
             .env("CHAN_NO_DESKTOP_HANDOFF", "1")
             .env("CHAN_NO_DEVSERVER_HANDOFF", "1")
-            .env_remove("CHAN_CONTROL_SOCKET")
-            .env_remove("CHAN_WINDOW_ID")
-            .env_remove("CHAN_TAB_NAME")
-            .env_remove("CHAN_TAB_GROUP")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
