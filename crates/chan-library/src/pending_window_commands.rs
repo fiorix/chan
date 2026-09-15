@@ -146,8 +146,7 @@ impl PendingWindowCommands {
             .collect()
     }
 
-    /// Whether anything is parked for `window_id` (expired frames included).
-    /// Test seam; the drain is the only production reader.
+    /// Whether no window has anything parked (expired frames included). Test seam; `take` is the only production reader.
     pub fn is_empty(&self) -> bool {
         self.lock().is_empty()
     }
