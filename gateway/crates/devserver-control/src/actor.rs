@@ -60,6 +60,10 @@ pub struct SessionRevocationPlan {
 
 enum Command {
     #[cfg(test)]
+    FillBrowserFleetBytes {
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
     FillSessionRow {
         proxy_id: ProxyId,
         row: TunnelRow,
@@ -296,6 +300,12 @@ fn handle_command(
     let now = Instant::now();
     let wall_now = Utc::now();
     match command {
+        #[cfg(test)]
+        Command::FillBrowserFleetBytes { reply } => {
+            state.fill_browser_fleet_bytes_for_test();
+            let _ = reply.send(());
+            Vec::new()
+        }
         #[cfg(test)]
         Command::FillSessionRow {
             proxy_id,
@@ -805,6 +815,13 @@ fn publish_watches(
 }
 
 impl ControllerHandle {
+    #[cfg(test)]
+    pub(crate) async fn fill_browser_fleet_bytes_for_test(&self) {
+        self.request(|reply| Command::FillBrowserFleetBytes { reply })
+            .await
+            .unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) async fn fill_session_row_for_test(
         &self,

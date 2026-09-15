@@ -98,6 +98,8 @@ Each request also carries a short-lived identity-signed admission lease bound to
 
 Each published row contains a random admin UUID, subject user, devserver owner, devserver id, wall-clock creation, and wall-clock expiry. Cookie ids, entry replay ids, audiences, peer addresses, and transport internals never enter the protocol or admin view. Inventory is visible only after the owning proxy is Active and fleet-ready. A disconnected row remains visible through the same authority grace as its tunnel rows, and targeted or global revocation remains partial while the proxy authority is unreachable.
 
+A `BrowserSessionUp` that exceeds a proxy or fleet row/byte cap advances the generation, leaves the row out of inventory, and sends its proxy an admin-id revocation for only that browser session. The control session and its other rows stay active. Each session remembers at most 4,096 refused browser-session ids separately from removed tunnel registrations, clears them on resync, and starts empty on a new connection. One later `BrowserSessionDown` consumes the remembered id without a resync, before or after the revocation result; a second down, an arbitrary unknown down, or a remembered id published up again resyncs. Past the bound the refusal still revokes, but its unremembered down resyncs. No waiter is registered for these revocations, so a valid result is ignored without changing inventory. The proxy also revokes every extension binding of that principal, including bindings backed by the user's other admitted sessions on the same devserver. Expiry and structural checks precede capacity refusal; snapshot caps still reject the control session.
+
 `SessionRevocation` supports exact subject/owner/devserver, subject user, admin session id, owner user, and all sessions. The controller fans each request to every connected or warming authority. Success requires every command acknowledgement, no retained unreachable authority, and a ready fleet. A 502 reports confirmed counts without claiming an authoritative zero.
 
 This limits honest retention and controller authority; it does not make an assigned proxy a trusted execution environment. A fully compromised proxy can capture the transient PAT during validation or refresh and reuse it until identity revokes it or it expires. Node isolation and PAT rotation/revocation remain the incident boundary.
@@ -171,7 +173,7 @@ Admin reads and SSE watches are served from republished `watch` snapshots rather
 - Readiness implies at least one Active session; losing the last one retracts the whole aggregate.
 - The actor holds no locks and performs no blocking I/O; bounded queues (actor 1024, outbound session 1024, inbound session 64) and the 32-frame/s session limit close or retire the offender.
 - Bearer comparisons (admin token, proxy token) run at constant time.
-- Every frame and aggregate is bounded: 1 MiB per frame, 128 rows per chunk, 2,048 tunnel rows/2 MiB and 100,000 tenant-session rows/32 MiB per proxy snapshot, 16,384 tunnel rows/64 MiB and 500,000 tenant-session rows/128 MiB fleet state, 4,096 remembered removal ids per session, and 8 outstanding ping nonces.
+- Every frame and aggregate is bounded: 1 MiB per frame, 128 rows per chunk, 2,048 tunnel rows/2 MiB and 100,000 tenant-session rows/32 MiB per proxy snapshot, 16,384 tunnel rows/64 MiB and 500,000 tenant-session rows/128 MiB fleet state, 4,096 remembered tunnel removal ids and 4,096 browser refusal ids per session, and 8 outstanding ping nonces.
 
 ## Error model
 
@@ -185,7 +187,7 @@ Admin reads and SSE watches are served from republished `watch` snapshots rather
 | `ProxyNotJoining`                 | session | snapshot on a non-joining session          |
 | `DuplicateProxyId`                | session | second live connection for a proxy id      |
 | `SessionLimit`                    | session | live-session cap reached                   |
-| `FleetCapacity`                   | session | snapshot, browser or refresh cap exceeded  |
+| `FleetCapacity`                   | session | snapshot or refresh cap; invalid revoke count  |
 | `BootIdMismatch`                  | session | non-empty snapshot from a changed boot     |
 | `BootHistoryCapacity`             | session | remembered-boot cap reached                |
 | `SnapshotTooLarge`                | session | snapshot exceeds 2,048 rows or 2 MiB       |

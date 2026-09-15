@@ -31,6 +31,7 @@ const MAX_OUTSTANDING_PINGS: usize = 8;
 /// Past the bound, an unremembered down resyncs and an unremembered
 /// refresh for a removed row ends the session as an unknown registration.
 const MAX_REMOVED_REGISTRATIONS: usize = 4096;
+const MAX_REMOVED_BROWSER_SESSIONS: usize = MAX_REMOVED_REGISTRATIONS;
 
 type TunnelKey = (Uuid, String);
 type PendingIdentity = (SessionKey, Uuid, Uuid);
@@ -161,6 +162,8 @@ struct ProxySession {
     /// expected, and queued refreshes are dropped. A resync or a new
     /// session starts with none.
     removed_registrations: HashSet<Uuid>,
+    /// Capacity refusals await one down, independently of their revocation result.
+    removed_browser_sessions: HashSet<Uuid>,
     status: ProxyStatus,
     fleet_ready: bool,
     connected_at: DateTime<Utc>,
@@ -372,6 +375,11 @@ impl ControllerState {
     }
 
     #[cfg(test)]
+    pub(crate) fn fill_browser_fleet_bytes_for_test(&mut self) {
+        self.browser_orphan_total.bytes = MAX_FLEET_BROWSER_SESSION_BYTES;
+    }
+
+    #[cfg(test)]
     pub(crate) fn fill_session_row_for_test(
         &mut self,
         proxy_id: &ProxyId,
@@ -456,6 +464,7 @@ impl ControllerState {
                 browser_sessions: HashMap::new(),
                 browser_session_resident_bytes: 0,
                 removed_registrations: HashSet::new(),
+                removed_browser_sessions: HashSet::new(),
                 status: ProxyStatus::Joining,
                 fleet_ready: false,
                 connected_at: wall_now,
@@ -827,7 +836,10 @@ impl ControllerState {
         let duplicate = self
             .proxies
             .values()
-            .any(|session| session.browser_sessions.contains_key(&row.admin_session_id));
+            .any(|session| session.browser_sessions.contains_key(&row.admin_session_id))
+            || self.proxies[proxy_id.as_str()]
+                .removed_browser_sessions
+                .contains(&row.admin_session_id);
         if duplicate {
             return Ok(self.force_resync(&key, generation.saturating_add(1)));
         }
@@ -837,15 +849,44 @@ impl ControllerState {
             .proxies
             .get_mut(proxy_id.as_str())
             .expect("key was validated");
-        if session.browser_sessions.len() >= MAX_BROWSER_SESSION_SNAPSHOT_ROWS
-            || fleet_rows >= MAX_FLEET_BROWSER_SESSION_ROWS
-            || session
-                .browser_session_resident_bytes
-                .saturating_add(row_bytes)
-                > MAX_BROWSER_SESSION_SNAPSHOT_BYTES
-            || fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_BROWSER_SESSION_BYTES
+        let cap = if session.browser_sessions.len() >= MAX_BROWSER_SESSION_SNAPSHOT_ROWS {
+            Some("proxy_browser_session_rows")
+        } else if fleet_rows >= MAX_FLEET_BROWSER_SESSION_ROWS {
+            Some("fleet_browser_session_rows")
+        } else if session
+            .browser_session_resident_bytes
+            .saturating_add(row_bytes)
+            > MAX_BROWSER_SESSION_SNAPSHOT_BYTES
         {
-            return Err(StateError::FleetCapacity);
+            Some("proxy_browser_session_bytes")
+        } else if fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_BROWSER_SESSION_BYTES {
+            Some("fleet_browser_session_bytes")
+        } else {
+            None
+        };
+        if let Some(cap) = cap {
+            tracing::warn!(
+                proxy_id = proxy_id.as_str(),
+                admin_session_id = %row.admin_session_id,
+                cap,
+                "revoking a browser session that exceeds controller capacity"
+            );
+            if session.removed_browser_sessions.len() < MAX_REMOVED_BROWSER_SESSIONS {
+                session
+                    .removed_browser_sessions
+                    .insert(row.admin_session_id);
+            }
+            // No waiter is registered: the row never entered our inventory,
+            // so the result needs no settlement. Its down is still expected.
+            return Ok(vec![Effect::Send {
+                session: key,
+                frame: ServerFrame::RevokeSessions {
+                    command_id: Uuid::new_v4(),
+                    revocation: SessionRevocation::SessionId {
+                        admin_session_id: row.admin_session_id,
+                    },
+                },
+            }]);
         }
         session.browser_session_resident_bytes = session
             .browser_session_resident_bytes
@@ -878,12 +919,14 @@ impl ControllerState {
             return Ok(effects);
         }
         self.touch(&key, now, wall_now)?;
-        let row = self
+        let session = self
             .proxies
             .get_mut(proxy_id.as_str())
-            .expect("key was validated")
-            .browser_sessions
-            .remove(&admin_session_id);
+            .expect("key was validated");
+        if session.removed_browser_sessions.remove(&admin_session_id) {
+            return Ok(Vec::new());
+        }
+        let row = session.browser_sessions.remove(&admin_session_id);
         let Some(row) = row else {
             return Ok(self.force_resync(&key, generation.saturating_add(1)));
         };
@@ -1774,6 +1817,7 @@ impl ControllerState {
             session.browser_sessions.clear();
             session.browser_session_resident_bytes = 0;
             session.removed_registrations.clear();
+            session.removed_browser_sessions.clear();
             self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         }
         self.remove_tunnels_for_session(key);
@@ -3138,6 +3182,252 @@ pub(super) mod tests {
             )
             .unwrap();
         assert!(has_decision(&effects, AdmissionDecision::AtCapacity));
+    }
+
+    #[test]
+    fn browser_session_up_over_capacity_refuses_only_that_session() {
+        for cap in ["session rows", "session bytes", "fleet rows", "fleet bytes"] {
+            for down_first in [false, true] {
+                let (mut state, id, incarnation, now) = ready_at_session_row_count(1);
+                let wall_now = Utc::now();
+                let incumbent = browser_row(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "one");
+                state
+                    .browser_session_up(&id, incarnation, 1, incumbent.clone(), now, wall_now)
+                    .unwrap();
+                match cap {
+                    "session rows" => {
+                        let proxy = state.proxies.get_mut("p1").unwrap();
+                        for index in 1..MAX_BROWSER_SESSION_SNAPSHOT_ROWS {
+                            let mut filler = incumbent.clone();
+                            filler.admin_session_id = Uuid::from_u128(index as u128);
+                            proxy
+                                .browser_sessions
+                                .insert(filler.admin_session_id, filler);
+                        }
+                    }
+                    "session bytes" => {
+                        state
+                            .proxies
+                            .get_mut("p1")
+                            .unwrap()
+                            .browser_session_resident_bytes = MAX_BROWSER_SESSION_SNAPSHOT_BYTES
+                    }
+                    "fleet rows" => {
+                        state.browser_orphan_total.rows = MAX_FLEET_BROWSER_SESSION_ROWS - 1
+                    }
+                    "fleet bytes" => state.fill_browser_fleet_bytes_for_test(),
+                    _ => unreachable!(),
+                }
+                let old_browsers = state.browser_session_views();
+                let old_tunnels = state.tunnel_views();
+                let old_rows = state.proxies["p1"].browser_sessions.len();
+                let old_bytes = state.proxies["p1"].browser_session_resident_bytes;
+                let refused = browser_row(
+                    Uuid::new_v4(),
+                    incumbent.subject_user_id,
+                    incumbent.owner_user_id,
+                    "two",
+                );
+                let effects = state
+                    .browser_session_up(&id, incarnation, 2, refused.clone(), now, wall_now)
+                    .unwrap_or_else(|error| {
+                        panic!("{cap}, down_first={down_first}: must refuse one session: {error}")
+                    });
+                let [Effect::Send {
+                    session,
+                    frame:
+                        ServerFrame::RevokeSessions {
+                            command_id,
+                            revocation: SessionRevocation::SessionId { admin_session_id },
+                        },
+                }] = effects.as_slice()
+                else {
+                    panic!("expected exactly one session revoke for {cap}: {effects:?}");
+                };
+                assert_eq!(session.proxy_id, "p1");
+                assert_eq!(session.incarnation, incarnation);
+                assert_eq!(*admin_session_id, refused.admin_session_id);
+                assert_eq!(state.proxies["p1"].generation, Some(2));
+                assert_eq!(state.browser_session_views(), old_browsers);
+                assert_eq!(state.tunnel_views(), old_tunnels);
+                assert_eq!(state.proxies["p1"].browser_sessions.len(), old_rows);
+                assert!(!state.proxies["p1"]
+                    .browser_sessions
+                    .contains_key(&refused.admin_session_id));
+                assert!(state.session_revocations.is_empty());
+                if !down_first {
+                    assert!(state
+                        .session_revocation_result(&id, incarnation, *command_id, 1)
+                        .unwrap()
+                        .is_empty());
+                }
+                assert!(state
+                    .browser_session_down(
+                        &id,
+                        incarnation,
+                        3,
+                        refused.admin_session_id,
+                        now,
+                        wall_now
+                    )
+                    .unwrap()
+                    .is_empty());
+                if down_first {
+                    assert!(state
+                        .session_revocation_result(&id, incarnation, *command_id, 1)
+                        .unwrap()
+                        .is_empty());
+                }
+                assert_eq!(state.browser_session_views(), old_browsers);
+                assert_eq!(state.tunnel_views(), old_tunnels);
+                assert_eq!(state.proxies["p1"].browser_sessions.len(), old_rows);
+                assert_eq!(
+                    state.proxies["p1"].browser_session_resident_bytes,
+                    old_bytes
+                );
+                assert_eq!(state.proxies["p1"].generation, Some(3));
+                assert_eq!(state.proxies["p1"].status, ProxyStatus::Active);
+                assert!(state.proxies["p1"].fleet_ready);
+                assert!(state.is_ready());
+                assert!(has_resync(
+                    &state
+                        .browser_session_down(
+                            &id,
+                            incarnation,
+                            4,
+                            refused.admin_session_id,
+                            now,
+                            wall_now
+                        )
+                        .unwrap(),
+                    5
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn refused_browser_sessions_are_bounded_and_reset_with_authority() {
+        for reset in ["overflow down", "resync", "reconnect"] {
+            let (mut state, id, incarnation, now) = ready_at_session_row_count(1);
+            let wall_now = Utc::now();
+            state.fill_browser_fleet_bytes_for_test();
+            for index in 1..=MAX_REMOVED_BROWSER_SESSIONS + 1 {
+                let row = browser_row(
+                    Uuid::from_u128(index as u128),
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    "one",
+                );
+                let effects = state
+                    .browser_session_up(&id, incarnation, index as u64, row, now, wall_now)
+                    .unwrap();
+                assert!(matches!(
+                    effects.as_slice(),
+                    [Effect::Send {
+                        frame: ServerFrame::RevokeSessions { .. },
+                        ..
+                    }]
+                ));
+            }
+            assert_eq!(
+                state.proxies["p1"].removed_browser_sessions.len(),
+                MAX_REMOVED_BROWSER_SESSIONS
+            );
+            assert!(state.session_revocations.is_empty());
+            let next = MAX_REMOVED_BROWSER_SESSIONS as u64 + 2;
+            let incarnation = match reset {
+                "overflow down" => {
+                    assert!(state
+                        .browser_session_down(
+                            &id,
+                            incarnation,
+                            next,
+                            Uuid::from_u128(1),
+                            now,
+                            wall_now
+                        )
+                        .unwrap()
+                        .is_empty());
+                    assert!(has_resync(
+                        &state
+                            .browser_session_down(
+                                &id,
+                                incarnation,
+                                next + 1,
+                                Uuid::from_u128(MAX_REMOVED_BROWSER_SESSIONS as u128 + 1),
+                                now,
+                                wall_now
+                            )
+                            .unwrap(),
+                        next + 2
+                    ));
+                    incarnation
+                }
+                "resync" => {
+                    assert!(has_resync(
+                        &state
+                            .browser_session_down(
+                                &id,
+                                incarnation,
+                                next + 1,
+                                Uuid::from_u128(1),
+                                now,
+                                wall_now
+                            )
+                            .unwrap(),
+                        next
+                    ));
+                    incarnation
+                }
+                "reconnect" => {
+                    state.disconnect(&id, incarnation, now).unwrap();
+                    begin(&mut state, "p1", now).1
+                }
+                _ => unreachable!(),
+            };
+            assert!(state.proxies["p1"].removed_browser_sessions.is_empty());
+            snapshot(&mut state, &id, incarnation, Vec::new(), now);
+            assert!(has_resync(
+                &state
+                    .browser_session_down(&id, incarnation, 1, Uuid::from_u128(2), now, wall_now)
+                    .unwrap(),
+                2
+            ));
+        }
+    }
+
+    #[test]
+    fn browser_capacity_refusal_preserves_expiry_and_structural_checks() {
+        for fault in [
+            "expired",
+            "generation gap",
+            "duplicate",
+            "refused duplicate",
+        ] {
+            let (mut state, id, incarnation, now) = ready_at_session_row_count(1);
+            let wall_now = Utc::now();
+            let mut row = browser_row(Uuid::new_v4(), Uuid::nil(), Uuid::nil(), "one");
+            if fault == "refused duplicate" {
+                state.fill_browser_fleet_bytes_for_test();
+            }
+            state
+                .browser_session_up(&id, incarnation, 1, row.clone(), now, wall_now)
+                .unwrap();
+            state.fill_browser_fleet_bytes_for_test();
+            if fault == "expired" {
+                row.expires_at = wall_now;
+            }
+            let generation = if fault == "generation gap" { 3 } else { 2 };
+            let result = state.browser_session_up(&id, incarnation, generation, row, now, wall_now);
+            if fault == "expired" {
+                assert!(matches!(result, Err(StateError::ExpiredBrowserSession)));
+                assert_eq!(state.proxies["p1"].generation, Some(1));
+            } else {
+                let expected = if fault == "generation gap" { 2 } else { 3 };
+                assert!(has_resync(&result.unwrap(), expected));
+            }
+        }
     }
 
     #[test]

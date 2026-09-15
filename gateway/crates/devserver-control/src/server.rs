@@ -2322,6 +2322,78 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_browser_session_up_past_the_fleet_cap_keeps_the_control_session() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            for down_first in [false, true] {
+                let controller = crate::spawn_controller(100);
+                let mut opened = connected(controller.clone()).await;
+                handshake(opened.stream.as_mut().unwrap()).await;
+                let incumbent = signed_row("owner", "one", Uuid::new_v4());
+                publish_snapshot(&mut opened, vec![incumbent.clone()]).await;
+                assert!(matches!(
+                    next_command(&mut opened, "snapshot").await,
+                    ServerFrame::SnapshotAccepted { base_generation: 0 }
+                ));
+                expect_fleet_ready(&mut opened, "snapshot").await;
+                controller.fill_browser_fleet_bytes_for_test().await;
+                let admin_session_id = Uuid::new_v4();
+                let created_at = chrono::Utc::now();
+                send(
+                    &mut opened,
+                    &[ClientFrame::BrowserSessionUp {
+                        generation: 1,
+                        row: BrowserSessionRow {
+                            admin_session_id,
+                            subject_user_id: incumbent.owner_user_id,
+                            owner_user_id: incumbent.owner_user_id,
+                            devserver_id: incumbent.devserver_id.clone(),
+                            created_at,
+                            expires_at: created_at + chrono::Duration::hours(1),
+                        },
+                    }],
+                )
+                .await;
+                let command_id = match next_command(&mut opened, "over-cap browser session").await {
+                    ServerFrame::RevokeSessions {
+                        command_id,
+                        revocation:
+                            devserver_control_proto::SessionRevocation::SessionId {
+                                admin_session_id: revoked_id,
+                            },
+                    } => {
+                        assert_eq!(revoked_id, admin_session_id);
+                        command_id
+                    }
+                    frame => panic!("expected a session revoke, got {frame:?}"),
+                };
+                let result = ClientFrame::SessionRevocationResult {
+                    command_id,
+                    revoked: 1,
+                };
+                let down = ClientFrame::BrowserSessionDown {
+                    generation: 2,
+                    admin_session_id,
+                };
+                let frames = if down_first {
+                    [down, result]
+                } else {
+                    [result, down]
+                };
+                send(&mut opened, &frames).await;
+                only_heartbeats(&mut opened, "after browser-session refusal and down").await;
+                assert_session_active(&controller, "after browser-session refusal").await;
+                assert_eq!(
+                    aggregate_ids(&controller).await,
+                    vec![incumbent.registration_id]
+                );
+                assert!(controller.browser_sessions().await.unwrap().is_empty());
+            }
+        })
+        .await
+        .expect("over-cap browser session test timed out");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_tunnel_up_past_the_session_cap_keeps_the_control_session() {
         tokio::time::timeout(Duration::from_secs(120), async {
             let controller = crate::spawn_controller(100);
