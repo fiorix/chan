@@ -1367,8 +1367,7 @@ async fn handle_open_devserver_workspace(
 /// Body of the workspace on/off/forget routes: the remote mount `prefix` to
 /// target. It rides the JSON body, not a path segment -- a mount prefix can carry
 /// characters axum's `Path` extractor and intervening proxies mangle (`%2F`), and
-/// the gateway-proxied path makes it worse. `force` is read only by `/off` (a
-/// destructive off of a workspace with live terminals); `on`/`forget` ignore it.
+/// the gateway-proxied path makes it worse. Both `/off` and `/forget` use `force` to override the live-terminal guard; `/on` ignores it.
 #[derive(Deserialize)]
 struct DevserverWorkspaceRef {
     prefix: String,
@@ -1386,18 +1385,12 @@ struct WorkspaceOff {
     force: bool,
 }
 
-/// The `409 Conflict` body the `/off` route returns when an UNforced off is
-/// refused because the workspace still has live terminal sessions. The launcher
-/// matches `error == "live_terminals"` (distinguishing it from a plain
-/// `NO_DESKTOP` 409), shows `active_terminals` in a confirm prompt, then retries
-/// the off with `force: true`. The `active_terminals` field name mirrors the
-/// devserver's internal `ActiveTerminalsRejection`, so the confirm flow is parity
-/// with the workspace-off the desktop already drives over the devserver API.
+/// The `409 Conflict` body returned by workspace off, forget, and DELETE routes when an unforced operation would kill live terminal sessions. The launcher matches `error == "live_terminals"`, displays `active_terminals`, and retries with `force: true` after confirmation.
 #[derive(Serialize)]
 struct LiveTerminalsRejection {
     /// Discriminator the launcher matches on -- always `"live_terminals"`.
     error: &'static str,
-    /// Live terminal sessions the off would kill.
+    /// Live terminal sessions the requested operation would kill.
     active_terminals: usize,
 }
 
@@ -1465,7 +1458,7 @@ async fn set_devserver_workspace_on(
     }
 }
 
-/// `POST /api/library/devservers/{id}/workspaces/forget` `{prefix}`: forget
+/// `POST /api/library/devservers/{id}/workspaces/forget` `{prefix, force}`: forget
 /// (unregister) a connected devserver's workspace (the remote mount `prefix`)
 /// through the desktop bridge. POST-with-body rather than DELETE -- a DELETE body
 /// is poorly supported across clients/proxies. 204/409.
