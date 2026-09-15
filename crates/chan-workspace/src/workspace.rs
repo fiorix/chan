@@ -2107,7 +2107,7 @@ impl Workspace {
     ///   * `.chan/`, `.git/`, `.hg/` are skipped inside a subtree copy
     ///     (the same control dirs the walk filter and rename never
     ///     touch); copying them would duplicate VCS / app metadata.
-    ///   * Each file write goes through `atomic_write_in` (the same
+    ///   * Each file write goes through `atomic_write_stream_in` (the same
     ///     atomic + parent-fsync path every user write uses) and honors
     ///     the editable-text UTF-8 gate.
     ///

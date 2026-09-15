@@ -1315,23 +1315,6 @@ pub fn validate_rel(requested: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Atomic write into a cap-std `Dir`: tmpfile in the same
-/// directory, write, fsync, atomic rename over `rel`. cap-tempfile
-/// handles the rename; we add the dir fsync for the same reason
-/// `atomic_write` does (POSIX permits a rename to be lost on power
-/// loss without a parent-dir fsync). Mode + xattrs are preserved
-/// for an existing target via the same capture/apply pattern as
-/// `atomic_write`.
-///
-/// `rel` must already be `validate_rel`-ed; cap-std would refuse a
-/// bad path anyway, but the explicit gate keeps our error mapping
-/// crisp.
-pub fn atomic_write_in(dir: &cap_std::fs::Dir, rel: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_write_stream_in(dir, rel, AtomicWriteKind::Bytes, u64::MAX, false, |sink| {
-        sink.write_chunk(bytes)
-    })
-}
-
 #[derive(Debug, Clone)]
 enum AtomicStreamFailure {
     TooLarge {
@@ -1632,7 +1615,7 @@ fn apply_metadata_in(dir: &cap_std::fs::Dir, rel: &Path, preserved: Option<Prese
     if let Ok(file) = dir.open(rel) {
         let perms = cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(p.mode));
         if let Err(e) = file.set_permissions(perms) {
-            tracing::warn!(?rel, mode = %format!("{:o}", p.mode), ?e, "atomic_write_in: chmod failed");
+            tracing::warn!(?rel, mode = %format!("{:o}", p.mode), ?e, "apply_metadata_in: chmod failed");
         }
     }
     write_xattrs_via_fd(dir, rel, &p.xattrs);
@@ -1660,7 +1643,7 @@ fn read_xattrs_via_fd(dir: &cap_std::fs::Dir, rel: &Path) -> Vec<(std::ffi::OsSt
     let names = match file.list_xattr() {
         Ok(it) => it,
         Err(e) => {
-            tracing::debug!(?rel, ?e, "atomic_write_in: xattr list failed");
+            tracing::debug!(?rel, ?e, "read_xattrs_via_fd: xattr list failed");
             return Vec::new();
         }
     };
@@ -1669,7 +1652,7 @@ fn read_xattrs_via_fd(dir: &cap_std::fs::Dir, rel: &Path) -> Vec<(std::ffi::OsSt
         match file.get_xattr(&name) {
             Ok(Some(v)) => out.push((name, v)),
             Ok(None) => {}
-            Err(e) => tracing::debug!(?rel, ?name, ?e, "atomic_write_in: xattr get failed"),
+            Err(e) => tracing::debug!(?rel, ?name, ?e, "read_xattrs_via_fd: xattr get failed"),
         }
     }
     out
@@ -1692,7 +1675,7 @@ fn write_xattrs_via_fd(
     };
     for (name, value) in xattrs {
         if let Err(e) = file.set_xattr(name, value) {
-            tracing::debug!(?rel, ?name, ?e, "atomic_write_in: xattr set failed");
+            tracing::debug!(?rel, ?name, ?e, "write_xattrs_via_fd: xattr set failed");
         }
     }
 }
@@ -1903,23 +1886,6 @@ pub(crate) fn list_tree_prefix_with_limit(
     // come back as their single self-entry; directories come back
     // with their own entry plus descendants.
     list_tree_inner(root, subtree_abs, 0, None, limit)
-}
-
-/// `list_tree_prefix` variant that also applies the directory-name
-/// blocklist. Used by the graph layer's presence pass so the
-/// semantic graph excludes the same `node_modules/` / `target/` dirs
-/// the index and the File Browser spine already exclude. The
-/// editor's on-demand `list_tree_prefix` stays unfiltered so a user
-/// can still open a file inside a noisy dir.
-pub fn list_tree_prefix_filtered(
-    root: &Path,
-    subtree_abs: &Path,
-    filter: &WalkFilter,
-) -> Result<Vec<TreeEntry>> {
-    if !subtree_abs.exists() {
-        return Ok(Vec::new());
-    }
-    list_tree_inner(root, subtree_abs, 0, Some(filter), LIST_TREE_LIMIT)
 }
 
 /// Subtree listing governed by one generated scope policy.
