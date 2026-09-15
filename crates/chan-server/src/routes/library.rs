@@ -1747,8 +1747,7 @@ async fn handle_workspace_on(
 }
 
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
-/// flock), keep the registration, persist off. Plain unmount -- the
-/// confirm-before-off is a launcher-UI concern, not a wire 409. Loopback-only.
+/// flock), keep the registration, and persist off. Live terminal sessions return 409 with `LiveTerminalsRejection` unless the optional JSON body sets `force: true`. Requires a mutable launcher.
 async fn handle_workspace_off(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
