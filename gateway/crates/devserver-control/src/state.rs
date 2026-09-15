@@ -39,6 +39,20 @@ const MAX_PROXY_AUTHORITIES: usize = MAX_PROXY_SESSIONS * 2;
 const MAX_ROWS_PER_SESSION: usize = devserver_control_proto::MAX_SNAPSHOT_ROWS;
 const MAX_FLEET_ROWS: usize = 16_384;
 const MAX_FLEET_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+// Verified names exclude controls, so only quotes and backslashes expand
+// (2x); the lease's version and base64url parts never need JSON escaping.
+// Fixed bytes: 183 for field names/punctuation, two 36-byte UUIDs, a
+// seven-digit signed limit, two 33-byte UTC timestamps (signed six-digit
+// years plus nanoseconds), and a 58-byte IPv6 socket (scope and port included).
+const MAX_PENDING_TUNNEL_BYTES: usize = 2
+    * (devserver_control_proto::MAX_USERNAME_BYTES
+        + devserver_control_proto::MAX_DEVSERVER_ID_BYTES)
+    + devserver_control_proto::MAX_ADMISSION_LEASE_BYTES
+    + 183
+    + 2 * 36
+    + 7
+    + 2 * 33
+    + 58;
 const MAX_FLEET_BROWSER_SESSION_ROWS: usize = 500_000;
 const MAX_FLEET_BROWSER_SESSION_BYTES: usize = 128 * 1024 * 1024;
 const MAX_PENDING_PER_SESSION: usize = 1024;
@@ -357,6 +371,36 @@ impl ControllerState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn fill_session_row_for_test(
+        &mut self,
+        proxy_id: &ProxyId,
+        row: TunnelRow,
+        claimed_registration_id: Uuid,
+    ) {
+        let key = self.current_key(proxy_id.as_str()).unwrap();
+        assert!(self.pending.values().any(|claim| {
+            claim.session == key && claim.registration_id == claimed_registration_id
+        }));
+        let session = self.proxies.get_mut(proxy_id.as_str()).unwrap();
+        assert_eq!(session.rows.len(), MAX_ROWS_PER_SESSION - 1);
+        session.resident_bytes += row_resident_bytes(&row).unwrap();
+        assert!(session
+            .rows
+            .insert(row.registration_id, row.clone())
+            .is_none());
+        let tunnel_key = (row.owner_user_id, row.devserver_id.clone());
+        let owned = OwnedTunnel {
+            session: key,
+            proxy_base_url: session.base_url.as_str().to_string(),
+            row,
+        };
+        assert!(self.tunnels.insert(tunnel_key.clone(), owned).is_none());
+        self.add_owner_key(&tunnel_key);
+        self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
+        self.view_generations.tunnels = self.view_generations.tunnels.wrapping_add(1);
+    }
+
     pub fn is_ready(&self) -> bool {
         self.ready
     }
@@ -614,36 +658,30 @@ impl ControllerState {
             return Ok(effects);
         }
         self.touch(&key, now, wall_now)?;
+        if self.publishes_registration(&key, row.registration_id) {
+            return Ok(self.force_resync(&key, generation.saturating_add(1)));
+        }
         let session_rows = self
             .proxies
             .get(proxy_id.as_str())
             .map_or(0, |session| session.rows.len());
         let (fleet_rows, fleet_bytes) = self.fleet_usage(None);
-        if session_rows >= MAX_ROWS_PER_SESSION || fleet_rows >= MAX_FLEET_ROWS {
-            return Err(StateError::FleetCapacity);
-        }
         let row_bytes = row_resident_bytes(&row)?;
-        if fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_RESIDENT_BYTES {
-            return Err(StateError::FleetCapacity);
-        }
-        if self.publishes_registration(&key, row.registration_id) {
-            return Ok(self.force_resync(&key, generation.saturating_add(1)));
-        }
 
         let tunnel_key = (row.owner_user_id, row.devserver_id.clone());
         let matching_claim = self.pending.get(&tunnel_key).is_some_and(|claim| {
             claim.session == key && claim.registration_id == row.registration_id
         });
-        if !matching_claim {
-            self.proxies
-                .get_mut(proxy_id.as_str())
-                .expect("key was validated")
-                .remember_removal(row.registration_id);
-            let (_, effects) =
-                self.issue_kill(key, vec![row.registration_id], CommandPurpose::Runtime, now);
-            return Ok(effects);
+        if matching_claim {
+            self.remove_pending(&tunnel_key);
         }
-        self.remove_pending(&tunnel_key);
+        if !matching_claim
+            || session_rows >= MAX_ROWS_PER_SESSION
+            || fleet_rows >= MAX_FLEET_ROWS
+            || fleet_bytes.saturating_add(row_bytes) > MAX_FLEET_RESIDENT_BYTES
+        {
+            return Ok(self.refuse_registration(key, row.registration_id, now));
+        }
 
         let session = self
             .proxies
@@ -935,9 +973,23 @@ impl ControllerState {
             .get(&session_key)
             .copied()
             .unwrap_or(0);
+        let session_rows = self
+            .proxies
+            .get(proxy_id.as_str())
+            .expect("session key was validated")
+            .rows
+            .len();
+        let (fleet_rows, fleet_bytes) = self.fleet_usage(None);
+        let reserved_bytes = self
+            .pending
+            .len()
+            .saturating_add(1)
+            .saturating_mul(MAX_PENDING_TUNNEL_BYTES);
         if self.pending.len() >= MAX_PENDING_FLEET
             || pending_for_session >= MAX_PENDING_PER_SESSION
-            || self.fleet_usage(None).0.saturating_add(self.pending.len()) >= MAX_FLEET_ROWS
+            || session_rows.saturating_add(pending_for_session) >= MAX_ROWS_PER_SESSION
+            || fleet_rows.saturating_add(self.pending.len()) >= MAX_FLEET_ROWS
+            || fleet_bytes.saturating_add(reserved_bytes) > MAX_FLEET_RESIDENT_BYTES
         {
             return Ok(vec![admission_effect(
                 session_key,
@@ -2176,8 +2228,8 @@ impl ControllerState {
                 .is_some_and(|proxy| proxy.removed_registrations.contains(&registration_id))
     }
 
-    /// Command one registration killed for lack of verifiable authority and
-    /// remember that its down is expected. A registration already refused
+    /// Command one refused registration killed and remember that its down
+    /// is expected. A registration already refused
     /// has its kill outstanding, so a second refusal issues nothing.
     fn refuse_registration(
         &mut self,
@@ -2897,6 +2949,281 @@ pub(super) mod tests {
         ));
         assert_eq!(state.proxy_views().len(), 1);
         assert_eq!(state.proxy_views()[0].proxy_id, "p1");
+    }
+
+    fn ready_at_session_row_count(
+        count: usize,
+    ) -> (ControllerState, ProxyId, SessionIncarnation, Instant) {
+        let now = Instant::now();
+        let mut state = ControllerState::new(MAX_FLEET_ROWS);
+        let rows = (0..count)
+            .map(|index| {
+                row(
+                    &format!("owner-{index}"),
+                    &format!("devserver-{index}"),
+                    Uuid::new_v4(),
+                )
+            })
+            .collect();
+        let (id, incarnation, _) = ready_one(&mut state, "p1", rows, now);
+        assert_eq!(state.proxies["p1"].rows.len(), count);
+        (state, id, incarnation, now + CONVERGENCE_WINDOW)
+    }
+
+    fn largest_row() -> TunnelRow {
+        TunnelRow {
+            registration_id: Uuid::max(),
+            owner_user_id: Uuid::max(),
+            user: "\\".repeat(devserver_control_proto::MAX_USERNAME_BYTES),
+            devserver_id: "\"".repeat(devserver_control_proto::MAX_DEVSERVER_ID_BYTES),
+            // Signed with the all-zero test key. The payload ends in JSON
+            // whitespace to reach the maximum canonical lease length.
+            admission_lease: devserver_control_proto::AdmissionLease::parse(
+                include_str!("testdata/max-admission-lease.txt")
+                    .lines()
+                    .collect::<String>(),
+            )
+            .unwrap(),
+            connected_at: DateTime::<Utc>::MAX_UTC,
+            admission_lease_expires_at: DateTime::<Utc>::MAX_UTC,
+            peer_addr: Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::new(
+                    0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                ),
+                u16::MAX,
+                u32::MAX,
+                u32::MAX,
+            ))),
+            max_connected_devservers: devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS,
+        }
+    }
+
+    #[test]
+    fn pending_byte_reservation_covers_the_largest_serialized_row() {
+        let row = largest_row();
+        let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )
+        .unwrap();
+        let verifier = devserver_control_proto::AdmissionLeaseVerifier::from_base64(
+            &signer.verifying_key_base64(),
+        )
+        .unwrap();
+        let claims = verifier
+            .verify(
+                &row.admission_lease,
+                DateTime::<Utc>::MAX_UTC - chrono::Duration::seconds(120),
+            )
+            .unwrap();
+        assert_eq!(
+            claims.binding,
+            row.binding_for(ProxyId::parse("p1").unwrap())
+        );
+        assert_eq!(
+            claims.expires_at,
+            row.admission_lease_expires_at.timestamp()
+        );
+        assert_eq!(
+            claims.max_connected_devservers,
+            row.max_connected_devservers
+        );
+        assert_eq!(
+            row.admission_lease.as_str().len(),
+            devserver_control_proto::MAX_ADMISSION_LEASE_BYTES
+        );
+        devserver_control_proto::ClientFrame::TunnelUp {
+            generation: 1,
+            row: row.clone(),
+        }
+        .validate()
+        .unwrap();
+        let bytes = row_resident_bytes(&row).unwrap();
+        assert_eq!(bytes, MAX_PENDING_TUNNEL_BYTES);
+        let byte_limited_claims = MAX_FLEET_RESIDENT_BYTES / bytes;
+        assert_eq!(byte_limited_claims, 13_791);
+        eprintln!("largest verified serialized row={bytes}, per-claim reservation={MAX_PENDING_TUNNEL_BYTES}, empty-fleet claims={byte_limited_claims}, fleet pending cap={MAX_PENDING_FLEET}");
+    }
+
+    #[test]
+    fn admission_reserves_session_rows_including_pending_claims() {
+        let (mut state, id, incarnation, now) =
+            ready_at_session_row_count(MAX_ROWS_PER_SESSION - 1);
+        let effects = state
+            .request_admission(
+                &id,
+                incarnation,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "first".into(),
+                "first".into(),
+                now,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(has_decision(&effects, AdmissionDecision::Admit));
+        let effects = state
+            .request_admission(
+                &id,
+                incarnation,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "second".into(),
+                "second".into(),
+                now,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(
+            has_decision(&effects, AdmissionDecision::AtCapacity),
+            "a pending claim reserves the last session row: {effects:?}"
+        );
+        assert_eq!(state.pending.len(), 1);
+    }
+
+    #[test]
+    fn admission_refuses_at_the_session_row_cap() {
+        let (mut state, id, incarnation, now) = ready_at_session_row_count(MAX_ROWS_PER_SESSION);
+        let effects = state
+            .request_admission(
+                &id,
+                incarnation,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "extra".into(),
+                "extra".into(),
+                now,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(
+            has_decision(&effects, AdmissionDecision::AtCapacity),
+            "live session rows already fill its cap: {effects:?}"
+        );
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn admission_reserves_fleet_bytes_including_pending_claims() {
+        let (mut state, id, incarnation, now) = ready_at_session_row_count(1);
+        let bytes = row_resident_bytes(&largest_row()).unwrap();
+        state.proxies.get_mut("p1").unwrap().resident_bytes =
+            MAX_FLEET_RESIDENT_BYTES - 2 * bytes + 1;
+        for (user, expected) in [
+            ("first", AdmissionDecision::Admit),
+            ("second", AdmissionDecision::AtCapacity),
+        ] {
+            let effects = state
+                .request_admission(
+                    &id,
+                    incarnation,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    user.into(),
+                    user.into(),
+                    now,
+                    Utc::now(),
+                )
+                .unwrap();
+            assert!(
+                has_decision(&effects, expected),
+                "pending claims reserve worst-case row bytes: {effects:?}"
+            );
+        }
+        assert_eq!(state.pending.len(), 1);
+        state.proxies.get_mut("p1").unwrap().resident_bytes = MAX_FLEET_RESIDENT_BYTES;
+        let effects = state
+            .request_admission(
+                &id,
+                incarnation,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "third".into(),
+                "third".into(),
+                now,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(has_decision(&effects, AdmissionDecision::AtCapacity));
+    }
+
+    #[test]
+    fn tunnel_up_over_capacity_refuses_only_that_registration() {
+        for cap in ["session rows", "fleet rows", "fleet bytes"] {
+            let (mut state, id, incarnation, now) = ready_at_session_row_count(1);
+            let newcomer = row("newcomer", "newcomer", Uuid::new_v4());
+            let effects = state
+                .request_admission(
+                    &id,
+                    incarnation,
+                    Uuid::new_v4(),
+                    newcomer.registration_id,
+                    newcomer.user.clone(),
+                    newcomer.devserver_id.clone(),
+                    now,
+                    Utc::now(),
+                )
+                .unwrap();
+            assert!(has_decision(&effects, AdmissionDecision::Admit));
+            match cap {
+                "session rows" => {
+                    let proxy = state.proxies.get_mut("p1").unwrap();
+                    for index in 1..MAX_ROWS_PER_SESSION {
+                        let extra = row("extra", &format!("extra-{index}"), Uuid::new_v4());
+                        proxy.resident_bytes += row_resident_bytes(&extra).unwrap();
+                        proxy.rows.insert(extra.registration_id, extra);
+                    }
+                }
+                "fleet rows" => state.orphan_total.rows = MAX_FLEET_ROWS - 1,
+                "fleet bytes" => state.orphan_total.bytes = MAX_FLEET_RESIDENT_BYTES,
+                _ => unreachable!(),
+            }
+            let old_rows = state.proxies["p1"].rows.clone();
+            let old_tunnels = state.tunnel_views();
+            let effects = state
+                .tunnel_up(&id, incarnation, 1, newcomer.clone(), now, Utc::now())
+                .unwrap_or_else(|error| {
+                    panic!("{cap} must refuse one row without ending its session: {error}")
+                });
+            let command_id = kill_command(&effects, "p1", newcomer.registration_id);
+            assert!(!effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Retire { .. })));
+            assert_eq!(state.proxies["p1"].rows, old_rows);
+            assert_eq!(state.tunnel_views(), old_tunnels);
+            assert!(state.proxies["p1"].fleet_ready);
+            assert!(
+                state.pending.is_empty(),
+                "{cap}: release the refused row's claim"
+            );
+            assert!(state.pending_index.is_empty());
+            assert!(state.pending_per_session.is_empty());
+            let effects = state
+                .tunnel_down(
+                    &id,
+                    incarnation,
+                    2,
+                    newcomer.registration_id,
+                    now,
+                    Utc::now(),
+                )
+                .unwrap();
+            assert!(effects.is_empty(), "{cap}: refused down must not resync");
+            state
+                .command_result(
+                    &id,
+                    incarnation,
+                    command_id,
+                    Vec::new(),
+                    vec![newcomer.registration_id],
+                    Vec::new(),
+                    now,
+                    Utc::now(),
+                )
+                .unwrap();
+            assert_eq!(state.proxies["p1"].generation, Some(2));
+            assert_eq!(state.proxies["p1"].rows, old_rows);
+            assert!(state.is_ready());
+        }
     }
 
     #[test]

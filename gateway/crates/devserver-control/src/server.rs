@@ -2321,6 +2321,101 @@ mod tests {
         assert_session_active(&controller, "after both downs").await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_up_past_the_session_cap_keeps_the_control_session() {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let controller = crate::spawn_controller(100);
+            let mut opened = connected(controller.clone()).await;
+            handshake(opened.stream.as_mut().unwrap()).await;
+            let rows: Vec<_> = (0..devserver_control_proto::MAX_SNAPSHOT_ROWS - 1)
+                .map(|index| signed_row(&format!("owner-{index}"), "one", Uuid::new_v4()))
+                .collect();
+            let mut expected: Vec<_> = rows.iter().map(|row| row.registration_id).collect();
+            expected.sort();
+            send(
+                &mut opened,
+                &[ClientFrame::SnapshotStart { base_generation: 0 }],
+            )
+            .await;
+            for chunk in rows.chunks(devserver_control_proto::MAX_SNAPSHOT_CHUNK_ROWS) {
+                send(
+                    &mut opened,
+                    &[ClientFrame::SnapshotChunk {
+                        rows: chunk.to_vec(),
+                    }],
+                )
+                .await;
+            }
+            send(
+                &mut opened,
+                &[ClientFrame::SnapshotEnd { base_generation: 0 }],
+            )
+            .await;
+            assert!(matches!(
+                next_command(&mut opened, "full snapshot").await,
+                ServerFrame::SnapshotAccepted { base_generation: 0 }
+            ));
+            expect_fleet_ready(&mut opened, "full snapshot").await;
+            assert_eq!(aggregate_ids(&controller).await, expected);
+
+            let extra = signed_row("extra", "extra", Uuid::new_v4());
+            let request_id = Uuid::new_v4();
+            send(
+                &mut opened,
+                &[ClientFrame::AdmissionRequest {
+                    request_id,
+                    registration_id: extra.registration_id,
+                    owner_user_id: extra.owner_user_id,
+                    user: extra.user.clone(),
+                    devserver_id: extra.devserver_id.clone(),
+                    admission_lease: extra.admission_lease.clone(),
+                }],
+            )
+            .await;
+            assert!(matches!(
+                next_command(&mut opened, "admission before filling the session").await,
+                ServerFrame::AdmissionDecision {
+                    request_id: admitted_request,
+                    registration_id,
+                    decision: AdmissionDecision::Admit,
+                } if admitted_request == request_id && registration_id == extra.registration_id
+            ));
+            // Admission reserves the last row. Inject an incumbent to exercise
+            // the publication backstop with that claim still present.
+            let filler = signed_row("filler", "filler", Uuid::new_v4());
+            expected.push(filler.registration_id);
+            expected.sort();
+            controller
+                .fill_session_row_for_test(
+                    ProxyId::parse("p1").unwrap(),
+                    filler,
+                    extra.registration_id,
+                )
+                .await;
+            assert_eq!(aggregate_ids(&controller).await, expected);
+            send(
+                &mut opened,
+                &[ClientFrame::TunnelUp {
+                    generation: 1,
+                    row: extra.clone(),
+                }],
+            )
+            .await;
+            kill_then_down(
+                &mut opened,
+                "over-cap registration",
+                extra.registration_id,
+                2,
+            )
+            .await;
+            only_heartbeats(&mut opened, "after the refused registration's down").await;
+            assert_session_active(&controller, "after the over-cap registration").await;
+            assert_eq!(aggregate_ids(&controller).await, expected);
+        })
+        .await
+        .expect("over-cap registration test timed out");
+    }
+
     /// `Stale` and `ControlWarming` both refuse one client on the proxy.
     /// `Stale` is the one that is true: the request's authority is not
     /// current, while the controller is ready.

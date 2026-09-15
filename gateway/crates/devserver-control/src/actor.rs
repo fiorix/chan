@@ -59,6 +59,13 @@ pub struct SessionRevocationPlan {
 }
 
 enum Command {
+    #[cfg(test)]
+    FillSessionRow {
+        proxy_id: ProxyId,
+        row: TunnelRow,
+        claimed_registration_id: Uuid,
+        reply: oneshot::Sender<()>,
+    },
     BeginSession {
         proxy_id: ProxyId,
         base_url: CanonicalOrigin,
@@ -249,12 +256,12 @@ pub fn spawn_controller_owned(
                     let effects = state.tick(Instant::now(), Utc::now());
                     apply_effects(&mut state, &mut sessions, &mut waiters, effects);
                     publish_watches(
-                            &state,
-                            &mut published,
-                            &readiness_watch_tx,
-                            &tunnel_watch_tx,
-                            &proxy_watch_tx,
-                            &browser_session_watch_tx,
+                        &state,
+                        &mut published,
+                        &readiness_watch_tx,
+                        &tunnel_watch_tx,
+                        &proxy_watch_tx,
+                        &browser_session_watch_tx,
                     );
                 }
                 command = rx.recv() => {
@@ -289,6 +296,17 @@ fn handle_command(
     let now = Instant::now();
     let wall_now = Utc::now();
     match command {
+        #[cfg(test)]
+        Command::FillSessionRow {
+            proxy_id,
+            row,
+            claimed_registration_id,
+            reply,
+        } => {
+            state.fill_session_row_for_test(&proxy_id, row, claimed_registration_id);
+            let _ = reply.send(());
+            Vec::new()
+        }
         Command::BeginSession {
             proxy_id,
             base_url,
@@ -787,6 +805,23 @@ fn publish_watches(
 }
 
 impl ControllerHandle {
+    #[cfg(test)]
+    pub(crate) async fn fill_session_row_for_test(
+        &self,
+        proxy_id: ProxyId,
+        row: TunnelRow,
+        claimed_registration_id: Uuid,
+    ) {
+        self.request(|reply| Command::FillSessionRow {
+            proxy_id,
+            row,
+            claimed_registration_id,
+            reply,
+        })
+        .await
+        .unwrap();
+    }
+
     pub async fn begin_session(
         &self,
         proxy_id: ProxyId,
