@@ -13,9 +13,7 @@ use crate::entry_replay::EntryReplayCache;
 use crate::registry::Registry;
 use crate::session_store::SessionStore;
 
-/// Application state passed to every handler. Holds no cookie or
-/// session machinery; devserver-proxy reads no cookie other than the
-/// `__Host-devserver_gate` issued by the proxy gate itself.
+/// Shared proxy configuration, registry, readiness, session store, and entry-replay cache. The proxy reads its own `__Host-devserver_gate` session and `__Host-devserver_csrf` cookies.
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
