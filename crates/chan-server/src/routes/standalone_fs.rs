@@ -1271,21 +1271,17 @@ fn standalone_transfer_batch_sync(
 /// tests so both surfaces exercise one `AppState` shape.
 #[cfg(test)]
 pub(crate) mod test_fixture {
-    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::Arc;
 
     use tempfile::TempDir;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::broadcast;
 
     use crate::bus::ScopeRegistry;
-    use crate::self_writes::SelfWrites;
     use crate::standalone_mutations::StandaloneMutationBus;
     use crate::standalone_watch::ScopedWatchManager;
+    use crate::state::test_support::base_app_state;
     use crate::state::{AppState, StandaloneDrafts, StandaloneFilesState};
-    use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
-    use crate::{EditorPrefs, ServerConfig};
 
     pub(crate) struct Fixture {
         pub(crate) _cfg: TempDir,
@@ -1334,49 +1330,11 @@ pub(crate) mod test_fixture {
         });
 
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
-        let (events_tx, _) = broadcast::channel::<String>(8);
-        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        std::mem::forget(shutdown_tx);
         let state = Arc::new(AppState {
-            library: lib,
-            workspace_root: root.clone(),
-            workspace_cell: Arc::new(RwLock::new(None)),
-            token: None,
-            prefix: Arc::new(RwLock::new(String::new())),
-            settings_disabled: false,
-            last_activity: Arc::new(AtomicU64::new(0)),
-            events_tx,
-            index_events_tx,
-            server_config: Mutex::new(ServerConfig::default()),
-            editor_prefs: Mutex::new(EditorPrefs::default()),
-            config_revision: AtomicU64::new(1),
-            config_write_serial: Mutex::new(()),
-            self_writes: Arc::new(SelfWrites::new()),
-            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
-                workspace_root: root.clone(),
-                mcp_socket_path: None,
-                control_socket_path: None,
-                terminal: ServerConfig::default().terminal,
-            })),
-            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
-            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
-            shutdown_rx,
+            events_tx: broadcast::channel::<String>(8).0,
             scope_registry: registry.clone(),
-            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
-            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
-            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
-            ephemeral_sessions: Mutex::new(HashMap::new()),
-            ephemeral_files_sessions: Mutex::new(HashMap::new()),
-            terminal_session_dir: None,
-            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
-            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
-            pending_window_commands: std::sync::Arc::new(Default::default()),
-            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
-            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
-            bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),
-            instance_id: "test-instance".to_string(),
             standalone_files: Some(standalone),
+            ..base_app_state(lib, root.clone())
         });
         Fixture {
             _cfg: cfg,

@@ -5425,19 +5425,17 @@ mod tests {
 
 #[cfg(test)]
 mod doc_divert_tests {
-    use std::collections::HashMap;
     use std::convert::Infallible;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use axum::body::{to_bytes, Body, Bytes};
     use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::{header, HeaderMap, Request, StatusCode};
     use axum::Json;
-    use chan_workspace::{SearchAggression, WatchEvent, WatchKind};
+    use chan_workspace::{WatchEvent, WatchKind};
     use serde_json::Value;
     use tempfile::TempDir;
-    use tokio::sync::{broadcast, watch};
     use tower::ServiceExt;
 
     use super::{
@@ -5445,10 +5443,8 @@ mod doc_divert_tests {
         WriteFileQuery,
     };
     use crate::doc_sessions::changes::{replace_diff, UpdateJson};
-    use crate::self_writes::SelfWrites;
-    use crate::state::{AppState, WorkspaceCell};
-    use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
-    use crate::{EditorPrefs, ServerConfig};
+    use crate::state::test_support::workspace_app_state;
+    use crate::state::AppState;
 
     pub(super) fn divert_app() -> (TempDir, TempDir, Arc<AppState>) {
         divert_app_with_tenant(
@@ -5481,61 +5477,9 @@ mod doc_divert_tests {
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
 
-        let (events_tx, _) = broadcast::channel::<String>(1);
-        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
-        let indexer = Arc::new(crate::indexer::Indexer::spawn(
-            workspace.clone(),
-            index_events_tx.subscribe(),
-            false,
-            SearchAggression::Conservative,
-            Arc::new(chan_workspace::NoProgress),
-        ));
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        std::mem::forget(shutdown_tx);
-
         let state = Arc::new(AppState {
-            library: lib,
-            workspace_root: root.path().to_path_buf(),
-            workspace_cell: Arc::new(RwLock::new(Some(WorkspaceCell {
-                workspace,
-                watch_handle: None,
-                indexer,
-            }))),
-            token: None,
-            prefix: Arc::new(RwLock::new(String::new())),
-            settings_disabled: false,
-            last_activity: Arc::new(AtomicU64::new(0)),
-            events_tx,
-            index_events_tx,
-            server_config: Mutex::new(ServerConfig::default()),
-            editor_prefs: Mutex::new(EditorPrefs::default()),
-            config_revision: AtomicU64::new(1),
-            config_write_serial: Mutex::new(()),
-            self_writes: Arc::new(SelfWrites::new()),
-            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
-                workspace_root: root.path().to_path_buf(),
-                mcp_socket_path: None,
-                control_socket_path: None,
-                terminal: ServerConfig::default().terminal,
-            })),
-            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
-            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
-            shutdown_rx,
-            scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
-            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
-            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
-            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
-            ephemeral_sessions: Mutex::new(HashMap::new()),
-            ephemeral_files_sessions: Mutex::new(HashMap::new()),
-            terminal_session_dir: None,
-            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
-            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
-            pending_window_commands: std::sync::Arc::new(Default::default()),
-            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
-            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: bulk,
-            instance_id: "test-instance".to_string(),
-            standalone_files: None,
+            ..workspace_app_state(lib, root.path().to_path_buf(), workspace)
         });
         (cfg, root, state)
     }

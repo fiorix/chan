@@ -120,22 +120,14 @@ fn ok_message(message: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::{Mutex, RwLock};
-
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
-    use chan_workspace::SearchAggression;
     use tempfile::TempDir;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::broadcast;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::self_writes::SelfWrites;
-    use crate::state::WorkspaceCell;
-    use crate::terminal_sessions::{Registry as TerminalRegistry, RegistryConfig};
-    use crate::{EditorPrefs, ServerConfig};
+    use crate::state::test_support::workspace_app_state;
 
     /// The real router over a tempdir workspace, plus a live `/ws` events
     /// subscription (window commands refuse to queue with zero subscribers)
@@ -153,63 +145,13 @@ mod tests {
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
-        let (events_tx, events_rx) = broadcast::channel::<String>(8);
-        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
-        let indexer = Arc::new(crate::indexer::Indexer::spawn(
-            workspace.clone(),
-            index_events_tx.subscribe(),
-            false,
-            SearchAggression::Conservative,
-            Arc::new(chan_workspace::NoProgress),
-        ));
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        std::mem::forget(shutdown_tx);
-        let session_registry = Arc::new(crate::session_presence::SessionRegistry::new());
-        let session_guard = session_registry.join("w-1", true, None).guard;
         let state = Arc::new(AppState {
-            library: lib,
-            workspace_root: root.path().to_path_buf(),
-            workspace_cell: Arc::new(RwLock::new(Some(WorkspaceCell {
-                workspace,
-                watch_handle: None,
-                indexer,
-            }))),
             token: Some("secret".to_string()),
-            prefix: Arc::new(RwLock::new(String::new())),
-            settings_disabled: false,
-            last_activity: Arc::new(AtomicU64::new(0)),
-            events_tx,
-            index_events_tx,
-            server_config: Mutex::new(ServerConfig::default()),
-            editor_prefs: Mutex::new(EditorPrefs::default()),
-            config_revision: AtomicU64::new(1),
-            config_write_serial: Mutex::new(()),
-            self_writes: Arc::new(SelfWrites::new()),
-            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
-                workspace_root: root.path().to_path_buf(),
-                mcp_socket_path: None,
-                control_socket_path: None,
-                terminal: ServerConfig::default().terminal,
-            })),
-            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
-            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
-            shutdown_rx,
-            scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
-            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
-            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
-            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
-            ephemeral_sessions: Mutex::new(HashMap::new()),
-            ephemeral_files_sessions: Mutex::new(HashMap::new()),
-            terminal_session_dir: None,
-            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
-            session_registry,
-            pending_window_commands: Arc::new(Default::default()),
-            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
-            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
-            bulk_transfer: crate::state::test_support::make_test_bulk_transfer_tenant(),
-            instance_id: "test-instance".to_string(),
-            standalone_files: None,
+            events_tx: broadcast::channel::<String>(8).0,
+            ..workspace_app_state(lib, root.path().to_path_buf(), workspace)
         });
+        let events_rx = state.events_tx.subscribe();
+        let session_guard = state.session_registry.join("w-1", true, None).guard;
         (cfg, root, events_rx, crate::router(state), session_guard)
     }
 

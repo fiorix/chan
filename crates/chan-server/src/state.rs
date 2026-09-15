@@ -358,6 +358,84 @@ pub(crate) mod test_support {
             .tenant()
     }
 
+    /// Owned workspace-less state rooted at the caller's fixture directory.
+    /// Callers can override fields before wrapping it in an Arc.
+    pub fn base_app_state(library: Library, workspace_root: PathBuf) -> AppState {
+        let (events_tx, _) = broadcast::channel::<String>(1);
+        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
+        // A never-tripped shutdown channel: tests don't run the
+        // signal watcher, so the receiver stays parked on the
+        // initial `false` value for the lifetime of the AppState.
+        // Sender is leaked so the rx isn't seen as closed.
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        std::mem::forget(shutdown_tx);
+        AppState {
+            library,
+            workspace_root: workspace_root.clone(),
+            workspace_cell: Arc::new(RwLock::new(None)),
+            token: None,
+            prefix: Arc::new(RwLock::new(String::new())),
+            settings_disabled: false,
+            events_tx,
+            index_events_tx,
+            server_config: Mutex::new(ServerConfig::default()),
+            editor_prefs: Mutex::new(EditorPrefs::default()),
+            config_revision: AtomicU64::new(1),
+            config_write_serial: Mutex::new(()),
+            self_writes: Arc::new(SelfWrites::new()),
+            last_activity: Arc::new(AtomicU64::new(0)),
+            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
+                workspace_root,
+                mcp_socket_path: None,
+                control_socket_path: None,
+                terminal: ServerConfig::default().terminal,
+            })),
+            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
+            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
+            shutdown_rx,
+            scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
+            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
+            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
+            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
+            ephemeral_sessions: Mutex::new(HashMap::new()),
+            ephemeral_files_sessions: Mutex::new(HashMap::new()),
+            terminal_session_dir: None,
+            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
+            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            pending_window_commands: std::sync::Arc::new(Default::default()),
+            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
+            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
+            bulk_transfer: make_test_bulk_transfer_tenant(),
+            instance_id: "test-instance".to_string(),
+            standalone_files: None,
+        }
+    }
+
+    /// Attach an already-open workspace and indexer to the base's index channel.
+    /// The caller can seed and index its workspace before starting the indexer.
+    pub fn workspace_app_state(
+        library: Library,
+        workspace_root: PathBuf,
+        workspace: Arc<chan_workspace::Workspace>,
+    ) -> AppState {
+        let base = base_app_state(library, workspace_root);
+        let indexer = Arc::new(crate::indexer::Indexer::spawn(
+            workspace.clone(),
+            base.index_events_tx.subscribe(),
+            false,
+            chan_workspace::SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        ));
+        AppState {
+            workspace_cell: Arc::new(RwLock::new(Some(super::WorkspaceCell {
+                workspace,
+                watch_handle: None,
+                indexer,
+            }))),
+            ..base
+        }
+    }
+
     /// Build an `AppState` with the two policy bools set to the
     /// requested values and everything else stubbed to defaults.
     /// The returned `AppState` is safe to wrap in `Arc` and hand to
@@ -406,53 +484,10 @@ pub(crate) mod test_support {
         }
         let lib = Library::open_at(config_path).expect("open library");
         std::mem::forget(tmp);
-        let (events_tx, _) = broadcast::channel::<String>(1);
-        let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
-        // A never-tripped shutdown channel: tests don't run the
-        // signal watcher, so the receiver stays parked on the
-        // initial `false` value for the lifetime of the AppState.
-        // Sender is leaked so the rx isn't seen as closed.
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        std::mem::forget(shutdown_tx);
         Arc::new(AppState {
-            library: lib,
-            workspace_root: PathBuf::from("/dev/null"),
-            workspace_cell: Arc::new(RwLock::new(None)),
-            token,
-            prefix: Arc::new(RwLock::new(String::new())),
             settings_disabled,
-            events_tx,
-            index_events_tx,
-            server_config: Mutex::new(ServerConfig::default()),
-            editor_prefs: Mutex::new(EditorPrefs::default()),
-            config_revision: AtomicU64::new(1),
-            config_write_serial: Mutex::new(()),
-            self_writes: Arc::new(SelfWrites::new()),
-            last_activity: Arc::new(AtomicU64::new(0)),
-            terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
-                workspace_root: PathBuf::from("/dev/null"),
-                mcp_socket_path: None,
-                control_socket_path: None,
-                terminal: ServerConfig::default().terminal,
-            })),
-            doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
-            scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
-            shutdown_rx,
-            scope_registry: Arc::new(crate::bus::ScopeRegistry::new()),
-            survey_bus: Arc::new(crate::survey::SurveyBus::new()),
-            window_bus: Arc::new(crate::window_bus::WindowBus::new()),
-            handover_bus: Arc::new(crate::handover_bus::HandoverBus::new()),
-            ephemeral_sessions: Mutex::new(HashMap::new()),
-            ephemeral_files_sessions: Mutex::new(HashMap::new()),
-            terminal_session_dir: None,
-            window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
-            session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
-            pending_window_commands: std::sync::Arc::new(Default::default()),
-            window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
-            window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
-            bulk_transfer: make_test_bulk_transfer_tenant(),
-            instance_id: "test-instance".to_string(),
-            standalone_files: None,
+            token,
+            ..base_app_state(lib, PathBuf::from("/dev/null"))
         })
     }
 
