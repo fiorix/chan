@@ -1,17 +1,11 @@
 //! In-process MCP server exposed over a local IPC transport.
 //!
-//! External MCP agents want to launch the chan MCP server as a
-//! subprocess so writes round-trip through chan-workspace's gates. The
-//! original wiring spawned `chan __mcp <workspace_root>`, which then
-//! called `Library::open_workspace` a second time. chan-workspace holds a
-//! per-workspace flock for single-writer ownership, so the child failed
-//! with `WorkspaceLocked`.
-//!
-//! The bridge resolves that conflict: chan-server already owns an
-//! `Arc<Workspace>` for the workspace it serves, so the MCP service is run
-//! in-process. Each external agent connects through `chan __mcp-proxy`
-//! to a local IPC endpoint the bridge listens on; the proxy just pipes
-//! stdin/stdout through it. No second workspace open, no flock contention.
+//! External agents connect through `chan __mcp-proxy`, which pipes stdio
+//! through the bridge endpoint. The in-process MCP service borrows the
+//! tenant's workspace through its cell resolver. Each blocking tool body
+//! reads the cell, waiting for any reset or import to install its replacement.
+//! Waiting requests, idle sessions and stalled response writes do not retain
+//! the workspace; a cleared cell answers "workspace is closed".
 //!
 //! Transport: the bridge reuses the control socket's cross-platform
 //! [`transport`](crate::control_socket::transport) module -- a Unix-domain
@@ -20,10 +14,10 @@
 //! so the platform-specific stream halves plug straight in with no chan-llm
 //! change.
 //!
-//! Lifetime: the bridge spawns at boot inside `build_app`. The
-//! returned `BridgeHandle` owns the socket-cleanup `Drop` and the
-//! accept-loop join handle; serve()/shutdown drops it explicitly so
-//! the endpoint is released even when the runtime is torn down abruptly.
+//! Lifetime: `build_app` starts the bridge and keeps its `BridgeHandle` in
+//! the tenant keepalive. Unmount drops it, aborting the accept loop and its
+//! owned sessions before the host waits for workspace release. A blocking
+//! tool body already running can retain the workspace until it returns.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -229,11 +223,13 @@ where
 
 /// Bridge handle returned from `start`. Drop = abort the accept loop and sessions
 /// and (on unix) unlink the socket file; a Windows named pipe is reclaimed
-/// by the OS once the last handle drops. Held by `AppState` for the lifetime
-/// of the chan-server process.
+/// by the OS once the last handle drops. The tenant keepalive owns this handle
+/// and drops it during unmount, before the workspace-release wait.
 pub struct BridgeHandle {
     socket_path: PathBuf,
     accept_loop: Option<JoinHandle<()>>,
+    #[cfg(all(test, unix))]
+    accepted: Arc<tokio::sync::Semaphore>,
 }
 
 impl BridgeHandle {
@@ -255,14 +251,19 @@ impl Drop for BridgeHandle {
 }
 
 /// Bind the endpoint and spawn an accept loop. Each accepted connection
-/// gets a fresh `chan_llm::mcp::Server` constructed against the
-/// current workspace Arc.
+/// gets a fresh `chan_llm::mcp::Server` with the tenant workspace resolver.
+/// Only blocking tool bodies invoke the resolver, so session admission does
+/// not wait on a workspace swap or retain a workspace snapshot.
 pub fn start<DF>(socket_path: PathBuf, workspace_for: DF) -> std::io::Result<BridgeHandle>
 where
     DF: Fn() -> Option<Arc<chan_workspace::Workspace>> + Send + Sync + 'static,
 {
     let mut listener = transport::bind(&socket_path)?;
     let workspace_for = Arc::new(workspace_for);
+    #[cfg(all(test, unix))]
+    let accepted = Arc::new(tokio::sync::Semaphore::new(0));
+    #[cfg(all(test, unix))]
+    let acceptance = accepted.clone();
 
     let accept_loop = tokio::spawn(async move {
         let mut sessions = JoinSet::new();
@@ -281,23 +282,24 @@ where
                     continue;
                 }
             };
-            let Some(workspace) = workspace_for() else {
-                tracing::warn!("mcp bridge session refused: workspace state unavailable");
-                continue;
-            };
+            let resolver = workspace_for.clone();
+            let server = chan_llm::mcp::Server::from_resolver(move || resolver());
             sessions.spawn(async move {
                 let (read, write) = conn.into_split();
-                let server = chan_llm::mcp::Server::new(workspace);
                 if let Err(e) = server.serve_io(read, write).await {
                     tracing::debug!("mcp bridge session: {e}");
                 }
             });
+            #[cfg(all(test, unix))]
+            acceptance.add_permits(1);
         }
     });
 
     Ok(BridgeHandle {
         socket_path,
         accept_loop: Some(accept_loop),
+        #[cfg(all(test, unix))]
+        accepted,
     })
 }
 
@@ -307,6 +309,175 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn read_rpc<R: tokio::io::AsyncBufRead + Unpin>(read: &mut R) -> serde_json::Value {
+        let mut line = String::new();
+        assert_ne!(read.read_line(&mut line).await.unwrap(), 0);
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn bridge_call_during_workspace_swap(import: bool) {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let config = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.write_text("live.md", "original").unwrap();
+            workspace.stop_open_recovery();
+            let weak = Arc::downgrade(&workspace);
+            let serve = chan_library::ServeConfig {
+                addr: ([127, 0, 0, 1], 0).into(), prefix: "/workspace".into(),
+                no_token: true, idle_timeout: None, open_browser: false,
+                search_aggression: None, verbose: false, settings_disabled: false,
+            };
+            let mut artifacts = crate::build_app(library, workspace, &serve,
+                Default::default(), chan_library::UnserveMode::Unsupported, None).await.unwrap();
+            artifacts.tasks.shutdown().await;
+            drop(artifacts.mcp_bridge.take());
+            let state = artifacts.state.clone();
+            let workspace = state.try_workspace().unwrap();
+            let archive_dir = tempfile::tempdir().unwrap();
+            let archive = if import {
+                let path = archive_dir.path().join("metadata.tar.zst");
+                state.library.export_metadata_archive(&state.workspace_root, &path,
+                    chan_workspace::MetadataExportOptions { chan_version: "test".into() }).unwrap();
+                Some(std::fs::read(path).unwrap())
+            } else {
+                None
+            };
+            let doc = state.doc_sessions.attach(&workspace, "live.md", "window", None).await.unwrap();
+            doc.session().apply_replace("writer", "flushed content").unwrap();
+            drop(workspace);
+            let resolver_cell = state.workspace_cell.clone();
+            let probe = Arc::new(std::sync::Mutex::new(None));
+            let resolver_probe = probe.clone();
+            let bridge = start(pick_socket_path(), move || {
+                if let Some(entered) = resolver_probe.lock().unwrap().take() {
+                    let entered: tokio::sync::oneshot::Sender<()> = entered;
+                    entered.send(()).unwrap();
+                }
+                resolver_cell.read().unwrap().as_ref().map(|cell| cell.workspace.clone())
+            }).unwrap();
+            let client = tokio::net::UnixStream::connect(bridge.socket_path()).await.unwrap();
+            let (read, mut write) = client.into_split();
+            let mut read = BufReader::new(read);
+            let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "swap-test", "version": "0"}}});
+            write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+            assert_eq!(read_rpc(&mut read).await["result"]["serverInfo"]["name"], "chan");
+            write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
+            assert_eq!(read_rpc(&mut read).await["id"], 2);
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            *probe.lock().unwrap() = Some(entered);
+            let (flushing, flush_started) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            crate::routes::install_test_session_close_gate(&state.workspace_root, flushing, released);
+            let app = axum::Router::new()
+                .route("/reset", axum::routing::post(crate::routes::api_storage_reset))
+                .route("/import", axum::routing::post(crate::routes::api_metadata_import))
+                .with_state(state.clone());
+            let request = if let Some(archive) = archive {
+                let mut body = b"--import\r\nContent-Disposition: form-data; name=\"rescan\"\r\n\r\nfalse\r\n--import\r\nContent-Disposition: form-data; name=\"file\"; filename=\"metadata.tar.zst\"\r\n\r\n".to_vec();
+                body.extend_from_slice(&archive);
+                body.extend_from_slice(b"\r\n--import--\r\n");
+                Request::post("/import").header("content-type", "multipart/form-data; boundary=import")
+                    .body(Body::from(body)).unwrap()
+            } else {
+                Request::post("/reset").header("content-type", "application/json")
+                    .body(Body::from(r#"{"mode":"workspace"}"#)).unwrap()
+            };
+            let swapping = tokio::spawn(app.oneshot(request));
+            flush_started.await.unwrap();
+            assert!(state.workspace_cell.try_read().is_err());
+            assert_eq!(weak.strong_count(), 1);
+            let request = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "read_file", "arguments": {"path": "live.md"}}});
+            write.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+            let early_reply = tokio::select! {
+                entered = entry => { entered.unwrap(); None },
+                reply = read_rpc(&mut read) => Some(reply),
+            };
+            assert_eq!(weak.strong_count(), 1);
+            release.send(()).unwrap();
+            let response = swapping.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(state.try_workspace().is_ok(), "swap left the tenant without a workspace");
+            let first_reply = match early_reply {
+                Some(reply) => reply,
+                None => read_rpc(&mut read).await,
+            };
+            let request = serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "read_file", "arguments": {"path": "live.md"}}});
+            write.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+            let second_reply = read_rpc(&mut read).await;
+            for reply in [&first_reply, &second_reply] {
+                let text = reply["result"]["content"][0]["text"].as_str()
+                    .unwrap_or_else(|| panic!("bridge lost the replacement workspace: {reply}"));
+                let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(value["content"], "flushed content", "tool bypassed the flush window: {reply}");
+            }
+            assert_eq!(weak.strong_count(), 0);
+            drop(bridge);
+            if let Some(cell) = artifacts.workspace_cell.write().unwrap().take() {
+                cell.indexer.cancel();
+                cell.workspace.stop_open_recovery();
+            };
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_reset_flush_waits_for_the_replacement_workspace() {
+        bridge_call_during_workspace_swap(false).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_import_flush_waits_for_the_replacement_workspace() {
+        bridge_call_during_workspace_swap(true).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_idle_initialized_session_does_not_pin_the_workspace_cell() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let config = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let lock_dir = workspace.paths().lock.clone();
+            let cell = Arc::new(std::sync::Mutex::new(Some(workspace)));
+            let bridge_cell = cell.clone();
+            let handle = start(pick_socket_path(), move || bridge_cell.lock().unwrap().clone()).unwrap();
+            let client = tokio::net::UnixStream::connect(handle.socket_path()).await.unwrap();
+            let (read, mut write) = client.into_split();
+            let mut read = BufReader::new(read);
+            let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "cell-lifetime-test", "version": "0"}}});
+            write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+            let mut reply = String::new();
+            read.read_line(&mut reply).await.unwrap();
+            let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
+            write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
+            let mut reply = String::new();
+            read.read_line(&mut reply).await.unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
+            drop(cell.lock().unwrap().take());
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("idle MCP session retains the workspace cell's owner");
+            let _reopened = library.open_workspace(root.path()).unwrap();
+            drop(handle);
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
@@ -319,16 +490,11 @@ mod tests {
             let workspace = library.open_workspace(root.path()).unwrap();
             let weak = Arc::downgrade(&workspace);
             let lock_dir = workspace.paths().lock.clone();
-            let (accepted, mut acceptance) = tokio::sync::mpsc::unbounded_channel();
-            let handle = start(pick_socket_path(), move || {
-                accepted.send(()).unwrap();
-                Some(workspace.clone())
-            })
-            .unwrap();
+            let handle = start(pick_socket_path(), move || Some(workspace.clone())).unwrap();
             let _client = tokio::net::UnixStream::connect(handle.socket_path())
                 .await
                 .unwrap();
-            acceptance.recv().await.unwrap();
+            handle.accepted.acquire().await.unwrap().forget();
             drop(handle);
             let released = tokio::time::timeout(Duration::from_secs(1), async {
                 while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {

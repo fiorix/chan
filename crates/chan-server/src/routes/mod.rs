@@ -97,6 +97,8 @@ pub use index::{
 pub use inspector::api_inspector;
 pub use library::{launcher_router, LauncherBearer};
 pub use mentions::api_get_mentions;
+#[cfg(all(test, unix))]
+pub(crate) use metadata::install_test_session_close_gate;
 pub use metadata::{api_metadata_export, api_metadata_import};
 pub use open::api_open;
 pub(crate) use preferences::broadcast_config_changed;

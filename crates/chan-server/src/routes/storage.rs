@@ -58,7 +58,7 @@ struct ResetResponse {
 }
 
 /// How long the reset path waits for outstanding `Arc<Workspace>` clones
-/// (in-flight handler tasks, MCP sessions, the dropped indexer's
+/// (in-flight handlers and MCP tool bodies, the dropped indexer's
 /// detached tokio tasks) to drop before giving up. Editor-side I/O
 /// is fast (markdown reads / writes); 5 s is comfortable headroom
 /// without making a misclick feel like a hang.
@@ -142,7 +142,7 @@ fn err_from_reset(e: &ResetError) -> Response {
 /// our copy remains. Holding the write lock means no NEW handler can
 /// reborrow the workspace, so the count is monotonically non-increasing
 /// once the cell is gone -- a `strong_count > 1` deadline expiry is a
-/// genuine "an MCP session / detached task is still pinning the workspace".
+/// genuine "an MCP tool body / detached task is still pinning the workspace".
 ///
 /// On Busy we restore the original `workspace_strong` as the cell (with
 /// fresh watcher + indexer). This avoids reopening through chan-workspace,
@@ -206,7 +206,7 @@ fn perform_reset_with(
     // Hold one strong Arc aside so the spin-wait below has something
     // to count against. Dropping the cell releases the indexer and
     // (separately) the cell's own workspace clone; whatever strong refs
-    // remain belong to in-flight handlers, MCP sessions, or the
+    // remain belong to in-flight handlers, MCP tool bodies, or the
     // detached tokio tasks the dropped Indexer struct left behind.
     let workspace_strong = cell.workspace.clone();
     drop(cell);

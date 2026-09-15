@@ -42,7 +42,7 @@ flowchart TD
     NDJSON["NDJSON JSON-RPC (pass-through)"]
     Framed["Content-Length frames (duplex pump)"]
     Rmcp["rmcp serve -> tools::execute"]
-    Ws[("Arc&lt;Workspace&gt;")]
+    Ws[("Workspace (strong owner in each running tool)")]
 
     Client --> Stdio
     Client --> Proxy
@@ -60,9 +60,11 @@ flowchart TD
     Rmcp --> Ws
 ```
 
-Both transport entry paths converge on `serve_io`, which sniffs the framing and dispatches every tool call through `tools::execute` onto the shared `Arc<Workspace>`.
+Both transport entry paths converge on `serve_io`, which sniffs the framing and dispatches JSON tool calls through `tools::execute` on the blocking pool.
 
-`mcp::Server` owns a `ToolContext`, which is just an `Arc<Workspace>`. Each JSON tool call goes through `tools::execute`. MCP handlers run workspace work on `spawn_blocking` so synchronous chan-workspace reads, writes, graph, search, and report work do not pin the async transport worker. The MCP-only `read_media` path still reads through `Workspace::read`, so it keeps the same path sandbox and regular-file checks that the editor uses.
+`mcp::Server` stores a workspace resolver. `Server::new(Arc<Workspace>)` captures an owner for `chan __mcp` and `chan-llm-mcp`; the tenant bridge uses `Server::from_resolver` with its workspace cell lookup. JSON tool calls and `read_media` resolve only inside their `spawn_blocking` closures and release the strong handle when the tool body returns. The resolver reads the cell only long enough to clone its current workspace: a tool call waits behind a reset or metadata import's cell write guard, then uses the replacement workspace. Waiting requests, idle sessions, response serialization and stalled response writes do not retain the bridge workspace. A cleared cell returns the MCP error `workspace is closed` without touching the workspace. Synchronous reads, writes, graph, search and report work stay off the async transport worker, and `read_media` uses `Workspace::read` with the same path sandbox and regular-file checks as the editor.
+
+Tool bodies check the MCP request cancellation token before resolving the workspace and again after a potentially blocked cell read. A cancelled request returns `request cancelled` before starting its workspace operation. Cancellation does not interrupt a cell lock wait or a running blocking tool body; a body already executing can retain the workspace and complete a write until it returns.
 
 `serve_stdio` is used by the standalone `chan-llm-mcp` binary and by `chan __mcp`. `serve_io` is used by chan-server's MCP bridge: the server already holds the workspace lock, so it hosts the MCP service in-process over a Unix-domain socket and lets child processes proxy stdio to that socket (`chan __mcp-proxy`).
 

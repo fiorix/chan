@@ -259,6 +259,31 @@ fn perform_metadata_import(
     import_result
 }
 
+#[cfg(all(test, unix))]
+struct TestSessionCloseGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(all(test, unix))]
+static TEST_SESSION_CLOSE_GATES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestSessionCloseGate>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, unix))]
+pub(crate) fn install_test_session_close_gate(
+    root: &Path,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    let root = std::fs::canonicalize(root).unwrap();
+    assert!(TEST_SESSION_CLOSE_GATES
+        .lock()
+        .unwrap()
+        .insert(root, TestSessionCloseGate { entered, release })
+        .is_none());
+}
+
 /// Run only after the old workspace has drained, while its cell write guard
 /// still excludes new handlers. These callers run on the blocking pool; the
 /// flush futures use the retained workspace directly and never read the cell.
@@ -267,6 +292,19 @@ pub(super) fn close_workspace_sessions(
     workspace: &Arc<Workspace>,
     reason: &'static str,
 ) {
+    #[cfg(all(test, unix))]
+    {
+        let gate = TEST_SESSION_CLOSE_GATES
+            .lock()
+            .unwrap()
+            .remove(workspace.root());
+        if let Some(gate) = gate {
+            gate.entered.send(()).unwrap();
+            gate.release
+                .recv_timeout(Duration::from_secs(5))
+                .expect("session-close test gate was not released");
+        }
+    }
     futures::executor::block_on(async {
         state
             .doc_sessions

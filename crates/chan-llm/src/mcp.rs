@@ -27,9 +27,11 @@ use chan_workspace::Workspace;
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{Content, ErrorData, ResourceContents},
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
     transport::stdio,
-    ServerHandler, ServiceExt,
+    RoleServer, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -98,17 +100,18 @@ fn media_kind_for_path(rel: &str) -> Option<MediaKind> {
 // instead of `std::result::Result<T, ErrorData>` and break the trait
 // bound. Use fully qualified `crate::error::Result` where needed.
 
-/// MCP server handle. Owns a `ToolContext` (workspace handle); each
-/// tool dispatch routes through `tools::execute`, so chan-workspace's
-/// path sandbox, special-file refusal, and editable-text gate apply
-/// to MCP-driven calls.
+type WorkspaceResolver = dyn Fn() -> Option<Arc<Workspace>> + Send + Sync;
+
+/// MCP server handle. Tool bodies resolve the workspace on the blocking
+/// pool, preserving chan-workspace's path sandbox,
+/// special-file refusal, and editable-text gate.
 ///
-/// Cloning is cheap: `ToolContext` is just an `Arc<Workspace>`. The
-/// rmcp tool macros expand into code that requires `Clone` on the
-/// host type.
+/// `new` retains an owner for standalone hosting. A tenant resolver reads
+/// its live cell so workspace swaps serialize with tool admission and
+/// unmount can clear the owner independently of queued requests and I/O.
 #[derive(Clone)]
 pub struct Server {
-    ctx: ToolContext,
+    workspace_for: Arc<WorkspaceResolver>,
     /// Hard cap on a single `read_media` response, in bytes. Set via
     /// `with_max_media_bytes`; defaults to
     /// `DEFAULT_MCP_MEDIA_MAX_BYTES`. Lives on the server (not the
@@ -119,9 +122,20 @@ pub struct Server {
 }
 
 impl Server {
+    /// Own the workspace for standalone MCP hosting.
     pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self::from_resolver(move || Some(workspace.clone()))
+    }
+
+    /// Resolve the current tenant workspace inside each blocking tool body.
+    /// The resolver must clone through the tenant cell and return `None`
+    /// after unmount. Queued requests do not acquire a workspace snapshot.
+    pub fn from_resolver<F>(workspace_for: F) -> Self
+    where
+        F: Fn() -> Option<Arc<Workspace>> + Send + Sync + 'static,
+    {
         Self {
-            ctx: ToolContext::new(workspace),
+            workspace_for: Arc::new(workspace_for),
             max_media_bytes: DEFAULT_MCP_MEDIA_MAX_BYTES,
         }
     }
@@ -419,11 +433,13 @@ you need the full thing). Pass `mtime_ns` back on `write_file` as \
     async fn read_file(
         &self,
         Parameters(p): Parameters<ReadFileParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         run_tool(
             "read_file",
             serde_json::json!({"path": p.path}),
-            self.ctx.clone(),
+            self.workspace_for.clone(),
+            context,
         )
         .await
     }
@@ -445,12 +461,13 @@ write_file call.")]
     async fn write_file(
         &self,
         Parameters(p): Parameters<WriteFileParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         let mut args = serde_json::json!({"path": p.path, "content": p.content});
         if let Some(mtime_ns) = p.expected_mtime_ns {
             args["expected_mtime_ns"] = serde_json::json!(mtime_ns);
         }
-        run_tool("write_file", args, self.ctx.clone()).await
+        run_tool("write_file", args, self.workspace_for.clone(), context).await
     }
 
     #[tool(description = "\
@@ -463,12 +480,13 @@ is true, narrow with a prefix or call workspace_search instead.")]
     async fn list_files(
         &self,
         Parameters(p): Parameters<ListFilesParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         let mut args = serde_json::json!({});
         if let Some(prefix) = p.prefix {
             args["prefix"] = serde_json::Value::String(prefix);
         }
-        run_tool("list_files", args, self.ctx.clone()).await
+        run_tool("list_files", args, self.workspace_for.clone(), context).await
     }
 
     #[tool(description = "\
@@ -481,11 +499,13 @@ including drafts in the in-workspace `.Drafts/` directory.")]
     async fn resolve_path(
         &self,
         Parameters(p): Parameters<ResolvePathParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         run_tool(
             "resolve_path",
             serde_json::json!({"path": p.path}),
-            self.ctx.clone(),
+            self.workspace_for.clone(),
+            context,
         )
         .await
     }
@@ -503,11 +523,18 @@ contacts, language membership, linked media, and containment.")]
     async fn workspace_search(
         &self,
         Parameters(p): Parameters<WorkspaceSearchParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         let args = serde_json::to_value(p).map_err(|error| {
             ErrorData::invalid_params(format!("invalid workspace_search args: {error}"), None)
         })?;
-        run_tool("workspace_search", args, self.ctx.clone()).await
+        run_tool(
+            "workspace_search",
+            args,
+            self.workspace_for.clone(),
+            context,
+        )
+        .await
     }
 
     #[tool(description = "\
@@ -524,8 +551,15 @@ config).")]
     async fn read_media(
         &self,
         Parameters(p): Parameters<ReadMediaParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<Content, ErrorData> {
-        read_media_content(self.ctx.clone(), p.path, self.max_media_bytes).await
+        read_media_content(
+            self.workspace_for.clone(),
+            p.path,
+            self.max_media_bytes,
+            context,
+        )
+        .await
     }
 
     #[tool(description = "\
@@ -545,6 +579,7 @@ need to drill in. The per-file array is capped at 200 entries; if \
     async fn repo_report(
         &self,
         Parameters(p): Parameters<RepoReportParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<String, ErrorData> {
         let mut args = serde_json::json!({});
         if let Some(prefix) = p.prefix {
@@ -556,7 +591,7 @@ need to drill in. The per-file array is capped at 200 entries; if \
         if let Some(b) = p.include_files {
             args["include_files"] = serde_json::Value::Bool(b);
         }
-        run_tool("repo_report", args, self.ctx.clone()).await
+        run_tool("repo_report", args, self.workspace_for.clone(), context).await
     }
 }
 
@@ -578,26 +613,50 @@ impl ServerHandler for Server {}
 async fn run_tool(
     name: &'static str,
     args: serde_json::Value,
-    ctx: ToolContext,
+    workspace_for: Arc<WorkspaceResolver>,
+    context: RequestContext<RoleServer>,
 ) -> std::result::Result<String, ErrorData> {
-    let result = tokio::task::spawn_blocking(move || tools::execute(name, &args, &ctx))
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))?;
-    match result {
-        Ok(v) => serde_json::to_string(&v)
-            .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None)),
-        Err(e) => Err(ErrorData::internal_error(mcp_safe_message(&e), None)),
-    }
+    let ct = context.ct;
+    #[cfg(test)]
+    tests::gate_tool(&args).await;
+    let result = tokio::task::spawn_blocking(move || {
+        if ct.is_cancelled() {
+            return Err(ErrorData::internal_error("request cancelled", None));
+        }
+        let workspace = workspace_for()
+            .ok_or_else(|| ErrorData::internal_error("workspace is closed", None))?;
+        if ct.is_cancelled() {
+            return Err(ErrorData::internal_error("request cancelled", None));
+        }
+        tools::execute(name, &args, &ToolContext::new(workspace))
+            .map_err(|e| ErrorData::internal_error(mcp_safe_message(&e), None))
+    })
+    .await
+    .map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))??;
+    serde_json::to_string(&result)
+        .map_err(|e| ErrorData::internal_error(format!("serialize result: {e}"), None))
 }
 
 async fn read_media_content(
-    ctx: ToolContext,
+    workspace_for: Arc<WorkspaceResolver>,
     path: String,
     max_media_bytes: u64,
+    context: RequestContext<RoleServer>,
 ) -> std::result::Result<Content, ErrorData> {
-    tokio::task::spawn_blocking(move || read_media_content_sync(&ctx, path, max_media_bytes))
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("read_media task failed: {e}"), None))?
+    let ct = context.ct;
+    tokio::task::spawn_blocking(move || {
+        if ct.is_cancelled() {
+            return Err(ErrorData::internal_error("request cancelled", None));
+        }
+        let workspace = workspace_for()
+            .ok_or_else(|| ErrorData::internal_error("workspace is closed", None))?;
+        if ct.is_cancelled() {
+            return Err(ErrorData::internal_error("request cancelled", None));
+        }
+        read_media_content_sync(&ToolContext::new(workspace), path, max_media_bytes)
+    })
+    .await
+    .map_err(|e| ErrorData::internal_error(format!("read_media task failed: {e}"), None))?
 }
 
 fn read_media_content_sync(
@@ -697,7 +756,386 @@ fn mcp_safe_message(err: &LlmError) -> String {
 mod tests {
     use super::*;
     use chan_workspace::Library;
+    use std::time::Duration;
     use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    const GATED_PATH: &str = "__mcp_test_dispatch_gate__.md";
+    struct ToolGate {
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+    static TOOL_GATE: std::sync::Mutex<Option<ToolGate>> = std::sync::Mutex::new(None);
+    const CANCELLED_GATED_PATH: &str = "__mcp_test_cancel_gate__.md";
+    static CANCELLED_TOOL_GATE: std::sync::Mutex<Option<ToolGate>> = std::sync::Mutex::new(None);
+
+    pub(super) async fn gate_tool(args: &serde_json::Value) {
+        let slot = match args["path"].as_str() {
+            Some(GATED_PATH) => &TOOL_GATE,
+            Some(CANCELLED_GATED_PATH) => &CANCELLED_TOOL_GATE,
+            _ => return,
+        };
+        let gate = slot.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), gate.release.acquire())
+                .await
+                .expect("dispatched tool gate was not released")
+                .unwrap()
+                .forget();
+        }
+    }
+
+    async fn write_rpc<W: AsyncWrite + Unpin>(writer: &mut W, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn read_rpc<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> serde_json::Value {
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn initialize<R, W>(reader: &mut R, writer: &mut W)
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        write_rpc(
+            writer,
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "lifetime-test", "version": "0"}}
+            }),
+        )
+        .await;
+        assert_eq!(
+            read_rpc(reader).await["result"]["serverInfo"]["name"],
+            "chan"
+        );
+        write_rpc(
+            writer,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        write_rpc(
+            writer,
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        )
+        .await;
+        assert_eq!(read_rpc(reader).await["id"], 2);
+    }
+
+    async fn assert_workspace_released(
+        weak: &std::sync::Weak<Workspace>,
+        lock_dir: &std::path::Path,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak.strong_count() != 0 || !chan_workspace::lock::is_free(lock_dir) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("MCP retains {} workspace handles", weak.strong_count()));
+    }
+
+    #[tokio::test]
+    async fn mcp_call_waits_for_the_replacement_workspace() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = TempDir::new().unwrap();
+            let root = TempDir::new().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.write_text("generation.md", "original").unwrap();
+            workspace.stop_open_recovery();
+            let weak = Arc::downgrade(&workspace);
+            let cell = Arc::new(std::sync::RwLock::new(Some(workspace)));
+            let resolving_cell = cell.clone();
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let probe = Arc::new(std::sync::Mutex::new(None));
+            let resolving_probe = probe.clone();
+            let server = Server::from_resolver(move || {
+                if let Some(entered) = resolving_probe.lock().unwrap().take() {
+                    let entered: tokio::sync::oneshot::Sender<()> = entered;
+                    entered.send(()).unwrap();
+                }
+                resolving_cell.read().unwrap().clone()
+            });
+            *probe.lock().unwrap() = Some(entered);
+            let (client, peer) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(peer);
+            let session = tokio::spawn(server.serve_io(read, write));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = BufReader::new(read);
+            initialize(&mut read, &mut write).await;
+            let (locked, lock_ready) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let swapping_root = root.path().to_path_buf();
+            let swapping = tokio::task::spawn_blocking(move || {
+                let mut guard = cell.write().unwrap();
+                locked.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(3)).unwrap();
+                drop(guard.take());
+                let replacement = library.open_workspace(&swapping_root).unwrap();
+                replacement
+                    .write_text("generation.md", "replacement")
+                    .unwrap();
+                *guard = Some(replacement);
+            });
+            lock_ready.await.unwrap();
+            let strong_count = weak.strong_count();
+            let weak_count = weak.weak_count();
+            assert_eq!(strong_count, 1);
+            write_rpc(
+                &mut write,
+                serde_json::json!({"jsonrpc": "2.0", "id": 3,
+                "method": "tools/call", "params": {"name": "read_file",
+                "arguments": {"path": "generation.md"}}}),
+            )
+            .await;
+            tokio::select! {
+                entered = entry => entered.unwrap(),
+                reply = read_rpc(&mut read) => panic!("tool bypassed the workspace cell: {reply}"),
+            }
+            assert_eq!(weak.strong_count(), strong_count);
+            assert_eq!(weak.weak_count(), weak_count);
+            let mut waiting = Box::pin(read_rpc(&mut read));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(waiting);
+            release.send(()).unwrap();
+            swapping.await.unwrap();
+            let reply = read_rpc(&mut read).await;
+            let value: serde_json::Value =
+                serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(value["content"], "replacement");
+            session.abort();
+            assert!(session.await.unwrap_err().is_cancelled());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_cancelled_request_does_not_resolve_or_write() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = TempDir::new().unwrap();
+            let root = TempDir::new().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.write_text(CANCELLED_GATED_PATH, "unchanged").unwrap();
+            workspace.stop_open_recovery();
+            let weak = Arc::downgrade(&workspace);
+            let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = resolutions.clone();
+            let server = Server::from_resolver(move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                weak.upgrade()
+            });
+            resolutions.store(0, std::sync::atomic::Ordering::SeqCst);
+            let (client, peer) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(peer);
+            let session = tokio::spawn(server.serve_io(read, write));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = BufReader::new(read);
+            initialize(&mut read, &mut write).await;
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            assert!(CANCELLED_TOOL_GATE.lock().unwrap().replace(ToolGate { entered, release: release.clone() }).is_none());
+            write_rpc(&mut write, serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "write_file", "arguments": {"path": CANCELLED_GATED_PATH, "content": "must not land"}}})).await;
+            entry.await.unwrap();
+            write_rpc(&mut write, serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                "params": {"requestId": 3, "reason": "test cancellation"}})).await;
+            write_rpc(&mut write, serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "ping"})).await;
+            assert_eq!(read_rpc(&mut read).await["id"], 4);
+            release.add_permits(1);
+            let reply = read_rpc(&mut read).await;
+            assert_eq!(reply["error"]["message"], "request cancelled");
+            assert_eq!(resolutions.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(workspace.read_text(CANCELLED_GATED_PATH).unwrap(), "unchanged");
+            session.abort();
+            assert!(session.await.unwrap_err().is_cancelled());
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_dispatched_request_releases_workspace_after_session_abort() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = TempDir::new().unwrap();
+            let root = TempDir::new().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.write_text(GATED_PATH, "unchanged").unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let lock_dir = workspace.paths().lock.clone();
+            let server = weak_server(weak.clone());
+            let (client, peer) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(peer);
+            let session = tokio::spawn(server.serve_io(read, write));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = BufReader::new(read);
+            initialize(&mut read, &mut write).await;
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            assert!(TOOL_GATE.lock().unwrap().replace(ToolGate { entered, release: release.clone() }).is_none());
+            write_rpc(&mut write, serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "write_file", "arguments": {"path": GATED_PATH, "content": "must not land"}}})).await;
+            entry.await.unwrap();
+            session.abort();
+            assert!(session.await.unwrap_err().is_cancelled());
+            drop(workspace);
+            assert_workspace_released(&weak, &lock_dir).await;
+            release.add_permits(1);
+            // Keep the reopened owner live: the stale request must not acquire it.
+            let reopened = library.open_workspace(root.path()).unwrap();
+            let mut line = String::new();
+            if read.read_line(&mut line).await.unwrap() != 0 {
+                let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert!(reply.get("error").is_some(), "cancelled request succeeded: {reply}");
+            }
+            assert_eq!(reopened.read_text(GATED_PATH).unwrap(), "unchanged");
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_call_after_workspace_drop_answers_workspace_closed() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = TempDir::new().unwrap();
+            let root = TempDir::new().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace.write_text("kept.md", "unchanged").unwrap();
+            let server = weak_server(Arc::downgrade(&workspace));
+            drop(workspace);
+            let (client, peer) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(peer);
+            let session = tokio::spawn(server.serve_io(read, write));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = BufReader::new(read);
+            initialize(&mut read, &mut write).await;
+            for (id, name, arguments) in [
+                (
+                    3,
+                    "write_file",
+                    serde_json::json!({"path": "kept.md", "content": "must not land"}),
+                ),
+                (4, "read_media", serde_json::json!({"path": "image.png"})),
+            ] {
+                write_rpc(
+                    &mut write,
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}}),
+                )
+                .await;
+                let reply = read_rpc(&mut read).await;
+                assert_eq!(reply["error"]["message"], "workspace is closed", "{reply}");
+            }
+            let reopened = library.open_workspace(root.path()).unwrap();
+            assert_eq!(reopened.read_text("kept.md").unwrap(), "unchanged");
+            session.abort();
+            assert!(session.await.unwrap_err().is_cancelled());
+        })
+        .await
+        .unwrap();
+    }
+
+    struct StalledWriter<W> {
+        inner: W,
+        stalled: Option<tokio::sync::oneshot::Sender<()>>,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for StalledWriter<W> {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes);
+            if result.is_pending() && self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(stalled) = self.stalled.take() {
+                    stalled.send(()).unwrap();
+                }
+            }
+            result
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_stalled_reader_does_not_pin_the_workspace() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = TempDir::new().unwrap();
+            let root = TempDir::new().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            workspace
+                .write_text("large.md", &"x".repeat(32 * 1024))
+                .unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let lock_dir = workspace.paths().lock.clone();
+            let server = weak_server(weak.clone());
+            let (client, peer) = tokio::io::duplex(1024);
+            let (read, write) = tokio::io::split(peer);
+            let (stalled, pending) = tokio::sync::oneshot::channel();
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let session = tokio::spawn(server.serve_io(
+                read,
+                StalledWriter {
+                    inner: write,
+                    stalled: Some(stalled),
+                    armed: armed.clone(),
+                },
+            ));
+            let (read, mut write) = tokio::io::split(client);
+            let mut read = BufReader::new(read);
+            initialize(&mut read, &mut write).await;
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            write_rpc(
+                &mut write,
+                serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "read_file", "arguments": {"path": "large.md"}}}),
+            )
+            .await;
+            pending.await.unwrap();
+            session.abort();
+            assert!(session.await.unwrap_err().is_cancelled());
+            drop(workspace);
+            assert_workspace_released(&weak, &lock_dir).await;
+            let _reopened = library.open_workspace(root.path()).unwrap();
+            drop(read);
+            drop(write);
+        })
+        .await
+        .unwrap();
+    }
 
     /// Pin the inlined `#[tool(description = ...)]` literals to the
     /// canonical `prompts::*_DESC` constants. rmcp-macros 1.6 won't
@@ -761,14 +1199,32 @@ mod tests {
         (cfg, workspace_dir, server)
     }
 
+    fn weak_server(workspace: std::sync::Weak<Workspace>) -> Server {
+        Server::from_resolver(move || workspace.upgrade())
+    }
+
+    fn request_context() -> RequestContext<RoleServer> {
+        struct ContextServer;
+        impl ServerHandler for ContextServer {}
+        let (_client, peer) = tokio::io::duplex(1);
+        let service = rmcp::service::serve_directly(ContextServer, tokio::io::split(peer), None);
+        RequestContext::new(
+            rmcp::model::NumberOrString::Number(1),
+            service.peer().clone(),
+        )
+    }
+
     #[tokio::test]
     async fn read_file_dispatches_to_workspace() {
         let (_cfg, root, server) = fixture();
         std::fs::write(root.path().join("a.md"), "hello").unwrap();
         let out = server
-            .read_file(Parameters(ReadFileParams {
-                path: "a.md".into(),
-            }))
+            .read_file(
+                Parameters(ReadFileParams {
+                    path: "a.md".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         // tools::execute returns {"path": ..., "content": ...} as JSON;
@@ -780,11 +1236,14 @@ mod tests {
     async fn write_file_applies_immediately() {
         let (_cfg, root, server) = fixture();
         let out = server
-            .write_file(Parameters(WriteFileParams {
-                path: "a.md".into(),
-                content: "hi".into(),
-                expected_mtime_ns: None,
-            }))
+            .write_file(
+                Parameters(WriteFileParams {
+                    path: "a.md".into(),
+                    content: "hi".into(),
+                    expected_mtime_ns: None,
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         assert!(out.contains("a.md"), "got: {out}");
@@ -806,15 +1265,21 @@ mod tests {
                 std::fs::create_dir_all(root.path().join(parent)).unwrap();
             }
             server
-                .write_file(Parameters(WriteFileParams {
-                    path: path.into(),
-                    content: body.into(),
-                    expected_mtime_ns: None,
-                }))
+                .write_file(
+                    Parameters(WriteFileParams {
+                        path: path.into(),
+                        content: body.into(),
+                        expected_mtime_ns: None,
+                    }),
+                    request_context(),
+                )
                 .await
                 .unwrap();
             let out = server
-                .read_file(Parameters(ReadFileParams { path: path.into() }))
+                .read_file(
+                    Parameters(ReadFileParams { path: path.into() }),
+                    request_context(),
+                )
                 .await
                 .unwrap();
             let value: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -827,7 +1292,10 @@ mod tests {
         let (_cfg, root, server) = fixture();
         std::fs::write(root.path().join("a.md"), "x").unwrap();
         let out = server
-            .list_files(Parameters(ListFilesParams { prefix: None }))
+            .list_files(
+                Parameters(ListFilesParams { prefix: None }),
+                request_context(),
+            )
             .await
             .unwrap();
         assert!(out.contains("a.md"), "got: {out}");
@@ -840,19 +1308,21 @@ mod tests {
         // `virtual` is false and the physical path lives under the
         // workspace root's drafts dir.
         let (_cfg, _root, server) = fixture();
-        let drafts_dir = server.ctx.workspace.drafts_dir_name().to_string();
-        server.ctx.workspace.create_draft_dir("untitled-1").unwrap();
+        let workspace = (server.workspace_for)().unwrap();
+        let drafts_dir = workspace.drafts_dir_name().to_string();
+        workspace.create_draft_dir("untitled-1").unwrap();
         let draft_dir_rel = format!("{drafts_dir}/untitled-1");
-        server
-            .ctx
-            .workspace
+        workspace
             .write_text(&format!("{draft_dir_rel}/draft.md"), "# draft\n")
             .unwrap();
 
         let out = server
-            .resolve_path(Parameters(ResolvePathParams {
-                path: draft_dir_rel.clone(),
-            }))
+            .resolve_path(
+                Parameters(ResolvePathParams {
+                    path: draft_dir_rel.clone(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -860,9 +1330,7 @@ mod tests {
         assert_eq!(body["virtual"], false);
         assert_eq!(
             body["physical_path"].as_str().unwrap(),
-            server
-                .ctx
-                .workspace
+            workspace
                 .drafts_dir()
                 .join("untitled-1")
                 .to_string_lossy()
@@ -874,11 +1342,14 @@ mod tests {
     async fn write_file_rejects_non_text_via_chan_workspace() {
         let (_cfg, _root, server) = fixture();
         let err = server
-            .write_file(Parameters(WriteFileParams {
-                path: "img.png".into(),
-                content: "x".into(),
-                expected_mtime_ns: None,
-            }))
+            .write_file(
+                Parameters(WriteFileParams {
+                    path: "img.png".into(),
+                    content: "x".into(),
+                    expected_mtime_ns: None,
+                }),
+                request_context(),
+            )
             .await
             .unwrap_err();
         // chan-workspace's editable-text gate fires; the MCP surface
@@ -899,11 +1370,14 @@ mod tests {
         // the scrub the message is category-only.
         let (_cfg, _root, server) = fixture();
         let err = server
-            .write_file(Parameters(WriteFileParams {
-                path: "img.png".into(),
-                content: "x".into(),
-                expected_mtime_ns: None,
-            }))
+            .write_file(
+                Parameters(WriteFileParams {
+                    path: "img.png".into(),
+                    content: "x".into(),
+                    expected_mtime_ns: None,
+                }),
+                request_context(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -945,9 +1419,12 @@ mod tests {
         let bytes = b"\x89PNG\r\n\x1a\n";
         std::fs::write(root.path().join("a.png"), bytes).unwrap();
         let content = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "a.png".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "a.png".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         let img = content.as_image().expect("expected ImageContent");
@@ -964,9 +1441,12 @@ mod tests {
         let bytes = b"%PDF-1.7\n";
         std::fs::write(root.path().join("docs spec.pdf"), bytes).unwrap();
         let content = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "docs spec.pdf".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "docs spec.pdf".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         let resource = content.as_resource().expect("expected resource content");
@@ -994,15 +1474,21 @@ mod tests {
         std::fs::write(root.path().join("photo.avif"), b"avif").unwrap();
 
         let svg = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "icon.svg".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "icon.svg".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
         let avif = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "photo.avif".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "photo.avif".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap();
 
@@ -1015,9 +1501,12 @@ mod tests {
         let (_cfg, root, server) = fixture();
         std::fs::write(root.path().join("a.bmp"), b"BMP").unwrap();
         let err = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "a.bmp".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "a.bmp".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1037,9 +1526,12 @@ mod tests {
         let server = server_default.with_max_media_bytes(4);
         std::fs::write(root.path().join("a.png"), b"\x89PNG\r").unwrap();
         let err = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "a.png".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "a.png".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1061,9 +1553,12 @@ mod tests {
         // error surfaces through mcp_safe_message as the scrubbed
         // category, no host filesystem detail.
         let err = server
-            .read_media(Parameters(ReadMediaParams {
-                path: "../escape.png".into(),
-            }))
+            .read_media(
+                Parameters(ReadMediaParams {
+                    path: "../escape.png".into(),
+                }),
+                request_context(),
+            )
             .await
             .unwrap_err();
         assert!(
