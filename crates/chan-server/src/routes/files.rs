@@ -5110,11 +5110,9 @@ pub enum TransferOp {
 
 #[derive(Serialize, Default)]
 pub(crate) struct TransferResponse {
-    /// Per-source outcome, in request order: the final destination path
-    /// each source landed at (after collision suffixing) plus the op.
+    /// Completed source/destination pairs in request order, with collision-suffixed destinations.
     pub(crate) moved: Vec<TransferItem>,
-    /// Sources skipped because the destination equals the source's
-    /// current parent (a no-op move) or the source escaped the workspace.
+    /// Sources skipped because the destination is their current parent (a no-op move). Resolution and mutation errors fail the batch; earlier entries stay applied, but no partial response is returned.
     pub(crate) skipped: Vec<String>,
     /// Link-rewrite CAS conflicts accumulated across all moved entries.
     pub(crate) conflicts: Vec<String>,
