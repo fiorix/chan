@@ -125,8 +125,8 @@ pub struct ClientConfig {
     /// SOCKS-to-HTTP shim if needed.
     ///
     /// Env vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are NOT
-    /// honoured automatically: the embedded callers (Swift /
-    /// Kotlin / CLI) get a deterministic surface this way.
+    /// honoured automatically: the caller decides whether a proxy is
+    /// used, so the client's behavior never depends on its environment.
     pub proxy: Option<Url>,
     /// Max concurrent inbound yamux substreams served by this
     /// client. Values below 1 are clamped to 1. Default 128.

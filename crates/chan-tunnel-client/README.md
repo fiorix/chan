@@ -15,7 +15,8 @@ ClientConfig                  url, token, workspace, backoff,
                               substream concurrency cap
 Registration                  HelloAck contents (prefix/user/workspace)
 TunnelEvent                   Connected / Disconnected / DialFailed
-ClientError                   uniffi-friendly error variants
+ClientError                   URL, TLS, I/O, handshake, refusal,
+                              and closed-transport errors
 
 dial(cfg)                     one TLS+h2 attempt; returns yamux conn
 dial_with_tls(cfg, tls)       same, with caller-cached TLS config
