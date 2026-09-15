@@ -704,7 +704,33 @@ pub async fn connect_gateway<R: tauri::Runtime>(
         return Err(msg);
     };
 
-    let pat = auth::load_gateway_pat(&discovery.identity_origin)?;
+    let pat = match auth::load_gateway_pat(&discovery.identity_origin) {
+        Ok(pat) => pat,
+        Err(error) => {
+            {
+                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+                let rt = runtimes
+                    .entry(gateway_id.clone())
+                    .or_insert_with(|| new_runtime(discovery.clone()));
+                if rt.status != GatewayStatus::Connected && !rt.pending_signin {
+                    rt.status = GatewayStatus::Disconnected;
+                    rt.last_error = Some(error.clone());
+                }
+            }
+            emit_notice(
+                &app,
+                "error",
+                "gateway",
+                &gateway_id,
+                &label,
+                "Gateway credentials unavailable",
+                &error,
+            );
+            drop_runtime_if_removed(&state, &gateway_id);
+            signal_rows_changed(&app, &state);
+            return Err(error);
+        }
+    };
     let Some(pat) = pat else {
         return signin_leg(&app, &state, &gateway_id, &label, &discovery, interactive);
     };
@@ -1906,6 +1932,201 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (origin, handle)
+    }
+
+    #[tokio::test]
+    async fn gateway_pat_load_failure_parks_notices_and_allows_retry() {
+        use tauri::Listener;
+
+        let (origin, server) = spawn_gateway_stub(false).await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        let (rows_tx, rows_rx) = std::sync::mpsc::channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            rows_tx.send(()).unwrap();
+        });
+        let discovery = devserver::discover_gateway(&origin).await.unwrap();
+        let error = "reading gateway keychain: injected read failure";
+        for existing in [false, true] {
+            if existing {
+                let mut rt = new_runtime(discovery.clone());
+                rt.status = GatewayStatus::Disconnected;
+                rt.last_error = Some("stale error".into());
+                state
+                    .gateway_manager
+                    .runtimes
+                    .lock()
+                    .unwrap()
+                    .insert("gw-keychain".into(), rt);
+            }
+            let failure = auth::fail_gateway_pat_load_for_test(&origin, error);
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect_gateway(
+                    app.handle().clone(),
+                    Arc::clone(&state),
+                    "gw-keychain".into(),
+                    true,
+                ),
+            )
+            .await
+            .expect("failed connect must finish");
+            assert_eq!(result.unwrap_err(), error);
+            let view = state
+                .gateway_manager
+                .view("gw-keychain")
+                .expect("failed PAT load must park a runtime");
+            assert_eq!(view.status, GatewayStatus::Disconnected);
+            assert!(!view.pending_signin);
+            assert_eq!(view.last_error.as_deref(), Some(error));
+            let payload = notice_rx.try_recv().expect("one error notice emitted");
+            let notice: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(notice["kind"], "error");
+            assert_eq!(notice["source"]["type"], "gateway");
+            assert_eq!(notice["source"]["id"], "gw-keychain");
+            assert_eq!(notice["source"]["label"], "test gateway");
+            assert_eq!(notice["message"], error);
+            assert_eq!(notice_rx.try_iter().count(), 0);
+            assert_eq!(rows_rx.try_iter().count(), 1, "row change signalled");
+
+            drop(failure);
+            auth::test_gateway_pats().lock().unwrap().insert(
+                origin.clone(),
+                auth::StoredPat {
+                    id: "valid".into(),
+                    secret: "test-secret".into(),
+                    label: "test".into(),
+                    expires_at: String::new(),
+                },
+            );
+            let retry = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect_gateway(
+                    app.handle().clone(),
+                    Arc::clone(&state),
+                    "gw-keychain".into(),
+                    true,
+                ),
+            )
+            .await;
+            auth::test_gateway_pats().lock().unwrap().remove(&origin);
+            let runtime = state
+                .gateway_manager
+                .runtimes
+                .lock()
+                .unwrap()
+                .remove("gw-keychain")
+                .unwrap();
+            if let Some(cancel) = &runtime.poll_cancel {
+                cancel.cancel();
+            }
+            retry
+                .expect("retry must finish")
+                .expect("retry must connect");
+            assert_eq!(runtime.status, GatewayStatus::Connected);
+            assert_eq!(runtime.username, "alice");
+            assert!(runtime.last_error.is_none());
+            assert!(runtime.poll_cancel.is_some());
+            assert!(!runtime.pending_signin);
+            assert_eq!(
+                notice_rx.try_iter().count(),
+                0,
+                "successful retry needs no error notice"
+            );
+            rows_rx.try_iter().for_each(drop);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gateway_pat_load_failure_preserves_connected_and_pending_runtimes() {
+        use tauri::Listener;
+
+        let (origin, server) = spawn_gateway_stub(false).await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            notice_tx.send(event.payload().to_string()).unwrap();
+        });
+        let discovery = devserver::discover_gateway(&origin).await.unwrap();
+        let error = "decoding stored gateway PAT: injected decode failure";
+        let _failure = auth::fail_gateway_pat_load_for_test(&origin, error);
+        for (status, pending_signin) in [
+            (GatewayStatus::Connected, false),
+            (GatewayStatus::Connecting, true),
+        ] {
+            let mut rt = new_runtime(discovery.clone());
+            rt.status = status;
+            rt.pending_signin = pending_signin;
+            rt.signin_stamp = 42;
+            rt.username = "known user".into();
+            rt.last_error = Some("previous error".into());
+            let cancel = CancellationToken::new();
+            rt.poll_cancel = Some(cancel.clone());
+            state
+                .gateway_manager
+                .runtimes
+                .lock()
+                .unwrap()
+                .insert("gw-keychain".into(), rt);
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect_gateway(
+                    app.handle().clone(),
+                    Arc::clone(&state),
+                    "gw-keychain".into(),
+                    true,
+                ),
+            )
+            .await
+            .expect("failed connect must finish");
+            assert_eq!(result.unwrap_err(), error);
+            let rt = state
+                .gateway_manager
+                .runtimes
+                .lock()
+                .unwrap()
+                .remove("gw-keychain")
+                .unwrap();
+            assert_eq!(rt.status, status);
+            assert_eq!(rt.pending_signin, pending_signin);
+            assert_eq!(rt.signin_stamp, 42);
+            assert_eq!(rt.username, "known user");
+            assert_eq!(rt.last_error.as_deref(), Some("previous error"));
+            assert!(!cancel.is_cancelled());
+            assert!(rt.poll_cancel.is_some());
+            let payload = notice_rx
+                .try_recv()
+                .expect("preserved runtime still emits the load error");
+            let notice: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(notice["kind"], "error");
+            assert_eq!(notice["message"], error);
+            assert_eq!(notice_rx.try_iter().count(), 0);
+        }
+        server.abort();
+    }
+
+    fn pat_load_test_state(origin: &str) -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let mut cfg = config::Config::default();
+        cfg.gateways.push(Gateway {
+            id: "gw-keychain".into(),
+            url: origin.into(),
+            label: "test gateway".into(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+        });
+        store.lock().unwrap().save(&cfg).unwrap();
+        (dir, Arc::new(AppState::with_store(store)))
     }
 
     #[tokio::test]

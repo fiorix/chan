@@ -363,7 +363,48 @@ pub(crate) fn test_gateway_pats() -> &'static Mutex<std::collections::HashMap<St
     PATS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+#[cfg(test)]
+fn test_gateway_pat_load_errors() -> &'static Mutex<HashMap<String, String>> {
+    static ERRORS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    ERRORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Clears an origin-scoped PAT load failure when the test scope exits.
+#[cfg(test)]
+pub(crate) struct GatewayPatLoadFailure(String);
+
+#[cfg(test)]
+impl Drop for GatewayPatLoadFailure {
+    fn drop(&mut self) {
+        test_gateway_pat_load_errors()
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
+
+/// Inject a PAT load failure until the returned guard drops, including on panic.
+#[cfg(test)]
+pub(crate) fn fail_gateway_pat_load_for_test(
+    identity_origin: &str,
+    error: &str,
+) -> GatewayPatLoadFailure {
+    test_gateway_pat_load_errors()
+        .lock()
+        .unwrap()
+        .insert(identity_origin.to_string(), error.to_string());
+    GatewayPatLoadFailure(identity_origin.to_string())
+}
+
 pub fn load_gateway_pat(identity_origin: &str) -> Result<Option<StoredPat>, String> {
+    #[cfg(test)]
+    if let Some(error) = test_gateway_pat_load_errors()
+        .lock()
+        .unwrap()
+        .get(identity_origin)
+    {
+        return Err(error.clone());
+    }
     #[cfg(test)]
     if let Some(pat) = test_gateway_pats().lock().unwrap().get(identity_origin) {
         return Ok(Some(pat.clone()));
