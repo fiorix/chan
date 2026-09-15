@@ -1,4 +1,8 @@
-//! Bounded workspace-local retrieval and graph traversal.
+//! Bounded workspace-local retrieval and graph traversal shared by transports.
+//!
+//! One serde-compatible request combines optional content retrieval, lexical entity matching or browsing, exact typed seeds, and breadth-first graph traversal. This module normalizes defaults, deduplicates selectors and filters, and enforces result and traversal budgets. Request and selector failures are structured result entries so valid seeds can still contribute; storage and search-backend failures use the outer `Result`.
+//!
+//! Queries read a filtered metadata-only tree, maintained graph rows, the ready search index, and available report snapshots. They do not read source bodies, start report scans, or initiate index rebuilds. File, directory, and contact nodes reserve their root containment spines before admission; metadata closure can add relationships without consuming another semantic hop. Returned graphs have stable ordering and explicitly report budget truncation.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path};
@@ -18,199 +22,327 @@ const DEFAULT_EDGE_LIMIT: u32 = 250;
 const MAX_EDGE_LIMIT: u32 = 2_500;
 const MAX_DEPTH: u8 = 10;
 
+/// Workspace-local content retrieval, entity matching, and graph traversal request. Missing JSON fields use the Rust defaults.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceSearchRequest {
+    /// Free-text query, trimmed before use; empty text is treated as absent.
     pub query: Option<String>,
+    /// Exact typed seeds, deduplicated in request order. Content hits and entity matches also seed traversal whenever the effective depth is above 0.
     pub from: Vec<WorkspaceSelector>,
+    /// Collections to query. Empty with a query means all domains; without a query, supply a `from` seed or choose a non-content domain to browse.
     pub domains: Vec<WorkspaceSearchDomain>,
+    /// Traversal depth, defaulting to 1 with exact seeds and 0 otherwise; values above 10 are clamped with a warning. Language seeds are further capped at 1.
     pub depth: Option<u8>,
+    /// Relationship direction, defaulting to `Auto`; each seed profile records the resolved direction.
     pub direction: WorkspaceTraversalDirection,
+    /// Relationship filter; empty means all kinds. Required root containment spines may be included even when `Contains` is omitted.
     pub relationship_kinds: Vec<WorkspaceRelationshipKind>,
+    /// Independent cap for content hits and entity matches. Missing or zero means 20; values above 100 are clamped with a warning.
     pub limit: Option<u32>,
+    /// Graph node budget, including containment ancestors. Missing or zero means 100; maximum 1,000.
     pub node_limit: Option<u32>,
+    /// Graph relationship budget, including containment spines. Missing or zero means 250; maximum 2,500.
     pub edge_limit: Option<u32>,
 }
 
+/// An exact typed seed, distinct from the free-text query used for lexical matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkspaceSelector {
+    /// Namespace that determines the value grammar and default traversal profile.
     pub kind: WorkspaceSelectorKind,
+    /// File/directory: workspace-relative path, without parent or absolute components; directory root accepts empty or `.`. Tag/mention: ASCII-case-insensitive name with optional `#`/`@@` sigil. Contact: exact stored path, or an unambiguous ASCII-case-insensitive basename, title, email, or alias. Language: ASCII-case-insensitive report language name, optionally prefixed `language:`. A mention resolving to one contact uses that contact node; multiple candidates produce an ambiguity error.
     pub value: String,
 }
 
+/// Entity namespace for an exact selector; serialized as snake_case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceSelectorKind {
+    /// A file that is not a contact node.
     File,
+    /// A directory, including the workspace root.
     Directory,
+    /// A tag maintained by the graph.
     Tag,
+    /// A mention, optionally resolving to a contact.
     Mention,
+    /// A contact maintained by the graph.
     Contact,
+    /// A language from a maintained code report.
     Language,
 }
 
+/// Content or entity collection to search; non-content domains also support query-free browsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceSearchDomain {
+    /// Ranked chunk retrieval from the search index; requires a query.
     Content,
+    /// File paths and basenames, excluding contacts.
     File,
+    /// Directory paths and basenames.
     Directory,
+    /// Tag names with or without their sigil.
     Tag,
+    /// Mention names with or without their sigil.
     Mention,
+    /// Contact paths, basenames, titles, emails, and aliases.
     Contact,
+    /// Language names from a maintained code report.
     Language,
 }
 
+/// Direction in which to follow relationships from each seed; serialized as snake_case.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceTraversalDirection {
+    /// Use outgoing relationships for file and directory seeds, and both directions for other seed kinds.
     #[default]
     Auto,
+    /// Follow relationships from source to target.
     Out,
+    /// Follow relationships from target to source.
     In,
+    /// Follow relationships in either direction.
     Both,
 }
 
+/// Relationship categories exposed by the workspace search graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceRelationshipKind {
+    /// A document link.
     Link,
+    /// A file-to-tag relationship.
     Tag,
+    /// A mention relationship, with contact resolution where available.
     Mention,
+    /// A language-to-file relationship from maintained report data.
     Language,
+    /// A parent-directory-to-child containment relationship.
     Contains,
 }
 
+/// Workspace identity, retrieval results, bounded graph, and structured diagnostics. Valid seeds may return results alongside selector errors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSearchResult {
+    /// Workspace that produced this result.
     pub workspace: WorkspaceSearchIdentity,
+    /// Derived-state readiness observed by the query.
     #[serde(default)]
     pub readiness: WorkspaceReadiness,
+    /// Content-retrieval status; entity-only queries can leave retrieval unrequested.
     pub search: WorkspaceSearchStatus,
+    /// Ranked content hits, at most one chunk per file.
     pub content_hits: Vec<WorkspaceContentHit>,
+    /// Lexical matches or browsed entities, bounded independently of content hits.
     pub entity_matches: Vec<WorkspaceEntityMatch>,
+    /// Admitted graph nodes in stable hop, kind, and id order.
     pub nodes: Vec<WorkspaceGraphNode>,
+    /// Relationships among admitted nodes, including required containment spines.
     pub relationships: Vec<WorkspaceRelationship>,
+    /// Normalized settings and resolved seed profiles.
     pub traversal: EffectiveWorkspaceTraversal,
+    /// Limits reached and candidate counts observed.
     pub truncation: WorkspaceSearchTruncation,
+    /// Recoverable limitations such as clamped limits or unavailable report data.
     pub warnings: Vec<WorkspaceSearchWarning>,
+    /// Structured failures that may coexist with results from valid seeds.
     pub errors: Vec<WorkspaceSearchError>,
 }
 
+/// Identity of the workspace that answered the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSearchIdentity {
+    /// Canonical workspace root rendered as a platform path.
     pub root: String,
+    /// Registry key for workspace metadata.
     pub metadata_key: String,
+    /// Workspace display name.
     pub display_name: String,
 }
 
+/// Whether content retrieval ran and which search mode it selected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSearchStatus {
+    /// Whether the content-search branch was entered.
     pub requested: bool,
+    /// Content-index readiness; also false when workspace derived state is recovering. Defaults to true when no search is needed.
     pub ready: bool,
+    /// Selected content-search mode, or `NotRun` if no mode was selected.
     pub mode: EffectiveSearchMode,
 }
 
+/// Content retrieval mode after applying semantic-search availability policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveSearchMode {
+    /// No content-search mode was selected.
     NotRun,
+    /// Lexical BM25 retrieval.
     Bm25,
+    /// BM25 and dense retrieval combined by reciprocal rank fusion.
     Hybrid,
 }
 
+/// The highest-ranked retrieved chunk for one file; content results collapse duplicate file paths.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceContentHit {
+    /// Workspace-relative file path.
     pub path: String,
+    /// Search-index identifier of the retained chunk.
     pub chunk_id: String,
+    /// Heading associated with the chunk.
     pub heading: String,
+    /// Starting line of the retained chunk.
     pub start_line: u64,
+    /// Search preview text.
     pub snippet: String,
+    /// Ranking score from the selected search mode.
     pub score: f32,
 }
 
+/// Case-folded lexical match strength, or query-free browsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceEntityMatchClass {
+    /// The folded field equals the folded query.
     Exact,
+    /// The folded field starts with the folded query.
     Prefix,
+    /// The folded field contains the folded query.
     Substring,
+    /// The entity was returned without a query.
     Browse,
 }
 
+/// A matched entity and an exact selector that can seed a subsequent traversal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEntityMatch {
+    /// Graph entity identifier.
     pub id: String,
+    /// Entity namespace.
     pub kind: WorkspaceSelectorKind,
+    /// Display label, including tag or mention sigils.
     pub label: String,
+    /// Exact selector for this entity.
     pub selector: WorkspaceSelector,
+    /// Strongest lexical match, or `Browse`.
     pub match_class: WorkspaceEntityMatchClass,
+    /// Field responsible for a lexical match; absent when browsing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_field: Option<String>,
+    /// Original value of the matching field; absent when browsing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_value: Option<String>,
+    /// Stored contact path when this is a contact match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Graph reference count for a tag or mention.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_count: Option<u64>,
+    /// Maintained report file count for a language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_count: Option<u64>,
+    /// Maintained report code-line count for a language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_lines: Option<u64>,
 }
 
+/// File display class derived from maintained report data or path classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceGraphFileClass {
+    /// Markdown content.
     Markdown,
+    /// Other indexable text, such as `.txt`.
     Text,
+    /// Source or configuration text.
     Source,
+    /// An image or PDF.
     Media,
+    /// Binary display category; workspace search does not emit this variant.
     Binary,
+    /// A path without a recognized display class.
     Other,
 }
 
+/// An admitted graph entity, serialized with a snake_case `kind` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceGraphNode {
+    /// A non-contact file.
     File {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Workspace-relative file path.
         path: String,
+        /// File display class.
         class: WorkspaceGraphFileClass,
     },
+    /// A directory in the workspace containment tree.
     Directory {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Workspace-relative path; the root directory uses an empty string.
         path: String,
     },
+    /// A tag with its maintained reference count.
     Tag {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Name without the tag or mention sigil.
         name: String,
+        /// Maintained graph reference count.
         reference_count: u64,
     },
+    /// An unresolved mention with its maintained reference count.
     Mention {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Name without the tag or mention sigil.
         name: String,
+        /// Maintained graph reference count.
         reference_count: u64,
     },
+    /// A contact with its maintained metadata.
     Contact {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Workspace-relative contact file path.
         path: String,
+        /// Contact file basename.
         basename: String,
+        /// Optional contact title.
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Contact email addresses.
         emails: Vec<String>,
+        /// Alternate contact names.
         aliases: Vec<String>,
     },
+    /// A code-report language summary.
     Language {
+        /// Graph node identifier.
         id: String,
+        /// Display label.
         label: String,
+        /// Report language name.
         language: String,
+        /// Files attributed to this language.
         file_count: u64,
+        /// Code lines attributed to this language.
         code_lines: u64,
     },
 }
@@ -239,95 +371,155 @@ impl WorkspaceGraphNode {
     }
 }
 
+/// A directed graph relationship between admitted node ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRelationship {
+    /// Source node id.
     pub source: String,
+    /// Target node id.
     pub target: String,
+    /// Relationship category.
     pub kind: WorkspaceRelationshipKind,
+    /// Optional document-link anchor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
+    /// Optional broken-link flag, left unset by workspace search. Unresolved document targets are omitted and reported with `WorkspaceSearchWarning::MissingLinkTarget`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broken: Option<bool>,
 }
 
+/// Normalized traversal settings and per-seed profiles after applying kind-specific defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveWorkspaceTraversal {
+    /// Request-wide depth after defaults and the maximum of 10 are applied.
     pub depth: u8,
+    /// Requested direction; `Auto` is resolved separately in each profile.
     pub direction: WorkspaceTraversalDirection,
+    /// Normalized relationship filter; an empty request expands to all kinds.
     pub relationship_kinds: Vec<WorkspaceRelationshipKind>,
+    /// A candidate required containment relationships while `Contains` was excluded. This can be true even if the candidate is rejected by a graph budget.
     pub spine_forced: bool,
+    /// Resolved seeds and their effective settings, including seeds later omitted by graph budgets.
     pub profiles: Vec<WorkspaceTraversalProfile>,
 }
 
+/// The resolved seed and the traversal settings actually applied to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTraversalProfile {
+    /// Normalized exact selector for the seed.
     pub selector: WorkspaceSelector,
+    /// Resolved graph node id.
     pub node_id: String,
+    /// Applied depth, including the language-profile cap of 1.
     pub depth: u8,
+    /// Applied direction after resolving `Auto`.
     pub direction: WorkspaceTraversalDirection,
 }
 
+/// Budget truncation flags and observed candidate counts. Observed counts describe work examined, not exhaustive totals for unvisited graph regions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSearchTruncation {
+    /// More distinct file hits were retrieved than the content-hit limit.
     pub content_hits: bool,
+    /// Distinct file hits observed before applying the result limit.
     pub content_hits_observed: u32,
+    /// More entities matched than the entity-match limit.
     pub entity_matches: bool,
+    /// Entity matches observed before applying the result limit.
     pub entity_matches_observed: u32,
+    /// A node and its required containment ancestors exceeded the node budget.
     pub graph_nodes: bool,
+    /// Distinct candidate node ids observed, including required ancestors and rejected candidates.
     pub graph_nodes_observed: u32,
+    /// A relationship or required containment spine exceeded the relationship budget.
     pub graph_edges: bool,
+    /// Distinct relationship keys seen by relationship admission or insertion. Containment edges of nodes rejected before insertion are not counted.
     pub graph_edges_observed: u32,
+    /// At least one graph admission was cut short by a node or relationship budget; other candidates can still be examined.
     pub frontier_stopped: bool,
 }
 
+/// A recoverable limitation, serialized with a snake_case `code` discriminator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum WorkspaceSearchWarning {
+    /// A requested limit exceeded its hard maximum.
     LimitClamped {
+        /// Request field that was clamped.
         field: String,
+        /// Requested value.
         requested: u32,
+        /// Applied maximum.
         effective: u32,
+        /// Human-readable explanation.
         message: String,
     },
+    /// Language metadata was requested while reports are disabled.
     ReportsDisabled {
+        /// Human-readable explanation.
         message: String,
     },
+    /// Reports are enabled but no maintained report snapshot is available.
     ReportsUnavailable {
+        /// Human-readable explanation.
         message: String,
     },
+    /// Semantic search is enabled but hybrid retrieval is unavailable; BM25 is used.
     HybridUnavailable {
+        /// Human-readable explanation.
         message: String,
     },
+    /// A graph link target cannot be represented by the current catalog.
     MissingLinkTarget {
+        /// Unavailable link target.
         target: String,
+        /// Human-readable explanation.
         message: String,
     },
 }
 
+/// A request, selector, readiness, or domain error carried inside a successful outer result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum WorkspaceSearchError {
+    /// The request has no query, exact seed, or non-content browse domain.
     InvalidRequest {
+        /// Human-readable explanation.
         message: String,
     },
+    /// A path selector violates the workspace-relative path grammar.
     InvalidSelector {
+        /// Selector that failed.
         selector: WorkspaceSelector,
+        /// Human-readable explanation.
         message: String,
     },
+    /// An exact selector matches no available entity.
     SelectorNotFound {
+        /// Selector that failed.
         selector: WorkspaceSelector,
+        /// Human-readable explanation.
         message: String,
     },
+    /// An exact selector resolves to multiple contacts.
     AmbiguousSelector {
+        /// Selector that failed.
         selector: WorkspaceSelector,
+        /// Exact contact selectors that disambiguate the request.
         candidates: Vec<WorkspaceSelector>,
+        /// Human-readable explanation.
         message: String,
     },
+    /// Workspace recovery or index rebuilding prevents a ready result.
     IndexNotReady {
+        /// Human-readable explanation.
         message: String,
     },
+    /// A requested domain lacks its required maintained data.
     DomainUnavailable {
+        /// Unavailable search domain.
         domain: WorkspaceSearchDomain,
+        /// Human-readable explanation.
         message: String,
     },
 }
@@ -346,6 +538,9 @@ struct NormalizedRequest {
 }
 
 impl Workspace {
+    /// Resolve the content-search policy without running a query.
+    ///
+    /// Hybrid requires semantic search to be enabled, embeddings to be compiled in, and the configured model to resolve. Otherwise return BM25; configuration read failures use the outer `Result`.
     pub fn effective_search_mode(&self) -> Result<EffectiveSearchMode> {
         if !self.semantic_enabled()? {
             return Ok(EffectiveSearchMode::Bm25);
@@ -361,6 +556,9 @@ impl Workspace {
         Ok(EffectiveSearchMode::Bm25)
     }
 
+    /// Retrieve content and entities and build a bounded graph for this workspace.
+    ///
+    /// Normalize the request once and return request, selector, readiness, and unavailable-domain errors in `WorkspaceSearchResult::errors`. Storage and search-backend failures use the outer `Result`. If derived state is recovering before or after the query, return an index-not-ready error without retrieval or graph results.
     pub fn workspace_search(
         &self,
         request: &WorkspaceSearchRequest,
@@ -1339,8 +1537,6 @@ fn directory_id(path: &str) -> String {
         format!("directory:{path}")
     }
 }
-
-// Traversal implementation follows below.
 
 #[derive(Debug, Clone, Default)]
 struct TraversalTruncation {
