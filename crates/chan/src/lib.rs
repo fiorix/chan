@@ -4195,7 +4195,7 @@ async fn cmd_devserver(
     let tunnel_token = tunnel_token.filter(|_| !no_tunnel);
     // An endpoint is required with a token, but not necessarily HERE: a
     // supervised verb recovers it from the installed unit, which is the whole
-    // point of a flagless `--restart`. Resolution stays lazy so that path is
+    // point of a flagless `restart`. Resolution stays lazy so that path is
     // reachable at all; the foreground and `chan` backends have nothing
     // persisted to read, so they demand it at the point of use.
     let tunnel_url = tunnel_url.filter(|url| !url.trim().is_empty());
@@ -4299,7 +4299,7 @@ async fn cmd_devserver(
             }
             // Preserve the running service's bound address when --bind/--port are
             // omitted (per field: explicit flag > persisted > default), so a
-            // flagless --restart/--join keeps what the service runs on.
+            // flagless restart/join keeps what the service runs on.
             let addr = service_target_addr(kind, bind, port);
             let tunnel = supervised_tunnel_spec(
                 kind,
@@ -4465,8 +4465,8 @@ struct SystemdTunnel {
 
 /// Build the tunnel spec for a systemd unit, resolving every field as "the
 /// explicit value wins, else what the installed unit already carries". A
-/// flagless `--restart` therefore comes back as the same registration it went
-/// down as, which is the contract the `--restart` help states.
+/// flagless `restart` therefore comes back as the same registration it went
+/// down as, which is the contract the `restart` help states.
 ///
 /// The PAT is the load-bearing case: the unit's 0600 `Environment=` is its ONLY
 /// store, so a management verb run from a shell that cannot see
@@ -4594,9 +4594,9 @@ fn persisted_unit_environment<'a>(unit: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..rest.find('"')?])
 }
 
-/// Dispatch a `systemd`/`launchd` action verb: `--start` (create + enable +
-/// start, then return), `--stop` (stop + disable), `--restart` (rewrite + bounce,
-/// then return), `--status`, or `--join` (ensure running, then attach + block).
+/// Dispatch a `systemd`/`launchd` action verb: `start` (create + enable +
+/// start, then return), `stop` (stop + disable), `restart` (rewrite + bounce,
+/// then return), `status`, or `join` (ensure running, then attach + block).
 /// Both backends compile on every target and are gated at runtime via `cfg!`, so
 /// a wrong-OS request errors clearly rather than silently doing nothing.
 async fn run_supervised_devserver(
@@ -4686,14 +4686,14 @@ async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
     }
 }
 
-/// The bound address for a `--restart`/`--join` whose `--bind`/`--port` were
+/// The bound address for a `restart`/`join` whose `--bind`/`--port` were
 /// omitted: each field falls back to the running backend's persisted address so
 /// a flagless restart keeps what the service runs on.
 fn service_target_addr(kind: ServiceKind, bind: Option<IpAddr>, port: Option<u16>) -> SocketAddr {
     resolve_devserver_addr(bind, port, persisted_devserver_addr(kind))
 }
 
-/// Apply the `--stop`/`--restart` address precedence per field: an explicit CLI
+/// Apply the `stop`/`restart` address precedence per field: an explicit CLI
 /// flag wins, else the running service's persisted value, else the built-in
 /// default. Pure (the FS read that yields `persisted` lives in the caller) so the
 /// precedence stays unit-testable.
@@ -4712,8 +4712,8 @@ fn resolve_devserver_addr(
 }
 
 /// The address the RUNNING systemd devserver serves its management API on,
-/// for the verbs that dial it (the `--stop` / `--force` terminal drain,
-/// `--join`'s health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
+/// for the verbs that dial it (the `stop` / `--force` terminal drain,
+/// `join`'s health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
 /// flags are the truth when present; a tunnel unit with no pinned port binds
 /// an OS-assigned one, which the service records in the devserver config at
 /// bind time (before READY=1, so an `is-active` unit has already written it).
@@ -4733,7 +4733,7 @@ fn running_systemd_devserver_addr() -> Option<SocketAddr> {
 
 /// The address a supervised backend persisted for its running (or last) service,
 /// or None when nothing is recorded. systemd/launchd carry it in the unit /
-/// agent the supervisor wrote (which survive a `--stop`); the `chan` daemon
+/// agent the supervisor wrote (which survive a `stop`); the `chan` daemon
 /// carries it in its pidfile.
 fn persisted_devserver_addr(kind: ServiceKind) -> Option<SocketAddr> {
     match kind {
@@ -4776,14 +4776,14 @@ fn read_launch_agent_plist() -> Option<String> {
     std::fs::read_to_string(launch_agent_path().ok()?).ok()
 }
 
-/// The `ExecStart=` command line from a systemd unit's text, for `--status`.
+/// The `ExecStart=` command line from a systemd unit's text, for `status`.
 fn systemd_execstart_line(unit: &str) -> Option<String> {
     unit.lines()
         .find_map(|l| l.strip_prefix("ExecStart=").map(|s| s.trim().to_string()))
 }
 
 /// A launchd plist's `ProgramArguments` joined into one command line, for
-/// `--status`. Pulls each `<string>` inside the `<array>` and unescapes it.
+/// `status`. Pulls each `<string>` inside the `<array>` and unescapes it.
 fn launchd_program_arguments(plist: &str) -> Option<String> {
     let array = plist
         .split_once("<array>")
@@ -4811,7 +4811,7 @@ fn unescape_plist_xml(s: &str) -> String {
 /// Whether the foreground devserver binds a local TCP listener. Non-tunnel always
 /// binds. Tunnel mode defaults to no-bind (the gateway is the surface) EXCEPT
 /// under systemd notify, where the loopback management API is needed so
-/// `chan devserver stop` / `--restart --force` can drain the terminals
+/// `chan devserver stop` / `restart --force` can drain the terminals
 /// explicitly (restart itself needs no call: the fd store preserves PTYs).
 /// `CHAN_DEVSERVER_LISTEN`
 /// forces either way. Tunnel-off + LISTEN=0 leaves nothing reachable (no local
@@ -4926,7 +4926,7 @@ const DEVSERVER_SYSTEMD_START_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// self-managed `chan` daemon, systemd, and launchd.
 enum DaemonLiveness {
     /// The self-managed `chan` daemon: its pidfile still names this live pid.
-    /// The pid re-pins when a `--restart` replaces the daemon (see
+    /// The pid re-pins when a `restart` replaces the daemon (see
     /// [`DaemonLiveness::adopt_restarted`]).
     Chan { record_path: PathBuf, pid: u32 },
     /// A systemd user service: `systemctl --user is-active`.
@@ -4948,7 +4948,7 @@ impl DaemonLiveness {
     }
 
     /// chan backend only: after [`DaemonLiveness::alive`] came back false,
-    /// look for a RESTARTED daemon to adopt. `--restart` spawns a new pid and
+    /// look for a RESTARTED daemon to adopt. `restart` spawns a new pid and
     /// rewrites daemon.json, so a join pinned to the attach-time pid would
     /// otherwise die by design at the first tick after every restart. A new
     /// live record is adopted only when its address equals `addr` -- the
@@ -4977,7 +4977,7 @@ impl DaemonLiveness {
 
 /// How long the watched backend may fail CONTINUOUSLY (liveness lost or
 /// `/api/health` missing) before an attached join gives up. Sized to ride out
-/// a `--restart` bounce (stopping the old instance alone may take up to 15s)
+/// a `restart` bounce (stopping the old instance alone may take up to 15s)
 /// and slow-network stalls; the trade-off is that a genuinely dead server is
 /// reported up to this much later.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(30);
@@ -5071,7 +5071,7 @@ impl WatchdogState {
 /// One watchdog probe pass: backend liveness first, then the bounded health
 /// probe. A chan-backend join whose pinned pid is gone checks for a restarted
 /// daemon on the same address before counting the pass as a failure, so a
-/// `--restart` reads as a re-pin instead of a death.
+/// `restart` reads as a re-pin instead of a death.
 async fn watchdog_probe(
     liveness: &mut DaemonLiveness,
     client: &reqwest::Client,
@@ -5093,7 +5093,7 @@ async fn watchdog_probe(
 
 /// Resolve when a non-terminal stdin reaches EOF.
 ///
-/// SSH remote commands and the desktop control terminal give `--join` a pipe
+/// SSH remote commands and the desktop control terminal give `join` a pipe
 /// for stdin. Closing that transport does not reliably signal the remote
 /// process, so stdin EOF is the ownership boundary that keeps a healthy
 /// watchdog from becoming an orphan. A real terminal stays Ctrl-C-driven.
@@ -5120,7 +5120,7 @@ async fn wait_for_join_stdin_eof() {
 /// user detaches with Ctrl-C or its non-TTY stdin closes -- the unified
 /// reattach contract (no journald / launchd log follow). Detaching leaves the
 /// backing server running and exits 0. The server dying exits non-zero, but
-/// only after [`WATCHDOG_GRACE`] of continuous failure: a `--restart` bounce or
+/// only after [`WATCHDOG_GRACE`] of continuous failure: a `restart` bounce or
 /// a slow network shows as a narrated wait + re-attach instead of killing the
 /// join (whose exit tears down the desktop connection riding on it). The exit
 /// code still tells the launcher survey a clean detach from a crash.
@@ -5225,7 +5225,7 @@ async fn start_devserver_under_systemd(
 /// `chan devserver join --service=systemd`: ensure the unit is running (start
 /// it if down, re-attach if up), then stay attached and block on the health
 /// watchdog until Ctrl-C. This is the "bring it up and watch it" form connect
-/// scripts use; unlike `--start` it does not return until the service stops or
+/// scripts use; unlike `start` it does not return until the service stops or
 /// the user detaches.
 async fn join_devserver_under_systemd(
     addr: SocketAddr,
@@ -5358,7 +5358,7 @@ async fn activate_devserver_unit(
 
 /// Write the unit for `addr` and bring it up: `daemon-reload`, then `enable
 /// --now` for a first start or `enable` + `restart` to bounce/(re)start under
-/// `--restart` (`enable --now` would not bounce an already-running unit). Waits
+/// `restart` (`enable --now` would not bounce an already-running unit). Waits
 /// until active and surfaces the bearer token. Shared by the first-start path
 /// and [`restart_devserver_under_systemd`]; the caller owns linger + the
 /// started/restarted log line + watching the service.
@@ -5394,7 +5394,7 @@ async fn bootstrap_systemd_unit(
 /// variant, draining every session through the management API first (and
 /// falling back to stop-then-start when the drain cannot complete, so a
 /// wedged devserver still restarts WITHOUT resurrecting its terminals).
-/// Use `--join` to stay attached.
+/// Use `join` to stay attached.
 async fn restart_devserver_under_systemd(
     addr: SocketAddr,
     force: bool,
@@ -5493,8 +5493,8 @@ async fn drain_devserver_terminals(addr: SocketAddr) -> std::result::Result<(), 
 /// failed drain still ends every terminal a HUP can reach. Idempotent: stop is
 /// a no-op when the unit is not active, and disable is skipped when no unit file
 /// is installed. The unit file itself stays on disk (disable only drops the
-/// `WantedBy` symlink), so `--status` can still show its last command.
-/// The `--stop` drain decision: a failed drain WARNS and still stops -- the
+/// `WantedBy` symlink), so `status` can still show its last command.
+/// The `stop` drain decision: a failed drain WARNS and still stops -- the
 /// released fd store closes every master and HUPs the shells, so stop is
 /// never blocked on a wedged devserver. `drain` is None when nothing was
 /// running or no address was discoverable.
@@ -6002,7 +6002,7 @@ fn devserver_systemd_unit_spec(
     }
     // Tunnel mode: carry the PAT in the unit (written 0600) and dial the gateway
     // via --tunnel-url. Under systemd the devserver still binds the loopback
-    // management API (see resolve_devserver_listen) so `--stop` / `--restart
+    // management API (see resolve_devserver_listen) so `stop` / `restart
     // --force` can drain the terminals. Only PINNED (explicit or preserved-explicit) address
     // flags ride in the ExecStart; an omitted field leaves the service to
     // resolve its tunnel-mode default (loopback bind, OS-assigned port), and
@@ -6180,7 +6180,7 @@ async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
 
 /// `chan devserver join --service=launchd`: ensure the agent is running (start
 /// it if down, re-attach if up), then stay attached and follow its log until
-/// Ctrl-C. Unlike `--start` it does not return until the agent stops or the user
+/// Ctrl-C. Unlike `start` it does not return until the agent stops or the user
 /// detaches.
 async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
@@ -6212,7 +6212,7 @@ async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
 
 /// (Re)register and start the launchd agent for `addr`: rewrite the plist
 /// (current binary + `addr`), bootout any stale registration, enable, bootstrap,
-/// and wait until active. Always re-registers, so it doubles as the `--restart`
+/// and wait until active. Always re-registers, so it doubles as the `restart`
 /// reload (a `kickstart -k` alone would bounce the OLD plist). Surfaces the
 /// bearer token. Shared by the first-start path and
 /// [`restart_devserver_under_launchd`]; the caller owns the started/restarted
@@ -6243,7 +6243,7 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
 
 /// `chan devserver restart --service=launchd`: rewrite + re-register the agent
 /// (current binary + `addr`) so it bounces (or starts if stopped), then return.
-/// Use `--join` to stay attached.
+/// Use `join` to stay attached.
 async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
     let was_running = launchd_is_active(uid).await;
@@ -6258,8 +6258,8 @@ async fn restart_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
 /// `chan devserver stop --service=launchd`: bootout the agent AND disable it,
 /// so launchd does not re-bootstrap it at the next GUI login. Idempotent:
 /// `bootout` errors when nothing is loaded, which we report as already-stopped;
-/// `disable` is best-effort. The plist stays on disk, so `--status` can still
-/// show its last command; `--start`/`--restart` re-enable it.
+/// `disable` is best-effort. The plist stays on disk, so `status` can still
+/// show its last command; `start`/`restart` re-enable it.
 async fn stop_devserver_under_launchd() -> Result<()> {
     let uid = current_uid().await?;
     let service = launchd_service_target(uid);
@@ -10897,7 +10897,7 @@ mod tests {
         assert!(!resolve_devserver_listen(true, false, Some(false)).unwrap());
         assert!(resolve_devserver_listen(true, false, Some(true)).unwrap());
         // Tunnel on, UNDER systemd notify: default binds the loopback management
-        // API so the `--stop` / `--force` terminal drain can reach it; explicit
+        // API so the `stop` / `--force` terminal drain can reach it; explicit
         // 0 still opts out.
         assert!(resolve_devserver_listen(true, true, None).unwrap());
         assert!(!resolve_devserver_listen(true, true, Some(false)).unwrap());
@@ -11178,7 +11178,7 @@ mod tests {
         );
     }
 
-    /// `--stop`/`--restart` address precedence: explicit flag > running
+    /// `stop`/`restart` address precedence: explicit flag > running
     /// persisted > default, applied per field so a flagless restart preserves
     /// the running address (the bug) while a single flag overrides just that
     /// field.
@@ -11231,7 +11231,7 @@ mod tests {
         );
     }
 
-    /// `--status` command extraction: the systemd ExecStart value and the
+    /// `status` command extraction: the systemd ExecStart value and the
     /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
     #[test]
     fn status_command_extracts_per_backend() {
@@ -13058,7 +13058,7 @@ mod tests {
 
     #[test]
     fn supervised_tunnel_spec_recovers_the_pat_from_the_installed_unit() {
-        // The regression this guards: a `--restart` typed in a shell that
+        // The regression this guards: a `restart` typed in a shell that
         // carries NEITHER the token nor the endpoint. The unit is the only
         // store for both, so the restart must come back as the same tunnel
         // registration -- not as a local devserver whose unit rewrite would
@@ -13136,7 +13136,7 @@ mod tests {
 
     /// The whole unit an unpinned tunnel devserver installs, asserted as text
     /// rather than by `contains`, because this exact byte sequence is the
-    /// contract: a `--restart` that renders something else classifies the
+    /// contract: a `restart` that renders something else classifies the
     /// installed unit as changed and rewrites it. Provisioning that writes a
     /// unit by hand has to match this to be left alone.
     #[test]
@@ -13312,7 +13312,7 @@ mod tests {
     #[test]
     fn persisted_flag_value_reads_tunnel_url_from_execstart() {
         // The "reuse first-run URL" read: pull --tunnel-url back out of a unit's
-        // ExecStart line the way a flagless --restart would.
+        // ExecStart line the way a flagless restart would.
         let unit = "ExecStart=/home/dev/.local/bin/chan devserver run \
                     --tunnel-url=https://first-run.test/v1/tunnel\n";
         assert_eq!(
@@ -13393,7 +13393,7 @@ mod tests {
         assert!(unit.contains("Environment=\"CHAN_TUNNEL_DEVSERVER_NAME=office box\"\n"));
         // A `%` writes as `%%` (systemd Environment= specifier
         // escaping), and reads back literal via persisted_tunnel_name:
-        // the round trip a flagless --restart takes.
+        // the round trip a flagless restart takes.
         let percent = SystemdTunnel {
             pinned_name: Some("box 50%".to_string()),
             ..tunnel

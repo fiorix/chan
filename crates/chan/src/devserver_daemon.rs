@@ -46,7 +46,7 @@ pub async fn run_devserver_as_chan(
         .map(|_| ())
 }
 
-/// `--service=chan --start`: start the background daemon and return.
+/// `chan devserver start --service=chan`: start the background daemon and return.
 pub async fn start_devserver_chan(
     addr: SocketAddr,
     force: bool,
@@ -88,7 +88,7 @@ pub async fn start_devserver_chan(
     Ok(record)
 }
 
-/// `--restart`: stop any running daemon, then start a new background daemon.
+/// `chan devserver restart --service=chan`: stop any running daemon, then start a new background daemon.
 pub async fn restart_devserver_chan(
     addr: SocketAddr,
     force: bool,
@@ -110,7 +110,7 @@ pub async fn restart_devserver_chan(
     Ok(())
 }
 
-/// `--service=chan --join`: start the background daemon if needed, then attach
+/// `chan devserver join --service=chan`: start the background daemon if needed, then attach
 /// as a watchdog until interrupted. Ctrl-C detaches and leaves the daemon alive.
 pub async fn join_devserver_chan(
     addr: SocketAddr,
@@ -142,7 +142,7 @@ pub async fn run_devserver_daemon_child(
     }
 }
 
-/// `--stop`: terminate the running daemon and clear stale pidfiles.
+/// `chan devserver stop --service=chan`: terminate the running daemon and clear stale pidfiles.
 pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
@@ -183,7 +183,7 @@ pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
     }
 }
 
-/// `--status`: report whether the background daemon is running.
+/// `chan devserver status --service=chan`: report whether the background daemon is running.
 pub fn status_devserver_chan(verbose: bool) -> Result<()> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
@@ -241,10 +241,14 @@ async fn attach_existing(
     if record.addr != requested.to_string() {
         anyhow::bail!(
             "chan devserver: a self-managed daemon is already running on {} \
-             (pid {}); requested {requested}. Use --restart to rebind, --stop \
-             to stop it, or --force to replace it.",
+             (pid {}); requested {requested}. To rebind, use chan devserver restart \
+             --service=chan with the options it was started with (including tunnel \
+             options), setting --bind {} and --port {}. Use chan devserver stop \
+             --service=chan to stop it, or retry with --force to replace it.",
             record.addr,
-            record.pid
+            record.pid,
+            requested.ip(),
+            requested.port()
         );
     }
     wait_for_daemon_ready(
@@ -581,6 +585,49 @@ fn print_daemon_paths(lock_path: &Path, record_path: &Path, log_path: &Path) {
             .join("config.json")
             .display()
     );
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn address_mismatch_names_real_management_commands() {
+        let record = DaemonRecord {
+            pid: 1,
+            creation_time: 0,
+            addr: "127.0.0.1:8787".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let error = attach_existing(
+            record,
+            "127.0.0.1:9898".parse().unwrap(),
+            Path::new("unused-daemon.log"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("chan devserver restart --service=chan"),
+            "{error}"
+        );
+        assert!(
+            error.contains("chan devserver stop --service=chan"),
+            "{error}"
+        );
+        assert!(
+            error.contains("with the options it was started with (including tunnel options)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("setting --bind 127.0.0.1 and --port 9898"),
+            "{error}"
+        );
+        assert!(error.contains("--force"), "{error}");
+        assert!(!error.contains("--restart"), "{error}");
+        assert!(!error.contains("--stop"), "{error}");
+    }
 }
 
 #[cfg(all(test, unix))]

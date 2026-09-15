@@ -234,7 +234,8 @@ fn devserver_config_path() -> std::io::Result<PathBuf> {
 /// connect-script output to learn the devserver's bearer token, on every
 /// connect and reconnect; the token value runs from the `=` to end of line.
 /// LOCKED wire string: the desktop matches this exact prefix, so both the
-/// foreground emit and the `--service=systemd --join` re-attach emit build to it.
+/// foreground emit and the `chan devserver join --service=systemd`
+/// re-attach emit build to it.
 pub const DEVSERVER_TOKEN_MARKER: &str = "CHAN_DEVSERVER_TOKEN=";
 
 /// Maximum age of the persisted bearer token: 30 days. A cold start whose
@@ -254,9 +255,9 @@ fn unix_now_secs() -> u64 {
 
 /// Read the persisted devserver bearer token from
 /// `~/.chan/devserver/config.json`, or `None` when it is absent, unreadable,
-/// or tokenless. The `--service=systemd --join` re-attach path prints the
-/// [`DEVSERVER_TOKEN_MARKER`] from this, since a journal-follow does not
-/// re-emit the running unit's original start line.
+/// or tokenless. The `chan devserver join --service=systemd` re-attach path
+/// prints the [`DEVSERVER_TOKEN_MARKER`] from this, since a journal-follow
+/// does not re-emit the running unit's original start line.
 pub fn persisted_devserver_token() -> Option<String> {
     let store = DevserverStore::at(devserver_config_path().ok()?);
     let token = store.load().devserver_token;
@@ -2598,8 +2599,8 @@ async fn handle_set_workspace_on(
 
 /// Explicitly end every terminal session and wait, bounded, until the child
 /// processes are observably dead. `chan devserver stop` drains through
-/// here before `systemctl stop`, and `--restart --force` before its
-/// destructive bounce; the response never claims completion for a child
+/// here before `systemctl stop`, and `chan devserver restart --force` before
+/// its destructive bounce; the response never claims completion for a child
 /// that is still running (`lingering`).
 async fn handle_terminal_sessions_drain(State(state): State<Arc<DevserverState>>) -> Response {
     let outcome = state.host.drain_terminal_sessions().await;
@@ -3724,8 +3725,8 @@ mod tests {
     fn token_marker_is_the_locked_wire_string() {
         // LOCKED contract: the desktop control terminal scrapes this exact
         // prefix from the connect-script output. Both the foreground emit and
-        // the `--service=systemd --join` re-attach emit build to it, so pin it
-        // here; an accidental edit breaks reconnect.
+        // the `chan devserver join --service=systemd` re-attach emit build to it,
+        // so pin it here; an accidental edit breaks reconnect.
         assert_eq!(DEVSERVER_TOKEN_MARKER, "CHAN_DEVSERVER_TOKEN=");
     }
 
