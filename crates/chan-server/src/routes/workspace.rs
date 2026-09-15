@@ -14,11 +14,7 @@ use crate::state::AppState;
 
 #[derive(Serialize)]
 struct WorkspaceInfo {
-    /// Absolute workspace root, POSIX-style on every platform so the
-    /// JSON shape stays stable. Empty string on `--tunnel-public`
-    /// runs: the absolute path of the owner's workspace would otherwise
-    /// reveal the owner's username and filesystem layout to every
-    /// anonymous visitor.
+    /// Workspace root rendered with the platform's path spelling and lossy UTF-8 conversion. The response includes the registered path without redaction.
     root: String,
     /// Path-derived label for compact UI surfaces. It is not stored
     /// in the registry and cannot be edited through `/api/workspace`.
