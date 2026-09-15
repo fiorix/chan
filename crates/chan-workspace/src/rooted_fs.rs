@@ -915,6 +915,9 @@ impl RootedFs {
         self.ensure_root_available()?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
+        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
+            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+        }
         // Source must exist as a regular file or directory; refuse
         // to move a symlink or special file. (renaming a symlink
         // is well-defined at the syscall level but not something

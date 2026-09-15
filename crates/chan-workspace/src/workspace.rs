@@ -7676,6 +7676,52 @@ mod tests {
     }
 
     #[test]
+    fn rename_into_subtree_is_refused_without_mutation() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a/file.md", "# source\n").unwrap();
+        let result = workspace.rename("a", "a/x/y");
+        let created_parent = root.path().join("a/x").exists();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(path)) if path == "a/x/y")
+                && !created_parent,
+            "result={result:?}; destination parent created inside source={created_parent}"
+        );
+        assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
+    }
+
+    #[test]
+    fn rename_with_link_rewrite_into_subtree_preserves_state() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a/file.md", "# source\n").unwrap();
+        workspace
+            .write_text("ref.md", "[source](a/file.md)\n")
+            .unwrap();
+        let log_before = workspace.rename_log.lock().unwrap().clone();
+        let result = workspace.rename_with_link_rewrite("a", "a/x/y");
+        let created_parent = root.path().join("a/x").exists();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(path)) if path == "a/x/y")
+                && !created_parent,
+            "result={result:?}; destination parent created inside source={created_parent}"
+        );
+        assert_eq!(*workspace.rename_log.lock().unwrap(), log_before);
+        assert_eq!(
+            workspace.read_text("ref.md").unwrap(),
+            "[source](a/file.md)\n"
+        );
+        assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
+    }
+
+    #[test]
+    fn rename_same_path_preserves_directory_and_file() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a/file.md", "# source\n").unwrap();
+        workspace.rename("a", "a").unwrap();
+        workspace.rename("a/file.md", "a/file.md").unwrap();
+        assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
+    }
+
+    #[test]
     fn drafts_reject_traversal_and_existing() {
         // Name validation + collision detection.
         let (_cfg, _root, workspace) = fixture();

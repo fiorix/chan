@@ -2666,6 +2666,41 @@ mod file_browser_listing_tests {
         }
     }
 
+    #[tokio::test]
+    async fn rename_into_subtree_route_is_400_without_mutation() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        state
+            .try_workspace()
+            .unwrap()
+            .write_text("a/file.md", "# source\n")
+            .unwrap();
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/move")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"from":"a","to":"a/x/y"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let created_parent = root.path().join("a/x").exists();
+        assert!(status == StatusCode::BAD_REQUEST && !created_parent,
+            "status={status}; destination parent created inside source={created_parent}; body={body:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a/file.md")).unwrap(),
+            "# source\n"
+        );
+    }
+
     #[test]
     fn list_files_sync_surfaces_drafts_dir_as_normal_in_root_folder() {
         // The drafts dir is a real in-root directory now, so the File
