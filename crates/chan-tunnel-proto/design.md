@@ -42,7 +42,7 @@ This crate owns:
 
 - Control frames (`Hello`, `HelloAck`) and the one-shot yamux lease-refresh request/response, including structured refusal codes and redacted PAT debug behavior.
 - Length-prefixed framing (`[u32 BE len][json bytes]`) used only for the two control messages.
-- Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers).
+- Workspace-name validation applied by both client and server, plus a defensive username check applied by the server after bearer-token validation.
 - `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
 - `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
 - The accept-failure policy (`AcceptFailure`, `accept_next`) shared by the tunnel terminator's listener and devserver-control's proxy control listener. See [Accept failures](#accept-failures).
@@ -148,7 +148,7 @@ The policy lives here because it is the one crate both loops already depend on: 
 
 ## 6. Trust boundaries / validation
 
-This crate is the validator surface for two values that flow into public routing: the workspace name (from the client's `Hello`) and the username (from the server's `Validated`).
+This crate validates the client's `Hello.workspace` and the server's `Validated.username`. The gateway keys registration by `(username, devserver_id)` and builds the tunnel prefix with the devserver id resolved from the bearer token; `Hello.workspace` never reaches a URL. The username supplies the owner part of the public tenant host label `{owner}--{disc}`, subject to the gateway's stricter username validation.
 
 ### Workspace name (`is_valid_workspace_name`)
 
@@ -156,7 +156,7 @@ Rules: 1..=32 ASCII bytes; characters `[a-z0-9-]`; first and last character alph
 
 ### Username (`is_valid_username`)
 
-Slightly looser than the workspace validator because real identity services emit mixed-case names with underscores: ASCII alphanumerics, `-`, `_`; first character alphanumeric (no leading punctuation); 1..=64. Applied by chan-tunnel-server after the validator returns, to keep `Validated::username` from carrying `..` / `alice/bob` / whitespace into public routing.
+ASCII alphanumerics, `-`, `_`; first character alphanumeric (no leading punctuation); 1..=64. Applied by chan-tunnel-server after the validator returns, to refuse path separators, whitespace and leading punctuation in `Validated::username`. It permits uppercase, underscores and double hyphens; the gateway's `gateway_common::validators::valid_username` enforces the stricter shape required for public tenant host labels.
 
 ### Frame-size cap
 

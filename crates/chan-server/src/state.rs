@@ -34,16 +34,13 @@ pub struct AppState {
     pub token: Option<String>,
     /// Canonical URL prefix the SPA prepends to fetch and WebSocket
     /// URLs, injected into the shell as `<meta name="chan-prefix">`.
-    /// Mutable so tunnel mode can swap in the registration prefix
-    /// (`/{user}/{workspace}`) on Connected; the local-serve path sets
-    /// it once at build time from `ServeConfig::prefix` and never
-    /// touches it again. Empty when no prefix.
+    /// Initialized from `ServeConfig::prefix` and shared with `ServerHandle`.
+    /// Devserver tenants retain their own prefixes when the tunnel connects.
+    /// Empty when served at root.
     ///
     /// Note: this is the SPA-facing prefix only; the axum router is
     /// already nested under `ServeConfig::prefix` at build time, so
-    /// changing this value does not re-route handlers. In tunnel
-    /// mode the public gateway strips the prefix before forwarding,
-    /// which is why the router stays mounted at root.
+    /// changing this value does not re-route handlers.
     pub prefix: Arc<RwLock<String>>,
     /// Snapshot of `ServeConfig::settings_disabled`. Immutable for
     /// the server's lifetime: true only on a `--no-settings` serve (the

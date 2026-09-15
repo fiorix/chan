@@ -1,16 +1,12 @@
-//! Workspace-name validation.
+//! Shape checks for tunnel workspace names and validated usernames.
 //!
-//! Workspace names appear in public URLs as `/{user}/{workspace}/...`, so
-//! they have to be URL-safe. The constraints are intentionally
-//! tight to keep paths predictable and to leave room for future
-//! routing rules: lowercase ASCII letters, digits, and ASCII
-//! hyphens; length 1..=32; cannot start or end with a hyphen.
-//!
-//! The tunnel client and server both call
-//! `is_valid_workspace_name` on the wire as a defense-in-depth check.
+//! Both tunnel ends check `Hello.workspace` as defense in depth. The
+//! devserver sends the placeholder `devserver`; the gateway registers the
+//! tunnel using the devserver id resolved from the token and never puts
+//! this Hello name in a public URL. The devserver derives public tenant
+//! path segments from its own workspace slugs.
 
-/// Maximum workspace-name length (inclusive). Picked to leave headroom
-/// for the rest of a typical path; bump deliberately if needed.
+/// Maximum accepted length of `Hello.workspace` (inclusive).
 pub const MAX_WORKSPACE_NAME_LEN: usize = 32;
 
 /// Maximum username length (inclusive). Generous compared to common
@@ -19,18 +15,14 @@ pub const MAX_WORKSPACE_NAME_LEN: usize = 32;
 /// that the upstream validator already accepted.
 pub const MAX_USERNAME_LEN: usize = 64;
 
-/// Returns true if `s` is a syntactically safe username for use in
-/// the public tunnel path `/{user}/{workspace}`. Slightly more
-/// permissive than `is_valid_workspace_name` because real identity
-/// services emit usernames with mixed case and underscores: ASCII
-/// alphanumerics, `-`, `_`; first character alphanumeric (no
-/// leading punctuation); 1..=`MAX_USERNAME_LEN`.
+/// Returns true if `s` passes the tunnel server's defensive username check:
+/// 1..=`MAX_USERNAME_LEN` ASCII alphanumerics, `-` or `_`, starting with
+/// an alphanumeric character. Rejects path separators, whitespace and leading
+/// punctuation after bearer-token validation.
 ///
-/// This is a defense-in-depth check applied AFTER the validator
-/// has authenticated the bearer token. The point isn't to vet
-/// identity (that's the validator's job); it's to refuse
-/// pathological values like `..` / `alice/bob` / `alice space`
-/// that would break URL routing on the public side.
+/// This permits uppercase, underscores and double hyphens. The gateway's
+/// `gateway_common::validators::valid_username` enforces the stricter shape
+/// required for usernames in public tenant host labels.
 pub fn is_valid_username(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() || bytes.len() > MAX_USERNAME_LEN {
