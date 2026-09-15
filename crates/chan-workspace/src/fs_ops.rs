@@ -96,7 +96,7 @@ pub fn is_editable_text(rel: &str) -> bool {
 
 /// True for paths whose class is markdown-style content the indexer
 /// and graph parse (`.md` / `.txt` today, i.e. `FileClass::EditableText`).
-/// Workspaces every per-file ingestion path: tantivy index entries,
+/// Drives every per-file ingestion path: tantivy index entries,
 /// graph nodes, link / token / heading extraction, link-rewrite on
 /// rename, reindex-after-restore, etc.
 ///
@@ -121,7 +121,7 @@ pub fn is_markdown_file(rel: &str) -> bool {
 }
 
 /// Coarse content class derived from a path's extension and (for
-/// well-known no-extension files) basename. Workspaces:
+/// well-known no-extension files) basename. Drives:
 ///   - which files the editor reads/writes through the UTF-8 gate
 ///     (`read_text` / `write_text`): any `EditableText` or `Text`.
 ///   - which files the search index + graph ingest: `EditableText`

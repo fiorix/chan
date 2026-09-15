@@ -191,7 +191,7 @@ pub fn list(trash_dir: &Path) -> Result<Vec<TrashEntry>> {
 
 /// Summary of a successful `restore`: what came out of the trash
 /// and where it now lives. The caller (`Workspace::trash_restore`) uses
-/// this to workspace a graph + search re-index of the restored subtree
+/// this to drive a graph + search re-index of the restored subtree
 /// without re-reading meta.json or re-walking from the trash side.
 #[derive(Debug, Clone)]
 pub struct RestoredEntry {
