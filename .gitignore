@@ -34,6 +34,10 @@ web-launcher/.chan-build-stamp
 .svelte-kit/
 .vite/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Embedding model bundle. Populated by `make models` for release
 # builds (~80 MB tar.zst); a moving target as upstream weights
 # revise, so we keep it out of git and rely on fetch-models to
