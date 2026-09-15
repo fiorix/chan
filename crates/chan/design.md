@@ -72,6 +72,12 @@ The real top-level set:
 
 Each subcommand handler is orchestration only: it opens a `Library`, resolves a `Workspace` when needed, calls into the owning library, and prints text or `--json`. The handlers do not re-implement library invariants; they depend on them.
 
+### Workspace status
+
+`chan workspace status PATH` looks up an existing registration without registering or refreshing it. An unregistered path fails with the `chan workspace add` hint. If the writer lock is held, including a holder that wins between lookup and open, status reports that holder and exits successfully. It reads the lock record for the pid and uses the same control-socket identity and devserver HTTP activity probes as `chan ps`. Each identity probe and each HTTP request, including its response body, has a two-second budget. An unreachable holder or activity endpoint leaves those details unknown. A free workspace is opened for the existing readiness and derived-state snapshots; missing metadata lock directories take this normal open path and are recreated.
+
+`--json` returns one object with `root`, `metadata_key`, `served`, `served_by` and `pid`. `served_by` is `standalone`, `desktop`, `devserver` or null; `pid` is null when unavailable or free. `readiness` is optional: free workspaces include it, while held workspaces include it only when a devserver answers. Optional `indexer` telemetry has the same fields as `chan ps` activity (`status`, `queue_depth`, `last_event_at`, `last_settled_at`). `index`, `graph` and `report` appear only for a free, ready workspace; they are absent for held or recovering workspaces. Unknown optional snapshots are omitted, not reported as zero counts.
+
 ## 5. serve: mounting chan-server and the embedded frontend
 
 `cmd_serve` is where `chan` becomes a running editor. It does more than bind a socket because a workspace has exactly one writer-lock holder, and `chan serve` has to cooperate with whatever might already own that lock on the box. The order of operations encodes that single-writer invariant:

@@ -692,6 +692,130 @@ async fn spawn_tenant_terminal(
 // Scenarios.
 // ---------------------------------------------------------------------------
 
+async fn assert_workspace_status(sandbox: &Sandbox, root: &Path, pid: u32, served_by: &str) {
+    let config_path = sandbox.chan_home.path().join("config.toml");
+    let before = std::fs::read(&config_path).unwrap();
+    let mut command = sandbox.command();
+    command
+        .args(["workspace", "status"])
+        .arg(root)
+        .arg("--json");
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::from(command)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("workspace status exits promptly")
+    .expect("run workspace status");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["root"],
+        chan_workspace::paths::canonicalize_normalized(root)
+            .display()
+            .to_string()
+    );
+    assert!(json["metadata_key"].is_string(), "{json}");
+    assert_eq!(json["served"], true);
+    assert_eq!(json["pid"], pid);
+    assert_eq!(json["served_by"], served_by);
+    for field in ["index", "graph", "report"] {
+        assert!(json.get(field).is_none(), "{json}");
+    }
+    if served_by == "devserver" {
+        assert!(json["readiness"].is_object(), "{json}");
+        assert!(json["indexer"].is_object(), "{json}");
+    } else {
+        assert!(json.get("readiness").is_none(), "{json}");
+        assert!(json.get("indexer").is_none(), "{json}");
+    }
+    assert_eq!(std::fs::read(&config_path).unwrap(), before);
+}
+
+#[tokio::test]
+async fn workspace_status_bounds_an_unresponsive_pid_named_holder() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let sandbox = Sandbox::new();
+    let root = sandbox.workspace("status-wedged");
+    let config_path = sandbox.chan_home.path().join("config.toml");
+    let library = chan_workspace::Library::open_at(config_path.clone()).unwrap();
+    let known = library.register_workspace(&root).unwrap();
+    let held = library.open_workspace(&root).unwrap();
+    let before = std::fs::read(&config_path).unwrap();
+    let pid = std::process::id();
+    let runtime = tempfile::Builder::new()
+        .prefix("chan-status-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = runtime
+        .path()
+        .join(format!("chan-control-{pid}-wedged.sock"));
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let mut command = sandbox.command_in(sandbox.chan_home.path(), runtime.path());
+    command
+        .args(["workspace", "status"])
+        .arg(&root)
+        .arg("--json");
+    let child = tokio::process::Command::from(command)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(4), listener.accept())
+        .await
+        .expect("status connects to the pid-named holder")
+        .unwrap();
+    let mut stream = BufReader::new(stream);
+    let mut request = String::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_line(&mut request))
+        .await
+        .expect("status sends Identify")
+        .unwrap();
+    assert!(matches!(
+        serde_json::from_str::<chan_shell::ControlRequest>(&request).unwrap(),
+        chan_shell::ControlRequest::Identify
+    ));
+    let output = tokio::time::timeout(Duration::from_secs(4), child.wait_with_output())
+        .await
+        .expect("status must return while the holder leaves Identify unanswered")
+        .unwrap();
+    drop(stream);
+    let (stdout, _) = assert_output_ok(output, "status with unresponsive holder");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["root"], held.root().display().to_string());
+    assert_eq!(json["metadata_key"], known.metadata_key);
+    assert_eq!(json["served"], true);
+    assert_eq!(json["pid"], pid);
+    assert!(json["served_by"].is_null());
+    for field in ["readiness", "indexer", "index", "graph", "report"] {
+        assert!(json.get(field).is_none(), "{json}");
+    }
+    assert_eq!(std::fs::read(&config_path).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_status_reports_a_standalone_holder_across_processes() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.workspace("status-standalone");
+    let (server, _) = spawn_serve(&sandbox, &root, false).await;
+    assert_workspace_status(&sandbox, &root, server.pid(), "standalone").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_status_reports_devserver_activity_across_processes() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.workspace("status-devserver");
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    mount_workspace(&http(), addr, &devserver_token(&server), &root).await;
+    assert_workspace_status(&sandbox, &root, server.pid(), "devserver").await;
+}
+
 /// SIGINT a `chan serve` whose cold index is still settling: it must exit
 /// inside the grace budget, and a second serve on the same root must then
 /// reacquire the writer flock (proving the first released it cleanly).

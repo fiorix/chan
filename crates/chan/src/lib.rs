@@ -1755,7 +1755,7 @@ where
                 json,
                 pretty,
             } => cmd_workspace_search(graph.to_request()?, targets, json, pretty).await,
-            WorkspaceAction::Status { path, json } => cmd_status(path, json),
+            WorkspaceAction::Status { path, json } => cmd_status(path, json).await,
             WorkspaceAction::Metadata { action } => cmd_metadata(action),
             WorkspaceAction::Contacts { action } => match action {
                 ContactsAction::Import { source } => match source {
@@ -2198,17 +2198,13 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
     let client = reqwest::Client::new();
     // One gate for the whole enrichment: if the listing does not answer, we
     // stop here rather than waiting out a timeout per workspace.
-    let listing = format!("http://{addr}/api/devserver/workspaces");
-    let request = client.get(&listing).bearer_auth(&token).send();
-    let Ok(Ok(response)) = tokio::time::timeout(PS_ACTIVITY_TIMEOUT, request).await else {
-        return out;
-    };
-    if !response.status().is_success() {
-        return out;
-    }
-    let Ok(entries) = response
-        .json::<Vec<chan_server::devserver_api::WorkspaceEntry>>()
-        .await
+    let Some(entries) = ps_get::<Vec<chan_server::devserver_api::WorkspaceEntry>>(
+        &client,
+        &format!("http://{addr}"),
+        "/api/devserver/workspaces",
+        &token,
+    )
+    .await
     else {
         return out;
     };
@@ -2228,10 +2224,11 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
     out
 }
 
-/// How long any one `chan ps` enrichment call may take. Short on purpose:
+/// How long any one `chan ps` / workspace-status enrichment call may take,
+/// including reading and decoding the response body. Short on purpose:
 /// this is decoration on a command whose primary answer (where a workspace
 /// is and whether it is served) is already in hand from the filesystem.
-const PS_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(3);
+const PS_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One authenticated status GET, decoded, with every failure flattened to
 /// `None` -- an unreachable or unparseable endpoint renders `-`, it does not
@@ -2242,18 +2239,22 @@ async fn ps_get<T: serde::de::DeserializeOwned>(
     path: &str,
     token: &str,
 ) -> Option<T> {
-    let request = client
-        .get(format!("{base}{path}"))
-        .bearer_auth(token)
-        .send();
-    let response = tokio::time::timeout(PS_ACTIVITY_TIMEOUT, request)
+    let request = async {
+        let response = client
+            .get(format!("{base}{path}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        response.json::<T>().await.ok()
+    };
+    tokio::time::timeout(PS_ACTIVITY_TIMEOUT, request)
         .await
-        .ok()?
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    response.json::<T>().await.ok()
+        .ok()
+        .flatten()
 }
 
 /// `chan ps`: report each registered workspace's serving state. Serving
@@ -2348,10 +2349,7 @@ async fn cmd_ps(json: bool) -> Result<()> {
 /// free).
 async fn serving_kind(holder_pid: u32) -> Option<ServedBy> {
     let socket = control_socket_for_pid(holder_pid).await?;
-    let message = chan_shell::send_control_request(&socket, chan_shell::ControlRequest::Identify)
-        .await
-        .ok()?;
-    let identity: chan_shell::Identity = serde_json::from_str(&message).ok()?;
+    let identity = socket_identity(&socket).await?;
     Some(match identity.kind {
         chan_shell::ServeKind::Standalone => ServedBy::Standalone,
         chan_shell::ServeKind::Desktop => ServedBy::Desktop,
@@ -2602,9 +2600,9 @@ async fn control_socket_for_workspace(
     .await
 }
 
-/// Overall bound on one stable-candidate `Identify` probe, so a wedged server
-/// (accepts but never replies) cannot hang `chan ps` / `chan close`.
-const STABLE_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Overall bound on one control-socket `Identify` probe, so a wedged server
+/// (accepts but never replies) cannot hang status / `chan ps` / `chan close`.
+const CONTROL_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 async fn control_socket_for_pid_in_dirs<I, P>(
     dirs: I,
@@ -2721,7 +2719,7 @@ async fn socket_identity_pid(socket: &Path) -> Option<u32> {
 
 async fn socket_identity(socket: &Path) -> Option<chan_shell::Identity> {
     let identify = chan_shell::send_control_request(socket, chan_shell::ControlRequest::Identify);
-    let message = tokio::time::timeout(STABLE_SOCKET_PROBE_TIMEOUT, identify)
+    let message = tokio::time::timeout(CONTROL_SOCKET_PROBE_TIMEOUT, identify)
         .await
         .ok()?
         .ok()?;
@@ -7279,12 +7277,6 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
 /// "not a chan workspace at <path>" hint with a `chan workspace add` next-step
 /// instead of leaking the implementation detail (auto-register
 /// side-effect, `WorkspaceNotRegistered(<path>)`, etc.).
-///
-/// Gated on `embeddings` to match both
-/// call sites (`cmd_index_set_semantic`, `cmd_index_status`).
-/// Without the gate `--no-default-features` builds with
-/// `RUSTFLAGS=-D warnings` fail on dead_code.
-#[cfg(feature = "embeddings")]
 fn not_a_chan_workspace_hint(root: &std::path::Path) -> String {
     format!(
         "not a chan workspace at {}; run `chan workspace add {}` first",
@@ -7677,7 +7669,13 @@ impl From<&KnownWorkspace> for WorkspaceListEntry {
 struct StatusOutput {
     root: String,
     metadata_key: Option<String>,
-    readiness: WorkspaceReadiness,
+    served: bool,
+    served_by: Option<ServedBy>,
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readiness: Option<WorkspaceReadiness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indexer: Option<PsIndexer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     index: Option<StatusIndex>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8013,17 +8011,71 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
 ];
 
-fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
-    let lib = library()?;
-    let root = path.ok_or_else(|| missing_workspace_path("status", "chan workspace status ."))?;
-    ensure_workspace_registered(&lib, &root)?;
-    let workspace = lib.open_workspace(&root)?;
-    let metadata_key = lib
+async fn workspace_status_for(lib: &Library, root: &Path) -> Result<StatusOutput> {
+    let paths = lib
+        .workspace_paths_for(root)
+        .ok_or_else(|| anyhow::anyhow!(not_a_chan_workspace_hint(root)))?;
+    let known = lib
         .list_workspaces()
         .into_iter()
-        .find(|d| same_path(&d.root_path, workspace.root()))
-        .map(|d| d.metadata_key);
-    let out = workspace_status_output(&workspace, metadata_key)?;
+        .find(|workspace| {
+            paths
+                .root
+                .file_name()
+                .is_some_and(|key| key == workspace.metadata_key.as_str())
+        })
+        .context("registered workspace disappeared during status lookup")?;
+    if paths.lock.is_dir()
+        && chan_workspace::lock::is_locked_by_foreign_holder(&paths.lock, &known.root_path)
+    {
+        return Ok(served_workspace_status(&known, &paths.lock).await);
+    }
+    match lib.open_workspace(root) {
+        Ok(workspace) => workspace_status_output(&workspace, Some(known.metadata_key)),
+        Err(
+            chan_workspace::ChanError::WorkspaceLocked
+            | chan_workspace::ChanError::WorkspaceAlreadyOpen,
+        ) => Ok(served_workspace_status(&known, &paths.lock).await),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn served_workspace_status(known: &KnownWorkspace, lock_dir: &Path) -> StatusOutput {
+    let pid = chan_workspace::lock::read_lock_record(lock_dir).map(|record| record.pid);
+    let served_by = match pid {
+        Some(pid) => serving_kind(pid).await,
+        None => None,
+    };
+    let root = known.root_path.display().to_string();
+    let activity = if served_by == Some(ServedBy::Devserver) {
+        devserver_activity(&HashSet::from([root.clone()]))
+            .await
+            .remove(&root)
+    } else {
+        None
+    };
+    let (readiness, indexer) = match activity {
+        Some(activity) => (activity.readiness, activity.indexer),
+        None => (None, None),
+    };
+    StatusOutput {
+        root,
+        metadata_key: Some(known.metadata_key.clone()),
+        served: true,
+        served_by,
+        pid,
+        readiness,
+        indexer,
+        index: None,
+        graph: None,
+        report: None,
+    }
+}
+
+async fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
+    let lib = library()?;
+    let root = path.ok_or_else(|| missing_workspace_path("status", "chan workspace status ."))?;
+    let out = workspace_status_for(&lib, &root).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -8032,12 +8084,25 @@ fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
     if let Some(metadata_key) = &out.metadata_key {
         println!("metadata: {metadata_key}");
     }
-    let readiness = match out.readiness {
-        WorkspaceReadiness::Ready { .. } => "ready",
-        WorkspaceReadiness::Recovering { .. } => "recovering",
-    };
-    println!("readiness: {readiness}");
-    if matches!(out.readiness, WorkspaceReadiness::Recovering { .. }) {
+    if out.served {
+        println!("state: served");
+        println!("by: {}", ps_by_column(true, out.served_by));
+        println!(
+            "pid: {}",
+            out.pid
+                .map_or_else(|| PS_ABSENT.to_string(), |pid| pid.to_string())
+        );
+    }
+    println!("readiness: {}", ps_ready_column(out.readiness));
+    if out.served {
+        println!(
+            "indexer: {} queue={}",
+            ps_indexer_column(out.indexer.as_ref()),
+            ps_queue_column(out.indexer.as_ref())
+        );
+        return Ok(());
+    }
+    if matches!(out.readiness, Some(WorkspaceReadiness::Recovering { .. })) {
         println!("derived state: unavailable while workspace recovery is in progress");
         return Ok(());
     }
@@ -8092,7 +8157,11 @@ fn workspace_status_output(
         return Ok(StatusOutput {
             root: workspace.root().display().to_string(),
             metadata_key,
-            readiness,
+            served: false,
+            served_by: None,
+            pid: None,
+            readiness: Some(readiness),
+            indexer: None,
             index: None,
             graph: None,
             report: None,
@@ -8124,7 +8193,11 @@ fn workspace_status_output(
     let out = StatusOutput {
         root: workspace.root().display().to_string(),
         metadata_key,
-        readiness,
+        served: false,
+        served_by: None,
+        pid: None,
+        readiness: Some(readiness),
+        indexer: None,
         index: Some(StatusIndex {
             ready: index.ready,
             indexed_docs: index.indexed_docs,
@@ -9968,6 +10041,142 @@ mod tests {
             warnings: Vec::new(),
             errors: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_status_reports_a_served_workspace_without_taking_the_lock() {
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let config_path = config.path().join("config.toml");
+        let holder = Library::open_at(config_path.clone()).unwrap();
+        let known = holder.register_workspace(root.path()).unwrap();
+        let held = holder.open_workspace(root.path()).unwrap();
+        let querying = Library::open_at(config_path.clone()).unwrap();
+        let before = std::fs::read(&config_path).unwrap();
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            workspace_status_for(&querying, root.path()),
+        )
+        .await
+        .expect("status is bounded")
+        .expect("status reports the existing holder");
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(json["root"], held.root().display().to_string());
+        assert_eq!(json["metadata_key"], known.metadata_key);
+        assert_eq!(json["served"], true);
+        assert_eq!(json["pid"], std::process::id());
+        for field in ["index", "graph", "report"] {
+            assert!(json.get(field).is_none(), "{json}");
+        }
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        assert!(matches!(
+            querying.open_workspace(root.path()),
+            Err(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_status_opens_a_workspace_with_a_missing_lock_directory() {
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let config_path = config.path().join("config.toml");
+        let lib = Library::open_at(config_path.clone()).unwrap();
+        let known = lib.register_workspace(root.path()).unwrap();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let before = std::fs::read(&config_path).unwrap();
+        std::fs::remove_dir_all(&paths.lock).unwrap();
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(4),
+            workspace_status_for(&lib, root.path()),
+        )
+        .await
+        .expect("status is bounded")
+        .expect("status recreates missing metadata directories");
+
+        assert!(!output.served, "a missing lock directory has no holder");
+        assert_eq!(output.metadata_key, Some(known.metadata_key));
+        assert_eq!(output.pid, None);
+        assert_eq!(output.served_by, None);
+        assert!(output.readiness.is_some());
+        assert!(paths.lock.is_dir());
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn ps_get_bounds_a_stalled_response_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let peer = async {
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("client connects")
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n["),
+            )
+            .await
+            .expect("headers sent")
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(6), finished)
+                .await
+                .expect("client check finishes")
+                .unwrap();
+            drop(stream);
+        };
+        let query = async {
+            let client = reqwest::Client::new();
+            let result = tokio::time::timeout(
+                Duration::from_secs(4),
+                ps_get::<serde_json::Value>(&client, &base, "/api/health", "test-token"),
+            )
+            .await;
+            done.send(()).unwrap();
+            result
+        };
+        let (result, ()) = tokio::join!(query, peer);
+        assert!(result
+            .expect("activity body decode must be bounded")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_status_refuses_an_unregistered_path_without_registering() {
+        let config = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        let unregistered = tempfile::tempdir().unwrap();
+        let config_path = config.path().join("config.toml");
+        let lib = Library::open_at(config_path.clone()).unwrap();
+        lib.register_workspace(registered.path()).unwrap();
+        let before = std::fs::read(&config_path).unwrap();
+        let metadata_count = std::fs::read_dir(config.path().join("workspaces"))
+            .unwrap()
+            .count();
+
+        let result = workspace_status_for(&lib, unregistered.path()).await;
+
+        assert_eq!(
+            lib.list_workspaces().len(),
+            1,
+            "status must not register a path"
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        assert!(lib.workspace_paths_for(unregistered.path()).is_none());
+        assert_eq!(
+            std::fs::read_dir(config.path().join("workspaces"))
+                .unwrap()
+                .count(),
+            metadata_count
+        );
+        assert_eq!(
+            result.err().expect("unregistered status fails").to_string(),
+            not_a_chan_workspace_hint(unregistered.path())
+        );
     }
 
     #[test]
