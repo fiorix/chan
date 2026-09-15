@@ -1589,12 +1589,7 @@ fn capture_metadata_in(dir: &cap_std::fs::Dir, rel: &Path) -> Option<PreservedMe
         return None;
     }
     let mode = meta.mode();
-    // For xattrs we need the absolute path; cap-std's File doesn't
-    // currently expose fgetxattr in a portable way, and falling back
-    // to lookup via the underlying fd is platform-specific. Best-
-    // effort: read xattrs through the in-process abs path computed
-    // from the dir handle. On systems where this isn't supported the
-    // shim returns empty.
+    // Read xattrs through the sandboxed fd (see `read_xattrs_via_fd`); platforms without xattr support capture none.
     let xattrs = read_xattrs_via_fd(dir, rel);
     Some(PreservedMeta { mode, xattrs })
 }
