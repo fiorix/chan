@@ -1,9 +1,9 @@
 ---
 name: gate
 description: >-
-  Run the chan pre-push gate (shellcheck, actionlint, fmt, clippy, test,
-  no-default-features build, gateway build, web checks, release devserver
-  smoke, native desktop package) and the isolated/own-gate model for
+  Run the chan pre-push gate (shellcheck, actionlint, fmt, clippy, rustdoc,
+  test, no-default-features build, gateway build, web checks, release
+  devserver smoke, native desktop package) and the isolated/own-gate model for
   multi-agent rounds.
 when_to_use: >-
   Before any push, when CI fails, or when you need to validate a
@@ -25,14 +25,15 @@ The gate runs, in order:
 5. `make web-lock-check` (strict `npm ci --dry-run`; rejects a desynced `web/package-lock.json` that every other web target's `npm install` would silently repair in place). It enforces npm >= 10, because older npm removes `node_modules` under `--dry-run`. The `chan-ann-ubuntu` build rootfs ships npm 9.2.0, so a container built from it fails this step until npm is raised in the guest; the step says so with the resolved version rather than failing obscurely.
 6. `cargo fmt --check` for the root workspace, and `make gateway-fmt` for the separate gateway workspace (Linux only; see step 4)
 7. `cargo clippy --all-targets -- -D warnings` (with `RUSTFLAGS=-D warnings`)
-8. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
-9. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
-10. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it). Its prerequisite `make gateway-version-pin-check` runs first and in well under a second: the gateway deb version pins (`check-package-version-pins.sh`) and the static packaging isolation contracts (`check-packaging-isolation.sh`, both in `packaging/gateway/scripts/`)
-11. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
-12. `make web-check` (svelte-check + vitest + production build)
-13. `make web-marketing-check` (marketing site build + smokes)
-14. `make shortcuts-check`
-15. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
+8. `cargo doc --locked --no-deps --workspace` (with `RUSTDOCFLAGS=-D warnings`, and `RUSTFLAGS=-D warnings` because cargo keys dependency artifacts on RUSTFLAGS: dropping it changes nothing this step checks, and gives the step a dependency artifact set of its own, which costs a cold or isolated gate a second full dependency build). The only step that runs rustdoc: it catches an intra-doc link that does not resolve (a renamed or moved item, or a public doc pointing at a private one), prose rustdoc parses as HTML (a bare `<name>` outside a code span), and a redundant explicit link target. Clippy reads doc comments too, but sees none of those. `--no-deps` skips the DEPENDENCIES' own documentation, which is what keeps `-D warnings` from failing on a third-party crate's docs. The SEPARATE gateway workspace is uncovered for the usual reason instead: `gateway/` is its own Cargo workspace, which `--workspace` never selects, like every other root-workspace step
+9. `cargo test --all-targets` (with `RUSTFLAGS=-D warnings`)
+10. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
+11. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it). Its prerequisite `make gateway-version-pin-check` runs first and in well under a second: the gateway deb version pins (`check-package-version-pins.sh`) and the static packaging isolation contracts (`check-packaging-isolation.sh`, both in `packaging/gateway/scripts/`)
+12. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
+13. `make web-check` (svelte-check + vitest + production build)
+14. `make web-marketing-check` (marketing site build + smokes)
+15. `make shortcuts-check`
+16. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
 
 Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge.
 

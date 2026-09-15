@@ -289,6 +289,12 @@ endif
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
+	# The only step that runs rustdoc: an intra-doc link that does not resolve,
+	# prose rustdoc parses as HTML, and a redundant link target are invisible to
+	# clippy, which reads doc comments but does not render them. RUSTFLAGS
+	# matches the lines around it because cargo keys dependency artifacts on
+	# RUSTFLAGS: without it the step builds a second set of its own.
+	RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --no-deps --workspace
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
 ifeq ($(UNAME_S),Linux)
