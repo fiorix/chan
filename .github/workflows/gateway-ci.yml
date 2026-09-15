@@ -73,6 +73,10 @@ jobs:
         with:
           path: chan
 
+      - name: static packaging checks
+        working-directory: chan
+        run: make gateway-version-pin-check
+
       # The gateway has no rust-toolchain.toml of its own; it inherits
       # the repo-root pin. Copy it to the runner root so the toolchain
       # action installs the same channel CI uses for the core.
