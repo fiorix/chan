@@ -144,7 +144,7 @@ Profile does not perform the product-facing drain inside policy PUT. Identity fi
 
 `POST /v1/admin/users/{id}/block`:
 
-1. Set `users.blocked_at = now()` and `block_reason` in one transaction with the next two steps.
+1. Set `users.blocked_at` if absent and set `block_reason` in the same transaction as the following steps. While an account-delete job exists, preserve the existing deletion reason; the supplied admin reason still belongs to the audit row.
 2. Update `api_tokens` to set `revoked_at = now()` for every live PAT belonging to the user.
 3. Append an `auth_audit` row with action `blocked`.
 4. Reserve a durable subject-revocation generation in the same transaction.

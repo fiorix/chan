@@ -782,6 +782,82 @@ async fn admin_block_revokes_tokens_and_audits() {
 }
 
 #[tokio::test]
+async fn admin_block_preserves_the_pending_deletion_reason() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let app = TestApp::new().await;
+        let uid: Uuid = mk_user(&app, "pending-delete-block@x.com")
+            .await
+            .parse()
+            .unwrap();
+        assert_eq!(
+            app.req(Method::DELETE, &format!("/v1/users/{uid}"), None)
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        let (_, user) = app
+            .req(Method::GET, &format!("/v1/users/{uid}"), None)
+            .await;
+        assert_eq!(user["block_reason"], "account deletion pending");
+        let mut reasons = Vec::new();
+        for reason in [Some("abuse"), None] {
+            let (status, user) = app
+                .admin(
+                    Method::POST,
+                    &format!("/v1/admin/users/{uid}/block"),
+                    Some(json!({"reason": reason})),
+                )
+                .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            reasons.push(user["block_reason"].clone());
+            let (kind, generation): (String, i64) = sqlx::query_as(
+                "SELECT kind, generation FROM control_revocation_jobs WHERE job_key = $1",
+            )
+            .bind(format!("subject:{uid}"))
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+            assert_eq!(kind, "account_delete");
+            assert_eq!(
+                generation,
+                reasons.len() as i64,
+                "block still reserves a fresh revocation generation"
+            );
+            assert_eq!(
+                app.admin(
+                    Method::POST,
+                    &format!("/v1/admin/users/{uid}/unblock"),
+                    None
+                )
+                .await
+                .0,
+                StatusCode::CONFLICT
+            );
+        }
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT block_reason FROM users WHERE id = $1")
+                .bind(uid)
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+        let notes: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT note FROM auth_audit WHERE user_id = $1 AND action = 'blocked' ORDER BY id",
+        )
+        .bind(uid)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        eprintln!("block responses={reasons:?}, stored reason={stored:?}, audit notes={notes:?}");
+        app.cleanup().await;
+        assert_eq!(notes, vec![Some("abuse".into()), None]);
+        assert_eq!(reasons, vec![json!("account deletion pending"); 2]);
+        assert_eq!(stored.as_deref(), Some("account deletion pending"));
+    })
+    .await
+    .expect("pending deletion block test timed out");
+}
+
+#[tokio::test]
 async fn admin_token_revoke_and_audit() {
     let app = TestApp::new().await;
     let (_, u) = app

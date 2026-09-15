@@ -961,16 +961,28 @@ async fn admin_block_user(
 ) -> Result<(StatusCode, Json<User>)> {
     let mut tx = state.pool.begin().await?;
 
+    // Read the deletion job after acquiring the user lock so a deletion
+    // that commits while this request waits is visible to the update.
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NotFound)?;
+
     let user = sqlx::query_as::<_, User>(&format!(
         "UPDATE users \
          SET blocked_at = COALESCE(blocked_at, now()), \
-             block_reason = $2, \
+             block_reason = CASE WHEN EXISTS( \
+                 SELECT 1 FROM control_revocation_jobs \
+                 WHERE job_key = $3 AND kind = 'account_delete' \
+             ) THEN block_reason ELSE $2 END, \
              updated_at = now() \
          WHERE id = $1 \
          RETURNING {USER_COLS}",
     ))
     .bind(id)
     .bind(body.reason.as_deref())
+    .bind(format!("subject:{id}"))
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(Error::NotFound)?;
