@@ -1,13 +1,14 @@
 //! chan-tunnel client library.
 //!
-//! Used by `chan devserver run --tunnel-token ...`. The eventual
-//! entry point dials the gateway's tunnel endpoint over
-//! h2/TLS, runs `handshake` over the resulting bidirectional
-//! stream, and serves every yamux substream with a user-supplied
-//! `tower::Service` (typically an `axum::Router`) via hyper.
+//! Used by `chan devserver run --tunnel-token ...`. `run` is the
+//! entry point: it dials the gateway's tunnel endpoint over h2/TLS
+//! (h2c for an `http://` URL to a loopback peer), runs `handshake`
+//! over the resulting bidirectional h2 stream, serves every yamux
+//! substream with the caller's `axum::Router` via hyper, and redials
+//! with backoff when the tunnel drops.
 //!
-//! For the wire test and for unit testing in isolation, the
-//! handshake is exposed as a free function over any tokio duplex.
+//! `dial`, `handshake` and `serve_substreams` are also exposed on
+//! their own, so a test can drive one stage in isolation.
 
 #![forbid(unsafe_code)]
 
@@ -177,9 +178,12 @@ impl Default for ClientConfig {
     }
 }
 
-/// What the server told the client during HelloAck. `chan devserver`
-/// uses `prefix` to wire its router so the user does not pass
-/// `--prefix` manually.
+/// What the server told the client during HelloAck. `run` logs it,
+/// emits it in `TunnelEvent::Connected`, and attaches it to every
+/// request it serves as an `axum::Extension`. Nothing routes on
+/// `prefix`: a devserver tenant serves at its own public slug.
+/// `chan devserver` checks `workspace` (the token-resolved devserver
+/// id) and `owner_user_id` against each request's gateway assertion.
 #[derive(Debug, Clone)]
 pub struct Registration {
     pub prefix: String,
@@ -210,11 +214,12 @@ pub enum TunnelEvent {
 /// Drive the Hello/HelloAck round-trip over `socket` and return a
 /// yamux client connection ready to accept inbound substreams.
 ///
-/// Generic in `S` so the wire test can pass a `tokio::io::duplex`
-/// half and the real client can pass an h2-bidi-stream adapter
-/// later. The yamux `Connection` returned holds ownership of the
-/// socket via a `tokio-util` compat shim; substreams it produces
-/// also use futures-io traits.
+/// Generic in `S`: `dial_with_tls` passes the tunnel POST's h2
+/// request and response streams wrapped in
+/// `chan_tunnel_proto::H2Duplex`, and a test that runs its own h2
+/// exchange passes the same adapter. The yamux `Connection` returned
+/// holds ownership of the socket via a `tokio-util` compat shim;
+/// substreams it produces also use futures-io traits.
 pub async fn handshake<S>(
     cfg: &ClientConfig,
     mut socket: S,
