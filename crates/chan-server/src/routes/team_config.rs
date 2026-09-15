@@ -19,11 +19,7 @@
 //! All file I/O routes through `Workspace::{read_text,write_text,
 //! create_dir}`, so the team config lives inside the same sandbox +
 //! atomic-write contract as notes content. `config.toml` and the
-//! generated `.md` both pass the editable-text gate. This is the
-//! reverse of the earlier design, which deliberately wrote the config
-//! to a user-chosen ABSOLUTE path outside the sandbox via `std::fs`;
-//! that exception is gone. The team's `.md` docs are now indexed +
-//! graphed like any other workspace content.
+//! generated `.md` both pass the editable-text gate. The team's `.md` docs are indexed and graphed like other workspace content.
 
 use std::sync::Arc;
 
