@@ -147,11 +147,23 @@ fn validate_transfer_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A same-origin file API URL and the workspace prefix checked against its window.
+pub struct ValidatedEndpoint {
+    url: Url,
+    workspace_prefix: String,
+}
+
+impl ValidatedEndpoint {
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+}
+
 pub fn validated_endpoint(
     current: &Url,
     requested: &str,
     kind: EndpointKind,
-) -> Result<Url, String> {
+) -> Result<ValidatedEndpoint, String> {
     let endpoint =
         Url::parse(requested).map_err(|error| format!("invalid transfer URL: {error}"))?;
     if !matches!(endpoint.scheme(), "http" | "https")
@@ -185,14 +197,17 @@ pub fn validated_endpoint(
     if !expected {
         return Err("native transfer URL is not the expected file API route".into());
     }
-    Ok(endpoint)
+    Ok(ValidatedEndpoint {
+        url: endpoint,
+        workspace_prefix: prefix.to_string(),
+    })
 }
 
 pub fn endpoint_for_window(
     window: &WebviewWindow,
     requested: &str,
     kind: EndpointKind,
-) -> Result<Url, String> {
+) -> Result<ValidatedEndpoint, String> {
     let current = window
         .url()
         .map_err(|error| format!("reading invoking webview URL: {error}"))?;
@@ -294,22 +309,19 @@ impl TransferCap {
 /// of trusting a second URL from the page. The loopback surface authenticates
 /// on the `t` query parameter, so that one pair is carried over and every
 /// other query parameter is dropped.
-pub fn config_url_for_transfer(endpoint: &Url) -> Result<Url, String> {
-    let path = endpoint.path();
-    let at = path
-        .rfind("/api/fs")
-        .ok_or_else(|| "transfer endpoint is not a file API URL".to_string())?;
+pub fn config_url_for_transfer(endpoint: &ValidatedEndpoint) -> Url {
     let token = endpoint
+        .url
         .query_pairs()
         .find(|(key, _)| key == "t")
         .map(|(_, value)| value.into_owned());
-    let mut config = endpoint.clone();
-    config.set_path(&format!("{}/api/config", &path[..at]));
+    let mut config = endpoint.url.clone();
+    config.set_path(&format!("{}/api/config", endpoint.workspace_prefix));
     config.set_query(None);
     if let Some(token) = token {
         config.query_pairs_mut().append_pair("t", &token);
     }
-    Ok(config)
+    config
 }
 
 /// Read the effective ceiling from the server that owns it, over the same
@@ -321,12 +333,10 @@ pub fn config_url_for_transfer(endpoint: &Url) -> Result<Url, String> {
 /// policy, so it does not get to invent one.
 pub async fn fetch_transfer_cap(
     client: &reqwest::Client,
-    endpoint: &Url,
+    endpoint: &ValidatedEndpoint,
     headers: HeaderMap,
 ) -> TransferCap {
-    let Ok(url) = config_url_for_transfer(endpoint) else {
-        return TransferCap::Unknown;
-    };
+    let url = config_url_for_transfer(endpoint);
     let Ok(response) = client.get(url).headers(headers).send().await else {
         return TransferCap::Unknown;
     };
@@ -438,34 +448,91 @@ mod tests {
     /// bearer query the loopback surface authenticates on.
     #[test]
     fn native_transfer_cap_config_url_derives_from_the_validated_endpoint() {
-        let endpoint =
-            Url::parse("https://alice.example/prefix/api/fs/a.md?download=1&t=secret").unwrap();
-        let config = config_url_for_transfer(&endpoint).unwrap();
+        let current = Url::parse("https://alice.example/prefix/").unwrap();
+        let endpoint = validated_endpoint(
+            &current,
+            "https://alice.example/prefix/api/fs/a.md?download=1&t=secret",
+            EndpointKind::Download,
+        )
+        .unwrap();
+        let config = config_url_for_transfer(&endpoint);
         assert_eq!(
             config.as_str(),
             "https://alice.example/prefix/api/config?t=secret"
         );
 
-        let upload = Url::parse("http://127.0.0.1:4090/api/fs/upload?t=tok").unwrap();
+        let upload = validated_endpoint(
+            &Url::parse("http://127.0.0.1:4090/").unwrap(),
+            "http://127.0.0.1:4090/api/fs/upload?t=tok",
+            EndpointKind::Upload,
+        )
+        .unwrap();
         assert_eq!(
-            config_url_for_transfer(&upload).unwrap().as_str(),
+            config_url_for_transfer(&upload).as_str(),
             "http://127.0.0.1:4090/api/config?t=tok"
         );
 
         // No token to carry means no query at all, not an empty one.
-        let bare = Url::parse("https://alice.example/prefix/api/fs/a.md?download=1").unwrap();
+        let bare = validated_endpoint(
+            &current,
+            "https://alice.example/prefix/api/fs/a.md?download=1",
+            EndpointKind::Download,
+        )
+        .unwrap();
         assert_eq!(
-            config_url_for_transfer(&bare).unwrap().as_str(),
+            config_url_for_transfer(&bare).as_str(),
             "https://alice.example/prefix/api/config"
         );
 
         // The former `/api/files` compatibility alias must stay refused.
-        let alias = Url::parse("https://alice.example/prefix/api/files/a.md?download=1").unwrap();
-        assert!(config_url_for_transfer(&alias).is_err());
+        assert!(validated_endpoint(
+            &current,
+            "https://alice.example/prefix/api/files/a.md?download=1",
+            EndpointKind::Download,
+        )
+        .is_err());
 
-        assert!(
-            config_url_for_transfer(&Url::parse("https://alice.example/nope").unwrap()).is_err()
-        );
+        assert!(validated_endpoint(
+            &current,
+            "https://alice.example/nope",
+            EndpointKind::Download
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_transfer_cap_config_url_ignores_file_api_segments() {
+        let cases = [
+            (
+                "https://alice.example/prefix/",
+                "https://alice.example/prefix/api/fs/docs/api/fs/notes.md?download=1&t=secret&extra=1",
+                "https://alice.example/prefix/api/config?t=secret",
+            ),
+            (
+                "http://127.0.0.1:4090/",
+                "http://127.0.0.1:4090/api/fs/mirror/api/fstab?download=1&t=tok",
+                "http://127.0.0.1:4090/api/config?t=tok",
+            ),
+            (
+                "https://alice.example/api/fs/index.html?w=1",
+                "https://alice.example/api/fs/api/fs/a.md?download=true&t=a%26b&extra=1",
+                "https://alice.example/api/fs/api/config?t=a%26b",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (current, requested, expected) in cases {
+            let endpoint = validated_endpoint(
+                &Url::parse(current).unwrap(),
+                requested,
+                EndpointKind::Download,
+            )
+            .unwrap();
+            let actual = config_url_for_transfer(&endpoint);
+            if actual.as_str() != expected {
+                failures.push(format!("{requested}: expected {expected}, got {actual}"));
+            }
+        }
+        assert!(failures.is_empty(), "wrong config URLs: {failures:?}");
     }
 
     #[test]

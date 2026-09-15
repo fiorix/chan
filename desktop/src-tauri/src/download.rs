@@ -139,10 +139,13 @@ pub async fn download_file_native(
     filename: String,
 ) -> Result<SavedDownload, String> {
     let endpoint = endpoint_for_window(&window, &url, EndpointKind::Download)?;
-    let headers = request_headers(&window, &endpoint, false)?;
+    let headers = request_headers(&window, endpoint.url(), false)?;
     let registration = TransferRegistration::new(transfer_id, None)?;
     let client = http_client()?;
-    let request = client.get(endpoint.clone()).headers(headers.clone()).send();
+    let request = client
+        .get(endpoint.url().clone())
+        .headers(headers.clone())
+        .send();
     let response = tokio::select! {
         _ = registration.progress.cancelled() => return Err("download cancelled".into()),
         response = request => response.map_err(|error| format!("download request failed: {error}"))?,

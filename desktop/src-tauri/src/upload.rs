@@ -64,7 +64,7 @@ pub async fn upload_files_native(
 ) -> Result<Vec<UploadedFile>, String> {
     target.validate()?;
     let endpoint = endpoint_for_window(&window, &url, EndpointKind::Upload)?;
-    let headers = request_headers(&window, &endpoint, true)?;
+    let headers = request_headers(&window, endpoint.url(), true)?;
     let registration = TransferRegistration::new(transfer_id, None)?;
     let paths = tokio::select! {
         _ = registration.progress.cancelled() => return Err("upload cancelled".into()),
@@ -119,7 +119,7 @@ pub async fn upload_files_native(
         }
         .part("file", part);
         let request = client
-            .post(endpoint.clone())
+            .post(endpoint.url().clone())
             .headers(headers.clone())
             .multipart(form)
             .send();
