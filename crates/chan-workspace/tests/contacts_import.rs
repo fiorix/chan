@@ -20,6 +20,38 @@ Organization 1 - Name,Organization 1 - Title
 ";
 
 #[test]
+fn imported_escaped_email_is_searchable_after_reindex() {
+    let cfg = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(root.path()).unwrap();
+    let workspace = lib.open_workspace(root.path()).unwrap();
+    let contacts = parse_google_csv(
+        "Name,E-mail 1 - Value\nImported Person,first_last@example.com\n".as_bytes(),
+    )
+    .unwrap();
+    let summary = workspace
+        .import_contacts("Contacts", contacts, ImportOpts::default())
+        .unwrap();
+    assert_eq!(summary.counts().wrote, 1);
+    assert!(workspace
+        .read_text("Contacts/Imported Person.md")
+        .unwrap()
+        .contains(r"first\_last@example.com"));
+    workspace.reindex(None).unwrap();
+    for _ in 0..2 {
+        let matches = workspace.contacts_filtered(Some("first_last"), 10).unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "escaped imported email was not found: {matches:?}"
+        );
+        assert_eq!(matches[0].emails, ["first_last@example.com"]);
+        workspace.index_file("Contacts/Imported Person.md").unwrap();
+    }
+}
+
+#[test]
 fn end_to_end_import_into_workspace() {
     let cfg = TempDir::new().unwrap();
     let workspace_root = TempDir::new().unwrap();

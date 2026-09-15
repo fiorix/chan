@@ -47,7 +47,9 @@ pub fn extract_emails(body: &str) -> Vec<String> {
         if bytes[i] == b'@' {
             if let Some((start, end)) = match_at(bytes, i) {
                 let raw = &body[start..end];
-                let lower = raw.to_ascii_lowercase();
+                // The matched range admits backslashes only as Markdown
+                // escapes of accepted local-part punctuation.
+                let lower = raw.replace('\\', "").to_ascii_lowercase();
                 if seen.insert(lower.clone()) {
                     out.push(lower);
                 }
@@ -67,6 +69,18 @@ fn match_at(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
     let mut start = at;
     while start > 0 && is_local_char(bytes[start - 1]) {
         start -= 1;
+        if bytes[start].is_ascii_punctuation() {
+            let backslashes = bytes[..start]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'\\')
+                .count();
+            // An even run represents literal backslashes, which remain a
+            // boundary. Only the final slash of an odd run escapes this byte.
+            if !backslashes.is_multiple_of(2) {
+                start -= 1;
+            }
+        }
     }
     // Trim a leading `.` so prose like "...email me at .alice@..."
     // doesn't capture the dot. Repeat for `.+-_%` runs.
@@ -124,6 +138,34 @@ fn is_domain_char(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_markdown_escaped_underscore_local_part() {
+        assert_eq!(
+            extract_emails(r"- **Email**: first\_last@example.com"),
+            ["first_last@example.com"]
+        );
+        assert_eq!(
+            extract_emails(r"First\_Last@Example.COM first_last@example.com"),
+            ["first_last@example.com"]
+        );
+        assert_eq!(
+            extract_emails(r"first\_middle\_last@example.com"),
+            ["first_middle_last@example.com"]
+        );
+        assert_eq!(
+            extract_emails(r"first\.last\+work@example.com"),
+            ["first.last+work@example.com"]
+        );
+        assert_eq!(
+            extract_emails(r"first\\_last@example.com"),
+            ["last@example.com"]
+        );
+        assert_eq!(
+            extract_emails(r"first\qlast@example.com"),
+            ["qlast@example.com"]
+        );
+    }
 
     #[test]
     fn extracts_a_single_email_from_a_bullet_line() {

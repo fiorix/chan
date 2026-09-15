@@ -403,6 +403,24 @@ mod tests {
     }
 
     #[test]
+    fn rendered_email_round_trips_through_extract_emails() {
+        let contact = Contact {
+            display_name: "Imported Person".into(),
+            emails: vec![EmailAddress {
+                value: "first_last@example.com".into(),
+                label: Some("work".into()),
+            }],
+            ..Default::default()
+        };
+        let markdown = render_markdown(&contact, &ctx());
+        assert!(markdown.contains(r"first\_last@example.com"));
+        assert_eq!(
+            crate::contacts::extract_emails(&markdown),
+            ["first_last@example.com"]
+        );
+    }
+
+    #[test]
     fn body_strips_newlines_inside_field_values() {
         let c = Contact {
             display_name: "Test".into(),
