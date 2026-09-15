@@ -757,13 +757,7 @@ impl chan_server::CollapsedMachinesStore for CollapsedMachinesConfig {
     }
 }
 
-/// Project a stored [`Devserver`] to the launcher's wire [`DevserverEntry`],
-/// eliding the token (only its presence, `has_token`, crosses the wire) and
-/// joining the live connection state (`connected`) from `conns`.
-/// Form + validate the desktop's stored dial URL from the launcher's host+port
-/// (the wire model since the devserver form switched back to Host+Port, smoke
-/// #3). The desktop persists the URL (the dial path, dedup, and window-restore
-/// key are URL-based); `entry_from_devserver` re-exposes host+port on the wire.
+/// Normalize and validate the desktop dial URL from an explicit URL or the launcher's host and port. The persisted URL identifies the connection and window-restore entry.
 fn devserver_url(input: &DevserverInput) -> Result<String, String> {
     if let Some(url) = input
         .url
@@ -781,6 +775,7 @@ fn devserver_url(input: &DevserverInput) -> Result<String, String> {
     crate::devserver::normalize_devserver_url(&url)
 }
 
+/// Project a stored devserver to the launcher entry, exposing host and port, token presence, live connection status, and cached feed metadata without exposing the token.
 fn entry_from_devserver(
     d: &Devserver,
     conns: &DevserverConns,
