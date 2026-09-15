@@ -50,8 +50,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ChanError, Result};
 use crate::fs_ops;
 
-/// 30 days. Hardcoded for v1; promote to a `Library` setting later
-/// if users want to tune it.
+/// Retention period for ordinary trash entries: 30 days.
 pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
 
 /// Marker file naming an entry that holds the only copy of a user's
@@ -77,8 +76,7 @@ struct Meta {
     size: u64,
 }
 
-/// One entry visible to callers. Owned strings + primitives so the
-/// type round-trips cleanly through uniffi later.
+/// One trash entry returned to callers, with its original path and deletion metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrashEntry {
     pub id: String,

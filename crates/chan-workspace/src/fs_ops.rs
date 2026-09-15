@@ -95,17 +95,16 @@ pub fn is_editable_text(rel: &str) -> bool {
 }
 
 /// True for paths whose class is markdown-style content the indexer
-/// and graph parse (`.md` / `.txt` today, i.e. `FileClass::EditableText`).
+/// and graph parse (`.md` / `.txt`, i.e. `FileClass::EditableText`).
 /// Drives every per-file ingestion path: tantivy index entries,
 /// graph nodes, link / token / heading extraction, link-rewrite on
 /// rename, reindex-after-restore, etc.
 ///
 /// Distinct from `is_editable_text`, which widens to any text file
 /// the editor can edit. Arbitrary source-class text (`FileClass::Text`)
-/// is editable but is **not** indexed today: false positives like
-/// `#include` looking like a `#tag` would pollute the graph. Phase
-/// 3 may revisit indexing source-class text as plain full-text;
-/// until then this predicate stays narrow.
+/// is editable but is **not** indexed: false positives like `#include`
+/// looking like a `#tag` would pollute the graph, so this predicate stays
+/// narrow.
 pub fn is_indexable_text(rel: &str) -> bool {
     matches!(classify(rel), FileClass::EditableText)
 }
@@ -128,15 +127,14 @@ pub fn is_markdown_file(rel: &str) -> bool {
 ///     only (markdown-class .md / .txt). See `is_indexable_text`.
 ///   - which files the editor previews as media (`Image`, `Pdf`).
 ///   - everything else falls through to `Other`: still walkable,
-///     readable as bytes, renameable / removeable, but opaque to
-///     the editor and the indexer.
+///     readable as bytes, renameable / removeable. A caller that can read the
+///     file may content-sniff it for the editor; the indexer still excludes it.
 ///
 /// Extension matching is ASCII case-insensitive. Files with an
 /// extension we don't recognize fall back to a basename check
 /// against well-known textual filenames (Makefile, Dockerfile,
-/// LICENSE, .gitignore, ...). No content sniffing in v1: phase
-/// 1.5 may add a "read first N bytes, treat as Text if valid
-/// UTF-8 and no NUL" fallback for genuinely unknown files.
+/// LICENSE, .gitignore, ...). The classifier does no I/O; callers that can
+/// read the file sniff `Other` content with `looks_like_text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileClass {
     /// `.md`, `.txt`. Editable through `read_text` / `write_text`,
@@ -385,7 +383,7 @@ fn classify_ext(ext: &str) -> Option<FileClass> {
         // ambiguous extensions stay out and either resolve via
         // basename ("Makefile") or fall to `Other` (we'd rather
         // refuse a sketchy ext than risk opening a binary as
-        // text). Content-sniffing is a follow-up.
+        // text). Callers content-sniff unknown files classified as `Other`.
         "rs" | "py" | "pyi" | "pyx" | "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx"
         | "m" | "mm" | "go" | "java" | "kt" | "kts" | "swift" | "js" | "jsx" | "ts" | "tsx"
         | "mjs" | "cjs" | "rb" | "php" | "pl" | "pm" | "lua" | "r" | "scala" | "sc" | "clj"
@@ -494,9 +492,7 @@ pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
 /// source tree doesn't burn CPU indexing dependencies.
 ///
 /// What this is NOT:
-///   - Glob matching. A future variant can grow that. v1 is
-///     basename equality so the chan config stays simple and
-///     the walker stays cheap.
+///   - Glob matching. Basename equality keeps the chan config simple and the walker cheap.
 ///   - A trash / lock / sandbox gate. `.git` / `.chan` skip is
 ///     hardcoded in `walk_workspace`; those are invariants, not
 ///     policy. The filter is purely additive on top.
