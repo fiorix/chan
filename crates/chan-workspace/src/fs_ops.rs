@@ -3091,12 +3091,7 @@ mod tests {
 
     #[test]
     fn bounded_reader_reads_lazily_instead_of_buffering_ahead() {
-        // The producer-thread design read ahead into a bounded queue, so a
-        // small file was already fully buffered before the consumer pulled
-        // once. Reading on the consumer's thread is what lets the lane worker
-        // BE the reader, and it is observable: a file truncated after the
-        // reader opens but before the first pull must report the shortfall
-        // rather than hand over bytes captured earlier.
+        // Reads happen on the caller's thread. Truncating after open but before the first pull must report the shortfall instead of returning buffered bytes.
         let (_cfg, root, workspace) = workspace_fixture();
         let size = BINARY_STREAM_CHUNK_SIZE * 4;
         let path = root.path().join("lazy.bin");

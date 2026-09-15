@@ -49,9 +49,6 @@ pub const TEXT_READ_CHUNK_SIZE: usize = 64 * 1024;
 /// Chunk size for bounded opaque-byte reads.
 pub const BINARY_STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
-/// Maximum number of unread chunks held by a bounded opaque-byte reader.
-pub const BINARY_STREAM_QUEUE_DEPTH: usize = 8;
-
 /// File written to `paths.graph_dir` before `rebuild_graph` starts
 /// and removed after `Index::build_all` commits. Its presence at
 /// `Workspace::open` time means a previous reindex did not run to
@@ -157,7 +154,7 @@ pub struct WritableFile {
     pub stat: Option<FileStat>,
 }
 
-/// Bounded opaque-byte reader backed by one owned producer thread.
+/// Opaque-byte reader that synchronously reads at most [`BINARY_STREAM_CHUNK_SIZE`] bytes per call on the caller's thread.
 pub struct BoundedFileReader {
     pub(crate) stat: FileStat,
     pub(crate) slice: (u64, u64),
@@ -1400,13 +1397,14 @@ impl Workspace {
         self.fs.write_atomic_stream(rel, kind, feed)
     }
 
-    /// Open one regular file and stream it through a fixed-size bounded queue.
+    /// Open one regular file for synchronous reads of at most [`BINARY_STREAM_CHUNK_SIZE`] bytes on the caller's thread.
     pub fn read_bytes_bounded(&self, rel: &str) -> Result<BoundedFileReader> {
         self.fs.read_bytes_bounded(rel)
     }
 
-    /// Open one regular file and stream the byte window `[start, start+len)`
-    /// through the same fixed-size bounded queue as `read_bytes_bounded`.
+    /// Open one regular file and read the byte window `[start, start+len)`
+    /// synchronously in chunks of at most [`BINARY_STREAM_CHUNK_SIZE`] bytes
+    /// on the caller's thread.
     /// Both bounds are clamped against the open handle's size, so a window
     /// past EOF streams nothing rather than erroring; the effective window
     /// is reported by `BoundedFileReader::slice`. Serves HTTP range reads,
@@ -5113,7 +5111,7 @@ mod tests {
         let path = root.path().join("shrinking.bin");
         std::fs::File::create(&path)
             .unwrap()
-            .set_len((BINARY_STREAM_CHUNK_SIZE * (BINARY_STREAM_QUEUE_DEPTH + 16)) as u64)
+            .set_len((BINARY_STREAM_CHUNK_SIZE * 24) as u64)
             .unwrap();
         let mut reader = workspace.read_bytes_bounded("shrinking.bin").unwrap();
         assert_eq!(

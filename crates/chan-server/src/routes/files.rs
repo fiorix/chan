@@ -878,10 +878,7 @@ fn strong_file_etag(stat: &FileStat) -> String {
     format!("\"{:x}-{}\"", stat.size, modified.unwrap_or_default())
 }
 
-/// Bridge a bounded reader onto a response body through a small async
-/// channel. The blocking side owns the reader, so an aborted response
-/// drops the channel, which stops the bridge and joins the reader's
-/// producer thread; no file handle outlives its response.
+/// Bridge a synchronous bounded reader onto a response body through a small async channel. The blocking task reads chunks on its own thread; dropping the response closes the channel so the next send stops the bridge and releases the reader's file handle.
 fn bounded_reader_body(
     mut reader: BoundedFileReader,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
@@ -897,8 +894,7 @@ fn bounded_reader_body(
                 break;
             }
         }
-        // Dropping the bounded reader closes its sync queue and joins the
-        // owned producer before the optional test completion fires.
+        // Close the reader's file handle before signaling test completion.
         drop(reader);
         if let Some(completion) = completion {
             let _ = completion.send(());
@@ -4086,8 +4082,7 @@ mod write_tests {
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let workspace = lib.open_workspace(root.path()).unwrap();
-        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE
-            * (chan_workspace::BINARY_STREAM_QUEUE_DEPTH + 16);
+        let size = chan_workspace::BINARY_STREAM_CHUNK_SIZE * 24;
         workspace
             .write_bytes("disconnect.bin", &vec![0x5a; size])
             .unwrap();
@@ -4103,7 +4098,7 @@ mod write_tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(2), completed)
             .await
-            .expect("disconnect must stop the bridge and join the bounded reader")
+            .expect("disconnect must stop the bridge and release the bounded reader")
             .expect("download bridge completion sender dropped");
     }
 

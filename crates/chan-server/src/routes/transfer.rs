@@ -574,8 +574,7 @@ fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, Do
             is_dir: meta.is_dir(),
         })
     } else {
-        // Opening happens before headers are sent. The returned reader keeps
-        // the exact file handle and bounded producer alive.
+        // Opening happens before headers are sent. The reader keeps the exact file handle for synchronous chunk reads on the caller's thread.
         let reader = AbsoluteFileReader::open(abs, limit).map_err(DownloadRefusal::unreadable)?;
         // Refused here rather than mid-stream so an over-ceiling download costs
         // one open and produces a status the caller can act on, instead of a
