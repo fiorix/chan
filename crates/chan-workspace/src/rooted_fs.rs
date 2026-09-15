@@ -589,7 +589,8 @@ impl RootedFs {
 
     /// The editable-text gate for `read_text` / `write_text` and
     /// friends: a path the extension classifier already types as text,
-    /// OR an unknown-extension file whose leading bytes sniff as text.
+    /// OR any other path (every path `fs_ops::is_editable_text` refuses)
+    /// whose leading bytes sniff as text.
     /// Keep the sniff out of `fs_ops::is_editable_text` (which stays a
     /// pure, I/O-free path predicate used in hot index walks); the
     /// content read belongs only on the per-file read/write path.

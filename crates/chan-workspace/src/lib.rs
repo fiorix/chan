@@ -1,9 +1,9 @@
 //! chan-workspace: filesystem, search, and graph primitives for chan workspaces.
 //!
 //! Public surface is path-based, all relative paths POSIX-style ("/" separator)
-//! and rooted at a Workspace's `root`. Designed to be FFI-safe via uniffi later:
-//! no lifetimes on public types, owned strings only, all handle types are
-//! `Arc<Self>`-able.
+//! and rooted at a Workspace's `root`. The API is synchronous (no `async fn`,
+//! no async runtime); `Library` clones cheaply and `Workspace` is shared as
+//! `Arc<Workspace>`, so callers drive it from threads they own.
 //!
 //! Three top-level handles:
 //!

@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn phone_without_plus_does_not_collide_with_e164_form() {
         // `+15550100` and `15550100` are distinct numbers in the
-        // exported CSV; previously both slugged to `phone-15550100`.
+        // exported CSV, so they must not share `phone-15550100`.
         let mut slugs = SlugAllocator::new("", &no_disk);
         let with_plus = Contact {
             phones: vec![PhoneNumber {

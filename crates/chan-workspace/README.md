@@ -9,11 +9,11 @@ Sandboxed filesystem, full-text search, link-graph, and report primitives for ch
 chan-workspace = "0.11"
 ```
 
-Hybrid (BM25 + dense) search is on by default via the `embeddings` feature. Disable with `default-features = false` for a BM25-only build (iOS, minimal targets).
+Hybrid (BM25 + dense) search is on by default via the `embeddings` feature. Disable with `default-features = false` for a BM25-only build without the candle stack.
 
 ## Public API at a glance
 
-  - `Library`: per-machine handle. Owns the workspace registry at `~/.chan/config.toml` (or the platform sandbox equivalent), resolves OS state and cache paths, opens workspaces.
+  - `Library`: per-machine handle. Owns the workspace registry at `~/.chan/config.toml` (or `config.toml` in the directory `CHAN_HOME` names), resolves OS state and cache paths, opens workspaces.
   - `Workspace`: per-directory handle. Holds a cross-process writer lock for its lifetime.
     - Filesystem: `read`, `read_text`, `write_text`, `write_bytes`, `read_text_with_stat` + `write_text_if_unchanged` (mtime CAS), `stat`, `list`, `list_tree`, `create_dir`, `rename`, `remove` (soft-delete to trash).
     - Trash: `trash_list`, `trash_restore`, `trash_purge`, `trash_empty`. 30-day retention, lazy GC.
@@ -22,9 +22,9 @@ Hybrid (BM25 + dense) search is on by default via the `embeddings` feature. Disa
     - Watch: `watch(Arc<dyn WatchCallback>)` returns a `WatchHandle`; drop to stop.
     - Blob storage: `put_session` and friends for opaque host JSON (window/session state).
   - `MiniWorkspace`: metadata-free filesystem facade for the standalone Files surface. It registers nothing, takes no writer lock, and starts no index or graph.
-  - `ChanError`: one umbrella enum, primitive payloads, FFI-safe.
+  - `ChanError`: the facades' umbrella error enum, with string, path and integer payloads.
 
-All public types are owned (no lifetimes), `Send + Sync`, and shaped for a future uniffi binding to Swift / Kotlin shells. No public `async fn`; async runs internal to the crate where it exists at all.
+The API is synchronous: no `async fn` and no async runtime dependency, so callers drive it from threads they own. `Library` is a cheap clone (shared state behind an `Arc`), `Workspace` is shared as `Arc<Workspace>`, and watch and progress events are owned, serializable data delivered through callback traits.
 
 ## Path and link conventions
 

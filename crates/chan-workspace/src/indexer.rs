@@ -1,7 +1,7 @@
 // Built-in graph indexer. Owns a watcher subscription, debounces
 // per-path events, and drives `Workspace::index_file` / `forget_file`
-// / `reconcile` so consumers (the CLI, chan-server, and the future
-// Swift / Kotlin shells) do not each reinvent the same queue.
+// / `reconcile`. Nothing outside chan-workspace starts one; chan-server
+// runs its own indexer.
 //
 // Threading model:
 //
@@ -641,10 +641,10 @@ mod tests {
 
     /// A file moved into the workspace from outside it reaches the
     /// index. inotify reports that as a lone `MOVED_TO`, which notify
-    /// delivers as a single-path `RenameMode::To`; it used to arrive
-    /// with the destination in the SOURCE slot, so this consumer read
-    /// it as "the destination vanished", called `forget_file` on a
-    /// file that had just arrived and scheduled nothing.
+    /// delivers as a single-path `RenameMode::To`. The path must land
+    /// in the destination slot: in the SOURCE slot this consumer would
+    /// read it as "the destination vanished", call `forget_file` on a
+    /// file that had just arrived and schedule nothing.
     ///
     /// Linux only: this is the inotify shape. Windows delivers a move
     /// into a watched directory as a create, and FSEvents reports

@@ -2032,9 +2032,9 @@ impl Workspace {
     //
     // Per-window opaque JSON owned by the host (window/pane
     // layout, active tabs, scroll positions). chan-workspace stores
-    // bytes; the host decides the schema. Native shells link these
-    // via uniffi and avoid reimplementing the atomic-write story
-    // per platform.
+    // bytes; the host decides the schema. Hosts (chan-server's session
+    // routes) go through these instead of writing blob files, so the
+    // atomic-write and key rules live in one place.
 
     /// Atomically write `content` to the session bucket under
     /// `key`. Bucket dir is created on first call.
@@ -2497,8 +2497,8 @@ impl Workspace {
     /// `ProgressStage::EmbedBatch` while the search index is being
     /// built. Consumers that don't care about progress pass
     /// `&NoProgress`; the no-arg `reindex` does that for them.
-    /// Foreign-language shells pass an `Arc<dyn ProgressCallback>`
-    /// (uniffi-bridged), deref-coerced to `&dyn ProgressCallback`.
+    /// A caller holding an `Arc<dyn ProgressCallback>` passes it
+    /// deref-coerced to `&dyn ProgressCallback`.
     pub fn reindex_with(
         &self,
         cancel: Option<&AtomicBool>,
@@ -3896,9 +3896,9 @@ impl Workspace {
     /// Start the built-in graph indexer on this workspace. Returns a
     /// handle; drop or `stop()` to tear down. The indexer attaches
     /// its own watcher, debounces per-path with `debounce_ms`, and
-    /// drives `index_file` / `forget_file` / `reconcile` so the
-    /// consumer (CLI, chan-server, FFI shells) doesn't need to
-    /// write its own indexing loop.
+    /// drives `index_file` / `forget_file` / `reconcile` so a consumer
+    /// does not have to write its own indexing loop. Nothing outside
+    /// chan-workspace calls it; chan-server runs its own indexer.
     pub fn start_graph_indexer(
         self: &Arc<Self>,
         debounce_ms: u64,

@@ -12,11 +12,10 @@
 // blob is opaque. Hosts that want a `.json` suffix include it in
 // the key.
 //
-// Why blobs in chan-workspace: native shells (iOS / Android, future)
-// link chan-workspace via uniffi and use these methods directly to
-// persist editor state. Pushing the I/O up to host code would force
-// every shell to reimplement the safety story (atomic writes, path
-// sandbox); centralising here keeps that story in one place.
+// Why blobs in chan-workspace: hosts persist window and session state
+// through `Workspace::put_session` and friends (chan-server's session
+// routes do), so the safety story (atomic writes, key sandbox) lives in
+// one place instead of being reimplemented by each host.
 
 use std::fs;
 use std::path::Path;
@@ -27,8 +26,7 @@ use crate::fs_ops;
 /// Maximum length of a blob key. 255 matches the most common
 /// filesystem filename ceiling (ext4, APFS, NTFS, btrfs, xfs);
 /// callers can compose `<prefix>-<sha256>` (74 chars) or longer
-/// natural identifiers without bumping the cap. The previous 100
-/// fit a sha256 hex but rejected reasonable composite keys.
+/// natural identifiers without bumping the cap.
 const MAX_KEY_LEN: usize = 255;
 
 /// Validate a flat blob key. The key becomes a single path

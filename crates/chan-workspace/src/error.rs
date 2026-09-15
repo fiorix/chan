@@ -1,6 +1,6 @@
-// One umbrella error type so the FFI surface stays a single enum.
-// Variants map cleanly across uniffi (no nested non-uniffi types in
-// Display/Debug payloads).
+// One umbrella error type for the Workspace, Library and MiniWorkspace
+// facades. Payloads are strings, paths and integers: a dependency error
+// converted into `ChanError` keeps only its text.
 
 use std::path::PathBuf;
 

@@ -855,12 +855,11 @@ mod tests {
 
     #[test]
     fn prefix_match_carries_a_snippet() {
-        // Regression: typing "lem" used to return hits with empty
-        // snippet bodies (tantivy's term-based SnippetGenerator
-        // can't highlight a prefix that isn't a real indexed
-        // token). The manual prefix highlighter in
-        // `manual_prefix_snippet` must produce a `<b>...</b>`
-        // wrapped excerpt.
+        // Typing "lem" must not return hits with empty snippet
+        // bodies: tantivy's term-based SnippetGenerator can't
+        // highlight a prefix that isn't a real indexed token, so the
+        // manual prefix highlighter in `manual_prefix_snippet` must
+        // produce a `<b>...</b>` wrapped excerpt.
         let (_tmp, idx) = fresh();
         idx.index_file(
             "a.md",
@@ -934,7 +933,7 @@ mod tests {
     fn prefix_search_survives_a_non_ascii_body() {
         // The manual highlighter is the typeahead fallback, so one
         // indexed note carrying a character whose case fold changes
-        // its byte length used to take down the whole search call.
+        // its byte length must not take down the whole search call.
         let (_tmp, idx) = fresh();
         idx.index_file(
             "a.md",

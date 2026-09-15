@@ -219,9 +219,9 @@ pub struct Edge {
 pub type FileStatRow = (String, Option<i64>, Option<i64>);
 
 /// Borrow-only payload describing one file's graph state, used by
-/// `GraphView::replace_all` for the atomic rebuild path. Internal
-/// (the borrow lifetime would not survive uniffi) and not re-exported
-/// from the crate root.
+/// `GraphView::replace_all` for the atomic rebuild path. It borrows
+/// from the caller's parsed data and is not re-exported from the crate
+/// root.
 pub struct FileGraph<'a> {
     pub rel: &'a str,
     pub title: Option<&'a str>,
@@ -1635,8 +1635,8 @@ pub enum LinkTargetKind {
     Heading,
 }
 
-/// One row in `link_targets` output. Owned strings + primitives so
-/// the type round-trips cleanly through uniffi later.
+/// One row in `link_targets` output. Owned strings and primitives with
+/// serde derives, so a row crosses threads and serializes as is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkTarget {
     pub kind: LinkTargetKind,

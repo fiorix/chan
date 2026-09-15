@@ -66,8 +66,8 @@ r2d2_sqlite = "0.25"
 # Pure-Rust embedding stack. candle handles tensor math + transformer
 # kernels, tokenizers does HF WordPiece/BPE, hf-hub fetches the
 # config.json + tokenizer.json + model.safetensors trio on first use.
-# All optional + gated by the `embeddings` feature so iOS / minimal
-# builds can opt out via `--no-default-features` and still get BM25.
+# All optional + gated by the `embeddings` feature so a build can opt
+# out via `--no-default-features` and still get BM25.
 # Keep these inside the unconditional [dependencies] block above any
 # `[target.cfg(...)]` section: the target-cfg table stays open until
 # the next header, so misplacing them would silently drop the deps
@@ -121,9 +121,8 @@ tempfile = { workspace = true }
 [features]
 default = ["embeddings"]
 # Hybrid search (BM25 + dense). Pulls candle + tokenizers + hf-hub.
-# Opt out (`--no-default-features`) on platforms without a usable
-# build (currently iOS); the resulting binary still has BM25 search
-# via tantivy.
+# Opt out (`--no-default-features`) for a build without the candle
+# stack; the resulting binary still has BM25 search via tantivy.
 embeddings = [
     "dep:candle-core",
     "dep:candle-nn",

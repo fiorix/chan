@@ -492,7 +492,7 @@ The contact importer separates parsing, markdown emission, slug allocation, and 
 
 ### VCS detection
 
-Pure stat-walk. `detect_parent_vcs` is used by `chan serve` (and any future shell) to decide whether a workspace path is inside a Git / Mercurial / Subversion working tree and would be better served at the repo root instead of an arbitrary subdir. `detect_workspace_vcs` answers "is the root itself a checkout". `is_vcs_control_path` recognizes the control files the watcher forwards (`.git/HEAD`, `.git/index`, `.hg/dirstate`).
+Pure stat-walk. `detect_parent_vcs` is used by `chan serve` to decide whether a workspace path is inside a Git / Mercurial / Subversion working tree and would be better served at the repo root instead of an arbitrary subdir. `detect_workspace_vcs` answers "is the root itself a checkout". `is_vcs_control_path` recognizes the control files the watcher forwards (`.git/HEAD`, `.git/index`, `.hg/dirstate`).
 
 `detect_parent_vcs` algorithm:
 

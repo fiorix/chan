@@ -372,12 +372,11 @@ fn standard_links(markdown: &str) -> Vec<Link> {
         match event {
             // `[label](dest)` and `![alt](src)` both contribute an
             // edge from the source file to the target. Image embeds
-            // were previously skipped, so an inspector view of an
-            // image showed a misleading "0 backlinks" even when the
-            // image was embedded in N markdown files. Treating both
-            // events as the same link kind matches the wiki-side
-            // behavior (`![[img]]` already produced an edge because
-            // the wiki scanner ignores the leading `!`).
+            // count: skipping them would show an image's inspector
+            // view a misleading "0 backlinks" even when N markdown
+            // files embed it. Treating both events as the same link
+            // kind matches the wiki-side behavior (`![[img]]` produces
+            // an edge because the wiki scanner ignores the leading `!`).
             Event::Start(Tag::Link { dest_url, .. })
             | Event::Start(Tag::Image { dest_url, .. }) => {
                 in_link = Some(dest_url.into_string());
@@ -481,10 +480,9 @@ mod tests {
 
     #[test]
     fn standard_image_embed_extracted() {
-        // `![alt](src)` is a Tag::Image in pulldown-cmark and used to
-        // be silently dropped, leaving images with empty backlinks
-        // in the inspector. Treat it as a link so the graph picks up
-        // the image as an edge target.
+        // `![alt](src)` is a Tag::Image in pulldown-cmark, not a link;
+        // dropping it would leave images with empty backlinks in the
+        // inspector, so it must come out as an edge target.
         let links = extract_links("see ![cat](images/cat.jpg) please");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "images/cat.jpg");

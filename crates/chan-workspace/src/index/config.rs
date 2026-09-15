@@ -293,7 +293,7 @@ mod tests {
     fn load_works_while_workspace_lock_is_held() {
         // `chan workspace index status` reads IndexConfig without
         // opening a Workspace (so no writer lock acquired), which means
-        // a running `chan serve` against the workspace no longer blocks
+        // a running `chan serve` against the workspace does not block
         // the CLI. Pin the invariant: `config::load` doesn't touch
         // any lock file and returns successfully even while another
         // holder (simulating the chan serve process) has acquired

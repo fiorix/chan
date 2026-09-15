@@ -1,8 +1,8 @@
 // Filesystem watcher.
 //
-// Callback-based on purpose: makes the API uniffi-friendly (the
-// FFI client passes a Swift / Kotlin object that implements the
-// callback trait, no closures across the boundary). The native
+// Callback-based on purpose: a consumer implements `WatchCallback`
+// (a `Send + Sync` trait object the watcher calls from its own
+// threads) instead of passing a closure or draining a channel. The
 // implementation uses `notify` and runs the watcher on its own
 // thread; events are filtered through the active `IndexScopePolicy`
 // so `.chan/` and most `.git/` / `.hg/` activity never reaches the

@@ -38,8 +38,7 @@ use crate::workspace::WorkspaceGeneration;
 
 /// Structural snapshot of one directory level, produced by the
 /// bootstrap walk. Counts and sizes only; no content, no graph edges.
-/// Serializable for the `/api/workspace/bootstrap` response and for the
-/// FFI bridge.
+/// Serializable for the `/api/workspace/bootstrap` response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapTree {
     /// Workspace-relative POSIX dir path of this node ("" for the workspace
@@ -99,8 +98,8 @@ impl SubtreeStats {
 
 /// Wire-stable mirror of `fs_ops::FileClass`. The internal enum is not
 /// `Serialize` (it is a filesystem-classification detail); this is the
-/// frozen JSON shape the SPA + FFI consume. A change here is an
-/// explicit wire-shape edit, pinned by the test below.
+/// frozen JSON shape the SPA consumes. A change here is an explicit
+/// wire-shape edit, pinned by the test below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileClassWire {

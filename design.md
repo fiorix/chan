@@ -263,4 +263,4 @@ Bearer tokens and on-disk secrets are mode 0600 on Unix. App-layer writes use th
 | Tunnel transport                   | chan-tunnel-client |
 | Self-upgrade flow                  | chan binary |
 
-The split keeps app-level concerns (HTTP, WebSocket, frontend bundle, editor preferences, terminal PTY) out of chan-workspace so native shells can link the workspace layer via uniffi without dragging in axum / reqwest / the rest of the HTTP stack. The Tauri desktop shell takes the other path: it embeds chan-server in-process and renders the same SPA in native webview windows; see [`desktop/design.md`](desktop/design.md).
+The split keeps app-level concerns (HTTP, WebSocket, frontend bundle, editor preferences, terminal PTY) out of chan-workspace, so a consumer that needs only the workspace layer links it without dragging in axum / reqwest / the rest of the HTTP stack. The Tauri desktop shell takes the other path: it embeds chan-server in-process and renders the same SPA in native webview windows; see [`desktop/design.md`](desktop/design.md).

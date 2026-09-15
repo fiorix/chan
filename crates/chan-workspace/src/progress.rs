@@ -3,19 +3,19 @@
 // One umbrella shape used by `Workspace::reindex_with`, the rename +
 // link-rewrite path, `import_contacts_with`, `Library::reset_workspace_with`,
 // and the embedder model load. Consumers (chan-server's WebSocket
-// fan-out, the CLI's progress bar, future native shells) build on
+// fan-out, the CLI's progress bar) build on
 // `ProgressCallback` so a single sink handles every long-running op
 // instead of one bespoke callback shape per surface.
 //
 // Design constraints:
-//   * Owned String fields, no lifetimes. The public API must survive
-//     the uniffi boundary later; foreign code can't hold borrowed
-//     references across an FFI call.
+//   * Owned String fields, no lifetimes, so a sink can keep or forward
+//     an event (queue it for the WebSocket fan-out) after the callback
+//     returns.
 //   * `ProgressCallback: Send + Sync`. Some ops fire from the embed
 //     batch worker or from inside the graph rebuild, so the sink
-//     can't assume single-threaded access. Foreign objects come in
-//     as `Arc<dyn ProgressCallback>` via uniffi; deref to the &dyn
-//     form the methods accept.
+//     can't assume single-threaded access. A caller holding an
+//     `Arc<dyn ProgressCallback>` derefs it to the &dyn form the
+//     methods accept.
 //   * Events are best-effort hints, not a stream contract. Dropping
 //     one because the consumer is slow is fine; the on-disk state
 //     is the authority. Implementations must not block (any I/O
@@ -99,8 +99,8 @@ pub enum ProgressStage {
     Heartbeat,
 }
 
-/// One progress tick. Plain data so the uniffi wrapper can serialize
-/// it without round-tripping through a trait. `current` / `total`
+/// One progress tick. Plain serde data, so a consumer serializes it
+/// directly (chan-server forwards it over the WebSocket). `current` / `total`
 /// are domain-specific (see `ProgressStage`); the consumer treats
 /// `total == 0` as "indeterminate" and renders a spinner instead of
 /// a percentage.
@@ -129,9 +129,9 @@ pub struct ProgressEvent {
 
 /// Sink for `ProgressEvent`s. `Send + Sync` so producers running on
 /// worker threads (embed batch flush) can call into the same sink as
-/// the main thread. Foreign-language implementations cross the FFI
-/// boundary as `Arc<dyn ProgressCallback>`; in-process Rust callers
-/// usually build one via `progress_fn` or use `NoProgress`.
+/// the main thread. A consumer implements the trait on its own type
+/// (chan-server's index-status and broadcast sinks do), wraps a closure
+/// with `progress_fn`, or uses `NoProgress`.
 pub trait ProgressCallback: Send + Sync {
     fn on_progress(&self, event: ProgressEvent);
 }
@@ -148,8 +148,8 @@ impl ProgressCallback for NoProgress {
 /// Wrap a Rust closure as a `ProgressCallback`. The closure must be
 /// `Fn + Send + Sync` because progress events fire from arbitrary
 /// worker threads inside the producers. Use this from the CLI and
-/// chan-server entry points; foreign-language shells will pass an
-/// `Arc<dyn ProgressCallback>` directly and skip this helper.
+/// chan-server entry points; a consumer with its own `ProgressCallback`
+/// type passes that as `Arc<dyn ProgressCallback>` and skips this helper.
 pub fn progress_fn<F>(f: F) -> Arc<dyn ProgressCallback>
 where
     F: Fn(ProgressEvent) + Send + Sync + 'static,

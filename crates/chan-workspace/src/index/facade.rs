@@ -463,7 +463,7 @@ impl Index {
     ///
     /// Returns `Ok(())` for the fallback path (caller skips the
     /// vector commit + continues to BM25); returns `Err(e)` for
-    /// any other error shape (caller propagates as before).
+    /// any other error shape (the caller propagates it).
     #[cfg(feature = "embeddings")]
     fn handle_embed_load_error(e: IndexError) -> Result<(), IndexError> {
         match e {
