@@ -31,7 +31,7 @@ use chan_library::{allocate_workspace_prefix, ServeConfig};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
-use crate::devserver::bytes_eq;
+use crate::devserver::{bytes_eq, ForceQuery};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
@@ -1784,10 +1784,12 @@ async fn handle_workspace_off(
 
 /// `DELETE /api/library/workspaces/{id}`: unmount if mounted, then UNREGISTER the
 /// workspace from the host library (the single registry) so it disappears
-/// everywhere. Loopback-only. 404 when no workspace maps to the id.
+/// everywhere. Live terminals return 409 unless `force=true`. A mutable launcher
+/// is required. 404 when no workspace maps to the id.
 async fn handle_remove_workspace(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ForceQuery>,
 ) -> Response {
     if let Err(resp) = require_mutable(&state) {
         return *resp;
@@ -1795,7 +1797,11 @@ async fn handle_remove_workspace(
     let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match state.host.remove_workspace_for_root(&root, false).await {
+    match state
+        .host
+        .remove_workspace_for_root(&root, query.force)
+        .await
+    {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
         Ok(WorkspaceLifecycleOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
@@ -3072,6 +3078,70 @@ mod devserver_route_tests {
             .await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} collapsed");
         }
+    }
+
+    #[tokio::test]
+    async fn local_workspace_remove_confirms_on_live_terminals_then_force_removes() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let prefix = chan_library::allocate_workspace_prefix(root.path()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            host.open_registered_workspace(
+                root.path(),
+                chan_library::ServeConfig {
+                    addr: "127.0.0.1:0".parse().unwrap(),
+                    no_token: true,
+                    prefix: prefix.clone(),
+                    idle_timeout: None,
+                    open_browser: false,
+                    search_aggression: None,
+                    settings_disabled: false,
+                    verbose: false,
+                },
+            )
+            .await
+            .expect("mount workspace");
+            let command = if cfg!(windows) {
+                "ping -n 60 127.0.0.1"
+            } else {
+                "sleep 60"
+            };
+            let create = Request::builder()
+                .method("POST")
+                .uri(format!("{prefix}/api/terminals"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "t", "command": command}).to_string(),
+                ))
+                .unwrap();
+            let created = host.clone().router().oneshot(create).await.unwrap();
+            assert_eq!(created.status(), StatusCode::CREATED, "terminal spawned");
+            assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
+
+            let serve_addr = OnceLock::new();
+            serve_addr
+                .set("127.0.0.1:8080".parse::<SocketAddr>().unwrap())
+                .unwrap();
+            let launcher = launcher_router(host.clone(), None, Some(Arc::new(serve_addr)));
+            let uri = format!("/api/library/workspaces{prefix}");
+            let (status, body) = request(&launcher, "DELETE", &uri, None).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"], "live_terminals");
+            assert_eq!(body["active_terminals"], 1);
+            assert_eq!(host.tenant_terminal_session_count(&prefix), 1);
+
+            let (status, _) =
+                request(&launcher, "DELETE", &format!("{uri}?force=true"), None).await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "forced remove");
+            assert_eq!(host.tenant_terminal_session_count(&prefix), 0);
+            let (status, _) = request(&launcher, "DELETE", &uri, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "workspace was unregistered");
+        })
+        .await
+        .expect("workspace removal must finish");
     }
 
     #[tokio::test]

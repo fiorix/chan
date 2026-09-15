@@ -1984,6 +1984,14 @@ pub async fn forget_workspace(
         )
         .await
         .map_err(SetWorkspaceOnError::other)?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            let active_terminals = resp
+                .json::<ActiveTerminalsRejection>()
+                .await
+                .map(|r| r.active_terminals)
+                .unwrap_or(0);
+            return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
+        }
         if !resp.status().is_success() {
             return Err(SetWorkspaceOnError::other(format!(
                 "gateway workspace delete returned HTTP {}",
@@ -3387,6 +3395,65 @@ mod tests {
             failures.is_empty(),
             "lifecycle requests failed: {failures:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_workspace_forget_confirms_live_terminals_then_forces() {
+        use axum::extract::{Path, Query};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/api/library/workspaces/{id}",
+            axum::routing::delete(
+                |Path(id): Path<String>,
+                 Query(query): Query<std::collections::HashMap<String, String>>,
+                 headers: HeaderMap| async move {
+                    assert_eq!(id, "diary-4ead05be");
+                    assert_eq!(headers.get("x-chan-csrf").unwrap(), "csrf-1");
+                    if query.get("force").is_some_and(|value| value == "true") {
+                        StatusCode::NO_CONTENT.into_response()
+                    } else {
+                        (
+                            StatusCode::CONFLICT,
+                            axum::Json(serde_json::json!({
+                                "error": "live_terminals",
+                                "active_terminals": 2,
+                            })),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = gateway_test_conn(format!("http://{addr}/desktop/v1/devserver/entry"));
+        *conn.gateway.as_ref().unwrap().session.lock().unwrap() = Some(GatewaySession {
+            gate: "opaque".into(),
+            cookie_header: "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1".into(),
+            csrf: "csrf-1".into(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+        let results = tokio::time::timeout(Duration::from_secs(10), async {
+            let unforced = forget_workspace(&conn, "/diary-4ead05be", false).await;
+            let forced = forget_workspace(&conn, "/diary-4ead05be", true).await;
+            (unforced, forced)
+        })
+        .await;
+        server.abort();
+        let (unforced, forced) = results.expect("forget requests must finish");
+        assert!(
+            matches!(
+                unforced,
+                Err(SetWorkspaceOnError::ActiveTerminals {
+                    active_terminals: 2
+                })
+            ),
+            "unforced forget: {unforced:?}"
+        );
+        forced.expect("forced forget must succeed");
     }
 
     #[tokio::test]

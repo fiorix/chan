@@ -651,9 +651,9 @@ enum SetWorkspaceOnResult {
 }
 
 #[derive(Deserialize, Default)]
-struct ForceQuery {
+pub(crate) struct ForceQuery {
     #[serde(default)]
-    force: bool,
+    pub(crate) force: bool,
 }
 
 /// Shared runtime state behind the management API and the discovery socket.
