@@ -1666,12 +1666,7 @@ fn remove_devserver_windows(app: &tauri::AppHandle, state: &AppState, id: &str) 
     let _ = app.emit(serve::SERVES_CHANGED, ());
 }
 
-/// Fully tear down a devserver: drop the connection, remove its workspace
-/// windows + stop the watcher, AND reap the control terminal (which kills the
-/// connect-script PTY), then refresh the launcher. The full teardown behind the
-/// explicit Disconnect button (`DesktopWindowOp::DisconnectDevserver`) and the
-/// launcher's HTTP-DELETE remove hook, where the connection is going away for
-/// good. Idempotent; safe to call when the devserver is already disconnected.
+/// Error marker for native access that requires an explicit trust grant.
 const NATIVE_TRUST_REQUIRED: &str = "native_trust_required";
 
 fn require_rostered_native_policy(
@@ -1776,6 +1771,12 @@ async fn revoke_devserver_native_trust(
     Ok(())
 }
 
+/// Fully tear down a devserver: drop the connection, remove its workspace
+/// windows + stop the watcher, AND reap the control terminal (which kills the
+/// connect-script PTY), then refresh the launcher. The full teardown behind the
+/// explicit Disconnect button (`DesktopWindowOp::DisconnectDevserver`) and the
+/// launcher's HTTP-DELETE remove hook, where the connection is going away for
+/// good. Idempotent; safe to call when the devserver is already disconnected.
 async fn teardown_devserver_connection(app: &tauri::AppHandle, state: &AppState, id: &str) {
     state.devservers.remove(id);
     // A full teardown reaps the control terminal, so the reconnect block must
@@ -8775,7 +8776,7 @@ mod tests {
         let disconnect = source_region(
             MAIN_RS,
             "\nfn remove_devserver_windows(",
-            "\n/// Fully tear down",
+            "\n/// Error marker for native access",
         );
         assert!(disconnect.contains("DevserverWatcherStop::CloseWindows"));
     }
