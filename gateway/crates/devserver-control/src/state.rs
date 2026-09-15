@@ -1173,7 +1173,13 @@ impl ControllerState {
             .saturating_add(refreshed_bytes)
             > MAX_FLEET_RESIDENT_BYTES
         {
-            return Err(StateError::FleetCapacity);
+            tracing::warn!(
+                proxy_id = proxy_id.as_str(),
+                %registration_id,
+                cap = "fleet_tunnel_bytes",
+                "killing a registration whose refreshed lease exceeds controller capacity"
+            );
+            return Ok(self.refuse_registration(session_key, registration_id, now));
         }
         let session = self
             .proxies
@@ -3428,6 +3434,67 @@ pub(super) mod tests {
                 assert!(has_resync(&result.unwrap(), expected));
             }
         }
+    }
+
+    #[test]
+    fn refresh_over_byte_cap_refuses_only_that_registration() {
+        let (mut state, id, incarnation, now) = ready_at_session_row_count(2);
+        let wall_now = Utc::now();
+        let old_rows = state.proxies["p1"].rows.clone();
+        let old_tunnels = state.tunnel_views();
+        let old = old_rows.values().next().unwrap().clone();
+        let mut refreshed = old.clone();
+        refreshed.admission_lease =
+            devserver_control_proto::AdmissionLease::parse("x".repeat(1024)).unwrap();
+        let growth = row_resident_bytes(&refreshed).unwrap() - row_resident_bytes(&old).unwrap();
+        assert!(growth > 1);
+        // Inject retained fleet bytes so only the refreshed row's growth exceeds the cap.
+        state.orphan_total.bytes = MAX_FLEET_RESIDENT_BYTES - state.fleet_usage(None).1 - 1;
+        assert_eq!(state.fleet_usage(None).1, MAX_FLEET_RESIDENT_BYTES - 1);
+        let effects = state
+            .refresh_lease(
+                &id,
+                incarnation,
+                old.registration_id,
+                old.owner_user_id,
+                old.user.clone(),
+                old.devserver_id.clone(),
+                old.max_connected_devservers,
+                refreshed.admission_lease,
+                refreshed.admission_lease_expires_at,
+                now,
+                wall_now,
+            )
+            .expect("byte pressure must refuse the registration without ending the session");
+        let command_id = kill_command(&effects, "p1", old.registration_id);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(state.proxies["p1"].rows, old_rows);
+        assert_eq!(state.tunnel_views(), old_tunnels);
+        assert_eq!(state.proxies["p1"].status, ProxyStatus::Active);
+        assert!(state.proxies["p1"].fleet_ready);
+        assert!(state.is_ready());
+        state
+            .command_result(
+                &id,
+                incarnation,
+                command_id,
+                vec![old.registration_id],
+                Vec::new(),
+                Vec::new(),
+                now,
+                wall_now,
+            )
+            .unwrap();
+        assert!(state.browser_session_views().is_empty());
+        assert!(state
+            .tunnel_down(&id, incarnation, 1, old.registration_id, now, wall_now)
+            .unwrap()
+            .is_empty());
+        assert_eq!(state.proxies["p1"].generation, Some(1));
+        assert_eq!(state.proxies["p1"].rows.len(), 1);
+        assert_eq!(state.tunnel_views().len(), 1);
+        assert_ne!(state.tunnel_views()[0].registration_id, old.registration_id);
+        assert!(state.is_ready());
     }
 
     #[test]
