@@ -873,7 +873,7 @@ struct RestoredWindow {
 /// prefer unburying the family's most recent hidden window, enforce the
 /// per-family window cap, then pop a compatible WindowConfig for the
 /// label + restore state (fresh label, empty hash, default zoom when
-/// nothing restorable exists). `Ok(None)` means an unburied window
+/// nothing restorable exists). `Ok(OpenOutcome::Unburied(label))` means an unburied window
 /// already satisfied the open and no new window should be built.
 fn unbury_or_restore(
     app: &AppHandle,
