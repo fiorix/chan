@@ -7445,10 +7445,7 @@ fn select_workspace_targets(
     }
     if targets.workspaces.is_empty() {
         let cwd = chan_workspace::paths::canonicalize_normalized(&std::env::current_dir()?);
-        let selected = known
-            .into_iter()
-            .filter(|workspace| cwd.starts_with(&workspace.root_path))
-            .max_by_key(|workspace| workspace.root_path.components().count());
+        let selected = resolve_workspace_cwd(&known, &cwd).cloned();
         return match selected {
             Some(workspace) => Ok((vec![workspace], Vec::new())),
             None => Ok((
@@ -7479,17 +7476,32 @@ fn select_workspace_targets(
     Ok((selected, errors))
 }
 
+fn resolve_workspace_cwd<'a>(
+    known: &'a [KnownWorkspace],
+    cwd: &Path,
+) -> Option<&'a KnownWorkspace> {
+    known
+        .iter()
+        .map(|workspace| {
+            (
+                workspace,
+                chan_workspace::paths::canonicalize_normalized(&workspace.root_path),
+            )
+        })
+        .filter(|(_, root)| cwd.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())
+        .map(|(workspace, _)| workspace)
+}
+
 fn resolve_workspace_selector<'a>(
     known: &'a [KnownWorkspace],
     selector: &str,
 ) -> std::result::Result<&'a KnownWorkspace, WorkspaceExecutionError> {
     let selector_path = PathBuf::from(selector);
-    let canonical = std::fs::canonicalize(&selector_path).ok();
+    let canonical = chan_workspace::paths::canonicalize_normalized(&selector_path);
     if let Some(workspace) = known.iter().find(|workspace| {
         workspace.root_path == selector_path
-            || canonical
-                .as_ref()
-                .is_some_and(|path| path == &workspace.root_path)
+            || canonical == chan_workspace::paths::canonicalize_normalized(&workspace.root_path)
             || workspace.root_path.to_string_lossy() == selector
     }) {
         return Ok(workspace);
@@ -10128,6 +10140,54 @@ mod tests {
                 .unwrap();
         assert_eq!(actual, expected);
         stub.abort();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_selection_matches_a_relinked_root_by_canonical_path() {
+        let config = tempfile::TempDir::new().unwrap();
+        let roots = tempfile::TempDir::new().unwrap();
+        let original = roots.path().join("original");
+        let moved = roots.path().join("moved");
+        std::fs::create_dir_all(original.join("nested")).unwrap();
+        let lib = Library::open_at(config.path().join("config.toml")).unwrap();
+        let registered = lib.register_workspace(&original).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &original).unwrap();
+        let known = lib.list_workspaces();
+
+        let by_path = resolve_workspace_selector(&known, moved.to_str().unwrap());
+        let cwd = chan_workspace::paths::canonicalize_normalized(&moved.join("nested"));
+        let by_cwd = resolve_workspace_cwd(&known, &cwd);
+        assert_eq!(
+            (
+                by_path
+                    .as_ref()
+                    .map(|workspace| &workspace.metadata_key)
+                    .ok(),
+                by_cwd.map(|workspace| &workspace.metadata_key),
+            ),
+            (
+                Some(&registered.metadata_key),
+                Some(&registered.metadata_key)
+            ),
+            "path error: {:?}",
+            by_path.err().map(|error| error.code)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_selection_matches_a_relative_dot_selector() {
+        let config = tempfile::TempDir::new().unwrap();
+        let lib = Library::open_at(config.path().join("config.toml")).unwrap();
+        let registered = lib
+            .register_workspace(&std::env::current_dir().unwrap())
+            .unwrap();
+        let known = lib.list_workspaces();
+
+        let selected = resolve_workspace_selector(&known, ".").unwrap();
+        assert_eq!(selected.metadata_key, registered.metadata_key);
     }
 
     #[test]
