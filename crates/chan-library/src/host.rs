@@ -40,6 +40,12 @@ use crate::{
     ServeConfig, ServeHandle, WorkspaceOverlay,
 };
 
+const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
+const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[cfg(test)]
+type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspace>>) + Send>;
+
 /// One workspace mounted into a [`WorkspaceHost`].
 #[derive(Debug, Clone)]
 pub struct HostedWorkspace {
@@ -305,6 +311,12 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     open_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
+    open_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    open_attempt_probe: std::sync::Mutex<Option<WorkspaceOpenProbe>>,
+    #[cfg(test)]
+    open_release_budget: std::time::Duration,
+    #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Desktop integration shared by every tenant this host mounts: the
@@ -563,6 +575,33 @@ struct WorkspaceMountGuard<'a> {
     armed: bool,
 }
 
+struct WorkspaceOpenCancellation(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for WorkspaceOpenCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+// Own startup recovery until the async caller transfers the workspace into
+// tenant construction. A cancelled receiver can drop a completed blocking
+// result without ever taking that ownership.
+struct OpenedWorkspace(Option<Arc<Workspace>>);
+
+impl OpenedWorkspace {
+    fn into_workspace(mut self) -> Arc<Workspace> {
+        self.0.take().unwrap()
+    }
+}
+
+impl Drop for OpenedWorkspace {
+    fn drop(&mut self) {
+        if let Some(workspace) = self.0.take() {
+            workspace.stop_open_recovery();
+        }
+    }
+}
+
 impl Drop for WorkspaceMountGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
@@ -618,6 +657,12 @@ impl WorkspaceHost {
             register_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            open_release_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            open_attempt_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
             builder,
@@ -988,16 +1033,73 @@ impl WorkspaceHost {
         let root = root.to_path_buf();
         #[cfg(test)]
         let probe = self.open_thread_probe.lock().unwrap().take();
+        #[cfg(test)]
+        let mut release_probe = self.open_release_probe.lock().unwrap().take();
+        #[cfg(test)]
+        let mut attempt_probe = self.open_attempt_probe.lock().unwrap().take();
+        #[cfg(test)]
+        let release_budget = self.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _cancel_on_drop = WorkspaceOpenCancellation(cancelled.clone());
         let workspace = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some(probe) = probe {
                 probe.send(std::thread::current().id()).unwrap();
             }
-            library.open_workspace(&root)
+            let mut release_deadline = None;
+            loop {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(ChanError::from(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "workspace open cancelled",
+                    )));
+                }
+                let result = library.open_workspace(&root);
+                #[cfg(test)]
+                let result = {
+                    let mut result = result;
+                    if let Some(probe) = attempt_probe.as_mut() {
+                        probe(&mut result);
+                    }
+                    result
+                };
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    if let Ok(workspace) = result {
+                        workspace.stop_open_recovery();
+                    }
+                    return Err(ChanError::from(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "workspace open cancelled",
+                    )));
+                }
+                match &result {
+                    Err(ChanError::WorkspaceAlreadyOpen) => {}
+                    // The lock record is cleared before the flock is released.
+                    // Keep waiting if this follows an in-process owner.
+                    Err(ChanError::WorkspaceLocked) if release_deadline.is_some() => {}
+                    _ => return result.map(|workspace| OpenedWorkspace(Some(workspace))),
+                }
+                #[cfg(test)]
+                if let Some(probe) = release_probe.take() {
+                    probe();
+                }
+                let deadline =
+                    *release_deadline.get_or_insert_with(|| Instant::now() + release_budget);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return result.map(|workspace| OpenedWorkspace(Some(workspace)));
+                }
+                // A synchronous retry stays on the blocking pool so the host
+                // can keep publishing Starting while an in-process owner exits.
+                std::thread::sleep(remaining.min(WORKSPACE_OPEN_RELEASE_POLL_INTERVAL));
+            }
         })
         .await
         .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))??;
-        self.open_workspace(workspace, config).await
+        self.open_workspace(workspace.into_workspace(), config)
+            .await
     }
 
     /// Mount the workspace at `root` under `config.prefix`, or return the
@@ -4657,6 +4759,215 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn already_open_mount_retries_a_transitional_lock() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let held = library.open_workspace(root.path()).unwrap();
+            held.stop_open_recovery();
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            host.open_release_budget = std::time::Duration::from_millis(100);
+            *host.open_release_probe.lock().unwrap() = Some(Box::new(move || drop(held)));
+            let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let injecting = injected.clone();
+            *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+                if result.is_ok() && !injecting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // Model the record-cleared, flock-held tail of an in-process drop.
+                    let workspace =
+                        std::mem::replace(result, Err(ChanError::WorkspaceLocked)).unwrap();
+                    workspace.stop_open_recovery();
+                    drop(workspace);
+                }
+            }));
+            let result = host
+                .open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await;
+            assert!(injected.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                result.is_ok(),
+                "transitional lock bypassed the release budget: {result:?}"
+            );
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Running, None)
+            );
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_mount_does_not_open_after_release() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for Finished {
+                fn drop(&mut self) {
+                    let _ = self.0.take().unwrap().send(());
+                }
+            }
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let held = library.open_workspace(root.path()).unwrap();
+            held.stop_open_recovery();
+            let lock_dir = held.paths().lock.clone();
+            let host = Arc::new(WorkspaceHost::new(library.clone(), fake_builder()));
+            let successful_opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let successful = successful_opens.clone();
+            let (finished, completion) = tokio::sync::oneshot::channel();
+            let finished = Finished(Some(finished));
+            *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
+                let _ = &finished;
+                if result.is_ok() {
+                    successful.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+            let (entered, entry) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            *host.open_release_probe.lock().unwrap() = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+                drop(held);
+            }));
+            let mounting_host = host.clone();
+            let mounting_root = root.path().to_path_buf();
+            let mount = tokio::spawn(async move {
+                mounting_host
+                    .open_registered_workspace(mounting_root, serve_config("/workspace"))
+                    .await
+            });
+            entry.await.unwrap();
+            mount.abort();
+            assert!(mount.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+            completion.await.unwrap();
+            assert_eq!(
+                successful_opens.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "cancelled mount opened the workspace after its owner left"
+            );
+            assert!(chan_workspace::lock::is_free(&lock_dir));
+            let reopened = library.open_workspace(root.path()).unwrap();
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                )
+            );
+            reopened.stop_open_recovery();
+            drop(reopened);
+            assert!(chan_workspace::lock::is_free(&lock_dir));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn already_open_mount_waits_for_an_in_process_release() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let held = library.open_workspace(root.path()).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            let observing_host = Arc::downgrade(&host);
+            let observing_root = root.path().to_path_buf();
+            let (observed, observation) = tokio::sync::oneshot::channel();
+            *host.open_release_probe.lock().unwrap() = Some(Box::new(move || {
+                let status = observing_host
+                    .upgrade()
+                    .unwrap()
+                    .workspace_status(&observing_root);
+                observed.send(status).unwrap();
+                drop(held);
+            }));
+            let result = host
+                .open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await;
+            assert_eq!(
+                observation.await.unwrap(),
+                (WorkspaceStatus::Starting, None)
+            );
+            assert!(
+                result.is_ok(),
+                "mount did not wait for the in-process release: {result:?}"
+            );
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Running, None)
+            );
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn already_open_mount_reports_releasing_after_the_budget() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let held = library.open_workspace(root.path()).unwrap();
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            let budget = std::time::Duration::from_millis(40);
+            host.open_release_budget = budget;
+            let host = Arc::new(host);
+            let observing_host = Arc::downgrade(&host);
+            let observing_root = root.path().to_path_buf();
+            let (observed, observation) = tokio::sync::oneshot::channel();
+            *host.open_release_probe.lock().unwrap() = Some(Box::new(move || {
+                let status = observing_host
+                    .upgrade()
+                    .unwrap()
+                    .workspace_status(&observing_root);
+                observed.send((status, std::time::Instant::now())).unwrap();
+            }));
+            let error = host
+                .open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await
+                .unwrap_err();
+            let (status, started) = observation.await.unwrap();
+            assert_eq!(status, (WorkspaceStatus::Starting, None));
+            assert!(
+                started.elapsed() >= budget,
+                "mount answered before the release budget"
+            );
+            assert!(
+                matches!(error, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+                "{error}"
+            );
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                )
+            );
+            drop(held);
+            host.open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await
+                .unwrap();
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Running, None)
+            );
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn interrupted_mount_already_open_reports_releasing_and_allows_retry() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let cfg = tempfile::tempdir().unwrap();
@@ -4664,7 +4975,8 @@ mod tests {
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
             let workspace = library.open_workspace(root.path()).unwrap();
-            let host = WorkspaceHost::new(library, fake_builder());
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            host.open_release_budget = std::time::Duration::from_millis(40);
             let error = host
                 .open_registered_workspace(root.path(), serve_config("/workspace"))
                 .await
@@ -4775,7 +5087,8 @@ mod tests {
             let workspace = library.open_workspace(root.path()).unwrap();
             // A blocking operation may outlive teardown and keep the writer handle.
             let lingering = workspace.clone();
-            let host = WorkspaceHost::new(library, fake_builder());
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            host.open_release_budget = std::time::Duration::from_millis(40);
             let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut artifacts = fake_artifacts_with_gated_shutdown(
                 entered_tx,

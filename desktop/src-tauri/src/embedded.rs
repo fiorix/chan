@@ -277,24 +277,12 @@ impl EmbeddedServer {
 
     pub async fn open_workspace(&self, key: &str) -> Result<String, String> {
         use chan_workspace::ChanError;
-        // A workspace just turned OFF can keep its flock for a beat: a
-        // background indexer / in-flight request still holding an
-        // `Arc<Workspace>` releases it shortly after the runtime is dropped.
-        // A quick OFF -> ON would otherwise spuriously hit
-        // `WorkspaceAlreadyOpen` (our own releasing handle) or
-        // `WorkspaceLocked`. Retry briefly so the toggle settles instead of
-        // erroring; a genuine other-process lock still surfaces after the
-        // short budget. Mirrors `unregister_with_retry` on the close side.
-        //
-        // Mount through the idempotent `open_or_get_registered_workspace`
-        // wrapper (its `register_lock` + `hosted_for_root` precheck): a
-        // redundant turn-on of an ALREADY-mounted root returns `Ok(existing)`
-        // rather than `WorkspaceAlreadyOpen`, so a click that lands in the gap
-        // before the launcher's `status:starting` disables the toggle settles
-        // to success instead of the wrong "open in another chan process"
-        // message. The retry loop still covers the OFF->ON releasing-handle
-        // case (root unregistered, flock not yet dropped), which surfaces as
-        // `WorkspaceAlreadyOpen` from the inner mount until the handle releases.
+        // The host waits for in-process owners while publishing Starting.
+        // Retry WorkspaceLocked here, which can also be the tail of a local
+        // release. Repeating the host's AlreadyOpen budget would multiply
+        // the wait and publish an error between attempts.
+        // The idempotent host wrapper returns an existing mount for redundant
+        // turn-on requests and serializes concurrent registrations.
         const MAX_ATTEMPTS: usize = 8;
         const BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
         let prefix = prefix_for_key(key);
@@ -305,11 +293,7 @@ impl EmbeddedServer {
                 .await
             {
                 Ok(hosted) => return Ok(hosted.handle.launch_url()),
-                Err(
-                    e @ chan_server::Error::Core(
-                        ChanError::WorkspaceLocked | ChanError::WorkspaceAlreadyOpen,
-                    ),
-                ) => {
+                Err(e @ chan_server::Error::Core(ChanError::WorkspaceLocked)) => {
                     if attempt == MAX_ATTEMPTS {
                         return Err(map_open_error(key, e));
                     }
