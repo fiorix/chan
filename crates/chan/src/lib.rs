@@ -206,8 +206,10 @@ its desktop behavior. With neither, the standalone CLI binds a local
 server and stays in the foreground until Ctrl-C. --standalone, --desktop,
 and --devserver force one target. --devserver=<port|url> names one local
 devserver explicitly. A missing explicit devserver or an ambiguous set is
-refused rather than guessed; other failed handoffs fall through to a
-standalone server.
+refused rather than guessed. When a registration was sent but no valid
+reply comes back in time, serve exits 1 instead of serving standalone,
+because the devserver may still be mounting the workspace. Other failed
+handoffs fall through to a standalone server.
 
 --on TARGET serves PATH on a REGISTERED remote devserver instead: TARGET
 is the devserver's URL or launcher label as `chan devserver ls` shows
@@ -3760,6 +3762,11 @@ fn devserver_registration_action(
              check `chan ps` or retry with `--standalone`",
             root.display()
         ),
+        Outcome::ReplyLost => anyhow::bail!(
+            "the devserver sent no valid reply to the registration; it may still be \
+             mounting {} or may have died; check `chan ps` or retry with `--standalone`",
+            root.display()
+        ),
     };
     Ok(DevserverRegistrationAction::Standalone(message))
 }
@@ -3948,8 +3955,9 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // CLI-to-devserver registration. A running same-user devserver mounts
         // this workspace, mints one window, and owns its flock, so the CLI
         // prints a note and exits. CHAN_NO_DEVSERVER_HANDOFF opts out (skip the
-        // attempt, serve standalone). A timed-out reply leaves the mount
-        // uncertain, so that outcome must refuse a standalone open.
+        // attempt, serve standalone). A sent request whose reply times out,
+        // never arrives or is invalid leaves the mount uncertain, so those
+        // outcomes must refuse a standalone open.
         OpenTarget::Devserver => {
             if let Some(instance_index) = selected_devserver {
                 let candidate = &candidates[instance_index];
@@ -10433,6 +10441,23 @@ mod tests {
             )
             .unwrap(),
             DevserverRegistrationAction::Registered
+        ));
+    }
+
+    #[test]
+    fn devserver_registration_lost_reply_refuses_standalone() {
+        use chan_server::devserver_handoff::Outcome;
+        let root = Path::new("notes");
+        for selector in [None, Some(DevserverSelector::Port(8787))] {
+            let error = devserver_registration_action(Outcome::ReplyLost, selector.as_ref(), root)
+                .expect_err("a lost reply must not open a standalone server");
+            assert_eq!(error.to_string(),
+                "the devserver sent no valid reply to the registration; it may still be mounting notes or may have died; check `chan ps` or retry with `--standalone`");
+        }
+        assert!(matches!(
+            devserver_registration_action(Outcome::Error("mount failed".into()), None, root)
+                .unwrap(),
+            DevserverRegistrationAction::Standalone(Some(message)) if message.contains("mount failed")
         ));
     }
 

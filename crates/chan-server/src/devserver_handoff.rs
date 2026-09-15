@@ -153,19 +153,24 @@ pub enum Response {
 }
 
 /// Outcome of a registration attempt as the CLI resolves it. Not on the
-/// wire: a reply timeout leaves the mount's outcome unknown and must not
-/// start a competing standalone server.
+/// wire: once the request was sent, a reply that times out, never arrives or
+/// is invalid leaves the mount's outcome unknown and must not start a
+/// competing standalone server.
 #[derive(Debug)]
 pub enum Outcome {
     /// The devserver mounted the workspace at `prefix` and minted its requested
     /// window. The CLI reports both and exits 0.
     Registered { prefix: String },
-    /// No usable endpoint or reply: connect refused, stale socket, I/O error
-    /// or malformed reply. Own the server standalone.
+    /// No usable endpoint: connect refused, stale socket, or an I/O error
+    /// before the request was sent. Own the server standalone.
     NoDevserver,
     /// The request was sent, but the devserver did not reply within its budget.
     /// The devserver may still be mounting the workspace.
     ReplyTimedOut,
+    /// The request was sent, but the connection closed or failed before a
+    /// reply, or the reply is not an answer to a registration. The devserver
+    /// may still be mounting the workspace, or may have died while mounting.
+    ReplyLost,
     /// The devserver is a different protocol version. Fall back to
     /// standalone after printing the skew.
     VersionSkew,
@@ -684,8 +689,10 @@ async fn probe_instance(endpoint: PathBuf, timeout: Duration) -> Option<Instance
 /// it to mint one workspace window record.
 ///
 /// A sent request that exhausts its reply budget returns
-/// [`Outcome::ReplyTimedOut`]: the caller must not open the workspace itself.
-/// A dead endpoint, malformed reply or response for another verb maps to
+/// [`Outcome::ReplyTimedOut`]. One whose connection then closes or fails, or
+/// whose reply is malformed or answers another verb, returns
+/// [`Outcome::ReplyLost`]. After either, the caller must not open the workspace
+/// itself. A dead endpoint or a failure before the request is sent maps to
 /// [`Outcome::NoDevserver`]. Protocol skew and application-level mount failures
 /// retain their distinct outcomes for the CLI's diagnostics.
 #[cfg(any(unix, windows))]
@@ -706,9 +713,10 @@ fn registration_outcome(reply: EndpointReply) -> Outcome {
         }
         EndpointReply::Response(Response::VersionSkew { .. }) => Outcome::VersionSkew,
         EndpointReply::Response(Response::Error { message }) => Outcome::Error(message),
-        EndpointReply::Response(Response::Identified { .. }) | EndpointReply::Unavailable => {
-            Outcome::NoDevserver
+        EndpointReply::Response(Response::Identified { .. }) | EndpointReply::Lost => {
+            Outcome::ReplyLost
         }
+        EndpointReply::Unavailable => Outcome::NoDevserver,
         EndpointReply::TimedOut => Outcome::ReplyTimedOut,
     }
 }
@@ -727,6 +735,7 @@ enum EndpointReply {
     Response(Response),
     Unavailable,
     TimedOut,
+    Lost,
 }
 
 #[cfg(any(unix, windows))]
@@ -801,9 +810,12 @@ where
         Ok::<String, std::io::Error>(line)
     };
     match tokio::time::timeout(reply_budget, io).await {
+        // A line is only read after the request was sent, so an empty or
+        // unparseable one is a lost reply.
         Ok(Ok(line)) => serde_json::from_str(&line)
             .map(EndpointReply::Response)
-            .unwrap_or(EndpointReply::Unavailable),
+            .unwrap_or(EndpointReply::Lost),
+        Ok(Err(_)) if sent => EndpointReply::Lost,
         Err(_) if sent => EndpointReply::TimedOut,
         Ok(Err(_)) | Err(_) => EndpointReply::Unavailable,
     }
@@ -1059,6 +1071,132 @@ mod tests {
     async fn registration_reply_timeout_is_not_no_devserver() {
         let outcome = registration_with_delayed_reply(None, Duration::from_millis(100)).await;
         assert!(matches!(outcome, Outcome::ReplyTimedOut), "{outcome:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    fn registration_request() -> Request {
+        Request::RegisterWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            workspace_path: "notes".into(),
+        }
+    }
+
+    /// Register over an in-memory stub that reads the whole request line, then
+    /// writes `reply` if one is given and closes.
+    #[cfg(any(unix, windows))]
+    async fn registration_after_request(reply: Option<&str>) -> Outcome {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client, peer) = tokio::io::duplex(1024);
+            let stub = async move {
+                let mut reader = BufReader::new(peer);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    registration_request()
+                );
+                if let Some(reply) = reply {
+                    reader.get_mut().write_all(reply.as_bytes()).await.unwrap();
+                }
+            };
+            let request = registration_request();
+            let (reply, ()) = tokio::join!(
+                exchange_request(client, &request, Duration::from_secs(5)),
+                stub
+            );
+            registration_outcome(reply)
+        })
+        .await
+        .expect("registration exchange is bounded")
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_eof_after_request_is_not_no_devserver() {
+        let outcome = registration_after_request(None).await;
+        assert!(matches!(outcome, Outcome::ReplyLost), "{outcome:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_garbage_reply_after_request_is_not_no_devserver() {
+        let outcome = registration_after_request(Some("not a registration reply\n")).await;
+        assert!(matches!(outcome, Outcome::ReplyLost), "{outcome:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_identity_reply_after_request_is_not_no_devserver() {
+        let reply = serde_json::to_string(&Response::Identified {
+            pid: 1,
+            library_root: PathBuf::from("/tmp/chan"),
+            port: 8787,
+            version: CHAN_VERSION.into(),
+        })
+        .unwrap();
+        let outcome = registration_after_request(Some(&format!("{reply}\n"))).await;
+        assert!(matches!(outcome, Outcome::ReplyLost), "{outcome:?}");
+    }
+
+    /// A read half that fails every read with a connection reset.
+    #[cfg(any(unix, windows))]
+    struct ResetReader;
+
+    #[cfg(any(unix, windows))]
+    impl tokio::io::AsyncRead for ResetReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_read_error_after_request_is_not_no_devserver() {
+        let stream = tokio::io::join(ResetReader, tokio::io::sink());
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            exchange_request(stream, &registration_request(), Duration::from_secs(5)),
+        )
+        .await
+        .expect("registration exchange is bounded");
+        let outcome = registration_outcome(reply);
+        assert!(matches!(outcome, Outcome::ReplyLost), "{outcome:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_drop_before_request_is_no_devserver() {
+        let (client, peer) = tokio::io::duplex(1024);
+        drop(peer);
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            exchange_request(client, &registration_request(), Duration::from_secs(5)),
+        )
+        .await
+        .expect("registration exchange is bounded");
+        let outcome = registration_outcome(reply);
+        assert!(matches!(outcome, Outcome::NoDevserver), "{outcome:?}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registration_error_reply_after_request_is_a_mount_error() {
+        let reply = serde_json::to_string(&Response::Error {
+            message: "mount failed".into(),
+        })
+        .unwrap();
+        let outcome = registration_after_request(Some(&format!("{reply}\n"))).await;
+        assert!(
+            matches!(&outcome, Outcome::Error(message) if message == "mount failed"),
+            "{outcome:?}"
+        );
     }
 
     #[test]
