@@ -2,8 +2,8 @@ use std::io;
 
 use thiserror::Error;
 
-/// Umbrella error. Primitive payloads only (strings, integers)
-/// so the type survives the future uniffi boundary unchanged.
+/// Umbrella error. Primitive payloads only (strings, integers), so a
+/// consumer (chan-workspace) can map it to its own error type as text.
 #[derive(Debug, Error)]
 pub enum ChanReportError {
     #[error("io: {0}")]

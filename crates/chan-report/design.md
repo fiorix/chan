@@ -56,7 +56,7 @@ Index dataflow: `scan` walks and counts each file into the `Index`; incremental 
 
 `Report` is a pure snapshot derived from an `Index`, a scope, and COCOMO parameters. Scopes cover the whole tree, a prefix, or an explicit file set, but all produce the same report shape so consumers can render one model.
 
-Update outcomes distinguish real changes from no-ops; chan-workspace uses that signal to debounce JSONL writes. Public data stays serde-friendly and FFI-shaped: owned fields, primitive payloads, one schema version, and one umbrella error type.
+Update outcomes distinguish real changes from no-ops; chan-workspace uses that signal to debounce JSONL writes. Public data stays serde-friendly: owned fields, primitive payloads, one schema version, and one umbrella error type.
 
 ### File bucket axis
 
