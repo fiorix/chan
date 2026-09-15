@@ -884,29 +884,27 @@ fn terminal_upload_stream_sync(
 }
 
 #[cfg(test)]
-fn terminal_upload_sync(
-    abs_dir: &Path,
-    original_name: &str,
-    bytes: &[u8],
-) -> Result<TerminalUploadResponse, String> {
-    let leaf = upload_leaf_filename(original_name).map_err(|e| e.to_string())?;
-    let target = abs_dir.join(&leaf);
-    if target.exists() {
-        return Err(format!("already exists: {}", target.display()));
-    }
-    // `atomic_write` writes a temp file and renames, so a failure leaves no
-    // partial file at `target`.
-    chan_workspace::fs_ops::atomic_write(&target, bytes)
-        .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    Ok(TerminalUploadResponse {
-        path: target.display().to_string(),
-        size: bytes.len() as u64,
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal_upload(
+        abs_dir: &Path,
+        original_name: &str,
+        bytes: &[u8],
+    ) -> chan_workspace::Result<TerminalUploadResponse> {
+        let (tx, rx) = mpsc::channel(2);
+        tx.try_send(TerminalUploadMessage::Chunk(Bytes::copy_from_slice(bytes)))
+            .unwrap();
+        tx.try_send(TerminalUploadMessage::Complete).unwrap();
+        drop(tx);
+        terminal_upload_stream_sync(
+            abs_dir,
+            original_name,
+            rx,
+            8192,
+            &crate::bulk_transfer::test_support::uncancelled(),
+        )
+    }
 
     #[tokio::test]
     async fn terminal_multipart_upload_streams_after_directory_metadata() {
@@ -1321,15 +1319,22 @@ mod tests {
     #[test]
     fn terminal_upload_writes_into_dir_and_refuses_existing_target() {
         let dir = tempfile::tempdir().unwrap();
-        let resp = terminal_upload_sync(dir.path(), "note.txt", b"hello").unwrap();
+        let resp = terminal_upload(dir.path(), "note.txt", b"hello").unwrap();
         assert_eq!(resp.size, 5);
         assert_eq!(
             std::fs::read(dir.path().join("note.txt")).unwrap(),
             b"hello"
         );
         // A second upload of the same name is refused (no silent overwrite).
-        let again = terminal_upload_sync(dir.path(), "note.txt", b"world").unwrap_err();
-        assert!(again.contains("already exists"), "{again}");
+        let error = terminal_upload(dir.path(), "note.txt", b"world").unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                chan_workspace::ChanError::PathAlreadyExists(path)
+                    if path == &dir.path().join("note.txt").display().to_string()
+            ),
+            "{error:?}"
+        );
         assert_eq!(
             std::fs::read(dir.path().join("note.txt")).unwrap(),
             b"hello"
@@ -1338,17 +1343,27 @@ mod tests {
 
     #[test]
     fn terminal_upload_writes_nothing_when_destination_is_unwritable() {
-        // A path whose parent is a file, not a directory: the dest cannot be a
-        // writable directory, so the upload must fail before writing.
+        // Refuse both a regular file and a path beneath it as upload directories.
         let dir = tempfile::tempdir().unwrap();
         let as_file = dir.path().join("file");
         std::fs::write(&as_file, b"x").unwrap();
-        let under_file = as_file.join("sub");
-        let e = terminal_upload_sync(&under_file, "x.txt", b"data").unwrap_err();
-        let lower = e.to_ascii_lowercase();
+        let error = terminal_upload(&as_file, "x.txt", b"data").unwrap_err();
         assert!(
-            lower.contains("cannot access destination") || lower.contains("not a directory"),
-            "{e}"
+            error.to_string().contains("destination is not a directory"),
+            "{error}"
+        );
+        let under_file = as_file.join("sub");
+        let error = terminal_upload(&under_file, "x.txt", b"data").unwrap_err();
+        #[cfg(unix)]
+        assert!(
+            matches!(&error, chan_workspace::ChanError::Io(message)
+                if message.to_ascii_lowercase().contains("not a directory")),
+            "{error:?}"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            matches!(error, chan_workspace::ChanError::NotFound(_)),
+            "{error:?}"
         );
         assert_eq!(std::fs::read(&as_file).unwrap(), b"x");
     }
