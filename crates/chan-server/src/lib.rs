@@ -28,16 +28,17 @@ mod devserver;
 /// Devserver management-API wire contract (HTTP/JSON), public so a
 /// chan-desktop client and the server build against the exact shapes.
 pub mod devserver_api;
-/// CLI-to-devserver workspace-registration RPC over a well-known per-user
-/// UDS. Public so the `chan` CLI (client) and the devserver (listener)
-/// share it; both already depend on chan-server.
+/// CLI-to-devserver workspace-registration RPC over per-instance Unix sockets
+/// or Windows named pipes in a well-known per-user namespace. Public so the
+/// `chan` CLI (client) and the devserver (listener) share it; both depend on
+/// chan-server.
 pub mod devserver_handoff;
 mod disk_echo;
 mod doc_sessions;
 mod embed_seed;
 mod error;
 mod extensions;
-/// macOS CLI-to-desktop workspace handoff over a well-known per-user UDS.
+/// CLI-to-desktop workspace handoff over a well-known per-user Unix socket or Windows named pipe.
 /// Public so both the `chan` CLI (client) and `chan-desktop`
 /// (listener) consume it; both already depend on chan-server.
 pub mod handoff;
@@ -1701,8 +1702,7 @@ impl chan_library::WorkspaceCellHandle for CellHandle {
             watch_handle,
             indexer,
         } = cell;
-        // Clear the shared cell before socket accept loops finish aborting;
-        // otherwise their stale Arc can keep the workspace marked open.
+        // Hosted shutdown stops tenant tasks and drops socket owners before clearing this cell. Release its strong workspace owners so the subsequent lock-release check can complete.
         indexer.cancel();
         workspace.stop_open_recovery();
         drop(watch_handle);
