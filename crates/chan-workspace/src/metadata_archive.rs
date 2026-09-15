@@ -1,3 +1,9 @@
+//! Import and export of registered workspace metadata as zstd-compressed tar archives.
+//!
+//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content and sibling locks, tokens, and trash are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; other included metadata is read live during archiving.
+//!
+//! Import replaces the four metadata subtrees after refusing a live in-process workspace and acquiring its writer lock. Unless `MetadataImportOptions::force_scm` is set, an archive with a Git identity requires a target identity: normalized remote lists must match when either is nonempty; otherwise differing known HEADs are refused. An archive without a Git identity imposes no SCM check.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -31,91 +37,141 @@ const EXCLUDED_SUBTREES: &[&str] = &[
     "graph.sqlite-wal",
 ];
 
+/// Producer information recorded in a metadata archive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataExportOptions {
+    /// Version of chan producing the archive, supplied by the caller.
     pub chan_version: String,
 }
 
+/// The exported archive, its manifest, and uncompressed entry counts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataExportReport {
+    /// Output path supplied to the export.
     pub archive_path: PathBuf,
+    /// Manifest written as the first archive entry.
     pub manifest: MetadataManifest,
+    /// Archive entry count, including directories and the manifest.
     pub files: usize,
+    /// Uncompressed regular-file bytes, including the manifest.
     pub bytes: u64,
 }
 
+/// Controls for SCM identity checks and post-import reindexing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataImportOptions {
+    /// Reopen the workspace and run a synchronous reindex after replacing metadata.
     pub rescan: bool,
+    /// Bypass the source-versus-target Git identity guard.
     pub force_scm: bool,
 }
 
+/// The imported manifest, replaced metadata subtrees, and extraction counts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataImportReport {
+    /// Manifest read from the archive.
     pub manifest: MetadataManifest,
+    /// Metadata subtrees replaced: `index`, `graph`, `report`, and `sessions`.
     pub imported_subtrees: Vec<String>,
+    /// Extracted payload entry count, including directories but excluding the payload root and manifest.
     pub files: usize,
+    /// Uncompressed regular-file bytes extracted from the payload.
     pub bytes: u64,
+    /// Whether the requested post-import reindex completed.
     pub rescanned: bool,
 }
 
+/// The JSON manifest stored as the first entry of a metadata archive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataManifest {
+    /// Archive layout version; imports accept version 1.
     pub archive_format_version: u32,
+    /// Caller-supplied version of the exporting chan process.
     pub chan_version: String,
+    /// Export timestamp in RFC 3339 UTC, with whole-second precision.
     pub created_at: String,
+    /// Registered source workspace root, rendered as a platform path.
     pub source_root: String,
+    /// Source registry key for the workspace metadata directory.
     pub source_metadata_key: String,
+    /// Format identifiers recorded by the exporter. Only the graph version is read from source metadata; index and report versions are compiled-in constants.
     pub metadata_schema: MetadataSchema,
+    /// Detected Git identity, omitted when neither a remote nor a HEAD is available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scm: Option<ScmIdentity>,
+    /// Metadata subtree names declared by the exporter.
     pub included_subtrees: Vec<String>,
+    /// Excluded metadata categories and filename patterns declared by the exporter.
     pub excluded_subtrees: Vec<String>,
 }
 
+/// Metadata format identifiers recorded by the exporting process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataSchema {
+    /// Identifier of the canonical-path-based metadata key scheme.
     pub path_key_scheme: String,
+    /// Search index schema version compiled into the exporter.
     pub index_schema_version: u32,
+    /// SQLite `user_version`, omitted if the graph database cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_user_version: Option<u32>,
+    /// Optional vector shard format identifier; the exporter leaves it unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_shard_format_version: Option<u32>,
+    /// Code-report schema version compiled into the exporter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_schema_version: Option<u32>,
 }
 
+/// Git repository identity used to guard metadata imports.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScmIdentity {
+    /// Sorted, deduplicated Git remotes with common GitHub URL forms unified and trailing slashes and `.git` removed.
     pub remotes: Vec<String>,
+    /// Resolved Git HEAD when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
 }
 
+/// Tar entry classification for archive path validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveEntryKind {
+    /// A regular file, allowed by the path validator.
     Regular,
+    /// A directory, allowed by the path validator.
     Directory,
+    /// A symbolic link, refused for extraction.
     Symlink,
+    /// A hard link, refused for extraction.
     Hardlink,
+    /// Any other tar entry type, refused for extraction.
     Special,
 }
 
+/// A path or entry kind that cannot be safely extracted.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum MetadataArchivePathError {
+    /// No normal path component remains after ignoring current-directory components.
     #[error("archive path is empty")]
     Empty,
+    /// The path has a root component.
     #[error("archive path must be relative: {0}")]
     Absolute(String),
+    /// The path contains a parent-directory component.
     #[error("archive path must not contain parent components: {0}")]
     Parent(String),
+    /// The path has a platform prefix or a Windows drive-root or UNC spelling.
     #[error("archive path must not contain a Windows prefix: {0}")]
     Prefix(String),
+    /// The entry is neither a regular file nor a directory.
     #[error("archive entry type is not safe to extract: {0:?}")]
     UnsafeKind(ArchiveEntryKind),
 }
 
 impl Library {
+    /// Export metadata for registered `root`.
+    ///
+    /// `output` must end in `.tar.zst` and must not already exist. The archive is written to a sibling temporary file and renamed to the requested output on success.
     pub fn export_metadata_archive(
         &self,
         root: &Path,
@@ -125,10 +181,16 @@ impl Library {
         export_metadata_archive(self, root, output, opts)
     }
 
+    /// Read only the first manifest entry without extracting or validating the payload.
+    ///
+    /// The first tar entry must be `chan-metadata-v1/manifest.json`; archive-format compatibility is checked by import, not inspection.
     pub fn inspect_metadata_archive(&self, archive: &Path) -> Result<MetadataManifest> {
         inspect_metadata_archive(archive)
     }
 
+    /// Replace metadata for registered `root` from an archive.
+    ///
+    /// Refuse unsupported archive formats, SCM identity mismatches unless `force_scm`, live in-process workspaces, and held writer locks. After replacement the writer lock is released; `rescan` reopens the workspace and synchronously reindexes its content.
     pub fn import_metadata_archive(
         &self,
         root: &Path,
@@ -139,6 +201,9 @@ impl Library {
     }
 }
 
+/// Check that an entry is a regular file or directory with a nonempty relative path.
+///
+/// Reject symbolic links, hard links, special entries, absolute paths, platform prefixes, Windows drive-root or UNC spellings, and parent-directory components. Current-directory components are ignored. This is a lexical check; it does not perform I/O or enforce the archive payload prefix.
 pub fn validate_archive_entry_path(
     path: &Path,
     kind: ArchiveEntryKind,
