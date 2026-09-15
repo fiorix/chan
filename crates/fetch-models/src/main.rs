@@ -14,9 +14,10 @@
 //!      the network. cargo-clean wipes the dir; that's intentional,
 //!      the next build re-downloads.
 //!   2. tar+zstd encode the staging dir into the embed bundle.
-//!      Drops `*.lock` and `**/blobs/**` along the way; tar follows
-//!      the snapshots/ symlinks into the blob bytes, so dropping
-//!      blobs/ outright would otherwise double the archive.
+//!      Drops `*.lock`, `*.no_exists` and `**/blobs/**` along the
+//!      way; tar follows the snapshots/ symlinks into the blob bytes,
+//!      so the snapshot entries already carry those bytes and keeping
+//!      blobs/ too would store them twice.
 //!
 //! Run from the workspace root via `make models` or
 //! `cargo run -p fetch-models`. Idempotent: re-running with the
@@ -197,9 +198,10 @@ fn encode_tar_zst_via<S: Write + Into<File>>(
     Ok(())
 }
 
-/// Recursive file walk (no external dep). Only yields regular
-/// files; tar's append-with-name handles paths that don't exist
-/// at the root.
+/// Recursive walk (no external dep), sorted. Yields regular files
+/// and symlinks, and skips any other entry type; a listed symlink
+/// is followed by its consumer (tar's `follow_symlinks(true)`, or
+/// `std::fs::metadata` in `bundle_up_to_date`).
 fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
     fn rec(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         for entry in
