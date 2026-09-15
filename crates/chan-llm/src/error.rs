@@ -1,6 +1,5 @@
-// One umbrella error so the FFI surface stays a single tagged enum.
-// Variants are uniffi-friendly: primitive payloads only, no nested
-// non-uniffi types in the Display strings.
+// One umbrella error, so a host matches a single tagged enum. Variants
+// carry primitive payloads only; no dependency error type is nested.
 
 use thiserror::Error;
 
@@ -14,8 +13,8 @@ pub enum LlmError {
     /// variant here. Prefer the narrow variants below when matching;
     /// they preserve the kind so hosts can branch (e.g. "show
     /// reload prompt" for `WriteConflict`, "show too-large dialog"
-    /// for `WriteTooLarge`). The narrow variants used to flatten
-    /// into this string and broke host UX.
+    /// for `WriteTooLarge`); flattening them into this string would lose
+    /// the kind the host UX branches on.
     #[error("chan-workspace: {0}")]
     Core(String),
     /// chan-workspace's `WriteConflict` passthrough. The write was a

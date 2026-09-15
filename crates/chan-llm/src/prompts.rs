@@ -1,8 +1,7 @@
 // Embedded prompts shared by every consumer of chan-llm.
 //
-// Cross-platform reuse depends on these being in one place: the
-// web frontend, the CLI, and any future native shell get the same
-// assistant behavior because they all link this crate. Bumping the
+// Reuse depends on these being in one place: every host that links
+// this crate gets the same assistant behavior. Bumping the
 // system prompt here changes every caller in lockstep; that is the
 // point.
 
