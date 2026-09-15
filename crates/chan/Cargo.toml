@@ -17,7 +17,7 @@ default = ["embeddings"]
 # Forwards to chan-server / chan-workspace's `embeddings` feature so a
 # top-level `--no-default-features` build disables the candle stack
 # all the way down. Default-on; opt out (`--no-default-features`)
-# only for platforms where candle-core won't build (currently iOS).
+# for a build without the candle stack.
 embeddings = ["chan-server/embeddings", "chan-workspace/embeddings"]
 # Bundle the default BGE-small model into the binary. Default-off
 # so plain `cargo build --release` produces a ~26 MB artifact. Build

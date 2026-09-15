@@ -10965,7 +10965,7 @@ mod tests {
         // assigns the port.
         assert_eq!(resolve_devserver_port(None, true, true), 0);
         // Tunnel without a listener: nothing binds; the addr keeps the shared
-        // default for the discovery/window-record report, as before.
+        // default for the discovery/window-record report.
         assert_eq!(resolve_devserver_port(None, true, false), DEFAULT_PORT);
         // Non-tunnel keeps the shared default the `chan serve` handoff and the
         // serve-path collision hint rely on.
@@ -11023,8 +11023,8 @@ mod tests {
             } => assert_eq!(args.service, ServiceKind::Systemd),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
-        // A bare `chan devserver` no longer runs a foreground server; the
-        // verb is explicit, and the flag-verb spellings are gone.
+        // A bare `chan devserver` does not run a foreground server: the verb
+        // is explicit, and flag-verb spellings are rejected.
         assert!(Cli::try_parse_from(["chan", "devserver"]).is_err());
         assert!(Cli::try_parse_from(["chan", "devserver", "--stop"]).is_err());
         assert!(Cli::try_parse_from(["chan", "devserver", "--start"]).is_err());
@@ -13232,7 +13232,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // Token plus endpoint resolves as before.
+        // Token plus endpoint resolves to a tunnel.
         let tunnel = build_devserver_tunnel(
             Some("chan_pat_a".into()),
             Some("https://cli.test".into()),
