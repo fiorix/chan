@@ -2239,14 +2239,28 @@ pub async fn set_workspace_on(
     on: bool,
     force: bool,
 ) -> Result<(), SetWorkspaceOnError> {
-    let timeout = (on || force).then_some(REMOTE_SERVE_HTTP_BUDGET);
     if let Some(gw) = &conn.gateway {
         let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
         let resp = match &body {
             Some(body) => {
-                gateway_request_json(gw, reqwest::Method::POST, &path, body, timeout).await
+                gateway_request_json(
+                    gw,
+                    reqwest::Method::POST,
+                    &path,
+                    body,
+                    Some(REMOTE_SERVE_HTTP_BUDGET),
+                )
+                .await
             }
-            None => gateway_request(gw, reqwest::Method::POST, &path, timeout).await,
+            None => {
+                gateway_request(
+                    gw,
+                    reqwest::Method::POST,
+                    &path,
+                    Some(REMOTE_SERVE_HTTP_BUDGET),
+                )
+                .await
+            }
         }
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
@@ -2269,7 +2283,7 @@ pub async fn set_workspace_on(
     let resp = http_client()
         .map_err(SetWorkspaceOnError::other)?
         .post(&url)
-        .timeout(timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS)))
+        .timeout(REMOTE_SERVE_HTTP_BUDGET)
         .bearer_auth(&conn.token)
         .json(&SetWorkspaceOnRequest { on, force })
         .send()
@@ -3345,7 +3359,7 @@ mod tests {
         // All classes share one six-second wait; real sockets must use real time.
         let mut requests = Vec::new();
         for conn in [direct, gateway] {
-            for operation in ["add", "on", "forced-off", "forget"] {
+            for operation in ["add", "on", "off", "forced-off", "forget"] {
                 let conn = conn.clone();
                 requests.push(async move {
                     let result = match operation {
@@ -3353,6 +3367,9 @@ mod tests {
                             .await
                             .map(|prefix| assert_eq!(prefix, "workspace-test")),
                         "on" => set_workspace_on(&conn, "/workspace-test", true, false)
+                            .await
+                            .map_err(|e| format!("{e:?}")),
+                        "off" => set_workspace_on(&conn, "/workspace-test", false, false)
                             .await
                             .map_err(|e| format!("{e:?}")),
                         "forced-off" => set_workspace_on(&conn, "/workspace-test", false, true)
