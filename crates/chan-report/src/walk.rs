@@ -12,6 +12,7 @@
 use ignore::gitignore::Gitignore;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::ChanReportError;
@@ -118,12 +119,14 @@ impl Filter {
     }
 }
 
-/// Walk the configured root and return every accepted relative
-/// path. POSIX-style, no leading slash, no `..`. The walker's
-/// own gitignore handling matches `Filter::accepts` for the root
-/// `.gitignore`; nested ignore files take effect inside the walk
-/// but are not reapplied by the cached filter.
-pub(crate) fn walk_root(opts: &ReportOptions) -> Result<Vec<String>, ChanReportError> {
+pub(crate) struct WalkResult {
+    pub(crate) paths: Vec<String>,
+    pub(crate) skipped: usize,
+}
+
+/// Walk the configured root and return accepted relative POSIX paths.
+/// Nested ignore files apply during the walk but not in the cached filter.
+pub(crate) fn walk_root(opts: &ReportOptions) -> Result<WalkResult, ChanReportError> {
     let mut builder = WalkBuilder::new(&opts.root);
     if let Some(path_policy) = &opts.path_policy {
         let root = opts.root.clone();
@@ -184,22 +187,146 @@ pub(crate) fn walk_root(opts: &ReportOptions) -> Result<Vec<String>, ChanReportE
         );
     }
 
-    let walker = builder.build();
+    collect_entries(
+        &opts.root,
+        builder.build().map(|entry| {
+            entry.map(|entry| {
+                (
+                    entry.file_type().is_some_and(|t| t.is_file()),
+                    entry.into_path(),
+                )
+            })
+        }),
+    )
+}
+
+fn collect_entries(
+    root: &Path,
+    entries: impl IntoIterator<Item = Result<(bool, PathBuf), ignore::Error>>,
+) -> Result<WalkResult, ChanReportError> {
     let mut out = Vec::new();
-    for entry in walker {
-        let entry = entry.map_err(|e| ChanReportError::Walk(e.to_string()))?;
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+    let mut skipped = 0;
+    for entry in entries {
+        let (is_file, abs) = match entry {
+            Ok(entry) => entry,
+            Err(error) if is_root_error(&error, root) => {
+                return Err(ChanReportError::Walk(error.to_string()));
+            }
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if !is_file {
             continue;
         }
-        let abs = entry.path();
-        let rel = abs
-            .strip_prefix(&opts.root)
-            .map_err(|_| ChanReportError::PathEscapesRoot(abs.display().to_string()))?;
-        let rel_str = rel
-            .to_str()
-            .ok_or_else(|| ChanReportError::InvalidUtf8Path(rel.display().to_string()))?
-            .replace('\\', "/");
-        out.push(rel_str);
+        let Some(rel) = abs.strip_prefix(root).ok().and_then(|rel| rel.to_str()) else {
+            skipped += 1;
+            continue;
+        };
+        out.push(rel.replace('\\', "/"));
     }
-    Ok(out)
+    Ok(WalkResult {
+        paths: out,
+        skipped,
+    })
+}
+
+fn is_root_error(error: &ignore::Error, root: &Path) -> bool {
+    fn check(error: &ignore::Error, root: &Path, has_path: bool) -> bool {
+        match error {
+            ignore::Error::WithPath { path, err } => path == root || check(err, root, true),
+            ignore::Error::WithDepth { depth, err } => *depth == 0 || check(err, root, has_path),
+            ignore::Error::WithLineNumber { err, .. } => check(err, root, has_path),
+            ignore::Error::Partial(errors) => {
+                errors.iter().any(|error| check(error, root, has_path))
+            }
+            // A mid-listing root read error can lose its path in walkdir.
+            // Without path context it cannot safely be treated as a child.
+            ignore::Error::Io(_) => !has_path,
+            _ => false,
+        }
+    }
+    check(error, root, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pathless_io_error_is_fatal() {
+        let root = Path::new("workspace");
+        let result = collect_entries(
+            root,
+            [
+                Ok((true, root.join("a.rs"))),
+                Err(ignore::Error::Io(std::io::Error::other(
+                    "root listing failed",
+                ))),
+            ],
+        );
+        assert!(
+            matches!(result, Err(ChanReportError::Walk(_))),
+            "a pathless listing error cannot certify a complete root scan"
+        );
+    }
+
+    fn denied(path: PathBuf) -> ignore::Error {
+        ignore::Error::WithPath {
+            path,
+            err: Box::new(ignore::Error::Io(
+                std::io::ErrorKind::PermissionDenied.into(),
+            )),
+        }
+    }
+
+    #[test]
+    fn a_failed_entry_or_non_utf8_name_does_not_abort_the_walk() {
+        let root = Path::new("workspace");
+        let mut entries = vec![
+            Ok((true, root.join("a.rs"))),
+            Err(denied(root.join("locked"))),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            entries.push(Ok((
+                true,
+                root.join(std::ffi::OsStr::from_bytes(b"bad\xff.rs")),
+            )));
+        }
+        entries.extend([
+            Ok((false, root.join("src"))),
+            Ok((true, root.join("src/b.rs"))),
+        ]);
+        let result =
+            collect_entries(root, entries).expect("bad entries must not abort sibling traversal");
+        assert_eq!(result.paths, ["a.rs", "src/b.rs"]);
+        assert_eq!(result.skipped, if cfg!(unix) { 2 } else { 1 });
+    }
+
+    #[test]
+    fn an_unreadable_root_still_fails_the_walk() {
+        let root = Path::new("workspace");
+        assert!(matches!(
+            collect_entries(root, [Err(denied(root.to_path_buf()))]),
+            Err(ChanReportError::Walk(_))
+        ));
+    }
+
+    #[test]
+    fn an_entry_outside_the_root_is_skipped() {
+        let root = Path::new("workspace");
+        let result = collect_entries(
+            root,
+            [
+                Ok((true, PathBuf::from("outside.rs"))),
+                Ok((true, root.join("a.rs"))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.paths, ["a.rs"]);
+        assert_eq!(result.skipped, 1);
+    }
 }

@@ -12,9 +12,6 @@ pub enum ChanReportError {
     #[error("path escapes root: {0}")]
     PathEscapesRoot(String),
 
-    #[error("invalid utf-8 path: {0}")]
-    InvalidUtf8Path(String),
-
     #[error("jsonl parse error at line {line}: {message}")]
     JsonlParse { line: u64, message: String },
 

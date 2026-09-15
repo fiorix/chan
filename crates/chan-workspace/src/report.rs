@@ -60,8 +60,8 @@ impl ReportState {
 
         // Try the persisted form first. Any error (missing file,
         // schema mismatch, parse error, partial write) falls
-        // through to a full scan. The new scan replaces the bad
-        // file on the next flush.
+        // through to a full scan. A complete scan replaces the bad file
+        // on the next flush; an incomplete scan invalidates the cache.
         let loaded = match std::fs::File::open(jsonl_path) {
             Ok(f) => Index::load_jsonl(BufReader::new(f), &opts).ok(),
             Err(_) => None,
@@ -71,6 +71,13 @@ impl ReportState {
             None => Index::scan(&opts).map_err(|e| ChanError::Report(e.to_string()))?,
         };
 
+        if index.skipped_entries() != 0 {
+            tracing::warn!(
+                root = %workspace_root.display(),
+                skipped = index.skipped_entries(),
+                "report scan skipped entries"
+            );
+        }
         let index = Arc::new(RwLock::new(index));
         let cocomo = opts.cocomo.clone();
         let jsonl_path = jsonl_path.to_path_buf();
@@ -86,9 +93,8 @@ impl ReportState {
                 .map_err(|e| ChanError::Report(format!("spawn writer thread: {e}")))?
         };
 
-        // Eagerly write the initial state so the file exists after
-        // first open. Best-effort: failures only warn, the writer
-        // thread will retry on the next flush.
+        // Eagerly persist complete scans and invalidate incomplete caches.
+        // Best-effort: failures only warn; the writer retries on a flush.
         let _ = flush_tx.send(());
 
         Ok(Arc::new(Self {
@@ -202,6 +208,13 @@ impl ReportState {
         let opts = report_options(workspace_root, policy);
         let replacement =
             Index::scan(&opts).map_err(|error| ChanError::Report(error.to_string()))?;
+        if replacement.skipped_entries() != 0 {
+            tracing::warn!(
+                root = %workspace_root.display(),
+                skipped = replacement.skipped_entries(),
+                "report scan skipped entries"
+            );
+        }
         match self.index.write() {
             Ok(mut index) => *index = replacement,
             Err(poisoned) => *poisoned.into_inner() = replacement,
@@ -323,28 +336,42 @@ fn writer_loop(
         thread::sleep(FLUSH_DEBOUNCE);
         while rx.try_recv().is_ok() {}
 
-        let mut buf = Vec::new();
-        let write_result = {
-            let idx = match index.read() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            idx.write_jsonl(&mut buf, &Scope::All, &cocomo)
+        let idx = match index.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
         };
-        if let Err(e) = write_result {
-            tracing::warn!(error = %e, "chan-report write_jsonl failed");
-            continue;
-        }
-        if let Some(parent) = jsonl_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(error = %e, path = %parent.display(), "chan-report mkdir failed");
-                continue;
-            }
-        }
-        if let Err(e) = atomic_write(&jsonl_path, &buf) {
-            tracing::warn!(error = %e, path = %jsonl_path.display(), "chan-report atomic_write failed");
+        if let Err(error) = persist_report(&jsonl_path, idx.skipped_entries(), |buf| {
+            let result = idx.write_jsonl(buf, &Scope::All, &cocomo);
+            drop(idx); // Release the index before syncing the cache to disk.
+            result
+        }) {
+            tracing::warn!(error = %error, path = %jsonl_path.display(), "chan-report persistence failed");
         }
     }
+}
+
+fn persist_report(
+    jsonl_path: &Path,
+    skipped_entries: usize,
+    serialize: impl FnOnce(&mut Vec<u8>) -> std::result::Result<(), chan_report::ChanReportError>,
+) -> Result<()> {
+    if skipped_entries != 0 {
+        drop(serialize); // Release any captured index guard before filesystem I/O.
+                         // Skips stay attached to this index through later updates. Remove
+                         // any older cache too, so the next open must attempt a full scan.
+        match std::fs::remove_file(jsonl_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    }
+    let mut buf = Vec::new();
+    serialize(&mut buf).map_err(|error| ChanError::Report(error.to_string()))?;
+    if let Some(parent) = jsonl_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    atomic_write(jsonl_path, &buf)
 }
 
 #[cfg(test)]
@@ -352,6 +379,53 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn incomplete_scans_never_persist_and_invalidate_cached_reports() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let opts = ReportOptions::new(root);
+        let index = Index::scan(&opts).unwrap();
+        let jsonl = root.join(".chan/report.jsonl");
+        let write = |buf: &mut Vec<u8>| index.write_jsonl(buf, &Scope::All, &opts.cocomo);
+
+        persist_report(&jsonl, 1, write).unwrap();
+        assert!(
+            !jsonl.exists(),
+            "an eager incomplete scan must not be cached"
+        );
+        persist_report(&jsonl, 0, write).unwrap();
+        assert!(jsonl.exists(), "a complete scan must be cached");
+        persist_report(&jsonl, 1, |_| {
+            panic!("an incomplete replacement must not serialize")
+        })
+        .unwrap();
+        assert!(
+            !jsonl.exists(),
+            "an incomplete policy scan must invalidate an existing cache"
+        );
+        persist_report(&jsonl, 1, |_| {
+            panic!("later updates cannot make an incomplete scan complete")
+        })
+        .unwrap();
+        assert!(!jsonl.exists());
+
+        fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+        let policy = Arc::new(
+            IndexScopePolicy::new(
+                root.to_path_buf(),
+                crate::WorkspaceGeneration::INITIAL,
+                crate::WalkFilter::default(),
+            )
+            .unwrap(),
+        );
+        let state = ReportState::open(root, &jsonl, policy).unwrap();
+        assert!(
+            lang_of(&state, "b.rs").is_some(),
+            "the next open must rescan"
+        );
+    }
 
     fn lang_of(state: &ReportState, rel: &str) -> Option<String> {
         state

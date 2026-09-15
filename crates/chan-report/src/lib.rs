@@ -126,6 +126,7 @@ pub struct Index {
     files: HashMap<String, FileStats>,
     dirs: HashMap<String, DirEntry>,
     filter: Filter,
+    skipped_entries: usize,
 }
 
 /// Internal per-directory aggregate. Mirrors `Totals` plus a
@@ -152,12 +153,25 @@ impl Index {
     /// Walk `opts.root` and produce an index. Files the walker
     /// or counter rejects (unrecognized extension, binary,
     /// gitignored, hidden, oversize) are silently dropped.
+    /// Entry and per-file counting errors are recorded by `skipped_entries`;
+    /// root traversal and invalid override errors still fail the scan.
     pub fn scan(opts: &ReportOptions) -> Result<Self, ChanReportError> {
-        let rels = walk::walk_root(opts)?;
-        let mut files = HashMap::with_capacity(rels.len());
-        for rel in rels {
-            if let Some(fs) = count::count_file_impl(&opts.root, &rel)? {
-                files.insert(rel, fs);
+        Self::scan_with(opts, count::count_file_impl)
+    }
+
+    fn scan_with(
+        opts: &ReportOptions,
+        mut count: impl FnMut(&Path, &str) -> Result<Option<FileStats>, ChanReportError>,
+    ) -> Result<Self, ChanReportError> {
+        let mut rels = walk::walk_root(opts)?;
+        let mut files = HashMap::with_capacity(rels.paths.len());
+        for rel in rels.paths {
+            match count(&opts.root, &rel) {
+                Ok(Some(fs)) => {
+                    files.insert(rel, fs);
+                }
+                Ok(None) => {}
+                Err(_) => rels.skipped += 1,
             }
         }
         let mut idx = Self {
@@ -165,9 +179,16 @@ impl Index {
             filter: Filter::build(opts)?,
             files,
             dirs: HashMap::new(),
+            skipped_entries: rels.skipped,
         };
         idx.rebuild_dirs();
         Ok(idx)
+    }
+
+    /// Entries skipped because walking or counting failed during the initial scan.
+    /// This count is not persisted and is zero for indexes loaded from JSONL.
+    pub fn skipped_entries(&self) -> usize {
+        self.skipped_entries
     }
 
     /// Re-count `rel` from disk and reconcile against the index.
@@ -338,6 +359,7 @@ impl Index {
             filter,
             files: map,
             dirs: HashMap::new(),
+            skipped_entries: 0,
         };
         idx.rebuild_dirs();
         Ok(idx)
@@ -579,4 +601,34 @@ fn roll_up(files: &[FileStats]) -> (Vec<LanguageStats>, Totals) {
     let mut by_language: Vec<LanguageStats> = by_lang.into_values().collect();
     sort_by_language(&mut by_language);
     (by_language, totals)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_per_file_count_error_does_not_abort_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let opts = ReportOptions::new(dir.path());
+        let index = Index::scan_with(&opts, |root, rel| {
+            if rel == "a.rs" {
+                Err(ChanReportError::Io("injected count failure".into()))
+            } else {
+                count::count_file_impl(root, rel)
+            }
+        })
+        .expect("one count failure must not abort the scan");
+        assert!(index.file("a.rs").is_none());
+        assert!(index.file("b.rs").is_some());
+        assert_eq!(index.skipped_entries(), 1);
+        let mut jsonl = Vec::new();
+        index
+            .write_jsonl(&mut jsonl, &Scope::All, &opts.cocomo)
+            .unwrap();
+        let loaded = Index::load_jsonl(std::io::Cursor::new(jsonl), &opts).unwrap();
+        assert_eq!(loaded.skipped_entries(), 0);
+    }
 }

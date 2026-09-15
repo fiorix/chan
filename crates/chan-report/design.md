@@ -110,7 +110,9 @@ The crate uses the `ignore` crate (same engine as ripgrep) with these settings d
   - `exclude_globs`: extra gitignore-style patterns applied on top of the gitignore rules, both during the walk and by the cached incremental filter.
   - `path_policy`: an optional `Arc<dyn ReportPathPolicy>` that overrides all four standalone sources above. The full walk and incremental filter call the same object, stay on one filesystem, and do not follow symlinks. chan-workspace uses this seam so report scope is exactly its generated index scope instead of a second matcher.
 
-The walker emits relative POSIX paths to the counter. Anything the counter can't classify (no recognized language) is dropped silently; binary content falls back to tokei's path-based parse and is dropped when that fails. Non-UTF-8 paths fail the walk with `ChanReportError::InvalidUtf8Path`.
+The walker emits relative POSIX paths to the counter. Unrecognized languages are dropped silently. Non-UTF-8 content uses tokei's path-based decoder; it is not necessarily binary or uncountable. Unreadable descendants, paths outside the root, non-UTF-8 file names, and per-file counting errors are skipped so siblings remain reportable. Errors traversing the root itself, I/O errors without path context, and invalid exclude overrides still fail the scan. A pathless I/O error can originate from the root's directory listing, so it cannot safely be classified as a failed descendant. `Index::skipped_entries()` exposes the number of entries skipped because walking or counting failed during the scan; this counter is not persisted and is zero after a JSONL load. chan-workspace logs one warning with the count when opening or replacing a report whose scan skipped entries.
+
+chan-workspace does not persist an index whose scan skipped entries. Its writer checks the scan count on every flush, including the eager open or policy-replacement flush and later updates. It also removes any existing JSONL cache for an incomplete index so the next open rescans; cache invalidation errors are logged. Later per-file updates do not clear the scan count. Only a complete replacement scan permits persistence again, preventing transient traversal failures from becoming holes in the cache.
 
 Standalone mode has one known asymmetry: the cached incremental `Filter` reapplies the root `.gitignore` plus exclude globs, but not nested ignore files deeper in the tree. Nested ignores take effect during a full standalone `scan`; a watcher-driven standalone `update` on a file only a nested `.gitignore` excludes can therefore insert a row that the next full rescan drops. A supplied `path_policy` removes that asymmetry because both paths call the same policy object.
 
@@ -141,6 +143,8 @@ These are documented in the same place they're read so users can override them p
 Integration coverage uses tempdir-built mixed-language trees and pins the behavioral contracts:
 
   - Walker: gitignore filtering during scan and update.
+  - Scan errors: injected descendant traversal, non-UTF-8 path, out-of-root path and per-file counting failures preserve good siblings and count skips; root traversal and pathless I/O errors remain fatal. JSONL loads reset the skipped-entry count.
+  - Workspace persistence: injected scan skip counts suppress fresh caches, invalidate existing caches and remain unpersisted on later flushes; a subsequent open rescans. Complete scans still write JSONL.
   - Counter: language detection, SLOC, and complexity vs. known fixtures written inline.
   - Incremental: distinct `UpdateOutcome`s, rename row movement, and ancestor-chain maintenance for the directory cache.
   - JSONL: write + load round-trips preserve file rows and the directory cache; schema mismatch returns `SchemaMismatch`.
@@ -152,4 +156,4 @@ Integration coverage uses tempdir-built mixed-language trees and pins the behavi
   - Atomic write to disk. chan-workspace owns persistence.
   - Cross-process locking. chan-workspace serializes access behind its own lock (an `RwLock` around the `Index`).
   - Threading. `scan`, `update`, and `snapshot` are synchronous; the consumer owns any worker threads.
-  - i18n / non-UTF-8 paths. Walker rejects non-UTF-8 entries with `ChanReportError::InvalidUtf8Path`.
+  - Non-UTF-8 path representation. Such file names are skipped and counted during the walk; report paths remain UTF-8.
