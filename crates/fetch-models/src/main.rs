@@ -24,6 +24,8 @@
 //! no-op. Honors `HTTPS_PROXY` / `HTTP_PROXY` for restricted
 //! networks; hf-hub's underlying HTTP client picks them up.
 
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -143,16 +145,20 @@ fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
 /// same bytes; tar follows symlinks by default, so blobs/ would
 /// double the archive).
 fn encode_tar_zst(src: &Path, dst: &Path) -> Result<()> {
-    // Atomic write: encode to a sibling tmp file, fsync, rename.
-    // Avoids leaving a half-written bundle on disk if the encode
-    // fails partway through (compounding `cargo build` confusion).
+    encode_tar_zst_via(src, dst, |path| File::create(path))
+}
+
+fn encode_tar_zst_via<S: Write + Into<File>>(
+    src: &Path,
+    dst: &Path,
+    create: impl FnOnce(&Path) -> io::Result<S>,
+) -> Result<()> {
+    // Complete both archive layers and sync the sibling temporary file
+    // before publishing it, so finalization failures cannot look current.
     let tmp = dst.with_extension("zst.tmp");
-    {
-        let file =
-            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        let zenc = zstd::Encoder::new(file, ZSTD_LEVEL)
-            .context("init zstd encoder")?
-            .auto_finish();
+    let result = (|| -> Result<()> {
+        let file = create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        let zenc = zstd::Encoder::new(file, ZSTD_LEVEL).context("init zstd encoder")?;
         let mut tarw = tar::Builder::new(zenc);
         tarw.follow_symlinks(true);
         // Walk the staging tree explicitly so we can filter
@@ -168,11 +174,26 @@ fn encode_tar_zst(src: &Path, dst: &Path) -> Result<()> {
             tarw.append_path_with_name(&entry, rel)
                 .with_context(|| format!("append {}", entry.display()))?;
         }
-        tarw.finish().context("finalize tar")?;
-        // Drop the encoder (auto_finish flushes zstd footer).
+        let zenc = tarw.into_inner().context("finalize tar")?;
+        let file: File = zenc.finish().context("finalize zstd")?.into();
+        file.sync_all()
+            .with_context(|| format!("sync {}", tmp.display()))?;
+        drop(file);
+        std::fs::rename(&tmp, dst)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), dst.display()))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(cleanup) = std::fs::remove_file(&tmp) {
+            if cleanup.kind() != io::ErrorKind::NotFound {
+                return Err(error.context(format!(
+                    "remove {} after encode failure: {cleanup}",
+                    tmp.display()
+                )));
+            }
+        }
+        return Err(error);
     }
-    std::fs::rename(&tmp, dst)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), dst.display()))?;
     Ok(())
 }
 
@@ -243,4 +264,113 @@ fn active_proxy() -> Option<(&'static str, String)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("fetch-models-{name}-{}", std::process::id()));
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("remove stale test directory: {error}"),
+            }
+            std::fs::create_dir(&path).expect("create unique test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let cleanup = std::fs::remove_dir_all(&self.0);
+            if !std::thread::panicking() {
+                cleanup.expect("remove test directory");
+            }
+        }
+    }
+
+    struct FailingWriter {
+        file: File,
+        remaining: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("injected finalization write failure"));
+            }
+            let count = self.file.write(&bytes[..bytes.len().min(self.remaining)])?;
+            self.remaining -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl From<FailingWriter> for File {
+        fn from(writer: FailingWriter) -> Self {
+            writer.file
+        }
+    }
+
+    #[test]
+    fn a_bundle_whose_final_flush_fails_is_not_promoted() {
+        use std::io::Read;
+
+        let dir = TestDir::new("final-flush");
+        let staging = dir.0.join("staging");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("config.json"), "{\"model\":\"tiny\"}\n").unwrap();
+        let reference = dir.0.join("reference.tar.zst");
+        encode_tar_zst(&staging, &reference).expect("reference bundle");
+        let reference_len = std::fs::metadata(&reference).unwrap().len();
+        let decoder = zstd::Decoder::new(File::open(&reference).unwrap()).unwrap();
+        let mut archive = tar::Archive::new(decoder);
+        let mut entries = archive.entries().unwrap();
+        {
+            let mut entry = entries.next().expect("staged file").unwrap();
+            assert_eq!(entry.path().unwrap().as_ref(), Path::new("config.json"));
+            let mut content = String::new();
+            entry.read_to_string(&mut content).unwrap();
+            assert_eq!(content, "{\"model\":\"tiny\"}\n");
+        }
+        assert!(entries.next().is_none());
+        let dst = dir.0.join("models.tar.zst");
+        let result = encode_tar_zst_via(&staging, &dst, |path| {
+            Ok(FailingWriter {
+                file: File::create(path)?,
+                remaining: reference_len as usize / 2,
+            })
+        });
+        let promoted_len = std::fs::metadata(&dst).ok().map(|meta| meta.len());
+        let up_to_date = bundle_up_to_date(&dst, &staging).unwrap();
+        assert!(result.is_err() && !dst.exists(), "result={result:?}, reference_len={reference_len}, promoted_len={promoted_len:?}, bundle_up_to_date={up_to_date}");
+        assert_eq!(result.as_ref().unwrap_err().to_string(), "finalize zstd");
+        assert!(
+            !dst.with_extension("zst.tmp").exists(),
+            "failed encode must clean the temporary bundle"
+        );
+        std::fs::copy(&reference, &dst).unwrap();
+        assert!(encode_tar_zst_via(&staging, &dst, |path| {
+            Ok(FailingWriter {
+                file: File::create(path)?,
+                remaining: reference_len as usize / 2,
+            })
+        })
+        .is_err());
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            std::fs::read(&reference).unwrap(),
+            "failed re-encode must preserve an existing bundle"
+        );
+        assert!(!dst.with_extension("zst.tmp").exists());
+    }
 }
