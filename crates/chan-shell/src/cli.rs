@@ -2243,7 +2243,7 @@ async fn cmd_shell_team(action: TeamAction) -> Result<()> {
     // The caller's window, when run from a chan terminal that owns one, so
     // the server binds each spawned agent session to it ($CHAN_WINDOW_ID
     // flows to the agents, like a regular SPA terminal). A windowless caller
-    // (a native terminal) omits it and the agents spawn unbound, as before.
+    // (a native terminal) omits it and the agents spawn unbound.
     let window_id = std::env::var("CHAN_WINDOW_ID")
         .ok()
         .map(|s| s.trim().to_string())

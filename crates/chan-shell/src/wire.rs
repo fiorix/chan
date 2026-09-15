@@ -458,7 +458,7 @@ pub enum ControlRequest {
         /// carry $CHAN_WINDOW_ID too and `cs pane` / `cs open` work from
         /// inside an agent (the window-targeting commands resolve a window).
         /// Absent when the caller has no window (e.g. a native terminal):
-        /// the agents spawn unbound, as before.
+        /// the agents spawn unbound.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<String>,
         /// Optional pane-side placement for every surfaced member tab. The
