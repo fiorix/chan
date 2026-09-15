@@ -151,15 +151,6 @@ use static_assets::serve_static;
 // crate root so the route layer reaches it as `crate::terminal_sessions::…`.
 pub(crate) use chan_library::terminal_sessions;
 
-/// Tunnel workspace-name helpers re-exported from chan-tunnel-proto so
-/// the `chan` binary can pre-validate / pre-sanitize without taking
-/// a direct dep on the tunnel proto crate.
-pub mod tunnel {
-    pub use chan_tunnel_proto::{
-        is_valid_workspace_name, sanitize_workspace_name, MAX_WORKSPACE_NAME_LEN,
-    };
-}
-
 use self_writes::SelfWrites;
 
 use std::path::PathBuf;

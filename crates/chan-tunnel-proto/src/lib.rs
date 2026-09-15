@@ -30,8 +30,7 @@ pub use h2_duplex::H2Duplex;
 pub use io::{read_frame, write_frame, IoFrameError};
 pub use lease_refresh::{LeaseRefreshRequest, LeaseRefreshResponse};
 pub use workspace_name::{
-    is_valid_username, is_valid_workspace_name, sanitize_workspace_name, MAX_USERNAME_LEN,
-    MAX_WORKSPACE_NAME_LEN,
+    is_valid_username, is_valid_workspace_name, MAX_USERNAME_LEN, MAX_WORKSPACE_NAME_LEN,
 };
 
 /// Path the client POSTs to on the public tunnel host. Stable

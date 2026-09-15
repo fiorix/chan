@@ -13,7 +13,6 @@ chan-tunnel-proto = "0.11"
 control::    Hello, HelloAck, ProtocolVersion
 lease_refresh:: LeaseRefreshRequest, LeaseRefreshResponse
 workspace_name:: is_valid_workspace_name, is_valid_username,
-             sanitize_workspace_name,
              MAX_WORKSPACE_NAME_LEN, MAX_USERNAME_LEN
 frame::      encode_frame, decode_frame, FrameError
 io::         read_frame, write_frame, IoFrameError

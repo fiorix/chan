@@ -1,4 +1,4 @@
-//! Workspace-name validation and sanitization.
+//! Workspace-name validation.
 //!
 //! Workspace names appear in public URLs as `/{user}/{workspace}/...`, so
 //! they have to be URL-safe. The constraints are intentionally
@@ -6,10 +6,7 @@
 //! routing rules: lowercase ASCII letters, digits, and ASCII
 //! hyphens; length 1..=32; cannot start or end with a hyphen.
 //!
-//! The `chan` CLI derives an initial workspace name from the directory
-//! basename; that derivation should call `sanitize_workspace_name`
-//! before saving so the user never holds a name that the tunnel
-//! server would reject. The tunnel client and server both call
+//! The tunnel client and server both call
 //! `is_valid_workspace_name` on the wire as a defense-in-depth check.
 
 /// Maximum workspace-name length (inclusive). Picked to leave headroom
@@ -66,50 +63,6 @@ pub fn is_valid_workspace_name(s: &str) -> bool {
     bytes.iter().all(|&b| valid(b))
 }
 
-/// Best-effort transform of an arbitrary string into a valid workspace
-/// name:
-/// - lowercases ASCII letters
-/// - replaces every other byte with `-`
-/// - collapses runs of `-`
-/// - trims leading/trailing `-`
-/// - truncates to `MAX_WORKSPACE_NAME_LEN`
-///
-/// Returns `None` when the result would be empty (e.g. input was
-/// all whitespace or punctuation). Callers should propagate that
-/// as a "please provide a name explicitly" error rather than
-/// silently inventing one.
-pub fn sanitize_workspace_name(input: &str) -> Option<String> {
-    let mut out = String::with_capacity(input.len());
-    let mut last_was_dash = true;
-    for ch in input.chars() {
-        let b = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '-'
-        };
-        if b == '-' {
-            if last_was_dash {
-                continue;
-            }
-            last_was_dash = true;
-        } else {
-            last_was_dash = false;
-        }
-        out.push(b);
-        if out.len() >= MAX_WORKSPACE_NAME_LEN {
-            break;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,24 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_typical_inputs() {
-        assert_eq!(sanitize_workspace_name("My Notes"), Some("my-notes".into()));
-        assert_eq!(
-            sanitize_workspace_name("  Daily Journal  "),
-            Some("daily-journal".into())
-        );
-        assert_eq!(
-            sanitize_workspace_name("notes/2026-Q2"),
-            Some("notes-2026-q2".into())
-        );
-        assert_eq!(sanitize_workspace_name("---"), None);
-        assert_eq!(sanitize_workspace_name(""), None);
-        let long = "x".repeat(100);
-        let sanitized = sanitize_workspace_name(&long).unwrap();
-        assert!(sanitized.len() <= MAX_WORKSPACE_NAME_LEN);
-    }
-
-    #[test]
     fn username_accepts_typical_shapes() {
         assert!(is_valid_username("alice"));
         assert!(is_valid_username("Alice"));
@@ -175,24 +110,5 @@ mod tests {
         assert!(!is_valid_username("alice?query"));
         assert!(!is_valid_username("alice#anchor"));
         assert!(!is_valid_username(&"a".repeat(MAX_USERNAME_LEN + 1)));
-    }
-
-    #[test]
-    fn sanitize_output_is_always_valid() {
-        for s in [
-            "Hello, World!",
-            "résumé",
-            "workspace_name",
-            "100%",
-            "____",
-            "a-b-c",
-        ] {
-            if let Some(n) = sanitize_workspace_name(s) {
-                assert!(
-                    is_valid_workspace_name(&n),
-                    "sanitized {s:?} -> {n:?} not valid"
-                );
-            }
-        }
     }
 }

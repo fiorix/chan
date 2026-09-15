@@ -42,7 +42,7 @@ This crate owns:
 
 - Control frames (`Hello`, `HelloAck`) and the one-shot yamux lease-refresh request/response, including structured refusal codes and redacted PAT debug behavior.
 - Length-prefixed framing (`[u32 BE len][json bytes]`) used only for the two control messages.
-- Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers), plus `sanitize_workspace_name`.
+- Workspace-name and username validators applied identically by client and server (defense-in-depth gate against URL-unsafe identifiers).
 - `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
 - `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
 - The accept-failure policy (`AcceptFailure`, `accept_next`) shared by the tunnel terminator's listener and devserver-control's proxy control listener. See [Accept failures](#accept-failures).
@@ -153,8 +153,6 @@ This crate is the validator surface for two values that flow into public routing
 ### Workspace name (`is_valid_workspace_name`)
 
 Rules: 1..=32 ASCII bytes; characters `[a-z0-9-]`; first and last character alphanumeric (no leading/trailing hyphen). Both sides call it: the client refuses to send an invalid name, and the server refuses to accept one (`invalid_workspace_name` refusal). The duplication is intentional; the server does not trust clients, and the client check surfaces a config error locally without a round-trip.
-
-`sanitize_workspace_name` is a best-effort transform from a free-form string (often the workspace directory's basename) into a valid name: lowercase ASCII, collapse non-alnum runs to single `-`, trim, truncate. Returns `None` when the result would be empty so the caller can prompt the user instead of inventing a name.
 
 ### Username (`is_valid_username`)
 
