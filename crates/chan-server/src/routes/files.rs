@@ -4076,7 +4076,7 @@ mod write_tests {
     }
 
     #[tokio::test]
-    async fn dropping_binary_download_body_joins_the_bounded_reader() {
+    async fn dropping_binary_download_body_releases_the_bounded_reader() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();

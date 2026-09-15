@@ -34,7 +34,8 @@ pub struct AppState {
     pub token: Option<String>,
     /// Canonical URL prefix the SPA prepends to fetch and WebSocket
     /// URLs, injected into the shell as `<meta name="chan-prefix">`.
-    /// Initialized from `ServeConfig::prefix` and shared with `ServerHandle`.
+    /// Initialized from `ServeConfig::prefix`, and shared with `TenantArtifacts`
+    /// when a host mounts the tenant (a standalone `chan serve` never does).
     /// Devserver tenants retain their own prefixes when the tunnel connects.
     /// Empty when served at root.
     ///

@@ -28,13 +28,13 @@ static BUILD_ID: OnceLock<String> = OnceLock::new();
 /// are ignored, so an in-process CLI dispatch cannot relabel a live server.
 ///
 /// `chan::run` calls this before dispatching any subcommand. A binary that
-/// embeds chan-server without calling it serves [`UNKNOWN_BUILD_ID`], which is
-/// the honest answer: nothing told the process what it is.
+/// embeds chan-server without calling it serves the build id `unknown`, which
+/// is the honest answer: nothing told the process what it is.
 pub fn set_build_id(id: impl Into<String>) {
     let _ = BUILD_ID.set(id.into());
 }
 
-/// The running binary's build id, or [`UNKNOWN_BUILD_ID`] when undeclared.
+/// The running binary's build id, or `unknown` when undeclared.
 pub fn build_id() -> &'static str {
     declared_or_unknown(BUILD_ID.get())
 }

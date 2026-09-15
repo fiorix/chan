@@ -3902,8 +3902,11 @@ pub(crate) fn open_graph_link(
     Ok("graph link request queued".into())
 }
 
-/// Category 1: open a new terminal tab in the originating window. A
-/// requested file resolves to its parent directory as the cwd.
+/// The tab options of a `cs terminal new` request, shared by the workspace and
+/// standalone open paths: the tab's name and group, the already-validated spawn
+/// command and environment overrides, and the optional pane and side the tab
+/// lands in. The cwd is not here because each path resolves it against a
+/// different root.
 struct TerminalOpenSpec {
     tab_name: Option<String>,
     tab_group: Option<String>,
@@ -3912,6 +3915,8 @@ struct TerminalOpenSpec {
     destination: Option<TabDestination>,
 }
 
+/// Category 1: open a new terminal tab in the originating window. A
+/// requested file resolves to its parent directory as the cwd.
 fn open_term_new(
     workspace: &Workspace,
     window_id: &str,

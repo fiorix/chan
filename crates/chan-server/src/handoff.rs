@@ -374,9 +374,8 @@ pub struct DevserverSummary {
 /// tmp, mirroring the devserver discovery dir, so a bare squattable node
 /// never sits in shared /tmp. Pure path resolution: the desktop bind side
 /// creates/validates the directory via [`ensure_well_known_socket_path`],
-/// the client side validates without creating via
-/// [`existing_well_known_socket_path`]. The name is kept short for the
-/// macOS `sun_path` 104-byte limit. Returns None on non-unix/windows.
+/// the client side validates it without creating it. The name is kept short
+/// for the macOS `sun_path` 104-byte limit. Returns None on non-unix/windows.
 pub fn well_known_socket_path() -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -439,7 +438,7 @@ fn uses_no_xdg_desktop_dir() -> bool {
 /// Bind-side resolution of the well-known endpoint: on the unix no-XDG arm
 /// this CREATES the owner-only socket directory, or refuses when another uid
 /// owns the node. Only the desktop's listener calls this; clients must never
-/// create the directory (see [`existing_well_known_socket_path`]).
+/// create the directory and only validate an existing one.
 pub fn ensure_well_known_socket_path() -> Option<PathBuf> {
     #[cfg(unix)]
     if uses_no_xdg_desktop_dir() {
@@ -1004,8 +1003,9 @@ pub async fn desktop_is_live() -> bool {
 /// Try to hand `workspace_path` to a running same-user desktop. Connects
 /// the well-known socket, sends an `OpenWorkspace` request, and parses
 /// the response. Any connect failure / stale socket / read error /
-/// malformed reply maps to `Outcome::NoDesktop` so the CLI behaves
-/// exactly like today when the desktop is absent.
+/// malformed reply maps to `Outcome::NoDesktop`, the answer for an
+/// absent desktop: the CLI then launches chan-desktop (a forced-desktop
+/// invocation) or starts a standalone server.
 ///
 /// A short connect+IO timeout bounds the case where a stale socket
 /// file exists but nothing is accepting; the CLI must not hang on a
@@ -1150,11 +1150,13 @@ pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
 
 /// Try to make a running same-user desktop tear down the workspace it serves at
 /// `workspace_path` -- the `chan close` / `chan workspace forget` handoff. Connects
-/// the well-known socket, sends a `CloseWorkspace` request, and maps the reply
-/// via [`map_close_response`]. Any connect failure / stale socket / read error /
-/// malformed reply maps to `Outcome::NoDesktop` so the CLI falls back to the
-/// per-pid control-socket teardown exactly like today when the desktop is
-/// absent. Mirrors `try_handoff`'s framing + timeouts.
+/// the well-known socket, sends a `CloseWorkspace` request, and maps the reply:
+/// `Closed` is `Outcome::HandedOff`, and a close refusal, version skew, or
+/// desktop error keeps its own `Outcome` variant. Any connect failure / stale
+/// socket / read error / malformed or unrelated reply maps to
+/// `Outcome::NoDesktop` so the CLI falls back to the per-pid control-socket
+/// teardown, the same path it takes when no desktop is running. Mirrors
+/// `try_handoff`'s framing + timeouts.
 #[cfg(unix)]
 pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome {
     let Some(socket_path) = existing_well_known_socket_path() else {

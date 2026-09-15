@@ -231,12 +231,13 @@ struct AppArtifacts {
     /// workers alive; dropping the last one shuts the lane down and joins
     /// them.
     bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
-    /// Mutable handle to the URL prefix injected into the SPA shell
-    /// as `<meta name="chan-prefix">`. Local serve sets it once at
-    /// build time from `ServeConfig::prefix`; tunnel mode swaps in
-    /// the registration prefix (`/{user}/{workspace}`) on Connected so
-    /// the SPA's API calls pick up the public path. Shared with
-    /// `AppState::prefix` (same Arc).
+    /// The URL prefix injected into the SPA shell as
+    /// `<meta name="chan-prefix">`. The app builders set it once from
+    /// `ServeConfig::prefix` and nothing writes it afterwards: a
+    /// devserver tenant already serves at its public slug, so a tunnel
+    /// connecting leaves it unchanged. Shared with `AppState::prefix`
+    /// (same Arc), and with `TenantArtifacts::prefix` when a host
+    /// mounts the tenant.
     prefix: Arc<RwLock<String>>,
     /// MCP socket bridge handle. Held here (not on AppState) so the
     /// accept-loop closures don't have to keep the AppState alive

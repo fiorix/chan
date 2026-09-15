@@ -2054,11 +2054,12 @@ fn start_registry_reload_watcher(
     Ok(watcher)
 }
 
-/// Fixed registration name sent in the tunnel `Hello` frame. The gateway
-/// resolves the devserver identity from the token (PAT SHA-256) and ignores
-/// this value; it is non-empty only to satisfy the client-side name check
-/// (`chan_tunnel_proto::is_valid_workspace_name`). One devserver per user means
-/// the registry key `(user, name)` never collides across users.
+/// Fixed placeholder sent as `Hello.workspace` in the tunnel handshake. The
+/// tunnel server keys each registration by username and the devserver id the
+/// gateway resolves from the token (PAT SHA-256), not by this value, so every
+/// devserver sends the same name without colliding. It still has to pass
+/// `chan_tunnel_proto::is_valid_workspace_name`: the client checks it before
+/// sending `Hello`, and the tunnel server refuses a `Hello` that fails it.
 const DEVSERVER_TUNNEL_NAME: &str = "devserver";
 
 /// Dial the gateway tunnel on a background task that races the reconnect loop
