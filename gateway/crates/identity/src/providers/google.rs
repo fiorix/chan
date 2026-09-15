@@ -2,8 +2,7 @@
 //!
 //! Standard OIDC: authorize -> token exchange -> userinfo. We pull
 //! `sub` (the stable Google account id), email + verified flag, and
-//! `name`. Falls back to email as the display name if `name` is
-//! absent.
+//! optional `name`, passed through as the display name without an email fallback.
 
 use async_trait::async_trait;
 use oauth2::basic::BasicClient;
