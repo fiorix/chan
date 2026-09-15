@@ -25,6 +25,8 @@ flowchart TB
 
 Registered workspace opens run `Library::open_workspace` on Tokio's blocking pool with an owned root and cloned library handle. Permit waits, writer-lock acquisition, canonicalization and trash cleanup therefore do not park a runtime worker. The optional registration mutex is asynchronous and stays on the caller; no synchronous host guard crosses the await. Tenant mounting resumes on the runtime after a successful open, and typed workspace failures remain `Error::Core`.
 
+A cancelled registered mount or an in-process writer-handle conflict settles `Starting` into `Error` with `workspace is still releasing; retry`, unless the root is actually mounted, in which case its transient state is cleared. Cancellation uses the retry state because an already-running blocking open can retain the writer handle until it returns. A later successful mount reports `Running`.
+
 A failed unregister settles `Removing` into `Error` with the returned failure reason and a status-feed notification, so a retained registration can be retried. An interrupted removal reports cancellation or panic instead of leaving the row in `Removing`.
 
 A user-intent close commits when it detaches the runtime and records off in the workspace overlay, before asynchronous teardown. Cancelling teardown aborts tenant tasks and clears the transient closing state with a feed notification; the off intent remains persisted. Shutdown closes preserve the overlay's desired state. Teardown stops and joins tenant tasks, drops socket and other keepalive owners, then clears the workspace cell and waits for the writer lock to release. An in-flight blocking operation, including an MCP tool call, can retain its workspace handle until that operation returns.
@@ -33,7 +35,7 @@ The window registry, workspace overlay, and local color store stamp save snapsho
 
 Each hosted runtime stores its normalized canonical root before publication. By-root lookups canonicalize only the caller's target, outside the workspace-map lock, and compare it with those stored keys so a mounted root's filesystem cannot block lookup while the shared routing map is locked. After tenant construction, root validation runs on the blocking pool without the map lock. Publication then checks both prefix and canonical root under the write lock; a losing runtime shuts down after releasing that guard. The asynchronous registration mutex still serializes idempotent registrations across the open and mount.
 
-Cancelling a mount does not stop an already-running blocking root check: its workspace handle retains the writer lock until `ensure_root_available` returns, indefinitely if the root hangs.
+Cancelling a mount does not stop an already-running blocking root check: its workspace handle retains the writer lock until `ensure_root_available` returns, indefinitely if the root hangs. The host settles the cancelled registered mount into `Error` with `workspace is still releasing; retry`.
 
 ## Boundaries
 

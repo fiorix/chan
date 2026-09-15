@@ -71,7 +71,7 @@ pub struct HostedWorkspace {
 /// `on`. The launcher drives spinners and disables toggles off this REAL
 /// backend state instead of an optimistic timer: a row spins while `starting`,
 /// settles solid on `running`/`stopped`, and surfaces `error` (with
-/// [`LauncherWorkspace::error`]) when a mount fails.
+/// [`LauncherWorkspace::error`]) when a lifecycle operation needs retrying.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceStatus {
@@ -92,14 +92,15 @@ pub enum WorkspaceStatus {
     /// Remove requested / in flight. The launcher shows a spinner and locks
     /// power/remove controls until the row disappears or settles.
     Removing,
-    /// The last mount attempt failed; [`LauncherWorkspace::error`] carries the
-    /// reason. The launcher clears the spinner and surfaces the reason.
+    /// A mount or removal failed, or the root is still releasing after an
+    /// interrupted operation. [`LauncherWorkspace::error`] carries the reason.
+    /// The launcher clears the spinner and surfaces the reason.
     Error,
     /// Mounted, but the filesystem under the root is currently unreachable --
     /// a network mount whose client stalled, died, or is being remounted.
     ///
     /// Distinct from both `Running` (which claims the workspace works) and
-    /// `Error` (which reads as a failed mount the user should retry). The
+    /// `Error` (which calls for retrying a lifecycle operation). The
     /// tenant stays up and keeps its live state; the health probe clears this
     /// back to `Running` on its own once the mount answers again, including
     /// across a remount. The launcher shows the row as degraded and keeps the
@@ -452,18 +453,15 @@ pub struct WorkspaceHost {
     /// where they meet. In-memory only -- a tunnel's lifetime is its
     /// foreground command's.
     tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
-    /// Transient mount-lifecycle overlay keyed by canonical workspace root: a
-    /// root being mounted (`Starting`) or whose last mount failed (`Error`).
-    /// The `workspaces` map is the running source of truth (presence = running);
-    /// this carries the two transient states it cannot express, so the launcher
-    /// can spin a row (`starting`) and show a failure reason (`error`). Marked
-    /// on mount START in [`open_registered_workspace`](Self::open_registered_workspace),
-    /// cleared when the mount settles to running, dropped to stopped on turn-off.
+    /// Transient lifecycle overlay keyed by canonical workspace root. The
+    /// `workspaces` map is the running source of truth; this records in-flight
+    /// operations, retryable failures and root health that it cannot express.
     mount_state: Mutex<HashMap<PathBuf, MountState>>,
 }
 
 /// The transient lifecycle of a workspace root that the `workspaces` map (the
-/// running set) cannot express: a mount in flight, or why the last one failed.
+/// running set) cannot express: in-flight operations, retryable failures or
+/// an unavailable filesystem.
 /// Held in [`WorkspaceHost::mount_state`] and projected into
 /// [`WorkspaceStatus`] by [`WorkspaceHost::workspace_status`].
 #[derive(Clone)]
@@ -474,7 +472,8 @@ enum MountState {
     Closing,
     /// A remove/unregister is in flight.
     Removing,
-    /// The last mount attempt failed; the string is the short human reason.
+    /// A mount or removal failed, or the root is still releasing after an
+    /// interrupted operation. The string is the short human reason.
     Error(String),
     /// Mounted but the filesystem under the root is unreachable; the string is
     /// the transport reason. Set and cleared by the health probe, never by a
@@ -554,6 +553,20 @@ impl Drop for WorkspaceCloseGuard<'_> {
         if self.armed {
             self.host.clear_mount_state(&self.root);
             self.host.notify_window_change();
+        }
+    }
+}
+
+struct WorkspaceMountGuard<'a> {
+    host: &'a WorkspaceHost,
+    root: PathBuf,
+    armed: bool,
+}
+
+impl Drop for WorkspaceMountGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.host.settle_interrupted_mount(&self.root);
         }
     }
 }
@@ -950,9 +963,15 @@ impl WorkspaceHost {
         // through -- the `open_or_get` wrapper, the desktop's direct boot-restore
         // (embedded.rs), the devserver `mount_at` -- so all of them surface
         // `starting`/`error` without each routing the lifecycle themselves.
-        self.mark_mount_starting(root);
+        let mut mounting = WorkspaceMountGuard {
+            host: self,
+            root: canonical_key(root),
+            armed: true,
+        };
+        self.mark_mount_starting(&mounting.root);
         let result = self.open_registered_workspace_inner(root, config).await;
-        self.settle_mount(root, &result);
+        self.settle_mount(&mounting.root, &result);
+        mounting.armed = false;
         result
     }
 
@@ -3095,9 +3114,9 @@ impl WorkspaceHost {
         self.notify_window_change();
     }
 
-    /// Record that a workspace root's last mount failed (`error` + reason) and
-    /// fire the watch feed so the launcher clears the spinner and surfaces the
-    /// reason.
+    /// Record a failed mount or removal, or a root still releasing after an
+    /// interrupted operation. Notify the watch feed so the launcher clears the
+    /// spinner and surfaces the reason.
     fn mark_mount_error(&self, root: &Path, reason: String) {
         let key = canonical_key(root);
         self.mount_state
@@ -3205,18 +3224,26 @@ impl WorkspaceHost {
             .remove(&key);
     }
 
-    /// Project a finished mount onto the lifecycle overlay: clear on success
-    /// (the `workspaces` map now reports `running`); leave `starting` on our own
-    /// in-flight contention (`WorkspaceAlreadyOpen` -- a concurrent task of THIS
-    /// process is mounting the same root and will settle it, so it is not a
-    /// failure); clear to the live lock probe on a foreign writer lock; record
-    /// `error` for a real open failure.
+    /// Clear successful mounts and foreign-lock contention; publish failures
+    /// for the launcher to display and retry.
     fn settle_mount(&self, root: &Path, result: &Result<HostedWorkspace, Error>) {
         match result {
             Ok(_) => self.clear_mount_state(root),
-            Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => {}
+            Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => {
+                self.settle_interrupted_mount(root)
+            }
             Err(Error::Core(ChanError::WorkspaceLocked)) => self.clear_workspace_lifecycle(root),
             Err(e) => self.mark_mount_error(root, e.to_string()),
+        }
+    }
+
+    fn settle_interrupted_mount(&self, root: &Path) {
+        if self.is_root_mounted(root) {
+            self.clear_workspace_lifecycle(root);
+        } else {
+            // A cancelled blocking open can keep its writer handle until the
+            // operation returns, so cancellation leaves an explicit retry state.
+            self.mark_mount_error(root, "workspace is still releasing; retry".into());
         }
     }
 
@@ -4627,6 +4654,160 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_mount_already_open_reports_releasing_and_allows_retry() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            let host = WorkspaceHost::new(library, fake_builder());
+            let error = host
+                .open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+                "{error}"
+            );
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                )
+            );
+            drop(workspace);
+            host.open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await
+                .unwrap();
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Running, None)
+            );
+            // A contention error for a root actually mounted here clears stale state.
+            host.mount_state
+                .lock()
+                .unwrap()
+                .insert(canonical_key(root.path()), MountState::Starting);
+            host.open_registered_workspace(root.path(), serve_config("/other"))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Running, None)
+            );
+            assert!(!host
+                .mount_state
+                .lock()
+                .unwrap()
+                .contains_key(&canonical_key(root.path())));
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_mount_cancellation_settles_starting() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let host = Arc::new(WorkspaceHost::new(
+                library,
+                Arc::new(GatedWorkspaceBuilder {
+                    entered: std::sync::Mutex::new(Some(entered_tx)),
+                    release: release.clone(),
+                }),
+            ));
+            let mounting_host = host.clone();
+            let mounting_root = root.path().to_path_buf();
+            let mount = tokio::spawn(async move {
+                mounting_host
+                    .open_registered_workspace(mounting_root, serve_config("/workspace"))
+                    .await
+            });
+            entered_rx.await.unwrap();
+            assert_eq!(
+                host.workspace_status(root.path()).0,
+                WorkspaceStatus::Starting
+            );
+            let notify = host.library_change_notify();
+            let changed = notify.notified();
+            mount.abort();
+            assert!(mount.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (
+                    WorkspaceStatus::Error,
+                    Some("workspace is still releasing; retry".into())
+                )
+            );
+            changed.await;
+            release.add_permits(1);
+            host.open_registered_workspace(root.path(), serve_config("/workspace"))
+                .await
+                .unwrap();
+            assert_eq!(
+                host.workspace_status(root.path()).0,
+                WorkspaceStatus::Running
+            );
+            host.close_workspace("/workspace", false).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_mount_after_cancelled_close_never_stays_starting() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            // A blocking operation may outlive teardown and keep the writer handle.
+            let lingering = workspace.clone();
+            let host = WorkspaceHost::new(library, fake_builder());
+            let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut artifacts = fake_artifacts_with_gated_shutdown(
+                entered_tx,
+                Arc::new(tokio::sync::Semaphore::new(0)),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            );
+            artifacts.cell = Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(Some(workspace))));
+            host.workspaces.write().unwrap().insert("/workspace".into(), HostedWorkspaceRuntime {
+                root: root.path().to_path_buf(),
+                canonical_root: canonical_key(root.path()),
+                handle: ServeHandle {
+                    addr: ([127, 0, 0, 1], 0).into(),
+                    prefix: "/workspace".into(),
+                    token: None,
+                },
+                artifacts,
+            });
+            let mut close = Box::pin(host.close_workspace_for_root(root.path(), false));
+            tokio::select! {
+                entered = entered_rx.recv() => entered.unwrap(),
+                result = close.as_mut() => panic!("close finished before shutdown gate: {result:?}"),
+            }
+            drop(close);
+            assert_eq!(host.workspace_status(root.path()).0, WorkspaceStatus::Stopped);
+            let error = host.open_registered_workspace(root.path(), serve_config("/workspace")).await.unwrap_err();
+            assert!(matches!(error, Error::Core(ChanError::WorkspaceAlreadyOpen)));
+            assert_eq!(host.workspace_status(root.path()), (WorkspaceStatus::Error, Some("workspace is still releasing; retry".into())));
+            drop(lingering);
+            host.open_registered_workspace(root.path(), serve_config("/workspace")).await.unwrap();
+            assert_eq!(host.workspace_status(root.path()).0, WorkspaceStatus::Running);
+            host.close_workspace("/workspace", false).await.unwrap();
+        }).await.unwrap();
     }
 
     #[tokio::test]
