@@ -27,19 +27,38 @@ die() {
 
 services=(profile identity devserver-control devserver-proxy)
 
-readiness_check="$REPO/packaging/gateway/scripts/check-database-ready.sh"
-for versions in "0 1" "1 0" "auto 1"; do
-    read -r expected policy <<< "$versions"
-    if DATABASE_URL=unused \
-        EXPECTED_SQLX_MIGRATION="$expected" \
-        DATABASE_ROLE_POLICY_VERSION="$policy" \
-        "$readiness_check" >/dev/null 2>&1; then
-        die "database readiness accepted invalid versions: $versions"
-    fi
-done
-
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+
+# A successful database reply keeps missing validation from passing merely
+# because psql is unavailable or the fixture URL cannot connect.
+mkdir -p "$WORK/readiness-bin"
+cat > "$WORK/readiness-bin/psql" <<'EOF'
+#!/bin/sh
+printf 't\n'
+EOF
+chmod +x "$WORK/readiness-bin/psql"
+readiness_check="$REPO/packaging/gateway/scripts/check-database-ready.sh"
+for versions in \
+    "0 1 EXPECTED_SQLX_MIGRATION must be positive" \
+    "1 0 DATABASE_ROLE_POLICY_VERSION must be positive" \
+    "auto 1 EXPECTED_SQLX_MIGRATION must be numeric" \
+    "1 auto DATABASE_ROLE_POLICY_VERSION must be numeric"; do
+    read -r expected policy message <<< "$versions"
+    if PATH="$WORK/readiness-bin:$PATH" DATABASE_URL=unused \
+        EXPECTED_SQLX_MIGRATION="$expected" \
+        DATABASE_ROLE_POLICY_VERSION="$policy" \
+        "$readiness_check" >/dev/null 2> "$WORK/readiness.err"; then
+        die "database readiness accepted invalid versions: $expected $policy"
+    fi
+    [[ $(cat "$WORK/readiness.err") == "$message" ]] \
+        || die "database readiness refusal returned the wrong error: $expected $policy"
+done
+PATH="$WORK/readiness-bin:$PATH" DATABASE_URL=unused \
+    EXPECTED_SQLX_MIGRATION=1 DATABASE_ROLE_POLICY_VERSION=1 \
+    "$readiness_check" \
+    || die "database readiness rejected valid versions with a ready database"
+
 mkdir -p "$WORK/postinst" "$WORK/postinst-bin"
 packages=(admin profile identity devserver-control devserver-proxy)
 for package in "${packages[@]}"; do
