@@ -90,9 +90,7 @@ impl From<chan_tunnel_proto::IoFrameError> for ClientError {
 pub struct ClientConfig {
     pub tunnel_url: Url,
     pub token: String,
-    /// Workspace name sent in the Hello frame. Combined server-side
-    /// with the token's user to form the public path
-    /// `/{user}/{workspace}/...`. Required.
+    /// Required Hello workspace field, validated as a workspace name. The devserver sends `"devserver"`; registration and the acknowledged prefix use the token-resolved devserver id, while tenant paths route within that registration.
     pub workspace: String,
     /// Display name sent in the Hello frame, for the gateway roster
     /// (`chan devserver run --tunnel-devserver-name`). Optional and
@@ -209,7 +207,7 @@ pub enum TunnelEvent {
     DialFailed { error: String, retry_in: Duration },
 }
 
-/// Workspace the Hello/HelloAck round-trip over `socket` and return a
+/// Drive the Hello/HelloAck round-trip over `socket` and return a
 /// yamux client connection ready to accept inbound substreams.
 ///
 /// Generic in `S` so the wire test can pass a `tokio::io::duplex`

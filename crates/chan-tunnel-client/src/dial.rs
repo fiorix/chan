@@ -89,7 +89,7 @@ pub async fn dial_with_tls(
     }
     tcp.set_nodelay(true).ok();
 
-    // Workspace h2 frames in the background; the connection future has
+    // Drive h2 frames in the background; the connection future has
     // a different type per branch (rustls TlsStream vs raw TcpStream),
     // so spawn inside each arm and only return the SendRequest.
     let mut send_req = if scheme == "https" {
