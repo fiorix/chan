@@ -9,7 +9,7 @@ Canonical design reference for `chan-report`. Update in the same commit as any c
 In scope:
 
   - Walk a directory with gitignore-aware filtering.
-  - Identify language per file using `tokei`'s detector (extension + shebang).
+  - Identify language per file using `tokei`'s filename and extension rules, with shebang detection for files at or below the content-counting limit.
   - Count code / comments / blanks per file.
   - Compute a cheap, language-aware complexity score (keyword counts: `if`, `for`, `while`, `case`, ...).
   - Roll up totals per language and across the whole tree, and maintain a per-directory aggregation for O(1) directory summaries.
@@ -89,7 +89,7 @@ The JSONL `file` records alone are sufficient to reconstruct the index; the `lan
 `Index::update(rel)`:
 
   - Applies the cached `Filter` to `rel`. Standalone indexes use hidden / gitignore / exclude-glob options; embedded indexes use the caller's `ReportPathPolicy`. If rejected and a row exists, drops the row and returns `Removed`; otherwise `Skipped`.
-  - Calls `count_file` against the stored root. If the file vanished or the counter rejected it, removes any existing row (`Removed`) or returns `Skipped`.
+  - Calls `count_file` against the stored root. If the file vanished, counting failed or the counter rejected it, removes any existing row (`Removed`) or returns `Skipped`. Counting errors do not leave stale rows behind or abort a rename after its source was removed.
   - Compares the new `FileStats` against the existing row. Returns `Unchanged` when identical; otherwise inserts or updates and returns `Inserted` / `Updated`.
 
 `Index::remove(rel)` is unconditional: drops the row if present and returns `Removed`, else `Unchanged`.
@@ -124,7 +124,11 @@ Per-file keyword count over a small, language-aware list. Cheap, deterministic, 
 
 The keyword list mirrors scc's: `if`, `else`, `elsif`, `elif`, `for`, `while`, `switch`, `case`, `match`, `do`, `goto`, `continue`, `break`, `try`, `catch`, `except`, `&&`, `||`, `and`, `or`. Alphabetic keywords match on word boundaries; symbolic operators are substring matches. The complexity scorer has a hook for per-language overrides, but every language currently uses the default list.
 
-Files larger than 16 MiB skip the in-memory read: tokei still counts them via its streaming path, but the complexity score is recorded as 0 (the second pass over multi-MB content is not worth it for a heuristic). The same fallback applies to non-UTF-8 content.
+Files larger than 16 MiB retain metadata-only rows: path, language inferred from filename or extension, bytes, mtime and bucket. Their content is not opened or read; code, comments, blanks and complexity are all 0. These rows contribute file and byte totals and retain graph language/bucket classification, but contribute no SLOC to COCOMO. The inspector's Code section therefore shows 0 lines. An oversized extensionless file recognizable only by its shebang is untracked because its language cannot be inferred without reading content.
+
+For files whose metadata size is at or below the cap, the UTF-8 reader consumes at most 16 MiB plus one byte, with capacity reserved from the open file's metadata. A read that crosses the cap detects growth after stat and produces the same metadata-only row for a path-recognized language. Size and mtime come from the open handle after the read. UTF-8 content is borrowed by both the line parser and the complexity scorer. Non-UTF-8 content read within the cap falls back to tokei's path-based decoder, with complexity recorded as 0. That decoder reopens and reads without a limit: growth or replacement during the fallback can exceed the initial bound. Tokei's slice parser does not perform that decoding.
+
+Files with extensions use tokei's filename and extension detector without I/O. Only extensionless named-file rules are mirrored locally. Other extensionless files are probed for a complete shebang line in the first 256 bytes; absent a newline or a `#!` prefix after leading whitespace, they are untracked without reading their body. A successful probe permits tokei's shebang detector to reopen the file. Replacement after the probe is not synchronized with that detector. A file that disappears between stat and open returns no row; other read errors are skipped and counted during scans and remove stale rows during updates.
 
 ## 8. COCOMO
 
@@ -140,13 +144,15 @@ These are documented in the same place they're read so users can override them p
 
 ## 9. Tests
 
-Integration coverage uses tempdir-built mixed-language trees and pins the behavioral contracts:
+Unit seams and integration tests with tempdir-built mixed-language trees pin the behavioral contracts:
 
   - Walker: gitignore filtering during scan and update.
   - Scan errors: injected descendant traversal, non-UTF-8 path, out-of-root path and per-file counting failures preserve good siblings and count skips; root traversal and pathless I/O errors remain fatal. JSONL loads reset the skipped-entry count.
   - Workspace persistence: injected scan skip counts suppress fresh caches, invalidate existing caches and remain unpersisted on later flushes; a subsequent open rescans. Complete scans still write JSONL.
   - Counter: language detection, SLOC, and complexity vs. known fixtures written inline.
-  - Incremental: distinct `UpdateOutcome`s, rename row movement, and ancestor-chain maintenance for the directory cache.
+  - Read cap: recognized oversized files retain metadata without a content read; deterministic growth after stat uses a bounded read, the open handle's size/mtime and zero line counts. Small shebang and non-UTF-8 files remain countable; oversized shebang-only files are untracked. Extensionless non-shebang files and overlong shebang lines do not enter the body reader. A parity test checks path-only detection against tokei for every mirrored filename, dotted named files and representative extensions.
+  - Oversized updates: a tracked small file that grows over the cap returns `Updated`, preserves its language and bucket, and contributes file/byte totals with zero line counts and complexity.
+  - Incremental: distinct `UpdateOutcome`s, rename row movement, and ancestor-chain maintenance for the directory cache. Unlink-after-stat and count errors remove stale rows; destination count errors cannot leave a rename partially applied without a flush outcome.
   - JSONL: write + load round-trips preserve file rows and the directory cache; schema mismatch returns `SchemaMismatch`.
   - Scope: `Prefix` and `Files` produce roll-ups consistent with the per-file rows they include; `dir_report` agrees with the equivalent `Prefix` snapshot.
 

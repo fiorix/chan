@@ -543,3 +543,36 @@ fn schema_mismatch_is_reported() {
         chan_report::ChanReportError::SchemaMismatch { .. }
     ));
 }
+
+#[test]
+fn a_tracked_file_growing_over_read_cap_keeps_metadata_only() {
+    let dir = tempdir().unwrap();
+    write(dir.path(), "large.rs", "fn main() { if true {} }\n");
+    let mut index = Index::scan(&ReportOptions::new(dir.path())).unwrap();
+    assert!(index.file("large.rs").unwrap().code > 0);
+    let bytes = 17 * 1024 * 1024;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(dir.path().join("large.rs"))
+        .unwrap()
+        .set_len(bytes)
+        .unwrap();
+    assert_eq!(index.update("large.rs").unwrap(), UpdateOutcome::Updated);
+    let stats = index.file("large.rs").expect("oversized row is retained");
+    assert_eq!(stats.bytes, bytes);
+    assert_eq!(stats.language, "Rust");
+    assert_eq!(
+        stats.bucket,
+        Some(FileBucket::SourceCode {
+            language: "Rust".into()
+        })
+    );
+    assert_eq!(
+        (stats.code, stats.comments, stats.blanks, stats.complexity),
+        (0, 0, 0, 0)
+    );
+    let report = index.snapshot(&Scope::All, &CocomoParams::default());
+    assert_eq!(report.totals.files, 1);
+    assert_eq!(report.totals.bytes, bytes);
+    assert_eq!(report.totals.code, 0);
+}

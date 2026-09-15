@@ -151,8 +151,9 @@ struct DirEntry {
 
 impl Index {
     /// Walk `opts.root` and produce an index. Files the walker
-    /// or counter rejects (unrecognized extension, binary,
-    /// gitignored, hidden, oversize) are silently dropped.
+    /// or counter rejects (unrecognized language, unparseable content,
+    /// gitignored, hidden) are silently dropped. Recognized files over
+    /// 16 MiB retain metadata-only rows with zero line counts and complexity.
     /// Entry and per-file counting errors are recorded by `skipped_entries`;
     /// root traversal and invalid override errors still fail the scan.
     pub fn scan(opts: &ReportOptions) -> Result<Self, ChanReportError> {
@@ -197,11 +198,19 @@ impl Index {
     ///   - `Inserted` when the file is new and the filter accepts it.
     ///   - `Updated` when stats changed.
     ///   - `Unchanged` when stats are byte-identical.
-    ///   - `Removed` when the file vanished or the filter no
-    ///     longer accepts it (and we held a row for it).
-    ///   - `Skipped` when the filter rejected the path and we did
-    ///     not hold a row for it.
+    ///   - `Removed` when the file vanished, counting failed, or the filter
+    ///     rejected it (and we held a row for it).
+    ///   - `Skipped` when the filter or counter rejected the path and we
+    ///     did not hold a row for it.
     pub fn update(&mut self, rel: &str) -> Result<UpdateOutcome, ChanReportError> {
+        self.update_with(rel, count::count_file_impl)
+    }
+
+    fn update_with(
+        &mut self,
+        rel: &str,
+        count: impl FnOnce(&Path, &str) -> Result<Option<FileStats>, ChanReportError>,
+    ) -> Result<UpdateOutcome, ChanReportError> {
         if !self.filter.accepts(rel) {
             return Ok(if self.remove_file_row(rel).is_some() {
                 UpdateOutcome::Removed
@@ -209,8 +218,8 @@ impl Index {
                 UpdateOutcome::Skipped
             });
         }
-        match count::count_file_impl(&self.root, rel)? {
-            Some(new_stats) => match self.files.get(rel).cloned() {
+        match count(&self.root, rel) {
+            Ok(Some(new_stats)) => match self.files.get(rel).cloned() {
                 Some(old) if old == new_stats => Ok(UpdateOutcome::Unchanged),
                 Some(old) => {
                     self.remove_file_from_dirs(rel, &old);
@@ -224,7 +233,7 @@ impl Index {
                     Ok(UpdateOutcome::Inserted)
                 }
             },
-            None => Ok(if self.remove_file_row(rel).is_some() {
+            Ok(None) | Err(_) => Ok(if self.remove_file_row(rel).is_some() {
                 UpdateOutcome::Removed
             } else {
                 UpdateOutcome::Skipped
@@ -247,8 +256,17 @@ impl Index {
     /// callers infer "something happened" from this being
     /// non-`Unchanged` or from a prior row existing at `from`.
     pub fn rename(&mut self, from: &str, to: &str) -> Result<UpdateOutcome, ChanReportError> {
+        self.rename_with(from, to, count::count_file_impl)
+    }
+
+    fn rename_with(
+        &mut self,
+        from: &str,
+        to: &str,
+        count: impl FnOnce(&Path, &str) -> Result<Option<FileStats>, ChanReportError>,
+    ) -> Result<UpdateOutcome, ChanReportError> {
         let removed = self.remove_file_row(from).is_some();
-        let out = self.update(to)?;
+        let out = self.update_with(to, count)?;
         // If we removed something at `from` but the destination
         // ended up `Unchanged` / `Skipped`, force at least
         // `Removed` so the writer flushes.
@@ -566,10 +584,14 @@ pub fn run(opts: &ReportOptions) -> Result<Report, ChanReportError> {
     Ok(idx.snapshot(&Scope::All, &opts.cocomo))
 }
 
-/// Stateless per-file count. Shared by `Index::scan` (parallel
-/// over walked files) and `Index::update` (single file). Returns
-/// `None` for files the counter skips: unrecognized extension,
-/// binary, excluded by the walker's filter, or vanished.
+/// Count one file from disk without applying the walker's filter.
+/// Shared by `Index::scan` and `Index::update`. Recognized files over
+/// 16 MiB retain metadata-only rows with zero line counts and complexity.
+/// Returns `None` for unrecognized, non-regular or vanished files, including
+/// disappearance after stat. Oversized files are recognized by path only.
+/// Other extensionless files need a complete shebang in a bounded prefix
+/// before their body is read. Other I/O errors are returned to the caller;
+/// scans count them as skips and updates remove any existing row.
 pub fn count_file(root: &Path, rel: &str) -> Result<Option<FileStats>, ChanReportError> {
     count::count_file_impl(root, rel)
 }
@@ -606,6 +628,45 @@ fn roll_up(files: &[FileStats]) -> (Vec<LanguageStats>, Totals) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_error_removes_an_existing_row_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let opts = ReportOptions::new(dir.path());
+        let mut index = Index::scan(&opts).unwrap();
+        let outcome = index.update_with("a.rs", |_, _| {
+            Err(ChanReportError::Io("injected read failure".into()))
+        });
+        assert_eq!(outcome.unwrap(), UpdateOutcome::Removed);
+        assert!(index.is_empty());
+        assert!(index.dir_report("", &opts.cocomo).is_none());
+        let mut jsonl = Vec::new();
+        index
+            .write_jsonl(&mut jsonl, &Scope::All, &opts.cocomo)
+            .unwrap();
+        assert!(Index::load_jsonl(std::io::Cursor::new(jsonl), &opts)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_count_error_during_rename_removes_both_stale_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.rs", "b.rs"] {
+            std::fs::write(dir.path().join(name), "fn a() {}\n").unwrap();
+        }
+        let opts = ReportOptions::new(dir.path());
+        let mut index = Index::scan(&opts).unwrap();
+        let outcome = index.rename_with("a.rs", "b.rs", |_, _| {
+            Err(ChanReportError::Io(
+                "injected rename destination failure".into(),
+            ))
+        });
+        assert_eq!(outcome.unwrap(), UpdateOutcome::Removed);
+        assert!(index.is_empty());
+        assert!(index.dir_report("", &opts.cocomo).is_none());
+    }
 
     #[test]
     fn a_per_file_count_error_does_not_abort_the_scan() {
