@@ -36,9 +36,7 @@ pub struct MentionsQuery {
 
 #[derive(Serialize)]
 pub struct MentionItem {
-    /// Mention label WITHOUT the `@@` sigil (e.g. `"Alice"`,
-    /// `"Bob"`). The SPA reads this directly to populate the
-    /// editor's mention-completion dropdown.
+    /// Mention label including the `@@` sigil (for example, `"@@Alice"`), ready to insert into the editor from the completion dropdown.
     pub label: String,
 }
 
@@ -72,10 +70,6 @@ pub async fn api_get_mentions(
                 })
                 .take(limit)
                 .map(|m| MentionItem {
-                    // Compose with the `@@` sigil so the SPA can
-                    // splice the result straight into the editor
-                    // buffer without re-prepending. The bare name
-                    // is one strip away if a consumer wants it.
                     label: format!("@@{}", m.name),
                 })
                 .collect();
