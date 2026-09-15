@@ -2510,57 +2510,6 @@ fn workspace_upload_target(
     Ok(rel)
 }
 
-#[cfg(test)]
-fn replace_file_sync(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
-    bytes: &[u8],
-) -> chan_workspace::Result<UploadFileResponse> {
-    let trimmed = path.trim_matches('/');
-    chan_workspace::fs_ops::validate_rel(trimmed)?;
-    let stat = workspace.stat(trimmed)?;
-    if stat.is_dir {
-        return Err(chan_workspace::ChanError::Io(format!(
-            "not a file: {trimmed}"
-        )));
-    }
-    workspace.ensure_writable(trimmed)?;
-    workspace.write_bytes(trimmed, bytes)?;
-    Ok(UploadFileResponse {
-        path: trimmed.to_string(),
-        size: bytes.len() as u64,
-    })
-}
-
-#[cfg(test)]
-fn upload_file_sync(
-    workspace: &chan_workspace::Workspace,
-    dir: &str,
-    original_name: &str,
-    bytes: &[u8],
-) -> chan_workspace::Result<UploadFileResponse> {
-    let dir = normalize_dir_query(dir)?;
-    if !dir.is_empty() {
-        let stat = workspace.stat(&dir)?;
-        if !stat.is_dir {
-            return Err(chan_workspace::ChanError::Io(format!(
-                "not a directory: {dir}"
-            )));
-        }
-    }
-    let filename = upload_leaf_filename(original_name)?;
-    let rel = join_rel(&dir, &filename);
-    if create_target_exists(workspace, &rel) {
-        return Err(chan_workspace::ChanError::PathAlreadyExists(rel));
-    }
-    workspace.ensure_writable(&rel)?;
-    workspace.write_bytes(&rel, bytes)?;
-    Ok(UploadFileResponse {
-        path: rel,
-        size: bytes.len() as u64,
-    })
-}
-
 pub(crate) fn upload_leaf_filename(original_name: &str) -> chan_workspace::Result<String> {
     let leaf = original_name
         .trim()
@@ -2583,9 +2532,37 @@ pub(crate) fn upload_leaf_filename(original_name: &str) -> chan_workspace::Resul
 mod file_browser_listing_tests {
     use super::{
         append_workspace_to_archive, create_target_exists, download_path_sync, list_dir_entries,
-        list_files_sync, replace_file_sync, upload_file_sync, upload_leaf_filename,
-        verify_readable_workspace_tree, workspace_path_writable, DownloadPayload, ListFilesQuery,
+        list_files_sync, upload_leaf_filename, verify_readable_workspace_tree,
+        workspace_path_writable, workspace_upload_stream_sync, DownloadPayload, ListFilesQuery,
+        UploadDestination, UploadFileResponse,
     };
+
+    fn workspace_upload(
+        workspace: &chan_workspace::Workspace,
+        dir: &str,
+        replace_path: Option<&str>,
+        filename: &str,
+        bytes: &[u8],
+    ) -> chan_workspace::Result<UploadFileResponse> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(super::RequestBodyMessage::Chunk(
+            axum::body::Bytes::copy_from_slice(bytes),
+        ))
+        .unwrap();
+        tx.try_send(super::RequestBodyMessage::Complete).unwrap();
+        drop(tx);
+        workspace_upload_stream_sync(
+            workspace,
+            &crate::self_writes::SelfWrites::new(),
+            &UploadDestination {
+                dir: dir.to_string(),
+                replace_path: replace_path.map(str::to_string),
+                filename: filename.to_string(),
+            },
+            &mut rx,
+            &crate::bulk_transfer::test_support::uncancelled(),
+        )
+    }
 
     static REMOVE_BEFORE_PREFLIGHT: std::sync::Mutex<Vec<std::path::PathBuf>> =
         std::sync::Mutex::new(Vec::new());
@@ -2800,7 +2777,7 @@ mod file_browser_listing_tests {
     }
 
     #[test]
-    fn upload_file_sync_writes_binary_with_original_leaf_name() {
+    fn workspace_upload_writes_binary_with_original_leaf_name() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -2808,7 +2785,8 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.create_dir("assets").unwrap();
 
-        let uploaded = upload_file_sync(&workspace, "assets", "photo 1.PNG", &[1, 2, 3]).unwrap();
+        let uploaded =
+            workspace_upload(&workspace, "assets", None, "photo 1.PNG", &[1, 2, 3]).unwrap();
 
         assert_eq!(uploaded.path, "assets/photo 1.PNG");
         assert_eq!(uploaded.size, 3);
@@ -2816,7 +2794,7 @@ mod file_browser_listing_tests {
     }
 
     #[test]
-    fn upload_file_sync_rejects_existing_target() {
+    fn workspace_upload_rejects_existing_target() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -2824,7 +2802,7 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.write_bytes("same.bin", b"old").unwrap();
 
-        let err = upload_file_sync(&workspace, "", "same.bin", b"new").unwrap_err();
+        let err = workspace_upload(&workspace, "", None, "same.bin", b"new").unwrap_err();
 
         assert!(matches!(err, chan_workspace::ChanError::PathAlreadyExists(p) if p == "same.bin"));
         assert_eq!(workspace.read("same.bin").unwrap(), b"old");
@@ -2941,7 +2919,7 @@ mod file_browser_listing_tests {
         workspace.create_dir("locked").unwrap();
         let locked = root.path().join("locked");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let err = upload_file_sync(&workspace, "locked", "x.txt", b"data").unwrap_err();
+        let err = workspace_upload(&workspace, "locked", None, "x.txt", b"data").unwrap_err();
         let message = err.to_string();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(message.contains("read-only"), "{message}");
@@ -2975,7 +2953,7 @@ mod file_browser_listing_tests {
     }
 
     #[test]
-    fn replace_file_sync_overwrites_existing_file() {
+    fn workspace_upload_replace_overwrites_existing_file() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -2983,7 +2961,8 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.write_text("same.md", "old").unwrap();
 
-        let uploaded = replace_file_sync(&workspace, "same.md", b"new").unwrap();
+        let uploaded =
+            workspace_upload(&workspace, "", Some("same.md"), "same.md", b"new").unwrap();
 
         assert_eq!(uploaded.path, "same.md");
         assert_eq!(uploaded.size, 3);
@@ -2991,7 +2970,7 @@ mod file_browser_listing_tests {
     }
 
     #[test]
-    fn replace_file_sync_rejects_non_utf8_for_text_file() {
+    fn workspace_upload_replace_rejects_non_utf8_for_text_file() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -2999,7 +2978,8 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.write_text("same.md", "old").unwrap();
 
-        let err = replace_file_sync(&workspace, "same.md", &[0xff, 0xfe]).unwrap_err();
+        let err = workspace_upload(&workspace, "", Some("same.md"), "same.md", &[0xff, 0xfe])
+            .unwrap_err();
 
         assert!(
             matches!(err, chan_workspace::ChanError::NonUtf8EditableText(_)),
@@ -3012,7 +2992,7 @@ mod file_browser_listing_tests {
     }
 
     #[test]
-    fn replace_file_sync_rejects_directory_target() {
+    fn workspace_upload_replace_rejects_directory_target() {
         let cfg = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -3020,7 +3000,7 @@ mod file_browser_listing_tests {
         let workspace = lib.open_workspace(root.path()).unwrap();
         workspace.create_dir("notes").unwrap();
 
-        let err = replace_file_sync(&workspace, "notes", b"new").unwrap_err();
+        let err = workspace_upload(&workspace, "", Some("notes"), "notes", b"new").unwrap_err();
 
         assert!(err.to_string().contains("not a file: notes"));
     }
