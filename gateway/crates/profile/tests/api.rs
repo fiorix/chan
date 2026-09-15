@@ -4,28 +4,14 @@
 //! schemas in. Each test gets its own throwaway schema, so tests are
 //! independent and can run in parallel.
 
-#[path = "../../../tests-shared/pg_reaper.rs"]
-mod pg_reaper;
+#[path = "../../../tests-shared/pg.rs"]
+mod test_db;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
-use sqlx::postgres::{PgPool, PgPoolOptions};
-
-/// Single-connection admin pool. `PgPool::connect` defaults to
-/// max_connections=10; multiplied by ~17 parallel tests (each
-/// opening admin pools twice -- once on setup, once on cleanup)
-/// blows past a default Postgres `max_connections=100`. Capping
-/// admin to one keeps per-test peak demand well under that cap.
-async fn admin_pool(url: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(url)
-        .await
-        .expect("connect admin")
-}
+use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -81,44 +67,8 @@ impl TestApp {
     }
 
     async fn new_database() -> Self {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
-        // Hold-one-connection reaper: clears any idle connections
-        // leaked by previous test-process runs, then keeps one slot
-        // pinned for the rest of this process so the role never
-        // goes fully idle from PG's perspective.
-        pg_reaper::reap_idle(&url).await;
-        let schema = format!("t_{}", Uuid::new_v4().simple());
-
-        // Create the schema using a one-shot admin connection so we
-        // don't pay for it on every pool acquire.
-        let admin = admin_pool(&url).await;
-        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-            .execute(&admin)
-            .await
-            .expect("create schema");
-        admin.close().await;
-
-        let s = schema.clone();
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(move |conn, _meta| {
-                let s = s.clone();
-                Box::pin(async move {
-                    sqlx::query(&format!("SET search_path TO \"{s}\", public"))
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .expect("connect pool");
-
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("migrate");
+        let (url, schema, pool) = test_db::create_schema().await;
+        test_db::migrate(&pool).await;
 
         Self {
             router: Router::new(),
@@ -132,11 +82,7 @@ impl TestApp {
         // Close the per-test pool first so the admin connection
         // doesn't have to wait behind it.
         self.pool.close().await;
-        let admin = admin_pool(&self.admin_url).await;
-        let _ = sqlx::query(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema))
-            .execute(&admin)
-            .await;
-        admin.close().await;
+        test_db::drop_schema(&self.admin_url, &self.schema).await;
     }
 
     async fn req(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -1327,7 +1273,7 @@ async fn upsert_refreshes_avatar_when_changed() {
 async fn upsert_concurrent_first_time_no_orphans() {
     // Race regression: multiple concurrent first-time signups for
     // the same (provider, subject) must converge on a single user
-    // row, not leave orphans behind. Workspaces N parallel upserts and
+    // row, not leave orphans behind. Runs N parallel upserts and
     // asserts they all return the same user id and no extra users
     // were created with that email.
     let app = TestApp::new().await;

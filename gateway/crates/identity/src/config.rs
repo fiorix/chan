@@ -421,42 +421,42 @@ fn validate_distinct_auth_tokens(tokens: &[(&str, &str)]) -> anyhow::Result<()> 
 }
 
 #[cfg(test)]
+pub(crate) fn test_config(apex: &str) -> Config {
+    Config {
+        bind_addr: "127.0.0.1:7000".parse().unwrap(),
+        internal_bind_addr: "127.0.0.1:7001".parse().unwrap(),
+        base_url: "http://localhost:7000".parse().unwrap(),
+        devserver_proxy_origin: apex.parse().unwrap(),
+        devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
+        database_url: "x".into(),
+        cookie_secure: true,
+        profile_client: ProfileClient::new("http://x/".parse().unwrap(), "x".into()).unwrap(),
+        internal_auth_token: "x".into(),
+        session_internal_auth_token: String::new(),
+        identity_admin_token: String::new(),
+        account_admin_token: String::new(),
+        workspace_admin: DevserverControlClient::new(
+            "http://127.0.0.1:7002".parse().unwrap(),
+            "test-identity-admin-token".into(),
+        )
+        .unwrap(),
+        admission_lease_verifier: {
+            let signer =
+                AdmissionLeaseSigner::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .unwrap();
+            AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap()
+        },
+        entry_signer: gateway_common::devserver_gate::EntrySigner::from_base64(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )
+        .unwrap(),
+        providers: vec![],
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_cfg(apex: &str) -> Config {
-        Config {
-            bind_addr: "127.0.0.1:7000".parse().unwrap(),
-            internal_bind_addr: "127.0.0.1:7001".parse().unwrap(),
-            base_url: "http://localhost:7000".parse().unwrap(),
-            devserver_proxy_origin: apex.parse().unwrap(),
-            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
-            database_url: "x".into(),
-            cookie_secure: true,
-            profile_client: ProfileClient::new("http://x/".parse().unwrap(), "x".into()).unwrap(),
-            internal_auth_token: "x".into(),
-            session_internal_auth_token: String::new(),
-            identity_admin_token: String::new(),
-            account_admin_token: String::new(),
-            workspace_admin: DevserverControlClient::new(
-                "http://127.0.0.1:7002".parse().unwrap(),
-                "test-identity-admin-token".into(),
-            )
-            .unwrap(),
-            admission_lease_verifier: {
-                let signer = AdmissionLeaseSigner::from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                )
-                .unwrap();
-                AdmissionLeaseVerifier::from_base64(&signer.verifying_key_base64()).unwrap()
-            },
-            entry_signer: gateway_common::devserver_gate::EntrySigner::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            )
-            .unwrap(),
-            providers: vec![],
-        }
-    }
 
     #[test]
     fn configured_identity_auth_tokens_must_be_pairwise_distinct() {
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn tenant_origin_prefixes_owner_and_disc_to_the_node_host() {
-        let cfg = test_cfg("https://proxy.chan.app");
+        let cfg = test_config("https://proxy.chan.app");
         let t = cfg
             .tenant_origin_for(
                 "alice",
@@ -537,14 +537,14 @@ mod tests {
         // A non-default port survives only when the apex itself carries
         // it (the effective ports must match); the tenant origin keeps
         // the explicit suffix.
-        let cfg = test_cfg("https://proxy.chan.app:8443");
+        let cfg = test_config("https://proxy.chan.app:8443");
         let t = cfg
             .tenant_origin_for("alice", "abc123", "p1", "https://p1.proxy.chan.app:8443")
             .expect("non-default port node base");
         assert_eq!(t.origin, "https://alice--abc123.p1.proxy.chan.app:8443");
         assert_eq!(t.authority, "alice--abc123.p1.proxy.chan.app:8443");
 
-        let cfg = test_cfg("http://proxy.localtest.me:7002");
+        let cfg = test_config("http://proxy.localtest.me:7002");
         let t = cfg
             .tenant_origin_for("alice", "abc123", "p1", "http://p1.proxy.localtest.me:7002")
             .expect("http dev node base");
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn tenant_origin_rejects_node_bases_outside_the_namespace() {
-        let cfg = test_cfg("https://proxy.chan.app");
+        let cfg = test_config("https://proxy.chan.app");
         let id = "abc123";
         for bad in [
             // The bare apex is the shared ingress, not a node.
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn tenant_origin_rejects_non_canonical_node_bases() {
-        let cfg = test_cfg("https://proxy.chan.app");
+        let cfg = test_config("https://proxy.chan.app");
         let id = "abc123";
         for bad in [
             "not a url",

@@ -7,8 +7,10 @@
 //! `access_denied`), its best-effort degrade when the profile lookup
 //! fails, and the happy path.
 
-#[path = "../../../tests-shared/pg_reaper.rs"]
-mod pg_reaper;
+#[path = "../../../tests-shared/identity_config.rs"]
+mod identity_config;
+#[path = "../../../tests-shared/identity_db.rs"]
+mod test_db;
 
 use std::sync::Arc;
 
@@ -16,9 +18,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::PgPool;
 use tower::ServiceExt;
-use tower_sessions_sqlx_store::PostgresStore;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -31,15 +32,6 @@ use identity::http;
 use identity::profile_client::ProfileClient;
 use identity::providers::github::GitHubProvider;
 use identity::token_throttle::TokenThrottle;
-
-async fn admin_pool(url: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(url)
-        .await
-        .expect("connect admin")
-}
 
 struct TestApp {
     router: Router,
@@ -56,41 +48,8 @@ impl TestApp {
     }
 
     async fn with_proxy_origin(proxy_origin: &str) -> Self {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
-        pg_reaper::reap_idle(&url).await;
-        let schema = format!("t_{}", Uuid::new_v4().simple());
-
-        let admin = admin_pool(&url).await;
-        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-            .execute(&admin)
-            .await
-            .expect("create schema");
-        admin.close().await;
-
-        let s = schema.clone();
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(move |conn, _meta| {
-                let s = s.clone();
-                Box::pin(async move {
-                    sqlx::query(&format!("SET search_path TO \"{s}\", public"))
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .expect("connect pool");
-
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("migrate identity tables");
-
-        let store = PostgresStore::new(pool.clone());
-        store.migrate().await.expect("migrate sessions");
+        let (url, schema, pool, store) =
+            test_db::create_schema(test_db::MigrationOrder::GatewayFirst).await;
 
         let profile = MockServer::start().await;
 
@@ -102,40 +61,15 @@ impl TestApp {
 
         let api_tokens = ApiTokenService::new(pool.clone());
         let cfg = Arc::new(Config {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
-            base_url: "http://localhost:7000/".parse().unwrap(),
             devserver_proxy_origin: proxy_origin.parse().unwrap(),
-            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
-            database_url: url.clone(),
-            cookie_secure: true,
-            profile_client,
-            internal_auth_token: "test-internal".to_string(),
-            session_internal_auth_token: "test-session-internal".to_string(),
-            identity_admin_token: String::new(),
-            account_admin_token: String::new(),
-            // Same mock server backs the proxy-admin client; its
-            // /admin/v1/* paths don't collide with profile's /v1/*.
+            // The profile mock also serves the disjoint control-admin paths.
             workspace_admin: DevserverControlClient::new(
                 profile.uri().parse().unwrap(),
                 "test-admin".into(),
             )
             .unwrap(),
-            admission_lease_verifier: {
-                let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                )
-                .unwrap();
-                devserver_control_proto::AdmissionLeaseVerifier::from_base64(
-                    &signer.verifying_key_base64(),
-                )
-                .unwrap()
-            },
-            entry_signer: gateway_common::devserver_gate::EntrySigner::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            )
-            .unwrap(),
             providers: vec![Arc::new(provider)],
+            ..identity_config::test_config(&url, profile_client)
         });
         let router = http::router(cfg, store, api_tokens.clone(), TokenThrottle::new());
 
@@ -151,11 +85,7 @@ impl TestApp {
 
     async fn cleanup(self) {
         self.pool.close().await;
-        let admin = admin_pool(&self.admin_url).await;
-        let _ = sqlx::query(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema))
-            .execute(&admin)
-            .await;
-        admin.close().await;
+        test_db::pg::drop_schema(&self.admin_url, &self.schema).await;
     }
 
     /// Insert a user row directly (FK target for PAT create). Mirrors

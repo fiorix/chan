@@ -15,10 +15,9 @@
 //! created. Once held, the connection is never dropped, so the role
 //! never goes idle for this process either.
 //!
-//! Included via `#[path = "../../../tests-shared/pg_reaper.rs"]
-//! mod pg_reaper;` from each integration-test entry. Not a real
-//! crate; the path lives outside any cargo-discovered tests dir so
-//! cargo never tries to compile it on its own.
+//! Included by `pg.rs` through `#[path]` for each integration-test entry.
+//! The shared files live outside any cargo-discovered tests directory so
+//! cargo never tries to compile them on their own.
 //!
 //! Hard exhaustion is the one case this cannot recover. If even one
 //! `chan` slot is unavailable at startup we cannot open the durable

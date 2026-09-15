@@ -5,8 +5,10 @@
 //! and the `/internal/v1/tokens/validate` endpoint over the live
 //! router.
 
-#[path = "../../../tests-shared/pg_reaper.rs"]
-mod pg_reaper;
+#[path = "../../../tests-shared/identity_config.rs"]
+mod identity_config;
+#[path = "../../../tests-shared/identity_db.rs"]
+mod test_db;
 
 use std::sync::Arc;
 
@@ -31,18 +33,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
-use sqlx::postgres::{PgPool, PgPoolOptions};
-
-async fn admin_pool(url: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(url)
-        .await
-        .expect("connect admin")
-}
+use sqlx::PgPool;
 use tower::ServiceExt;
-use tower_sessions_sqlx_store::PostgresStore;
 use uuid::Uuid;
 
 use identity::api_tokens::{NewToken, RequestMeta, TokenOrigin};
@@ -71,41 +63,8 @@ impl TestEnv {
     }
 
     async fn new_with_policy_required(policy_required: bool) -> Self {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
-        pg_reaper::reap_idle(&url).await;
-        let schema = format!("t_{}", Uuid::new_v4().simple());
-
-        let admin = admin_pool(&url).await;
-        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-            .execute(&admin)
-            .await
-            .expect("create schema");
-        admin.close().await;
-
-        let s = schema.clone();
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(move |conn, _meta| {
-                let s = s.clone();
-                Box::pin(async move {
-                    sqlx::query(&format!("SET search_path TO \"{s}\", public"))
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .expect("connect pool");
-
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("migrate");
-
-        let store = PostgresStore::new(pool.clone());
-        store.migrate().await.expect("migrate sessions");
+        let (url, schema, pool, store) =
+            test_db::create_schema(test_db::MigrationOrder::GatewayFirst).await;
 
         // Minimal Config; nothing in the PAT endpoints reads OAuth
         // provider state. We still need a provider configured because
@@ -125,38 +84,8 @@ impl TestEnv {
         .with_policy_required(policy_required);
         let api_tokens_for_state = api_tokens.clone();
         let cfg = Arc::new(Config {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
-            base_url: "http://localhost:7000/".parse().unwrap(),
-            devserver_proxy_origin: "https://proxy.example.test".parse().unwrap(),
-            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
-            database_url: url.clone(),
-            cookie_secure: true,
-            profile_client,
-            internal_auth_token: "test-internal".to_string(),
-            session_internal_auth_token: "test-session-internal".to_string(),
-            identity_admin_token: String::new(),
-            account_admin_token: String::new(),
-            workspace_admin: gateway_common::devserver_control_client::DevserverControlClient::new(
-                "http://127.0.0.1:7002".parse().unwrap(),
-                "test-identity-admin-token".into(),
-            )
-            .unwrap(),
-            admission_lease_verifier: {
-                let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                )
-                .unwrap();
-                devserver_control_proto::AdmissionLeaseVerifier::from_base64(
-                    &signer.verifying_key_base64(),
-                )
-                .unwrap()
-            },
-            entry_signer: gateway_common::devserver_gate::EntrySigner::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            )
-            .unwrap(),
             providers: vec![Arc::new(provider)],
+            ..identity_config::test_config(&url, profile_client)
         });
         let (public_router, internal_router) =
             http::routers(cfg, store, api_tokens_for_state, TokenThrottle::new());
@@ -174,11 +103,7 @@ impl TestEnv {
 
     async fn cleanup(self) {
         self.pool.close().await;
-        let admin = admin_pool(&self.admin_url).await;
-        let _ = sqlx::query(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema))
-            .execute(&admin)
-            .await;
-        admin.close().await;
+        test_db::pg::drop_schema(&self.admin_url, &self.schema).await;
     }
 
     /// Insert a user row directly so PAT create has an FK target.

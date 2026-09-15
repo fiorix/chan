@@ -6,8 +6,10 @@
 //! at a closed port here, so that hop fails and must not fail the
 //! mint).
 
-#[path = "../../../tests-shared/pg_reaper.rs"]
-mod pg_reaper;
+#[path = "../../../tests-shared/identity_config.rs"]
+mod identity_config;
+#[path = "../../../tests-shared/identity_db.rs"]
+mod test_db;
 
 use std::sync::{Arc, Mutex};
 
@@ -15,9 +17,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::json;
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::PgPool;
 use tower::ServiceExt;
-use tower_sessions_sqlx_store::PostgresStore;
 use uuid::Uuid;
 
 use identity::api_tokens::{ApiTokenService, RequestMeta};
@@ -27,18 +28,10 @@ use identity::profile_client::ProfileClient;
 
 const ADMIN_TOKEN: &str = "test-identity-admin-token";
 
-async fn admin_pool(url: &str) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(url)
-        .await
-        .expect("connect admin")
-}
-
 struct TestApp {
     router: Router,
     api_tokens: ApiTokenService,
+    pool: PgPool,
     schema: String,
     admin_url: String,
 }
@@ -55,41 +48,8 @@ impl TestApp {
     /// `profile_url`. The operator revoke's profile hop is not
     /// best-effort, so its tests pass a live stub here.
     async fn with_profile(admin_token: &str, profile_url: &str) -> Self {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
-        pg_reaper::reap_idle(&url).await;
-        let schema = format!("t_{}", Uuid::new_v4().simple());
-
-        let admin = admin_pool(&url).await;
-        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-            .execute(&admin)
-            .await
-            .expect("create schema");
-        admin.close().await;
-
-        let s = schema.clone();
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(move |conn, _meta| {
-                let s = s.clone();
-                Box::pin(async move {
-                    sqlx::query(&format!("SET search_path TO \"{s}\", public"))
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .expect("connect pool");
-
-        let store = PostgresStore::new(pool.clone());
-        store.migrate().await.expect("migrate sessions");
-
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("migrate identity tables");
+        let (url, schema, pool, store) =
+            test_db::create_schema(test_db::MigrationOrder::SessionsFirst).await;
 
         let api_tokens = ApiTokenService::new(pool.clone());
 
@@ -97,38 +57,9 @@ impl TestApp {
             .expect("profile client");
 
         let cfg = Arc::new(Config {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            internal_bind_addr: "127.0.0.1:0".parse().unwrap(),
-            base_url: "http://localhost:7000/".parse().unwrap(),
-            devserver_proxy_origin: "https://proxy.example.test".parse().unwrap(),
-            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
-            database_url: url.clone(),
-            cookie_secure: true,
-            profile_client,
-            internal_auth_token: "test-internal".to_string(),
-            session_internal_auth_token: "test-session-internal".to_string(),
             identity_admin_token: admin_token.to_string(),
             account_admin_token: "test-account-admin".to_string(),
-            workspace_admin: gateway_common::devserver_control_client::DevserverControlClient::new(
-                "http://127.0.0.1:7002".parse().unwrap(),
-                "test-identity-admin-token".into(),
-            )
-            .unwrap(),
-            admission_lease_verifier: {
-                let signer = devserver_control_proto::AdmissionLeaseSigner::from_base64(
-                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                )
-                .unwrap();
-                devserver_control_proto::AdmissionLeaseVerifier::from_base64(
-                    &signer.verifying_key_base64(),
-                )
-                .unwrap()
-            },
-            entry_signer: gateway_common::devserver_gate::EntrySigner::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            )
-            .unwrap(),
-            providers: vec![],
+            ..identity_config::test_config(&url, profile_client)
         });
 
         let router = http::router(
@@ -141,36 +72,19 @@ impl TestApp {
         Self {
             router,
             api_tokens,
+            pool,
             schema,
             admin_url: url,
         }
     }
 
     async fn cleanup(self) {
-        let admin = admin_pool(&self.admin_url).await;
-        let _ = sqlx::query(&format!("DROP SCHEMA \"{}\" CASCADE", self.schema))
-            .execute(&admin)
-            .await;
-        admin.close().await;
+        self.pool.close().await;
+        test_db::pg::drop_schema(&self.admin_url, &self.schema).await;
     }
 
     async fn insert_user(&self, id: Uuid, email: &str) {
-        let url = self.admin_url.clone();
-        let s = self.schema.clone();
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(move |conn, _meta| {
-                let s = s.clone();
-                Box::pin(async move {
-                    sqlx::query(&format!("SET search_path TO \"{s}\", public"))
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&url)
-            .await
-            .expect("connect for insert_user");
+        let pool = test_db::pg::schema_pool(&self.admin_url, &self.schema, 1).await;
         sqlx::query(
             "INSERT INTO users (id, email, username) VALUES \
              ($1, $2, 'u' || substr(replace($1::text, '-', ''), 1, 12))",
