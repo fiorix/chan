@@ -49,9 +49,6 @@ pub trait WorkspaceCellHandle: Send + Sync {
     fn clear(&self) -> Option<(Weak<Workspace>, PathBuf)>;
 }
 
-/// The host operations a control-socket connection reaches through a `Weak`
-/// back-reference (`WorkspaceHost` registers itself via `install_self`). Held
-/// as `Weak<dyn HostControl>` so the control socket never names the concrete
 /// A tenant's standalone filesystem surface, as the host reaches it.
 ///
 /// The host routes but never resolves: when `cs open` names a path outside its
@@ -83,6 +80,9 @@ pub struct StandaloneOpenFrame {
     pub path: String,
 }
 
+/// The host operations a control-socket connection reaches through a `Weak`
+/// back-reference (`WorkspaceHost` registers itself via `install_self`). Held
+/// as `Weak<dyn HostControl>` so the control socket never names the concrete
 /// host type.
 #[async_trait]
 pub trait HostControl: Send + Sync {
