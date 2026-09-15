@@ -726,7 +726,7 @@ matches both terminal and tunnel.
 
 A standalone terminal (the workspace-less terminal tenant) supports
 ALL of this: tab names, groups, the write queue, restart, close and
-scrollback. `terminal new --path` works there too when the host serves
+scrollback. `terminal new PATH` works there too when the host serves
 a filesystem, resolving the path through the same root the window's
 file browser walks; `terminal team` refuses, for want of a workspace
 tree to write into. That makes a standalone terminal fully automatable
@@ -775,12 +775,13 @@ CAVEATS:
   name, in which case write / restart / close hit every holder and
   scrollback refuses as ambiguous.
 
-  `cs terminal team` refuses on a standalone terminal with "only
-  available in a workspace window; this is a standalone terminal", and
-  so does `cs terminal new --path` on a host that serves no filesystem
-  to resolve the path against. There is no env var that tells a
-  workspace window from a standalone terminal, so that refusal is the
-  honest signal.
+  `cs terminal team` requires a workspace window. `cs terminal new PATH`
+  needs a workspace window or a standalone terminal whose host serves
+  a filesystem to resolve PATH against. Omit PATH to open a terminal
+  when that filesystem is unavailable. A workspace-only command refuses
+  with "this is a standalone terminal". No environment variable tells
+  a workspace window from a standalone terminal; that refusal is the
+  signal.
 
 SEE ALSO:
   cs terminal survey (ask a human and block), cs terminal team (Team
@@ -887,12 +888,15 @@ address another live destination directly.
 --tab-name sets $CHAN_TAB_NAME inside the new terminal and
 --tab-group sets $CHAN_TAB_GROUP ("default" when omitted); those are
 what a later `cs terminal write` / restart / close selects on. The
-optional path sets the tab's working directory: workspace-relative,
-or absolute under the workspace root, and a file resolves to its
-parent directory. Pathless `new` also works on a standalone
-terminal; --path is workspace-only. --command runs a command instead
-of the default shell. Repeat --env KEY=VALUE to set its spawn
-environment; CHAN_AGENT can identify an unrecognised agent launcher.
+optional positional PATH sets the tab's working directory: relative
+to the caller's directory, or absolute. In a workspace window, PATH
+must resolve inside the workspace root; a file resolves to its parent
+directory. A standalone terminal needs a host that serves a filesystem,
+and PATH must name a directory inside its capability root. Omit PATH
+for the workspace root or the standalone spawn's default directory.
+--command runs a command instead of the default shell. Repeat
+--env KEY=VALUE to set its spawn environment; CHAN_AGENT can identify
+an unrecognised agent launcher.
 "#;
 
 /// `cs terminal new` examples, side effects, and caveats.
@@ -925,10 +929,9 @@ CAUTIONS:
 
 CAVEATS:
   Needs --window or $CHAN_WINDOW_ID plus $CHAN_CONTROL_SOCKET; without
-  it the command refuses ("this needs $CHAN_WINDOW_ID"). On a
-  standalone terminal a --path is refused with "cs terminal new --path
-  is only available in a workspace window"; drop --path to open a
-  terminal there.
+  it the command refuses ("this needs $CHAN_WINDOW_ID"). A PATH also
+  needs a workspace window or a standalone terminal whose host serves
+  a filesystem. Omit PATH to open a terminal without resolving a cwd.
 
 SEE ALSO:
   cs terminal write (drive the new tab), cs terminal close (tear it down),

@@ -72,13 +72,19 @@ Every chan-spawned terminal carries these. Read them; do not set them.
   CHAN_WORKSPACE_NAME   that path's basename.
 
 WORKSPACE ONLY:
-`open`, `graph`, `search`, `export`, every `session` action, `terminal
-team` (including `--script`), and `terminal new` with a path need a
-workspace behind the window. In a standalone terminal they refuse and say
-so. Nothing else here does: `terminal`, `pane`, `copy`, `paste`, `upload`,
-`download`, and `tunnel` all work in a plain terminal window.
+`graph`, `search`, `export`, every `session` action, `terminal team`
+(including `--script`), and graph-link `open` need a workspace behind
+the window. In a standalone terminal they refuse and say so.
 
-No environment variable distinguishes the two. That refusal IS the check.
+FILESYSTEM REQUIRED:
+`open PATH` and `terminal new PATH` need a workspace window or a
+standalone terminal whose host serves a filesystem.
+
+Other `terminal` commands, `pane`, `copy`, `paste`, `upload`, `download`,
+and `tunnel` work in a plain terminal window.
+
+No environment variable distinguishes a workspace window from a standalone
+terminal. A workspace-only command's refusal IS the check.
 `window new|open|rm|hide` and `tunnel` additionally need the desktop app.
 
 EXAMPLES:
@@ -829,9 +835,11 @@ pub enum TerminalAction {
     #[command(long_about = help::CS_TERMINAL_NEW)]
     #[command(after_long_help = help::CS_TERMINAL_NEW_AFTER)]
     New {
-        /// Working directory for the new terminal (workspace-relative or
-        /// absolute under the workspace root). Defaults to the workspace
-        /// root.
+        /// Working directory, relative to the caller or absolute. In a
+        /// workspace window, PATH must resolve inside the workspace root;
+        /// a file targets its parent. A standalone host must serve a
+        /// filesystem, and PATH must name a directory in its capability root.
+        /// Omit for the workspace root or the standalone spawn default.
         #[arg(value_hint = clap::ValueHint::AnyPath, verbatim_doc_comment)]
         path: Option<PathBuf>,
         /// Tab name ($CHAN_TAB_NAME inside the new terminal).
@@ -2699,6 +2707,27 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("max 4096 bytes"), "{error}");
+    }
+
+    #[test]
+    fn terminal_new_help_uses_positional_path() {
+        use clap::CommandFactory;
+
+        assert!(CsCli::try_parse_from(["cs", "terminal", "new", "--path", "x"]).is_err());
+        let mut cmd = CsCli::command();
+        cmd.build();
+        let terminal = cmd.find_subcommand_mut("terminal").unwrap();
+        let help = terminal.render_long_help().to_string();
+        let new_help = terminal
+            .find_subcommand_mut("new")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(new_help.contains("[PATH]"), "{new_help}");
+        assert!(
+            !help.contains("--path") && !new_help.contains("--path"),
+            "terminal help:\n{help}\nterminal new help:\n{new_help}"
+        );
     }
 
     #[test]

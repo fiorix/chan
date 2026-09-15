@@ -437,10 +437,10 @@ pub fn workspace_only_refusal(what: &str, hint: Option<&str>) -> String {
 /// `files_served` says whether this tenant mounted the standalone filesystem
 /// surface, which is what makes the two PATH commands answerable here: `cs
 /// open PATH` opens that path in this window's browser or editor, and `cs
-/// terminal new --path` resolves its cwd through the same capability root.
+/// terminal new PATH` resolves its cwd through the same capability root.
 /// Without that surface there is no filesystem to resolve against, so they are
-/// refused as before -- `cs open PATH` with the guidance to load it as a
-/// workspace instead.
+/// refused -- `cs open PATH` with the guidance to load it as a workspace
+/// instead.
 fn terminal_tenant_refusal(
     req: &ControlRequest,
     tenant: ControlTenant,
@@ -462,10 +462,9 @@ fn terminal_tenant_refusal(
             Some("An open workspace window does the rendering; run cs export from a terminal in one."),
         )),
         ControlRequest::OpenTermNew { path: Some(_), .. } if !files_served => {
-            Some(workspace_only_refusal(
-                "terminal new --path",
-                Some("Drop --path to open a terminal here."),
-            ))
+            Some(
+                "cs terminal new PATH is only available in a workspace window or a standalone terminal whose host serves a filesystem; this is a standalone terminal without one. Omit PATH to open a terminal here.".into(),
+            )
         }
         ControlRequest::SessionList => Some(session_refusal("session list")),
         ControlRequest::SessionSelf { .. } => Some(session_refusal("session self")),
@@ -629,9 +628,10 @@ mod tenant_gate_tests {
 
     #[test]
     fn workspace_only_commands_refuse_on_a_terminal_tenant_as_one_family() {
-        // graph / search / terminal-new-path / every session* / every team*
-        // (including --script) need a workspace, so they refuse on a standalone
-        // terminal, and every refusal reads as the same message family.
+        // Graph, search, export, session and team commands refuse on a standalone
+        // terminal regardless of its filesystem. terminal-new PATH also refuses
+        // without a filesystem. Each tested refusal contains the same phrase
+        // about a workspace window, even when it names the filesystem alternative.
         let mut reqs = vec![
             ControlRequest::OpenGraphLink {
                 window_id: "w".into(),
@@ -671,12 +671,10 @@ mod tenant_gate_tests {
 
     #[test]
     fn terminal_new_gate_depends_on_the_path_arg() {
-        // `cs terminal new --path` needs a workspace root; `cs terminal new`
-        // with no path is pure window routing and runs on a standalone
-        // terminal.
+        // A positional PATH needs a served filesystem; pathless `cs terminal new` is pure window routing and runs on a standalone terminal.
         let refusal =
             terminal_tenant_refusal(&term_new(Some("sub")), ControlTenant::TerminalOnly, false);
-        assert!(refusal.is_some_and(|m| m.contains("terminal new --path")));
+        assert!(refusal.is_some_and(|m| m.contains("terminal new PATH")));
         assert_eq!(
             terminal_tenant_refusal(&term_new(None), ControlTenant::TerminalOnly, false),
             None,
@@ -687,7 +685,7 @@ mod tenant_gate_tests {
     fn the_path_commands_run_once_the_tenant_serves_a_filesystem() {
         // A standalone window that browses and edits the machine's disk can
         // answer `cs open PATH` (open it in THIS window) and `cs terminal new
-        // --path` (resolve the cwd through the same capability root). The
+        // PATH` (resolve the cwd through the same capability root). The
         // refusals were about the missing filesystem, not about the window.
         for req in [open_path("/home/u/notes"), term_new(Some("/home/u/src"))] {
             assert_eq!(
@@ -774,9 +772,9 @@ pub struct ControlSocketCtx {
     /// How `ControlRequest::Close` tears this process's workspace(s) down.
     pub unserve: UnserveScope,
     /// The standalone filesystem surface this tenant mounted, when it has one.
-    /// `cs open` and `cs terminal new --path` reach the server machine's disk
+    /// `cs open` and `cs terminal new PATH` reach the server machine's disk
     /// through it on a workspace-less tenant; `None` means terminals only, and
-    /// those commands are refused with the guidance they always had.
+    /// those commands are refused with guidance to serve a workspace or omit PATH.
     pub standalone_files: Option<Arc<crate::state::StandaloneFilesState>>,
 }
 
@@ -1338,10 +1336,10 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
                 Err(message) => return ControlResponse::Error { message },
             };
             // Opening a terminal is window routing, not a workspace operation:
-            // the only filesystem use is resolving an optional --path cwd,
+            // the only filesystem use is resolving an optional PATH cwd,
             // which a workspace-less tenant does through its standalone
             // capability root. Without either surface the gate above already
-            // refused a `--path`, so this branch sees one only when it can
+            // refused a PATH, so this branch sees one only when it can
             // resolve it. This mirrors `WindowList`'s tenant branch.
             match tenant {
                 ControlTenant::TerminalOnly => {
@@ -3999,7 +3997,7 @@ fn open_term_new_standalone(
     Ok("terminal request queued".into())
 }
 
-/// Resolve a `cs terminal new --path` argument against the standalone
+/// Resolve a `cs terminal new PATH` argument against the standalone
 /// filesystem: the wire form of a real directory under the capability root,
 /// which the window's spawn then sends back as `?app=files&cwd=`. A file, a
 /// missing path, or anything outside the root is a refusal -- a terminal that
@@ -4026,7 +4024,7 @@ fn standalone_term_cwd(
     files
         .fs
         .resolve_directory(&rel)
-        .map_err(|e| format!("terminal new --path {}: {e}", requested.display()))?;
+        .map_err(|e| format!("terminal new {}: {e}", requested.display()))?;
     Ok(rel)
 }
 
@@ -6271,9 +6269,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_term_new_with_path_on_a_terminal_tenant_rejects() {
-        // `cs terminal new --path X` can't resolve against a workspace root
-        // that doesn't exist here; reject with the pinned message rather than
-        // silently dropping the requested cwd.
+        // This standalone terminal serves no filesystem for resolving PATH. Reject with the pinned message instead of silently dropping the requested cwd.
         let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
         let ctx = test_ctx(workspace_cell, ControlTenant::TerminalOnly);
 
@@ -6295,7 +6291,7 @@ mod tests {
             ControlResponse::Error { message } => {
                 assert!(
                     message
-                        .contains("cs terminal new --path is only available in a workspace window"),
+                        .contains("cs terminal new PATH is only available in a workspace window or a standalone terminal whose host serves a filesystem"),
                     "{message}"
                 );
                 assert!(
