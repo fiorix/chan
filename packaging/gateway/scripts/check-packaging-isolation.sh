@@ -277,8 +277,9 @@ if grep -Eq 'GRANT .*ALL (TABLES|SEQUENCES)|ALTER DEFAULT PRIVILEGES.*GRANT' \
     die "database role scripts contain a blanket or default grant"
 fi
 
-latest_migration=$(find "$REPO/gateway/migrations" -maxdepth 1 -name '*.sql' -printf '%f\n' \
-    | sort | tail -n 1)
+latest_migration=$(find "$REPO/gateway/migrations" -maxdepth 1 -name '*.sql' \
+    | sed 's|.*/||' | LC_ALL=C sort | tail -n 1)
+[[ -n "$latest_migration" ]] || die "no SQL migrations found in $REPO/gateway/migrations"
 latest_migration=${latest_migration%%_*}
 latest_migration=$((10#$latest_migration))
 grep -Fqx "EXPECTED_SQLX_MIGRATION=$latest_migration" \
