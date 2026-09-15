@@ -1,22 +1,8 @@
-//! Per-tunnel driver task.
+//! Per-tunnel driver task owning one registered tunnel's yamux connection.
 //!
-//! Owns a `yamux::Connection` for the lifetime of one registered
-//! tunnel. Three things share its attention:
+//! One `poll_fn` merges five sources: shutdown, lease-refresh completion, the lease deadline, outbound open requests from the proxy, and inbound peer streams. Sequential polling lets inbound and outbound operations borrow the same connection.
 //!
-//! 1. `OpenRequest` messages from the fronting proxy (via
-//!    `TunnelHandle::open`) asking for a new outbound substream. Each
-//!    message carries a oneshot reply channel.
-//! 2. Inbound substreams from the peer. The protocol does not use
-//!    these in v0; we drop them, which yamux turns into a RST on
-//!    the next poll.
-//! 3. The shutdown signal: the registry's `oneshot::Sender<()>`
-//!    being dropped (either because the entry was evicted, or
-//!    because deregistration ran). Receiver wakes with an error.
-//!
-//! All three are merged into one `poll_fn` body so the two
-//! reborrows of `&mut conn` happen sequentially within a single
-//! poll invocation; `select!` over multiple `poll_fn`s holding
-//! `&mut conn` would conflict on the borrow.
+//! Inbound streams carry admission-lease refresh requests. One refresh runs at a time; streams arriving during a refresh are dropped. The token is revalidated against the tunnel's user and devserver identity under `LEASE_REFRESH_TIMEOUT`, covering frame read through response write. A successful refresh updates the optional lease deadline. When a deadline exists, reaching it closes and deregisters the tunnel.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -40,7 +26,7 @@ const LEASE_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 const LEASE_REFRESH_TIMEOUT: Duration = Duration::from_millis(20);
 
 /// Run the driver to completion. Returns when the yamux connection
-/// closes, errors, or the shutdown signal fires.
+/// closes, errors, an admission lease expires, or the shutdown signal fires.
 ///
 /// `handle` is kept alive only so the driver can call
 /// `Registry::deregister_if_owner` once it exits. Cloning the
@@ -71,7 +57,7 @@ pub(crate) async fn run_tunnel<S>(
         Inbound(yamux::Stream),
         RefreshFinished(Option<chrono::DateTime<chrono::Utc>>),
         LeaseExpired,
-        Shutdown, // shutdown signal or yamux error
+        Shutdown, // shutdown signal, yamux error, or inbound connection close
     }
 
     loop {
