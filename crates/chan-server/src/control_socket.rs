@@ -945,6 +945,8 @@ fn spawn_accept_loop(mut listener: transport::Listener, ctx: ControlSocketCtx) -
     })
 }
 
+const CONTROL_REQUEST_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Frame one accepted control connection: read a single line-framed JSON
 /// `ControlRequest`, dispatch it, and write the JSON `ControlResponse` line
 /// back. Platform-neutral -- it works over whatever read/write halves the
@@ -958,7 +960,15 @@ async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
     // newline), so it fails to parse and answers a clean error instead of an OOM.
     let mut reader = BufReader::new(read.take(MAX_CONTROL_REQUEST_BYTES));
     let mut line = String::new();
-    let request = match reader.read_line(&mut line).await {
+    // One total deadline covers the first line, including partial input.
+    // Dispatched handlers keep their own lifetimes after this read completes.
+    let read_result =
+        match tokio::time::timeout(CONTROL_REQUEST_LINE_TIMEOUT, reader.read_line(&mut line)).await
+        {
+            Ok(result) => result,
+            Err(_) => return,
+        };
+    let request = match read_result {
         Ok(0) => Err(ControlResponse::Error {
             message: "empty control request".into(),
         }),
@@ -5438,6 +5448,125 @@ mod tests {
             .await
             .expect("read identify reply");
         serde_json::from_str(&line).expect("control response json")
+    }
+
+    #[cfg(unix)]
+    async fn control_request_deadline_case(drip: bool) {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("control.sock");
+            let mut listener = transport::bind(&socket).unwrap();
+            let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            let conn = listener.accept().await.unwrap();
+            let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+            client.writable().await.unwrap();
+            tokio::time::pause();
+            let mut serving = Box::pin(serve_connection(conn, ctx));
+            assert!(futures::poll!(serving.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(5)).await;
+            if drip {
+                assert_eq!(client.try_write(b"{\"type\":").unwrap(), 8);
+            }
+            assert!(futures::poll!(serving.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(4)).await;
+            if drip {
+                assert_eq!(client.try_write(b"\"identify\"").unwrap(), 10);
+            }
+            assert!(
+                futures::poll!(serving.as_mut()).is_pending(),
+                "first-line deadline fired early"
+            );
+            tokio::time::advance(Duration::from_secs(1)).await;
+            // Let the runtime process the expired timer within its clock granularity.
+            tokio::time::timeout(Duration::from_millis(10), serving.as_mut())
+                .await
+                .expect("first-line read survived its ten-second total deadline");
+            tokio::time::resume();
+            drop(serving);
+            let mut bytes = Vec::new();
+            match client.read_to_end(&mut bytes).await {
+                Ok(_) => assert!(bytes.is_empty(), "expiry closes without a reply"),
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_request_deadline_closes_a_silent_client() {
+        control_request_deadline_case(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_request_deadline_is_not_reset_by_partial_input() {
+        control_request_deadline_case(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_request_deadline_serves_an_immediate_request() {
+        use std::time::Duration;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+            let handle = start(dir.path().join("control.sock"), ctx).unwrap();
+            assert!(matches!(
+                identify_round_trip(handle.socket_path()).await,
+                ControlResponse::Ok { .. }
+            ));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_request_deadline_does_not_limit_a_parked_handover() {
+        use std::time::Duration;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("control.sock");
+            let mut listener = transport::bind(&socket).unwrap();
+            let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            let conn = listener.accept().await.unwrap();
+            let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+            let _leader = ctx.session_registry.join("leader", true, None).guard;
+            let _follower = ctx.session_registry.join("follower", false, None).guard;
+            let mut events = ctx.events_tx.subscribe();
+            let mut request = serde_json::to_vec(&ControlRequest::SessionHandover {
+                window_id: "follower".into(),
+                to: None,
+                accept: false,
+                reject: false,
+                timeout_secs: 600,
+            })
+            .unwrap();
+            request.push(b'\n');
+            client.write_all(&request).await.unwrap();
+            let mut serving = Box::pin(serve_connection(conn, ctx));
+            tokio::select! {
+                event = events.recv() => {
+                    let prompt: serde_json::Value = serde_json::from_str(&event.unwrap()).unwrap();
+                    assert_eq!(prompt["command"], "handover_prompt");
+                }
+                () = serving.as_mut() => panic!("handover completed before its prompt"),
+            }
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(11)).await;
+            assert!(
+                futures::poll!(serving.as_mut()).is_pending(),
+                "first-line deadline ended an already-dispatched handover"
+            );
+            tokio::time::resume();
+        })
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]
