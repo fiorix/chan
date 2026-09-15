@@ -164,7 +164,7 @@ pub async fn open_reverse_tunnel(
             {
                 // A replayed trigger for the same id: the newer listener wins.
                 // Stop the older one and hold its handle until the wind-down
-                // completes (dropping a still-running handle is not a stop).
+                // completes; dropping the handle requests shutdown but does not wait for it.
                 previous.stop();
                 tauri::async_runtime::spawn(async move { previous.wait().await });
             }

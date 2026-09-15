@@ -59,9 +59,7 @@ pub struct ClientConfig {
     pub spec: TunnelSpec,
 }
 
-/// A running tunnel. Dropping the handle does not stop it; call
-/// [`TunnelHandle::stop`] or await [`TunnelHandle::wait`], which returns when
-/// the devserver closes the tunnel.
+/// A running tunnel. Dropping the handle requests shutdown, as does [`TunnelHandle::stop`]. Await [`TunnelHandle::wait`] to join the task after a stop request or wait for the devserver to close it.
 #[derive(Debug)]
 pub struct TunnelHandle {
     /// The authority the listener actually bound, resolved for port-0 asks.
