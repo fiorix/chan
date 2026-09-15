@@ -88,7 +88,7 @@ sequenceDiagram
 8. If `user.is_blocked()`, write a `login_denied` audit row and return 403 (`Error::Forbidden`).
 9. Resolve `profile.get_user_flags(user.id)`. If `oauth_login` resolves false, write a `login_denied` audit row (with note `oauth_login flag not granted`) and 303 to `/?denied=oauth_login`. The SPA's Login view reads the query param and renders a "sign-in is closed" panel. The gate runs *before* `cycle_id` so a denied callback never carries an authenticated session.
 10. **Rotate the session id (`session.cycle_id()`)** at the privilege boundary.
-11. Stamp microsecond-normalized `authenticated_at`, insert `user_id`, and upsert `identity_session_index` with the post-cycle tower store id. Pre-index sessions fail `whoami` closed.
+11. Stamp microsecond-normalized `authenticated_at`, insert `user_id`, and upsert `identity_session_index` with the post-cycle tower store id. Public authentication and `whoami` require the index to match the session record.
 12. Write a `login` audit row, claim pending grants, consume `return_to` exactly once, and 303 there (or `/`). An `oauth_login` denial appends its stable marker to the same validated target.
 
 ### PAT lifecycle
@@ -115,7 +115,11 @@ SPA and operator PAT expiry arithmetic is checked: a positive lifetime that cann
 
 ### OAuth-session and product control plane
 
-Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent. Logout removes its own index row.
+Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent.
+
+Every public session-authenticated request resolves the store id through `identity_session_index` and requires matching `user_id` and `authenticated_at`, as `whoami` does. This adds one lookup by the unique `store_id` column (migration 0016) to a well-formed authenticated request. An authenticated record without matching index authority is flushed and returns 401, or follows the anonymous branch on share landings and desktop authorize. An unindexed session is signed out on its next authenticated request.
+
+Anonymous pre-auth sessions keep their OAuth state and redirect stashes; desktop authorize validates authentication before saving its new stash. Logout always flushes, even if index resolution fails, removes its own index row, and audits only a resolved user.
 
 Identity is the composition boundary for product mutations:
 
@@ -130,7 +134,7 @@ Durable state is never rolled back after a partial drain. A 502 contains only th
 
 `/api/me`:
 
-1. Resolve `user_id` from the session.
+1. Resolve `user_id` from the session and its matching index row.
 2. `profile.get_user(uid)`. Flush session and 401 if the user is gone underneath the cookie.
 3. Call devserver-control admin `GET /admin/v1/owners/{owner_user_id}/tunnels` (immutable owner id, not username) for the live-devserver list (one row per live devserver; a user can hold several). Empty for blocked users, and empty (with a log line, not a 500) on a devserver-control outage so the rest of the dashboard still loads from profile.
 4. Return `{user, devservers: [{devserver_id, status}], flags}`, where `flags` is the per-user resolved feature-flag map.
@@ -273,7 +277,7 @@ A rename kills the caller's live tunnels (`kill_owner_tunnels`) before profile p
 - `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry.
 - `Secure` follows the `COOKIE_SECURE` env var.
 - devserver-proxy does **not** read this cookie. Cross-service auth uses a short-lived Ed25519 entry credential, not cookie sharing.
-- Authenticated sessions are indexed only after `cycle_id`; the index's secret `store_id` is database-only and never appears in serialization, debug output, or tracing.
+- Authenticated sessions are indexed only after `cycle_id`; every public authentication checks the store id, user and authentication time against that index and flushes a mismatch. The index's secret `store_id` is database-only and never appears in serialization, debug output, or tracing.
 - `/internal/v1/sessions/whoami` accepts the raw cookie only over the internal bearer surface and treats every invalid/pre-auth/pre-index/blocked/deleted case as the same 401.
 
 ### Session id rotates on login
@@ -306,7 +310,7 @@ The origin strings stay coupled to DNS, the per-node wildcard TLS certificates, 
 
 ## Invariants
 
-- A signed-in session always carries `user_id: Uuid` under `KEY_USER`.
+- A signed-in session always carries `user_id: Uuid` under `KEY_USER` and an `authenticated_at` matching its indexed store id.
 - `pending_oauth` is removed on the first read in the callback. A cold-reloaded callback (missing pending) returns 400, not a fresh flow.
 - Blocked accounts cannot start a session: the login flow writes `login_denied` and returns 403.
 - Accounts whose `oauth_login` flag resolves to false cannot start a session either: the login flow writes `login_denied` and 303s to `/?denied=oauth_login` so the SPA can explain why.

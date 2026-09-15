@@ -21,7 +21,7 @@ Small axum service in front of Postgres. Schema:
 - `feature_flag_overrides (flag_key, user_id, enabled, set_at, PRIMARY KEY (flag_key, user_id))`: per-user explicit enable/disable rows. The effective value for `(flag, user)` is the override row when present, else `default_enabled`.
 - `devserver_user_policies (user_id, enabled, max_connected_devservers, updated_at)`: durable, product-agnostic per-user tunnel policy. No row is the compatibility default; identity can require a row at deployment time.
 - `devserver_fleet_policy (singleton, admissions_enabled, updated_at)`: seeded singleton for a persistent fleet pause. Missing or unreadable state is an authorization failure.
-- `identity_session_index (admin_session_id, user_id, store_id, authenticated_at, created_at)`: identity-owned index stored in the shared database. `store_id` is a bearer secret used only to delete the matching tower session and is never returned.
+- `identity_session_index (admin_session_id, user_id, store_id, authenticated_at, created_at)`: identity-owned index stored in the shared database. `store_id` is a bearer secret used to resolve OAuth session authentication against this index and to delete the matching tower session; it is never returned.
 
 ```mermaid
 erDiagram

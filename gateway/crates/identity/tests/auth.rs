@@ -700,6 +700,367 @@ async fn login_then_me() {
     app.cleanup().await;
 }
 
+async fn mock_session_user(app: &TestApp, uid: Uuid) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": uid,
+            "email": "session-index@example.com",
+            "display_name": "Session User",
+            "username": format!("u{}", &uid.simple().to_string()[..12]),
+            "username_edits": 0,
+            "created_at": chrono::Utc::now(),
+            "updated_at": chrono::Utc::now(),
+        })))
+        .mount(&app.profile)
+        .await;
+}
+
+async fn unindex_session(app: &TestApp, client: &Client<'_>) {
+    let deleted = sqlx::query("DELETE FROM identity_session_index WHERE store_id = $1")
+        .bind(raw_session_cookie(client))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
+}
+
+async fn store_session_exists(app: &TestApp, store_id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tower_sessions.session WHERE id = $1)")
+        .bind(store_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn unindexed_oauth_sessions_cannot_authenticate_public_apis() {
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let app = TestApp::new().await;
+        let uid = fake_user_id();
+        mock_session_user(&app, uid).await;
+        let mut observed = Vec::new();
+        for route in ["/api/me", "/api/tokens"] {
+            let mut client = Client::new(&app);
+            happy_login(&app, &mut client, uid, "session-index@example.com").await;
+            assert_eq!(
+                client.send(Method::GET, route, None).await.0,
+                StatusCode::OK
+            );
+            let store_id = raw_session_cookie(&client);
+            unindex_session(&app, &client).await;
+            assert!(store_session_exists(&app, &store_id).await);
+            let status = client.send(Method::GET, route, None).await.0;
+            observed.push((route, status, store_session_exists(&app, &store_id).await));
+        }
+        app.cleanup().await;
+        assert_eq!(
+            observed,
+            vec![
+                ("/api/me", StatusCode::UNAUTHORIZED, false),
+                ("/api/tokens", StatusCode::UNAUTHORIZED, false),
+            ]
+        );
+    })
+    .await
+    .expect("unindexed OAuth API test timed out");
+}
+
+#[tokio::test]
+async fn user_wide_oauth_revoke_denies_every_session_authenticated_route() {
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let app = TestApp::new().await;
+        let uid = fake_user_id();
+        mock_session_user(&app, uid).await;
+        let token = Uuid::nil();
+        let devserver = "a".repeat(64);
+        let routes = vec![
+            (Method::GET, "/api/me".into(), None),
+            (
+                Method::PATCH,
+                "/api/me/username".into(),
+                Some(json!({"username": "session-user"})),
+            ),
+            (Method::DELETE, "/api/profile".into(), None),
+            (Method::GET, "/api/tokens".into(), None),
+            (
+                Method::POST,
+                "/api/tokens".into(),
+                Some(json!({"label": "session test"})),
+            ),
+            (Method::DELETE, format!("/api/tokens/{token}"), None),
+            (Method::GET, format!("/api/tokens/{token}/audit"), None),
+            (Method::GET, "/api/devservers/owned".into(), None),
+            (Method::GET, "/api/devservers/incoming".into(), None),
+            (
+                Method::GET,
+                format!("/api/devservers/{devserver}/grants"),
+                None,
+            ),
+            (
+                Method::POST,
+                format!("/api/devservers/{devserver}/grants"),
+                Some(json!({"grantee_email": "guest@example.com"})),
+            ),
+            (Method::DELETE, format!("/api/grants/{token}"), None),
+            (Method::GET, "/desktop/authorize/consent".into(), None),
+            (Method::POST, "/desktop/authorize/confirm".into(), None),
+        ];
+        let mut sessions = Vec::new();
+        for unindexed in [false, true] {
+            for _ in &routes {
+                let mut client = Client::new(&app);
+                happy_login(&app, &mut client, uid, "session-index@example.com").await;
+                if unindexed {
+                    unindex_session(&app, &client).await;
+                }
+                sessions.push((unindexed, client));
+            }
+        }
+        let (status, result) = authenticated_json(
+            &app.router,
+            Method::POST,
+            &format!("/admin/v1/users/{uid}/sessions/revoke"),
+            OPERATOR_ADMIN_TOKEN,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["oauth_sessions_revoked"], routes.len());
+        let mut failures = Vec::new();
+        for ((unindexed, mut client), (method, route, body)) in
+            sessions.into_iter().zip(routes.iter().cycle())
+        {
+            let store_id = raw_session_cookie(&client);
+            let status = if route == "/desktop/authorize/confirm" {
+                let request = Request::builder()
+                    .method(Method::POST)
+                    .uri(route)
+                    .header(header::COOKIE, client.cookie.as_ref().unwrap())
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("action=allow&csrf=unused"))
+                    .unwrap();
+                app.router.clone().oneshot(request).await.unwrap().status()
+            } else {
+                client.send(method.clone(), route, body.clone()).await.0
+            };
+            let retained = store_session_exists(&app, &store_id).await;
+            if status != StatusCode::UNAUTHORIZED || retained {
+                failures.push(format!(
+                    "{method} {route}: unindexed={unindexed}, status={status}, retained={retained}"
+                ));
+            }
+        }
+        app.cleanup().await;
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    })
+    .await
+    .expect("user-wide OAuth route test timed out");
+}
+
+#[tokio::test]
+async fn malformed_oauth_authentication_time_signs_out() {
+    use tower_sessions::SessionStore;
+
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let app = TestApp::new().await;
+        let uid = fake_user_id();
+        mock_session_user(&app, uid).await;
+        let store = PostgresStore::new(app.pool.clone());
+        let mut observed = Vec::new();
+        for malformed in [json!("not a timestamp"), json!(123), json!({}), Value::Null] {
+            let mut client = Client::new(&app);
+            happy_login(&app, &mut client, uid, "session-index@example.com").await;
+            assert_eq!(
+                client.send(Method::GET, "/api/me", None).await.0,
+                StatusCode::OK
+            );
+            let store_id = raw_session_cookie(&client);
+            let mut record = store
+                .load(&store_id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(record
+                .data
+                .insert("authenticated_at".into(), malformed)
+                .is_some());
+            store.save(&record).await.unwrap();
+            let status = client.send(Method::GET, "/api/me", None).await.0;
+            observed.push((status, store_session_exists(&app, &store_id).await));
+        }
+        app.cleanup().await;
+        assert_eq!(observed, vec![(StatusCode::UNAUTHORIZED, false); 4]);
+    })
+    .await
+    .expect("malformed OAuth timestamp test timed out");
+}
+
+#[tokio::test]
+async fn oauth_session_index_must_match_user_and_authentication_time() {
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let app = TestApp::new().await;
+        let uid = fake_user_id();
+        let other_uid = fake_user_id();
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, username) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(other_uid)
+        .bind("other-session@example.com")
+        .bind("Other User")
+        .bind(format!("u{}", &other_uid.simple().to_string()[..12]))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        mock_session_user(&app, uid).await;
+        for mismatch in ["user", "authentication time", "missing authentication time"] {
+            let mut client = Client::new(&app);
+            happy_login(&app, &mut client, uid, "session-index@example.com").await;
+            let store_id = raw_session_cookie(&client);
+            match mismatch {
+                "user" => {
+                    sqlx::query(
+                        "UPDATE identity_session_index SET user_id = $1 WHERE store_id = $2",
+                    )
+                    .bind(other_uid)
+                    .bind(&store_id)
+                    .execute(&app.pool)
+                    .await
+                    .unwrap();
+                }
+                "authentication time" => {
+                    sqlx::query(
+                        "UPDATE identity_session_index \
+                         SET authenticated_at = authenticated_at - interval '1 second' \
+                         WHERE store_id = $1",
+                    )
+                    .bind(&store_id)
+                    .execute(&app.pool)
+                    .await
+                    .unwrap();
+                }
+                "missing authentication time" => {
+                    use tower_sessions::SessionStore;
+                    let store = PostgresStore::new(app.pool.clone());
+                    let session_id = store_id.parse().unwrap();
+                    let mut record = store.load(&session_id).await.unwrap().unwrap();
+                    assert!(record.data.remove("authenticated_at").is_some());
+                    store.save(&record).await.unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                client.send(Method::GET, "/api/me", None).await.0,
+                StatusCode::UNAUTHORIZED,
+                "{mismatch}"
+            );
+            assert!(!store_session_exists(&app, &store_id).await, "{mismatch}");
+        }
+        app.cleanup().await;
+    })
+    .await
+    .expect("OAuth index mismatch test timed out");
+}
+
+#[tokio::test]
+async fn oauth_signout_preserves_anonymous_share_and_desktop_signin_flows() {
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let app = TestApp::new().await;
+        let uid = fake_user_id();
+        mock_session_user(&app, uid).await;
+        let desktop_uri = "/desktop/authorize?\
+            redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fauth%2Fcallback&\
+            state=desktop-test&label=desktop&\
+            code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&\
+            code_challenge_method=S256&scopes=tunnel&expires_in=3600";
+        for unindexed in [false, true] {
+            for (route, destination) in [
+                ("/s/owner", "/s/owner"),
+                ("/s/owner/workspace", "/s/owner/workspace"),
+                (desktop_uri, "/desktop/authorize/consent"),
+            ] {
+                let mut client = Client::new(&app);
+                if unindexed {
+                    happy_login(&app, &mut client, uid, "session-index@example.com").await;
+                    unindex_session(&app, &client).await;
+                } else {
+                    assert_eq!(
+                        client.send(Method::GET, "/auth/github", None).await.0,
+                        StatusCode::SEE_OTHER
+                    );
+                    assert_eq!(
+                        client.send(Method::GET, "/api/me", None).await.0,
+                        StatusCode::UNAUTHORIZED
+                    );
+                }
+                let old_store_id = raw_session_cookie(&client);
+                let (status, _, _, location) = client.send(Method::GET, route, None).await;
+                assert_eq!(
+                    status,
+                    StatusCode::SEE_OTHER,
+                    "{route}, unindexed={unindexed}"
+                );
+                assert_eq!(location, "/");
+                // The session store can reuse the flushed id when the handler
+                // saves an anonymous stash. Neither record may retain authority.
+                use tower_sessions::SessionStore;
+                let store = PostgresStore::new(app.pool.clone());
+                for store_id in [old_store_id, raw_session_cookie(&client)] {
+                    if let Some(record) = store.load(&store_id.parse().unwrap()).await.unwrap() {
+                        assert!(!record.data.contains_key("user_id"));
+                        assert!(!record.data.contains_key("authenticated_at"));
+                    }
+                }
+                assert_eq!(
+                    client.send(Method::GET, "/api/me", None).await.0,
+                    StatusCode::UNAUTHORIZED
+                );
+                happy_login_at(
+                    &app,
+                    &mut client,
+                    uid,
+                    "session-index@example.com",
+                    "/auth/github",
+                    destination,
+                )
+                .await;
+                if route == desktop_uri {
+                    assert_eq!(
+                        client.send(Method::GET, destination, None).await.0,
+                        StatusCode::OK
+                    );
+                }
+                assert_eq!(
+                    client.send(Method::POST, "/api/logout", None).await.0,
+                    StatusCode::NO_CONTENT
+                );
+            }
+        }
+        let mut unindexed_logout = Client::new(&app);
+        happy_login(
+            &app,
+            &mut unindexed_logout,
+            uid,
+            "session-index@example.com",
+        )
+        .await;
+        let store_id = raw_session_cookie(&unindexed_logout);
+        unindex_session(&app, &unindexed_logout).await;
+        assert_eq!(
+            unindexed_logout
+                .send(Method::POST, "/api/logout", None)
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!store_session_exists(&app, &store_id).await);
+        app.cleanup().await;
+    })
+    .await
+    .expect("OAuth anonymous continuation test timed out");
+}
+
 #[tokio::test]
 async fn indexed_oauth_session_whoami_inventory_and_exact_revoke_converge() {
     let app = TestApp::new().await;

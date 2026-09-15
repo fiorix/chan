@@ -803,23 +803,47 @@ async fn index_authenticated_session(
     Ok(())
 }
 
-pub(crate) async fn current_user_id(session: &Session) -> Result<Uuid> {
-    session
-        .get::<Uuid>(KEY_USER)
-        .await
-        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))?
+pub(crate) async fn current_user_id(state: &AppState, session: &Session) -> Result<Uuid> {
+    current_user_id_optional(state, session)
+        .await?
         .ok_or(Error::Unauthorized)
 }
 
-/// Same as [`current_user_id`] but absence of a session returns `Ok(None)`
-/// instead of `Unauthorized`. Used by handlers that have an
-/// unauthenticated fall-through (`/desktop/authorize` bounces through
-/// sign-in before completing).
-pub(crate) async fn current_user_id_optional(session: &Session) -> Result<Option<Uuid>> {
-    session
+/// Resolve authenticated sessions through their revocation index. Missing or
+/// mismatched index authority signs the session out; anonymous pre-auth state
+/// is preserved for handlers that bounce through sign-in.
+pub(crate) async fn current_user_id_optional(
+    state: &AppState,
+    session: &Session,
+) -> Result<Option<Uuid>> {
+    let Some(user_id) = session
         .get::<Uuid>(KEY_USER)
         .await
-        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let authenticated_at = session
+        .get_value(KEY_AUTHENTICATED_AT)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))?
+        .and_then(|value| serde_json::from_value::<DateTime<Utc>>(value).ok());
+    if let (Some(store_id), Some(authenticated_at)) = (session.id(), authenticated_at) {
+        let indexed = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+            "SELECT user_id, authenticated_at FROM identity_session_index WHERE store_id = $1",
+        )
+        .bind(store_id.to_string())
+        .fetch_optional(&state.pool)
+        .await?;
+        if indexed == Some((user_id, authenticated_at)) {
+            return Ok(Some(user_id));
+        }
+    }
+    session
+        .flush()
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session flush: {e}")))?;
+    Ok(None)
 }
 
 /// Resolve the session to a non-blocked user. Used by every
@@ -830,7 +854,7 @@ pub(crate) async fn current_user_id_optional(session: &Session) -> Result<Option
 /// blocked view, the other two are always permitted (right to log
 /// out, right to delete).
 async fn current_active_user(state: &AppState, session: &Session) -> Result<User> {
-    let uid = current_user_id(session).await?;
+    let uid = current_user_id(state, session).await?;
     let pc = &state.cfg.profile_client;
     let Some(user) = pc.get_user(uid).await? else {
         let _ = session.flush().await;
@@ -870,7 +894,7 @@ struct MeResponse {
 }
 
 async fn me(State(state): State<AppState>, session: Session) -> Result<Response> {
-    let uid = current_user_id(&session).await?;
+    let uid = current_user_id(&state, &session).await?;
     let pc = &state.cfg.profile_client;
     // User vanished underneath the cookie: invalidate and 401.
     let Some(user) = pc.get_user(uid).await? else {
@@ -934,10 +958,13 @@ async fn logout(
     session: Session,
     headers: HeaderMap,
 ) -> Result<StatusCode> {
-    // Read the user_id before flushing so we can attribute the audit
-    // row; absent (already-logged-out) sessions just skip the write.
-    let uid = session.get::<Uuid>(KEY_USER).await.ok().flatten();
+    // Audit only authenticated users, but always flush even if resolving
+    // the index fails. Signing out must not depend on index availability.
     let store_id = session.id().map(|id| id.to_string());
+    let uid = current_user_id_optional(&state, &session)
+        .await
+        .ok()
+        .flatten();
     session
         .flush()
         .await
@@ -979,7 +1006,7 @@ async fn providers_list(State(state): State<AppState>) -> Json<ProvidersResponse
 }
 
 async fn delete_profile(State(state): State<AppState>, session: Session) -> Result<StatusCode> {
-    let uid = current_user_id(&session).await?;
+    let uid = current_user_id(&state, &session).await?;
 
     // Establish denial before acknowledging either synchronous completion or
     // queued work. The profile transaction blocks new authorization and
@@ -1518,10 +1545,7 @@ async fn share_landing(
 
     // Unauthenticated: stash + send to login. Use a 303 (See Other)
     // so a refresh on the SPA root doesn't re-trigger the share flow.
-    let uid = session
-        .get::<Uuid>(KEY_USER)
-        .await
-        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))?;
+    let uid = current_user_id_optional(&state, &session).await?;
     let Some(uid) = uid else {
         // The sanitized selector rides the stash so a `?d=`-qualified
         // link survives the sign-in round trip (hex only, safe to
@@ -1654,10 +1678,7 @@ async fn share_landing_root(
 
     // Unauthenticated: stash + send to login. 303 so a refresh on the SPA
     // root doesn't re-trigger the open flow.
-    let uid = session
-        .get::<Uuid>(KEY_USER)
-        .await
-        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session get: {e}")))?;
+    let uid = current_user_id_optional(&state, &session).await?;
     let Some(uid) = uid else {
         let dest = match &selector {
             Some(d) => format!("/s/{owner}?d={d}"),

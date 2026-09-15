@@ -669,15 +669,15 @@ pub async fn authorize(
     Query(q): Query<AuthorizeQuery>,
 ) -> Result<Redirect> {
     let params = validate(q)?;
+    let uid = current_user_id_optional(&state, &session).await?;
     session
         .insert(KEY_DESKTOP_AUTHORIZE, &params)
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert desktop_authorize: {e}")))?;
 
-    let Some(uid) = current_user_id_optional(&session).await? else {
+    let Some(uid) = uid else {
         // Bounce through SPA sign-in. `auth_callback` redirects to
         // CONSENT_PATH once the user is authenticated.
-        let _ = state;
         return Ok(Redirect::to("/"));
     };
     // Authenticated. Short-circuit a known-blocked user to the
@@ -700,7 +700,7 @@ pub async fn authorize(
 
 /// `GET /desktop/authorize/consent` -- renders the consent HTML.
 pub async fn consent(State(state): State<AppState>, session: Session) -> Result<Response> {
-    let uid = current_user_id(&session).await?;
+    let uid = current_user_id(&state, &session).await?;
     let Some(params) = peek_pending(&session).await? else {
         return Err(Error::BadRequest("no pending desktop authorize".into()));
     };
@@ -747,7 +747,7 @@ pub async fn confirm(
     headers: HeaderMap,
     Form(form): Form<ConfirmForm>,
 ) -> Result<Response> {
-    let uid = current_user_id(&session).await?;
+    let uid = current_user_id(&state, &session).await?;
 
     // Consume CSRF first so a replay of an old form fails even if
     // params are still stashed.
