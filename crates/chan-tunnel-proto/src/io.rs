@@ -1,7 +1,7 @@
-//! Async helpers for the two control frames that precede yamux.
+//! Async helpers for Hello/HelloAck and admission-lease refresh control frames.
 //!
 //! The wire codec in `frame.rs` is sync and operates on a
-//! `BytesMut` so callers can workspace it from any I/O loop. In
+//! `BytesMut` so callers can drive it from any I/O loop. In
 //! practice both sides of the tunnel run on tokio, so a pair of
 //! tiny `read_frame` / `write_frame` helpers is enough; nothing in
 //! the protocol needs streaming control frames.
@@ -22,10 +22,10 @@ pub enum IoFrameError {
     Io(#[from] std::io::Error),
 }
 
-/// Read one length-prefixed JSON frame from `r`. The peer is
-/// expected to send exactly one before either side hands the
-/// stream to yamux; reading more than `MAX_CONTROL_FRAME_BYTES`
-/// is rejected by the inner codec.
+/// Read one length-prefixed JSON frame from `r`. Used for the initial
+/// Hello/HelloAck exchange before yamux and for admission-lease refresh
+/// frames on yamux substreams. A declared payload above
+/// `MAX_CONTROL_FRAME_BYTES` is rejected before reading the payload.
 pub async fn read_frame<R, T>(r: &mut R) -> Result<T, IoFrameError>
 where
     R: AsyncRead + Unpin,
