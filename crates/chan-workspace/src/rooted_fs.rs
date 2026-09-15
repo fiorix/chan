@@ -910,8 +910,9 @@ impl RootedFs {
         Ok(())
     }
 
-    /// Rename within the root through the capability handle.
-    pub(crate) fn rename(&self, from: &str, to: &str) -> Result<()> {
+    /// Validate a rename without mutation. Returns whether the destination
+    /// already identifies the source directory, which needs no write probe.
+    pub(crate) fn preflight_rename(&self, from: &str, to: &str) -> Result<bool> {
         self.ensure_root_available()?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
@@ -954,7 +955,15 @@ impl RootedFs {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(map_cap_err(error, &to_rel)),
         };
-        if !(same_file && src_ft.is_dir()) {
+        Ok(same_file && src_ft.is_dir())
+    }
+
+    /// Rename within the root through the capability handle.
+    pub(crate) fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let same_directory = self.preflight_rename(from, to)?;
+        let from_rel = self.rel(from)?;
+        let to_rel = self.rel(to)?;
+        if !same_directory {
             self.ensure_writable(to)?;
         }
         if let Some(parent) = to_rel.parent() {

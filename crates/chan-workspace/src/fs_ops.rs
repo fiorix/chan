@@ -1853,7 +1853,7 @@ pub const LIST_DIR_LIMIT: usize = 50_000;
 /// walker sees more than `LIST_TREE_LIMIT` entries, so a runaway
 /// or mis-pointed workspace never OOMs the caller.
 pub fn list_tree(root: &Path) -> Result<Vec<TreeEntry>> {
-    list_tree_inner(root, root, 1, None)
+    list_tree_inner(root, root, 1, None, LIST_TREE_LIMIT)
 }
 
 /// Variant of `list_tree` that also applies a caller-supplied
@@ -1862,7 +1862,7 @@ pub fn list_tree(root: &Path) -> Result<Vec<TreeEntry>> {
 /// rebuild to walk a hundred thousand README.md files. The
 /// editor's tree view keeps using the unfiltered `list_tree`.
 pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEntry>> {
-    list_tree_inner(root, root, 1, Some(filter))
+    list_tree_inner(root, root, 1, Some(filter), LIST_TREE_LIMIT)
 }
 
 /// `list_tree` variant governed by one generated scope policy.
@@ -1887,6 +1887,14 @@ pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<Tr
 /// `LIST_TREE_LIMIT` still applies, in case a misconfigured prefix
 /// covers the whole workspace (e.g. the user pointed chan at `~`).
 pub fn list_tree_prefix(root: &Path, subtree_abs: &Path) -> Result<Vec<TreeEntry>> {
+    list_tree_prefix_with_limit(root, subtree_abs, LIST_TREE_LIMIT)
+}
+
+pub(crate) fn list_tree_prefix_with_limit(
+    root: &Path,
+    subtree_abs: &Path,
+    limit: usize,
+) -> Result<Vec<TreeEntry>> {
     if !subtree_abs.exists() {
         return Ok(Vec::new());
     }
@@ -1894,7 +1902,7 @@ pub fn list_tree_prefix(root: &Path, subtree_abs: &Path) -> Result<Vec<TreeEntry
     // legacy client-side filter in chan-llm did the same. Files
     // come back as their single self-entry; directories come back
     // with their own entry plus descendants.
-    list_tree_inner(root, subtree_abs, 0, None)
+    list_tree_inner(root, subtree_abs, 0, None, limit)
 }
 
 /// `list_tree_prefix` variant that also applies the directory-name
@@ -1911,7 +1919,7 @@ pub fn list_tree_prefix_filtered(
     if !subtree_abs.exists() {
         return Ok(Vec::new());
     }
-    list_tree_inner(root, subtree_abs, 0, Some(filter))
+    list_tree_inner(root, subtree_abs, 0, Some(filter), LIST_TREE_LIMIT)
 }
 
 /// Subtree listing governed by one generated scope policy.
@@ -2009,6 +2017,7 @@ fn list_tree_inner(
     walk_from: &Path,
     min_depth: usize,
     filter: Option<&WalkFilter>,
+    limit: usize,
 ) -> Result<Vec<TreeEntry>> {
     let mut out = Vec::new();
     let iter: Box<dyn Iterator<Item = DirEntry>> = if walk_from == root {
@@ -2060,10 +2069,10 @@ fn list_tree_inner(
         Box::new(walker)
     };
     for entry in iter {
-        if out.len() >= LIST_TREE_LIMIT {
+        if out.len() >= limit {
             return Err(ChanError::ListingTooLarge {
                 observed: out.len(),
-                limit: LIST_TREE_LIMIT,
+                limit,
             });
         }
         let rel = entry

@@ -2184,14 +2184,25 @@ impl Workspace {
         to: &str,
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<RenameOutcome> {
+        self.rename_with_link_rewrite_with_limit(from, to, progress, fs_ops::LIST_TREE_LIMIT)
+    }
+
+    fn rename_with_link_rewrite_with_limit(
+        &self,
+        from: &str,
+        to: &str,
+        progress: &dyn crate::progress::ProgressCallback,
+        limit: usize,
+    ) -> Result<RenameOutcome> {
         use crate::progress::{ProgressEvent, ProgressStage};
+        self.fs.preflight_rename(from, to)?;
         // Snapshot mapping BEFORE the rename so the file walker sees
         // the subtree in its old location. Empty mapping is fine
         // (e.g., directory rename with no descendants) and means the
         // rewrite pass is a no-op.
         let from_canon = canonical_posix(from);
         let to_canon = canonical_posix(to);
-        let mapping = self.snapshot_rename_mapping(&from_canon, &to_canon)?;
+        let mapping = self.snapshot_rename_mapping(&from_canon, &to_canon, limit)?;
 
         // Single rename op. From here on the on-disk tree reflects the
         // new layout; the graph is intentionally still stale (rebuilt
@@ -2383,11 +2394,15 @@ impl Workspace {
     }
 
     /// Pre-rename snapshot of every concrete file under `from`, paired
-    /// with its post-rename path. Returns an empty Vec if `from` is a
-    /// single file (the caller's `(from, to)` pair already covers it)
-    /// or a non-existent path. Returns just the single pair if `from`
-    /// is one file. Directories return one entry per descendant file.
-    fn snapshot_rename_mapping(&self, from: &str, to: &str) -> Result<HashMap<String, String>> {
+    /// with its post-rename path. A single file returns its own pair;
+    /// directories return one entry per descendant file. The source
+    /// subtree's listing budget is checked before anything moves.
+    fn snapshot_rename_mapping(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> Result<HashMap<String, String>> {
         let from_rel = self.rel(from)?;
         let meta = match self.fs.dir().symlink_metadata(&from_rel) {
             Ok(m) => m,
@@ -2401,11 +2416,10 @@ impl Workspace {
         if !meta.is_dir() {
             return Ok(HashMap::new());
         }
-        // Directory walk. list_tree returns workspace-rooted POSIX paths
-        // for every regular file + dir under the workspace; we filter to
-        // descendants of `from/` and pair them with their new home
-        // under `to/`.
-        let entries = self.list_tree()?;
+        // Subtree entries stay workspace-relative, including source paths
+        // reached through an in-root symlink component.
+        let entries =
+            fs_ops::list_tree_prefix_with_limit(self.root(), &self.root().join(&from_rel), limit)?;
         let prefix = if from.is_empty() {
             String::new()
         } else {
@@ -7980,6 +7994,100 @@ mod tests {
             "result={result:?}; destination parent created inside source={created_parent}"
         );
         assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
+    }
+
+    #[test]
+    fn rename_snapshot_walks_only_the_source_subtree() {
+        let (_cfg, root, workspace) = fixture();
+        let limit = 4;
+        workspace.write_text("small/a.md", "# a\n").unwrap();
+        workspace.write_bytes("small/b.bin", b"b").unwrap();
+        for n in 0..=limit {
+            workspace
+                .write_text(&format!("large/{n}.md"), "large\n")
+                .unwrap();
+        }
+        let small = workspace.rename_with_link_rewrite_with_limit(
+            "small",
+            "moved",
+            &crate::progress::NoProgress,
+            limit,
+        );
+        let oversized = workspace.rename_with_link_rewrite_with_limit(
+            "large",
+            "oversized",
+            &crate::progress::NoProgress,
+            limit,
+        );
+        assert!(
+            matches!(oversized, Err(ChanError::ListingTooLarge { limit: 4, .. })),
+            "{oversized:?}"
+        );
+        assert!(!root.path().join("oversized").exists());
+        assert_eq!(
+            std::fs::read_dir(root.path().join("large"))
+                .unwrap()
+                .count(),
+            limit + 1
+        );
+        let outcome = small.expect("a large sibling must not consume the source listing budget");
+        assert_eq!(
+            outcome.renamed,
+            [
+                ("small/a.md".to_string(), "moved/a.md".to_string()),
+                ("small/b.bin".to_string(), "moved/b.bin".to_string()),
+            ]
+        );
+        assert!(!root.path().join("small").exists());
+        assert_eq!(workspace.read_text("moved/a.md").unwrap(), "# a\n");
+        assert_eq!(workspace.read("moved/b.bin").unwrap(), b"b");
+        assert!(!workspace
+            .rename_log
+            .lock()
+            .unwrap()
+            .contains_key("large/0.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_snapshot_tracks_a_source_with_a_symlink_component() {
+        let (_cfg, root, workspace) = fixture();
+        workspace
+            .write_text("real/source/file.md", "# source\n")
+            .unwrap();
+        std::os::unix::fs::symlink("real", root.path().join("alias")).unwrap();
+        let outcome = workspace
+            .rename_with_link_rewrite("alias/source", "moved")
+            .unwrap();
+        assert_eq!(
+            outcome.renamed,
+            [(
+                "alias/source/file.md".to_string(),
+                "moved/file.md".to_string()
+            )]
+        );
+        assert_eq!(workspace.read_text("moved/file.md").unwrap(), "# source\n");
+        assert!(!root.path().join("real/source").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_snapshot_refuses_alias_before_listing() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a/sub/file.md", "# source\n").unwrap();
+        std::os::unix::fs::symlink("a/sub", root.path().join("link")).unwrap();
+        let result = workspace.rename_with_link_rewrite_with_limit(
+            "a",
+            "link/x/y",
+            &crate::progress::NoProgress,
+            0,
+        );
+        assert!(
+            matches!(result, Err(ChanError::DestinationInsideSource(_))),
+            "{result:?}"
+        );
+        assert!(!root.path().join("a/sub/x").exists());
+        assert!(workspace.rename_log.lock().unwrap().is_empty());
     }
 
     #[cfg(unix)]
