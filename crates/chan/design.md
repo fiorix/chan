@@ -95,7 +95,11 @@ flowchart TB
   Hand -->|"None: no desktop / refused / skew"| Serve
   Target -->|"Devserver"| Reg["try_register_devserver"]
   Reg -->|"Registered: devserver owns flock"| Ret2(["return Ok early"])
-  Reg -->|"NoDevserver / skew / error"| Serve
+  Reg -->|"ReplyTimedOut: mount may still be running"| Refuse(["print error + exit 1"])
+  Reg -->|"NoDevserver"| Explicit{"--devserver=PORT?"}
+  Explicit -->|"yes: selected devserver is no longer live"| Refuse
+  Explicit -->|"no"| Serve
+  Reg -->|"skew / error"| Serve
   Target -->|"Standalone"| Serve
   Serve["open_workspace: acquire writer flock exactly once"] --> Run["chan_server::serve: HTTP/WS + embedded SPA"]
 ```
@@ -104,10 +108,10 @@ flowchart TB
 
   1. **Absolutize and gate.** The serve root is made absolute against the CLI's cwd (the desktop handoff runs with cwd `/`, and the registry is keyed by canonical path, so a relative root must not leak). Unless `--here` is passed, a root inside a Git / Mercurial / Subversion working tree is refused with a structured marker on stderr and exit 70, so a wrapping shell can offer the repo root instead.
   2. **Desktop handoff.** When the `Desktop` personality is active (or `CHAN_DESKTOP_HANDOFF=1` forces it, which is how the Windows desktop bundle re-execs the standalone console binary into a handoff), a same-user `chan-desktop` in a GUI session is asked to open the workspace in a native window, and the CLI exits. The desktop then owns the flock; the CLI must not also open it.
-  3. **Devserver registration.** Otherwise, unless opted out, a same-user local `chan devserver` is offered the workspace; if it mounts it, the CLI prints a note and exits, again leaving one flock owner. This path runs for the standalone binary too and needs no GUI, because devservers are exactly where SSH-only boxes live.
+  3. **Devserver registration.** Otherwise, unless opted out, a same-user local `chan devserver` is offered the workspace; if it mounts it, the CLI prints a note and exits, again leaving one flock owner. Registration has a 75-second reply budget, exceeding the devserver's 60-second mount budget; identity requests keep a three-second budget. The server first waits on its mount lock without a bound, and startup restore can hold that lock for minutes, so `chan serve` just after a devserver start can exhaust its reply budget. After three seconds without an answer the CLI prints `chan: waiting for the devserver to mount <root>`. If a sent request exhausts the registration budget, the CLI reports that the devserver did not answer within 75 seconds and may still be mounting the workspace, then exits 1 with a hint to check `chan ps` or retry with `--standalone`. It never opens the workspace itself after that timeout. This path runs for the standalone binary too and needs no GUI, because devservers are exactly where SSH-only boxes live.
   4. **Standalone serve.** When no handoff takes the workspace, the CLI registers and opens it itself and calls `chan_server::serve(lib, workspace, config)`, which mounts the per-tenant HTTP / WebSocket app and the embedded SPA. The update banner and the background probe fire here, a non-loopback bind prints a plaintext-exposure warning, and a bind collision on the shared default port (`8787`) against an already-running devserver is recognized and turned into an actionable hint rather than a bare "address already in use".
 
-Every handoff path returns early, so a successful handoff never double-opens, and every failure mode (no desktop, refused, stale socket, version skew, GUI absent) drops through to the standalone serve. `chan devserver` reuses the same `chan-server` machinery through `run_devserver` for the multi-workspace case.
+Every successful handoff returns early and never double-opens. An unanswered registration that exceeds its reply budget refuses a competing standalone open because the devserver may still finish mounting. Other failures (no desktop, refused, stale socket, version skew, GUI absent) drop through to the standalone serve; an explicitly selected devserver that is no longer live is also refused. `chan devserver` reuses the same `chan-server` machinery through `run_devserver` for the multi-workspace case.
 
 ## 6. The Personality split
 

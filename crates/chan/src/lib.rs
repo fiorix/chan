@@ -3713,6 +3713,44 @@ async fn cmd_serve_cli(args: ServeCliArgs, personality: Personality, verbose: bo
     .await
 }
 
+#[derive(Debug)]
+enum DevserverRegistrationAction {
+    Registered,
+    Standalone(Option<String>),
+}
+
+fn devserver_registration_action(
+    outcome: chan_server::devserver_handoff::Outcome,
+    selector: Option<&DevserverSelector>,
+    root: &Path,
+) -> Result<DevserverRegistrationAction> {
+    use chan_server::devserver_handoff::Outcome;
+    let message = match outcome {
+        Outcome::Registered { .. } => return Ok(DevserverRegistrationAction::Registered),
+        Outcome::VersionSkew => Some(
+            "chan: a local devserver is running a different version; \
+             cannot register. Starting a standalone server."
+                .to_string(),
+        ),
+        Outcome::Error(message) => Some(format!(
+            "chan: the local devserver could not mount this workspace \
+             ({message}); starting a standalone server."
+        )),
+        Outcome::NoDevserver => {
+            if let Some(DevserverSelector::Port(port)) = selector {
+                anyhow::bail!("local devserver selected by --devserver={port} is no longer live");
+            }
+            None
+        }
+        Outcome::ReplyTimedOut => anyhow::bail!(
+            "the devserver did not answer within 75 s; it may still be mounting {}; \
+             check `chan ps` or retry with `--standalone`",
+            root.display()
+        ),
+    };
+    Ok(DevserverRegistrationAction::Standalone(message))
+}
+
 async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
     let ServeArgs {
         addr,
@@ -3897,39 +3935,33 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // CLI-to-devserver registration. A running same-user devserver mounts
         // this workspace, mints one window, and owns its flock, so the CLI
         // prints a note and exits. CHAN_NO_DEVSERVER_HANDOFF opts out (skip the
-        // attempt, serve standalone); every non-registered outcome drops
-        // through to the standalone path below.
+        // attempt, serve standalone). A timed-out reply leaves the mount
+        // uncertain, so that outcome must refuse a standalone open.
         OpenTarget::Devserver => {
             if let Some(instance_index) = selected_devserver {
                 let candidate = &candidates[instance_index];
                 let instance = &devservers
                     .as_ref()
                     .expect("selected devserver came from discovery")[instance_index];
-                use chan_server::devserver_handoff::Outcome;
-                match chan_server::devserver_handoff::try_register_devserver(instance, &root).await
-                {
-                    Outcome::Registered { prefix: _ } => {
+                let registration =
+                    chan_server::devserver_handoff::try_register_devserver(instance, &root);
+                tokio::pin!(registration);
+                let outcome = tokio::select! {
+                    outcome = &mut registration => outcome,
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                        eprintln!("chan: waiting for the devserver to mount {}", root.display());
+                        registration.await
+                    }
+                };
+                match devserver_registration_action(outcome, flags.devserver.as_ref(), &root)? {
+                    DevserverRegistrationAction::Registered => {
                         let message = devserver_window_opened_message(&root, candidate);
                         println!("{message}");
                         return Ok(());
                     }
-                    Outcome::VersionSkew => {
-                        eprintln!(
-                            "chan: a local devserver is running a different version; \
-                             cannot register. Starting a standalone server."
-                        );
-                    }
-                    Outcome::Error(message) => {
-                        eprintln!(
-                            "chan: the local devserver could not mount this workspace \
-                             ({message}); starting a standalone server."
-                        );
-                    }
-                    Outcome::NoDevserver => {
-                        if let Some(DevserverSelector::Port(port)) = flags.devserver {
-                            anyhow::bail!(
-                                "local devserver selected by --devserver={port} is no longer live"
-                            );
+                    DevserverRegistrationAction::Standalone(message) => {
+                        if let Some(message) = message {
+                            eprintln!("{message}");
                         }
                     }
                 }
@@ -10349,6 +10381,40 @@ mod tests {
                 .unwrap();
         assert_eq!(actual, expected);
         stub.abort();
+    }
+
+    #[test]
+    fn devserver_registration_timeout_refuses_standalone() {
+        use chan_server::devserver_handoff::Outcome;
+        let root = Path::new("notes");
+        for selector in [None, Some(DevserverSelector::Port(8787))] {
+            let error =
+                devserver_registration_action(Outcome::ReplyTimedOut, selector.as_ref(), root)
+                    .expect_err("timeout must not open a standalone server");
+            assert_eq!(error.to_string(),
+                "the devserver did not answer within 75 s; it may still be mounting notes; check `chan ps` or retry with `--standalone`");
+        }
+        assert!(matches!(
+            devserver_registration_action(Outcome::NoDevserver, None, root).unwrap(),
+            DevserverRegistrationAction::Standalone(None)
+        ));
+        assert!(devserver_registration_action(
+            Outcome::NoDevserver,
+            Some(&DevserverSelector::Port(8787)),
+            root
+        )
+        .is_err());
+        assert!(matches!(
+            devserver_registration_action(
+                Outcome::Registered {
+                    prefix: "/notes".into()
+                },
+                None,
+                root
+            )
+            .unwrap(),
+            DevserverRegistrationAction::Registered
+        ));
     }
 
     #[cfg(unix)]

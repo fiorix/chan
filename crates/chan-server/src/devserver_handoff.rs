@@ -38,6 +38,11 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 #[cfg(any(unix, windows))]
 const IO_TIMEOUT: Duration = Duration::from_millis(3000);
+// Exceeds devserver.rs's WORKSPACE_MOUNT_TIMEOUT (60 seconds), but the server
+// first waits without a bound on its mount lock. Startup restore can hold
+// that lock for minutes, so registration just after startup can time out.
+#[cfg(any(unix, windows))]
+const REGISTER_REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 #[cfg(any(unix, windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -92,6 +97,14 @@ pub enum Request {
 }
 
 impl Request {
+    #[cfg(any(unix, windows))]
+    fn reply_budget(&self) -> Duration {
+        match self {
+            Request::Identify { .. } => IO_TIMEOUT,
+            Request::RegisterWorkspace { .. } => REGISTER_REPLY_TIMEOUT,
+        }
+    }
+
     /// The handshake protocol version carried by any request variant.
     pub fn protocol(&self) -> u32 {
         match self {
@@ -140,17 +153,19 @@ pub enum Response {
 }
 
 /// Outcome of a registration attempt as the CLI resolves it. Not on the
-/// wire: every non-`Registered` variant maps to "own the server exactly as
-/// a standalone serve," with a distinct variant so the CLI prints the right
-/// note.
+/// wire: a reply timeout leaves the mount's outcome unknown and must not
+/// start a competing standalone server.
 #[derive(Debug)]
 pub enum Outcome {
     /// The devserver mounted the workspace at `prefix` and minted its requested
     /// window. The CLI reports both and exits 0.
     Registered { prefix: String },
-    /// No devserver discovered: no socket, connect refused, stale socket,
-    /// or any I/O error before a valid response. Own the server standalone.
+    /// No usable endpoint or reply: connect refused, stale socket, I/O error
+    /// or malformed reply. Own the server standalone.
     NoDevserver,
+    /// The request was sent, but the devserver did not reply within its budget.
+    /// The devserver may still be mounting the workspace.
+    ReplyTimedOut,
     /// The devserver is a different protocol version. Fall back to
     /// standalone after printing the skew.
     VersionSkew,
@@ -641,9 +656,13 @@ async fn probe_instance(endpoint: PathBuf, timeout: Duration) -> Option<Instance
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
     };
-    let response = tokio::time::timeout(timeout, request_endpoint(&endpoint, &request))
-        .await
-        .ok()??;
+    let EndpointReply::Response(response) =
+        tokio::time::timeout(timeout, request_endpoint(&endpoint, &request))
+            .await
+            .ok()?
+    else {
+        return None;
+    };
     match response {
         Response::Identified {
             pid,
@@ -664,9 +683,11 @@ async fn probe_instance(endpoint: PathBuf, timeout: Duration) -> Option<Instance
 /// Register `workspace_path` with the selected local devserver instance and ask
 /// it to mint one workspace window record.
 ///
-/// A dead endpoint, timeout, malformed reply, or response for another verb
-/// maps to [`Outcome::NoDevserver`]. Protocol skew and an application-level
-/// mount failure retain their distinct outcomes for the CLI's diagnostics.
+/// A sent request that exhausts its reply budget returns
+/// [`Outcome::ReplyTimedOut`]: the caller must not open the workspace itself.
+/// A dead endpoint, malformed reply or response for another verb maps to
+/// [`Outcome::NoDevserver`]. Protocol skew and application-level mount failures
+/// retain their distinct outcomes for the CLI's diagnostics.
 #[cfg(any(unix, windows))]
 pub async fn try_register_devserver(instance: &Instance, workspace_path: &Path) -> Outcome {
     let request = Request::RegisterWorkspace {
@@ -674,11 +695,21 @@ pub async fn try_register_devserver(instance: &Instance, workspace_path: &Path) 
         cli_version: CHAN_VERSION.into(),
         workspace_path: workspace_path.display().to_string(),
     };
-    match request_endpoint(&instance.endpoint, &request).await {
-        Some(Response::Registered { prefix, .. }) => Outcome::Registered { prefix },
-        Some(Response::VersionSkew { .. }) => Outcome::VersionSkew,
-        Some(Response::Error { message }) => Outcome::Error(message),
-        Some(Response::Identified { .. }) | None => Outcome::NoDevserver,
+    registration_outcome(request_endpoint(&instance.endpoint, &request).await)
+}
+
+#[cfg(any(unix, windows))]
+fn registration_outcome(reply: EndpointReply) -> Outcome {
+    match reply {
+        EndpointReply::Response(Response::Registered { prefix, .. }) => {
+            Outcome::Registered { prefix }
+        }
+        EndpointReply::Response(Response::VersionSkew { .. }) => Outcome::VersionSkew,
+        EndpointReply::Response(Response::Error { message }) => Outcome::Error(message),
+        EndpointReply::Response(Response::Identified { .. }) | EndpointReply::Unavailable => {
+            Outcome::NoDevserver
+        }
+        EndpointReply::TimedOut => Outcome::ReplyTimedOut,
     }
 }
 
@@ -690,36 +721,40 @@ pub async fn try_register_devserver(
     Outcome::NoDevserver
 }
 
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+enum EndpointReply {
+    Response(Response),
+    Unavailable,
+    TimedOut,
+}
+
+#[cfg(any(unix, windows))]
+async fn request_endpoint(endpoint: &Path, request: &Request) -> EndpointReply {
+    request_endpoint_with_budget(endpoint, request, request.reply_budget()).await
+}
+
 #[cfg(unix)]
-async fn request_endpoint(endpoint: &Path, request: &Request) -> Option<Response> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+async fn request_endpoint_with_budget(
+    endpoint: &Path,
+    request: &Request,
+    reply_budget: Duration,
+) -> EndpointReply {
     use tokio::net::UnixStream;
 
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(endpoint))
-        .await
-        .ok()?
-        .ok()?;
-    let mut payload = serde_json::to_vec(request).ok()?;
-    payload.push(b'\n');
-    let (read, mut write) = stream.into_split();
-    let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        Ok::<String, std::io::Error>(line)
+    let Ok(Ok(stream)) = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(endpoint)).await
+    else {
+        return EndpointReply::Unavailable;
     };
-    let line = tokio::time::timeout(IO_TIMEOUT, io).await.ok()?.ok()?;
-    if line.trim().is_empty() {
-        return None;
-    }
-    serde_json::from_str(&line).ok()
+    exchange_request(stream, request, reply_budget).await
 }
 
 #[cfg(windows)]
-async fn request_endpoint(endpoint: &Path, request: &Request) -> Option<Response> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+async fn request_endpoint_with_budget(
+    endpoint: &Path,
+    request: &Request,
+    reply_budget: Duration,
+) -> EndpointReply {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -730,34 +765,143 @@ async fn request_endpoint(endpoint: &Path, request: &Request) -> Option<Response
             Ok(client) => break client,
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 if std::time::Instant::now() >= deadline {
-                    return None;
+                    return EndpointReply::Unavailable;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Err(_) => return None,
+            Err(_) => return EndpointReply::Unavailable,
         }
     };
-    let mut payload = serde_json::to_vec(request).ok()?;
+    exchange_request(client, request, reply_budget).await
+}
+
+#[cfg(any(unix, windows))]
+async fn exchange_request<S>(
+    mut stream: S,
+    request: &Request,
+    reply_budget: Duration,
+) -> EndpointReply
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let Ok(mut payload) = serde_json::to_vec(request) else {
+        return EndpointReply::Unavailable;
+    };
     payload.push(b'\n');
-    let (read, mut write) = tokio::io::split(client);
+    let mut sent = false;
     let io = async {
-        write.write_all(&payload).await?;
-        write.flush().await?;
-        let mut reader = BufReader::new(read);
+        stream.write_all(&payload).await?;
+        stream.flush().await?;
+        sent = true;
+        let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).await?;
         Ok::<String, std::io::Error>(line)
     };
-    let line = tokio::time::timeout(IO_TIMEOUT, io).await.ok()?.ok()?;
-    if line.trim().is_empty() {
-        return None;
+    match tokio::time::timeout(reply_budget, io).await {
+        Ok(Ok(line)) => serde_json::from_str(&line)
+            .map(EndpointReply::Response)
+            .unwrap_or(EndpointReply::Unavailable),
+        Err(_) if sent => EndpointReply::TimedOut,
+        Ok(Err(_)) | Err(_) => EndpointReply::Unavailable,
     }
-    serde_json::from_str(&line).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn registration_reply_budget_covers_the_workspace_mount() {
+        let register = Request::RegisterWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            workspace_path: "notes".into(),
+        };
+        let identify = Request::Identify {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+        };
+        assert_eq!(identify.reply_budget(), Duration::from_secs(3));
+        assert!(register.reply_budget() > Duration::from_secs(60));
+        assert_eq!(register.reply_budget(), Duration::from_secs(75));
+    }
+
+    #[cfg(unix)]
+    async fn registration_with_delayed_reply(delay: Option<Duration>, budget: Duration) -> Outcome {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::Builder::new()
+            .prefix("chan-reg-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = dir.path().join("register.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let handler = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<Request>(&line).unwrap(),
+                    Request::RegisterWorkspace { .. }
+                ));
+                match delay {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending::<()>().await,
+                }
+                let response = Response::Registered {
+                    devserver_version: CHAN_VERSION.into(),
+                    prefix: "/notes".into(),
+                };
+                let mut payload = serde_json::to_vec(&response).unwrap();
+                payload.push(b'\n');
+                reader.get_mut().write_all(&payload).await.unwrap();
+            })
+            .await
+            .expect("registration stub is bounded");
+        });
+        let request = Request::RegisterWorkspace {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            workspace_path: "notes".into(),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            request_endpoint_with_budget(&socket, &request, budget),
+        )
+        .await;
+        handler.abort();
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(1), handler)
+            .await
+            .expect("registration handler stops")
+        {
+            assert!(error.is_cancelled(), "registration handler failed: {error}");
+        }
+        registration_outcome(reply.expect("registration client is bounded"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registration_waits_for_a_delayed_mount_reply() {
+        let outcome = registration_with_delayed_reply(
+            Some(Duration::from_millis(300)),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Registered { prefix } if prefix == "/notes"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registration_reply_timeout_is_not_no_devserver() {
+        let outcome = registration_with_delayed_reply(None, Duration::from_millis(100)).await;
+        assert!(matches!(outcome, Outcome::ReplyTimedOut), "{outcome:?}");
+    }
 
     #[test]
     fn request_round_trips() {
