@@ -71,7 +71,7 @@ impl Drop for AdmissionLock {
 const RECORD_FILE: &str = "writer.json";
 
 /// Identity written by the holder immediately after it wins the advisory
-/// lock, into both [`RECORD_FILE`] and the body of [`LOCK_FILE`].
+/// lock, into both the `writer.json` record and the body of `writer.lock`.
 ///
 /// The on-disk shape is a cross-crate contract: `chan close` parses it
 /// to discover the serving process. Keep the field set and
@@ -150,8 +150,8 @@ impl WorkspaceLock {
     /// contended path is reached only for that leaked-fd case, and the body
     /// of a contended lock is readable, so the steal can key on the current
     /// tenancy's own record. On Windows a contended lock's body is exactly
-    /// what `LockFileEx` refuses to serve, and the sidecar cannot be tied to
-    /// the current tenancy (see [`RecordSource`]), so a steal is never
+    /// what `LockFileEx` refuses to serve, and the sidecar may still describe
+    /// a previous tenancy after a crash, so a steal is never
     /// authorized there: a leaked dead holder's lock is named by `chan ps`
     /// but keeps refusing until the pinning handle dies, which is the
     /// pre-sidecar behavior. `process_alive` probes the recorded pid so only

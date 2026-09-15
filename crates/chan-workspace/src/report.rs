@@ -356,9 +356,10 @@ fn persist_report(
     serialize: impl FnOnce(&mut Vec<u8>) -> std::result::Result<(), chan_report::ChanReportError>,
 ) -> Result<()> {
     if skipped_entries != 0 {
-        drop(serialize); // Release any captured index guard before filesystem I/O.
-                         // Skips stay attached to this index through later updates. Remove
-                         // any older cache too, so the next open must attempt a full scan.
+        // Release any captured index guard before filesystem I/O.
+        drop(serialize);
+        // Skips stay attached to this index through later updates. Remove
+        // any older cache too, so the next open must attempt a full scan.
         match std::fs::remove_file(jsonl_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

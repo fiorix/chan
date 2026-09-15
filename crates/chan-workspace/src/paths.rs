@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 /// Per-user config dir. Holds the global `config.toml` (workspace
 /// registry + default-workspace). Uses `.chan` under the OS-provided home
-/// on every platform, including the app sandbox home on iOS / Android.
+/// on every platform.
 ///
 /// `CHAN_HOME` overrides this with the directory to use IN PLACE OF `~/.chan`
 /// (CARGO_HOME / GNUPGHOME semantics -- the dir itself, not a parent): set
@@ -363,8 +363,6 @@ pub struct DetectedCloud {
 ///   - Linux: Dropbox (`~/Dropbox`); iCloud isn't available and
 ///     Google Drive on Linux ships through third-party tools
 ///     (Insync, rclone) with user-chosen paths chan can't predict.
-///   - iOS / Android: empty list. The platform's own document
-///     picker handles cloud-storage discovery.
 ///
 /// Empty list = no cloud workspaces detected; the picker falls back to
 /// prompting for an explicit local directory.

@@ -423,12 +423,15 @@ fn classify_basename(name: &str) -> Option<FileClass> {
     Some(class)
 }
 
-/// Leading bytes sampled by `looks_like_text` for files the
-/// extension / basename classifier can't type. 8 KiB catches a NUL
-/// or an invalid UTF-8 byte in any real binary header while staying a
-/// single cheap read; text files this size or larger that are clean
-/// in their first 8 KiB are overwhelmingly clean throughout (the
-/// editor's full UTF-8 read is the backstop for the rare exception).
+/// Leading bytes `Workspace::sniff_is_text` reads and hands to
+/// `looks_like_text` for every path `is_editable_text` refuses, so the
+/// sniff costs one small read. The verdict covers only this prefix: a
+/// NUL or an invalid UTF-8 sequence in it refuses the file, but a
+/// binary file whose first 8 KiB are NUL-free valid UTF-8 (a long
+/// ASCII header) passes, as does a file whose first NUL or invalid
+/// byte comes later. The editor's full text reads decode the whole
+/// file and fail on invalid UTF-8 anywhere; a later NUL is valid UTF-8
+/// and reads as text.
 pub const TEXT_SNIFF_BYTES: usize = 8192;
 
 /// Content sniff for files `classify` settles on `FileClass::Other`:

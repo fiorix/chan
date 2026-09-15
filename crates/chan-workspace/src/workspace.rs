@@ -127,12 +127,17 @@ pub struct FileStat {
     /// display and for the graph DB which stores i64 seconds.
     pub mtime: Option<i64>,
     /// Last modification time as Unix nanoseconds. Fits an i64
-    /// until year 2262. Used by `write_text_if_unchanged` so two
-    /// edits within the same wall-clock second are still detected
-    /// as a conflict on filesystems with sub-second mtime (ext4 /
-    /// xfs / APFS / btrfs). May be None on filesystems that only
-    /// expose seconds (FAT, some network mounts), in which case
-    /// the optimistic-concurrency check degrades to seconds.
+    /// until year 2262. The token `write_text_if_unchanged` compares:
+    /// on filesystems with sub-second mtime (ext4 / xfs / APFS /
+    /// btrfs) it tells apart two edits within the same wall-clock
+    /// second, and on filesystems that only carry seconds it resolves
+    /// whole seconds only. A timestamp can stay equal across a write, so
+    /// the mtime alone never proves the disk is unchanged; callers
+    /// that pass the bytes they last observed (`expected_disk`) get a
+    /// matching token checked against the file's content too. `None`
+    /// when the platform reports no modification time or it does not
+    /// fit (before the Unix epoch, past 2262); an existing file with
+    /// no token always fails that check as a conflict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime_ns: Option<i64>,
     pub is_dir: bool,
@@ -1260,7 +1265,7 @@ impl Workspace {
     /// recursively removed on Unix. Callers that are about to publish a tenant
     /// or begin a new root-dependent operation therefore cannot infer path
     /// availability from the open handle alone. This check deliberately uses
-    /// the live path and the same file-shape contract as [`Workspace::open`]:
+    /// the live path and the same file-shape contract as `Workspace::open`:
     /// missing roots are typed, and a root replaced by a symlink or non-
     /// directory is refused.
     pub fn ensure_root_available(&self) -> Result<()> {
@@ -1275,16 +1280,18 @@ impl Workspace {
     /// every operation on it answers `ENOTCONN` forever even though the path
     /// is healthy again, and re-opening the workspace is refused because we
     /// still hold its writer lock. The host's health probe calls this so the
-    /// workspace recovers without a restart. See
-    /// [`RootedFs::revalidate`](crate::rooted_fs::RootedFs::revalidate) for
-    /// how a remount is told apart from a recreated root.
+    /// workspace recovers without a restart. A remount is adopted only when
+    /// the root still resolves to the same path with the same inode on a new
+    /// device; a different directory at the path stays
+    /// [`ChanError::WorkspaceRootMissing`].
     pub fn revalidate_root(&self) -> Result<bool> {
         self.fs.revalidate()
     }
 
     /// [`exists`](Self::exists) that reports an unreachable mount instead of
     /// answering "absent". Callers that tear down state on absence must use
-    /// this; see [`RootedFs::try_exists`](crate::rooted_fs::RootedFs::try_exists).
+    /// this: a transport error (a stalled or dead network mount) is
+    /// [`ChanError::RootUnavailable`], never `Ok(false)`.
     pub fn try_exists(&self, rel: &str) -> Result<bool> {
         self.fs.try_exists(rel)
     }

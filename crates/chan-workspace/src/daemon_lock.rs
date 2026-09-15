@@ -2,7 +2,7 @@
 //! behind the `chan devserver` `--service=chan` backend.
 //!
 //! A sibling of [`WorkspaceLock`](crate::lock::WorkspaceLock): the SAME fs4
-//! advisory flock + [`process_alive`](crate::lock::process_alive) stale-takeover,
+//! advisory flock + [`process_alive`] stale-takeover,
 //! but its on-disk record carries the daemon's bound address + start time + a
 //! pid-reuse guard instead of the frozen workspace `LockRecord`. The lock anchor
 //! (`daemon.lock`) and the record (`daemon.json`) are separate files: the flock

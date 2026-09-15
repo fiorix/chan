@@ -4,12 +4,12 @@ Canonical design reference for `chan-workspace`. Update in the same commit as an
 
 ## 1. Problem and scope
 
-`chan-workspace` is the local-first filesystem, search, graph, and workspace-state core for chan. It owns the per-machine registry of known workspaces and the per-workspace search index, link graph, and code/SLOC report. Its `Workspace` facade provides sandboxed filesystem access rooted at a registered directory; its metadata-free `MiniWorkspace` facade provides the standalone Files surface without a registry row, writer lock, index, or graph. Both share the same crate-private filesystem-capability core. `DraftStore` sits beside them as the per-library drafts lifecycle for standalone windows (see "Drafts"). The crate backs the `chan` CLI, chan-server, and the desktop app, and its API is shaped to survive a uniffi boundary for native iOS / Android shells.
+`chan-workspace` is the local-first filesystem, search, graph, and workspace-state core for chan. It owns the per-machine registry of known workspaces and the per-workspace search index, link graph, and code/SLOC report. Its `Workspace` facade provides sandboxed filesystem access rooted at a registered directory; its metadata-free `MiniWorkspace` facade provides the standalone Files surface without a registry row, writer lock, index, or graph. Both share the same crate-private filesystem-capability core. `DraftStore` sits beside them as the per-library drafts lifecycle for standalone windows (see "Drafts"). The crate backs the `chan` CLI, chan-server, and the desktop app. Its API is synchronous and needs no async runtime; section 9 lists the shape constraints it keeps.
 
 In scope:
 
   - Filesystem primitives (`read` / `write` / `stat` / `list` / `rename` / `copy` / `remove` / `list_tree`) rooted at a workspace, including bounded byte streams and progressively limited atomic writes.
-  - Workspace registry persisted to `~/.chan/config.toml` (or the OS sandbox equivalent on iOS / Android).
+  - Workspace registry persisted to `~/.chan/config.toml`, or to `config.toml` inside the directory `CHAN_HOME` names in place of `~/.chan`.
   - Per-workspace search index (tantivy 0.24, BM25; optional dense via candle + BGE-small for hybrid).
   - Per-workspace graph database (sqlite, single writer, r2d2 pool for readers).
   - Per-workspace code/SLOC report (chan-report `Index` kept current by the watcher, persisted as JSONL).
@@ -191,11 +191,11 @@ The config and lazy embedder mutexes are never held together. Lazy initializatio
 
 Two additional config fields, `vectors_model` and `vectors_dim`, describe the model that produced the vectors currently on disk. They are stamped at the end of every successful embed pass. On `Index::open`, if `vectors_model` is set and differs from `model` (the user-configured target), the embeddings dir is wiped and the tracking fields cleared; BM25 segments are preserved because BM25 is model-independent. This closes the silent-corruption window where a hand-edited or upgraded `model` field would otherwise mix vectors from two different models in the same store. A schema-version bump still wipes everything and clears both tracking fields.
 
-With the `embeddings` feature on (default), the index also stores per-chunk dense vectors via candle + BGE-small (`DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"`). `SearchMode` is `Bm25` (default), `Semantic`, or `Hybrid`; hybrid runs BM25 and dense in parallel, then fuses with reciprocal-rank fusion. Dense search is a per-workspace opt-in (`semantic_enabled`); on builds where the embedder is unavailable (`--no-default-features`, currently iOS) or the model is not downloaded, semantic and hybrid queries degrade to BM25-only and the result's `mode` field says so.
+With the `embeddings` feature on (default), the index also stores per-chunk dense vectors via candle + BGE-small (`DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"`). `SearchMode` is `Bm25` (default), `Semantic`, or `Hybrid`; hybrid runs BM25 and dense in parallel, then fuses with reciprocal-rank fusion. Dense search is a per-workspace opt-in (`semantic_enabled`); on builds where the embedder is unavailable (`--no-default-features`) or the model is not downloaded, semantic and hybrid queries degrade to BM25-only and the result's `mode` field says so.
 
 Chunking is configurable per-index via `Chunking` (`Headings`, `WholeDoc`, `Fixed { chars }`). The default is `Headings` (one chunk per ATX section, files without headings collapse to a single whole-doc chunk).
 
-`reindex` is synchronous and blocking. It runs on the calling thread; the caller decides whether to spawn a worker. `reindex_with` accepts a progress callback driven by `ProgressStage` events; `reindex_with_aggression` additionally takes a `SearchAggression`. All flavors return `BuildSummary`. This keeps the API uniffi-clean and avoids leaking an async runtime through the FFI boundary.
+`reindex` is synchronous and blocking. It runs on the calling thread; the caller decides whether to spawn a worker. `reindex_with` accepts a progress callback driven by `ProgressStage` events; `reindex_with_aggression` additionally takes a `SearchAggression`. All flavors return `BuildSummary`. This keeps an async runtime out of the API: a caller without a runtime calls it directly, and an async caller moves it onto a blocking thread (chan-server's indexer runs its rebuild passes through `tokio::task::spawn_blocking`).
 
 `Index::build_all` runs the per-file read + markdown chunking on a bounded thread pool. Worker count comes from `SearchAggression`: `Conservative` pins one reader, `Balanced` (the default) uses `available_parallelism - 2` clamped to [1, 6], `Aggressive` uses `available_parallelism - 1` clamped to [1, 8]. The file-descriptor budget (`fd_budget`) can cap the count further and paces workers when the process is near its `nofile` limit: the crate runs inside the editor process, where macOS commonly starts with a soft limit of 256, and an eager SQLite pool plus Tantivy fanout can otherwise exhaust the table during first boot on a large workspace. Workers ship parsed chunks to the main thread over a bounded `sync_channel` (workers * 2 / 4 / 8 for Conservative / Balanced / Aggressive); the main thread is the only writer into tantivy and the only producer of embed batches, so writer-mutex contention and embed ordering stay simple. Cores are held back so the server's tokio runtime and the OS UI thread keep breathing during a reindex of a large workspace. Progress ticks remain monotonic from the consumer's perspective even when worker completions land out of order.
 
@@ -317,7 +317,7 @@ After picking a file, the editor calls `GraphView::headings_of(rel)` to populate
 
 `Workspace::watch` returns an owned `WatchHandle`. Initial root and recursive registration complete before return; partial registration returns `WatchHealthState::Degraded`, emits `ProviderError`, and retries under the owned supervisor. Backend provider loss also marks the handle degraded and re-registers the roots. Successful retry restores healthy state. `stop()` is idempotent and joins the supervisor before returning, `join()` requests the same synchronous teardown, and drop applies the same rule, so no registrar or notify callback thread is detached.
 
-Callback-based on purpose: the Swift / Kotlin shell implements the trait by passing an `Arc<dyn WatchCallback>` (uniffi generates a wrapper around a foreign object). No closures cross the FFI.
+Callback-based on purpose: a consumer implements `WatchCallback` and passes an `Arc<dyn WatchCallback>`, a `Send + Sync` trait object the watcher calls from its own threads, rather than a closure or a channel.
 
 The dispatch filter calls the active `IndexScopePolicy`, with two watcher-specific deviations:
 
@@ -330,7 +330,7 @@ When the report subsystem is active, the same watcher fan-outs each event into t
 
 ### Built-in graph indexer
 
-`Workspace::start_graph_indexer(debounce_ms)` returns a `GraphIndexer` handle that owns a watcher subscription and one worker thread, so consumers (CLI, chan-server, native shells) do not each reinvent the same queue. `DEFAULT_DEBOUNCE_MS` is 150.
+`Workspace::start_graph_indexer(debounce_ms)` returns a `GraphIndexer` handle that owns a watcher subscription and one worker thread. Nothing outside chan-workspace calls it; chan-server runs its own indexer (`crates/chan-server/src/indexer.rs`). `DEFAULT_DEBOUNCE_MS` is 150.
 
   - Debouncing is per-path, trailing-edge: the first event for a path schedules a deadline at `now + debounce`; further events push it forward; the deadline maturing triggers `index_file`.
   - `Removed` events and the source side of `Renamed` skip the debounce: a stale graph row pointing at a missing file is the user-visible failure mode, so deletions flush immediately. Directory events forget every graph and search row at or below the source path through the same journaled mutation boundary.
@@ -439,7 +439,7 @@ Per-workspace settings live in the workspace sidecar rather than an app-specific
 
 ### Progress and recovery
 
-Long-running operations (reindex, rename with link rewrite, contacts import, workspace reset, embedding model load) report progress through one umbrella callback type. The same sink shape carries every stage, so a consumer (chan-server's WebSocket fan-out, the CLI's progress bar, future native shells) wires one listener instead of one per op.
+Long-running operations (reindex, rename with link rewrite, contacts import, workspace reset, embedding model load) report progress through one umbrella callback type. The same sink shape carries every stage, so a consumer (chan-server's WebSocket fan-out, the CLI's progress bar) wires one listener instead of one per op.
 
 Progress events carry a stage, current count, total count (`0` means indeterminate), optional label, and optional `eta_secs`. Stage names are the wire vocabulary: `GraphRebuild`, `IndexFile`, `EmbedBatch`, `RenameRewrite`, `Import`, `Reset`, `ModelLoad`, and `Heartbeat`.
 
@@ -484,7 +484,7 @@ stateDiagram-v2
 
 *Durable markers seed recovery, monotonic generations prevent stale completion, and coalescing keeps repeated provider loss bounded to one required follow-up pass.*
 
-Cardinality is per-file for `IndexFile` / `RenameRewrite` / `GraphRebuild` and per-batch for `EmbedBatch`; on a 10k-file workspace a full reindex can push tens of thousands of events. Consumers that fan out over a transport (chan-server WebSocket, native FFI bridge) should coalesce or rate-limit upstream of the socket; the producer side does not throttle.
+Cardinality is per-file for `IndexFile` / `RenameRewrite` / `GraphRebuild` and per-batch for `EmbedBatch`; on a 10k-file workspace a full reindex can push tens of thousands of events. Consumers that fan out over a transport (chan-server WebSocket) should coalesce or rate-limit upstream of the socket; the producer side does not throttle.
 
 ### Contacts
 
@@ -503,7 +503,7 @@ Pure stat-walk. `detect_parent_vcs` is used by `chan serve` (and any future shel
 
 The function never invokes `git`/`hg`/`svn` and never reads repository contents. The shell layer (`chan serve`, desktop) is responsible for the user-facing decision (refuse and suggest the repo root, present a dialog, accept an explicit override).
 
-Foreign-language boundary: exported data is owned (no lifetimes) and `Send + Sync`. Watch and progress events derive `Serialize` / `Deserialize` so a consumer can forward them across a WebSocket / FFI bridge without an intermediate copy type.
+Event data is owned: watch and progress events carry no borrows, are `Send + Sync`, and derive `Serialize` / `Deserialize`, so a consumer can forward them across a WebSocket without an intermediate copy type.
 
 ## 5. Invariants and trust boundaries
 
@@ -561,15 +561,15 @@ chan-workspace keeps user content and machine-local state separate. The registry
 
 The metadata key is the path slug plus an 8-hex hash of the canonical path at first registration. `Library::move_workspace` preserves it when the local path moves, so sidecars follow the workspace logically without moving files on disk.
 
-Every target uses `.chan` under the OS-provided home directory for config, state, and cache alike, including the app sandbox home on iOS and Android. `CHAN_HOME` overrides the directory directly. If no home directory resolves, Unix uses `/var/tmp/chan-<uid>` and Windows uses `C:\ProgramData\chan`. One platform-independent selector derives the home-relative path or invokes that fallback; `state_dir` and `cache_dir` delegate to `config_dir`.
+Every target uses `.chan` under the OS-provided home directory for config, state, and cache alike. `CHAN_HOME` overrides the directory directly. If no home directory resolves, Unix uses `/var/tmp/chan-<uid>` and Windows uses `C:\ProgramData\chan`. One platform-independent selector derives the home-relative path or invokes that fallback; `state_dir` and `cache_dir` delegate to `config_dir`.
 
 Drafts are the deliberate exception to "no chan state in the workspace root." They live in-tree as a real hidden directory named by `Registry::drafts_dir` (default `.Drafts`), created lazily on first Cmd+N, and are indexed/graphed like ordinary content. The walker still hard-skips `.git` and `.chan` and honors the effective excluded-dirs set; `.Drafts` is not on the skip list.
 
 ## 7. Error model
 
-One umbrella `ChanError` enum so the Swift / Kotlin error type is a single tagged union. Foreign I/O errors preserve `ErrorKind::NotFound` as `ChanError::NotFound`; other I/O kinds become `Io`. Both display as `io error: <message>`, and `ChanError::io_with_context` preserves the missing-path kind when adding operation/resource context. Foreign `toml`, `rusqlite`, `notify`, and `tantivy` errors become `ConfigDecode`, `Graph`, `Watch`, and `Search` with their `Display` text preserved.
+The `Workspace`, `Library`, and `MiniWorkspace` facades return one umbrella `ChanError` enum, so their callers match a single tagged union. Lower-level public modules keep their own error types: `index` (`IndexError`, `Bm25Error`, `ConfigError`, `EmbedError`, `VectorError`; `Embedder::open` returns `EmbedError`) and `metadata_archive` (`MetadataArchivePathError`, returned by `validate_archive_entry_path`). `IndexError` converts into `ChanError`. Foreign I/O errors preserve `ErrorKind::NotFound` as `ChanError::NotFound`; other I/O kinds become `Io`. Both display as `io error: <message>`, and `ChanError::io_with_context` preserves the missing-path kind when adding operation/resource context. Foreign `toml`, `rusqlite`, `notify`, and `tantivy` errors become `ConfigDecode`, `Graph`, `Watch`, and `Search` with their `Display` text preserved.
 
-Variants intentionally do not carry rich nested types: uniffi can encode an enum with primitive payloads; nested error chains do not round-trip cleanly across the FFI.
+`ChanError` variants intentionally do not carry rich nested types: payloads are strings, paths, and integers, and a dependency error converted into `ChanError` keeps only its `Display` text. The lower-level types above do wrap dependency errors (`Bm25Error` wraps tantivy's errors, `IndexError` wraps `std::io::Error`).
 
 Notable variants:
 
@@ -602,6 +602,6 @@ The graph rebuild collects readable text-file stamps from its walk and replaces 
 
 A schema bump in any store is user-data-safe: only chan-managed cache is destroyed; the user's notes are untouched.
 
-## 9. Native-shell boundary
+## 9. API shape
 
-`chan-workspace`'s interface is shaped to survive a uniffi boundary: no lifetimes in exported data, owned strings/paths, `Arc`-able handles, one umbrella `ChanError` enum with primitive payloads, and callback-based streaming instead of Rust stream/channel types. A native shell links the same crate and shares the atomic-write / sandbox / blob-storage semantics with the desktop chan-server without reimplementing them per platform. The `--no-default-features` build (BM25-only, no candle) is the expected starting point for iOS until candle-core builds cleanly for that target.
+`chan-workspace`'s interface is kept synchronous so every embedder drives it from threads it owns: no public `async fn` and no async runtime dependency. A `Workspace` is shared across threads as `Arc<Workspace>`; the `Workspace`, `Library`, and `MiniWorkspace` facades return one umbrella `ChanError` enum with primitive payloads (section 7 names the lower-level modules that keep their own error types); and watch and progress events arrive through callback traits (`WatchCallback`, `ProgressCallback`) as owned, serializable events instead of Rust stream or channel types. The chunked text read is the exception to that event shape: `Workspace::read_text_with_stat_chunked` streams borrowed `TextReadEvent` values through an `FnMut` closure. The CLI, chan-server, and the desktop app link the same crate and share its atomic-write, sandbox, and blob-storage semantics instead of reimplementing them.

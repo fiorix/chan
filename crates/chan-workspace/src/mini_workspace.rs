@@ -1,7 +1,7 @@
 //! Metadata-free standalone file access over a capability root.
 //!
 //! `MiniWorkspace` is the filesystem face of the standalone Files
-//! application: the same crate-private [`RootedFs`] core a `Workspace`
+//! application: the same crate-private `RootedFs` core a `Workspace`
 //! delegates to, with none of the workspace machinery around it. Opening
 //! one registers nothing, creates no metadata, takes no workspace lock,
 //! starts no indexer, and never opens a graph; a write made through it is

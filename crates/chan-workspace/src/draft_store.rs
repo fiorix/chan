@@ -12,8 +12,10 @@
 //!
 //! Layout under the injected root:
 //!
-//!   <root>/Drafts/<name>/...                    one directory per draft
-//!   <root>/drafts-trash/<id>/{payload,meta.json} discarded drafts, flat
+//! ```text
+//! <root>/Drafts/<name>/...                     one directory per draft
+//! <root>/drafts-trash/<id>/{payload,meta.json} discarded drafts, flat
+//! ```
 //!
 //! `Drafts` is capitalized because it is user content a person browses
 //! through the standalone File Browser (the convention `.Drafts` and the

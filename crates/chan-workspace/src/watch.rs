@@ -1074,9 +1074,8 @@ fn register_one(
 }
 
 /// Non-Linux: the backends (FSEvents, ReadDirectoryChanges) recurse
-/// natively with no per-directory descriptor cost, so the blanket
-/// recursive watch stays; the dispatch filter mutes excluded subtrees
-/// there exactly as before.
+/// natively with no per-directory descriptor cost, so each root takes one
+/// recursive watch and the dispatch filter mutes excluded subtrees.
 #[cfg(not(target_os = "linux"))]
 fn register_root(
     watcher: &mut RecommendedWatcher,
