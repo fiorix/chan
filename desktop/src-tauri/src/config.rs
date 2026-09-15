@@ -1068,13 +1068,13 @@ fn mint_unused_gateway_id(existing: &[Gateway]) -> Result<String, String> {
 /// gateway wasn't connected.
 pub type GatewayRemoveHook = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// chan-desktop's [`GatewayRegistry`](chan_server::GatewayRegistry)
+/// chan-desktop's [`GatewayRegistry`]
 /// implementation -- the bridge the launcher's `/api/library/gateways`
 /// routes reach through `WorkspaceHost::gateway_registry`. Wraps the SHARED
 /// [`ConfigStore`] handle like [`DevserverConfigRegistry`], so gateway CRUD
 /// serializes through the same lock as every other config write.
 ///
-/// The volatile [`GatewayEntry`](chan_server::GatewayEntry) fields
+/// The volatile [`GatewayEntry`] fields
 /// (`status`, `pending_signin`, `devserver_count`, `last_error`) project
 /// from the gateway manager's runtime map.
 pub struct GatewayConfigRegistry {

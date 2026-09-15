@@ -1955,10 +1955,11 @@ fn plan_for_geometry(mons: &[config::MonitorDesc], g: &WindowGeometry) -> Geomet
 
 /// Resolve the geometry to apply for `label` against the CURRENT monitor
 /// signature. An exact-signature match and a layout-changed fallback both
-/// restore the stored rect clamped to its monitor (the fallback used to center +
-/// shrink on the primary -- the external-monitor bug); nothing stored -> default.
-/// Desktop-local and read-only -- never blocks the open. Logs a `WINGEO` line so
-/// the host can pin the behaviour on real multi-monitor hardware from the rc2 run.
+/// restore the stored rect clamped to its monitor, never centered and shrunk on
+/// the primary (which would misplace a window saved on an external monitor);
+/// nothing stored -> default. Desktop-local and read-only -- never blocks the
+/// open. Logs a `WINGEO` line so the behaviour can be checked on real
+/// multi-monitor hardware.
 pub(crate) fn resolve_geometry_plan(app: &AppHandle, label: &str) -> GeometryPlan {
     let mons = current_monitors(app);
     let sig = config::monitor_signature(&mons);
@@ -2001,7 +2002,7 @@ pub(crate) fn apply_geometry_plan(window: &tauri::WebviewWindow, label: &str, pl
     // then be divided by the wrong scale and shrink the window. dpi passes a
     // Logical value through unchanged, so the window lands at the stored points
     // (and thus the right physical size) on its own monitor once shown, and the
-    // size / position order no longer matters.
+    // size / position order does not matter.
     if let Err(e) = window.set_size(LogicalSize::new(w as f64, h as f64)) {
         tracing::warn!(label = %label, error = %e, "restoring window size failed");
     }
@@ -3151,7 +3152,7 @@ mod tests {
             !MAIN_RS.contains("struct BinStatus"),
             "BinStatus struct must be gone",
         );
-        // serve.rs must no longer carry the binary resolver. Build
+        // serve.rs must not carry the binary resolver either. Build
         // the needle at runtime so this assertion's own source text
         // doesn't satisfy the `contains` check it performs.
         let serve_rs = include_str!("serve.rs");
@@ -3588,8 +3589,8 @@ mod tests {
             .split("WindowEvent::Destroyed")
             .next()
             .expect("arm ends before the Destroyed branch");
-        // The teaching notice is gone: the arm no longer buries-then-notifies
-        // (WP17 supersedes the after-the-fact hidden-window notice).
+        // The arm must not bury and then show a hidden-window notice: the
+        // close-confirm prompt asks before anything is hidden.
         assert!(
             !arm.contains("show_bury_notice"),
             "the CloseRequested arm must not call the removed hidden-window notice",
@@ -4455,7 +4456,7 @@ mod tests {
 
         // Every app command in the vocabulary must be a registered
         // handler: catches both parser garbage and SPA calls to commands
-        // the desktop no longer ships.
+        // the desktop does not ship.
         const MAIN_RS: &str = include_str!("main.rs");
         let registered: std::collections::HashSet<String> =
             invoke_handler_commands(MAIN_RS).into_iter().collect();

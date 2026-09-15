@@ -225,7 +225,8 @@ pub struct AppState {
     /// before entry work and rechecks it immediately before registration; trust
     /// revocation and roster invalidation bump it.
     native_policy_generations: Mutex<HashMap<String, u64>>,
-    /// Teardown hook the launcher's [`DevserverConfigRegistry`] fires after an
+    /// Teardown hook the launcher's
+    /// [`DevserverConfigRegistry`](config::DevserverConfigRegistry) fires after an
     /// HTTP `DELETE /api/library/devservers/{id}` drops a row, so that path
     /// reaps a live connection/windows through [`teardown_devserver_connection`]
     /// (shared with `disconnect_devserver`). The registry (chan-server side) can't see the `AppHandle`,
@@ -786,8 +787,8 @@ impl DevserverFeed {
     /// workspace + colour). KEEPS `library_ids` (the same
     /// devserver keeps its id on reconnect). Clears its buried-label overrides so
     /// a reconnect doesn't show its reopened windows as hidden. The control
-    /// terminal is no longer a desktop feed record (it is a chan-library registry
-    /// row now); its reap is `reap_control_window` on the connect-script PTY exit /
+    /// terminal is not a desktop feed record (it is a chan-library registry
+    /// row); its reap is `reap_control_window` on the connect-script PTY exit /
     /// teardown, not a `forget` drop.
     fn forget(&self, id: &str) {
         self.windows.lock().unwrap().remove(id);
@@ -945,8 +946,9 @@ impl DevserverFeed {
 
     /// The devserver id owning `library_id`, learned from live window snapshots
     /// or the cached library id seeded at connect. The reverse of
-    /// [`library_id_of`]; window-label actions use it so a disconnect overlay
-    /// still resolves after the live snapshot is hidden or retired.
+    /// [`library_id_of`](Self::library_id_of); window-label actions use it so a
+    /// disconnect overlay still resolves after the live snapshot is hidden or
+    /// retired.
     fn devserver_id_for_library(&self, library_id: &str) -> Option<String> {
         if let Some(id) = self.windows.lock().unwrap().iter().find_map(|(id, snap)| {
             snap.lock()
@@ -994,7 +996,7 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
                 }
             }
         }
-        // The control terminal is no longer synthesized here: it is a
+        // The control terminal is not synthesized here: it is a
         // real chan-library registry row (minted by `mint_control_window` under the
         // devserver's `library_id`, `control:true`), so it already rides the
         // registry snapshot that `assemble_window_records` merges -- no desktop-side
@@ -1092,14 +1094,15 @@ const DEVSERVER_CONTROL_RESTORED_EVENT: &str = "devserver-control-restored";
 
 /// Poll a connected devserver's served-workspace list into the feed cache so the
 /// (sync) [`DevserverFeed::workspaces`] serves it without blocking on HTTP. Fires
-/// [`EmbeddedServer::signal_library_change`] only when the list actually changes,
-/// so the launcher re-pushes on a real delta, not every tick. Stops when `cancel`
-/// leaves the running state, the same signal that stops the window watcher.
+/// [`EmbeddedServer::signal_library_change`](embedded::EmbeddedServer::signal_library_change)
+/// only when the list actually changes, so the launcher re-pushes on a real
+/// delta, not every tick. Stops when `cancel` leaves the running state, the same
+/// signal that stops the window watcher.
 ///
-/// The devserver's pane-highlight COLOUR is no longer polled here: it rides the
+/// The devserver's pane-highlight COLOUR is not polled here: it rides the
 /// push-based `/api/library/local-color/watch` feed via
 /// [`window_watcher_wiring::spawn_devserver_color_watch`]. There is no
-/// `workspaces/watch` endpoint yet, so the workspace list stays polled.
+/// `workspaces/watch` endpoint, so the workspace list is polled.
 fn spawn_devserver_workspace_poll(
     app: tauri::AppHandle,
     state: Arc<AppState>,
@@ -3152,7 +3155,7 @@ async fn reconnect_devserver(
         let mut probe = conn.clone();
         probe.token = token.clone();
         // `fetch_workspaces` is the connectivity probe (does this token auth?);
-        // its rows are no longer consumed (the watcher re-surfaces the windows).
+        // its rows are not consumed (the watcher re-surfaces the windows).
         if devserver::fetch_workspaces(&probe).await.is_ok() {
             // A disconnect that landed mid-probe already tore the windows
             // down; do not resurrect the connection or re-open them.
@@ -3250,9 +3253,9 @@ pub(crate) async fn forget_devserver_workspace_impl(
 /// distinct from Forget ([`forget_devserver_workspace_impl`]). Reached over the
 /// desktop bridge from the launcher's `workspaces/on|off` routes.
 /// An unforced off of a workspace with live terminals is NOT an error: it
-/// resolves to [`SetWorkspaceOnOutcome::NeedsForce`] with the live-terminal
-/// count, so the launcher confirms then retries with `force: true` (which
-/// force-offs → [`Done`](chan_server::SetWorkspaceOnOutcome::Done)).
+/// resolves to [`NeedsForce`](chan_server::SetWorkspaceOnOutcome::NeedsForce)
+/// with the live-terminal count, so the launcher confirms then retries with
+/// `force: true` (which force-offs -> [`Done`](chan_server::SetWorkspaceOnOutcome::Done)).
 pub(crate) async fn set_devserver_workspace_on_impl(
     state: &Arc<AppState>,
     id: String,
@@ -5349,7 +5352,7 @@ fn run_hidden_mcp_proxy_if_requested() -> Result<bool, String> {
 }
 
 /// When chan-desktop is invoked through a `cs` name (a `~/.local/bin/cs`
-/// wrapper or symlink, argv[0] stem == "cs"), behave as the `cs` control
+/// wrapper or symlink, `argv[0]` stem == "cs"), behave as the `cs` control
 /// client and EXIT instead of launching the GUI. This is what lets desktop
 /// users get `cs` (and the MCP discovery it carries) without a separate
 /// `chan` binary on PATH. Mirrors `run_hidden_mcp_proxy_if_requested`: a
@@ -5379,7 +5382,7 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
 }
 
 /// When chan-desktop is invoked through a `chan` name (a `~/.local/bin/chan`
-/// symlink or AppImage wrapper, argv[0] stem == "chan"), run the whole `chan`
+/// symlink or AppImage wrapper, `argv[0]` stem == "chan"), run the whole `chan`
 /// CLI in-process with the Desktop personality and EXIT instead of launching
 /// the GUI. This is what makes a desktop install also provide `chan` with no
 /// separate download. Mirrors `run_as_cs_if_requested`: a pre-GUI argv probe
@@ -5431,7 +5434,7 @@ async fn run_mcp_proxy(socket: PathBuf) -> Result<(), String> {
 /// Re-attaching to the parent shell's console (and binding any null std handle
 /// to it) is what routes the CLI output back to the terminal.
 ///
-/// Gated on the CLI invocation: a normal GUI launch (argv[0] stem
+/// Gated on the CLI invocation: a normal GUI launch (`argv[0]` stem
 /// "chan-desktop") returns early and stays console-free.
 #[cfg(windows)]
 fn attach_parent_console_for_cli() {

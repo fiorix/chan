@@ -18,12 +18,11 @@
 //! GTK / Win32), so `confirm` is cfg-split internally and callers stay
 //! platform-agnostic.
 //!
-//! `confirm` is callback-shaped like the old `.show(cb)` it replaces: the
-//! result callback runs on the main thread. On macOS the modal is scheduled
-//! via `run_on_main_thread`, so it fires on a fresh main-loop turn (after the
-//! calling window-close handler unwinds) -- keeping the close path non-blocking
-//! and the bury / destroy / hide side effects on the main thread exactly as
-//! before.
+//! `confirm` is callback-shaped: the result callback runs on the main thread.
+//! On macOS the modal is scheduled via `run_on_main_thread`, so it fires on a
+//! fresh main-loop turn (after the calling window-close handler unwinds), which
+//! keeps the close path non-blocking and leaves the bury / destroy / hide side
+//! effects on the main thread.
 
 use tauri::AppHandle;
 

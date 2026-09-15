@@ -1,6 +1,6 @@
 //! Managed per-gateway account connections.
 //!
-//! A configured [`Gateway`](crate::config::Gateway) is connected at the
+//! A configured [`Gateway`] is connected at the
 //! ACCOUNT level: the desktop discovers the gateway once, signs in once per
 //! gateway account (`desktop.account` scope, PAT in the OS keyring), and
 //! polls the gateway's devserver roster; the rostered devservers surface as

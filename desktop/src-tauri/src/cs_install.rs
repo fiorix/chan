@@ -3,7 +3,7 @@
 //! `chan_workspace::paths::local_bin_dir`, so a smoke instance stays isolated),
 //! so a chan-desktop install also gives you the `chan` / `cs` command line with
 //! nothing extra to download. Both names resolve to the running chan-desktop
-//! binary; the argv[0] dispatch (`chan_shell::invoked_as_chan` /
+//! binary; the `argv[0]` dispatch (`chan_shell::invoked_as_chan` /
 //! `invoked_as_cs`) selects the CLI / control-client path before any GUI init.
 //!
 //! The shape of the shim depends on how chan-desktop was installed:
@@ -15,8 +15,8 @@
 //! - **Linux AppImage**: tiny wrapper scripts (`exec -a chan "$APPIMAGE" "$@"`),
 //!   not symlinks. `std::env::current_exe()` inside an AppImage points into the
 //!   ephemeral `/tmp/.mount_*` squashfs that vanishes on exit, and the `AppRun`
-//!   shim can reset argv[0]; `exec -a <name> "$APPIMAGE"` pins both the stable
-//!   path and the argv[0] the detection keys on. The wrapper also records the
+//!   shim can reset `argv[0]`; `exec -a <name> "$APPIMAGE"` pins both the stable
+//!   path and the `argv[0]` the detection keys on. The wrapper also records the
 //!   caller's working directory in `$CHAN_CALLER_PWD`: the AppImage's inner
 //!   `AppRun` chdirs into the mounted `<AppDir>/usr` (and exports no `OWD`)
 //!   before the binary runs, so without the record a relative CLI path
@@ -39,7 +39,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
-/// The two names we own. Both point at the same chan-desktop binary; argv[0]
+/// The two names we own. Both point at the same chan-desktop binary; `argv[0]`
 /// dispatch picks the behavior.
 #[cfg(unix)]
 const SHIM_NAMES: [&str; 2] = ["chan", "cs"];
@@ -164,7 +164,7 @@ fn detect_kind() -> InstallKind {
 }
 
 /// The wrapper script that re-execs `target` as `name`. `exec -a` (a bash
-/// builtin present on every AppImage-capable desktop) forces argv[0] regardless
+/// builtin present on every AppImage-capable desktop) forces `argv[0]` regardless
 /// of how the AppImage `AppRun` shim would otherwise rewrite it.
 #[cfg(unix)]
 fn wrapper_script(name: &str, target: &Path) -> String {
@@ -424,7 +424,7 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
     Ok(changed)
 }
 
-/// Windows: there is no `exec -a` to force argv[0] and no POSIX symlink, so the
+/// Windows: there is no `exec -a` to force `argv[0]` and no POSIX symlink, so the
 /// shims are `.cmd` wrappers in a per-user bin dir (`%LOCALAPPDATA%\chan\bin`)
 /// that set `ARGV0=<name>` before re-execing the installed chan-desktop.exe.
 /// `chan_shell::invoked_arg0()` reads `$ARGV0` ahead of `argv[0]`, so the
