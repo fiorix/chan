@@ -1,6 +1,6 @@
 //! End-to-end tests for the tunnel listener.
 //!
-//! Workspaces a real `chan-tunnel-client` against `serve_tunnel_listener`
+//! Drives a real `chan-tunnel-client` against `serve_tunnel_listener`
 //! over a localhost socket, exercising the auth gates (base scope, cap)
 //! that unit tests can only exercise in pieces.
 //! The client dials h2c (`http://...`); no TLS plumbing on this

@@ -268,7 +268,7 @@ struct Entry {
     /// When this sender is dropped, the per-tunnel driver task's
     /// receiver wakes with a `RecvError`, which it treats as
     /// "you've been evicted; close the yamux connection and
-    /// exit". The receiver lives in `driver::workspace_tunnel`.
+    /// exit". The receiver lives in `driver::run_tunnel`.
     _shutdown_tx: oneshot::Sender<()>,
 }
 

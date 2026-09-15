@@ -48,7 +48,7 @@ const LEASE_REFRESH_TIMEOUT: Duration = Duration::from_millis(20);
 /// also remove the entry, but only after the request channel
 /// receiver this task owns goes away, which already implies
 /// "tunnel is gone" to the public side.
-pub(crate) async fn workspace_tunnel<S>(
+pub(crate) async fn run_tunnel<S>(
     mut conn: YamuxConnection<S>,
     mut open_rx: mpsc::Receiver<OpenRequest>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -355,7 +355,7 @@ mod tests {
             admission_lease: None,
             admission_lease_expires_at: None,
         };
-        tokio::spawn(workspace_tunnel(
+        tokio::spawn(run_tunnel(
             conn,
             open_rx,
             shutdown_rx,

@@ -28,7 +28,7 @@ use http::{header, Method, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Semaphore};
 
-use crate::driver::workspace_tunnel;
+use crate::driver::run_tunnel;
 use crate::registry::Registry;
 use crate::{
     handshake_validated_with_admission, RegistrationAdmission, RegistrationPermit, ServerError,
@@ -162,7 +162,7 @@ where
 {
     // Cap concurrent in-flight handshakes. The permit is held only
     // through the authenticate-and-handshake stages; once the
-    // per-tunnel driver takes over (workspace_tunnel), the permit is
+    // per-tunnel driver takes over (run_tunnel), the permit is
     // dropped and the slot frees up for the next dial. This bounds
     // memory / task count against floods of half-open or slow peers.
     let inflight = Arc::new(Semaphore::new(MAX_INFLIGHT_HANDSHAKES));
@@ -203,7 +203,7 @@ where
     }
 }
 
-/// Workspace a single client's h2 connection through accept,
+/// Drive a single client's h2 connection through accept,
 /// validate, handshake, register, and tunnel-driver lifecycle.
 async fn handle_tunnel_conn(
     tcp: TcpStream,
@@ -430,7 +430,7 @@ async fn handle_tunnel_conn(
     drop(inflight_permit);
     let _ = admitted.send(());
 
-    workspace_tunnel(
+    run_tunnel(
         yconn,
         open_rx,
         shutdown_rx,

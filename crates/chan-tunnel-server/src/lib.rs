@@ -261,10 +261,7 @@ fn make_prefix(_username: &str, key: &str) -> String {
     format!("/{key}")
 }
 
-/// Workspace the Hello/HelloAck round-trip over `socket`. Validates
-/// the bearer `token` via `validator` and uses the workspace name from
-/// the client's Hello to build the public path. Returns the yamux
-/// server connection ready to open outbound substreams.
+/// Drive the Hello/HelloAck round-trip over `socket`. Validate the bearer `token` via `validator` and build the acknowledged prefix from the token-resolved devserver id. Return the yamux server connection ready to open outbound substreams.
 ///
 /// `pre_ack` runs after the token is validated and before the
 /// HelloAck is written. Returning an error from it aborts the
