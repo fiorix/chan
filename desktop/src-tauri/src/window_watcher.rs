@@ -1,16 +1,8 @@
 //! The desktop window watcher -- chan-desktop as a pure view of the library.
 //!
-//! Every native window is a reconciled reflection of the library's authoritative
-//! window set. A `LibraryWatcher` per connected library (the embedded
-//! local library + each devserver) holds the latest [`WindowRecord`] snapshot and
-//! [`reconcile`]s the native surface to it: open a native window for every library
-//! window that lacks one, close every native window the library no longer lists.
+//! Each connected library has a [`watch_loop`] that reconciles its [`WindowRecord`] snapshot with the native surface. Feed and local view changes trigger [`reconcile`]: missing windows open, removed windows close, and buried windows or pending deletions remain suppressed. Native labels combine the library and window ids, so repeated snapshots reuse the same windows.
 //!
-//! This replaces the old imperative open/close paths (`reopen_devserver_terminal_
-//! windows` / `teardown_devserver_windows` / `track_devserver_window` + the in-memory
-//! `devserver_windows` map). Because the reconcile is an idempotent diff keyed by the
-//! library-minted id, **reconnect = resubscribe + reconcile can never mint a
-//! duplicate** by construction.
+//! The stop action either closes the library's native windows for disconnect or preserves them for a replacement watcher.
 //!
 //! Wiring: the local library feeds in-process via
 //! `host.assemble_window_records()` + the registry's change `Notify`; a devserver

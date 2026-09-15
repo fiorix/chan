@@ -2756,10 +2756,9 @@ async fn connect_devserver_impl_inner(
             .control_terminal_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        // Track the control tenant prefix NOW, before the fallible scrape /
-        // wait / open below: a connect that fails partway leaves the script
-        // PTY running, and the failure survey's Retry / Edit / Abandon reap it
-        // through teardown_devserver_windows (which reads this map).
+        // Record the control tenant prefix alongside its run. Connection
+        // cleanup removes this entry; reap_devserver_control_terminal locates
+        // the control window by its deterministic label, not by this map.
         state
             .control_terminal_prefixes
             .lock()
