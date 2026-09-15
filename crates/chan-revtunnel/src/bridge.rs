@@ -169,6 +169,9 @@ mod tests {
         let mut failures = Vec::new();
         for iteration in 0..10u8 {
             let (mut client, spliced) = socket_pair().await;
+            let spliced = spliced.into_std().unwrap();
+            let observer = spliced.try_clone().unwrap();
+            let spliced = TcpStream::from_std(spliced).unwrap();
             let (to_peer, mut peer_rx) = mpsc::channel(1);
             to_peer.send(b"occupied".to_vec()).await.unwrap();
             let (peer_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
@@ -178,18 +181,44 @@ mod tests {
             client.write_all(&payload).await.unwrap();
             client.shutdown().await.unwrap();
 
-            // Local EOF cannot finish while the one-slot outbound channel is
-            // occupied: the byte read from TCP is waiting in `send`.
+            // EOF on the nonblocking observer proves the pump consumed the
+            // byte. A queued byte or WouldBlock cannot establish that the
+            // uplink has reached its send, even after the client shuts down.
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    match observer.peek(&mut [0u8; 1]) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("could not observe the spliced socket: {error}"),
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("splice consumes the byte before the peer closes");
+            drop(observer);
+
+            // The one-slot outbound channel still blocks the consumed byte.
             assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(50), &mut pump)
-                    .await
-                    .is_err(),
+                !pump.is_finished(),
                 "splice returned before its blocked send"
             );
 
             // Ending the opposite direction must let that send finish rather
-            // than cancel it. Free the slot only after the peer close races it.
+            // than cancel it. Socket EOF proves the downlink has shut down
+            // before the outbound slot opens and the send can complete.
             drop(peer_tx);
+            assert_eq!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.read(&mut [0u8; 1]),
+                )
+                .await
+                .expect("peer close shuts down the socket")
+                .unwrap(),
+                0
+            );
             assert_eq!(peer_rx.recv().await.unwrap(), b"occupied".to_vec());
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut pump)
                 .await
