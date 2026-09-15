@@ -265,8 +265,8 @@ pub(super) fn command_builder(
     #[cfg(not(windows))]
     {
         match command {
-            // No command: the user's default interactive shell, exactly as
-            // before (portable_pty resolves $SHELL / the passwd entry).
+            // No command: the user's default interactive shell
+            // (portable_pty resolves $SHELL / the passwd entry).
             None => CommandBuilder::new_default_prog(),
             // One-shot: run it through a login shell so profile-exported PATH
             // (where `cs` lives) is in scope. The shell is resolved via

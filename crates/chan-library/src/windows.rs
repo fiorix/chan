@@ -640,7 +640,7 @@ impl WindowRegistry {
         *latest_save = *generation;
         // Control rows are transient/per-connection (in-memory only): never write
         // them, so a desktop crash can't strand a stale control window on the
-        // next boot. Durable rows persist as before.
+        // next boot. Every other row is written.
         let durable: Vec<&PersistedWindow> = windows.iter().filter(|w| !w.control).collect();
         let result = save_atomic(&self.store_path, &durable);
         #[cfg(test)]

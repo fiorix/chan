@@ -1,11 +1,13 @@
 //! Discovery of the shells a terminal can spawn -- the model behind a
 //! Windows-Terminal-style profile picker.
 //!
-//! `platform::command_builder` resolves ONE shell for the whole process
-//! (`platform::windows_shell`'s `OnceLock`). That stays: it is the *default*
-//! profile, and it exists because resolution shells out on the interactive
-//! path. This module adds the other half -- an enumeration of every shell
-//! present on the machine, so a caller can spawn a named one instead.
+//! With no profile named, `platform::command_builder` spawns the default
+//! shell: on Windows the one `platform::windows_shell` resolves once and caches
+//! in a `OnceLock` (resolution shells out, so it must not run on the
+//! interactive path); on unix the user's shell, which portable-pty resolves
+//! from `$SHELL` and the passwd entry. This module is the other half -- an
+//! enumeration of every shell present on the machine, so a caller can spawn a
+//! named one instead.
 //!
 //! Shape, mirroring Windows Terminal's dynamic profile generators: one
 //! generator per source, each contributing zero or more [`ShellProfile`]s, all
