@@ -855,6 +855,7 @@ struct ServeCliArgs {
     /// Mutually exclusive with -4.
     #[arg(short = '6', long = "ipv6", verbatim_doc_comment)]
     ipv6: bool,
+    /// Port to bind.
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
     /// URL path prefix to mount the server under. Lets a reverse
@@ -953,6 +954,7 @@ struct ServeCliArgs {
 /// cannot drift.
 #[derive(Args, Debug)]
 struct CloseCliArgs {
+    /// Workspace root to stop serving.
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: PathBuf,
     /// Close PATH on a REGISTERED remote devserver instead of here: TARGET
@@ -966,6 +968,7 @@ struct CloseCliArgs {
 /// The `chan workspace forget` argument set.
 #[derive(Args, Debug)]
 struct ForgetCliArgs {
+    /// Workspace root to unregister.
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: PathBuf,
     /// Forget PATH on a REGISTERED remote devserver instead of here: TARGET
@@ -997,16 +1000,23 @@ struct WorkspaceGraphArgs {
     /// Exact typed traversal seed. Repeat for multiple seeds.
     #[arg(long = "from", value_name = "TYPE:VALUE", required = true)]
     from: Vec<String>,
+    /// Traversal depth; defaults to 1 for the required --from seeds.
     #[arg(long)]
     depth: Option<u8>,
+    /// Traversal direction: auto, out, in, or both.
     #[arg(long, value_name = "DIRECTION")]
     direction: Option<String>,
+    /// Relationship kind to retain: link, tag, mention, language, contains.
     #[arg(long = "edge-kind", value_name = "KIND")]
     edge_kinds: Vec<String>,
+    /// Accepted search-result limit; has no effect on graph traversal.
+    /// Use --node-limit and --edge-limit to bound the graph.
     #[arg(long)]
     limit: Option<u32>,
+    /// Graph node limit.
     #[arg(long)]
     node_limit: Option<u32>,
+    /// Graph relationship limit.
     #[arg(long)]
     edge_limit: Option<u32>,
 }
@@ -1042,6 +1052,7 @@ enum WorkspaceAction {
     /// registers and serves in one step, which is the usual way in.
     #[command(verbatim_doc_comment)]
     Add {
+        /// Directory to register as a workspace.
         path: PathBuf,
         /// Enable per-workspace semantic search (BGE-small
         /// dense vectors). Per-workspace footprint; needs the shared
@@ -1116,8 +1127,10 @@ enum WorkspaceAction {
         search: chan_shell::WorkspaceSearchArgs,
         #[command(flatten)]
         targets: WorkspaceTargets,
+        /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        /// Indent JSON output when --json is set.
         #[arg(long)]
         pretty: bool,
     },
@@ -1127,8 +1140,10 @@ enum WorkspaceAction {
         graph: WorkspaceGraphArgs,
         #[command(flatten)]
         targets: WorkspaceTargets,
+        /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        /// Indent JSON output when --json is set.
         #[arg(long)]
         pretty: bool,
     },

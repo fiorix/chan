@@ -359,6 +359,7 @@ pub enum ShellAction {
     #[command(long_about = help::CS_OPEN)]
     #[command(after_long_help = help::CS_OPEN_AFTER)]
     Open {
+        /// Path or chan://graph link to open; defaults to the current directory.
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: Option<String>,
         #[command(flatten)]
@@ -368,6 +369,7 @@ pub enum ShellAction {
     #[command(long_about = help::CS_GRAPH)]
     #[command(after_long_help = help::CS_GRAPH_AFTER)]
     Graph {
+        /// File or directory to focus; omit to show the whole graph.
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: Option<PathBuf>,
         #[command(flatten)]
@@ -393,6 +395,7 @@ pub enum ShellAction {
     #[command(long_about = help::CS_UPLOAD)]
     #[command(after_long_help = help::CS_UPLOAD_AFTER)]
     Upload {
+        /// Destination directory for the upload picker; a file targets its parent.
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: PathBuf,
     },
@@ -400,6 +403,7 @@ pub enum ShellAction {
     #[command(long_about = help::CS_DOWNLOAD)]
     #[command(after_long_help = help::CS_DOWNLOAD_AFTER)]
     Download {
+        /// File or directory to download.
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: PathBuf,
     },

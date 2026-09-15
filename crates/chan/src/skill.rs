@@ -592,6 +592,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_visible_argument_has_help() {
+        let mut missing = Vec::new();
+        for root in [Root::Chan, Root::Cs] {
+            walk_visible(root, |path, cmd| {
+                if root == Root::Chan && path.first().map(String::as_str) == Some("shell") {
+                    return;
+                }
+                for arg in cmd.get_arguments().filter(|arg| !arg.is_hide_set()) {
+                    let documented = [arg.get_help(), arg.get_long_help()]
+                        .into_iter()
+                        .flatten()
+                        .any(|help| !help.to_string().trim().is_empty());
+                    if !documented {
+                        missing.push(format!(
+                            "{} {}: {}",
+                            root.prefix(),
+                            path.join(" "),
+                            arg.get_id()
+                        ));
+                    }
+                }
+            });
+        }
+        assert!(
+            missing.is_empty(),
+            "visible arguments without help:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    #[test]
     fn dumped_terminal_help_names_kimi_and_agy_as_submit_agents() {
         let list = render_topic("cs-terminal-list").expect("terminal list help");
         let team = render_topic("cs-terminal-team").expect("terminal team help");
