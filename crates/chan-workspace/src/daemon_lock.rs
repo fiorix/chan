@@ -90,7 +90,7 @@ impl DaemonLock {
         force: bool,
     ) -> Result<DaemonAcquire> {
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ChanError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(ChanError::from)?;
         }
         let file = open_lock_file(lock_path)?;
         match FileExt::try_lock_exclusive(&file) {
@@ -102,7 +102,7 @@ impl DaemonLock {
                 }))
             }
             Err(e) if is_contended(&e) => Self::contended(lock_path, record_path, addr, force),
-            Err(e) => Err(ChanError::Io(e.to_string())),
+            Err(e) => Err(ChanError::from(e)),
         }
     }
 
@@ -145,7 +145,7 @@ impl DaemonLock {
                 Some(r) if is_record_live(&r) => Ok(DaemonAcquire::Running(r)),
                 _ => Err(ChanError::WorkspaceLocked),
             },
-            Err(e) => Err(ChanError::Io(e.to_string())),
+            Err(e) => Err(ChanError::from(e)),
         }
     }
 }
@@ -214,7 +214,7 @@ pub fn is_record_live(record: &DaemonRecord) -> bool {
 /// pretty JSON sibling of the lock anchor; the directory is created if needed.
 fn write_record(record_path: &Path, addr: &str) -> Result<()> {
     if let Some(parent) = record_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ChanError::Io(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(ChanError::from)?;
     }
     let pid = std::process::id();
     let record = DaemonRecord {
@@ -224,7 +224,7 @@ fn write_record(record_path: &Path, addr: &str) -> Result<()> {
         started_at: chrono::Utc::now().to_rfc3339(),
     };
     let json = serde_json::to_vec_pretty(&record).map_err(|e| ChanError::Io(e.to_string()))?;
-    std::fs::write(record_path, json).map_err(|e| ChanError::Io(e.to_string()))
+    std::fs::write(record_path, json).map_err(ChanError::from)
 }
 
 /// The OS process creation time for `pid` (the pid-reuse guard), or `None` when

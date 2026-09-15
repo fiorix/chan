@@ -109,7 +109,7 @@ impl GraphIndexer {
         let thread = std::thread::Builder::new()
             .name("chan-workspace::indexer".into())
             .spawn(move || run_loop(workspace_w, rx, inner_w, debounce))
-            .map_err(|e| ChanError::Io(format!("spawn indexer thread: {e}")))?;
+            .map_err(|e| ChanError::io_with_context(e, "spawn indexer thread"))?;
 
         *inner.thread.lock().unwrap() = Some(thread);
         *inner.watch.lock().unwrap() = Some(watch);

@@ -293,7 +293,7 @@ impl RootedFs {
     /// Map a public chan path to an existing real directory.
     pub(crate) fn resolve_physical_dir(&self, rel: &str) -> Result<std::path::PathBuf> {
         let abs = self.resolve_physical_path(rel)?;
-        let meta = std::fs::metadata(&abs).map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = std::fs::metadata(&abs).map_err(ChanError::from)?;
         if !meta.is_dir() {
             return Err(ChanError::Io("path is not a directory".into()));
         }
@@ -507,7 +507,7 @@ impl RootedFs {
                         if message == "invalid UTF-8 in streamed text write"
                 )
             {
-                return Err(ChanError::Io(format!(
+                return Err(ChanError::NonUtf8EditableText(format!(
                     "refusing to write non-UTF-8 bytes to editable text file: {rel}"
                 )));
             }
@@ -545,8 +545,7 @@ impl RootedFs {
         let slice = (start, len);
         // Seek once, here, so a bad offset fails the caller before any
         // response framing is derived from the slice.
-        file.seek(SeekFrom::Start(start))
-            .map_err(|error| ChanError::Io(error.to_string()))?;
+        file.seek(SeekFrom::Start(start)).map_err(ChanError::from)?;
         Ok(BoundedFileReader {
             stat,
             slice,
@@ -559,9 +558,7 @@ impl RootedFs {
     pub(crate) fn read(&self, rel: &str) -> Result<Vec<u8>> {
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(&dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let mut f = dir.open(&rel_path).map_err(ChanError::from)?;
         use std::io::Read;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
@@ -607,9 +604,7 @@ impl RootedFs {
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(&dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let mut f = dir.open(&rel_path).map_err(ChanError::from)?;
         use std::io::Read;
         let mut buf = String::new();
         f.read_to_string(&mut buf)?;
@@ -624,9 +619,7 @@ impl RootedFs {
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(&dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let mut f = dir.open(&rel_path).map_err(ChanError::from)?;
         let meta = f.metadata()?;
         let mut content = String::new();
         f.read_to_string(&mut content)?;
@@ -655,9 +648,7 @@ impl RootedFs {
         }
         let (dir, rel_path) = self.resolve_io(rel)?;
         ensure_regular_file_in(&dir, &rel_path)?;
-        let mut f = dir
-            .open(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let mut f = dir.open(&rel_path).map_err(ChanError::from)?;
         let meta = f.metadata()?;
         let stat = FileStat {
             size: meta.len(),
@@ -819,9 +810,7 @@ impl RootedFs {
     /// Lstat `rel` into a `FileStat`.
     pub(crate) fn stat(&self, rel: &str) -> Result<FileStat> {
         let (dir, rel_path) = self.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = dir.symlink_metadata(&rel_path).map_err(ChanError::from)?;
         Ok(FileStat {
             size: if meta.is_dir() { 0 } else { meta.len() },
             mtime: mtime_secs_cap(&meta),
@@ -849,14 +838,10 @@ impl RootedFs {
         // so `.Drafts/<name>` lists through the workspace-root handle
         // like any other path.
         let read = if at_root {
-            self.dir()
-                .read_dir(".")
-                .map_err(|e| ChanError::Io(e.to_string()))?
+            self.dir().read_dir(".").map_err(ChanError::from)?
         } else {
             let rel_path = self.rel(rel)?;
-            self.dir()
-                .read_dir(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))?
+            self.dir().read_dir(&rel_path).map_err(ChanError::from)?
         };
         let mut out = Vec::new();
         let mut skipped = 0usize;
@@ -921,7 +906,7 @@ impl RootedFs {
         let rel_path = self.rel(rel)?;
         self.dir()
             .create_dir_all(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+            .map_err(ChanError::from)?;
         Ok(())
     }
 
@@ -937,7 +922,7 @@ impl RootedFs {
         let src_meta = self
             .dir()
             .symlink_metadata(&from_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+            .map_err(ChanError::from)?;
         let src_ft = src_meta.file_type();
         if !(src_ft.is_dir() || (src_ft.is_file() && !src_ft.is_symlink())) {
             return Err(ChanError::SpecialFile {
@@ -973,16 +958,14 @@ impl RootedFs {
         }
         if let Some(parent) = to_rel.parent() {
             if !parent.as_os_str().is_empty() {
-                self.dir()
-                    .create_dir_all(parent)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
+                self.dir().create_dir_all(parent).map_err(ChanError::from)?;
             }
         }
         // Both paths resolve through the capability handle. The destination
         // check still assumes no concurrent external creator before rename.
         self.dir()
             .rename(&from_rel, &self.dir(), &to_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+            .map_err(ChanError::from)?;
         Ok(())
     }
 
@@ -1000,7 +983,7 @@ impl RootedFs {
         let src_meta = self
             .dir()
             .symlink_metadata(&from_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+            .map_err(ChanError::from)?;
         let src_ft = src_meta.file_type();
         if src_ft.is_symlink() || !(src_ft.is_dir() || src_ft.is_file()) {
             return Err(ChanError::SpecialFile {
@@ -1032,9 +1015,17 @@ impl RootedFs {
             })();
             if let Err(error) = result {
                 if let Err(cleanup) = self.remove_tree(&stage) {
-                    return Err(ChanError::Io(format!(
-                        "{error}; failed to remove temporary copy {stage}: {cleanup}"
-                    )));
+                    let message =
+                        format!("{error}; failed to remove temporary copy {stage}: {cleanup}");
+                    return Err(
+                        if matches!(error, ChanError::NotFound(_))
+                            || matches!(cleanup, ChanError::NotFound(_))
+                        {
+                            ChanError::NotFound(message)
+                        } else {
+                            ChanError::Io(message)
+                        },
+                    );
                 }
                 return Err(error);
             }
@@ -1059,9 +1050,7 @@ impl RootedFs {
     /// half-copied destination.
     pub(crate) fn preflight_tree(&self, rel: &str, skip_control_dirs: bool) -> Result<()> {
         let (dir, rel_path) = self.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = dir.symlink_metadata(&rel_path).map_err(ChanError::from)?;
         let ft = meta.file_type();
         if ft.is_symlink() || !(ft.is_file() || ft.is_dir()) {
             return Err(ChanError::SpecialFile {
@@ -1071,14 +1060,13 @@ impl RootedFs {
         }
         if ft.is_file() {
             dir.open(&rel_path)
-                .map_err(|e| ChanError::Io(format!("unreadable source {rel}: {e}")))?;
+                .map_err(|e| ChanError::io_with_context(e, format!("unreadable source {rel}")))?;
             return Ok(());
         }
-        for entry in dir
-            .read_dir(&rel_path)
-            .map_err(|e| ChanError::Io(format!("unreadable source directory {rel}: {e}")))?
-        {
-            let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
+        for entry in dir.read_dir(&rel_path).map_err(|e| {
+            ChanError::io_with_context(e, format!("unreadable source directory {rel}"))
+        })? {
+            let entry = entry.map_err(ChanError::from)?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 return Err(ChanError::Io(format!(
                     "source tree under {rel} contains a non-UTF-8 name"
@@ -1096,15 +1084,11 @@ impl RootedFs {
     /// preflight already refused everything else).
     pub(crate) fn remove_tree(&self, rel: &str) -> Result<()> {
         let (dir, rel_path) = self.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = dir.symlink_metadata(&rel_path).map_err(ChanError::from)?;
         if meta.is_dir() {
-            dir.remove_dir_all(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))
+            dir.remove_dir_all(&rel_path).map_err(ChanError::from)
         } else {
-            dir.remove_file(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))
+            dir.remove_file(&rel_path).map_err(ChanError::from)
         }
     }
 
@@ -1194,12 +1178,9 @@ impl RootedFs {
         dst_canon: &str,
         created: &mut Vec<String>,
     ) -> Result<()> {
-        let read = self
-            .dir()
-            .read_dir(src_rel)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let read = self.dir().read_dir(src_rel).map_err(ChanError::from)?;
         for entry in read {
-            let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
+            let entry = entry.map_err(ChanError::from)?;
             let name = entry.file_name();
             let name_str = name.to_str().ok_or_else(|| {
                 ChanError::Io(format!(
@@ -1211,9 +1192,7 @@ impl RootedFs {
             if matches!(name_str, ".chan" | ".git" | ".hg") {
                 continue;
             }
-            let ft = entry
-                .file_type()
-                .map_err(|e| ChanError::Io(e.to_string()))?;
+            let ft = entry.file_type().map_err(ChanError::from)?;
             let child_src = src_rel.join(&name);
             let child_dst = dst_rel.join(&name);
             let child_dst_canon = format!("{dst_canon}/{name_str}");
@@ -1226,7 +1205,7 @@ impl RootedFs {
             if ft.is_dir() {
                 self.dir()
                     .create_dir_all(&child_dst)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
+                    .map_err(ChanError::from)?;
                 self.copy_subtree(&child_src, &child_dst, &child_dst_canon, created)?;
             } else {
                 self.copy_one_file(&child_src, &child_dst, &child_dst_canon, created)?;
@@ -1343,7 +1322,7 @@ pub(crate) fn map_cap_err(err: std::io::Error, rel: &std::path::Path) -> ChanErr
     if msg.contains("outside of the filesystem") || msg.contains("path escape") {
         return ChanError::SymlinkEscape(rel.to_path_buf());
     }
-    ChanError::Io(msg)
+    ChanError::from(err)
 }
 
 /// cap-std variant of `mtime_secs` for `cap_std::fs::Metadata`.

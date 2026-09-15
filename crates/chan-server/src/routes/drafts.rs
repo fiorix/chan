@@ -796,6 +796,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_kind_file_read_route_is_404() {
+        let app = route_test_app();
+        let response = crate::router(app.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fs/missing.md")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_kind_draft_inspect_route_is_404() {
+        let app = route_test_app();
+        let response = crate::router(app.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/drafts/inspect")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":".Drafts/missing/draft.md"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("io error: not found:"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn create_draft_route_without_body_seeds_the_markdown_draft() {
         // The plain Cmd+N path sends no body and no content-type; it keeps
         // seeding the markdown draft.

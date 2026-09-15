@@ -561,12 +561,14 @@ Drafts are the deliberate exception to "no chan state in the workspace root." Th
 
 ## 7. Error model
 
-One umbrella `ChanError` enum so the Swift / Kotlin error type is a single tagged union. All foreign errors (`io`, `toml`, `rusqlite`, `notify`, `tantivy`) collapse into `ChanError::Io`, `::ConfigDecode`, `::Graph`, `::Watch`, `::Search` with their `Display` text preserved.
+One umbrella `ChanError` enum so the Swift / Kotlin error type is a single tagged union. Foreign I/O errors preserve `ErrorKind::NotFound` as `ChanError::NotFound`; other I/O kinds become `Io`. Both display as `io error: <message>`, and `ChanError::io_with_context` preserves the missing-path kind when adding operation/resource context. Foreign `toml`, `rusqlite`, `notify`, and `tantivy` errors become `ConfigDecode`, `Graph`, `Watch`, and `Search` with their `Display` text preserved.
 
 Variants intentionally do not carry rich nested types: uniffi can encode an enum with primitive payloads; nested error chains do not round-trip cleanly across the FFI.
 
 Notable variants:
 
+  - `NotFound`: a missing path; the server maps the type to 404 without inspecting platform error text.
+  - `NonUtf8EditableText`: a byte write would put invalid UTF-8 in editable text; retains the `io error: ` message prefix and maps to 415.
   - `WorkspaceLocked`: another process holds the writer lock.
   - `WorkspaceAlreadyOpen`: this process still holds a handle.
   - `WorkspaceFdPressure`: the fd-budget permit wait expired; close a workspace or retry.

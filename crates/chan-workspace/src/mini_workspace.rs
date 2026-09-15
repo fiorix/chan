@@ -49,9 +49,9 @@ impl MiniWorkspace {
         let fs = RootedFs::open(root.to_path_buf(), transfer_max_bytes)?;
         let start_canon = start
             .canonicalize()
-            .map_err(|e| ChanError::Io(format!("canonicalize start directory: {e}")))?;
+            .map_err(|e| ChanError::io_with_context(e, "canonicalize start directory"))?;
         let start_meta = std::fs::symlink_metadata(&start_canon)
-            .map_err(|e| ChanError::Io(format!("stat start directory: {e}")))?;
+            .map_err(|e| ChanError::io_with_context(e, "stat start directory"))?;
         if !start_meta.is_dir() {
             return Err(ChanError::Io(format!(
                 "start path is not a directory: {}",
@@ -154,11 +154,7 @@ impl MiniWorkspace {
     /// lstat one wire path; `""` stats the root directory itself.
     pub fn stat(&self, rel: &str) -> Result<FileStat> {
         if self.wire_dir(rel)?.is_empty() {
-            let meta = self
-                .fs
-                .dir()
-                .dir_metadata()
-                .map_err(|e| ChanError::Io(e.to_string()))?;
+            let meta = self.fs.dir().dir_metadata().map_err(ChanError::from)?;
             return Ok(crate::rooted_fs::file_stat_from_cap(&meta));
         }
         self.fs.stat(rel)
@@ -317,9 +313,7 @@ impl MiniWorkspace {
             return Err(ChanError::ProtectedPath(rel.to_string()));
         }
         let (dir, rel_path) = self.fs.resolve_io(rel)?;
-        let meta = dir
-            .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = dir.symlink_metadata(&rel_path).map_err(ChanError::from)?;
         let ft = meta.file_type();
         if ft.is_symlink() || !(ft.is_file() || ft.is_dir()) {
             return Err(ChanError::SpecialFile {
@@ -332,12 +326,11 @@ impl MiniWorkspace {
                 if is_not_empty_error(&e) {
                     ChanError::DirectoryNotEmpty(rel.to_string())
                 } else {
-                    ChanError::Io(e.to_string())
+                    ChanError::from(e)
                 }
             })
         } else {
-            dir.remove_file(&rel_path)
-                .map_err(|e| ChanError::Io(e.to_string()))
+            dir.remove_file(&rel_path).map_err(ChanError::from)
         }
     }
 
@@ -364,9 +357,7 @@ impl MiniWorkspace {
             return Err(ChanError::DestinationInsideSource(to.to_string()));
         }
         let (dir, from_path) = self.fs.resolve_io(from)?;
-        let src_meta = dir
-            .symlink_metadata(&from_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let src_meta = dir.symlink_metadata(&from_path).map_err(ChanError::from)?;
         let src_ft = src_meta.file_type();
         if src_ft.is_symlink() || !(src_ft.is_dir() || src_ft.is_file()) {
             return Err(ChanError::SpecialFile {
@@ -380,8 +371,7 @@ impl MiniWorkspace {
         }
         if let Some(parent) = to_path.parent() {
             if !parent.as_os_str().is_empty() {
-                dir.create_dir_all(parent)
-                    .map_err(|e| ChanError::Io(e.to_string()))?;
+                dir.create_dir_all(parent).map_err(ChanError::from)?;
             }
         }
         match dir.rename(&from_path, &dir, &to_path) {
@@ -389,7 +379,7 @@ impl MiniWorkspace {
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 self.move_across_devices(from, to)
             }
-            Err(e) => Err(ChanError::Io(e.to_string())),
+            Err(e) => Err(ChanError::from(e)),
         }
     }
 
@@ -425,7 +415,7 @@ impl MiniWorkspace {
         let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
         if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
             self.fs.remove_tree_best_effort(&tmp);
-            return Err(ChanError::Io(e.to_string()));
+            return Err(ChanError::from(e));
         }
         Ok(())
     }
@@ -526,13 +516,18 @@ impl MiniWorkspace {
         let (_, to_path) = self.fs.resolve_io(to)?;
         if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
             self.fs.remove_tree_best_effort(&tmp);
-            return Err(ChanError::Io(e.to_string()));
+            return Err(ChanError::from(e));
         }
         if let Err(error) = self.fs.remove_tree(from) {
-            return Err(ChanError::Io(format!(
+            let message = format!(
                 "cross-device move copied {from} to {to}, but removing the source failed: \
                  {error}; both source and destination remain"
-            )));
+            );
+            return Err(if matches!(error, ChanError::NotFound(_)) {
+                ChanError::NotFound(message)
+            } else {
+                ChanError::Io(message)
+            });
         }
         Ok(())
     }
@@ -541,16 +536,11 @@ impl MiniWorkspace {
     /// preserving the atomic per-file write posture.
     fn copy_tree_plain(&self, from: &str, to: &str) -> Result<()> {
         let (dir, from_path) = self.fs.resolve_io(from)?;
-        let meta = dir
-            .symlink_metadata(&from_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+        let meta = dir.symlink_metadata(&from_path).map_err(ChanError::from)?;
         if meta.is_dir() {
             self.fs.create_dir(to)?;
-            for entry in dir
-                .read_dir(&from_path)
-                .map_err(|e| ChanError::Io(e.to_string()))?
-            {
-                let entry = entry.map_err(|e| ChanError::Io(e.to_string()))?;
+            for entry in dir.read_dir(&from_path).map_err(ChanError::from)? {
+                let entry = entry.map_err(ChanError::from)?;
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                     return Err(ChanError::Io(format!(
                         "source tree under {from} contains a non-UTF-8 name"

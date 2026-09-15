@@ -214,7 +214,7 @@ impl Iterator for BoundedFileReader {
             Err(error) => {
                 self.remaining = 0;
                 self.file = None;
-                return Some(Err(ChanError::Io(error.to_string())));
+                return Some(Err(ChanError::from(error)));
             }
         };
         chunk.truncate(count);
@@ -536,7 +536,9 @@ impl RecoveryWorker {
         let worker = std::thread::Builder::new()
             .name("chan-workspace-recovery".to_string())
             .spawn(move || run_open_recovery(workspace, plan, &stop))
-            .map_err(|error| ChanError::Io(format!("spawn workspace recovery worker: {error}")))?;
+            .map_err(|error| {
+                ChanError::io_with_context(error, "spawn workspace recovery worker")
+            })?;
         *self.worker.lock().unwrap() = Some(worker);
         Ok(())
     }
@@ -821,7 +823,7 @@ impl Workspace {
             )));
         }
         let paths = ensure_workspace_metadata_dirs_in(chan_home, &entry.metadata_key)
-            .map_err(|e| ChanError::Io(format!("ensure workspace metadata dirs: {e}")))?;
+            .map_err(|e| ChanError::io_with_context(e, "ensure workspace metadata dirs"))?;
         let lock = WorkspaceLock::acquire(&paths.lock, &fs.canonical_root())?;
         // Rescue draft discards an older release nested under a
         // `drafts/` bucket before the sweep below reads that bucket as
@@ -1695,7 +1697,7 @@ impl Workspace {
             .fs
             .dir()
             .symlink_metadata(&rel_path)
-            .map_err(|e| ChanError::Io(e.to_string()))?;
+            .map_err(ChanError::from)?;
         let ft = meta.file_type();
         let is_dir = ft.is_dir();
         let is_regular_file = ft.is_file() && !ft.is_symlink();
@@ -1924,10 +1926,13 @@ impl Workspace {
         // The postcondition turns an otherwise-successful orphaned create into
         // the shared typed root-loss error.
         self.fs.dir().create_dir_all(drafts_rel).map_err(|error| {
-            ChanError::Io(format!(
-                "failed to create drafts directory {}: {error}",
-                self.drafts_root.display()
-            ))
+            ChanError::io_with_context(
+                error,
+                format!(
+                    "failed to create drafts directory {}",
+                    self.drafts_root.display()
+                ),
+            )
         })?;
         self.fs.dir().create_dir(&rel).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -1936,10 +1941,10 @@ impl Workspace {
                     abs.display()
                 ))
             } else {
-                ChanError::Io(format!(
-                    "failed to create draft directory {}: {error}",
-                    abs.display()
-                ))
+                ChanError::io_with_context(
+                    error,
+                    format!("failed to create draft directory {}", abs.display()),
+                )
             }
         })?;
         self.ensure_root_available()?;
@@ -3793,10 +3798,9 @@ impl Workspace {
         // node_modules/target/venv/.git storm never reaches the
         // broadcast bus or the indexer.
         #[cfg(target_os = "freebsd")]
-        let capability_root =
-            self.fs.dir().try_clone().map_err(|error| {
-                ChanError::Io(format!("clone workspace root for watcher: {error}"))
-            })?;
+        let capability_root = self.fs.dir().try_clone().map_err(|error| {
+            ChanError::io_with_context(error, "clone workspace root for watcher")
+        })?;
         #[cfg(not(target_os = "freebsd"))]
         let capability_root = ();
         WatchHandle::start(&roots, capability_root, Arc::clone(&self.scope_policy), fan)
@@ -4325,7 +4329,7 @@ fn persist_pending_writes(
         match std::fs::remove_file(&path) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(ChanError::Io(format!("remove pending_writes: {e}"))),
+            Err(e) => return Err(ChanError::io_with_context(e, "remove pending_writes")),
         }
     }
     std::fs::create_dir_all(graph_dir)?;
@@ -4486,6 +4490,24 @@ mod cap_err_tests {
     use crate::rooted_fs::map_cap_err;
     use std::io;
     use std::path::Path;
+
+    #[test]
+    fn missing_kind_survives_cap_error_mapping() {
+        for message in [
+            "The system cannot find the file specified. (os error 2)",
+            "The system cannot find the path specified. (os error 3)",
+        ] {
+            let mapped = map_cap_err(
+                io::Error::new(io::ErrorKind::NotFound, message),
+                Path::new("notes/x.md"),
+            );
+            assert_eq!(mapped.to_string(), format!("io error: {message}"));
+            assert!(
+                matches!(mapped, ChanError::NotFound(_)),
+                "kind lost: {mapped:?}"
+            );
+        }
+    }
 
     /// Pin the cap-std error-string match. If cap-std ever rewords
     /// the message we use to detect a sandbox escape, this test
@@ -6890,6 +6912,7 @@ mod tests {
 
         let err = workspace.write_bytes("note.md", &[0xff, 0xfe]).unwrap_err();
 
+        assert!(matches!(err, ChanError::NonUtf8EditableText(_)), "{err:?}");
         assert!(err
             .to_string()
             .contains("non-UTF-8 bytes to editable text file"));

@@ -575,7 +575,7 @@ fn sweep_orphans_in(
             Ok(r) => r,
             // Not yet created on a fresh install; nothing to sweep.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(ChanError::Io(format!("read {parent:?}: {e}"))),
+            Err(e) => return Err(ChanError::io_with_context(e, format!("read {parent:?}"))),
         };
         for entry in read.flatten() {
             let name = entry.file_name();

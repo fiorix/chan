@@ -298,13 +298,13 @@ fn ensure_parent_inside_root(root: &Path, abs: &Path) -> Result<()> {
     };
     let root_canon = root
         .canonicalize()
-        .map_err(|e| ChanError::Io(format!("canonicalize workspace root: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "canonicalize workspace root"))?;
     if parent == root || parent == root_canon {
         return Ok(());
     }
     let parent_canon = parent
         .canonicalize()
-        .map_err(|e| ChanError::Io(format!("canonicalize path parent: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "canonicalize path parent"))?;
     if !parent_canon.starts_with(&root_canon) {
         return Err(ChanError::SymlinkEscape(abs.to_path_buf()));
     }
@@ -924,8 +924,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path)
-        .map_err(|e| ChanError::Io(e.error.to_string()))?;
+    tmp.persist(path).map_err(|e| ChanError::from(e.error))?;
     apply_metadata(path, preserved);
     sync_dir(dir)?;
     Ok(())
@@ -1222,7 +1221,7 @@ pub fn ensure_regular_file(path: &Path) -> Result<()> {
 pub fn resolve_safe_strict(root: &Path, requested: &str) -> Result<PathBuf> {
     let root_canon = root
         .canonicalize()
-        .map_err(|e| ChanError::Io(format!("canonicalize workspace root: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "canonicalize workspace root"))?;
     resolve_safe_strict_canon(root, &root_canon, requested)
 }
 
@@ -1341,7 +1340,10 @@ enum AtomicStreamFailure {
         limit: u64,
     },
     InvalidUtf8,
-    Io(String),
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
 }
 
 impl AtomicStreamFailure {
@@ -1353,7 +1355,7 @@ impl AtomicStreamFailure {
                 limit: *limit,
             },
             Self::InvalidUtf8 => ChanError::Io("invalid UTF-8 in streamed text write".to_string()),
-            Self::Io(message) => ChanError::Io(message.clone()),
+            Self::Io { kind, message } => std::io::Error::new(*kind, message.clone()).into(),
         }
     }
 }
@@ -1465,7 +1467,10 @@ impl AtomicWriteSink for AtomicStreamSink<'_> {
             .expect("atomic stream temp is present until commit")
             .write_all(chunk)
         {
-            return Err(self.fail(AtomicStreamFailure::Io(format!("write: {error}"))));
+            return Err(self.fail(AtomicStreamFailure::Io {
+                kind: error.kind(),
+                message: format!("write: {error}"),
+            }));
         }
         self.written = attempted;
         Ok(())
@@ -1571,7 +1576,7 @@ where
         .expect("atomic stream temp is present until commit")
         .as_file()
         .sync_all()
-        .map_err(|e| ChanError::Io(format!("fsync tmp: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "fsync tmp"))?;
     let tmp = sink.take_temp();
     tmp.replace(leaf).map_err(|e| map_cap(e, rel))?;
     apply_metadata_in(dir, rel, preserved);
@@ -1594,7 +1599,7 @@ fn map_cap(err: std::io::Error, rel: &Path) -> ChanError {
     if msg.contains("outside of the filesystem") || msg.contains("path escape") {
         return ChanError::SymlinkEscape(rel.to_path_buf());
     }
-    ChanError::Io(msg)
+    ChanError::from(err)
 }
 
 #[cfg(unix)]
@@ -1753,9 +1758,9 @@ pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
     let raw = dir.as_raw_fd();
     let proc_path = format!("/proc/self/fd/{raw}");
     let f = std::fs::File::open(&proc_path)
-        .map_err(|e| ChanError::Io(format!("reopen dir via procfs for fsync: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "reopen dir via procfs for fsync"))?;
     f.sync_all()
-        .map_err(|e| ChanError::Io(format!("fsync dir: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "fsync dir"))?;
     Ok(())
 }
 
@@ -1768,10 +1773,10 @@ pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
-    .map_err(|e| ChanError::Io(format!("reopen dir for fsync: {e}")))?;
+    .map_err(|e| ChanError::io_with_context(e.into(), "reopen dir for fsync"))?;
     let f: std::fs::File = reopened.into();
     f.sync_all()
-        .map_err(|e| ChanError::Io(format!("fsync dir: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "fsync dir"))?;
     Ok(())
 }
 
@@ -1781,10 +1786,10 @@ pub(crate) fn sync_dir_handle(dir: &cap_std::fs::Dir) -> Result<()> {
     let owned = dir
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|e| ChanError::Io(format!("dup dir fd: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "dup dir fd"))?;
     let f: std::fs::File = owned.into();
     f.sync_all()
-        .map_err(|e| ChanError::Io(format!("fsync dir: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "fsync dir"))?;
     Ok(())
 }
 
@@ -2097,6 +2102,24 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    #[test]
+    fn missing_kind_survives_atomic_cap_error_mapping() {
+        for message in [
+            "The system cannot find the file specified. (os error 2)",
+            "The system cannot find the path specified. (os error 3)",
+        ] {
+            let mapped = map_cap(
+                std::io::Error::new(std::io::ErrorKind::NotFound, message),
+                Path::new("notes/x.md"),
+            );
+            assert_eq!(mapped.to_string(), format!("io error: {message}"));
+            assert!(
+                matches!(mapped, ChanError::NotFound(_)),
+                "kind lost: {mapped:?}"
+            );
+        }
+    }
+
     fn workspace_fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
@@ -2168,12 +2191,12 @@ mod tests {
 
         assert!(matches!(
             ensure_parent_inside_root(&root, &target),
-            Err(ChanError::Io(_))
+            Err(ChanError::NotFound(_))
         ));
         assert!(!target_inside_root(&root, &target));
         assert!(matches!(
             resolve_safe_strict(&root, "inside.md"),
-            Err(ChanError::Io(_))
+            Err(ChanError::NotFound(_))
         ));
     }
 

@@ -298,7 +298,7 @@ fn write_json(
         .write_atomic_stream(recovery_path, AtomicWriteKind::Bytes, |sink| {
             let mut writer = SinkWriter { sink };
             serde_json::to_writer(&mut writer, value).map_err(|error| {
-                ChanError::Io(format!("serialize editor-session recovery: {error}"))
+                ChanError::io_with_context(error.into(), "serialize editor-session recovery")
             })
         })
         .map(|_| ())
@@ -329,9 +329,14 @@ struct SinkWriter<'a> {
 
 impl Write for SinkWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.sink
-            .write_chunk(bytes)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.sink.write_chunk(bytes).map_err(|error| {
+            let kind = if matches!(error, ChanError::NotFound(_)) {
+                io::ErrorKind::NotFound
+            } else {
+                io::ErrorKind::Other
+            };
+            io::Error::new(kind, error.to_string())
+        })?;
         Ok(bytes.len())
     }
 

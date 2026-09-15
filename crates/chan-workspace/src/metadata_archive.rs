@@ -238,8 +238,9 @@ fn export_metadata_archive(
 
 fn inspect_metadata_archive(archive: &Path) -> Result<MetadataManifest> {
     let file = File::open(archive)?;
-    let decoder = zstd::stream::read::Decoder::new(BufReader::new(file))
-        .map_err(|e| ChanError::Io(format!("open zstd archive {}: {e}", archive.display())))?;
+    let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
+        ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
+    })?;
     let mut archive = Archive::new(decoder);
     let mut entries = archive.entries()?;
     let Some(first) = entries.next() else {
@@ -407,7 +408,7 @@ fn write_archive(
     let graph_wal = workspace_paths.graph_dir.join("graph.sqlite-wal");
     let file = File::create(tmp)?;
     let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), 0)
-        .map_err(|e| ChanError::Io(format!("create zstd encoder: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "create zstd encoder"))?;
     let mut builder = Builder::new(encoder);
     let mut stats = ArchiveStats::default();
 
@@ -441,7 +442,7 @@ fn write_archive(
     let encoder = builder.into_inner()?;
     encoder
         .finish()
-        .map_err(|e| ChanError::Io(format!("finish zstd archive: {e}")))?;
+        .map_err(|e| ChanError::io_with_context(e, "finish zstd archive"))?;
     Ok((stats.files, stats.bytes))
 }
 
@@ -481,10 +482,13 @@ fn snapshot_bm25(source: &Path, destination: &Path) -> Result<()> {
                 std::fs::remove_dir_all(destination)?;
             }
             Err(error) => {
-                return Err(ChanError::Io(format!(
-                    "snapshot search index (attempt {} of {ATTEMPTS}): {error}",
-                    attempt + 1
-                )))
+                return Err(ChanError::io_with_context(
+                    error,
+                    format!(
+                        "snapshot search index (attempt {} of {ATTEMPTS})",
+                        attempt + 1
+                    ),
+                ))
             }
         }
     }
@@ -565,8 +569,9 @@ fn replace_subtree(paths: &WorkspacePaths, payload: &Path, subtree: &str) -> Res
 
 fn extract_payload(archive: &Path, payload: &Path) -> Result<(usize, u64)> {
     let file = File::open(archive)?;
-    let decoder = zstd::stream::read::Decoder::new(BufReader::new(file))
-        .map_err(|e| ChanError::Io(format!("open zstd archive {}: {e}", archive.display())))?;
+    let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
+        ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
+    })?;
     let mut archive = Archive::new(decoder);
     let mut stats = ArchiveStats::default();
     for entry in archive.entries()? {

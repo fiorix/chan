@@ -89,10 +89,10 @@ struct DraftEntry {
 #[cfg(test)]
 fn ensure_root(drafts_dir: &Path) -> Result<()> {
     fs::create_dir_all(drafts_dir).map_err(|e| {
-        ChanError::Io(format!(
-            "failed to create drafts directory {}: {e}",
-            drafts_dir.display()
-        ))
+        ChanError::io_with_context(
+            e,
+            format!("failed to create drafts directory {}", drafts_dir.display()),
+        )
     })
 }
 
@@ -106,10 +106,10 @@ pub fn preflight(drafts_dir: &Path) -> Result<Vec<DraftIssue>> {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            return Err(ChanError::Io(format!(
-                "failed to read drafts dir {}: {e}",
-                drafts_dir.display()
-            )))
+            return Err(ChanError::io_with_context(
+                e,
+                format!("failed to read drafts dir {}", drafts_dir.display()),
+            ))
         }
     };
     let mut issues = Vec::new();
@@ -174,10 +174,10 @@ pub fn create_dir(drafts_dir: &Path, name: &str) -> Result<DraftRef> {
         )));
     }
     fs::create_dir_all(&abs).map_err(|e| {
-        ChanError::Io(format!(
-            "failed to create draft directory {}: {e}",
-            abs.display()
-        ))
+        ChanError::io_with_context(
+            e,
+            format!("failed to create draft directory {}", abs.display()),
+        )
     })?;
     Ok(DraftRef {
         name: name.to_string(),
@@ -194,10 +194,10 @@ pub fn list(drafts_dir: &Path) -> Result<Vec<DraftRef>> {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            return Err(ChanError::Io(format!(
-                "failed to read drafts dir {}: {e}",
-                drafts_dir.display()
-            )))
+            return Err(ChanError::io_with_context(
+                e,
+                format!("failed to read drafts dir {}", drafts_dir.display()),
+            ))
         }
     };
     let mut out = Vec::new();
@@ -245,9 +245,9 @@ pub(crate) fn discard_labeled(
     let src = drafts_dir.join(name);
     let meta = fs::symlink_metadata(&src).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            ChanError::Io(format!("not found: draft `{name}` at {}", src.display()))
+            ChanError::NotFound(format!("not found: draft `{name}` at {}", src.display()))
         } else {
-            ChanError::Io(format!("failed to inspect draft `{name}`: {e}"))
+            ChanError::io_with_context(e, format!("failed to inspect draft `{name}`"))
         }
     })?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
@@ -326,9 +326,9 @@ pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
     let src = drafts_dir.join(name);
     let meta = fs::symlink_metadata(&src).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            ChanError::Io(format!("not found: draft `{name}` at {}", src.display()))
+            ChanError::NotFound(format!("not found: draft `{name}` at {}", src.display()))
         } else {
-            ChanError::Io(format!("failed to inspect draft `{name}`: {e}"))
+            ChanError::io_with_context(e, format!("failed to inspect draft `{name}`"))
         }
     })?;
     if !meta.is_dir() || meta.file_type().is_symlink() {
@@ -468,9 +468,10 @@ fn promote_draft(
             ensure_existing_dir(parent, "target parent")?;
             copy_draft_to_new_dir(scan, target_abs, target_rel)
         }
-        Err(e) => Err(ChanError::Io(format!(
-            "failed to inspect target {target_rel}: {e}"
-        ))),
+        Err(e) => Err(ChanError::io_with_context(
+            e,
+            format!("failed to inspect target {target_rel}"),
+        )),
     }
 }
 
@@ -499,9 +500,10 @@ fn copy_draft_to_new_dir(
     fs_ops::sync_tree(&stage)?;
     if let Err(e) = fs::rename(&stage, target_abs) {
         let _ = fs::remove_dir_all(&stage);
-        return Err(ChanError::Io(format!(
-            "failed to install draft at {target_rel}: {e}"
-        )));
+        return Err(ChanError::io_with_context(
+            e,
+            format!("failed to install draft at {target_rel}"),
+        ));
     }
     remove_promoted_source(&scan, target_rel)?;
     Ok(DraftPromoteReport {
@@ -536,10 +538,19 @@ fn copy_draft_into_existing_dir_with(
         .and_then(|()| move_children(&stage, target_abs, target_rel, rename));
     if let Err(error) = result {
         if let Err(cleanup) = fs::remove_dir_all(&stage) {
-            return Err(ChanError::Io(format!(
+            let message = format!(
                 "{error}; failed to remove draft stage {}: {cleanup}",
                 stage.display()
-            )));
+            );
+            return Err(
+                if matches!(error, ChanError::NotFound(_))
+                    || cleanup.kind() == std::io::ErrorKind::NotFound
+                {
+                    ChanError::NotFound(message)
+                } else {
+                    ChanError::Io(message)
+                },
+            );
         }
         return Err(error);
     }
@@ -578,11 +589,14 @@ fn copy_dir_checked(src: &Path, dst: &Path, name: &str) -> Result<()> {
             copy_dir_checked(&src_path, &dst_path, name)?;
         } else if ft.is_file() {
             fs::copy(&src_path, &dst_path).map_err(|e| {
-                ChanError::Io(format!(
-                    "failed to copy draft file {} to {}: {e}",
-                    src_path.display(),
-                    dst_path.display()
-                ))
+                ChanError::io_with_context(
+                    e,
+                    format!(
+                        "failed to copy draft file {} to {}",
+                        src_path.display(),
+                        dst_path.display()
+                    ),
+                )
             })?;
             fs_ops::sync_file(&dst_path)?;
         } else {
@@ -609,10 +623,10 @@ fn move_children(
             let dest = target_abs.join(&name);
             ensure_absent(&dest, &format!("{target_rel}/{}", name.to_string_lossy()))?;
             rename(&entry.path(), &dest).map_err(|e| {
-                ChanError::Io(format!(
-                    "failed to move draft entry into {}: {e}",
-                    dest.display()
-                ))
+                ChanError::io_with_context(
+                    e,
+                    format!("failed to move draft entry into {}", dest.display()),
+                )
             })?;
             moved.push(name);
         }
@@ -621,17 +635,24 @@ fn move_children(
     })();
     if let Err(error) = result {
         let mut unrestored = Vec::new();
+        let mut missing = matches!(error, ChanError::NotFound(_));
         for name in moved.iter().rev() {
             let dest = target_abs.join(name);
             if let Err(restore) = rename(&dest, &stage.join(name)) {
+                missing |= restore.kind() == std::io::ErrorKind::NotFound;
                 unrestored.push(format!("{}: {restore}", dest.display()));
             }
         }
         if !unrestored.is_empty() {
-            return Err(ChanError::Io(format!(
+            let message = format!(
                 "{error}; could not restore draft entries from target: {}",
                 unrestored.join("; ")
-            )));
+            );
+            return Err(if missing {
+                ChanError::NotFound(message)
+            } else {
+                ChanError::Io(message)
+            });
         }
         return Err(error);
     }
@@ -651,11 +672,14 @@ fn copy_file_atomic(src: &Path, target: &Path) -> Result<()> {
     let tmp = unique_temp_sibling(target)?;
     if let Err(e) = fs::copy(src, &tmp) {
         let _ = fs::remove_file(&tmp);
-        return Err(ChanError::Io(format!(
-            "failed to copy draft file {} to {}: {e}",
-            src.display(),
-            target.display()
-        )));
+        return Err(ChanError::io_with_context(
+            e,
+            format!(
+                "failed to copy draft file {} to {}",
+                src.display(),
+                target.display()
+            ),
+        ));
     }
     if let Err(e) = fs_ops::sync_file(&tmp) {
         let _ = fs::remove_file(&tmp);
@@ -663,10 +687,10 @@ fn copy_file_atomic(src: &Path, target: &Path) -> Result<()> {
     }
     if let Err(e) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        return Err(ChanError::Io(format!(
-            "failed to install draft file at {}: {e}",
-            target.display()
-        )));
+        return Err(ChanError::io_with_context(
+            e,
+            format!("failed to install draft file at {}", target.display()),
+        ));
     }
     Ok(())
 }
@@ -692,9 +716,9 @@ fn unique_temp_sibling(target: &Path) -> Result<PathBuf> {
 fn ensure_existing_dir(path: &Path, label: &str) -> Result<()> {
     let meta = fs::symlink_metadata(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            ChanError::Io(format!("not found: {label} {}", path.display()))
+            ChanError::NotFound(format!("not found: {label} {}", path.display()))
         } else {
-            ChanError::Io(format!("failed to inspect {label} {}: {e}", path.display()))
+            ChanError::io_with_context(e, format!("failed to inspect {label} {}", path.display()))
         }
     })?;
     if meta.is_dir() && !meta.file_type().is_symlink() {

@@ -64,21 +64,17 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         C::PathEmpty | C::PathEscape | C::SymlinkEscape(_) | C::DestinationInsideSource(_) => {
             (StatusCode::BAD_REQUEST, e.to_string())
         }
-        C::NotEditableText(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()),
+        C::NotEditableText(_) | C::NonUtf8EditableText(_) => {
+            (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
+        }
         C::SpecialFile { .. } => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string()),
-        C::WorkspaceNotRegistered(_) | C::WorkspaceRootMissing(_) => {
+        C::WorkspaceNotRegistered(_) | C::WorkspaceRootMissing(_) | C::NotFound(_) => {
             (StatusCode::NOT_FOUND, e.to_string())
         }
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
         C::WriteTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
-        C::Io(s) if s.contains("No such file") || s.contains("not found") => {
-            (StatusCode::NOT_FOUND, e.to_string())
-        }
-        C::Io(s) if s.contains("refusing to write non-UTF-8 bytes to editable text file") => {
-            (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.to_string())
-        }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     let mut response = err(status, msg);
@@ -113,6 +109,36 @@ mod tests {
             .expect("error field")
             .to_string();
         (parts.status, message)
+    }
+
+    #[tokio::test]
+    async fn missing_kind_windows_file_is_404() {
+        assert_missing_kind_status("The system cannot find the file specified. (os error 2)").await;
+    }
+
+    #[tokio::test]
+    async fn missing_kind_windows_path_is_404() {
+        assert_missing_kind_status("The system cannot find the path specified. (os error 3)").await;
+    }
+
+    async fn assert_missing_kind_status(message: &str) {
+        let error = chan_workspace::ChanError::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            message.to_string(),
+        ));
+        let (status, body) = status_and_error(err_from(&error)).await;
+        assert_eq!(body, format!("io error: {message}"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_kind_permission_denied_text_is_500() {
+        let error = chan_workspace::ChanError::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied: not found in access policy",
+        ));
+        let (status, _) = status_and_error(err_from(&error)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -200,10 +226,11 @@ mod tests {
 
     #[tokio::test]
     async fn err_from_maps_non_utf8_editable_upload_to_415() {
-        let (status, msg) = status_and_error(err_from(&chan_workspace::ChanError::Io(
-            "refusing to write non-UTF-8 bytes to editable text file: note.md".to_string(),
-        )))
-        .await;
+        let (status, msg) =
+            status_and_error(err_from(&chan_workspace::ChanError::NonUtf8EditableText(
+                "refusing to write non-UTF-8 bytes to editable text file: note.md".to_string(),
+            )))
+            .await;
 
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert!(msg.contains("non-UTF-8"));

@@ -130,7 +130,7 @@ pub fn load(root: &Path) -> Result<DashboardConfig> {
     if !path.exists() {
         return Ok(DashboardConfig::default());
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| ChanError::Io(e.to_string()))?;
+    let raw = std::fs::read_to_string(&path).map_err(ChanError::from)?;
     toml::from_str(&raw).map_err(|e| ChanError::ConfigDecode {
         path,
         message: e.to_string(),

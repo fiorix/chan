@@ -1350,7 +1350,7 @@ impl WatchHandle {
                 );
             })
             .map_err(|error| {
-                crate::error::ChanError::Io(format!("spawn watcher supervisor: {error}"))
+                crate::error::ChanError::io_with_context(error, "spawn watcher supervisor")
             })?;
         if initial_rx.recv().is_err() {
             let _ = supervisor.join();

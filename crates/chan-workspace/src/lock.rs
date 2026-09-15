@@ -186,7 +186,7 @@ impl WorkspaceLock {
                 })
             }
             Err(e) if is_contended(&e) => Self::try_steal(lock_dir, workspace_root),
-            Err(e) => Err(ChanError::Io(e.to_string())),
+            Err(e) => Err(ChanError::from(e)),
         }
     }
 
@@ -261,7 +261,7 @@ impl WorkspaceLock {
             }
             // Lost a race to break the stale lock; treat as locked.
             Err(e) if is_contended(&e) => Err(ChanError::WorkspaceLocked),
-            Err(e) => Err(ChanError::Io(e.to_string())),
+            Err(e) => Err(ChanError::from(e)),
         }
     }
 }
@@ -387,7 +387,7 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<File> {
         const FILE_SHARE_DELETE: u32 = 0x4;
         opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
-    opts.open(path).map_err(|e| ChanError::Io(e.to_string()))
+    opts.open(path).map_err(ChanError::from)
 }
 
 /// Publish the holder record to both places: the unlocked [`RECORD_FILE`] that
@@ -416,12 +416,10 @@ fn write_record(file: &File, lock_dir: &Path, workspace_root: &Path) -> Result<(
 }
 
 fn write_record_body(mut file: &File, json: &[u8]) -> Result<()> {
-    file.set_len(0).map_err(|e| ChanError::Io(e.to_string()))?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| ChanError::Io(e.to_string()))?;
-    file.write_all(json)
-        .map_err(|e| ChanError::Io(e.to_string()))?;
-    file.flush().map_err(|e| ChanError::Io(e.to_string()))?;
+    file.set_len(0).map_err(ChanError::from)?;
+    file.seek(SeekFrom::Start(0)).map_err(ChanError::from)?;
+    file.write_all(json).map_err(ChanError::from)?;
+    file.flush().map_err(ChanError::from)?;
     Ok(())
 }
 

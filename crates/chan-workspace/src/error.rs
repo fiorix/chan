@@ -88,15 +88,34 @@ pub enum ChanError {
     TrashCorrupt { id: String, message: String },
     #[error("trash restore target already exists: {0}")]
     TrashOccupied(String),
+    /// A missing path, with the original I/O message preserved for callers.
+    #[error("io error: {0}")]
+    NotFound(String),
+    /// A byte write would put invalid UTF-8 in an editable text file.
+    #[error("io error: {0}")]
+    NonUtf8EditableText(String),
     #[error("io error: {0}")]
     Io(String),
     #[error("operation cancelled")]
     Cancelled,
 }
 
+impl ChanError {
+    /// Add operation/resource context without losing a missing-path kind.
+    pub fn io_with_context(error: std::io::Error, context: impl std::fmt::Display) -> Self {
+        let kind = error.kind();
+        let message = format!("{context}: {error}");
+        Self::from(std::io::Error::new(kind, message))
+    }
+}
+
 impl From<std::io::Error> for ChanError {
     fn from(e: std::io::Error) -> Self {
-        ChanError::Io(e.to_string())
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ChanError::NotFound(e.to_string())
+        } else {
+            ChanError::Io(e.to_string())
+        }
     }
 }
 
@@ -130,5 +149,51 @@ impl From<notify::Error> for ChanError {
 impl From<crate::index::IndexError> for ChanError {
     fn from(e: crate::index::IndexError) -> Self {
         ChanError::Search(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_kind_survives_io_context() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "The system cannot find the path specified. (os error 3)",
+        );
+        let mapped = ChanError::io_with_context(error, "read notes/x.md");
+        assert_eq!(
+            mapped.to_string(),
+            "io error: read notes/x.md: The system cannot find the path specified. (os error 3)"
+        );
+        assert!(
+            matches!(mapped, ChanError::NotFound(_)),
+            "kind lost: {mapped:?}"
+        );
+    }
+
+    #[test]
+    fn io_variants_preserve_display() {
+        let message = "No such file or directory (os error 2)";
+        assert_eq!(
+            ChanError::NotFound(message.into()).to_string(),
+            ChanError::Io(message.into()).to_string()
+        );
+        let message = "refusing to write non-UTF-8 bytes to editable text file: note.md";
+        assert_eq!(
+            ChanError::NonUtf8EditableText(message.into()).to_string(),
+            ChanError::Io(message.into()).to_string()
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AlreadyExists,
+            std::io::ErrorKind::NotADirectory,
+        ] {
+            let error =
+                ChanError::io_with_context(std::io::Error::new(kind, "not found"), "operation");
+            assert!(matches!(error, ChanError::Io(_)));
+            assert_eq!(error.to_string(), "io error: operation: not found");
+        }
     }
 }

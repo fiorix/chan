@@ -337,12 +337,10 @@ pub fn purge_all(trash_dir: &Path) -> Result<TrashEmptyReport> {
     if removed == 0 && failed > 0 {
         // Total failure: the trash is unchanged and the caller's UX
         // ("trash emptied") would be a lie. Surface the last error.
-        return Err(ChanError::Io(format!(
-            "purge_all: 0 of {failed} entries removed; last error: {}",
-            last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-        )));
+        return Err(ChanError::io_with_context(
+            last_err.expect("a failed purge records its last error"),
+            format!("purge_all: 0 of {failed} entries removed; last error"),
+        ));
     }
     Ok(TrashEmptyReport {
         removed,

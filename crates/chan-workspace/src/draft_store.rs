@@ -77,16 +77,19 @@ impl DraftStore {
     /// subdirectory name is refused for the same reason.
     pub fn open(store_root: &Path) -> Result<Self> {
         std::fs::create_dir_all(store_root).map_err(|e| {
-            ChanError::Io(format!(
-                "failed to create drafts store root {}: {e}",
-                store_root.display()
-            ))
+            ChanError::io_with_context(
+                e,
+                format!(
+                    "failed to create drafts store root {}",
+                    store_root.display()
+                ),
+            )
         })?;
         let root_canon = store_root.canonicalize().map_err(|e| {
-            ChanError::Io(format!(
-                "canonicalize drafts store root {}: {e}",
-                store_root.display()
-            ))
+            ChanError::io_with_context(
+                e,
+                format!("canonicalize drafts store root {}", store_root.display()),
+            )
         })?;
         let drafts_dir = root_canon.join(DRAFTS_DIR_NAME);
         let trash_dir = root_canon.join(TRASH_DIR_NAME);
@@ -161,10 +164,10 @@ impl DraftStore {
                 )))
             }
             Err(e) => {
-                return Err(ChanError::Io(format!(
-                    "draft `{name}` is not available at {}: {e}",
-                    dir.display()
-                )))
+                return Err(ChanError::io_with_context(
+                    e,
+                    format!("draft `{name}` is not available at {}", dir.display()),
+                ))
             }
         }
         fs_ops::atomic_write(&dir.join(file_name), content.as_bytes())

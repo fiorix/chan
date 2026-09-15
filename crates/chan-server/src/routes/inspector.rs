@@ -428,6 +428,6 @@ mod tests {
     fn inspector_missing_path_is_not_found() {
         let (_cfg, _root, workspace) = open_workspace();
         let err = build_inspector_payload(&workspace, "missing.md").unwrap_err();
-        assert!(matches!(err, chan_workspace::ChanError::Io(_)));
+        assert!(matches!(err, chan_workspace::ChanError::NotFound(_)));
     }
 }

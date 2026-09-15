@@ -1341,7 +1341,7 @@ impl SceneRegistry {
             .await
             .map_err(|e| AttachError::Task(e.to_string()))??;
             if disk.is_none() && recovery.is_none() {
-                return Err(AttachError::Workspace(ChanError::Io(format!(
+                return Err(AttachError::Workspace(ChanError::NotFound(format!(
                     "not found: {path}"
                 ))));
             }

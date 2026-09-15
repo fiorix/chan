@@ -800,8 +800,7 @@ fn terminal_upload_stream_sync(
     limit: u64,
     cancel: &BulkCancel,
 ) -> chan_workspace::Result<TerminalUploadResponse> {
-    let metadata = std::fs::metadata(abs_dir)
-        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+    let metadata = std::fs::metadata(abs_dir).map_err(chan_workspace::ChanError::from)?;
     if !metadata.is_dir() {
         return Err(chan_workspace::ChanError::Io(format!(
             "destination is not a directory: {}",
@@ -815,13 +814,13 @@ fn terminal_upload_stream_sync(
             target.display().to_string(),
         ));
     }
-    let mut temp = tempfile::NamedTempFile::new_in(abs_dir)
-        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+    let mut temp =
+        tempfile::NamedTempFile::new_in(abs_dir).map_err(chan_workspace::ChanError::from)?;
     let mut written = 0u64;
     loop {
         match cancel
             .recv(&mut rx)
-            .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+            .map_err(chan_workspace::ChanError::from)?
         {
             Some(TerminalUploadMessage::Chunk(bytes)) => {
                 // Checked per chunk rather than once at the start: an abandoned
@@ -843,7 +842,7 @@ fn terminal_upload_stream_sync(
                     });
                 }
                 temp.write_all(&bytes)
-                    .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
+                    .map_err(chan_workspace::ChanError::from)?;
                 written = attempted;
             }
             Some(TerminalUploadMessage::Complete) => break,
@@ -861,9 +860,9 @@ fn terminal_upload_stream_sync(
     }
     temp.as_file()
         .sync_all()
-        .map_err(|error| chan_workspace::ChanError::Io(format!("fsync tmp: {error}")))?;
+        .map_err(|error| chan_workspace::ChanError::io_with_context(error, "fsync tmp"))?;
     temp.persist_noclobber(&target)
-        .map_err(|error| chan_workspace::ChanError::Io(error.error.to_string()))?;
+        .map_err(|error| chan_workspace::ChanError::from(error.error))?;
     // Post-commit: `persist_noclobber` already renamed the file into place, so
     // a failed directory fsync means the dirent may not survive a power loss,
     // not that the upload did not happen. Failing the response here reports

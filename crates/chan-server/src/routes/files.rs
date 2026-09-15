@@ -454,6 +454,8 @@ fn download_path_sync(
         // Pre-flight the tree before streaming so an unreadable entry fails fast
         // with a clear "cannot read X" status instead of truncating a streamed
         // archive mid-flight.
+        #[cfg(test)]
+        file_browser_listing_tests::remove_before_download_preflight(workspace, path);
         let payload_bytes = verify_readable_workspace_tree(workspace, path)?;
         let limit = workspace.transfer_max_bytes();
         if payload_bytes > limit {
@@ -956,6 +958,9 @@ fn verify_readable_workspace_tree(
 /// download that fails has to say which entry stopped it.
 fn name_preflight_path(rel: &str, error: chan_workspace::ChanError) -> chan_workspace::ChanError {
     match error {
+        chan_workspace::ChanError::NotFound(message) => {
+            chan_workspace::ChanError::NotFound(format!("cannot read {rel}: {message}"))
+        }
         chan_workspace::ChanError::Io(message) => {
             chan_workspace::ChanError::Io(format!("cannot read {rel}: {message}"))
         }
@@ -1738,11 +1743,7 @@ pub(crate) fn consume_transfer_body(
     write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
 ) -> chan_workspace::Result<()> {
     consume_body_with(
-        || {
-            cancel
-                .recv(rx)
-                .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))
-        },
+        || cancel.recv(rx).map_err(chan_workspace::ChanError::from),
         write_chunk,
     )
 }
@@ -2586,6 +2587,85 @@ mod file_browser_listing_tests {
         verify_readable_workspace_tree, workspace_path_writable, DownloadPayload, ListFilesQuery,
     };
 
+    static REMOVE_BEFORE_PREFLIGHT: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn remove_before_download_preflight(
+        workspace: &chan_workspace::Workspace,
+        path: &str,
+    ) {
+        let path = workspace.root().join(path);
+        let mut pending = REMOVE_BEFORE_PREFLIGHT.lock().unwrap();
+        if let Some(index) = pending.iter().position(|candidate| candidate == &path) {
+            pending.swap_remove(index);
+            std::fs::remove_dir(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_kind_download_preflight_route_keeps_400() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        std::fs::create_dir(root.path().join("vanished")).unwrap();
+        REMOVE_BEFORE_PREFLIGHT
+            .lock()
+            .unwrap()
+            .push(state.try_workspace().unwrap().root().join("vanished"));
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fs/vanished?download=1")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            !root.path().join("vanished").exists(),
+            "preflight seam did not run"
+        );
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("io error: cannot read vanished:"));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn missing_kind_download_preflight_name_preserves_404() {
+        for message in [
+            "The system cannot find the file specified. (os error 2)",
+            "The system cannot find the path specified. (os error 3)",
+        ] {
+            let error = super::name_preflight_path(
+                "notes/missing.md",
+                chan_workspace::ChanError::from(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    message,
+                )),
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("io error: cannot read notes/missing.md: {message}")
+            );
+            assert_eq!(
+                crate::error::err_from(&error).status(),
+                axum::http::StatusCode::NOT_FOUND
+            );
+            assert!(
+                !matches!(error, chan_workspace::ChanError::Io(_)),
+                "kind lost: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn list_files_sync_surfaces_drafts_dir_as_normal_in_root_folder() {
         // The drafts dir is a real in-root directory now, so the File
@@ -2886,6 +2966,10 @@ mod file_browser_listing_tests {
 
         let err = replace_file_sync(&workspace, "same.md", &[0xff, 0xfe]).unwrap_err();
 
+        assert!(
+            matches!(err, chan_workspace::ChanError::NonUtf8EditableText(_)),
+            "{err:?}"
+        );
         assert!(err
             .to_string()
             .contains("non-UTF-8 bytes to editable text file"));
@@ -5463,6 +5547,53 @@ mod doc_divert_tests {
             authority_version,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn multipart_upload_rejects_non_utf8_editable_text_with_415() {
+        let (_cfg, root, state) = divert_app();
+        state
+            .try_workspace()
+            .unwrap()
+            .write_text("note.md", "original")
+            .unwrap();
+        let boundary = "non-utf8-upload";
+        let mut body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"path\"\r\n\r\n\
+             note.md\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"note.md\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&[0xff, 0xfe]);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/fs/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body_json(response).await["error"],
+            "io error: refusing to write non-UTF-8 bytes to editable text file: note.md"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("note.md")).unwrap(),
+            "original"
+        );
     }
 
     #[tokio::test]
