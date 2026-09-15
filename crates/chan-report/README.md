@@ -2,7 +2,7 @@
 
 Per-file language and SLOC report for a directory tree, with per-language roll-ups and a Basic COCOMO summary on top. Maintains state incrementally so a single filesystem event re-counts one file instead of the whole tree.
 
-Built to be embedded in `chan-workspace`. The crate is I/O-free for state: it walks, counts, and computes; persistence (atomic write of `.chan/report.jsonl`) is the consumer's responsibility.
+Built to be embedded in `chan-workspace`. The crate is I/O-free for state: it walks, counts, and computes; persistence is the consumer's responsibility. chan-workspace atomically writes the JSONL to `workspaces/<metadata_key>/report/report.jsonl` under the chan home (`~/.chan` by default).
 
 ## Public API at a glance
 
