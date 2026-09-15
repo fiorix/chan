@@ -34,19 +34,31 @@ PORT="$(choose_port)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chan-built-devserver.XXXXXX")"
 LOG="$TMP_ROOT/devserver.log"
 PID=
+KILL_TARGET=
 
 # ShellCheck does not trace function calls through trap handlers.
 # shellcheck disable=SC2329
 cleanup() {
-    local status=$?
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        kill "$PID" 2>/dev/null || true
+    local status=$? attempt
+    trap - EXIT
+    trap '' INT TERM
+    if [ -n "$KILL_TARGET" ]; then
+        kill -TERM -- "$KILL_TARGET" 2>/dev/null || true
+        for ((attempt = 0; attempt < 50; attempt++)); do
+            kill -0 -- "$KILL_TARGET" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 -- "$KILL_TARGET" 2>/dev/null; then
+            kill -KILL -- "$KILL_TARGET" 2>/dev/null || true
+        fi
         wait "$PID" 2>/dev/null || true
     fi
     rm -rf -- "$TMP_ROOT"
     exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$TMP_ROOT/chan-home" "$TMP_ROOT/runtime"
 case "$BIN" in
@@ -55,10 +67,11 @@ case "$BIN" in
         # `exec -a` name through ARGV0. Match the installed AppImage shim.
         ARGV0=chan \
         APPIMAGE_EXTRACT_AND_RUN=1 \
+        TMPDIR="$TMP_ROOT" \
         CHAN_HOME="$TMP_ROOT/chan-home" \
         CHAN_UPDATE_CHECK=0 \
         XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
-        bash -c 'exec -a chan "$@"' _ "$BIN" \
+        setsid bash -c 'exec -a chan "$@"' _ "$BIN" \
             devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
             >"$LOG" 2>&1 &
         ;;
@@ -72,6 +85,12 @@ case "$BIN" in
         ;;
 esac
 PID=$!
+KILL_TARGET=$PID
+case "$BIN" in
+    # The runtime forks AppRun. Its session owns both processes even if the
+    # runtime exits first; plain binaries also run on hosts without setsid.
+    *.AppImage) KILL_TARGET=-$PID ;;
+esac
 
 BODY=
 for ((attempt = 0; attempt < 90; attempt++)); do
