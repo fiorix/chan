@@ -9941,8 +9941,14 @@ mod tests {
             ]),
             (Some(".".into()), Some(DevserverSelector::Port(9000)))
         );
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--devserver=0"]).is_err());
-        assert!(Cli::try_parse_from(["chan", "open", ".", "--devserver=not-a-url"]).is_err());
+        for (selector, message) in [
+            ("--devserver=0", "invalid devserver port 0"),
+            ("--devserver=not-a-url", "invalid devserver selector"),
+        ] {
+            let error = Cli::try_parse_from(["chan", "serve", ".", selector]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 
     #[test]
