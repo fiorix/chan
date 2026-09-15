@@ -1234,12 +1234,13 @@ async fn chan_service_start_status_join_restart_stop() {
     assert!(stdout.contains("not running"), "status output: {stdout}");
 }
 
-/// An attached `--join` must ride out a stalled daemon AND a `--restart`
-/// instead of exiting: the join process IS the desktop connection (the connect
-/// script blocks on it), so a join that dies on a bounce tears down every
-/// workspace window and blocks reconnect until the control terminal is closed
-/// by hand. The watchdog's grace window narrates the outage, re-pins to the
-/// restarted daemon's pid, and a later Ctrl-C still detaches with exit 0.
+/// An attached `chan devserver join` must ride out a stalled daemon AND a
+/// `chan devserver restart` instead of exiting: the join process IS the
+/// desktop connection (the connect script blocks on it), so a join that dies
+/// on a bounce tears down every workspace window and blocks reconnect until
+/// the control terminal is closed by hand. The watchdog's grace window
+/// narrates the outage, re-pins to the restarted daemon's pid, and a later
+/// Ctrl-C still detaches with exit 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chan_service_join_survives_stall_and_restart() {
     let sandbox = Sandbox::new();
