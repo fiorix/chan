@@ -34,9 +34,7 @@ pub type TerminalRegistryCell = Arc<OnceLock<Arc<TerminalRegistry>>>;
 
 // The control-socket wire contract (request + response) is shared with
 // the `cs` client through chan-shell, so a tag/field rename moves in
-// lockstep instead of silently breaking one side. The transport module is
-// the only `#[cfg]`-split surface now (unix socket vs. windows named pipe),
-// so these types and every handler below are platform-neutral.
+// lockstep instead of silently breaking one side. The transport module abstracts Unix sockets and Windows named pipes behind shared bind, accept, connect, and split-stream operations.
 pub use chan_shell::{ControlRequest, ControlResponse};
 // The survey types are part of the same shared wire module; the handler
 // pushes a SurveySpec to the SPA and formats the SurveyReply for the CLI.
@@ -1050,14 +1048,7 @@ async fn write_response<W: AsyncWrite + Unpin>(write: &mut W, response: &Control
     }
 }
 
-/// The cross-platform transport module -- the ONLY `#[cfg]`-split surface for
-/// both the control socket AND the MCP bridge (`mcp_bridge.rs` reuses
-/// `bind`/`accept` + `connect`/`Client`). unix uses a `UnixListener`/`UnixStream`;
-/// windows uses a `tokio::net::windows::named_pipe` server/client. Both yield a
-/// `Conn`/`Client` whose `into_split()` gives read/write halves that implement
-/// `AsyncRead + AsyncWrite`, so the accept loop, `serve_connection`, the MCP
-/// bridge, and every handler stay platform-neutral. tokio is `features=["full"]`
-/// workspace-wide, so neither path adds a dep.
+/// Shared transport for the control socket and MCP bridge: Unix listeners/streams on Unix and Tokio named-pipe servers/clients on Windows. Both expose `bind`, `accept`, `connect`, and `Conn`/`Client` split read/write halves implementing the async I/O traits.
 pub(crate) mod transport {
     #[cfg(unix)]
     mod imp {
