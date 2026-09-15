@@ -1191,7 +1191,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
         standalone_files,
     } = ctx;
     // The registry is a set-once cell that may be filled after the
-    // socket starts; resolve it per request, exactly as before.
+    // socket starts; resolve it per request.
     let terminal_registry = terminal_registry.get();
     let tenant = *tenant;
     // Single chokepoint for standalone-terminal gating: refuse the
