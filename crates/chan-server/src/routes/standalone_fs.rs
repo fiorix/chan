@@ -48,7 +48,7 @@ use crate::state::{AppState, StandaloneFilesState};
 use crate::util::{slugify_for_filename, split_filename};
 
 use super::files::{
-    accumulate_text_body, basename, consume_request_body, join_rel, ndjson_bytes,
+    accumulate_text_body, basename, consume_transfer_body, join_rel, ndjson_bytes,
     ndjson_error_bytes, normalize_dir_query, parent_dir, parse_optional_mtime_ns, project_kind,
     read_multipart_text_field, resolve_range, stream_binary_plan, upload_leaf_filename,
     write_precondition_response, BinaryPlan, CreateBody, FileResponse, FileStreamEvent,
@@ -806,19 +806,27 @@ async fn stream_standalone_upload(
             alive_rx,
         );
     }
-    loop {
-        let message = match field.chunk().await {
-            Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
-            Ok(None) => RequestBodyMessage::Complete,
-            Err(error) => RequestBodyMessage::Failed(error.to_string()),
-        };
-        let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
-        if tx.send(message).await.is_err() || terminal {
-            break;
+    let feed = async move {
+        loop {
+            let message = match field.chunk().await {
+                Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
+                Ok(None) => RequestBodyMessage::Complete,
+                Err(error) => RequestBodyMessage::Failed(error.to_string()),
+            };
+            let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
+            if tx.send(message).await.is_err() || terminal {
+                break;
+            }
         }
-    }
-    drop(tx);
-    match job.outcome().await {
+        drop(tx);
+    };
+    let outcome = job.outcome();
+    tokio::pin!(feed, outcome);
+    let result = tokio::select! {
+        result = &mut outcome => result,
+        () = &mut feed => outcome.await,
+    };
+    match result {
         BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
         BulkOutcome::Done(Err(error)) => standalone_err(&error),
         // Cancellation, lane shutdown, and a panicked job are reported
@@ -849,7 +857,7 @@ fn standalone_upload_stream_sync(
     // cannot observe an untracked echo.
     let ticket = begin_mutation(files, w, std::slice::from_ref(&rel));
     let result = fs.write_atomic_stream(&rel, AtomicWriteKind::Bytes, |sink| {
-        consume_request_body(rx, |chunk| {
+        consume_transfer_body(rx, cancel, |chunk| {
             // Checked per chunk so an abandoned upload returns its
             // admission slot within one chunk's work; the atomic writer
             // discards its temp file on this error.
@@ -1817,6 +1825,81 @@ mod tests {
             body_json(response).await,
             json!({"error": "protected_path", "path": "home/user"})
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_standalone_upload_preserves_target_without_a_sender() {
+        let fx = files_fixture();
+        let dir = fx.root.join("uploads");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("stalled.bin"), b"original").unwrap();
+        let files = fx.state.standalone_files.clone().unwrap();
+        let destination = super::UploadDestination {
+            dir: String::new(),
+            replace_path: Some("uploads/stalled.bin".into()),
+            filename: "stalled.bin".into(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(super::RequestBodyMessage::Chunk(
+            axum::body::Bytes::from_static(b"partial"),
+        ))
+        .unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result =
+                super::standalone_upload_stream_sync(&files, None, &destination, &mut rx, &cancel);
+            let _ = done_tx.send(result);
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(tx);
+        let error = result
+            .expect("standalone upload kept waiting for a stalled client")
+            .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.to_string().contains("stalled"), "{error}");
+        assert_eq!(std::fs::read(dir.join("stalled.bin")).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_standalone_upload_returns_without_more_body_bytes() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut fx = files_fixture();
+            let dir = fx.root.join("uploads");
+            std::fs::create_dir(&dir).unwrap();
+            let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            std::sync::Arc::get_mut(&mut fx.state)
+                .unwrap()
+                .bulk_transfer = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
+            let files = fx.state.standalone_files.clone().unwrap();
+            let mut multipart = crate::bulk_transfer::test_support::stalled_multipart().await;
+            let field = multipart.next_field().await.unwrap().unwrap();
+            let destination = super::UploadDestination {
+                dir: "uploads".into(),
+                replace_path: None,
+                filename: "stalled.bin".into(),
+            };
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                super::stream_standalone_upload(
+                    &fx.state,
+                    files,
+                    None,
+                    destination,
+                    &axum::http::HeaderMap::new(),
+                    field,
+                ),
+            )
+            .await
+            .expect("upload response waited for more client bytes");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

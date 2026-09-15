@@ -187,6 +187,18 @@ impl BulkCancel {
             )),
         }
     }
+
+    pub(crate) fn recv<T>(
+        &self,
+        rx: &mut tokio::sync::mpsc::Receiver<T>,
+    ) -> std::io::Result<Option<T>> {
+        self.check_cancelled()?;
+        match rx.try_recv() {
+            Ok(value) => Ok(Some(value)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => self.wait_for_progress(rx.recv()),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Ok(None),
+        }
+    }
 }
 
 /// Delivery of one job's result, deferred so the worker can release its slot
@@ -661,6 +673,31 @@ pub(crate) mod test_support {
         assert!(body.is_err(), "an aborted download must fail its body");
     }
 
+    /// A file part that supplies bytes and then leaves its body open forever.
+    pub(crate) async fn stalled_multipart() -> axum::extract::Multipart {
+        use axum::extract::FromRequest;
+        use futures::StreamExt;
+
+        let prefix = format!(
+            "--stall-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"stalled.bin\"\r\n\r\n{}",
+            "x".repeat(4096),
+        );
+        let stream = futures::stream::once(async move {
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(prefix))
+        })
+        .chain(futures::stream::pending());
+        let request = axum::http::Request::builder()
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=stall-boundary",
+            )
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+        axum::extract::Multipart::from_request(request, &())
+            .await
+            .unwrap()
+    }
+
     /// Hold every admission slot on `tenant`'s lane. Dropping the returned
     /// senders releases the held jobs.
     pub(crate) fn saturate_admission(
@@ -752,6 +789,12 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tx.try_send(()).unwrap();
         assert_runtime_drop_cancels_channel_wait(async move { tx.reserve().await.map(|_| ()) }, rx);
+    }
+
+    #[test]
+    fn runtime_drop_cancels_an_empty_upload_channel_wait() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        assert_runtime_drop_cancels_channel_wait(async move { rx.recv().await }, tx);
     }
 
     /// The item's central claim, in the only form that is decidable rather

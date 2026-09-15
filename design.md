@@ -95,7 +95,7 @@ Owns the per-tenant HTTP/WS runtime: launch-token auth, SPA fallback and embedde
 Stable contracts:
 
 - Async handlers treat `chan-workspace` as a synchronous filesystem boundary: they snapshot the live workspace, return retryable busy responses during metadata swaps, and move blocking filesystem/index/report/archive/transfer work off the async executor.
-- Bulk download sends run on a process-owned transfer lane and abort after the configured no-progress timeout, freeing capacity even for an unpolled response. Aborted response bodies end with an error.
+- Bulk download sends and upload receives run on a process-owned transfer lane and abort after the configured no-progress timeout. Stalled clients release worker capacity; aborted downloads end with a body error and stalled uploads discard their partial temporary files.
 - Tenant unmount ends its control connections, including `cs tunnel`. A decoded `Close` keeps only the teardown scope and reply half long enough to acknowledge its own unmount, with a bounded reply write.
 - Registered workspace opens run through chan-library on the blocking pool. The core bounds fd-budget permit waits to three seconds; temporary exhaustion reaches launcher add/on callers as HTTP 503 with retry guidance.
 - Per-launch auth gates every `/api/*` and `/ws` route. SPA fallback must not mask `/api/*` or `/ws` misses.

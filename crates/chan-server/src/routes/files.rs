@@ -1726,10 +1726,33 @@ async fn feed_request_body(body: Body, tx: mpsc::Sender<RequestBodyMessage>) {
 
 pub(crate) fn consume_request_body(
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
+    write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
+) -> chan_workspace::Result<()> {
+    consume_body_with(|| Ok(rx.blocking_recv()), write_chunk)
+}
+
+/// Bulk uploads share the lane's cancellation and no-progress policy.
+pub(crate) fn consume_transfer_body(
+    rx: &mut mpsc::Receiver<RequestBodyMessage>,
+    cancel: &crate::bulk_transfer::BulkCancel,
+    write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
+) -> chan_workspace::Result<()> {
+    consume_body_with(
+        || {
+            cancel
+                .recv(rx)
+                .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))
+        },
+        write_chunk,
+    )
+}
+
+fn consume_body_with(
+    mut receive: impl FnMut() -> chan_workspace::Result<Option<RequestBodyMessage>>,
     mut write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
 ) -> chan_workspace::Result<()> {
     loop {
-        match rx.blocking_recv() {
+        match receive()? {
             Some(RequestBodyMessage::Chunk(bytes)) => write_chunk(&bytes)?,
             Some(RequestBodyMessage::Complete) => return Ok(()),
             Some(RequestBodyMessage::Failed(error)) => {
@@ -2374,19 +2397,27 @@ async fn stream_workspace_upload(
         );
     }
 
-    loop {
-        let message = match field.chunk().await {
-            Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
-            Ok(None) => RequestBodyMessage::Complete,
-            Err(error) => RequestBodyMessage::Failed(error.to_string()),
-        };
-        let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
-        if tx.send(message).await.is_err() || terminal {
-            break;
+    let feed = async move {
+        loop {
+            let message = match field.chunk().await {
+                Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
+                Ok(None) => RequestBodyMessage::Complete,
+                Err(error) => RequestBodyMessage::Failed(error.to_string()),
+            };
+            let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
+            if tx.send(message).await.is_err() || terminal {
+                break;
+            }
         }
-    }
-    drop(tx);
-    match job.outcome().await {
+        drop(tx);
+    };
+    let outcome = job.outcome();
+    tokio::pin!(feed, outcome);
+    let result = tokio::select! {
+        result = &mut outcome => result,
+        () = &mut feed => outcome.await,
+    };
+    match result {
         crate::bulk_transfer::BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
         crate::bulk_transfer::BulkOutcome::Done(Err(error)) => err_from(&error),
         // Cancellation, lane shutdown and a panicked job are reported
@@ -2418,7 +2449,7 @@ fn workspace_upload_stream_sync(
         // its admission slot within one chunk's work. The atomic writer's temp
         // file is discarded on this error, so nothing is left behind and the
         // target is untouched.
-        consume_request_body(rx, |chunk| {
+        consume_transfer_body(rx, cancel, |chunk| {
             if cancel.is_cancelled() {
                 return Err(chan_workspace::ChanError::Io(
                     "upload cancelled before it completed".into(),
@@ -4273,6 +4304,80 @@ mod write_tests {
         );
 
         drop(releases);
+    }
+
+    #[test]
+    fn stalled_workspace_upload_preserves_target_without_a_sender() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(root.path().join("stalled.bin"), b"original").unwrap();
+        let destination = UploadDestination {
+            dir: String::new(),
+            replace_path: Some("stalled.bin".into()),
+            filename: "stalled.bin".into(),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(RequestBodyMessage::Chunk(Bytes::from_static(b"partial")))
+            .unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = workspace_upload_stream_sync(
+                &workspace,
+                &crate::self_writes::SelfWrites::new(),
+                &destination,
+                &mut rx,
+                &cancel,
+            );
+            let _ = done_tx.send(result);
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(tx);
+        let error = result
+            .expect("workspace upload kept waiting for a stalled client")
+            .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.to_string().contains("stalled"), "{error}");
+        assert_eq!(
+            std::fs::read(root.path().join("stalled.bin")).unwrap(),
+            b"original"
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_workspace_upload_returns_without_more_body_bytes() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let (_cfg, root, workspace) = admitted_download_workspace();
+            let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
+            let mut multipart = crate::bulk_transfer::test_support::stalled_multipart().await;
+            let field = multipart.next_field().await.unwrap().unwrap();
+            let destination = UploadDestination {
+                dir: String::new(),
+                replace_path: None,
+                filename: "stalled.bin".into(),
+            };
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream_workspace_upload(
+                    &bulk,
+                    None,
+                    None,
+                    workspace,
+                    Arc::new(crate::self_writes::SelfWrites::new()),
+                    destination,
+                    field,
+                ),
+            )
+            .await
+            .expect("upload response waited for more client bytes");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

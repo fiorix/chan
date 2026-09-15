@@ -733,19 +733,27 @@ async fn stream_terminal_upload(
             alive_rx,
         );
     }
-    loop {
-        let message = match field.chunk().await {
-            Ok(Some(bytes)) => TerminalUploadMessage::Chunk(bytes),
-            Ok(None) => TerminalUploadMessage::Complete,
-            Err(error) => TerminalUploadMessage::Failed(error.to_string()),
-        };
-        let terminal = !matches!(message, TerminalUploadMessage::Chunk(_));
-        if tx.send(message).await.is_err() || terminal {
-            break;
+    let feed = async move {
+        loop {
+            let message = match field.chunk().await {
+                Ok(Some(bytes)) => TerminalUploadMessage::Chunk(bytes),
+                Ok(None) => TerminalUploadMessage::Complete,
+                Err(error) => TerminalUploadMessage::Failed(error.to_string()),
+            };
+            let terminal = !matches!(message, TerminalUploadMessage::Chunk(_));
+            if tx.send(message).await.is_err() || terminal {
+                break;
+            }
         }
-    }
-    drop(tx);
-    match job.outcome().await {
+        drop(tx);
+    };
+    let outcome = job.outcome();
+    tokio::pin!(feed, outcome);
+    let result = tokio::select! {
+        result = &mut outcome => result,
+        () = &mut feed => outcome.await,
+    };
+    match result {
         BulkOutcome::Done(Ok(response)) => Json(response).into_response(),
         BulkOutcome::Done(Err(error)) => err_from(&error),
         // Cancellation, lane shutdown, and a panicked job are reported
@@ -811,7 +819,10 @@ fn terminal_upload_stream_sync(
         .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?;
     let mut written = 0u64;
     loop {
-        match rx.blocking_recv() {
+        match cancel
+            .recv(&mut rx)
+            .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+        {
             Some(TerminalUploadMessage::Chunk(bytes)) => {
                 // Checked per chunk rather than once at the start: an abandoned
                 // upload must return its admission slot within one chunk's work
@@ -1341,6 +1352,60 @@ mod tests {
             "{e}"
         );
         assert_eq!(std::fs::read(&as_file).unwrap(), b"x");
+    }
+
+    #[test]
+    fn stalled_terminal_upload_aborts_without_a_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"partial")))
+            .unwrap();
+        let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
+            std::time::Duration::from_millis(25),
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = terminal_upload_stream_sync(&target_dir, "stalled.bin", rx, 8192, &cancel);
+            let _ = done_tx.send(result);
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(tx);
+        let error = result
+            .expect("upload kept waiting for a stalled client")
+            .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.to_string().contains("stalled"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stalled_terminal_upload_returns_without_more_body_bytes() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let dir = tempfile::tempdir().unwrap();
+            let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
+            let mut multipart = crate::bulk_transfer::test_support::stalled_multipart().await;
+            let field = multipart.next_field().await.unwrap().unwrap();
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stream_terminal_upload(
+                    &bulk,
+                    None,
+                    None,
+                    dir.path().to_path_buf(),
+                    "stalled.bin".into(),
+                    8192,
+                    field,
+                ),
+            )
+            .await
+            .expect("upload response waited for more client bytes");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
