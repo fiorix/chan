@@ -293,12 +293,14 @@ async fn process_job(
                  first_cut_confirmed_at = now(), \
                  settle_not_before = now() + make_interval(secs => $3), \
                  next_attempt_at = now() + make_interval(secs => $3), \
+                 deadline = now() + make_interval(secs => $4), \
                  attempts = 0, updated_at = now() \
                  WHERE job_key = $1 AND generation = $2",
             )
             .bind(&row.job_key)
             .bind(row.generation)
             .bind(SETTLEMENT_SECONDS as f64)
+            .bind((SETTLEMENT_SECONDS + RETRY_WINDOW_SECONDS) as f64)
             .execute(pool)
             .await?;
             Ok(())

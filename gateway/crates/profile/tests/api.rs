@@ -60,6 +60,27 @@ impl TestApp {
     }
 
     async fn new_with_control(control_url: &str) -> Self {
+        let mut app = Self::new_database().await;
+        let workspace_admin =
+            gateway_common::devserver_control_client::DevserverControlClient::new(
+                control_url.parse().unwrap(),
+                "test-profile-admin-token".into(),
+            )
+            .unwrap();
+        app.router = profile::http::router(profile::http::AppState {
+            revocations: profile::revocation::RevocationCoordinator::spawn(
+                app.pool.clone(),
+                workspace_admin.clone(),
+            ),
+            pool: app.pool.clone(),
+            auth_token: TOKEN.to_string(),
+            admin_token: Some(ADMIN_TOKEN.to_string()),
+            workspace_admin,
+        });
+        app
+    }
+
+    async fn new_database() -> Self {
         let url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL must be set; e.g. postgres://localhost/chan_gateway_test");
         // Hold-one-connection reaper: clears any idle connections
@@ -99,25 +120,8 @@ impl TestApp {
             .await
             .expect("migrate");
 
-        let workspace_admin =
-            gateway_common::devserver_control_client::DevserverControlClient::new(
-                control_url.parse().unwrap(),
-                "test-profile-admin-token".into(),
-            )
-            .unwrap();
-        let router = profile::http::router(profile::http::AppState {
-            revocations: profile::revocation::RevocationCoordinator::spawn(
-                pool.clone(),
-                workspace_admin.clone(),
-            ),
-            pool: pool.clone(),
-            auth_token: TOKEN.to_string(),
-            admin_token: Some(ADMIN_TOKEN.to_string()),
-            workspace_admin,
-        });
-
         Self {
-            router,
+            router: Router::new(),
             schema,
             admin_url: url,
             pool,
@@ -2926,4 +2930,55 @@ async fn coalesced_reservation_resets_a_due_generation_to_first_cut_phase() {
     assert!(deadline.is_none());
     assert!(generation > old_generation);
     app.cleanup().await;
+}
+
+#[tokio::test]
+async fn settling_cut_gets_a_fresh_retry_window_after_a_late_first_cut() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let healthy = Arc::new(AtomicBool::new(true));
+        let control_health = healthy.clone();
+        let control = Router::new().fallback(move || {
+            let healthy = control_health.clone();
+            async move {
+                let status = if healthy.load(Ordering::SeqCst) { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+                (status, axum::Json(json!({"killed": 0, "revoked": 0, "proxies_confirmed": 1, "proxies_expected": 1})))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+        // This test owns every claim, so the background coordinator must not race process_once.
+        let app = TestApp::new_database().await;
+        let uid: Uuid = sqlx::query_scalar("INSERT INTO users (email, username) VALUES ('late-cut@x.com', 'late-cut') RETURNING id")
+            .fetch_one(&app.pool).await.unwrap();
+        profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(uid)).await.unwrap();
+        let key = format!("subject:{uid}");
+        sqlx::query("UPDATE control_revocation_jobs SET deadline = now() - interval '1 second', next_attempt_at = now() WHERE job_key = $1")
+            .bind(&key).execute(&app.pool).await.unwrap();
+        let client = gateway_common::devserver_control_client::DevserverControlClient::new(control_url.parse().unwrap(), "test-profile-admin-token".into()).unwrap();
+        assert_eq!(profile::revocation::process_once(&app.pool, &client).await.unwrap(), 1);
+        let (phase, first_cut, settle, deadline): RevocationScheduleRow = sqlx::query_as("SELECT phase, first_cut_confirmed_at, settle_not_before, deadline FROM control_revocation_jobs WHERE job_key = $1")
+            .bind(&key).fetch_one(&app.pool).await.unwrap();
+        assert_eq!(phase, "settling");
+        let retry_window = deadline.unwrap() - settle.unwrap();
+        assert_eq!(settle.unwrap() - first_cut.unwrap(), chrono::Duration::seconds(40));
+
+        healthy.store(false, Ordering::SeqCst);
+        sqlx::query("UPDATE control_revocation_jobs SET settle_not_before = now(), next_attempt_at = now() WHERE job_key = $1")
+            .bind(&key).execute(&app.pool).await.unwrap();
+        assert_eq!(profile::revocation::process_once(&app.pool, &client).await.unwrap(), 1);
+        let row: Option<(String, i32)> = sqlx::query_as("SELECT phase, attempts FROM control_revocation_jobs WHERE job_key = $1")
+            .bind(&key).fetch_optional(&app.pool).await.unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_audit WHERE user_id = $1 AND action = 'session_revoke_failed'")
+            .bind(uid).fetch_one(&app.pool).await.unwrap();
+        eprintln!("late first cut: retry_window={retry_window}, after transient second-cut failure job={row:?}, exhaustion_audits={audits}");
+        app.cleanup().await;
+        server.abort();
+        assert_eq!(row, Some(("settling".into(), 1)));
+        assert_eq!(audits, 0);
+        assert_eq!(retry_window, chrono::Duration::minutes(5));
+    }).await.expect("revocation retry-window test timed out");
 }
