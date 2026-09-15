@@ -506,6 +506,12 @@ impl HostedWorkspaceRuntime {
         // infinite -- but the window shrinks from minutes to one operation.
         self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.shutdown().await;
+        // Socket owners must end their sessions before the release verifier
+        // waits for the workspace handles those sessions hold.
+        drop(std::mem::replace(
+            &mut self.artifacts.keepalive,
+            Box::new(()),
+        ));
         let released = self.artifacts.cell.clear();
         if let Some((weak, lock_dir)) = released {
             let wait = tokio::task::spawn_blocking(move || {

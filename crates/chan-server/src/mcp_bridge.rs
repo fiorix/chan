@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rand::RngCore;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::control_socket::transport;
 
@@ -227,7 +227,7 @@ where
     out
 }
 
-/// Bridge handle returned from `start`. Drop = abort the accept loop
+/// Bridge handle returned from `start`. Drop = abort the accept loop and sessions
 /// and (on unix) unlink the socket file; a Windows named pipe is reclaimed
 /// by the OS once the last handle drops. Held by `AppState` for the lifetime
 /// of the chan-server process.
@@ -265,8 +265,13 @@ where
     let workspace_for = Arc::new(workspace_for);
 
     let accept_loop = tokio::spawn(async move {
+        let mut sessions = JoinSet::new();
         loop {
-            let conn = match listener.accept().await {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = sessions.join_next(), if !sessions.is_empty() => continue,
+            };
+            let conn = match accepted {
                 Ok(conn) => conn,
                 Err(e) => {
                     tracing::warn!("mcp bridge accept: {e}");
@@ -280,7 +285,7 @@ where
                 tracing::warn!("mcp bridge session refused: workspace state unavailable");
                 continue;
             };
-            tokio::spawn(async move {
+            sessions.spawn(async move {
                 let (read, write) = conn.into_split();
                 let server = chan_llm::mcp::Server::new(workspace);
                 if let Err(e) = server.serve_io(read, write).await {
@@ -300,6 +305,186 @@ where
 #[cfg(unix)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn mcp_unmount_releases_a_silent_clients_workspace() {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            let config = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library =
+                chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            let weak = Arc::downgrade(&workspace);
+            let lock_dir = workspace.paths().lock.clone();
+            let (accepted, mut acceptance) = tokio::sync::mpsc::unbounded_channel();
+            let handle = start(pick_socket_path(), move || {
+                accepted.send(()).unwrap();
+                Some(workspace.clone())
+            })
+            .unwrap();
+            let _client = tokio::net::UnixStream::connect(handle.socket_path())
+                .await
+                .unwrap();
+            acceptance.recv().await.unwrap();
+            drop(handle);
+            let released = tokio::time::timeout(Duration::from_secs(1), async {
+                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert!(
+                released.is_ok(),
+                "MCP client retains {} workspace handles",
+                weak.strong_count()
+            );
+            let _reopened = library.open_workspace(root.path()).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    struct SocketObservingBuilder(tokio::sync::mpsc::UnboundedSender<PathBuf>);
+
+    #[async_trait::async_trait]
+    impl chan_library::TenantBuilder for SocketObservingBuilder {
+        async fn build_workspace(
+            &self,
+            library: chan_workspace::Library,
+            workspace: Arc<chan_workspace::Workspace>,
+            config: &chan_library::ServeConfig,
+            desktop: chan_library::desktop_window_ops::DesktopBridge,
+            unserve: chan_library::UnserveMode,
+            control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, chan_library::Error> {
+            let artifacts = crate::build_app(
+                library,
+                workspace,
+                config,
+                desktop,
+                unserve,
+                control_identity,
+            )
+            .await?;
+            self.0
+                .send(
+                    artifacts
+                        .mcp_bridge
+                        .as_ref()
+                        .unwrap()
+                        .socket_path()
+                        .to_path_buf(),
+                )
+                .unwrap();
+            Ok(crate::into_tenant_artifacts(artifacts))
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: chan_workspace::Library,
+            _config: &chan_library::ServeConfig,
+            _desktop: chan_library::desktop_window_ops::DesktopBridge,
+            _unserve: chan_library::UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, chan_library::Error> {
+            unreachable!("workspace-only test")
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_unmount_closes_hosted_sessions_before_waiting_for_the_flock() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let config = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library =
+                chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let (sockets, mut socket_rx) = tokio::sync::mpsc::unbounded_channel();
+            let host = Arc::new(chan_library::WorkspaceHost::new(
+                library,
+                Arc::new(SocketObservingBuilder(sockets)),
+            ));
+            let serve = chan_library::ServeConfig {
+                addr: ([127, 0, 0, 1], 0).into(),
+                prefix: "/workspace".into(),
+                no_token: true,
+                idle_timeout: None,
+                open_browser: false,
+                search_aggression: None,
+                verbose: false,
+                settings_disabled: false,
+            };
+            host.open_registered_workspace(root.path(), serve.clone())
+                .await
+                .unwrap();
+            for initialized in [false, true] {
+                let socket = socket_rx.recv().await.unwrap();
+                let workspace = host.live_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&workspace);
+                let lock_dir = workspace.paths().lock.clone();
+                let mut client = tokio::net::UnixStream::connect(socket).await.unwrap();
+                let initialize = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "close-test", "version": "0"}
+                    }
+                });
+                client.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+                let mut reply = String::new();
+                BufReader::new(&mut client).read_line(&mut reply).await.unwrap();
+                let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
+                if initialized {
+                    client.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
+                    let mut reply = String::new();
+                    BufReader::new(&mut client).read_line(&mut reply).await.unwrap();
+                    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                    assert_eq!(reply["id"], 2);
+                    assert!(reply.get("result").is_some(), "{reply}");
+                }
+                drop(workspace);
+                // Allow loaded watcher backends time to stop, while staying
+                // below the five-second workspace-release fallback window.
+                let close_started = std::time::Instant::now();
+                let closed = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    host.close_workspace_for_root(root.path(), false),
+                )
+                .await;
+                eprintln!(
+                    "mcp_hosted_close initialized={initialized} elapsed_us={}",
+                    close_started.elapsed().as_micros()
+                );
+                assert!(closed
+                    .expect("close waited for an MCP client's flock")
+                    .unwrap()
+                    .completed());
+                assert_eq!(weak.strong_count(), 0);
+                assert!(chan_workspace::lock::is_free(&lock_dir));
+                host.open_registered_workspace(root.path(), serve.clone())
+                    .await
+                    .unwrap();
+                drop(client);
+            }
+            assert!(host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap()
+                .completed());
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn proxy_connect_falls_back_to_live_socket_when_configured_socket_is_stale() {
