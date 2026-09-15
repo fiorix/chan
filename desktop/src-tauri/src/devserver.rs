@@ -1826,9 +1826,7 @@ pub async fn fetch_library_windows(
 /// (`POST /api/library/windows`): the library assigns the id, persists the
 /// record, and fires the watch, so the desktop's watcher reconciles the new
 /// window open -- no client-side open. Used for the first-connect boot terminal
-/// (`kind: Terminal`) and launcher-open reroutes. `app` selects the application
-/// riding a terminal-class tenant (`Some(Files)` for a standalone Files
-/// window); `None` is the kind's default app.
+/// (`kind: Terminal`) and launcher-open reroutes. `kind` selects the window kind; `workspace_path` identifies the root for a workspace window.
 pub async fn mint_library_window(
     conn: &DevserverConn,
     kind: chan_server::WindowKind,
