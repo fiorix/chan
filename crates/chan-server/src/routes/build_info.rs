@@ -30,9 +30,8 @@ pub async fn api_build_info() -> Response {
         version: env!("CARGO_PKG_VERSION"),
         build: crate::routes::build_id(),
         features: BuildFeatures {
-            // Mirrors chan-workspace's `embeddings` cargo feature. ON in
-            // default builds; OFF on platforms where candle won't
-            // build (currently iOS), which use `--no-default-features`.
+            // Mirrors chan-workspace's `embeddings` cargo feature: ON in
+            // default builds, OFF in a `--no-default-features` build.
             embeddings: cfg!(feature = "embeddings"),
         },
     })

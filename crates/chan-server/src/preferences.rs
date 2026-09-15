@@ -435,9 +435,9 @@ impl EditorPrefs {
     }
 }
 
-/// `~/.chan/preferences.toml` on desktop. iOS / Android pass an
-/// explicit path via `load_from` / `save_to` since their sandbox
-/// dir isn't `chan_workspace::paths::config_dir`.
+/// `preferences.toml` in the chan home (`chan_workspace::paths::config_dir`,
+/// `~/.chan` by default). `load_from` / `save_to` take an explicit path
+/// instead.
 pub fn default_path() -> PathBuf {
     chan_workspace::paths::config_dir().join("preferences.toml")
 }

@@ -3786,9 +3786,9 @@ mod tests {
         // A different basename differs.
         let c = allocate_workspace_prefix(Path::new("/tmp/other")).unwrap();
         assert_ne!(a, c);
-        // Same basename under a DIFFERENT parent no longer collides: the
-        // hash suffix keys the prefix to the root, so the two map to DISTINCT
-        // prefixes and both mount (the old basename-only slug rejected the
+        // Same basename under a DIFFERENT parent does not collide: the hash
+        // suffix keys the prefix to the root, so the two map to DISTINCT
+        // prefixes and both mount (a basename-only slug would reject the
         // second at mount time).
         let d = allocate_workspace_prefix(Path::new("/tmp/sub/notes")).unwrap();
         assert!(d.starts_with("/notes-"), "{d}");
@@ -3814,8 +3814,8 @@ mod tests {
         assert!(state.host.mounted_prefixes().unwrap().contains(&prefix));
 
         // A SECOND workspace with the same basename under a DIFFERENT parent
-        // no longer collides -- the hash keys the prefix to the root, so both
-        // mount at distinct prefixes (the bug was the second being rejected).
+        // does not collide -- the hash keys the prefix to the root, so both
+        // mount at distinct prefixes instead of the second being rejected.
         let other = tempfile::tempdir().expect("other");
         let notes2 = other.path().join("notes");
         std::fs::create_dir_all(&notes2).unwrap();
@@ -3831,7 +3831,7 @@ mod tests {
         );
         assert!(state.host.mounted_prefixes().unwrap().contains(&prefix2));
 
-        // A workspace named "api" no longer shadows the reserved /api management
+        // A workspace named "api" does not shadow the reserved /api management
         // namespace: the hash suffix mounts it at `/api-{8hex}`, a distinct
         // top-level segment.
         let api_parent = tempfile::tempdir().expect("api parent");
@@ -3846,7 +3846,7 @@ mod tests {
         assert_ne!(api_prefix, RESERVED_WORKSPACE_PREFIX);
 
         // The reserved guard still rejects a LITERAL `/api` mount (defense in
-        // depth: allocate_workspace_prefix can no longer produce it, but a direct
+        // depth: allocate_workspace_prefix cannot produce it, but a direct
         // mount at the management namespace must still fail).
         let err = state
             .mount_at(&api_dir, RESERVED_WORKSPACE_PREFIX)

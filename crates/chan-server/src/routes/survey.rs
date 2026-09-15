@@ -27,7 +27,7 @@ use crate::state::AppState;
 /// `window_command` frames against). The server excludes that window from the
 /// stale-overlay close fan-out so a window answering its own survey does not
 /// receive an `answered_elsewhere` close racing its own local clear. Optional:
-/// a reply without it just fans the close to every target as before.
+/// a reply without it fans the close to every target.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SurveyReplyRequest {

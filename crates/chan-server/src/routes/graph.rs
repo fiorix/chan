@@ -1623,7 +1623,7 @@ fn build_graph_view(
     let disk_files = workspace_disk_files(&workspace);
     let image_files = image_subset(&disk_files);
     // Directory entries from the same walk. Markdown links whose
-    // target is a directory (e.g. `[notes](../notes/)`) used to
+    // target is a directory (e.g. `[notes](../notes/)`) would otherwise
     // fall through to ghost emission as `kind: file` missing nodes;
     // we filter them out of the ghost path and drop the corresponding
     // edges below.

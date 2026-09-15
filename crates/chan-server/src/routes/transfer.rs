@@ -595,9 +595,9 @@ struct TerminalUploadResponse {
 
 /// Query marker splitting the upload route's two contracts. `app=files`
 /// selects the standalone File Browser lane; anything else (including a
-/// missing marker) keeps the historical `cs upload` behavior. A plain
-/// string rather than a typed enum so an unknown `app` value stays
-/// ignored, exactly as it was before the parameter existed.
+/// missing marker) selects the `cs upload` lane. A plain string rather
+/// than a typed enum so an unknown `app` value selects the `cs upload`
+/// lane instead of failing to deserialize.
 #[derive(Default, Deserialize)]
 pub(crate) struct TerminalUploadQuery {
     #[serde(default)]

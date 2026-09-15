@@ -2157,7 +2157,7 @@ async fn reconcile_session_locked(
         drop(st);
     }
     // Clean session, non-empty divergent content: an ordinary external
-    // edit; fold it in immediately, as before.
+    // edit; fold it in immediately.
     session.merge_disk(disk_text, &disk_stat, disk_verbatim);
 }
 
@@ -4077,11 +4077,11 @@ mod tests {
     async fn flush_cas_conflict_on_a_matching_token_reads_the_disk_back() {
         // An mtime-preserving external rewrite: the bytes diverge, the
         // timestamp stays on the session's token. `write_text_if_unchanged`
-        // still refuses (that is what `expected_disk` is for), but the
-        // reconcile that answers the refusal used to see a token that
-        // matched, read nothing, and return -- so attempt 1 replayed the
-        // identical rejected job. `scene_sessions` never had this hole: its
-        // flush-echo guard reads the disk and compares bytes.
+        // still refuses (that is what `expected_disk` is for), and the
+        // reconcile that answers the refusal must read the disk back rather
+        // than see a matching token, read nothing, and return -- which would
+        // make attempt 1 replay the identical rejected job. `scene_sessions`
+        // guards the same case by reading the disk and comparing bytes.
         let fx = fixture(&[("a.md", "seed\n")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
         drain(&mut rxa);

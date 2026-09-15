@@ -135,10 +135,9 @@ impl ServerConfig {
     }
 }
 
-/// Default server config path: `~/.chan/server.toml` on desktop.
-/// iOS / Android callers pass an explicit path via `load_from` /
-/// `save_to` since their sandbox dir isn't
-/// `chan_workspace::paths::config_dir`.
+/// Default server config path: `server.toml` in the chan home
+/// (`chan_workspace::paths::config_dir`, `~/.chan` by default).
+/// `load_from` / `save_to` take an explicit path instead.
 pub fn default_path() -> PathBuf {
     chan_workspace::paths::config_dir().join("server.toml")
 }

@@ -1848,7 +1848,7 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
         drop(st);
     }
     // Clean session, non-empty divergent content: an ordinary external
-    // edit; fold it in immediately, as before.
+    // edit; fold it in immediately.
     session.merge_disk(disk_text, &disk_stat);
 }
 

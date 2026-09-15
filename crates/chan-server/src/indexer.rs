@@ -326,8 +326,7 @@ impl RebuildRequester {
 /// Every pass the workspace parks arrives here and is forwarded to the
 /// coordinator, which is the only claimant a served workspace has. Routing all
 /// of them through one channel is what stops a pass from being parked by a path
-/// that forgot to poke the coordinator: the poke is no longer the caller's to
-/// remember.
+/// that forgot to poke the coordinator: no caller has to remember the poke.
 ///
 /// A later `Indexer::spawn` over the same workspace replaces this driver rather
 /// than stacking on it; dropping an indexer leaves the stale sender installed,
@@ -1317,9 +1316,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_coordinator_runs_a_reconcile_instead_of_erroring_on_it() {
-        // The coordinator used to refuse any non-rebuild pass outright: it
-        // requeued the pass and flipped the indexer to Error, which is
-        // terminal for that generation. It is the only claimant a served
+        // The coordinator must run a non-rebuild pass rather than refuse it:
+        // refusing would requeue the pass and flip the indexer to Error, which
+        // is terminal for that generation. It is the only claimant a served
         // workspace has, so refusing is stranding.
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();

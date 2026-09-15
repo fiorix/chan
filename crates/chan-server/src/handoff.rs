@@ -1247,10 +1247,11 @@ pub async fn try_close_workspace(_workspace_path: &std::path::Path, _remove: boo
 }
 
 /// Map a `CloseWorkspace` reply line to an [`Outcome`]. Shared by the unix +
-/// windows arms: only `Closed` is a success; a skew falls back to `VersionSkew`,
-/// an `Error` to `DesktopError`, and any other reply / unparseable line to
-/// `NoDesktop` so the caller drops to the control-socket teardown rather than
-/// guessing.
+/// windows arms: only `Closed` is a success; a `CloseRefused` keeps its live
+/// terminal count as `Outcome::CloseRefused`, a skew falls back to
+/// `VersionSkew`, an `Error` to `DesktopError`, and any other reply /
+/// unparseable line to `NoDesktop` so the caller drops to the control-socket
+/// teardown rather than guessing.
 #[cfg(any(unix, windows))]
 fn map_close_response(line: &str) -> Outcome {
     match serde_json::from_str::<Response>(line) {

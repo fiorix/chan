@@ -4219,10 +4219,10 @@ struct TermWriteOutcome {
 
 /// Convert a terminal write outcome into its typed control response.
 ///
-/// A requested submit is always encoded, so this path no longer produces
-/// `ControlResponse::SubmitRefused`. The variant stays on the wire because a
-/// `cs` client still has to understand one from an older devserver, which
-/// refused whenever the target's spawn command named no agent.
+/// A requested submit is always encoded, so this path never produces
+/// `ControlResponse::SubmitRefused`. The variant stays on the wire so a `cs`
+/// client can still read one from an older devserver, which refused whenever
+/// the target's spawn command named no agent.
 fn term_write_response(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
@@ -8872,7 +8872,7 @@ position = { row = 0, col = 1 }
     #[tokio::test]
     async fn spawn_and_poke_team_windowless_does_not_surface() {
         // No window to surface into -> no `team_spawned` push (the SPA learns
-        // the sessions on its next attach, as before).
+        // the sessions on its next attach).
         let (_root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
