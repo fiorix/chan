@@ -3954,10 +3954,7 @@ fn open_term_new(
     })
 }
 
-/// Category 1, workspace-less: open a new terminal tab in a standalone
-/// terminal window. There is no workspace to resolve a cwd against, so the
-/// command carries no cwd -- pure window routing, the same shape as
-/// `open_dashboard`. The caller has already rejected any `--path`.
+/// Open a new tab in a standalone terminal window. `cwd`, when present, is the wire path `standalone_term_cwd` resolved under the standalone capability root; without one the tab opens in the spawn's default directory.
 fn open_term_new_standalone(
     window_id: &str,
     spec: TerminalOpenSpec,
