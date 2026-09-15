@@ -1371,11 +1371,7 @@ async fn proxy_http(
     opts: ProxyOpts<'_>,
     operation: ActiveOperation,
 ) -> Result<Response> {
-    // The full request deadline (headers + body streaming) is anchored
-    // at this Instant. send_request is bounded explicitly below; the
-    // response body is bounded by wrapping it in DeadlineBody, which
-    // shares the same deadline so a slow-drip upstream can't outlast
-    // the configured timeout. Bypassed when request_timeout is None.
+    // One deadline covers substream open, handshake, response headers, and body streaming: the earlier of the configured request timeout and session expiry. Without a request timeout, session expiry still bounds the request.
     let request_deadline = opts
         .request_timeout
         .map(|d| tokio::time::Instant::now() + d);
@@ -1485,13 +1481,7 @@ async fn proxy_http(
         Some(max) => Body::new(Limited::new(body, max)),
         None => Body::new(body),
     };
-    // Wrap the body when a deadline applies so:
-    //  * a slow-drip upstream is bounded end-to-end, and
-    //  * dropping the body aborts the conn task so a client that
-    //    bails mid-response doesn't leak the yamux substream.
-    // When no deadline is configured we let the body stream
-    // unwrapped; the conn task exits naturally when the upstream
-    // half-closes the substream.
+    // Always enforce the shared deadline and authorization cancellation on the body. Dropping it also aborts the connection task so a disconnected client releases its yamux substream.
     let response_body = Body::new(DeadlineBody::new(
         bounded,
         deadline,
