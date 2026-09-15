@@ -945,7 +945,21 @@ fn spawn_accept_loop(mut listener: transport::Listener, ctx: ControlSocketCtx) -
     })
 }
 
-const CONTROL_REQUEST_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const REQUEST_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Read one request line under a total deadline, including partial input.
+/// Expiry returns `None`; dispatched handlers keep their own lifetimes.
+pub(crate) async fn read_request_line<R>(
+    reader: &mut R,
+    line: &mut String,
+) -> Option<std::io::Result<usize>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    tokio::time::timeout(REQUEST_LINE_TIMEOUT, reader.read_line(line))
+        .await
+        .ok()
+}
 
 /// Frame one accepted control connection: read a single line-framed JSON
 /// `ControlRequest`, dispatch it, and write the JSON `ControlResponse` line
@@ -960,14 +974,9 @@ async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
     // newline), so it fails to parse and answers a clean error instead of an OOM.
     let mut reader = BufReader::new(read.take(MAX_CONTROL_REQUEST_BYTES));
     let mut line = String::new();
-    // One total deadline covers the first line, including partial input.
-    // Dispatched handlers keep their own lifetimes after this read completes.
-    let read_result =
-        match tokio::time::timeout(CONTROL_REQUEST_LINE_TIMEOUT, reader.read_line(&mut line)).await
-        {
-            Ok(result) => result,
-            Err(_) => return,
-        };
+    let Some(read_result) = read_request_line(&mut reader, &mut line).await else {
+        return;
+    };
     let request = match read_result {
         Ok(0) => Err(ControlResponse::Error {
             message: "empty control request".into(),

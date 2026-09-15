@@ -674,7 +674,6 @@ where
     U: Fn(&tokio::net::UnixStream) -> std::io::Result<u32> + Send + Sync + 'static,
 {
     use std::os::unix::fs::PermissionsExt;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let stable_lock = crate::control_socket::take_stable_lock(&socket_path)?;
@@ -713,27 +712,8 @@ where
             }
             let handler = handler.clone();
             tokio::spawn(async move {
-                let (read, mut write) = stream.into_split();
-                let mut reader = BufReader::new(read);
-                let mut line = String::new();
-                let response = match reader.read_line(&mut line).await {
-                    Ok(0) => Response::Error {
-                        message: "empty handoff request".into(),
-                    },
-                    Ok(_) => match serde_json::from_str::<Request>(&line) {
-                        Ok(req) => dispatch(req, handler.as_ref()).await,
-                        Err(e) => Response::Error {
-                            message: format!("invalid handoff request: {e}"),
-                        },
-                    },
-                    Err(e) => Response::Error {
-                        message: format!("read handoff request: {e}"),
-                    },
-                };
-                if let Ok(mut out) = serde_json::to_vec(&response) {
-                    out.push(b'\n');
-                    let _ = write.write_all(&out).await;
-                }
+                let (read, write) = stream.into_split();
+                serve_connection(read, write, handler.as_ref()).await;
             });
         }
     });
@@ -758,7 +738,6 @@ where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let pipe_name = socket_path.as_os_str().to_owned();
@@ -788,27 +767,8 @@ where
             let connected = std::mem::replace(&mut next, fresh);
             let handler = handler.clone();
             tokio::spawn(async move {
-                let (read, mut write) = tokio::io::split(connected);
-                let mut reader = BufReader::new(read);
-                let mut line = String::new();
-                let response = match reader.read_line(&mut line).await {
-                    Ok(0) => Response::Error {
-                        message: "empty handoff request".into(),
-                    },
-                    Ok(_) => match serde_json::from_str::<Request>(&line) {
-                        Ok(req) => dispatch(req, handler.as_ref()).await,
-                        Err(e) => Response::Error {
-                            message: format!("invalid handoff request: {e}"),
-                        },
-                    },
-                    Err(e) => Response::Error {
-                        message: format!("read handoff request: {e}"),
-                    },
-                };
-                if let Ok(mut out) = serde_json::to_vec(&response) {
-                    out.push(b'\n');
-                    let _ = write.write_all(&out).await;
-                }
+                let (read, write) = tokio::io::split(connected);
+                serve_connection(read, write, handler.as_ref()).await;
             });
         }
     });
@@ -829,6 +789,46 @@ where
         std::io::ErrorKind::Unsupported,
         "handoff listener requires unix-domain sockets or windows named pipes",
     ))
+}
+
+// Leave room for paths, URLs, labels and an optional connect script.
+#[cfg(any(unix, windows))]
+const MAX_HANDOFF_REQUEST_BYTES: u64 = 1024 * 1024;
+
+#[cfg(any(unix, windows))]
+async fn serve_connection<R, W, F, Fut>(read: R, mut write: W, handler: &F)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+    F: Fn(Request) -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Response> + Send,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let mut reader = BufReader::new(read.take(MAX_HANDOFF_REQUEST_BYTES));
+    let mut line = String::new();
+    let Some(read_result) = crate::control_socket::read_request_line(&mut reader, &mut line).await
+    else {
+        return;
+    };
+    let response = match read_result {
+        Ok(0) => Response::Error {
+            message: "empty handoff request".into(),
+        },
+        Ok(_) => match serde_json::from_str::<Request>(&line) {
+            Ok(req) => dispatch(req, handler).await,
+            Err(e) => Response::Error {
+                message: format!("invalid handoff request: {e}"),
+            },
+        },
+        Err(e) => Response::Error {
+            message: format!("read handoff request: {e}"),
+        },
+    };
+    if let Ok(mut out) = serde_json::to_vec(&response) {
+        out.push(b'\n');
+        let _ = write.write_all(&out).await;
+    }
 }
 
 /// Apply the protocol-version gate, then call the desktop's async `handler`.
@@ -1684,6 +1684,160 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
 
 #[cfg(test)]
 mod tests {
+    async fn request_deadline_case(drip: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (mut client, peer) = tokio::io::duplex(1024);
+            let (read, write) = tokio::io::split(peer);
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let handler = |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Response::Closed {
+                        desktop_version: CHAN_VERSION.into(),
+                    }
+                }
+            };
+            let mut serving = Box::pin(serve_connection(read, write, &handler));
+            assert!(futures::poll!(serving.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(5)).await;
+            if drip {
+                client.write_all(b"{\"type\":").await.unwrap();
+            }
+            assert!(futures::poll!(serving.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(4)).await;
+            if drip {
+                client.write_all(b"\"unfinished").await.unwrap();
+            }
+            assert!(
+                futures::poll!(serving.as_mut()).is_pending(),
+                "deadline fired early"
+            );
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::timeout(Duration::from_millis(10), serving.as_mut())
+                .await
+                .expect("request read survived the ten-second total deadline");
+            drop(serving);
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            assert!(reply.is_empty(), "expiry must close without a reply");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_request_deadline_closes_a_silent_client() {
+        request_deadline_case(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_request_deadline_is_not_reset_by_partial_input() {
+        request_deadline_case(true).await;
+    }
+
+    async fn request_handler_case(slow: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (mut client, peer) = tokio::io::duplex(1024);
+            let (read, write) = tokio::io::split(peer);
+            let request = Request::OpenWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: CHAN_VERSION.into(),
+                workspace_path: "notes".into(),
+            };
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let release = tokio::sync::Semaphore::new(0);
+            let handler = |received| {
+                assert_eq!(received, request);
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let release = &release;
+                async move {
+                    if slow {
+                        release.acquire().await.unwrap().forget();
+                    }
+                    Response::Closed {
+                        desktop_version: CHAN_VERSION.into(),
+                    }
+                }
+            };
+            client
+                .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            let mut serving = Box::pin(serve_connection(read, write, &handler));
+            if slow {
+                assert!(futures::poll!(serving.as_mut()).is_pending());
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                tokio::time::advance(Duration::from_secs(11)).await;
+                assert!(
+                    futures::poll!(serving.as_mut()).is_pending(),
+                    "request deadline ended the handler"
+                );
+                release.add_permits(1);
+            }
+            serving.as_mut().await;
+            drop(serving);
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Response>(&reply).unwrap(),
+                Response::Closed {
+                    desktop_version: CHAN_VERSION.into()
+                }
+            );
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_request_deadline_serves_an_immediate_request() {
+        request_handler_case(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_request_deadline_does_not_limit_a_slow_handler() {
+        request_handler_case(true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handoff_request_over_the_byte_cap_is_refused() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let request = Request::OpenWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: CHAN_VERSION.into(),
+                workspace_path: "x".repeat(MAX_HANDOFF_REQUEST_BYTES as usize),
+            };
+            let request = format!("{}\n", serde_json::to_string(&request).unwrap());
+            let (mut client, peer) = tokio::io::duplex(request.len());
+            let (read, write) = tokio::io::split(peer);
+            client.write_all(request.as_bytes()).await.unwrap();
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            serve_connection(read, write, &|_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Response::Closed {
+                        desktop_version: CHAN_VERSION.into(),
+                    }
+                }
+            })
+            .await;
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<Response>(&reply).unwrap(),
+                Response::Error { message } if message.starts_with("invalid handoff request:")
+            ));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        })
+        .await
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[derive(Clone, Copy, Debug)]
     enum ClientVerb {
