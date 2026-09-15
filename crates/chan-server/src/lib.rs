@@ -358,17 +358,7 @@ fn format_index_progress(event: &ProgressEvent, verbose: bool) -> String {
     line
 }
 
-/// Build the full axum app: state assembly, channels, watcher,
-/// indexer, config loads, router. Shared by `serve()` (local TCP
-/// listener) and the `WorkspaceHost` tenant builder (the devserver and
-/// chan-desktop mount their tenants through it) so every path serves
-/// byte-identical request handling.
-/// Prime the Windows default-shell resolution cache off the async request path.
-/// Resolution may shell out (`where pwsh`) with a blocking process spawn;
-/// resolving it lazily on the first terminal create would run that on a tokio
-/// worker and freeze the embedded SPA. Fire it on a blocking thread at
-/// server-build time -- before the router accepts any request -- so the
-/// command-builder cache read is instant. A no-op off Windows.
+/// Prime shell-profile discovery on a blocking task at server-build time so command discovery cannot block an async request worker. Also prime the default-shell cache on Windows, where resolution may spawn a process. Shell-profile priming is scheduled on every platform.
 fn prime_terminal_shell() {
     // Detached on purpose: the blocking prime runs to completion on the
     // blocking pool regardless of the dropped handle (spawn_blocking is not
@@ -464,6 +454,11 @@ async fn build_app(
     .await
 }
 
+/// Build the full axum app: state assembly, channels, watcher,
+/// indexer, config loads, router. Shared by `serve()` (local TCP
+/// listener) and the `WorkspaceHost` tenant builder (the devserver and
+/// chan-desktop mount their tenants through it) so every path serves
+/// byte-identical request handling.
 async fn build_app_with_extensions(
     build: AppBuild,
     config: &ServeConfig,
