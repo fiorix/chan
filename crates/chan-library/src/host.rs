@@ -558,6 +558,28 @@ impl Drop for WorkspaceCloseGuard<'_> {
     }
 }
 
+struct WorkspaceRemoveGuard<'a> {
+    host: &'a WorkspaceHost,
+    root: PathBuf,
+    error: Option<String>,
+    armed: bool,
+}
+
+impl Drop for WorkspaceRemoveGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let reason = self.error.take().unwrap_or_else(|| {
+                if std::thread::panicking() {
+                    "workspace removal panicked; retry".into()
+                } else {
+                    "workspace removal cancelled; retry".into()
+                }
+            });
+            self.host.mark_mount_error(&self.root, reason);
+        }
+    }
+}
+
 impl WorkspaceHost {
     /// Create an empty host backed by the caller's `Library`, with no
     /// desktop attached (window-lifecycle ops refuse; the title map stays
@@ -2683,8 +2705,21 @@ impl WorkspaceHost {
             WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
         }
 
-        self.mark_mount_removing(root);
-        let removed = self.library().unregister_workspace(root)?;
+        let mut removing = WorkspaceRemoveGuard {
+            host: self,
+            root: target.clone(),
+            error: None,
+            armed: true,
+        };
+        self.mark_mount_removing(&target);
+        let removed = match self.library().unregister_workspace(root) {
+            Ok(removed) => removed,
+            Err(error) => {
+                let error = Error::from(error);
+                removing.error = Some(error.to_string());
+                return Err(error);
+            }
+        };
         // Forget the on/off state so a devserver restart doesn't re-mount it.
         if let Some(overlay) = self.workspace_overlay() {
             overlay.forget(&target.to_string_lossy());
@@ -2694,8 +2729,9 @@ impl WorkspaceHost {
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
         self.discard_workspace_windows(root);
-        self.clear_mount_state(root);
+        self.clear_mount_state(&target);
         self.notify_window_change();
+        removing.armed = false;
         if removed {
             Ok(WorkspaceLifecycleOutcome::Completed)
         } else {
@@ -4509,6 +4545,88 @@ mod tests {
     #[tokio::test]
     async fn mount_publication_rechecks_canonical_root() {
         mount_publication_race(true).await;
+    }
+
+    #[tokio::test]
+    async fn failed_remove_guard_settles_cancellation_and_unwind() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let host = WorkspaceHost::new(library, fake_builder());
+            for panicking in [false, true] {
+                host.mark_mount_removing(root.path());
+                let notify = host.library_change_notify();
+                let changed = notify.notified();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _removing = WorkspaceRemoveGuard {
+                        host: &host,
+                        root: canonical_key(root.path()),
+                        error: None,
+                        armed: true,
+                    };
+                    if panicking {
+                        panic!("injected removal panic");
+                    }
+                }));
+                assert_eq!(result.is_err(), panicking);
+                let reason = if panicking {
+                    "workspace removal panicked; retry"
+                } else {
+                    "workspace removal cancelled; retry"
+                };
+                assert_eq!(
+                    host.workspace_status(root.path()),
+                    (WorkspaceStatus::Error, Some(reason.into()))
+                );
+                changed.await;
+                assert!(host.library().workspace_paths_for(root.path()).is_some());
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_remove_reports_error_and_can_be_retried() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            library.register_workspace(root.path()).unwrap();
+            let workspace = library.open_workspace(root.path()).unwrap();
+            let host = WorkspaceHost::new(library.clone(), fake_builder());
+            let notify = host.library_change_notify();
+            let changed = notify.notified();
+            let error = host
+                .remove_workspace_for_root(root.path(), false)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+                "{error}"
+            );
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Error, Some(error.to_string()))
+            );
+            changed.await;
+            assert!(library.workspace_paths_for(root.path()).is_some());
+            drop(workspace);
+            assert!(host
+                .remove_workspace_for_root(root.path(), false)
+                .await
+                .unwrap()
+                .completed());
+            assert!(library.workspace_paths_for(root.path()).is_none());
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Stopped, None)
+            );
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
