@@ -76,9 +76,8 @@ fn retry_transient_openpty<T>(
 /// portable-pty formats the errno into the message text
 /// (`bail!("failed to openpty: {:?}", io::Error::last_os_error())`), so ENXIO
 /// is only recoverable from that text; `code: 6` is ENXIO on darwin. A missed
-/// match simply skips the retry and returns the error exactly as before, so
-/// the coupling to portable-pty's wording can only fail toward today's
-/// behavior.
+/// match skips the retry and returns the `openpty` error unchanged, so a change
+/// in portable-pty's wording can only cost the retry, never the error.
 #[cfg(target_os = "macos")]
 fn is_transient_openpty_refusal(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}");

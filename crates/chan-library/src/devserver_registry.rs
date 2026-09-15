@@ -122,7 +122,7 @@ pub struct DevserverEntry {
     #[serde(default)]
     pub gateway_id: Option<String>,
     /// The owning gateway's public identity origin for the launcher's
-    /// "via <gateway>" note; empty for plain rows. `#[serde(default)]`: a row
+    /// `via <gateway>` note; empty for plain rows. `#[serde(default)]`: a row
     /// without the field reads empty.
     #[serde(default)]
     pub gateway_url: String,

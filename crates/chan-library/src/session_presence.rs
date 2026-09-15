@@ -73,9 +73,9 @@ pub enum ParticipantState {
 /// A participant's DISPLAY role, derived from the socket's ORIGIN: a
 /// local-origin `/ws` (the loopback bind or an `ssh -L` forward to it) reads
 /// `Leader`, a tunnel `/ws` reads `Follower`. This is separate from the single
-/// designated-owner slot ([`Inner::leader`]) that handover routing and the
-/// launcher gate consume; a remote holding the fallback owner slot still reads
-/// `Follower` here.
+/// designated-owner slot ([`SessionRegistry::leader`]) that handover routing
+/// and the launcher gate consume; a remote holding the fallback owner slot
+/// still reads `Follower` here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {

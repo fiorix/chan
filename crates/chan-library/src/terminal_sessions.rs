@@ -399,7 +399,7 @@ pub trait FdStorePark: Send + Sync {
 }
 
 /// Cloneable handle to the installed [`FdStorePark`] hook. A newtype so
-/// [`Registry`] and [`Session`] keep deriving `Debug`.
+/// [`Registry`] and `Session` keep deriving `Debug`.
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
 pub struct FdStoreParker(Arc<dyn FdStorePark>);
@@ -488,8 +488,8 @@ pub struct CreateOptions {
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
     /// Id of the shell profile to spawn. `None` uses the configured default
-    /// profile, and failing that the built-in shell resolution -- so a client
-    /// that never names a profile behaves exactly as before profiles existed.
+    /// profile, and failing that the built-in default shell, so a client that
+    /// never names a profile still spawns a shell.
     ///
     /// Carried on the session (not just the request) so a restart reproduces
     /// the shell the tab was opened with.

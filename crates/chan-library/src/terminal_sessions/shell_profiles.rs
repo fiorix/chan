@@ -1,8 +1,8 @@
 //! Discovery of the shells a terminal can spawn -- the model behind a
 //! Windows-Terminal-style profile picker.
 //!
-//! [`platform::command_builder`] resolves ONE shell for the whole process
-//! ([`platform::windows_shell`]'s `OnceLock`). That stays: it is the *default*
+//! `platform::command_builder` resolves ONE shell for the whole process
+//! (`platform::windows_shell`'s `OnceLock`). That stays: it is the *default*
 //! profile, and it exists because resolution shells out on the interactive
 //! path. This module adds the other half -- an enumeration of every shell
 //! present on the machine, so a caller can spawn a named one instead.
@@ -12,7 +12,7 @@
 //! resolved once and cached.
 //!
 //! Discovery shells out (`where`, `reg`, `git`), so it carries the same
-//! constraint as [`platform::prime_windows_shell`]: prime it off the async
+//! constraint as `platform::prime_windows_shell`: prime it off the async
 //! request path or a tokio worker blocks and the SPA freezes. See
 //! [`prime_shell_profiles`].
 //!
@@ -157,8 +157,8 @@ pub struct ShellProfile {
     /// would need a `where` lookup, and that must not happen on the spawn path
     /// (see the module docs).
     pub program: PathBuf,
-    /// Interactive arguments. One-shots are derived via
-    /// [`ShellKind::one_shot_args`].
+    /// Interactive arguments. A one-shot command's arguments are derived
+    /// from these by the profile's [`ShellKind`].
     pub args: Vec<String>,
     pub kind: ShellKind,
     /// Extra `PATH` entries the shell needs prepended. Git BASH is the reason
@@ -193,14 +193,14 @@ impl ShellProfile {
 /// process lifetime.
 ///
 /// Caches the *list*, not a choice -- that is the whole difference from
-/// [`platform::windows_shell`], which caches the single resolved default.
+/// `platform::windows_shell`, which caches the single resolved default.
 pub fn shell_profiles() -> &'static [ShellProfile] {
     static CACHE: std::sync::OnceLock<Vec<ShellProfile>> = std::sync::OnceLock::new();
     CACHE.get_or_init(discover)
 }
 
 /// Force the [`shell_profiles`] cache to resolve eagerly, off the async request
-/// path. Same rule and same reason as [`platform::prime_windows_shell`]:
+/// path. Same rule and same reason as `platform::prime_windows_shell`:
 /// discovery uses blocking `std::process::Command` (`where`, `reg`, `git`), and
 /// a lazy resolve on a tokio worker would freeze the SPA.
 pub fn prime_shell_profiles() {

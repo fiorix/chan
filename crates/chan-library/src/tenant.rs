@@ -353,8 +353,9 @@ pub struct TenantArtifacts {
     /// The bounded owner of the existing terminal/session/document/scene tasks
     /// and their existing cooperative shutdown sender.
     pub tasks: TenantTaskOwner,
-    /// SPA-facing URL prefix (tunnel mode swaps it on Connected). Shared Arc
-    /// with the tenant's `AppState`.
+    /// SPA-facing URL prefix. The tenant builder fills it with the tenant's
+    /// route prefix and nothing writes it afterwards. Shared Arc with the
+    /// tenant's `AppState`.
     pub prefix: Arc<RwLock<String>>,
     /// Which window ids hold a live `/ws` socket -- the `connected` source for
     /// the window-record assembly.

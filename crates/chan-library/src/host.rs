@@ -1604,8 +1604,8 @@ impl WorkspaceHost {
 
     /// Explicitly end every terminal session in every tenant and wait,
     /// bounded, until each child process is observably dead. Backs the
-    /// devserver drain endpoint (`chan devserver stop` / `--restart
-    /// --force`): the response must not claim completion before the
+    /// devserver drain endpoint (`chan devserver stop` / `chan devserver
+    /// restart --force`): the response must not claim completion before the
     /// children are gone, HUP-immune ones included.
     pub async fn drain_terminal_sessions(&self) -> TerminalDrainOutcome {
         self.drain_terminal_sessions_with(child_process_running, Duration::from_secs(5))
@@ -2519,8 +2519,8 @@ impl WorkspaceHost {
 
     /// Total LIVE terminal sessions owned by `window_id` across this host's
     /// mounted tenants. The read-only basis for the `cs window rm` `--force`
-    /// guard; mirrors the tenant iteration in [`reap_discarded_window_state`](
-    /// Self::reap_discarded_window_state) but counts instead of reaping.
+    /// guard; mirrors the tenant iteration in `reap_discarded_window_state`
+    /// but counts instead of reaping.
     pub fn live_terminal_count(&self, window_id: &str) -> usize {
         let registries: Vec<_> = {
             let Ok(tenants) = self.workspaces.read() else {
