@@ -111,9 +111,11 @@ impl From<chan_tunnel_proto::IoFrameError> for ServerError {
 /// and used to populate the HelloAck plus the registry key.
 ///
 /// The registration identity is resolved from the TOKEN, not from the
-/// client's `Hello`: `devserver_id` is the second registry key (one
-/// devserver per user, keyed on `(username, devserver_id)`). The client's
-/// `Hello.workspace` is an ignored placeholder label. The validator
+/// client's `Hello`: `devserver_id` is the second registry key, so
+/// registrations are keyed on `(username, devserver_id)` and one user can
+/// hold several devservers (up to the per-user cap). The client's
+/// `Hello.workspace` is a placeholder label: it must pass the workspace
+/// name check, but nothing keys on it. The validator
 /// derives `devserver_id` from the PAT (the gateway uses the PAT's
 /// SHA-256), so token rotation yields a fresh devserver.
 #[derive(Clone)]

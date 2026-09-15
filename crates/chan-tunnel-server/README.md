@@ -13,7 +13,8 @@ chan-tunnel-server = "0.11"
 Validator (trait)             implemented by host: token -> Validated
 Validated                     user_id, username, scopes
                               assertion key, admission lease + expiry
-ServerError                   uniffi-friendly error variants
+ServerError                   token, scope, identity, I/O, handshake,
+                              capacity, and control-plane errors
 RegistrationAdmission        controller-backed pre-insert permit + fence
 
 handshake(socket, token,

@@ -307,16 +307,16 @@ impl Registry {
         Arc::new(Self::default())
     }
 
-    /// Register a new tunnel and enforce a per-user concurrent-workspace
-    /// cap atomically with the insert. `max_workspaces_per_user == 0`
-    /// disables the check. The cap is enforced under the same lock
-    /// acquisition that performs the eviction + insert, so two
-    /// parallel dials from the same user cannot both observe
-    /// `count == max - 1` and both succeed.
+    /// Register a new tunnel and enforce a per-user cap on concurrent
+    /// devserver registrations atomically with the insert.
+    /// `max_workspaces_per_user == 0` disables the check. The cap is
+    /// enforced under the same lock acquisition that performs the
+    /// eviction + insert, so two parallel dials from the same user
+    /// cannot both observe `count == max - 1` and both succeed.
     ///
-    /// Reconnect of a workspace the user already holds is always
+    /// Reconnect of a devserver the user already holds is always
     /// allowed: the same-key entry is evicted and replaced, and the
-    /// user's workspace count is unchanged.
+    /// user's registration count is unchanged.
     #[cfg(test)]
     pub(crate) fn register_with_cap(
         self: &Arc<Self>,
