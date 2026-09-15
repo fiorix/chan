@@ -7982,6 +7982,32 @@ mod tests {
         assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rename_through_symlink_alias_preserves_rename_log() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a/file.md", "# source\n").unwrap();
+        workspace.write_text("old.md", "old\n").unwrap();
+        workspace
+            .rename_with_link_rewrite("old.md", "new.md")
+            .unwrap();
+        std::os::unix::fs::symlink("a", root.path().join("link")).unwrap();
+        let before = workspace.rename_log.lock().unwrap().clone();
+        let persisted = std::fs::read(workspace.paths.graph_dir.join("rename_log.json")).unwrap();
+        let result = workspace.rename_with_link_rewrite("a", "link/x/y");
+        let stray = root.path().join("a/x").exists();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(_))) && !stray,
+            "rename={result:?}; stray source directory={stray}"
+        );
+        assert_eq!(*workspace.rename_log.lock().unwrap(), before);
+        assert_eq!(
+            std::fs::read(workspace.paths.graph_dir.join("rename_log.json")).unwrap(),
+            persisted
+        );
+        assert_eq!(workspace.read_text("a/file.md").unwrap(), "# source\n");
+    }
+
     #[test]
     fn rename_with_link_rewrite_into_subtree_preserves_state() {
         let (_cfg, root, workspace) = fixture();

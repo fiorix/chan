@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{ChanError, Result};
 use crate::fs_ops::{self, AtomicWriteKind, AtomicWriteSink, PathClass};
-use crate::rooted_fs::{descends_into, describe_cap_file_kind, ListPolicy, RootedFs};
+use crate::rooted_fs::{describe_cap_file_kind, ListPolicy, RootedFs};
 use crate::workspace::{
     BoundedFileReader, DirEntry, FileStat, TextReadEvent, WorkspacePath, WritableFile,
 };
@@ -353,9 +353,7 @@ impl MiniWorkspace {
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
-        if descends_into(from, to) {
-            return Err(ChanError::DestinationInsideSource(to.to_string()));
-        }
+        self.fs.ensure_destination_outside_source(from, to)?;
         let (dir, from_path) = self.fs.resolve_io(from)?;
         let src_meta = dir.symlink_metadata(&from_path).map_err(ChanError::from)?;
         let src_ft = src_meta.file_type();
@@ -396,9 +394,7 @@ impl MiniWorkspace {
         if self.is_protected(from) || self.is_protected(to) {
             return Err(ChanError::ProtectedPath(from.to_string()));
         }
-        if descends_into(from, to) {
-            return Err(ChanError::DestinationInsideSource(to.to_string()));
-        }
+        self.fs.ensure_destination_outside_source(from, to)?;
         let (dir, to_path) = self.fs.resolve_io(to)?;
         if dir.symlink_metadata(&to_path).is_ok() {
             return Err(ChanError::PathAlreadyExists(to.to_string()));
@@ -500,9 +496,7 @@ impl MiniWorkspace {
     fn move_across_devices(&self, from: &str, to: &str) -> Result<()> {
         // Repeated from `move_plain` rather than assumed from it: this lane
         // is the one that actually recurses, and it is reachable on its own.
-        if descends_into(from, to) {
-            return Err(ChanError::DestinationInsideSource(to.to_string()));
-        }
+        self.fs.ensure_destination_outside_source(from, to)?;
         self.fs.preflight_tree(from, false)?;
         let tmp = self.fs.temp_sibling_name(to)?;
         match self.copy_tree_plain(from, &tmp) {
@@ -1006,6 +1000,32 @@ mod tests {
         assert!(fx.mini.list("proj").unwrap().len() == 2, "source intact");
         fx.mini.copy_plain("proj", "projector").unwrap();
         assert!(fx.root.join("projector/f.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutations_refuse_destination_through_symlink_alias() {
+        for operation in [
+            MiniWorkspace::move_plain,
+            MiniWorkspace::copy_plain,
+            MiniWorkspace::move_across_devices,
+        ] {
+            let fx = fixture();
+            stdfs::create_dir_all(fx.root.join("a/sub")).unwrap();
+            stdfs::write(fx.root.join("a/file.txt"), "source").unwrap();
+            std::os::unix::fs::symlink("a/sub", fx.root.join("link")).unwrap();
+            let result = operation(&fx.mini, "a", "link/x/y");
+            let stray = fx.root.join("a/sub/x").exists();
+            assert!(
+                matches!(&result, Err(ChanError::DestinationInsideSource(_))) && !stray,
+                "mutation={result:?}; stray source directory={stray}"
+            );
+            assert_eq!(stdfs::read_dir(fx.root.join("a/sub")).unwrap().count(), 0);
+            assert_eq!(
+                stdfs::read_to_string(fx.root.join("a/file.txt")).unwrap(),
+                "source"
+            );
+        }
     }
 
     #[test]

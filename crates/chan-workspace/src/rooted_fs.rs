@@ -915,9 +915,7 @@ impl RootedFs {
         self.ensure_root_available()?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
-        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
-            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
-        }
+        self.ensure_destination_outside_source(from, to)?;
         // Source must exist as a regular file or directory; refuse
         // to move a symlink or special file. (renaming a symlink
         // is well-defined at the syscall level but not something
@@ -976,13 +974,7 @@ impl RootedFs {
     pub(crate) fn copy(&self, from: &str, to: &str) -> Result<CopyOutcome> {
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
-        // Before any mutation: the destination directory is created before
-        // the source is read, so a destination inside the source is
-        // enumerated as one of the source's own entries and the walk never
-        // ends. Same guard, same position in the sequence, as the tree lane.
-        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
-            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
-        }
+        self.ensure_destination_outside_source(from, to)?;
         let src_meta = self
             .dir()
             .symlink_metadata(&from_rel)
@@ -1035,6 +1027,70 @@ impl RootedFs {
         }
         created.sort();
         Ok(CopyOutcome { created })
+    }
+
+    /// Refuse directory destinations whose physical ancestry contains the
+    /// source. Run before creating parents or a copy stage. External path
+    /// replacements between this check and the mutation remain a race.
+    pub(crate) fn ensure_destination_outside_source(&self, from: &str, to: &str) -> Result<()> {
+        use std::path::Path;
+
+        let from_rel = self.rel(from)?;
+        let to_rel = self.rel(to)?;
+        if descends_into(&posix_path(&from_rel), &posix_path(&to_rel)) {
+            return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+        }
+        let dir = self.dir();
+        let source = dir.symlink_metadata(&from_rel).map_err(ChanError::from)?;
+        if !source.is_dir() {
+            return Ok(());
+        }
+        let mut ancestor = to_rel.parent().unwrap_or(Path::new(""));
+        let canonical = loop {
+            let path = if ancestor.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                ancestor
+            };
+            match dir.canonicalize(path) {
+                Ok(path) => break path,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let Some(parent) = ancestor.parent() else {
+                        return Err(map_cap_err(error, ancestor));
+                    };
+                    ancestor = parent;
+                }
+                Err(error) => return Err(map_cap_err(error, ancestor)),
+            }
+        };
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+            // Canonical paths are sandboxed and root-relative. Checking every
+            // physical prefix also catches aliases to descendants of source.
+            for ancestor in canonical.ancestors() {
+                let metadata = if ancestor.as_os_str().is_empty() {
+                    dir.dir_metadata()
+                } else {
+                    dir.metadata(ancestor)
+                }
+                .map_err(|error| map_cap_err(error, ancestor))?;
+                if source.dev() == metadata.dev() && source.ino() == metadata.ino() {
+                    return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Native canonicalization normalizes case; cap-std preserves the
+            // input casing. The capability check above validates the sandbox.
+            let source = self.root_path.join(&from_rel).canonicalize()?;
+            let destination = self.root_path.join(canonical).canonicalize()?;
+            if destination.starts_with(source) {
+                return Err(ChanError::DestinationInsideSource(posix_path(&to_rel)));
+            }
+        }
+        Ok(())
     }
 
     fn ensure_copy_destination_absent(&self, rel: &std::path::Path) -> Result<()> {
@@ -1482,6 +1538,103 @@ fn posix_path(path: &std::path::Path) -> String {
 mod mutation_tests {
     use super::*;
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_refuses_destination_through_directory_symlink_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::write(root.path().join("a/note.txt"), "source").unwrap();
+        std::os::unix::fs::symlink("a", root.path().join("link")).unwrap();
+        let result = rooted.rename("a", "link/x/y");
+        let stray = root.path().join("a/x").exists();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(_))) && !stray,
+            "rename={result:?}; stray source directory={stray}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("a/note.txt")).unwrap(),
+            "source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_refuses_destination_through_symlink_to_source_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir_all(root.path().join("a/sub")).unwrap();
+        std::os::unix::fs::symlink("a/sub", root.path().join("link")).unwrap();
+        let result = rooted.rename("a", "link/x/y");
+        let stray = root.path().join("a/sub/x").exists();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(_))) && !stray,
+            "rename={result:?}; stray source directory={stray}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_destination_through_directory_symlink_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::write(root.path().join("a/note.txt"), "source").unwrap();
+        std::os::unix::fs::symlink("a", root.path().join("link")).unwrap();
+        let result = rooted.copy("a", "link/x/y");
+        let stray = root.path().join("a/x").exists();
+        let entries: Vec<_> = fs::read_dir(root.path().join("a"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            matches!(&result, Err(ChanError::DestinationInsideSource(_))) && !stray,
+            "copy={result:?}; stray source directory={stray}; source entries={entries:?}"
+        );
+        assert_eq!(entries, ["note.txt"]);
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            2,
+            "no copy stage remains"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutations_allow_destination_through_sibling_symlink_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::create_dir(root.path().join("b")).unwrap();
+        fs::write(root.path().join("a/note.txt"), "source").unwrap();
+        std::os::unix::fs::symlink("b", root.path().join("link")).unwrap();
+        rooted.copy("a", "link/copied").unwrap();
+        rooted.rename("a", "link/moved").unwrap();
+        for rel in ["b/copied/note.txt", "b/moved/note.txt"] {
+            assert_eq!(fs::read_to_string(root.path().join(rel)).unwrap(), "source");
+        }
+        assert!(!root.path().join("a").exists());
+    }
+
+    #[test]
+    fn mutations_refuse_destination_through_case_alias() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("probe")).unwrap();
+        if !root.path().join("PROBE").is_dir() {
+            eprintln!("skipping case alias checks: filesystem is case-sensitive");
+            return;
+        }
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        let renamed = rooted.rename("probe", "PROBE/x/y");
+        let copied = rooted.copy("probe", "PROBE/z/y");
+        assert!(
+            matches!(&renamed, Err(ChanError::DestinationInsideSource(_)))
+                && matches!(&copied, Err(ChanError::DestinationInsideSource(_)))
+                && fs::read_dir(root.path().join("probe")).unwrap().count() == 0,
+            "rename={renamed:?}; copy={copied:?}"
+        );
+    }
 
     #[test]
     fn directory_copy_cleans_stage_after_transfer_failure() {
