@@ -19,6 +19,8 @@ devserver-control is a singleton, database-free controller. One process, two lis
 
 All fleet state lives in `ControllerState`, owned by a single actor task. Mutations arrive over a bounded mpsc channel (capacity 1024) from the session tasks and the HTTP handlers; fleet reads use coalesced `tokio::sync::watch` snapshots (published at most once per one-second actor tick), while owner reads use a maintained owner index and materialize only that owner's rows. There are no locks: the actor is the only task that touches the state, so no lock is ever held across an `.await`. State transitions return `Effect` values (send a frame, retire a session, settle a kill or revocation waiter) that the actor applies after the transition, which keeps the state machine synchronous and unit-testable.
 
+Tunnel, browser-session, and proxy watches track separate state generations. Collection mutations invalidate only their affected views; heartbeats update the proxy directory without rebuilding inventory, and lease refreshes rebuild the tunnel view without cloning browser-session rows. Each tick publishes the generations that changed since its previous publication, alongside readiness.
+
 ```mermaid
 flowchart LR
     subgraph PX[devserver-proxy fleet]

@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
+use crate::state::ViewGenerations;
 use crate::{
     BrowserSessionView, CommandOutcome, ControllerState, Effect, ProxyView, SessionIncarnation,
     SessionKey, StateError, TunnelView,
@@ -219,19 +220,6 @@ enum Command {
     },
 }
 
-impl Command {
-    fn affects_watch_views(&self) -> bool {
-        !matches!(
-            self,
-            Self::Readiness { .. }
-                | Self::Tunnels { .. }
-                | Self::OwnerTunnels { .. }
-                | Self::Proxies { .. }
-                | Self::BrowserSessions { .. }
-        )
-    }
-}
-
 type StateReply = oneshot::Sender<Result<MutationStatus, StateError>>;
 
 pub fn spawn_controller(max_devservers_per_user: usize) -> ControllerHandle {
@@ -253,35 +241,28 @@ pub fn spawn_controller_owned(
         let mut waiters = HashMap::new();
         let mut ticker = tokio::time::interval(TICK_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut watch_views_dirty = true;
+        let mut published = ViewGenerations::default();
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let before = state.watch_shape();
                     let effects = state.tick(Instant::now(), Utc::now());
-                    let has_effects = !effects.is_empty();
                     apply_effects(&mut state, &mut sessions, &mut waiters, effects);
-                    watch_views_dirty |= has_effects || before != state.watch_shape();
-                    if watch_views_dirty {
-                        publish_watches(
+                    publish_watches(
                             &state,
+                            &mut published,
                             &readiness_watch_tx,
                             &tunnel_watch_tx,
                             &proxy_watch_tx,
                             &browser_session_watch_tx,
-                        );
-                        watch_views_dirty = false;
-                    }
+                    );
                 }
                 command = rx.recv() => {
                     let Some(command) = command else {
                         break;
                     };
-                    let affects_watch_views = command.affects_watch_views();
                     let effects = handle_command(command, &mut state, &mut sessions, &mut waiters);
                     apply_effects(&mut state, &mut sessions, &mut waiters, effects);
-                    watch_views_dirty |= affects_watch_views;
                 }
             }
         }
@@ -777,6 +758,7 @@ fn apply_effects(
 
 fn publish_watches(
     state: &ControllerState,
+    published: &mut ViewGenerations,
     readiness_watch: &watch::Sender<bool>,
     tunnel_watch: &watch::Sender<Arc<Vec<TunnelView>>>,
     proxy_watch: &watch::Sender<Arc<Vec<ProxyView>>>,
@@ -791,23 +773,17 @@ fn publish_watches(
             true
         }
     });
-    publish(tunnel_watch, Arc::new(state.tunnel_views()));
-    publish(proxy_watch, Arc::new(state.proxy_views()));
-    publish(
-        browser_session_watch,
-        Arc::new(state.browser_session_views()),
-    );
-}
-
-fn publish<T: PartialEq>(sender: &watch::Sender<Arc<Vec<T>>>, next: Arc<Vec<T>>) {
-    sender.send_if_modified(|current| {
-        if current.as_ref() == next.as_ref() {
-            false
-        } else {
-            *current = next;
-            true
-        }
-    });
+    let next = state.view_generations();
+    if published.tunnels != next.tunnels {
+        tunnel_watch.send_replace(Arc::new(state.tunnel_views()));
+    }
+    if published.proxies != next.proxies {
+        proxy_watch.send_replace(Arc::new(state.proxy_views()));
+    }
+    if published.browser_sessions != next.browser_sessions {
+        browser_session_watch.send_replace(Arc::new(state.browser_session_views()));
+    }
+    *published = next;
 }
 
 impl ControllerHandle {
@@ -1268,8 +1244,545 @@ mod tests {
     use super::*;
     use crate::SESSION_DEAD_AFTER;
 
+    fn reset_view_materializations() {
+        crate::state::FLEET_TUNNEL_VIEW_MATERIALIZATIONS.with(|count| count.set(0));
+        crate::state::BROWSER_SESSION_VIEW_MATERIALIZATIONS.with(|count| count.set(0));
+    }
+
+    fn view_materializations() -> (usize, usize) {
+        (
+            crate::state::FLEET_TUNNEL_VIEW_MATERIALIZATIONS.with(std::cell::Cell::get),
+            crate::state::BROWSER_SESSION_VIEW_MATERIALIZATIONS.with(std::cell::Cell::get),
+        )
+    }
+
+    fn browser_row(id: Uuid) -> BrowserSessionRow {
+        BrowserSessionRow {
+            admin_session_id: id,
+            subject_user_id: Uuid::nil(),
+            owner_user_id: crate::state::legacy_owner_user_id("alice"),
+            devserver_id: "one".into(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    async fn heartbeat_tick(actor: &ControllerHandle, session: &mut ProxyControlSession) {
+        tokio::time::advance(TICK_INTERVAL).await;
+        tokio::task::yield_now().await;
+        while let Ok(frame) = session.commands.try_recv() {
+            if let ServerFrame::Ping { nonce } = frame {
+                actor
+                    .pong(proxy(), session.incarnation, nonce)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_and_refresh_materialize_only_changed_inventory() {
+        let (actor, task) = spawn_controller_owned(100);
+        let mut session = actor
+            .begin_session(
+                proxy(),
+                CanonicalOrigin::parse("https://p1.proxy.example.test").unwrap(),
+                env!("CARGO_PKG_VERSION").into(),
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+        let tunnel = row("alice", "one", Uuid::new_v4());
+        actor
+            .accept_snapshot(
+                proxy(),
+                session.incarnation,
+                0,
+                vec![tunnel.clone()],
+                Vec::new(),
+                vec![browser_row(Uuid::new_v4()), browser_row(Uuid::new_v4())],
+            )
+            .await
+            .unwrap();
+        keep_alive_until_ready(&actor, &mut session).await;
+        heartbeat_tick(&actor, &mut session).await;
+        reset_view_materializations();
+        for _ in 0..10 {
+            heartbeat_tick(&actor, &mut session).await;
+        }
+        let heartbeat_counts = view_materializations();
+        eprintln!(
+            "heartbeat rounds=10 tunnel_views={} browser_session_views={}",
+            heartbeat_counts.0, heartbeat_counts.1
+        );
+
+        reset_view_materializations();
+        for _ in 0..10 {
+            actor
+                .refresh_lease(
+                    proxy(),
+                    session.incarnation,
+                    tunnel.registration_id,
+                    tunnel.owner_user_id,
+                    tunnel.user.clone(),
+                    tunnel.devserver_id.clone(),
+                    tunnel.max_connected_devservers,
+                    AdmissionLease::parse("refreshed").unwrap(),
+                    Utc::now() + chrono::Duration::hours(1),
+                )
+                .await
+                .unwrap();
+            heartbeat_tick(&actor, &mut session).await;
+        }
+        let refresh_counts = view_materializations();
+        eprintln!(
+            "refresh rounds=10 tunnel_views={} browser_session_views={}",
+            refresh_counts.0, refresh_counts.1
+        );
+
+        reset_view_materializations();
+        let browser = browser_row(Uuid::new_v4());
+        actor
+            .browser_session_up(proxy(), session.incarnation, 1, browser.clone())
+            .await
+            .unwrap();
+        heartbeat_tick(&actor, &mut session).await;
+        let browser_counts = view_materializations();
+        assert!(actor
+            .watch_browser_sessions()
+            .borrow()
+            .iter()
+            .any(|row| row.id == browser.admin_session_id));
+
+        reset_view_materializations();
+        actor
+            .tunnel_down(proxy(), session.incarnation, 2, tunnel.registration_id)
+            .await
+            .unwrap();
+        heartbeat_tick(&actor, &mut session).await;
+        let tunnel_counts = view_materializations();
+        assert!(actor.watch_tunnels().borrow().is_empty());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(heartbeat_counts, (0, 0));
+        assert_eq!(refresh_counts.1, 0);
+        assert_eq!(browser_counts, (0, 1));
+        assert_eq!(tunnel_counts, (1, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "full fleet timing probe; run alone with --nocapture"]
+    async fn heartbeat_full_fleet_watch_probe() {
+        let mut state = crate::state::tests::fleet_watch_probe_state();
+        let mut published = ViewGenerations::default();
+        let (ready, _) = watch::channel(false);
+        let (tunnels, _) = watch::channel(Arc::new(Vec::new()));
+        let (proxies, _) = watch::channel(Arc::new(Vec::new()));
+        let (browsers, _) = watch::channel(Arc::new(Vec::new()));
+        publish_watches(
+            &state,
+            &mut published,
+            &ready,
+            &tunnels,
+            &proxies,
+            &browsers,
+        );
+        let mut samples = Vec::new();
+        reset_view_materializations();
+        for _ in 0..20 {
+            tokio::time::advance(TICK_INTERVAL).await;
+            let started = std::time::Instant::now();
+            for effect in state.tick(Instant::now(), Utc::now()) {
+                if let Effect::Send {
+                    session,
+                    frame: ServerFrame::Ping { nonce },
+                } = effect
+                {
+                    state
+                        .pong(
+                            &ProxyId::parse(&session.proxy_id).unwrap(),
+                            session.incarnation,
+                            nonce,
+                            Instant::now(),
+                            Utc::now(),
+                        )
+                        .unwrap();
+                }
+            }
+            publish_watches(
+                &state,
+                &mut published,
+                &ready,
+                &tunnels,
+                &proxies,
+                &browsers,
+            );
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        eprintln!("heartbeat full fleet: tunnels=16384 browser_sessions=500000 rounds=20 median={:?} max={:?} materializations={:?}", samples[samples.len() / 2], samples.last().unwrap(), view_materializations());
+    }
+
     fn proxy() -> ProxyId {
         ProxyId::parse("p1").unwrap()
+    }
+
+    struct WatchHarness {
+        state: ControllerState,
+        sessions: HashMap<SessionKey, mpsc::Sender<ServerFrame>>,
+        waiters: HashMap<Uuid, oneshot::Sender<CommandOutcome>>,
+        published: ViewGenerations,
+        ready: watch::Sender<bool>,
+        tunnels: watch::Sender<Arc<Vec<TunnelView>>>,
+        proxies: watch::Sender<Arc<Vec<ProxyView>>>,
+        browsers: watch::Sender<Arc<Vec<BrowserSessionView>>>,
+    }
+
+    impl WatchHarness {
+        fn new() -> Self {
+            Self {
+                state: ControllerState::new(100),
+                sessions: HashMap::new(),
+                waiters: HashMap::new(),
+                published: ViewGenerations::default(),
+                ready: watch::channel(false).0,
+                tunnels: watch::channel(Arc::new(Vec::new())).0,
+                proxies: watch::channel(Arc::new(Vec::new())).0,
+                browsers: watch::channel(Arc::new(Vec::new())).0,
+            }
+        }
+
+        fn effects(&mut self, effects: Vec<Effect>) {
+            apply_effects(
+                &mut self.state,
+                &mut self.sessions,
+                &mut self.waiters,
+                effects,
+            );
+        }
+
+        fn command<T>(&mut self, build: impl FnOnce(oneshot::Sender<T>) -> Command) -> T {
+            let (reply, mut receive) = oneshot::channel();
+            let effects = handle_command(
+                build(reply),
+                &mut self.state,
+                &mut self.sessions,
+                &mut self.waiters,
+            );
+            self.effects(effects);
+            receive
+                .try_recv()
+                .expect("actor command must reply synchronously")
+        }
+
+        fn check(&mut self, class: &str) {
+            publish_watches(
+                &self.state,
+                &mut self.published,
+                &self.ready,
+                &self.tunnels,
+                &self.proxies,
+                &self.browsers,
+            );
+            assert_eq!(
+                *self.ready.borrow(),
+                self.state.is_ready(),
+                "{class}: readiness"
+            );
+            assert_eq!(
+                self.tunnels.borrow().as_ref(),
+                &self.state.tunnel_views(),
+                "{class}: tunnels"
+            );
+            assert_eq!(
+                self.proxies.borrow().as_ref(),
+                &self.state.proxy_views(),
+                "{class}: proxies"
+            );
+            assert_eq!(
+                self.browsers.borrow().as_ref(),
+                &self.state.browser_session_views(),
+                "{class}: browser sessions"
+            );
+        }
+
+        fn tick(&mut self, wall_now: DateTime<Utc>, class: &str) {
+            let effects = self.state.tick(Instant::now(), wall_now);
+            self.effects(effects);
+            self.check(class);
+        }
+
+        fn join(
+            &mut self,
+            id: ProxyId,
+            rows: Vec<TunnelRow>,
+            browsers: Vec<BrowserSessionRow>,
+        ) -> ProxyControlSession {
+            let (command_tx, commands) = mpsc::channel(SESSION_QUEUE_CAPACITY);
+            let incarnation = self
+                .command(|reply| Command::BeginSession {
+                    proxy_id: id.clone(),
+                    base_url: CanonicalOrigin::parse(&format!(
+                        "https://{}.proxy.example.test",
+                        id.as_str()
+                    ))
+                    .unwrap(),
+                    package_version: env!("CARGO_PKG_VERSION").into(),
+                    boot_id: Uuid::new_v4(),
+                    command_tx,
+                    reply,
+                })
+                .unwrap();
+            self.check("proxy join");
+            self.command(|reply| Command::AcceptSnapshot {
+                proxy_id: id,
+                incarnation,
+                base_generation: 0,
+                rows,
+                refused: Vec::new(),
+                browser_sessions: browsers,
+                reply,
+            })
+            .unwrap();
+            self.check("snapshot acceptance");
+            ProxyControlSession {
+                incarnation,
+                commands,
+            }
+        }
+
+        fn pong(&mut self, id: &ProxyId, session: &mut ProxyControlSession) {
+            while let Ok(frame) = session.commands.try_recv() {
+                if let ServerFrame::Ping { nonce } = frame {
+                    self.command(|reply| Command::Pong {
+                        proxy_id: id.clone(),
+                        incarnation: session.incarnation,
+                        nonce,
+                        reply,
+                    })
+                    .unwrap();
+                    self.check("heartbeat pong");
+                }
+            }
+        }
+
+        fn admit(&mut self, session: &ProxyControlSession, row: &TunnelRow) {
+            self.command(|reply| Command::RequestAdmission {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                request_id: Uuid::new_v4(),
+                registration_id: row.registration_id,
+                owner_user_id: row.owner_user_id,
+                user: row.user.clone(),
+                devserver_id: row.devserver_id.clone(),
+                max_connected_devservers: row.max_connected_devservers,
+                admission_lease: row.admission_lease.clone(),
+                admission_lease_expires_at: row.admission_lease_expires_at,
+                reply,
+            })
+            .unwrap();
+            self.check("admission");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_inventory_mutation_keeps_watches_current() {
+        let mut harness = WatchHarness::new();
+        let initial = row("alice", "one", Uuid::new_v4());
+        let browser = browser_row(Uuid::new_v4());
+        let mut session = harness.join(proxy(), vec![initial.clone()], vec![browser.clone()]);
+        for _ in 0..6 {
+            tokio::time::advance(crate::HEARTBEAT_INTERVAL).await;
+            harness.tick(Utc::now(), "heartbeat and initial convergence");
+            harness.pong(&proxy(), &mut session);
+        }
+        assert!(*harness.ready.borrow());
+        assert_eq!(harness.tunnels.borrow().len(), 1);
+        assert_eq!(harness.browsers.borrow().len(), 1);
+
+        harness
+            .command(|reply| Command::RefreshLease {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                registration_id: initial.registration_id,
+                owner_user_id: initial.owner_user_id,
+                user: initial.user.clone(),
+                devserver_id: initial.devserver_id.clone(),
+                max_connected_devservers: initial.max_connected_devservers,
+                admission_lease: AdmissionLease::parse("refreshed").unwrap(),
+                admission_lease_expires_at: Utc::now() + chrono::Duration::hours(2),
+                reply,
+            })
+            .unwrap();
+        harness.check("lease refresh");
+        assert_eq!(harness.tunnels.borrow()[0].admission_lease, "refreshed");
+
+        let extra = row("alice", "two", Uuid::new_v4());
+        harness.admit(&session, &extra);
+        harness
+            .command(|reply| Command::TunnelUp {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 1,
+                row: extra.clone(),
+                reply,
+            })
+            .unwrap();
+        harness.check("tunnel up");
+        assert_eq!(harness.tunnels.borrow().len(), 2);
+        harness
+            .command(|reply| Command::TunnelDown {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 2,
+                registration_id: extra.registration_id,
+                reply,
+            })
+            .unwrap();
+        harness.check("tunnel down");
+        assert_eq!(harness.tunnels.borrow().len(), 1);
+
+        let added_browser = browser_row(Uuid::new_v4());
+        harness
+            .command(|reply| Command::BrowserSessionUp {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 3,
+                row: added_browser.clone(),
+                reply,
+            })
+            .unwrap();
+        harness.check("browser session up");
+        assert_eq!(harness.browsers.borrow().len(), 2);
+        harness
+            .command(|reply| Command::BrowserSessionDown {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 4,
+                admin_session_id: added_browser.admin_session_id,
+                reply,
+            })
+            .unwrap();
+        harness.check("browser session down");
+        assert_eq!(harness.browsers.borrow().len(), 1);
+
+        let plan = harness
+            .command(|reply| Command::KillTunnel {
+                owner_user_id: initial.owner_user_id,
+                devserver_id: initial.devserver_id.clone(),
+                reply,
+            })
+            .unwrap();
+        harness.check("kill request");
+        let (command_id, registrations) = recv_kill(&mut session).await;
+        harness
+            .command(|reply| Command::ReportResult {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                command_id,
+                killed: registrations,
+                missing: Vec::new(),
+                failed: Vec::new(),
+                reply,
+            })
+            .unwrap();
+        harness.check("confirmed kill");
+        assert!(harness.tunnels.borrow().is_empty());
+        assert!(matches!(plan, KillPlan::Issued(_)));
+
+        let _plan = harness
+            .command(|reply| Command::RevokeSessions {
+                revocation: SessionRevocation::All,
+                reply,
+            })
+            .unwrap();
+        harness.check("browser revocation request");
+        let ServerFrame::RevokeSessions { command_id, .. } = session.commands.try_recv().unwrap()
+        else {
+            panic!("expected revocation command")
+        };
+        harness
+            .command(|reply| Command::BrowserSessionDown {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 5,
+                admin_session_id: browser.admin_session_id,
+                reply,
+            })
+            .unwrap();
+        harness.check("revoked browser down");
+        harness
+            .command(|reply| Command::ReportSessionRevocation {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                command_id,
+                revoked: 1,
+                reply,
+            })
+            .unwrap();
+        harness.check("browser revocation result");
+        assert!(harness.browsers.borrow().is_empty());
+
+        let mut expiring = row("alice", "expiring", Uuid::new_v4());
+        let expiry = Utc::now() + chrono::Duration::seconds(60);
+        expiring.admission_lease_expires_at = expiry;
+        harness.admit(&session, &expiring);
+        harness
+            .command(|reply| Command::TunnelUp {
+                proxy_id: proxy(),
+                incarnation: session.incarnation,
+                generation: 6,
+                row: expiring,
+                reply,
+            })
+            .unwrap();
+        harness.check("expiring tunnel up");
+        harness.tick(expiry, "lease expiry");
+        assert!(harness.tunnels.borrow().is_empty());
+
+        let second_id = ProxyId::parse("p2").unwrap();
+        let second = harness.join(
+            second_id.clone(),
+            vec![row("bob", "retained", Uuid::new_v4())],
+            vec![browser_row(Uuid::new_v4())],
+        );
+        harness
+            .command(|reply| Command::Disconnect {
+                proxy_id: second_id,
+                incarnation: second.incarnation,
+                reply,
+            })
+            .unwrap();
+        harness.check("proxy leave with retained authority");
+        assert_eq!(harness.tunnels.borrow().len(), 1);
+        for _ in 0..6 {
+            tokio::time::advance(crate::HEARTBEAT_INTERVAL).await;
+            harness.tick(Utc::now(), "orphan expiry");
+            harness.pong(&proxy(), &mut session);
+        }
+        assert!(harness.tunnels.borrow().is_empty());
+        assert!(harness.browsers.borrow().is_empty());
+
+        let mut second = harness.join(
+            ProxyId::parse("p3").unwrap(),
+            vec![row("bob", "resync", Uuid::new_v4())],
+            vec![browser_row(Uuid::new_v4())],
+        );
+        harness
+            .command(|reply| Command::RequireResync {
+                proxy_id: ProxyId::parse("p3").unwrap(),
+                incarnation: second.incarnation,
+                reply,
+            })
+            .unwrap();
+        harness.check("resync retracts inventory");
+        assert!(harness.tunnels.borrow().is_empty());
+        assert!(harness.browsers.borrow().is_empty());
+        second.commands.close();
+        tokio::time::advance(SESSION_DEAD_AFTER).await;
+        harness.tick(Utc::now(), "silent proxy expiry and readiness loss");
+        assert!(!*harness.ready.borrow());
+        assert!(harness.proxies.borrow().is_empty());
     }
 
     async fn keep_alive_until_ready(actor: &ControllerHandle, session: &mut ProxyControlSession) {

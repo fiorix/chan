@@ -15,6 +15,8 @@ use uuid::Uuid;
 std::thread_local! {
     static ROW_SIZE_SERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TUNNEL_VIEW_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static FLEET_TUNNEL_VIEW_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static BROWSER_SESSION_VIEW_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -289,7 +291,17 @@ pub enum StateError {
     AuthorityTemporarilyUnavailable,
 }
 
+/// Generations of the inputs to each published fleet view. Mutations of
+/// internal claims, commands and heartbeat nonces do not invalidate inventory.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ViewGenerations {
+    pub(crate) tunnels: u64,
+    pub(crate) browser_sessions: u64,
+    pub(crate) proxies: u64,
+}
+
 pub(crate) struct ControllerState {
+    view_generations: ViewGenerations,
     max_devservers_per_user: usize,
     ready: bool,
     next_incarnation: u64,
@@ -318,6 +330,7 @@ pub(crate) struct ControllerState {
 impl ControllerState {
     pub fn new(max_devservers_per_user: usize) -> Self {
         Self {
+            view_generations: ViewGenerations::default(),
             max_devservers_per_user,
             ready: false,
             next_incarnation: 1,
@@ -348,13 +361,8 @@ impl ControllerState {
         self.ready
     }
 
-    pub(crate) fn watch_shape(&self) -> (bool, usize, usize, usize) {
-        (
-            self.ready,
-            self.tunnels.len(),
-            self.proxies.len(),
-            self.browser_sessions.len(),
-        )
+    pub(crate) fn view_generations(&self) -> ViewGenerations {
+        self.view_generations
     }
 
     pub fn begin_session_authorized(
@@ -413,6 +421,7 @@ impl ControllerState {
                 outstanding_pings: VecDeque::new(),
             },
         );
+        self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         Ok((incarnation, Vec::new()))
     }
 
@@ -571,6 +580,7 @@ impl ControllerState {
         session.last_seen = now;
         session.last_seen_at = wall_now;
 
+        self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         let mut effects = vec![Effect::Send {
             session: key.clone(),
             frame: ServerFrame::SnapshotAccepted { base_generation },
@@ -641,6 +651,8 @@ impl ControllerState {
             .expect("key was validated");
         session.resident_bytes = session.resident_bytes.saturating_add(row_bytes);
         session.rows.insert(row.registration_id, row.clone());
+        self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
+        self.view_generations.tunnels = self.view_generations.tunnels.wrapping_add(1);
 
         let mut effects = Vec::new();
         let proxy_base_url = self
@@ -804,6 +816,8 @@ impl ControllerState {
             .browser_sessions
             .insert(row.admin_session_id, row.clone());
         if session.status == ProxyStatus::Active && session.fleet_ready {
+            self.view_generations.browser_sessions =
+                self.view_generations.browser_sessions.wrapping_add(1);
             self.browser_sessions.insert(
                 row.admin_session_id,
                 OwnedBrowserSession { session: key, row },
@@ -850,6 +864,8 @@ impl ControllerState {
             .is_some();
         if published {
             self.browser_sessions.remove(&admin_session_id);
+            self.view_generations.browser_sessions =
+                self.view_generations.browser_sessions.wrapping_add(1);
         }
         Ok(Vec::new())
     }
@@ -1081,6 +1097,7 @@ impl ControllerState {
             })
         {
             owned.row = refreshed;
+            self.view_generations.tunnels = self.view_generations.tunnels.wrapping_add(1);
         }
         Ok(Vec::new())
     }
@@ -1411,6 +1428,8 @@ impl ControllerState {
     }
 
     pub fn tunnel_views(&self) -> Vec<TunnelView> {
+        #[cfg(test)]
+        FLEET_TUNNEL_VIEW_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut out: Vec<_> = self.tunnels.values().map(tunnel_view).collect();
         out.sort_by(|a, b| {
             a.user
@@ -1427,6 +1446,8 @@ impl ControllerState {
     }
 
     pub fn browser_session_views(&self) -> Vec<BrowserSessionView> {
+        #[cfg(test)]
+        BROWSER_SESSION_VIEW_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut views: Vec<_> = self
             .browser_sessions
             .values()
@@ -1660,6 +1681,9 @@ impl ControllerState {
             .filter(|session| session.incarnation == key.incarnation)
             .ok_or(StateError::StaleSession)?;
         session.last_seen = now;
+        if session.last_seen_at != wall_now {
+            self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
+        }
         session.last_seen_at = wall_now;
         Ok(())
     }
@@ -1698,6 +1722,7 @@ impl ControllerState {
             session.browser_sessions.clear();
             session.browser_session_resident_bytes = 0;
             session.removed_registrations.clear();
+            self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         }
         self.remove_tunnels_for_session(key);
         self.remove_browser_sessions_for_session(key);
@@ -1784,6 +1809,7 @@ impl ControllerState {
             if let Some(session) = self.proxies.get_mut(&joining.proxy_id) {
                 session.status = ProxyStatus::Active;
                 session.fleet_ready = true;
+                self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
             }
             self.replace_browser_sessions();
             self.clear_orphans_for_proxy_authority(&joining.proxy_id, boot_id);
@@ -2106,6 +2132,7 @@ impl ControllerState {
                 }
                 proxy.status = ProxyStatus::Active;
                 proxy.fleet_ready = true;
+                self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
                 let boot_id = proxy.boot_id;
                 self.replace_browser_sessions();
                 self.clear_orphans_for_proxy_authority(&session.proxy_id, boot_id);
@@ -2222,6 +2249,7 @@ impl ControllerState {
             })
             .unwrap_or_default();
         self.proxies.remove(&key.proxy_id);
+        self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         let retain_until = now + DISCONNECTED_AUTHORITY_RETENTION;
         self.disconnected_proxy_deadlines
             .entry((key.proxy_id.clone(), boot_id))
@@ -2316,6 +2344,7 @@ impl ControllerState {
         if let Some(proxy) = self.proxies.get_mut(&session.proxy_id) {
             if proxy.incarnation == session.incarnation {
                 if let Some(row) = proxy.rows.remove(&registration_id) {
+                    self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
                     proxy.remember_removal(registration_id);
                     let bytes = row_resident_bytes(&row).unwrap_or(0);
                     proxy.resident_bytes = proxy.resident_bytes.saturating_sub(bytes);
@@ -2337,8 +2366,7 @@ impl ControllerState {
             })
             .collect();
         for key in removed_keys {
-            self.tunnels.remove(&key);
-            self.remove_owner_key(&key);
+            self.remove_tunnel(&key);
         }
         if let Some(bytes) = removed_orphan_bytes {
             self.orphan_total.rows = self.orphan_total.rows.saturating_sub(1);
@@ -2459,12 +2487,21 @@ impl ControllerState {
             .filter_map(|(key, owned)| (owned.session == *session).then_some(key.clone()))
             .collect();
         for key in keys {
-            self.tunnels.remove(&key);
-            self.remove_owner_key(&key);
+            self.remove_tunnel(&key);
+        }
+    }
+
+    fn remove_tunnel(&mut self, key: &TunnelKey) {
+        if self.tunnels.remove(key).is_some() {
+            self.view_generations.tunnels = self.view_generations.tunnels.wrapping_add(1);
+            self.remove_owner_key(key);
         }
     }
 
     fn replace_tunnels(&mut self, tunnels: HashMap<TunnelKey, OwnedTunnel>) {
+        if self.tunnels != tunnels {
+            self.view_generations.tunnels = self.view_generations.tunnels.wrapping_add(1);
+        }
         self.tunnels = tunnels;
         self.owner_occupancy.clear();
         let tunnel_keys: Vec<_> = self.tunnels.keys().cloned().collect();
@@ -2475,13 +2512,22 @@ impl ControllerState {
     }
 
     fn remove_browser_sessions_for_session(&mut self, session: &SessionKey) {
+        let before = self.browser_sessions.len();
         self.browser_sessions
             .retain(|_, owned| owned.session != *session);
+        if self.browser_sessions.len() != before {
+            self.view_generations.browser_sessions =
+                self.view_generations.browser_sessions.wrapping_add(1);
+        }
     }
 
     fn replace_browser_sessions(&mut self) {
-        self.browser_sessions
-            .retain(|_, owned| self.browser_orphan_usage.contains_key(&owned.session));
+        let mut next: HashMap<_, _> = self
+            .browser_sessions
+            .iter()
+            .filter(|(_, owned)| self.browser_orphan_usage.contains_key(&owned.session))
+            .map(|(id, owned)| (*id, owned.clone()))
+            .collect();
         for (proxy_id, proxy) in &self.proxies {
             if proxy.status != ProxyStatus::Active || !proxy.fleet_ready {
                 continue;
@@ -2491,7 +2537,7 @@ impl ControllerState {
                 incarnation: proxy.incarnation,
             };
             for row in proxy.browser_sessions.values() {
-                self.browser_sessions.insert(
+                next.insert(
                     row.admin_session_id,
                     OwnedBrowserSession {
                         session: session.clone(),
@@ -2500,6 +2546,11 @@ impl ControllerState {
                 );
             }
         }
+        if self.browser_sessions != next {
+            self.view_generations.browser_sessions =
+                self.view_generations.browser_sessions.wrapping_add(1);
+        }
+        self.browser_sessions = next;
     }
 
     fn clear_orphans_for_proxy_authority(&mut self, proxy_id: &str, boot_id: Uuid) {
@@ -2652,8 +2703,74 @@ pub(crate) fn legacy_owner_user_id(user: &str) -> Uuid {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    pub(crate) fn fleet_watch_probe_state() -> ControllerState {
+        let now = Instant::now();
+        let mut state = ControllerState::new(MAX_FLEET_ROWS);
+        for proxy_index in 0..8 {
+            let (id, incarnation) = begin(&mut state, &format!("p{proxy_index}"), now);
+            let key = SessionKey {
+                proxy_id: id.as_str().into(),
+                incarnation,
+            };
+            let proxy = state.proxies.get_mut(id.as_str()).unwrap();
+            proxy.status = ProxyStatus::Active;
+            proxy.fleet_ready = true;
+            proxy.generation = Some(0);
+            for index in 0..MAX_ROWS_PER_SESSION {
+                let index = proxy_index * MAX_ROWS_PER_SESSION + index;
+                let mut row = row(
+                    "owner",
+                    &format!("{index:064x}"),
+                    Uuid::from_u128(index as u128 + 1),
+                );
+                row.admission_lease =
+                    devserver_control_proto::AdmissionLease::parse("x".repeat(2048)).unwrap();
+                proxy.resident_bytes += row_resident_bytes(&row).unwrap();
+                proxy.rows.insert(row.registration_id, row.clone());
+                state.tunnels.insert(
+                    (row.owner_user_id, row.devserver_id.clone()),
+                    OwnedTunnel {
+                        session: key.clone(),
+                        proxy_base_url: proxy.base_url.as_str().into(),
+                        row,
+                    },
+                );
+            }
+            for index in 0..MAX_FLEET_BROWSER_SESSION_ROWS / 8 {
+                let index = proxy_index * (MAX_FLEET_BROWSER_SESSION_ROWS / 8) + index;
+                let row = browser_row(
+                    Uuid::from_u128(index as u128 + 1),
+                    Uuid::nil(),
+                    legacy_owner_user_id("owner"),
+                    &format!("{:064x}", index % MAX_FLEET_ROWS),
+                );
+                proxy.browser_session_resident_bytes +=
+                    browser_session_resident_bytes(&row).unwrap();
+                proxy
+                    .browser_sessions
+                    .insert(row.admin_session_id, row.clone());
+                state.browser_sessions.insert(
+                    row.admin_session_id,
+                    OwnedBrowserSession {
+                        session: key.clone(),
+                        row,
+                    },
+                );
+            }
+        }
+        state.ready = true;
+        state.view_generations = ViewGenerations {
+            tunnels: 1,
+            browser_sessions: 1,
+            proxies: 1,
+        };
+        assert_eq!(state.tunnels.len(), MAX_FLEET_ROWS);
+        assert_eq!(state.browser_sessions.len(), MAX_FLEET_BROWSER_SESSION_ROWS);
+        state
+    }
 
     fn proxy(id: &str) -> ProxyId {
         ProxyId::parse(id).unwrap()
