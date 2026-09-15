@@ -1257,12 +1257,6 @@ pub fn resolve_safe_strict_canon(
     Ok(joined)
 }
 
-/// Validate a request rel-path for use with the cap-std sandboxed
-/// `Dir`. Strips a leading `/`, refuses empty / `..` traversal /
-/// absolute paths, and returns a `PathBuf` of pure `Component::Normal`
-/// segments. cap-std performs the actual TOCTOU-free walk; this
-/// helper just gives us cleaner error variants than mapping
-/// cap-std's generic `io::Error`s.
 /// Whether `name` is the on-disk artifact of an in-progress atomic write
 /// rather than a file a user made. The streaming writer publishes through a
 /// same-directory temporary, which surfaces to a filesystem watcher under
@@ -1291,6 +1285,12 @@ pub fn is_atomic_write_temp_name(name: &str) -> bool {
     parts.next().is_none()
 }
 
+/// Validate a request rel-path for use with the cap-std sandboxed
+/// `Dir`. Strips a leading `/`, refuses empty / `..` traversal /
+/// absolute paths, and returns a `PathBuf` of pure `Component::Normal`
+/// segments. cap-std performs the actual TOCTOU-free walk; this
+/// helper just gives us cleaner error variants than mapping
+/// cap-std's generic `io::Error`s.
 pub fn validate_rel(requested: &str) -> Result<PathBuf> {
     let trimmed = requested.trim_start_matches('/');
     if trimmed.is_empty() {
