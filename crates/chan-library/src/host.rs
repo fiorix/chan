@@ -4760,7 +4760,7 @@ mod tests {
 
     #[tokio::test]
     async fn already_open_mount_retries_a_transitional_lock() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -4768,12 +4768,16 @@ mod tests {
             let held = library.open_workspace(root.path()).unwrap();
             held.stop_open_recovery();
             let mut host = WorkspaceHost::new(library, fake_builder());
-            host.open_release_budget = std::time::Duration::from_millis(100);
+            // The retried attempt's successful open runs inside the budget, so
+            // keep it far above any open on a loaded runner.
+            host.open_release_budget = std::time::Duration::from_secs(10);
             *host.open_release_probe.lock().unwrap() = Some(Box::new(move || drop(held)));
             let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let injecting = injected.clone();
             *host.open_attempt_probe.lock().unwrap() = Some(Box::new(move |result| {
                 if result.is_ok() && !injecting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // Model a slow open so a budget that only fits a fast one fails here.
+                    std::thread::sleep(std::time::Duration::from_millis(250));
                     // Model the record-cleared, flock-held tail of an in-process drop.
                     let workspace =
                         std::mem::replace(result, Err(ChanError::WorkspaceLocked)).unwrap();
