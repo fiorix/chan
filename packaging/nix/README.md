@@ -71,7 +71,9 @@ The packages follow the repository's pinned Rust toolchain. They use Node.js 22 
 
 ## Fixed-output maintenance
 
-Both packages feed `${src}/web` to `fetchNpmDeps`, so they share the `npmDeps.hash` derived from `web/package-lock.json`. Their Rust crate selections differ, so each derivation has its own `cargoHash`.
+Both packages feed `${src}/web` to `fetchNpmDeps`, so they share the `npmDeps.hash` derived from `web/package-lock.json`. Both also build from the same flake source and vendor the same root `Cargo.lock` (`cargoBuildFlags` selects the crate to build, not the crates to vendor), so they share the `cargoHash`: one harvested value goes into both derivations, and `make nix-hash-check` fails when the two differ. Harvesting each package independently cross-checks that value; it never yields a second one.
+
+`packaging/nix/cargo-lock.sha256` records, in `sha256sum` format, the digest of the `Cargo.lock` the pinned `cargoHash` was harvested for. `make nix-hash-check`, a `make pre-push` step on every host, compares the live lock with it, so any lock change fails the gate until the hash is harvested again, and `make nix-hash-pin CARGO_HASH=sha256-...` writes the harvested value into both derivations and rewrites the digest file from the live lock in one step. The pin helper refuses a placeholder or a malformed value and leaves every file untouched when it does. `npmDeps.hash` has no such record: a stale npm hash passes the gate and fails only in the Nix build, which reports it before the cargo mismatch.
 
 When a new package's `cargoHash` has not been harvested yet, use this deliberately failing placeholder rather than inventing a plausible hash:
 
@@ -80,13 +82,15 @@ When a new package's `cargoHash` has not been harvested yet, use this deliberate
 cargoHash = lib.fakeHash;
 ```
 
+The placeholder is a working state for the harvest, not one to commit: `make nix-hash-check` fails while either file carries it.
+
 Dependency changes intentionally make the affected build fail with a replacement hash:
 
 - update the shared `npmDeps.hash` in both derivations after `web/package-lock.json` changes
-- update each affected derivation's `cargoHash` after `Cargo.lock` or its Rust crate selection changes
+- update the `cargoHash` in both derivations after `Cargo.lock` changes, with `make nix-hash-pin`, which also records the lock digest
 - update `flake.lock` deliberately when changing nixpkgs or rust-overlay
 
-Replace only the hash named by Nix's mismatch, then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair.
+Replace only the hash named by Nix's mismatch (a new `cargoHash` goes into both derivations, through `make nix-hash-pin`), then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair.
 
 ## Cachix release path
 
