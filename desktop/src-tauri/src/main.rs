@@ -192,13 +192,6 @@ pub struct AppState {
     /// mid-transfer (the local library answers through the embedded host instead).
     /// Volatile: each devserver feed push refreshes its library's slice.
     pub devserver_active_transfers: Mutex<std::collections::HashSet<String>>,
-    /// The embedded control-terminal tenant prefix (`/control-N`) running each
-    /// scripted devserver's connect script, keyed by `Devserver.id`. Kept
-    /// separate from `devserver_windows` because this is a LOCAL embedded
-    /// tenant prefix, not a remote workspace prefix; teardown closes the tenant
-    /// (reaping the script PTY) on disconnect/forget, and reconnect must never
-    /// mistake it for a workspace window. Absent for a no-script devserver.
-    pub control_terminal_prefixes: Mutex<HashMap<String, String>>,
     /// Current scripted control run per devserver. The generation binds the
     /// prefix, watcher, and connect result so a stale run cannot emit against or
     /// overwrite a newer connect attempt.
@@ -306,7 +299,6 @@ impl AppState {
             devserver_watcher_views: Mutex::new(HashMap::new()),
             pending_window_deletes: Arc::new(window_watcher::PendingDeleteState::default()),
             devserver_active_transfers: Mutex::new(std::collections::HashSet::new()),
-            control_terminal_prefixes: Mutex::new(HashMap::new()),
             control_terminal_runs: Mutex::new(HashMap::new()),
             control_terminal_dead: Mutex::new(std::collections::HashSet::new()),
             control_terminal_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1639,7 +1631,6 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
     if state.remove_buried(&label) {
         rebuild_window_menu(app);
     }
-    state.control_terminal_prefixes.lock().unwrap().remove(id);
     state.control_terminal_runs.lock().unwrap().remove(id);
     if let Some(embedded) = state.embedded.get() {
         embedded.reap_control_window(&label).await;
@@ -2759,14 +2750,6 @@ async fn connect_devserver_impl_inner(
             .control_terminal_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        // Record the control tenant prefix alongside its run. Connection
-        // cleanup removes this entry; reap_devserver_control_terminal locates
-        // the control window by its deterministic label, not by this map.
-        state
-            .control_terminal_prefixes
-            .lock()
-            .unwrap()
-            .insert(id.clone(), ct.prefix.clone());
         state.control_terminal_runs.lock().unwrap().insert(
             id.clone(),
             ControlTerminalRun {
