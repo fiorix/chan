@@ -7,6 +7,7 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
@@ -18,6 +19,17 @@ fn cs_symlink() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, cs)
 }
 
+/// A command over a scrubbed copy of the process environment: the whole
+/// `CHAN_*` namespace is removed, so a test launched from inside a chan
+/// terminal cannot inherit terminal-session state, handoff hints or
+/// credentials, and the parse and dispatch under test see only what the
+/// test itself sets.
+fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_clear().envs(chan::test_env::scrubbed_process_env());
+    cmd
+}
+
 #[test]
 fn cs_terminal_list_dispatches_to_shell() {
     let (_dir, cs) = cs_symlink();
@@ -25,10 +37,8 @@ fn cs_terminal_list_dispatches_to_shell() {
     // list` errors for the missing $CHAN_CONTROL_SOCKET. That the
     // `terminal` subcommand parses AT ALL proves the `cs -> shell`
     // rewrite: plain `chan terminal list` would be an unknown subcommand.
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["terminal", "list"])
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run cs terminal list");
 
@@ -48,10 +58,7 @@ fn cs_help_shows_shell_subcommands() {
     let (_dir, cs) = cs_symlink();
     // `cs --help` is `chan shell --help`, so its usage lists the shell
     // actions (terminal / graph / dashboard), not the top-level commands.
-    let output = Command::new(&cs)
-        .arg("--help")
-        .output()
-        .expect("run cs --help");
+    let output = command(&cs).arg("--help").output().expect("run cs --help");
 
     assert!(output.status.success(), "cs --help should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -98,10 +105,7 @@ fn cs_help_usage_is_cs_not_cs_shell() {
     // line names `cs` itself -- no `shell` level anywhere in the path.
     // (The word "shell" alone still appears in command prose, e.g. "the
     // shell's own reach"; the forbidden string is the `cs shell` path.)
-    let output = Command::new(&cs)
-        .arg("--help")
-        .output()
-        .expect("run cs --help");
+    let output = command(&cs).arg("--help").output().expect("run cs --help");
 
     assert!(output.status.success(), "cs --help should succeed");
     let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
@@ -118,7 +122,7 @@ fn cs_help_usage_is_cs_not_cs_shell() {
 #[test]
 fn cs_terminal_help_usage_is_cs_terminal() {
     let (_dir, cs) = cs_symlink();
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["terminal", "--help"])
         .output()
         .expect("run cs terminal --help");
@@ -139,7 +143,7 @@ fn cs_terminal_help_usage_is_cs_terminal() {
 fn chan_shell_help_keeps_its_own_usage() {
     // Explicit `chan shell` (no alias) still renders its own two-level
     // usage; the shared-parser routing applies only to a `cs` argv0.
-    let output = Command::new(env!("CARGO_BIN_EXE_chan"))
+    let output = command(env!("CARGO_BIN_EXE_chan"))
         .args(["shell", "--help"])
         .output()
         .expect("run chan shell --help");
@@ -158,10 +162,8 @@ fn cs_verbose_flag_parses_under_the_shared_parser() {
     // The `cs` parser carries the same global `-v` the `chan` CLI has, so
     // `cs -v terminal list` parses and fails on the missing control
     // socket -- not on a clap usage error.
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["-v", "terminal", "list"])
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run cs -v terminal list");
 
@@ -182,10 +184,8 @@ fn cs_session_self_bare_is_a_query_not_a_usage_error() {
     // Bare `cs session self` is the whoami query, so with no chan terminal
     // env it fails on the missing $CHAN_WINDOW_ID -- NOT on a clap usage
     // error demanding --name/--reset.
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["session", "self"])
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run cs session self");
 
@@ -208,7 +208,7 @@ fn cs_session_self_bare_is_a_query_not_a_usage_error() {
 fn plain_chan_rejects_terminal_subcommand() {
     // Control: WITHOUT the `cs` rewrite, `chan terminal` is unknown. This
     // is what makes the rewrite load-bearing.
-    let output = Command::new(env!("CARGO_BIN_EXE_chan"))
+    let output = command(env!("CARGO_BIN_EXE_chan"))
         .args(["terminal", "list"])
         .output()
         .expect("run chan terminal list");
@@ -231,10 +231,8 @@ fn cs_prefix_match_resolves_terminal_list() {
     // deliberately NOT used: it matches both terminal and tunnel, so clap
     // refuses it, and a test pinned to an ambiguous prefix would break
     // every time a command joined that letter.
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["te", "l"])
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run cs te l");
 
@@ -258,11 +256,9 @@ fn inherited_argv0_does_not_steer_the_alias() {
     //
     // `chan` invoked as `chan` with ARGV0=cs stays the chan CLI: `terminal`
     // is not one of its subcommands.
-    let output = Command::new(env!("CARGO_BIN_EXE_chan"))
+    let output = command(env!("CARGO_BIN_EXE_chan"))
         .args(["terminal", "list"])
         .env("ARGV0", "cs")
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run chan terminal list with ARGV0=cs");
 
@@ -277,11 +273,9 @@ fn inherited_argv0_does_not_steer_the_alias() {
     // still dispatches the cs client, failing on the missing control socket
     // rather than on an unknown subcommand.
     let (_dir, cs) = cs_symlink();
-    let output = Command::new(&cs)
+    let output = command(&cs)
         .args(["terminal", "list"])
         .env("ARGV0", "chan")
-        .env_remove("CHAN_CONTROL_SOCKET")
-        .env_remove("CHAN_WINDOW_ID")
         .output()
         .expect("run cs terminal list with ARGV0=chan");
 
