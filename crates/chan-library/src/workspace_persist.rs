@@ -198,7 +198,7 @@ impl WorkspaceOverlay {
 
 /// Persist pretty JSON through a unique temporary file with file and directory
 /// fsync, shared with the workspace filesystem's atomic-write implementation.
-fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+pub(crate) fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     chan_workspace::fs_ops::atomic_write(path, &bytes).map_err(std::io::Error::other)

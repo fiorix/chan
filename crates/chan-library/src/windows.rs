@@ -33,6 +33,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::workspace_persist::save_atomic;
+
 /// House glyph (⌂) for a local workspace under `$HOME`, mirroring the launcher's
 /// lucide House icon. Titles are library-owned, so this is their single source.
 const ICON_LOCAL_HOME: &str = "\u{2302}"; // ⌂ house
@@ -762,14 +764,6 @@ fn state_path_for(store_path: &Path) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "windows".to_string());
     store_path.with_file_name(format!("{stem}-state.json"))
-}
-
-/// Persist pretty JSON through a unique temporary file with file and directory
-/// fsync, shared with the workspace filesystem's atomic-write implementation.
-fn save_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    chan_workspace::fs_ops::atomic_write(path, &bytes).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
