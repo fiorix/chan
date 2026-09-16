@@ -344,7 +344,11 @@ enum UserCmd {
     /// Rename a user's public handle (consumes one of their cap-4
     /// rename slots).
     Rename { ident: String, username: String },
-    /// Hard-delete a user (cascades identities + tokens + audit).
+    /// Delete a user: profile blocks the account and revokes its tokens,
+    /// identity revokes its OAuth and tenant sessions and evicts its
+    /// tunnels, and the row is removed once the data plane has drained.
+    /// Waits up to 55 s for that and exits non-zero if it has not
+    /// converged.
     Delete {
         ident: String,
         #[arg(long, help = "skip the y/N prompt")]
@@ -777,13 +781,12 @@ async fn user(c: &AdminClient, json: bool, cmd: UserCmd) -> anyhow::Result<()> {
             let renamed = c.update_username(u.id, &username).await?;
             render_users(std::slice::from_ref(&renamed), json);
         }
-        UserCmd::Delete { ident, yes } => {
-            let u = c.resolve_user(&ident).await?;
-            if !yes && !confirm(&format!("delete user {} <{}>?", u.username, u.email))? {
-                return Err(anyhow!("aborted"));
-            }
-            c.delete_user(u.id).await?;
-            eprintln!("deletion scheduled for {}", u.id);
+        UserCmd::Delete { .. } => {
+            // Handled in `run` so it can use both profile + identity
+            // clients (identity revokes live access and waits for the
+            // row to go before the command returns). Reaching this arm
+            // means the dispatch forgot to intercept; fail loudly.
+            unreachable!("UserCmd::Delete must be intercepted in run()");
         }
         UserCmd::Block { .. } => {
             // Handled in `run` so it can use both profile + workspace
@@ -1368,18 +1371,6 @@ impl AdminClient {
             StatusCode::NOT_FOUND => Err(ClientError::NotFound.into()),
             StatusCode::BAD_REQUEST => Err(ClientError::BadInput(read_body(res).await).into()),
             StatusCode::CONFLICT => Err(ClientError::BadInput(read_body(res).await).into()),
-            s => Err(upstream(s, res).await.into()),
-        }
-    }
-
-    async fn delete_user(&self, id: Uuid) -> anyhow::Result<()> {
-        let res = self
-            .req(Method::DELETE, &format!("/v1/users/{id}"))
-            .send()
-            .await?;
-        match res.status() {
-            StatusCode::ACCEPTED => Ok(()),
-            StatusCode::NOT_FOUND => Err(ClientError::NotFound.into()),
             s => Err(upstream(s, res).await.into()),
         }
     }
@@ -2885,6 +2876,35 @@ mod tests {
         for invalid in ["", "0s", "-1h", "forever", "1w"] {
             assert!(parse_duration(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[tokio::test]
+    async fn user_delete_is_intercepted_before_the_profile_only_dispatcher() {
+        let mut cli = Cli::try_parse_from([
+            "chan-gateway-admin",
+            "--profile-token",
+            "profile-secret",
+            "user",
+            "delete",
+            "alice",
+            "--yes",
+        ])
+        .unwrap();
+        // clap's `env` feature may have filled it from the shell.
+        cli.identity_token = None;
+        assert!(matches!(
+            cli.cmd,
+            Cmd::User {
+                cmd: UserCmd::Delete { .. }
+            }
+        ));
+        let err = run(cli).await.unwrap_err();
+        // Only the intercept arm in run() demands the identity token; the
+        // catch-all arm that reaches user() needs the profile token alone.
+        assert!(
+            err.to_string().contains("CHAN_ADMIN_IDENTITY_TOKEN"),
+            "{err}"
+        );
     }
 
     #[test]
