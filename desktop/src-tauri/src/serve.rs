@@ -3647,8 +3647,9 @@ mod tests {
         // The closure build_workspace_window_with_completion registers on each
         // window is a dispatch table: the CloseRequested arm is one call into
         // on_close_requested and the Destroyed arm one call into on_destroyed,
-        // so the close and destroy behaviour lives entirely in the two functions
-        // the other pins slice. An arm that grew a body of its own would sit outside them.
+        // so the close and destroy behaviour lives entirely in the two
+        // functions the other pins slice. An arm that grew a body of its own
+        // would sit outside them.
         const SERVE_RS: &str = include_str!("serve.rs");
         let (_, rest) = SERVE_RS
             .split_once("\nfn build_workspace_window_with_completion(")
