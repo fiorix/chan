@@ -3057,17 +3057,6 @@ mod tests {
     }
 
     #[test]
-    fn invoke_handler_registers_outbound_attach_ipcs() {
-        const MAIN_RS: &str = include_str!("main.rs");
-        assert!(MAIN_RS.contains("add_outbound_workspace,"));
-        assert!(MAIN_RS.contains("open_outbound_workspace,"));
-        assert!(MAIN_RS.contains("remove_outbound_workspace,"));
-        assert!(MAIN_RS.contains("fn add_outbound_workspace("));
-        assert!(MAIN_RS.contains("fn open_outbound_workspace("));
-        assert!(MAIN_RS.contains("fn remove_outbound_workspace("));
-    }
-
-    #[test]
     fn outbound_windows_load_the_connecting_page_not_the_remote() {
         // Blank-white outbound bug: a direct WebviewUrl::External(remote)
         // paints white when the remote is down. Outbound windows load the

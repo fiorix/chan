@@ -1491,135 +1491,6 @@ fn get_config(state: State<Arc<AppState>>) -> Result<Config, String> {
     state.store.lock().unwrap().get().map_err(err)
 }
 
-const OUTBOUND_LABEL_MAX_CHARS: usize = 120;
-
-/// Persist an explicit outbound URL attachment and open it in a
-/// workspace webview. The remote server owns its own lifecycle; desktop
-/// only stores enough state to show and reopen the row.
-#[tauri::command]
-fn add_outbound_workspace(
-    app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
-    url: String,
-    label: String,
-) -> Result<String, String> {
-    let url = normalize_outbound_url(&url)?;
-    let label = normalize_outbound_label(&label)?;
-    let (id, stored_url) = {
-        let mut store = state.store.lock().unwrap();
-        let mut cfg = store.get().map_err(err)?;
-        let (id, stored_url) = match cfg.outbound.iter_mut().find(|d| d.url == url) {
-            Some(existing) => {
-                if !label.is_empty() {
-                    existing.label = label.clone();
-                }
-                (existing.id.clone(), existing.url.clone())
-            }
-            None => {
-                let entry = OutboundWorkspace {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    url: url.clone(),
-                    label,
-                    added_at: config::current_millis(),
-                };
-                let id = entry.id.clone();
-                cfg.outbound.push(entry);
-                (id, url)
-            }
-        };
-        store.save(&cfg).map_err(err)?;
-        (id, stored_url)
-    };
-    serve::spawn_remote_workspace_window(&app, &id, &stored_url)?;
-    let _ = app.emit(serve::SERVES_CHANGED, ());
-    Ok(id)
-}
-
-/// Open another webview for a stored outbound URL attachment.
-#[tauri::command]
-fn open_outbound_workspace(
-    app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
-    let url = {
-        let cfg = state.store.lock().unwrap().get().map_err(err)?;
-        let outbound = cfg
-            .outbound
-            .iter()
-            .find(|d| d.id == id)
-            .ok_or_else(|| format!("no outbound workspace attachment {id}"))?;
-        outbound.url.clone()
-    };
-    serve::spawn_remote_workspace_window(&app, &id, &url).map(|_| ())
-}
-
-/// Forget an outbound URL attachment. The remote server is not
-/// stopped; only desktop config and open webviews for this
-/// attachment are removed.
-#[tauri::command]
-fn remove_outbound_workspace(
-    app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
-    id: String,
-) -> Result<(), String> {
-    {
-        let mut store = state.store.lock().unwrap();
-        let mut cfg = store.get().map_err(err)?;
-        let before = cfg.outbound.len();
-        cfg.outbound.retain(|d| d.id != id);
-        if cfg.outbound.len() != before {
-            store.save(&cfg).map_err(err)?;
-        }
-    }
-    serve::close_remote_workspace_windows(&app, &id);
-    let _ = app.emit(serve::SERVES_CHANGED, ());
-    Ok(())
-}
-
-fn normalize_outbound_url(raw: &str) -> Result<String, String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err("remote URL is required".to_string());
-    }
-    let mut parsed =
-        url::Url::parse(raw).map_err(|e| format!("invalid remote URL {raw:?}: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("remote URL must use http:// or https://".to_string());
-    }
-    if parsed.host_str().is_none() {
-        return Err("remote URL must include a host".to_string());
-    }
-    strip_query_param(&mut parsed, "w");
-    Ok(parsed.to_string())
-}
-
-fn strip_query_param(parsed: &mut url::Url, name: &str) {
-    if !parsed.query_pairs().any(|(key, _)| key == name) {
-        return;
-    }
-    let pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .filter(|(key, _)| key != name)
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    let mut query = parsed.query_pairs_mut();
-    query.clear();
-    for (key, value) in pairs {
-        query.append_pair(&key, &value);
-    }
-}
-
-fn normalize_outbound_label(raw: &str) -> Result<String, String> {
-    let label = raw.trim().to_string();
-    if label.chars().count() > OUTBOUND_LABEL_MAX_CHARS {
-        return Err(format!(
-            "remote label must be {OUTBOUND_LABEL_MAX_CHARS} characters or fewer",
-        ));
-    }
-    Ok(label)
-}
-
 fn devserver_url_token(raw: &str) -> Option<String> {
     let parsed = url::Url::parse(raw).ok()?;
     parsed
@@ -6296,9 +6167,6 @@ fn main() {
             zoom_reset,
             open_local_workspace,
             probe_url,
-            add_outbound_workspace,
-            open_outbound_workspace,
-            remove_outbound_workspace,
             devserver::gateway_csrf_token,
             list_devserver_workspaces,
             reconnect_devserver,
@@ -9200,19 +9068,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_outbound_url_accepts_http_and_strips_window_param() {
-        let url = normalize_outbound_url(" http://127.0.0.1:4000/workspace/?t=abc&w=old#files ")
-            .expect("valid url");
-        assert_eq!(url, "http://127.0.0.1:4000/workspace/?t=abc#files");
-    }
-
-    #[test]
-    fn normalize_outbound_url_rejects_non_http() {
-        let err = normalize_outbound_url("file:///tmp/foo").expect_err("rejected");
-        assert!(err.contains("http:// or https://"));
-    }
-
-    #[test]
     fn devserver_url_token_reads_t_only() {
         assert_eq!(
             devserver_url_token("http://127.0.0.1:8787/?t=tok_abc").as_deref(),
@@ -9222,16 +9077,6 @@ mod tests {
             devserver_url_token("http://127.0.0.1:8787/?token=tok_abc"),
             None
         );
-    }
-
-    #[test]
-    fn normalize_outbound_label_trims_and_caps() {
-        assert_eq!(
-            normalize_outbound_label("  Remote notes  ").expect("label"),
-            "Remote notes",
-        );
-        let too_long = "x".repeat(OUTBOUND_LABEL_MAX_CHARS + 1);
-        assert!(normalize_outbound_label(&too_long).is_err());
     }
 
     #[test]

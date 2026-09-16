@@ -15,9 +15,6 @@ permissions = [
   "allow-zoom-out",
   "allow-zoom-reset",
   "allow-open-local-workspace",
-  "allow-add-outbound-workspace",
-  "allow-open-outbound-workspace",
-  "allow-remove-outbound-workspace",
   "allow-list-devserver-workspaces",
   "allow-reconnect-devserver",
   "allow-restart-desktop-after-update",
@@ -273,21 +270,6 @@ commands.allow = ["finish_generated_download"]
 identifier = "allow-cancel-generated-download"
 description = "Cancels and cleans an SPA-generated download."
 commands.allow = ["cancel_generated_download"]
-
-[[permission]]
-identifier = "allow-add-outbound-workspace"
-description = "Enables the add_outbound_workspace command."
-commands.allow = ["add_outbound_workspace"]
-
-[[permission]]
-identifier = "allow-open-outbound-workspace"
-description = "Enables the open_outbound_workspace command."
-commands.allow = ["open_outbound_workspace"]
-
-[[permission]]
-identifier = "allow-remove-outbound-workspace"
-description = "Enables the remove_outbound_workspace command."
-commands.allow = ["remove_outbound_workspace"]
 
 [[permission]]
 identifier = "allow-list-devserver-workspaces"
