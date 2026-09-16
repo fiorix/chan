@@ -1961,19 +1961,22 @@ fn list_tree_scoped_inner(
             });
         Box::new(walker)
     };
-    tree_entries(root, iter)
+    tree_entries(root, iter, LIST_TREE_LIMIT)
 }
 
+/// Collect walked entries into tree entries, refusing with
+/// `ListingTooLarge` once `iter` yields more than `limit` of them.
 fn tree_entries<'a>(
     root: &Path,
     iter: impl Iterator<Item = DirEntry> + 'a,
+    limit: usize,
 ) -> Result<Vec<TreeEntry>> {
     let mut out = Vec::new();
     for entry in iter {
-        if out.len() >= LIST_TREE_LIMIT {
+        if out.len() >= limit {
             return Err(ChanError::ListingTooLarge {
                 observed: out.len(),
-                limit: LIST_TREE_LIMIT,
+                limit,
             });
         }
         let rel = entry
@@ -2010,7 +2013,6 @@ fn list_tree_inner(
     filter: Option<&WalkFilter>,
     limit: usize,
 ) -> Result<Vec<TreeEntry>> {
-    let mut out = Vec::new();
     let iter: Box<dyn Iterator<Item = DirEntry>> = if walk_from == root {
         // Same shape the public `walk_workspace` / `walk_workspace_filtered`
         // helpers offer; reuse them so the .git / .chan and special-
@@ -2059,38 +2061,7 @@ fn list_tree_inner(
             });
         Box::new(walker)
     };
-    for entry in iter {
-        if out.len() >= limit {
-            return Err(ChanError::ListingTooLarge {
-                observed: out.len(),
-                limit,
-            });
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| ChanError::PathEscape)?;
-        let path_str = rel.to_string_lossy().replace('\\', "/");
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(?path_str, ?e, "metadata failed; skipping");
-                continue;
-            }
-        };
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64);
-        out.push(TreeEntry {
-            path: path_str,
-            is_dir: meta.is_dir(),
-            mtime,
-            size: if meta.is_dir() { 0 } else { meta.len() },
-        });
-    }
-    Ok(out)
+    tree_entries(root, iter, limit)
 }
 
 #[cfg(test)]
@@ -2318,6 +2289,33 @@ mod tests {
             Some(&b"hello"[..]),
             "xattr lost on overwrite"
         );
+    }
+
+    #[test]
+    fn tree_entries_refuses_with_the_callers_limit() {
+        let root = TempDir::new().unwrap();
+        for name in ["a.md", "b.md", "c.md"] {
+            std::fs::write(root.path().join(name), "x").unwrap();
+        }
+        let walk = || {
+            WalkDir::new(root.path())
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+        };
+        // The bound is the caller's, not `LIST_TREE_LIMIT`.
+        let error = tree_entries(root.path(), walk(), 2).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ChanError::ListingTooLarge {
+                    observed: 2,
+                    limit: 2
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(tree_entries(root.path(), walk(), 3).unwrap().len(), 3);
     }
 
     #[test]
