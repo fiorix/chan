@@ -3822,9 +3822,9 @@ fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<S
 }
 
 /// The `terminal_broadcast` frame for `POST /api/terminals/{session}/broadcast`,
-/// the one window-command producer outside this module. Going through the
-/// typed frame keeps it on the `type, window_id` prefix the `/ws` pump scans,
-/// so it reaches the owning window's socket and no other.
+/// the one chan-server window-command producer outside this module. Going
+/// through the typed frame keeps it on the `type, window_id` prefix the `/ws`
+/// pump scans, so it reaches the owning window's socket and no other.
 pub(crate) fn terminal_broadcast_frame(
     window_id: &str,
     session_id: String,

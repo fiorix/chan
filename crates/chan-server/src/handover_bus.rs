@@ -77,6 +77,13 @@ mod tests {
         );
         assert!(bus.complete(&id, HandoverReply::Accept));
         assert_eq!(rx.await.expect("reply delivered"), HandoverReply::Accept);
+        // The wrapper's cancel reaches the registry: a cancelled id no longer
+        // completes, so the reply route answers 404, and its receiver sees the
+        // sender go.
+        let (cancelled, cancelled_rx) = bus.register();
+        bus.cancel(&cancelled);
+        assert!(!bus.complete(&cancelled, HandoverReply::Accept));
+        assert!(cancelled_rx.await.is_err());
     }
 
     #[tokio::test]

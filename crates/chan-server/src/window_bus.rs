@@ -72,5 +72,12 @@ mod tests {
         assert!(bus.complete(&id, serde_json::json!({"activePaneId": "p1"})));
         let payload = rx.await.expect("payload delivered");
         assert_eq!(payload["activePaneId"], "p1");
+        // The wrapper's cancel reaches the registry: a cancelled id no longer
+        // completes, so the reply route answers 404, and its receiver sees the
+        // sender go.
+        let (cancelled, cancelled_rx) = bus.register();
+        bus.cancel(&cancelled);
+        assert!(!bus.complete(&cancelled, serde_json::json!({})));
+        assert!(cancelled_rx.await.is_err());
     }
 }

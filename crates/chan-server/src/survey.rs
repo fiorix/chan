@@ -248,14 +248,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn survey_ids_carry_the_prefix() {
+    #[tokio::test]
+    async fn survey_ids_carry_the_prefix() {
         let bus = SurveyBus::new();
         let (id, _rx) = bus.register();
         assert!(
             id.starts_with("survey-"),
             "id {id:?} lacks the survey- prefix"
         );
+        // The wrapper's cancel reaches the registry: a cancelled id no longer
+        // completes, so the reply route answers 404, and its receiver sees the
+        // sender go.
+        let (cancelled, cancelled_rx) = bus.register();
+        bus.cancel(&cancelled);
+        assert!(!bus.complete_survey(
+            &cancelled,
+            SurveyReply::Option {
+                survey_id: cancelled.clone(),
+                option_index: 0,
+                option_label: "Yes".into(),
+            },
+            None,
+        ));
+        assert!(cancelled_rx.await.is_err());
     }
 
     fn key(windows: &[&str], tab: Option<&str>) -> SurveyQueueKey {
