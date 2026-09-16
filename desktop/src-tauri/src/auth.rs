@@ -2,11 +2,11 @@
 //! loopback redirect with PKCE.
 //!
 //! Flow:
-//!   1. The Computers window calls `open_signin` (or a gateway connect
-//!      calls `open_gateway_signin`). We generate a random state nonce
-//!      and a PKCE `code_verifier` (kept in-process), bind an ephemeral
-//!      `http://127.0.0.1:<port>/auth/callback` listener in THIS
-//!      process, and shell out to the user's default browser pointing at
+//!   1. A gateway connect calls `open_gateway_signin`. We generate a
+//!      random state nonce and a PKCE `code_verifier` (kept in-process),
+//!      bind an ephemeral `http://127.0.0.1:<port>/auth/callback`
+//!      listener in THIS process, and shell out to the user's default
+//!      browser pointing at
 //!      `/desktop/authorize?...&redirect_uri=http://127.0.0.1:<port>/auth/callback\
 //!      &state=<nonce>&code_challenge=<challenge>&code_challenge_method=S256`.
 //!   2. gw.{domain} handles OAuth (passkeys, autofill, all native to the
@@ -44,14 +44,14 @@
 //! a short server-side TTL, dead after the first redeem, and never logged
 //! (the listener has no request logging by construction).
 //!
-//! Keychain layout: service `chan-desktop`, account `gw.chan.app`.
-//! Value is JSON `{id, secret, label, expires_at}` so sign-out can
-//! both clear locally and surface the token id for a future
-//! server-side revoke pass.
+//! Keychain layout: service `chan-desktop`, one account per gateway
+//! identity origin (`gateway:<origin>`, see `gateway_account`). Value
+//! is JSON `{id, secret, label, expires_at}`; the token id rides along
+//! for a future server-side revoke pass.
 //!
-//! v1 sign-out is local-only: we drop the keychain entry. Server-
-//! side revoke needs the gw.{domain} session, which only the user's
-//! browser has -- wiring that is a follow-up.
+//! There is no user-facing sign-out. A gateway that answers 401 has its
+//! entry dropped (`clear_gateway_pat`) so the next connect falls into
+//! the browser sign-in instead of replaying a dead credential.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -79,15 +79,8 @@ pub const AUTH_CHANGED: &str = "auth-changed";
 pub const AUTH_ERROR: &str = "auth-error";
 
 const KEYCHAIN_SERVICE: &str = "chan-desktop";
-const KEYCHAIN_ACCOUNT: &str = "gw.chan.app";
-/// Origin serving `/desktop/authorize` for the hosted gw.chan.app
-/// flow; also what the loopback settle path redeems that flow's code
-/// against.
-const IDENTITY_ORIGIN: &str = "https://gw.chan.app";
-const AUTHORIZE_URL: &str = "https://gw.chan.app/desktop/authorize";
 /// Path the loopback listener answers and the `redirect_uri` names.
 const LOOPBACK_CALLBACK_PATH: &str = "/auth/callback";
-const SCOPES: &str = "tunnel";
 /// Account-level gateway scope: one PAT reads the account's devserver
 /// roster and mints entries for any of its devservers (own or shared).
 /// Requested as the SOLE scope; the gateway rejects mixed requests.
@@ -161,32 +154,11 @@ fn entry_for(account: &str) -> Result<Entry, String> {
     Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| format!("keychain entry: {e}"))
 }
 
-fn entry() -> Result<Entry, String> {
-    entry_for(KEYCHAIN_ACCOUNT)
-}
-
-fn load() -> Result<Option<StoredPat>, String> {
-    match entry()?.get_password() {
-        Ok(s) => serde_json::from_str(&s)
-            .map(Some)
-            .map_err(|e| format!("decoding stored PAT: {e}")),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("reading keychain: {e}")),
-    }
-}
-
 fn store_for(account: &str, pat: &StoredPat) -> Result<(), String> {
     let json = serde_json::to_string(pat).map_err(|e| format!("encoding PAT: {e}"))?;
     entry_for(account)?
         .set_password(&json)
         .map_err(|e| format!("writing keychain: {e}"))
-}
-
-fn clear() -> Result<(), String> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("clearing keychain: {e}")),
-    }
 }
 
 /// Best-effort hostname for the PAT label. Fall back to a generic
@@ -303,50 +275,6 @@ fn bind_loopback_listener() -> Result<(std::net::TcpListener, u16), String> {
         .map_err(|e| format!("could not read the local sign-in listener address: {e}"))?
         .port();
     Ok((listener, port))
-}
-
-#[tauri::command]
-pub fn auth_status() -> AuthStatus {
-    match load() {
-        Ok(Some(pat)) => AuthStatus {
-            is_signed_in: true,
-            label: Some(pat.label),
-            expires_at: if pat.expires_at.is_empty() {
-                None
-            } else {
-                Some(pat.expires_at)
-            },
-        },
-        _ => AuthStatus {
-            is_signed_in: false,
-            label: None,
-            expires_at: None,
-        },
-    }
-}
-
-/// Open gw.chan.app/desktop/authorize in the user's default browser.
-/// Short-circuits when already signed in.
-#[tauri::command]
-pub fn open_signin(app: AppHandle) -> Result<(), String> {
-    if load().ok().flatten().is_some() {
-        return Ok(());
-    }
-    launch_signin(
-        &app,
-        KEYCHAIN_ACCOUNT.to_string(),
-        IDENTITY_ORIGIN.to_string(),
-        None,
-        AUTHORIZE_URL,
-        SCOPES,
-        bind_loopback_listener,
-    )?;
-    // Replacing the slot orphans any parked gateway sign-in (its browser
-    // leg lost the nonce): settle those waits so no spinner or busy gate
-    // outlives them. `abandon_pending_signins` is runtime-rows-only and
-    // never touches the just-installed slot (see its doc).
-    crate::gateway::abandon_pending_signins(&app, &app.state::<Arc<crate::AppState>>());
-    Ok(())
 }
 
 pub fn gateway_account(identity_origin: &str) -> String {
@@ -1061,21 +989,6 @@ fn classify_request(head: &str, port: u16) -> RequestDecision {
     RequestDecision::Callback(query.to_string())
 }
 
-/// Local sign-out. Clears the keychain entry. Server-side revoke is
-/// a follow-up -- it needs the gw.{domain} session which only the
-/// user's browser has access to.
-#[tauri::command]
-pub fn signout(app: AppHandle) -> Result<AuthStatus, String> {
-    clear()?;
-    let status = AuthStatus {
-        is_signed_in: false,
-        label: None,
-        expires_at: None,
-    };
-    let _ = app.emit(AUTH_CHANGED, &status);
-    Ok(status)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,7 +1500,7 @@ mod tests {
             "https://id.example".to_string(),
             None,
             "https://id.example/desktop/authorize",
-            SCOPES,
+            DESKTOP_ACCOUNT_SCOPES,
             || Err("boom: EMFILE".to_string()),
         );
         assert!(result.is_err());

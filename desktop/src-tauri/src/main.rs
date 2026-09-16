@@ -5825,8 +5825,8 @@ fn main() {
 
             // The loopback sign-in callback lands in THIS process on the
             // ephemeral `http://127.0.0.1:<port>/auth/callback` listener
-            // that `auth::open_signin` / `auth::open_gateway_signin` bind
-            // per attempt (see src/auth.rs). There is no OS scheme handler
+            // that `auth::open_gateway_signin` binds per attempt (see
+            // src/auth.rs). There is no OS scheme handler
             // and no second-instance spawn, so the callback needs no setup
             // wiring here.
 
@@ -6302,9 +6302,6 @@ fn main() {
             devserver::gateway_csrf_token,
             list_devserver_workspaces,
             reconnect_devserver,
-            auth::auth_status,
-            auth::open_signin,
-            auth::signout,
         ])
         .build(app_context())
         .expect("error building tauri application");

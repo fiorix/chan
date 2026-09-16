@@ -18,9 +18,6 @@ permissions = [
   "allow-add-outbound-workspace",
   "allow-open-outbound-workspace",
   "allow-remove-outbound-workspace",
-  "allow-auth-status",
-  "allow-open-signin",
-  "allow-signout",
   "allow-list-devserver-workspaces",
   "allow-reconnect-devserver",
   "allow-restart-desktop-after-update",
@@ -291,21 +288,6 @@ commands.allow = ["open_outbound_workspace"]
 identifier = "allow-remove-outbound-workspace"
 description = "Enables the remove_outbound_workspace command."
 commands.allow = ["remove_outbound_workspace"]
-
-[[permission]]
-identifier = "allow-auth-status"
-description = "Enables the auth_status command."
-commands.allow = ["auth_status"]
-
-[[permission]]
-identifier = "allow-open-signin"
-description = "Enables the open_signin command."
-commands.allow = ["open_signin"]
-
-[[permission]]
-identifier = "allow-signout"
-description = "Enables the signout command."
-commands.allow = ["signout"]
 
 [[permission]]
 identifier = "allow-list-devserver-workspaces"

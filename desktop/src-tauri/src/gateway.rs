@@ -1045,9 +1045,8 @@ pub async fn resume_gateway_signin<R: tauri::Runtime>(
 ///
 /// INVARIANT (correctness, not nicety): this touches gateway RUNTIME
 /// ROWS only and MUST NOT clear the auth slot or drop the loopback
-/// listener. `open_signin` installs the new slot and THEN calls this, so
-/// an abandon that dropped the slot would nuke the just-created sign-in.
-/// The slot/listener lifecycle is owned entirely by `auth`
+/// listener. The settle path calls this after a callback has consumed
+/// the slot; the slot/listener lifecycle is owned entirely by `auth`
 /// (`replace_pending` drops the prior, the stamp-guarded timer drops the
 /// abandoned at the slot TTL = `GATEWAY_SIGNIN_TIMEOUT`, the settle path
 /// drops on completion, the open-url-failure arm drops on a failed open).
