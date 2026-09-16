@@ -2330,9 +2330,10 @@ impl UploadDestinationParts {
 /// The multipart prologue every streaming upload route runs: the destination
 /// parts are read until the `file` part arrives, and `then` receives that
 /// part still live, so the lane consumes it chunk by chunk. The file part is
-/// handed to a continuation rather than returned because it borrows the
-/// multipart the loop polls again on the metadata arms; a returned field
-/// would hold that borrow across the next `next_field`.
+/// handed to a continuation rather than returned: a field returned from
+/// inside the loop would tie every `next_field` borrow to the caller's
+/// lifetime, which the borrow checker refuses (E0499) even though the early
+/// return never polls the multipart again.
 ///
 /// Every refusal here is a 400 and nothing has been admitted or written: a
 /// `file` part before a destination part, a metadata part that fails to read

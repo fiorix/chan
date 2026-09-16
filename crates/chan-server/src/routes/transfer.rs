@@ -629,7 +629,8 @@ pub async fn api_terminal_upload_file(
     filesystem_upload_response(state, headers, multipart).await
 }
 
-/// Write one uid-filesystem upload using the shared atomic writer and ceiling.
+/// Stream one upload into an absolute directory of this uid's filesystem
+/// through the terminal writer, under the library's transfer ceiling.
 pub(crate) async fn filesystem_upload_response(
     state: std::sync::Arc<crate::state::AppState>,
     headers: axum::http::HeaderMap,
@@ -883,7 +884,10 @@ mod tests {
 
     /// The `dir` part precedes the streaming `file` part. A body that leads
     /// with the file is refused before a byte is written, and the refusal
-    /// names the one destination part this lane accepts.
+    /// names the one destination part this lane accepts. The `file` part
+    /// carries no filename, so a lane that admitted it anyway would stop at
+    /// the leaf-name check, before a temp file exists, with an empty `dir`
+    /// (the filesystem root) as its destination.
     #[tokio::test]
     async fn terminal_upload_prologue_refuses_file_before_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -891,7 +895,7 @@ mod tests {
         let rooted_dir = dir.path().display().to_string();
         let body = format!(
             "--{boundary}\r\n\
-             Content-Disposition: form-data; name=\"file\"; filename=\"early.bin\"\r\n\r\n\
+             Content-Disposition: form-data; name=\"file\"\r\n\r\n\
              no-write\r\n\
              --{boundary}\r\n\
              Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
@@ -906,13 +910,14 @@ mod tests {
             error_body(response).await,
             "`dir` must precede the streaming `file` part"
         );
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// This lane has no replace flow, so a `path` part is not a destination:
     /// a body carrying `path` and `file` but no `dir` is refused like one with
     /// no destination at all. Counting `path` would admit the upload with an
-    /// empty `dir`, which resolves to the filesystem root.
+    /// empty `dir`, which resolves to the filesystem root; the `file` part
+    /// carries no filename so that such a lane stops at the leaf-name check
+    /// instead of writing there.
     #[tokio::test]
     async fn terminal_upload_prologue_ignores_path_and_refuses_file_without_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -923,7 +928,7 @@ mod tests {
              Content-Disposition: form-data; name=\"path\"\r\n\r\n\
              {rooted_path}\r\n\
              --{boundary}\r\n\
-             Content-Disposition: form-data; name=\"file\"; filename=\"unrooted.bin\"\r\n\r\n\
+             Content-Disposition: form-data; name=\"file\"\r\n\r\n\
              no-write\r\n\
              --{boundary}--\r\n"
         );
@@ -935,7 +940,6 @@ mod tests {
             error_body(response).await,
             "`dir` must precede the streaming `file` part"
         );
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
