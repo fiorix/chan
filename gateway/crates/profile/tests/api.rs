@@ -56,12 +56,11 @@ impl TestApp {
         app.router = profile::http::router(profile::http::AppState {
             revocations: profile::revocation::RevocationCoordinator::spawn(
                 app.pool.clone(),
-                workspace_admin.clone(),
+                workspace_admin,
             ),
             pool: app.pool.clone(),
             auth_token: TOKEN.to_string(),
             admin_token: Some(ADMIN_TOKEN.to_string()),
-            workspace_admin,
         });
         app
     }

@@ -4,7 +4,6 @@ use axum::middleware::{self, Next};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use gateway_common::devserver_control_client::DevserverControlClient;
 use gateway_common::validators::{valid_username, MAX_USERNAME_EDITS};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -66,9 +65,6 @@ pub struct AppState {
     /// route 401, which is the safe default if the env var was
     /// forgotten on a fresh deploy.
     pub admin_token: Option<String>,
-    /// Scope-specific devserver-control client used for block and grant
-    /// revocation. Its configuration is mandatory at startup.
-    pub workspace_admin: DevserverControlClient,
     pub revocations: crate::revocation::RevocationCoordinator,
 }
 
