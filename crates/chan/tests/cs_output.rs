@@ -24,12 +24,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chan_shell::{ControlRequest, ControlResponse};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-/// Every wait in a case: the fake server's accept and read, and the `cs`
+/// Every wait in a case: the fake server's accept and reads, and the `cs`
 /// exit. Generous for a loaded CI box; a hang fails the test instead of
 /// stalling the run.
 const BUDGET: Duration = Duration::from_secs(30);
@@ -373,8 +373,10 @@ struct Run {
 }
 
 /// Run `cs <args> <mode flags>` against a one-shot fake control server that
-/// answers `reply` as one `Ok` line. The socket lives under the system temp
-/// dir with a short name, inside the Unix socket path limit on macOS.
+/// answers `reply` as one `Ok` line once `cs` has half-closed its write side,
+/// the order a real server's dispatch imposes. The socket lives under the
+/// system temp dir with a short name, inside the Unix socket path limit on
+/// macOS.
 async fn run_cs(case: &Case, reply: &str, mode: &[&str]) -> Run {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let socket: PathBuf = std::env::temp_dir().join(format!(
@@ -395,11 +397,26 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str]) -> Run {
             .expect("cs connects within the budget")
             .expect("accept");
         let (read, mut write) = conn.into_split();
+        let mut reader = BufReader::new(read);
         let mut request = String::new();
-        timeout(BUDGET, BufReader::new(read).read_line(&mut request))
+        timeout(BUDGET, reader.read_line(&mut request))
             .await
             .expect("cs sends its request within the budget")
             .expect("read request line");
+        // `cs` half-closes its write side right after the request line and
+        // only then reads the reply; a real server is still dispatching at
+        // that point. Answer only after that EOF: the reply plus this task's
+        // exit closes the socket, and a close that lands before the client's
+        // shutdown makes macOS refuse the shutdown with ENOTCONN.
+        let mut trailing = Vec::new();
+        timeout(BUDGET, reader.read_to_end(&mut trailing))
+            .await
+            .expect("cs half-closes its write side within the budget")
+            .expect("read to the client's EOF");
+        assert!(
+            trailing.is_empty(),
+            "cs sent bytes after its request line: {trailing:?}"
+        );
         write.write_all(line.as_bytes()).await.expect("write reply");
         request
     });
