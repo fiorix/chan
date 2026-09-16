@@ -67,6 +67,6 @@ pub(crate) async fn drop_schema(url: &str, schema: &str) {
     sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
         .execute(&admin)
         .await
-        .expect("drop test schema");
+        .unwrap_or_else(|e| panic!("drop test schema {schema}: {e}"));
     admin.close().await;
 }
