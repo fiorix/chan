@@ -1745,6 +1745,12 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
     }
 }
 
+/// Builds the JSON refusal body the `chan` CLI parses for the live-terminal
+/// count.
+fn live_terminals_body(active_terminals: usize) -> String {
+    format!(r#"{{"error":"live_terminals","active_terminals":{active_terminals}}}"#)
+}
+
 /// Tear down whatever this process serves for `path`, the server side of
 /// `chan close`. The scope (built at mount time) decides: a standalone
 /// `chan serve` serve of that root fires its graceful-shutdown signal so the
@@ -1752,15 +1758,11 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
 /// that tenant; an opt-out process refuses. The response still flushes before
 /// a standalone process drains and exits.
 ///
-/// `remove` carries `chan workspace forget` (and `chan workspace forget`) through to
-/// a HOST: it then also UNREGISTERS the workspace from its library + overlay
-/// (so a devserver-served workspace disappears from the launcher and does not
-/// survive a restart), not just unmounts it. A standalone serve ignores it --
-/// it exits either way, and the caller forgets the local registry.
-fn live_terminals_body(active_terminals: usize) -> String {
-    format!(r#"{{"error":"live_terminals","active_terminals":{active_terminals}}}"#)
-}
-
+/// `remove` carries `chan workspace forget` through to a HOST: it then also
+/// UNREGISTERS the workspace from its library + overlay (so a devserver-served
+/// workspace disappears from the launcher and does not survive a restart), not
+/// just unmounts it. A standalone serve ignores it -- it exits either way, and
+/// the caller forgets the local registry.
 async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> ControlResponse {
     match scope {
         UnserveScope::Standalone { root, shutdown_tx } => {
