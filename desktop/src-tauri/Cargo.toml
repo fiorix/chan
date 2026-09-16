@@ -99,8 +99,8 @@ url = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# `MainThreadMarker`: the AppKit calls below are main-thread-only and take
-# the marker as proof.
+# `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)
+# are main-thread-only and take the marker as proof.
 objc2 = "0.6"
 # `NSAlert`, `NSApplication` and `NSButton` back the native confirm dialog
 # in src/native_dialog.rs; `NSPasteboard` backs the drag-pasteboard read in
