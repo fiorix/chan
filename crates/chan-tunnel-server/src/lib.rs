@@ -265,8 +265,10 @@ fn make_prefix(_username: &str, key: &str) -> String {
 /// workspace name, obtain the admission permit, write the HelloAck and
 /// wrap the duplex in yamux server mode. Validation happens before the
 /// call so the listener can answer 401 before it commits to the 200
-/// response body; everything after the 200 is refused in-band with a
-/// `HelloAck::Refused` frame instead of a transport error.
+/// response body. After the 200, a bad protocol, a bad workspace name or
+/// an admission refusal is answered in-band with a `HelloAck::Refused`
+/// frame; an unsafe username, a missing or malformed Hello and a failed
+/// ack write end the stream with an error and no frame.
 ///
 /// The username check is defense-in-depth: the validator has already
 /// authenticated the token, but the username it returns flows into the

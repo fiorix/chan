@@ -16,7 +16,7 @@ sequenceDiagram
     S->>S: validate token and tunnel scope
     S-->>C: 200 OK, h2 stream stays open
     C->>S: Hello frame (protocol, workspace, display name)
-    S->>S: validate workspace and run pre_ack hook
+    S->>S: validate workspace and ask registration admission
     S-->>C: HelloAck Ok frame (prefix, user, workspace, owner_user_id)
     Note over C,S: h2 stream now belongs to yamux, both directions
     V->>S: public HTTP request
