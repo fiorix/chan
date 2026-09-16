@@ -1608,28 +1608,38 @@ enum DevPlan {
     Supervised(ServiceKind, DevAction),
 }
 
-/// The single action verb the user passed, if any. The subcommand grammar
-/// admits at most one management verb, so the order here is immaterial.
-fn selected_devserver_action(
-    start: bool,
-    stop: bool,
-    restart: bool,
-    status: bool,
-    join: bool,
-) -> Option<DevAction> {
-    if start {
-        Some(DevAction::Start)
-    } else if stop {
-        Some(DevAction::Stop)
-    } else if restart {
-        Some(DevAction::Restart)
-    } else if status {
-        Some(DevAction::Status)
-    } else if join {
-        Some(DevAction::Join)
-    } else {
-        None
-    }
+/// One server-side `chan devserver` verb: the foreground `run`, a management
+/// verb against a background service, or the token rotation, which needs no
+/// service plan at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevserverVerb {
+    Run,
+    Manage(DevAction),
+    RotateToken,
+}
+
+/// Split a `chan devserver` subcommand into the shared server-side flags and
+/// the [`DevserverVerb`] it selects. The client-side subcommands (register,
+/// ls, connect, disconnect, forget) carry no server-side flags and come back
+/// whole in the `Err`, so the caller dispatches them itself.
+fn devserver_verb(
+    action: DevserverAction,
+) -> Result<(DevserverServeArgs, DevserverVerb), DevserverAction> {
+    use DevserverAction as A;
+    Ok(match action {
+        A::Run { args } => (args, DevserverVerb::Run),
+        A::Start { args } => (args, DevserverVerb::Manage(DevAction::Start)),
+        A::Stop { args } => (args, DevserverVerb::Manage(DevAction::Stop)),
+        A::Restart { args } => (args, DevserverVerb::Manage(DevAction::Restart)),
+        A::Status { args } => (args, DevserverVerb::Manage(DevAction::Status)),
+        A::Join { args } => (args, DevserverVerb::Manage(DevAction::Join)),
+        A::RotateToken { args } => (args, DevserverVerb::RotateToken),
+        client_side @ (A::Register { .. }
+        | A::Ls { .. }
+        | A::Connect { .. }
+        | A::Disconnect { .. }
+        | A::Forget { .. }) => return Err(client_side),
+    })
 }
 
 /// Validate a `(--service, action)` combination and resolve it to a [`DevPlan`],
@@ -4137,78 +4147,59 @@ fn devserver_bind_collision_hint(addr: SocketAddr, err: &anyhow::Error) -> Optio
     ))
 }
 
+/// Dispatch one `chan devserver` subcommand: a client-side verb goes to its
+/// desktop-launcher handler, and every server-side verb goes through
+/// [`cmd_devserver`] with the flags it carries, so flag semantics and service
+/// resolution live in one place whichever verb selected them.
+async fn cmd_devserver_action(action: DevserverAction, verbose: bool) -> Result<()> {
+    use DevserverAction as A;
+    let (args, verb) = match devserver_verb(action) {
+        Ok(server_side) => server_side,
+        Err(A::Register { url, name, script }) => {
+            return cmd_devserver_register(url, name, script).await;
+        }
+        Err(A::Ls { json }) => return cmd_devserver_ls(json).await,
+        Err(A::Connect { target }) => return cmd_devserver_connect(target).await,
+        Err(A::Disconnect { target }) => return cmd_devserver_disconnect(target).await,
+        Err(A::Forget { target, force }) => return cmd_devserver_forget(target, force).await,
+        Err(
+            server_side @ (A::Run { .. }
+            | A::Start { .. }
+            | A::Stop { .. }
+            | A::Restart { .. }
+            | A::Status { .. }
+            | A::Join { .. }
+            | A::RotateToken { .. }),
+        ) => unreachable!("devserver_verb maps every server-side verb, got {server_side:?}"),
+    };
+    cmd_devserver(args, verb, verbose).await
+}
+
 /// Run a headless multi-workspace devserver. The no-service default and
 /// `--service=none` run in the foreground on `bind:port`; `--service=chan` is
 /// the portable background daemon; `--service=systemd`/`launchd` are OS-backed
 /// services driven by management verbs (`start`/`stop`/`restart`/
 /// `status`/`join`). [`plan_devserver`] validates the `(service, action)`
 /// pair before we touch any real service manager.
-/// Adapt a `chan devserver` verb onto [`cmd_devserver`], whose resolver
-/// still models the server-side verb as one-of-six booleans (`run` is the
-/// none-of-them foreground form). One code path for flag semantics and
-/// service resolution, whichever verb selected it.
-async fn cmd_devserver_action(action: DevserverAction, verbose: bool) -> Result<()> {
-    use DevserverAction as A;
-    let (args, start, stop, restart, status, join, rotate_token) = match action {
-        A::Run { args } => (args, false, false, false, false, false, false),
-        A::Start { args } => (args, true, false, false, false, false, false),
-        A::Stop { args } => (args, false, true, false, false, false, false),
-        A::Restart { args } => (args, false, false, true, false, false, false),
-        A::Status { args } => (args, false, false, false, true, false, false),
-        A::Join { args } => (args, false, false, false, false, true, false),
-        A::RotateToken { args } => (args, false, false, false, false, false, true),
-        A::Register { url, name, script } => {
-            return cmd_devserver_register(url, name, script).await;
-        }
-        A::Ls { json } => return cmd_devserver_ls(json).await,
-        A::Connect { target } => return cmd_devserver_connect(target).await,
-        A::Disconnect { target } => return cmd_devserver_disconnect(target).await,
-        A::Forget { target, force } => return cmd_devserver_forget(target, force).await,
-    };
-    cmd_devserver(
-        args.bind,
-        args.port,
-        args.service,
-        start,
-        stop,
-        restart,
-        status,
-        join,
-        rotate_token,
-        args.force,
-        args.tunnel_url,
-        args.tunnel_token,
-        args.tunnel_devserver_name,
-        args.no_tunnel,
-        verbose,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn cmd_devserver(
-    bind: Option<IpAddr>,
-    port: Option<u16>,
-    service: ServiceKind,
-    start: bool,
-    stop: bool,
-    restart: bool,
-    status: bool,
-    join: bool,
-    rotate_token: bool,
-    force: bool,
-    tunnel_url: Option<String>,
-    tunnel_token: Option<String>,
-    tunnel_devserver_name: Option<String>,
-    no_tunnel: bool,
-    verbose: bool,
-) -> Result<()> {
+async fn cmd_devserver(args: DevserverServeArgs, verb: DevserverVerb, verbose: bool) -> Result<()> {
     // Backend-agnostic: rotation dials whatever devserver persisted its
     // port, or falls back to the config file, so it never needs the
     // service plan below.
-    if rotate_token {
-        return cmd_rotate_devserver_token().await;
-    }
+    let action = match verb {
+        DevserverVerb::RotateToken => return cmd_rotate_devserver_token().await,
+        DevserverVerb::Run => None,
+        DevserverVerb::Manage(action) => Some(action),
+    };
+    let DevserverServeArgs {
+        bind,
+        port,
+        service,
+        force,
+        tunnel_url,
+        tunnel_token,
+        tunnel_devserver_name,
+        no_tunnel,
+    } = args;
     // `--no-tunnel` drops the token before anything can read it, so a devserver
     // spawned from a shell that inherited CHAN_TUNNEL_TOKEN stays local when
     // asked to. The supervised path takes the flag itself as well, to decline
@@ -4220,7 +4211,6 @@ async fn cmd_devserver(
     // reachable at all; the foreground and `chan` backends have nothing
     // persisted to read, so they demand it at the point of use.
     let tunnel_url = tunnel_url.filter(|url| !url.trim().is_empty());
-    let action = selected_devserver_action(start, stop, restart, status, join);
     // Resolve `--service=auto` (the default) to a concrete backend from the
     // runtime OS, then validate it exactly like an explicit backend. After this
     // no `Auto` reaches `plan_devserver` or any downstream dispatch.
@@ -11186,33 +11176,74 @@ mod tests {
         assert!(missing.contains("--service=chan"));
     }
 
-    /// `selected_devserver_action` collapses the five action bools to at most one
-    /// verb (clap's group makes the flags mutually exclusive).
+    /// `devserver_verb` splits each server-side subcommand into its shared
+    /// flags and one `DevserverVerb`: `run` is the foreground form, the five
+    /// management verbs carry their `DevAction`, `rotate-token` stands alone,
+    /// and the flags pass through untouched. A client-side subcommand has no
+    /// server-side verb and comes back whole.
     #[test]
-    fn devserver_selected_action() {
-        assert_eq!(
-            selected_devserver_action(false, false, false, false, false),
-            None
-        );
-        assert_eq!(
-            selected_devserver_action(true, false, false, false, false),
-            Some(DevAction::Start)
-        );
-        assert_eq!(
-            selected_devserver_action(false, true, false, false, false),
-            Some(DevAction::Stop)
-        );
-        assert_eq!(
-            selected_devserver_action(false, false, true, false, false),
-            Some(DevAction::Restart)
-        );
-        assert_eq!(
-            selected_devserver_action(false, false, false, true, false),
-            Some(DevAction::Status)
-        );
-        assert_eq!(
-            selected_devserver_action(false, false, false, false, true),
-            Some(DevAction::Join)
+    fn devserver_verb_maps_every_server_side_subcommand() {
+        let _env = test_env::ChanTestEnv::new();
+        let parse = |args: &[&str]| match Cli::parse_from(args).command {
+            Command::Devserver { action } => action,
+            other => panic!("expected Command::Devserver, got {other:?}"),
+        };
+        for (spelling, expected) in [
+            ("run", DevserverVerb::Run),
+            ("start", DevserverVerb::Manage(DevAction::Start)),
+            ("stop", DevserverVerb::Manage(DevAction::Stop)),
+            ("restart", DevserverVerb::Manage(DevAction::Restart)),
+            ("status", DevserverVerb::Manage(DevAction::Status)),
+            ("join", DevserverVerb::Manage(DevAction::Join)),
+            ("rotate-token", DevserverVerb::RotateToken),
+        ] {
+            let action = parse(&[
+                "chan",
+                "devserver",
+                spelling,
+                "--bind",
+                "127.0.0.2",
+                "--port",
+                "4242",
+                "--service=chan",
+                "--force",
+                "--tunnel-url",
+                "https://tunnel.example",
+                "--tunnel-token",
+                "chan_pat_x",
+                "--tunnel-devserver-name",
+                "box",
+                "--no-tunnel",
+            ]);
+            let (args, verb) = devserver_verb(action)
+                .unwrap_or_else(|client_side| panic!("{spelling}: got {client_side:?}"));
+            assert_eq!(verb, expected, "{spelling}");
+            assert_eq!(args.bind, "127.0.0.2".parse().ok(), "{spelling}");
+            assert_eq!(args.port, Some(4242), "{spelling}");
+            assert_eq!(args.service, ServiceKind::Chan, "{spelling}");
+            assert!(args.force, "{spelling}");
+            assert_eq!(
+                args.tunnel_url.as_deref(),
+                Some("https://tunnel.example"),
+                "{spelling}"
+            );
+            assert_eq!(
+                args.tunnel_token.as_deref(),
+                Some("chan_pat_x"),
+                "{spelling}"
+            );
+            assert_eq!(
+                args.tunnel_devserver_name.as_deref(),
+                Some("box"),
+                "{spelling}"
+            );
+            assert!(args.no_tunnel, "{spelling}");
+        }
+
+        let client_side = devserver_verb(parse(&["chan", "devserver", "ls", "--json"]));
+        assert!(
+            matches!(client_side, Err(DevserverAction::Ls { json: true })),
+            "{client_side:?}"
         );
     }
 
