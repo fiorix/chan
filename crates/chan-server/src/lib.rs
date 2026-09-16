@@ -48,6 +48,7 @@ mod indexer;
 mod local_socket;
 mod mcp_bridge;
 mod preferences;
+mod round_trip_bus;
 #[cfg(test)]
 mod route_authority;
 mod routes;

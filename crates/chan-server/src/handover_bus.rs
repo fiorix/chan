@@ -6,14 +6,14 @@
 //! server-minted `request_id` and awaits it; the answer path
 //! (`POST /api/session/handover/reply`, or the leader's CLI) calls
 //! [`HandoverBus::complete`], which fires the oneshot and unblocks the
-//! requester. The exact shape of [`crate::survey::SurveyBus`] and
-//! [`crate::window_bus::WindowBus`]; a handover is single-recipient (the
-//! leader) rather than fanned out, but the parked-oneshot registry is the same.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
+//! requester. A handover is single-recipient (the leader) rather than fanned
+//! out like a survey, but the parked-oneshot registry is the same
+//! [`RoundTripBus`] that [`crate::survey::SurveyBus`] and
+//! [`crate::window_bus::WindowBus`] wrap.
 
 use tokio::sync::oneshot;
+
+use crate::round_trip_bus::RoundTripBus;
 
 /// The leader's answer to a handover request. Typed (not opaque) so the
 /// requester's `cs session handover` prints a distinct line and exit status for
@@ -24,68 +24,42 @@ pub enum HandoverReply {
     Reject { reason: Option<String> },
 }
 
-/// A `request_id -> oneshot<HandoverReply>` registry. One entry per in-flight
-/// `cs session handover`. The id is UNGUESSABLE (a random token): the answer
-/// route trusts whoever echoes the id, so a predictable id would let a
-/// token-bearing caller forge an accept/reject it never received the prompt for.
-#[derive(Default)]
+/// The `cs session handover` round-trips: a [`RoundTripBus`] of `handover-`
+/// ids over the typed [`HandoverReply`].
 pub struct HandoverBus {
-    pending: Mutex<HashMap<String, oneshot::Sender<HandoverReply>>>,
+    requests: RoundTripBus<HandoverReply>,
+}
+
+impl Default for HandoverBus {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HandoverBus {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Mint a fresh `request_id`, park a oneshot under it, and return the id
-    /// plus the receiver the control handler awaits. The handler stamps the id
-    /// onto the leader's handover prompt so the answer echoes it back.
-    ///
-    /// Unused until the `cs session handover` control handler lands; drop the
-    /// allow then.
-    #[allow(dead_code)]
-    pub fn register(&self) -> (String, oneshot::Receiver<HandoverReply>) {
-        let request_id = format!("handover-{}", crate::auth::random_token());
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("handover bus poisoned")
-            .insert(request_id.clone(), tx);
-        (request_id, rx)
-    }
-
-    /// Drop a parked request without firing it. The control handler calls this
-    /// on any early-exit path after `register` (timeout, the requester
-    /// disconnecting) so an abandoned request does not leak its sender.
-    ///
-    /// Unused until the `cs session handover` control handler lands; drop the
-    /// allow then.
-    #[allow(dead_code)]
-    pub fn cancel(&self, request_id: &str) {
-        self.pending
-            .lock()
-            .expect("handover bus poisoned")
-            .remove(request_id);
-    }
-
-    /// Complete a parked request: take its sender out of the map and fire the
-    /// oneshot with the leader's answer. Returns `false` when no request with
-    /// that id is parked (already answered, timed out, or stale), which the
-    /// reply route maps to a 404.
-    pub fn complete(&self, request_id: &str, reply: HandoverReply) -> bool {
-        let sender = self
-            .pending
-            .lock()
-            .expect("handover bus poisoned")
-            .remove(request_id);
-        match sender {
-            // `send` fails only if the receiver was dropped (the requester's CLI
-            // disconnected or timed out); report that failure so the reply
-            // route maps the stale response to a 404.
-            Some(tx) => tx.send(reply).is_ok(),
-            None => false,
+        Self {
+            requests: RoundTripBus::new("handover-"),
         }
+    }
+
+    /// Park a request; see [`RoundTripBus::register`]. The handler stamps the
+    /// id onto the leader's handover prompt so the answer echoes it back.
+    pub fn register(&self) -> (String, oneshot::Receiver<HandoverReply>) {
+        self.requests.register()
+    }
+
+    /// Drop a parked request without firing it (timeout, the requester
+    /// disconnecting); see [`RoundTripBus::cancel`].
+    pub fn cancel(&self, request_id: &str) {
+        self.requests.cancel(request_id)
+    }
+
+    /// Fire a parked request with the leader's answer; see
+    /// [`RoundTripBus::complete`]. `false` is what the reply route maps to a
+    /// 404.
+    pub fn complete(&self, request_id: &str, reply: HandoverReply) -> bool {
+        self.requests.complete(request_id, reply)
     }
 }
 
@@ -94,9 +68,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn register_then_complete_delivers_the_reply() {
+    async fn handover_ids_carry_the_prefix_and_round_trip_an_accept() {
         let bus = HandoverBus::new();
         let (id, rx) = bus.register();
+        assert!(
+            id.starts_with("handover-"),
+            "id {id:?} lacks the handover- prefix"
+        );
         assert!(bus.complete(&id, HandoverReply::Accept));
         assert_eq!(rx.await.expect("reply delivered"), HandoverReply::Accept);
     }
@@ -117,36 +95,5 @@ mod tests {
                 reason: Some("busy".into())
             }
         );
-    }
-
-    #[test]
-    fn complete_unknown_request_is_false() {
-        let bus = HandoverBus::new();
-        assert!(!bus.complete("handover-nope", HandoverReply::Accept));
-    }
-
-    #[test]
-    fn complete_after_receiver_drop_is_false() {
-        let bus = HandoverBus::new();
-        let (id, rx) = bus.register();
-        drop(rx);
-        assert!(!bus.complete(&id, HandoverReply::Accept));
-    }
-
-    #[test]
-    fn each_register_mints_a_distinct_id() {
-        let bus = HandoverBus::new();
-        let (a, _ra) = bus.register();
-        let (b, _rb) = bus.register();
-        assert_ne!(a, b);
-    }
-
-    #[tokio::test]
-    async fn cancel_drops_the_parked_request() {
-        let bus = HandoverBus::new();
-        let (id, rx) = bus.register();
-        bus.cancel(&id);
-        assert!(!bus.complete(&id, HandoverReply::Accept));
-        assert!(rx.await.is_err());
     }
 }

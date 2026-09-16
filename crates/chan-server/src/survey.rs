@@ -23,6 +23,8 @@ use std::sync::Mutex;
 use chan_shell::SurveyReply;
 use tokio::sync::oneshot;
 
+use crate::round_trip_bus::RoundTripBus;
+
 /// How many surveys one target can hold at a time: the open one plus the
 /// waiters. A new survey past the cap is refused with an explicit queue-full
 /// response, never a silent drop. Mirrors the `cs terminal write` FIFO bound
@@ -82,13 +84,11 @@ impl Drop for SurveyTurnGuard<'_> {
     }
 }
 
-/// A `survey_id -> oneshot<SurveyReply>` registry. One entry per in-flight
-/// `cs terminal survey`. The id is UNGUESSABLE (a random token): the SPA's
-/// reply route trusts whoever echoes the id, so a predictable id would let a
-/// token-bearing caller forge an answer to a survey it never saw.
-#[derive(Default)]
+/// The `cs terminal survey` round-trips: a [`RoundTripBus`] of `survey-` ids
+/// over the [`SurveyReplyEnvelope`], plus the per-target FIFO that serializes
+/// the surveys addressed to one overlay slot.
 pub struct SurveyBus {
-    pending: Mutex<HashMap<String, oneshot::Sender<SurveyReplyEnvelope>>>,
+    pending: RoundTripBus<SurveyReplyEnvelope>,
     /// Per-target FIFOs keyed by [`SurveyQueueKey`]. The front entry is the
     /// survey currently allowed to be open; the rest wait in arrival order.
     /// An emptied queue is removed so keys do not accumulate.
@@ -105,33 +105,31 @@ pub struct SurveyBus {
 /// the pre-report behavior (fan the close to every target).
 pub type SurveyReplyEnvelope = (SurveyReply, Option<String>);
 
+impl Default for SurveyBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SurveyBus {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pending: RoundTripBus::new("survey-"),
+            queues: Mutex::new(HashMap::new()),
+            next_ticket: AtomicU64::new(0),
+        }
     }
 
-    /// Mint a fresh `survey_id`, park a oneshot under it, and return the id
-    /// plus the receiver the control handler awaits. The handler stamps the
+    /// Park a survey; see [`RoundTripBus::register`]. The handler stamps the
     /// id onto the outgoing [`chan_shell::SurveySpec`] so the SPA echoes it
     /// back in its reply.
     pub fn register(&self) -> (String, oneshot::Receiver<SurveyReplyEnvelope>) {
-        let survey_id = format!("survey-{}", crate::auth::random_token());
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("survey bus poisoned")
-            .insert(survey_id.clone(), tx);
-        (survey_id, rx)
+        self.pending.register()
     }
 
-    /// Drop a parked survey without firing it. The control handler calls
-    /// this on any early-exit path after `register` so an abandoned survey
-    /// does not leak its sender.
+    /// Drop a parked survey without firing it; see [`RoundTripBus::cancel`].
     pub fn cancel(&self, survey_id: &str) {
-        self.pending
-            .lock()
-            .expect("survey bus poisoned")
-            .remove(survey_id);
+        self.pending.cancel(survey_id)
     }
 
     /// Ask for a turn against `key`'s target. The first survey per target is
@@ -219,18 +217,7 @@ impl SurveyBus {
         reply: SurveyReply,
         answered_by: Option<String>,
     ) -> bool {
-        let sender = self
-            .pending
-            .lock()
-            .expect("survey bus poisoned")
-            .remove(survey_id);
-        match sender {
-            // `send` fails only if the receiver was dropped (the CLI
-            // disconnected); report that failure so the reply route maps
-            // the stale response to a 404.
-            Some(tx) => tx.send((reply, answered_by)).is_ok(),
-            None => false,
-        }
+        self.pending.complete(survey_id, (reply, answered_by))
     }
 }
 
@@ -262,56 +249,13 @@ mod tests {
     }
 
     #[test]
-    fn complete_unknown_survey_is_false() {
+    fn survey_ids_carry_the_prefix() {
         let bus = SurveyBus::new();
-        assert!(!bus.complete_survey(
-            "survey-nope",
-            SurveyReply::Followup {
-                survey_id: "survey-nope".into(),
-            },
-            None,
-        ));
-    }
-
-    #[test]
-    fn complete_after_receiver_drop_is_false() {
-        let bus = SurveyBus::new();
-        let (id, rx) = bus.register();
-        drop(rx);
-        assert!(!bus.complete_survey(
-            &id,
-            SurveyReply::Followup {
-                survey_id: id.clone(),
-            },
-            None,
-        ));
-    }
-
-    #[test]
-    fn each_register_mints_a_distinct_id() {
-        let bus = SurveyBus::new();
-        let (a, _ra) = bus.register();
-        let (b, _rb) = bus.register();
-        assert_ne!(a, b);
-    }
-
-    #[tokio::test]
-    async fn cancel_drops_the_parked_survey() {
-        let bus = SurveyBus::new();
-        let (id, rx) = bus.register();
-        bus.cancel(&id);
-        // A cancelled survey no longer matches, and its receiver observes
-        // the dropped sender.
-        assert!(!bus.complete_survey(
-            &id,
-            SurveyReply::Option {
-                survey_id: id.clone(),
-                option_index: 0,
-                option_label: "x".into(),
-            },
-            None,
-        ));
-        assert!(rx.await.is_err());
+        let (id, _rx) = bus.register();
+        assert!(
+            id.starts_with("survey-"),
+            "id {id:?} lacks the survey- prefix"
+        );
     }
 
     fn key(windows: &[&str], tab: Option<&str>) -> SurveyQueueKey {
