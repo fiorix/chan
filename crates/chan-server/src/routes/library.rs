@@ -644,6 +644,11 @@ fn scoped_local_windows(
     rows
 }
 
+/// The local library's launcher rows: one per registered workspace (the set
+/// `chan list` shows, read live from the host library, the source of truth),
+/// each stamped with its live serve state and sorted by id for a stable list.
+/// `GET /api/library/workspaces` returns these and then appends connected
+/// devservers' rows; the scoped library snapshot returns them alone.
 fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
     let library_id = host.library_id().to_string();
     let mut rows: Vec<_> = host
@@ -655,6 +660,9 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
+            // Live lifecycle state the launcher drives spinners off. `on` stays
+            // the live mounted bool (== status `running`); `status` carries the
+            // richer `starting`/`error` the bool can't express.
             let (status, error) = host.workspace_status(&workspace.root_path);
             Some(LauncherWorkspace {
                 path: workspace.root_path.to_string_lossy().into_owned(),
@@ -665,6 +673,11 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 on: status == WorkspaceStatus::Running,
                 status,
                 error,
+                // Local rows: no devserver, prefix == workspace_id (the
+                // slash-free slug); on/off/remove route by workspace_id. Carry
+                // this host's library id so the launcher groups a headless
+                // devserver's own windows (`lib-<hex>`) under Local machine, not
+                // the orphan bucket.
                 library_id: Some(library_id.clone()),
                 devserver_id: None,
                 prefix: workspace_id.clone(),
@@ -1530,41 +1543,7 @@ async fn dispatch_window_op(
 /// id for a stable list.
 async fn handle_list_workspaces(State(state): State<Arc<LauncherState>>) -> Response {
     let host = &state.host;
-    let local_library_id = host.library_id().to_string();
-    let mut rows: Vec<LauncherWorkspace> = host
-        .library()
-        .list_workspaces()
-        .into_iter()
-        .filter_map(|ws| {
-            let workspace_id = allocate_workspace_prefix(&ws.root_path)
-                .ok()?
-                .trim_start_matches('/')
-                .to_string();
-            // Live lifecycle state the launcher drives spinners off. `on` stays
-            // the live mounted bool (== status `running`); `status` carries the
-            // richer `starting`/`error` the bool can't express.
-            let (status, error) = host.workspace_status(&ws.root_path);
-            Some(LauncherWorkspace {
-                path: ws.root_path.to_string_lossy().into_owned(),
-                label: ws
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| workspace_label(&ws.root_path)),
-                on: status == WorkspaceStatus::Running,
-                status,
-                error,
-                // Local rows: no devserver, prefix == workspace_id (the slash-free
-                // slug); on/off/remove route by workspace_id. Carry this host's
-                // library id so the launcher groups a headless devserver's own
-                // windows (`lib-<hex>`) under Local machine, not the orphan bucket.
-                library_id: Some(local_library_id.clone()),
-                devserver_id: None,
-                prefix: workspace_id.clone(),
-                workspace_id,
-            })
-        })
-        .collect();
-    rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+    let mut rows = scoped_local_workspaces(host);
     // Append connected devservers' workspaces after the sorted local rows. The
     // feed already tags each with its `devserver_id` + remote `library_id`, and
     // the SPA groups them by `devserver_id`, so local rows stay first.
@@ -2450,6 +2429,44 @@ mod devserver_route_tests {
         assert_eq!(
             body[0]["library_id"],
             serde_json::json!(host.library_id().to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scoped_local_rows_match_the_workspaces_route() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root_a.path()).unwrap();
+        lib.register_workspace(root_b.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), crate::route_builder()));
+        // Hold a foreign lock on one root so the two builders must agree on a
+        // mixed-status list (`locked` + `stopped`), not a uniform one.
+        let _foreign = hold_foreign_lock(&lib, root_a.path());
+        let router = launcher_router(host.clone(), None, None);
+
+        // No devserver feed is attached, so the route returns local rows only,
+        // which must equal what `scoped_local_workspaces` builds.
+        let (status, route_rows) = request(&router, "GET", "/api/library/workspaces", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let scoped_rows = serde_json::to_value(super::scoped_local_workspaces(&host)).unwrap();
+        assert_eq!(route_rows, scoped_rows);
+
+        // Guard the fixture actually exercises a mixed-status list.
+        let rows = route_rows.as_array().expect("array of rows");
+        assert_eq!(rows.len(), 2);
+        let statuses: Vec<&str> = rows.iter().map(|r| r["status"].as_str().unwrap()).collect();
+        assert!(
+            statuses.contains(&"locked"),
+            "one row must be locked: {:?}",
+            statuses
+        );
+        assert!(
+            statuses.contains(&"stopped"),
+            "one row must be stopped: {:?}",
+            statuses
         );
     }
 
