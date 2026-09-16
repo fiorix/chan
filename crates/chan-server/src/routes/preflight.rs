@@ -323,28 +323,43 @@ fn workspace_summary(workspace: &chan_workspace::Workspace) -> Summary {
     }
 }
 
+/// The workspace and indexer a preflight handler derives its snapshot from,
+/// or the [`err_state`] response when the workspace cell is busy, missing or
+/// poisoned. The error is boxed so the `Err` variant stays pointer-sized (an
+/// axum `Response` is large; clippy::result_large_err otherwise fires under
+/// -D warnings).
+fn workspace_and_indexer(
+    state: &AppState,
+) -> Result<(Arc<chan_workspace::Workspace>, Arc<crate::indexer::Indexer>), Box<Response>> {
+    let workspace = state.try_workspace().map_err(|e| Box::new(err_state(&e)))?;
+    let indexer = state.try_indexer().map_err(|e| Box::new(err_state(&e)))?;
+    Ok((workspace, indexer))
+}
+
+/// The snapshot a preflight handler answers with: `build_snapshot` over
+/// `status`, plus the onboarding summary. The onboarding summary describes an
+/// OPEN workspace, so attach it only once ready (also keeps the per-poll work
+/// off the cold-build path).
+fn settled_snapshot(
+    workspace: &chan_workspace::Workspace,
+    status: &IndexStatus,
+) -> PreflightSnapshot {
+    let mut snapshot = build_snapshot(workspace, status);
+    if snapshot.is_settled() {
+        snapshot.summary = Some(workspace_summary(workspace));
+    }
+    snapshot
+}
+
 pub async fn api_preflight(State(state): State<Arc<AppState>>) -> Response {
-    let workspace = match state.try_workspace() {
-        Ok(w) => w,
-        Err(e) => return err_state(&e),
-    };
-    let indexer = match state.try_indexer() {
-        Ok(i) => i,
-        Err(e) => return err_state(&e),
+    let (workspace, indexer) = match workspace_and_indexer(&state) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
     };
     // Semantic reads hit sqlite + the model resolver touches the filesystem,
     // so do the whole derivation on the blocking pool.
-    match tokio::task::spawn_blocking(move || {
-        let status = indexer.snapshot();
-        let mut snapshot = build_snapshot(&workspace, &status);
-        // The onboarding summary describes an OPEN workspace, so attach it only
-        // once ready (also keeps the per-poll work off the cold-build path).
-        if snapshot.is_settled() {
-            snapshot.summary = Some(workspace_summary(&workspace));
-        }
-        snapshot
-    })
-    .await
+    match tokio::task::spawn_blocking(move || settled_snapshot(&workspace, &indexer.snapshot()))
+        .await
     {
         Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => err(
@@ -390,24 +405,13 @@ async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
             format!("unknown choice {choice:?} for pre-flight step \"index\""),
         );
     }
-    let workspace = match state.try_workspace() {
-        Ok(w) => w,
-        Err(e) => return err_state(&e),
-    };
-    let indexer = match state.try_indexer() {
-        Ok(i) => i,
-        Err(e) => return err_state(&e),
+    let (workspace, indexer) = match workspace_and_indexer(state) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
     };
     indexer.request_rebuild();
-    match tokio::task::spawn_blocking(move || {
-        let status = indexer.snapshot();
-        let mut snapshot = build_snapshot(&workspace, &status);
-        if snapshot.is_settled() {
-            snapshot.summary = Some(workspace_summary(&workspace));
-        }
-        snapshot
-    })
-    .await
+    match tokio::task::spawn_blocking(move || settled_snapshot(&workspace, &indexer.snapshot()))
+        .await
     {
         Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => err(
@@ -424,13 +428,9 @@ async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
 /// of the snapshot entirely.
 #[cfg(feature = "embeddings")]
 async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
-    let workspace = match state.try_workspace() {
-        Ok(w) => w,
-        Err(e) => return err_state(&e),
-    };
-    let indexer = match state.try_indexer() {
-        Ok(i) => i,
-        Err(e) => return err_state(&e),
+    let (workspace, indexer) = match workspace_and_indexer(state) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
     };
     let choice = choice.to_owned();
     // The blocking closure carries its error as `Box<Response>` so the
@@ -468,12 +468,7 @@ async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
                 )));
             }
         }
-        let status = indexer.snapshot();
-        let mut snapshot = build_snapshot(&workspace, &status);
-        if snapshot.is_settled() {
-            snapshot.summary = Some(workspace_summary(&workspace));
-        }
-        Ok(snapshot)
+        Ok(settled_snapshot(&workspace, &indexer.snapshot()))
     })
     .await
     {
@@ -605,6 +600,28 @@ mod tests {
         // leaves it empty so phase and lock derivation stay independent.
         let (_c, _r, ws) = workspace();
         let snap = build_snapshot(&ws, &idle());
+        assert!(snap.summary.is_none());
+    }
+
+    #[test]
+    fn settled_snapshot_attaches_the_summary_only_when_settled() {
+        let (_c, _r, ws) = workspace();
+        assert!(settled_snapshot(&ws, &idle()).summary.is_some());
+        // Build work on a ready generation is settled (`is_settled` does not
+        // wait for it), so the summary rides along with the unlocked boot.
+        let building = IndexStatus::Building {
+            current: 3,
+            total: 10,
+            file: "a.md".into(),
+        };
+        assert!(settled_snapshot(&ws, &building).summary.is_some());
+        // A failed index locks the boot on phase Failed, which is not settled,
+        // so the onboarding summary stays off the snapshot.
+        let failed = IndexStatus::Error {
+            message: "boom".into(),
+        };
+        let snap = settled_snapshot(&ws, &failed);
+        assert_eq!(snap.phase, Phase::Failed);
         assert!(snap.summary.is_none());
     }
 
