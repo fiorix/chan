@@ -2910,7 +2910,7 @@ mod tests {
     #[test]
     fn proxy_view_pins_the_admin_wire_field_names() {
         // devserver-control's state::ProxyView is the producer and this
-        // CLI is its only consumer, so a producer-side rename would
+        // CLI is its only Rust consumer, so a producer-side rename would
         // surface as `proxy ps` failing to parse the fleet. The status
         // stays the wire string because the CLI renders it verbatim.
         let v: ProxyView = serde_json::from_str(
@@ -2930,7 +2930,7 @@ mod tests {
         assert_eq!(v.tunnel_count, 3);
         assert_eq!(v.status, "active");
 
-        // The joining state round-trips too; the fleet publishes it
+        // The joining state parses too; the fleet publishes it
         // while a proxy's snapshot is still staging.
         let joining: ProxyView = serde_json::from_str(
             r#"{
