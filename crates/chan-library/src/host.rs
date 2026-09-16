@@ -57,22 +57,6 @@ pub struct HostedWorkspace {
     pub handle: ServeHandle,
 }
 
-/// The launcher's workspace row: one registered workspace as the launcher lists
-/// it. `workspace_id` is the route prefix without its leading slash -- a single
-/// legible segment the launcher addresses by and treats as opaque. `on` =
-/// currently mounted/served. No token: the launcher opens a workspace's tenant
-/// separately (which carries its own per-tenant token).
-///
-/// Local rows (the host's own library) carry `devserver_id: None` and route
-/// their on/off/remove by `workspace_id` (the by-root path). Rows merged
-/// in from a connected devserver via [`DevserverFeedSource::workspaces`] carry
-/// `devserver_id: Some(..)` + the remote `library_id`, and the SPA groups them by
-/// `devserver_id` and routes their on/off/forget by `prefix`.
-///
-/// Defined here, not in chan-server's route module, because
-/// [`DevserverFeedSource`] returns it and that trait is a chan-library type the
-/// host holds; chan-server re-exports it for its route handlers (the same
-/// define-in-library / re-export-from-server shape as `DevserverEntry`).
 /// A workspace's live lifecycle state, distinct from the persisted desired
 /// `on`. The launcher drives spinners and disables toggles off this REAL
 /// backend state instead of an optimistic timer: a row spins while `starting`,
@@ -174,6 +158,22 @@ impl WorkspaceLifecycleOutcome {
     }
 }
 
+/// The launcher's workspace row: one registered workspace as the launcher lists
+/// it. `workspace_id` is the route prefix without its leading slash -- a single
+/// legible segment the launcher addresses by and treats as opaque. `on` =
+/// currently mounted/served. No token: the launcher opens a workspace's tenant
+/// separately (which carries its own per-tenant token).
+///
+/// Local rows (the host's own library) carry `devserver_id: None` and route
+/// their on/off/remove by `workspace_id` (the by-root path). Rows merged
+/// in from a connected devserver via [`DevserverFeedSource::workspaces`] carry
+/// `devserver_id: Some(..)` + the remote `library_id`, and the SPA groups them by
+/// `devserver_id` and routes their on/off/forget by `prefix`.
+///
+/// Defined here, not in chan-server's route module, because
+/// [`DevserverFeedSource`] returns it and that trait is a chan-library type the
+/// host holds; chan-server re-exports it for its route handlers (the same
+/// define-in-library / re-export-from-server shape as `DevserverEntry`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherWorkspace {
     /// Route prefix without its leading slash -- the launcher's opaque local key.
@@ -2329,9 +2329,6 @@ impl WorkspaceHost {
         connected.into_iter().next().map(|row| row.window_id)
     }
 
-    /// Remember the window an escaping open just went to, so the opens that
-    /// follow it land there too. Cleared implicitly: a window that leaves the
-    /// registry stops matching and the next open picks again.
     /// Whether this window was minted by a routed `cs open` and has not yet
     /// been handed its frame, so the surface opening it should not seed a
     /// default terminal. False for every window on a host that serves no
@@ -2355,6 +2352,9 @@ impl WorkspaceHost {
             .unwrap_or(false)
     }
 
+    /// Remember the window an escaping open just went to, so the opens that
+    /// follow it land there too. Cleared implicitly: a window that leaves the
+    /// registry stops matching and the next open picks again.
     fn remember_routed_standalone(&self, window_id: &str) {
         if let Ok(mut last) = self.last_routed_standalone.lock() {
             *last = Some(window_id.to_string());
