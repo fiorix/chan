@@ -2,11 +2,11 @@
 //! JSON record from the control socket. `--json` is the server's bytes
 //! verbatim plus a newline; `--json --pretty` re-indents through a
 //! `serde_json::Value`, whose keys are sorted because serde_json is built
-//! without `preserve_order`;
-//! the default is the markdown rendering, which ends its own output. `cs
-//! search` parses the reply into the typed result before printing, so its
-//! pretty form keeps the struct's field order, and it exits non-zero after
-//! printing when the result carries structured errors.
+//! without `preserve_order`; the default is the markdown rendering, which
+//! ends its own output. `cs search` parses the reply into the typed result
+//! before printing, so its pretty form keeps the struct's field order, and
+//! it exits non-zero after printing when the result carries structured
+//! errors.
 //!
 //! Each case runs the `cs` binary (the chan binary invoked as `cs`, as in
 //! cs_alias.rs) against a one-shot fake control server on a temp Unix
@@ -436,9 +436,10 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
             }
             Answer::AtOnce => {}
         }
-        // A `cs` that failed between its request and its read is already
-        // gone and the write breaks the pipe. Let that show as `cs`'s own
-        // stderr through the exit assertions, not as a panic in this task.
+        // A `cs` that failed between its request and its read may already
+        // be gone, and then the write breaks the pipe. Let that show as
+        // `cs`'s own stderr through the exit assertions, not as a panic in
+        // this task.
         let _ = write.write_all(line.as_bytes()).await;
         request
     });
@@ -554,8 +555,10 @@ async fn search_prints_then_fails_when_the_result_carries_errors() {
 /// request line is read, without waiting for `cs` to half-close. When that
 /// close arrives first, macOS answers the client's shutdown with ENOTCONN,
 /// and `cs` must still print the reply it already has. Which side wins is
-/// a scheduling race, so the fastest command runs several times to make a
-/// regression likely to show; on Linux the shutdown never fails either way.
+/// a scheduling race, so one command runs several times to make a
+/// regression likely to show; the fake answers every command alike, and
+/// `window list` needs no environment beyond the socket. On Linux the
+/// shutdown never fails either way.
 #[tokio::test]
 async fn a_server_that_answers_and_closes_at_once_still_gets_its_reply_printed() {
     let case = cases()
