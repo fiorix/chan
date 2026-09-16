@@ -1,7 +1,8 @@
 //! Byte-level pins of what `cs` prints for the commands that answer with a
 //! JSON record from the control socket. `--json` is the server's bytes
 //! verbatim plus a newline; `--json --pretty` re-indents through a
-//! `serde_json::Value`, whose maps are ordered, so the keys come out sorted;
+//! `serde_json::Value`, whose keys are sorted because serde_json is built
+//! without `preserve_order`;
 //! the default is the markdown rendering, which ends its own output. `cs
 //! search` parses the reply into the typed result before printing, so its
 //! pretty form keeps the struct's field order, and it exits non-zero after

@@ -1217,8 +1217,8 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
 
 /// Print a control reply the way every JSON-answering `cs` command does:
 /// `--json` is the server's bytes verbatim, `--json --pretty` re-indents
-/// them through a `serde_json::Value` (whose maps are ordered, so the keys
-/// come out sorted), and the default is `render`'s markdown, which ends its
+/// them through a `serde_json::Value` (keys are sorted because serde_json is
+/// built without `preserve_order`), and the default is `render`'s markdown, which ends its
 /// own output. `noun` names the reply in the parse and format errors.
 fn print_reply(
     raw: &str,
@@ -1239,8 +1239,9 @@ fn print_reply(
     print_json(raw, noun, value.as_ref())
 }
 
-/// The `--json` half of a reply: `pretty` re-serializes `value` (a typed
-/// result keeps its field order; a `serde_json::Value` sorts its keys), and
+/// The `--json` half of a reply: `Some(value)` is re-serialized (a typed
+/// result keeps its field order; a `serde_json::Value` sorts its keys because
+/// serde_json is built without `preserve_order`), and
 /// `None` prints the server's bytes as they came. Both go to stdout so the
 /// output pipes cleanly.
 fn print_json<T: serde::Serialize>(raw: &str, noun: &str, pretty: Option<&T>) -> Result<()> {
@@ -1654,8 +1655,8 @@ async fn cmd_pane(
         },
     };
     let raw = send_control_request(&socket, request).await?;
-    // JSON is the reply as is, whatever the action; only a query renders the
-    // layout, a mutation renders its exec result below.
+    // With --json every action prints the reply (re-indented under --pretty);
+    // without it a query renders the layout and a mutation is handled below.
     if json || is_query {
         print_reply(
             &raw,

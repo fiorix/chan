@@ -4163,14 +4163,14 @@ async fn cmd_devserver_action(action: DevserverAction, verbose: bool) -> Result<
         Err(A::Disconnect { target }) => return cmd_devserver_disconnect(target).await,
         Err(A::Forget { target, force }) => return cmd_devserver_forget(target, force).await,
         Err(
-            server_side @ (A::Run { .. }
+            A::Run { .. }
             | A::Start { .. }
             | A::Stop { .. }
             | A::Restart { .. }
             | A::Status { .. }
             | A::Join { .. }
-            | A::RotateToken { .. }),
-        ) => unreachable!("devserver_verb maps every server-side verb, got {server_side:?}"),
+            | A::RotateToken { .. },
+        ) => unreachable!("devserver_verb maps every server-side verb"),
     };
     cmd_devserver(args, verb, verbose).await
 }
