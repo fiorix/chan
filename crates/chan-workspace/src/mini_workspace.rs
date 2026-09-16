@@ -399,21 +399,7 @@ impl MiniWorkspace {
         if dir.symlink_metadata(&to_path).is_ok() {
             return Err(ChanError::PathAlreadyExists(to.to_string()));
         }
-        self.fs.preflight_tree(from, false)?;
-        let tmp = self.fs.temp_sibling_name(to)?;
-        match self.copy_tree_plain(from, &tmp) {
-            Ok(()) => {}
-            Err(error) => {
-                self.fs.remove_tree_best_effort(&tmp);
-                return Err(error);
-            }
-        }
-        let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
-        if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
-            self.fs.remove_tree_best_effort(&tmp);
-            return Err(ChanError::from(e));
-        }
-        Ok(())
+        self.stage_tree_copy(from, to)
     }
 
     /// Finder-style collision-free destination name for pasting `name`
@@ -497,21 +483,7 @@ impl MiniWorkspace {
         // Repeated from `move_plain` rather than assumed from it: this lane
         // is the one that actually recurses, and it is reachable on its own.
         self.fs.ensure_destination_outside_source(from, to)?;
-        self.fs.preflight_tree(from, false)?;
-        let tmp = self.fs.temp_sibling_name(to)?;
-        match self.copy_tree_plain(from, &tmp) {
-            Ok(()) => {}
-            Err(error) => {
-                self.fs.remove_tree_best_effort(&tmp);
-                return Err(error);
-            }
-        }
-        let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
-        let (_, to_path) = self.fs.resolve_io(to)?;
-        if let Err(e) = dir.rename(&tmp_path, &dir, &to_path) {
-            self.fs.remove_tree_best_effort(&tmp);
-            return Err(ChanError::from(e));
-        }
+        self.stage_tree_copy(from, to)?;
         if let Err(error) = self.fs.remove_tree(from) {
             let message = format!(
                 "cross-device move copied {from} to {to}, but removing the source failed: \
@@ -522,6 +494,26 @@ impl MiniWorkspace {
             } else {
                 ChanError::Io(message)
             });
+        }
+        Ok(())
+    }
+
+    /// Stage a copy of `from` in a uniquely named temporary sibling of `to`
+    /// and rename it into place once complete. The whole source tree is
+    /// preflighted first; a failure at any later step removes only the
+    /// temporary tree and never creates `to`.
+    fn stage_tree_copy(&self, from: &str, to: &str) -> Result<()> {
+        self.fs.preflight_tree(from, false)?;
+        let tmp = self.fs.temp_sibling_name(to)?;
+        if let Err(error) = self.copy_tree_plain(from, &tmp) {
+            self.fs.remove_tree_best_effort(&tmp);
+            return Err(error);
+        }
+        let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
+        let (_, to_path) = self.fs.resolve_io(to)?;
+        if let Err(error) = dir.rename(&tmp_path, &dir, &to_path) {
+            self.fs.remove_tree_best_effort(&tmp);
+            return Err(ChanError::from(error));
         }
         Ok(())
     }
@@ -1026,6 +1018,21 @@ mod tests {
         assert!(fx.mini.list("proj").unwrap().len() == 2, "source intact");
         fx.mini.copy_plain("proj", "projector").unwrap();
         assert!(fx.root.join("projector/f.txt").exists());
+    }
+
+    #[test]
+    fn copy_plain_refuses_an_existing_destination_inside_the_source_as_containment() {
+        let fx = fixture();
+        stdfs::create_dir_all(fx.root.join("proj/sub")).unwrap();
+        stdfs::write(fx.root.join("proj/f.txt"), "f").unwrap();
+        // Containment is decided before the no-clobber check, so a
+        // destination that both sits inside the source and already exists
+        // is refused as containment rather than as a collision.
+        assert!(matches!(
+            fx.mini.copy_plain("proj", "proj/sub"),
+            Err(ChanError::DestinationInsideSource(path)) if path == "proj/sub"
+        ));
+        assert_eq!(fx.mini.list("proj").unwrap().len(), 2, "source intact");
     }
 
     #[cfg(unix)]
