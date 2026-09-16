@@ -1084,6 +1084,90 @@ fn devserver_route_prefix(slug: &str) -> String {
 const DEVSERVER_CONTROL_ATTENTION_EVENT: &str = "devserver-control-attention";
 const DEVSERVER_CONTROL_RESTORED_EVENT: &str = "devserver-control-restored";
 
+/// Warm a devserver's pane-colour cache before its window watcher opens any
+/// window, so a devserver window seeds its `?pane=` colour from the first
+/// build instead of flashing blue until the colour watch
+/// ([`window_watcher_wiring::spawn_devserver_color_watch`]) pushes its first
+/// frame. The cache is keyed by devserver id and read through `pane_color` at
+/// mint time; the watch keeps it live afterwards. Best-effort: a failed fetch
+/// leaves the cache cold for the watch to fill and logs `failure` at debug, so
+/// connect never fails on it. The local library needs no analog, since its
+/// `pane_color("local")` reads the persisted desktop config directly.
+async fn seed_devserver_color(
+    state: &AppState,
+    id: &str,
+    conn: &devserver::DevserverConn,
+    failure: &str,
+) {
+    match devserver::fetch_local_color(conn).await {
+        Ok(color) => {
+            state.devserver_feed.set_color(id.to_string(), color);
+        }
+        Err(e) => {
+            tracing::debug!(devserver = %id, error = %e, "{failure}");
+        }
+    }
+}
+
+/// Wire a devserver's freshly spawned window watcher into the launcher: clear
+/// any down flag a script death or an outage left so the rows render at once,
+/// register the watcher's live window snapshot, seed the workspace list from
+/// `rows` when the connect fetched them already, then start the workspace
+/// poll and the colour watch on the watcher's `cancel` and keep its view and
+/// stop handle, so the close handler buries windows through the view and a
+/// disconnect stops all three tasks with one send. The seed sits after
+/// `register_windows`, because `library_id_of` resolves through the registered
+/// snapshot, and before the poll starts, so the poll's fresher list is never
+/// overwritten by it.
+fn wire_devserver_watcher(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    id: &str,
+    conn: devserver::DevserverConn,
+    (cancel, snapshot, view): (
+        tokio::sync::watch::Sender<DevserverWatcherStop>,
+        Arc<Mutex<Vec<chan_server::WindowRecord>>>,
+        Arc<window_watcher::WatcherViewState>,
+    ),
+    rows: Option<Vec<devserver::DevserverWorkspaceRow>>,
+) {
+    state.devserver_feed.set_down(id, false);
+    state
+        .devserver_feed
+        .register_windows(id.to_string(), snapshot);
+    if let Some(rows) = rows {
+        let library_id = state.devserver_feed.library_id_of(id);
+        let mapped = rows
+            .into_iter()
+            .map(|r| to_launcher_workspace(id, library_id.clone(), r))
+            .collect();
+        state.devserver_feed.set_workspaces(id.to_string(), mapped);
+    }
+    spawn_devserver_workspace_poll(
+        app.clone(),
+        Arc::clone(state),
+        id.to_string(),
+        conn.clone(),
+        cancel.subscribe(),
+    );
+    window_watcher_wiring::spawn_devserver_color_watch(
+        Arc::clone(state),
+        id.to_string(),
+        conn,
+        cancel.subscribe(),
+    );
+    state
+        .devserver_watcher_views
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), view);
+    state
+        .devserver_watchers
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), cancel);
+}
+
 /// Poll a connected devserver's served-workspace list into the feed cache so the
 /// (sync) [`DevserverFeed::workspaces`] serves it without blocking on HTTP. Fires
 /// [`EmbeddedServer::signal_library_change`](embedded::EmbeddedServer::signal_library_change)
@@ -2592,18 +2676,13 @@ async fn connect_rostered_devserver(
     )?;
     state.devservers.set(id.clone(), conn.clone());
 
-    match devserver::fetch_local_color(&conn).await {
-        Ok(color) => {
-            state.devserver_feed.set_color(id.clone(), color);
-        }
-        Err(e) => {
-            tracing::debug!(
-                devserver = %id,
-                error = %e,
-                "eager gateway pane-colour seed failed; the colour watch will fill it",
-            );
-        }
-    }
+    seed_devserver_color(
+        &state,
+        &id,
+        &conn,
+        "eager gateway pane-colour seed failed; the colour watch will fill it",
+    )
+    .await;
 
     // Seed the devserver's self-reported OS so the launcher's machine icon
     // renders instead of the neutral globe. The raw-connect path reads it from
@@ -2654,37 +2733,14 @@ async fn connect_rostered_devserver(
         let _ = cancel.send(DevserverWatcherStop::CloseWindows);
         return Err(e.into());
     }
-    state.devserver_feed.set_down(&id, false);
-    state.devserver_feed.register_windows(id.clone(), snapshot);
-    let library_id = state.devserver_feed.library_id_of(&id);
-    let mapped = rows
-        .into_iter()
-        .map(|r| to_launcher_workspace(&id, library_id.clone(), r))
-        .collect();
-    state.devserver_feed.set_workspaces(id.clone(), mapped);
-    spawn_devserver_workspace_poll(
-        app.clone(),
-        Arc::clone(&state),
-        id.clone(),
-        conn.clone(),
-        cancel.subscribe(),
-    );
-    window_watcher_wiring::spawn_devserver_color_watch(
-        Arc::clone(&state),
-        id.clone(),
+    wire_devserver_watcher(
+        &app,
+        &state,
+        &id,
         conn,
-        cancel.subscribe(),
+        (cancel, snapshot, view),
+        Some(rows),
     );
-    state
-        .devserver_watcher_views
-        .lock()
-        .unwrap()
-        .insert(id.clone(), view);
-    state
-        .devserver_watchers
-        .lock()
-        .unwrap()
-        .insert(id.clone(), cancel);
     if let Some(embedded) = state.embedded() {
         embedded.signal_library_change();
     }
@@ -2895,27 +2951,13 @@ async fn connect_devserver_impl_inner(
             )?;
         }
     }
-    // Warm this devserver's pane-colour cache BEFORE the window watcher
-    // opens any window, so a devserver window seeds its `?pane=` colour from the
-    // FIRST build instead of flashing blue until the async colour watch
-    // (`spawn_devserver_color_watch`, below) pushes the first frame. The cache is
-    // keyed by devserver id and read through `pane_color` at mint time; the watch
-    // keeps it live for later changes. Best-effort: a fetch failure just leaves the
-    // cache cold (the watch fills it shortly), so connect must NOT fail on it. (The
-    // local library needs no analog -- its `pane_color("local")` reads the persisted
-    // desktop config directly, always fresh.)
-    match devserver::fetch_local_color(&conn).await {
-        Ok(color) => {
-            state.devserver_feed.set_color(id.clone(), color);
-        }
-        Err(e) => {
-            tracing::debug!(
-                devserver = %id,
-                error = %e,
-                "eager pane-colour seed failed; the colour watch will fill it",
-            );
-        }
-    }
+    seed_devserver_color(
+        &state,
+        &id,
+        &conn,
+        "eager pane-colour seed failed; the colour watch will fill it",
+    )
+    .await;
     if let Some((ct, generation)) = &control {
         ensure_control_run_live(&state, &id, *generation, &ct.prefix)?;
     }
@@ -2932,38 +2974,7 @@ async fn connect_devserver_impl_inner(
     if let Some((ct, generation)) = &control {
         ensure_control_run_live(&state, &id, *generation, &ct.prefix)?;
     }
-    // Feed the launcher: register this devserver's live window snapshot,
-    // poll its served workspaces into the cache, and subscribe to its colour feed
-    // with push-based updates. All stop when the disconnect flips `cancel` (they
-    // subscribe to the same channel). A fresh connect clears any down flag a
-    // previous script death / outage left, so the rows render immediately.
-    state.devserver_feed.set_down(&id, false);
-    state.devserver_feed.register_windows(id.clone(), snapshot);
-    spawn_devserver_workspace_poll(
-        app.clone(),
-        Arc::clone(&state),
-        id.clone(),
-        conn.clone(),
-        cancel.subscribe(),
-    );
-    window_watcher_wiring::spawn_devserver_color_watch(
-        Arc::clone(&state),
-        id.clone(),
-        conn.clone(),
-        cancel.subscribe(),
-    );
-    // Track the watcher view so the close handler can bury this devserver's
-    // windows through it.
-    state
-        .devserver_watcher_views
-        .lock()
-        .unwrap()
-        .insert(id.clone(), view);
-    state
-        .devserver_watchers
-        .lock()
-        .unwrap()
-        .insert(id.clone(), cancel);
+    wire_devserver_watcher(&app, &state, &id, conn, (cancel, snapshot, view), None);
     // The desktop does not mint a boot terminal on connect: the headless
     // devserver runs the library's own first-open rule when it opens (one
     // terminal the very first time, never re-minted once the user closes it), so
@@ -3121,35 +3132,10 @@ async fn reconnect_devserver(
                         probe.clone(),
                     )
                     .await?;
-                // Re-point the launcher feed at the fresh snapshot + a
-                // poll + colour watch on the rotated token; the old ones stopped on
-                // the cancel above. The rotation proves the transport answers, so
-                // clear any down flag an outage set.
-                state.devserver_feed.set_down(&id, false);
-                state.devserver_feed.register_windows(id.clone(), snapshot);
-                spawn_devserver_workspace_poll(
-                    app.clone(),
-                    Arc::clone(&state),
-                    id.clone(),
-                    probe.clone(),
-                    cancel.subscribe(),
-                );
-                window_watcher_wiring::spawn_devserver_color_watch(
-                    Arc::clone(&state),
-                    id.clone(),
-                    probe,
-                    cancel.subscribe(),
-                );
-                state
-                    .devserver_watcher_views
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), view);
-                state
-                    .devserver_watchers
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), cancel);
+                // Re-point the launcher feed at the fresh snapshot, a poll and a
+                // colour watch on the rotated token; the old ones stopped on the
+                // cancel above.
+                wire_devserver_watcher(&app, &state, &id, probe, (cancel, snapshot, view), None);
             }
             let _ = app.emit(serve::SERVES_CHANGED, ());
             return Ok(true);
@@ -8719,6 +8705,35 @@ mod tests {
             "\n/// Error marker for native access",
         );
         assert!(disconnect.contains("DevserverWatcherStop::CloseWindows"));
+    }
+
+    #[test]
+    fn every_devserver_connect_wires_its_watcher_through_one_helper() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        // The three connect paths share one post-watcher sequence (down flag,
+        // snapshot, poll, colour watch, view and stop handle), so each must
+        // call the helper and none may register the snapshot on its own.
+        for (start, end) in [
+            (
+                "\nasync fn connect_rostered_devserver(",
+                "\nasync fn connect_devserver_impl_inner(",
+            ),
+            (
+                "\nasync fn connect_devserver_impl_inner(",
+                "\nasync fn list_devserver_workspaces(",
+            ),
+            ("\nasync fn reconnect_devserver(", "\n/// Forget (unmount)"),
+        ] {
+            let connect = source_region(MAIN_RS, start, end);
+            assert!(
+                connect.contains("wire_devserver_watcher("),
+                "{start:?} wires its watcher through the helper"
+            );
+            assert!(
+                !connect.contains("register_windows("),
+                "{start:?} registers no window snapshot on its own"
+            );
+        }
     }
 
     #[test]
