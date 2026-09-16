@@ -1966,10 +1966,39 @@ mod bulk_transfer_construction_tests {
 #[cfg(test)]
 mod tenant_builder_tests {
     use super::*;
+    use crate::control_socket::{transport, ControlResponse};
     use crate::route_authority::{
         test_support::mounted_routes, Verb, FALLBACK, TERMINAL_TENANT, WORKSPACE_TENANT,
     };
+    use axum::http::StatusCode;
     use std::collections::BTreeSet;
+    use tower::ServiceExt;
+
+    /// One line-framed control request and its reply over a built tenant's
+    /// own socket. chan-server links chan-shell without its client feature,
+    /// so the frame is written by hand, as in the control socket tests.
+    async fn control_round_trip(socket: &std::path::Path, request: &str) -> ControlResponse {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let client = transport::connect(socket)
+                .await
+                .expect("connect control socket");
+            let (read, mut write) = client.into_split();
+            write
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .expect("write control request");
+            let mut line = String::new();
+            BufReader::new(read)
+                .read_line(&mut line)
+                .await
+                .expect("read control reply");
+            serde_json::from_str(&line).expect("control response json")
+        })
+        .await
+        .expect("control round trip timed out")
+    }
 
     #[tokio::test]
     async fn tenant_builders_preserve_routes_and_state() {
@@ -1999,6 +2028,8 @@ mod tenant_builder_tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
+            // The child's markers say which fallback arm ran; surface them.
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return;
         }
 
@@ -2032,9 +2063,28 @@ mod tenant_builder_tests {
         .unwrap();
         let mut terminal_app = build_tenant_app(
             TenantBuild {
-                library,
+                library: library.clone(),
                 tenant: TenantKind::Terminal {
                     session_dir: None,
+                    drafts_store_root: None,
+                },
+                desktop: DesktopBridge::default(),
+                unserve: chan_library::UnserveMode::Standalone,
+                control_identity: None,
+                bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+        // The durable terminal: the one kind that carries a session store and
+        // the Files surface.
+        let session_dir = tempfile::tempdir().unwrap();
+        let mut files_app = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir: Some(session_dir.path().to_path_buf()),
                     drafts_store_root: None,
                 },
                 desktop: DesktopBridge::default(),
@@ -2058,6 +2108,11 @@ mod tenant_builder_tests {
                 terminal_router(terminal_app.state.clone()),
                 TERMINAL_TENANT,
             ),
+            (
+                &files_app,
+                terminal_router(files_app.state.clone()),
+                TERMINAL_TENANT,
+            ),
         ] {
             let expected: BTreeSet<_> = table
                 .iter()
@@ -2076,11 +2131,71 @@ mod tenant_builder_tests {
             assert!(artifacts.control_socket.is_some());
             assert!(artifacts.state.token.is_some());
             assert_eq!(artifacts.state.token, artifacts.token);
-            assert!(artifacts.state.terminal_session_dir.is_none());
-            assert!(artifacts.state.standalone_files.is_none());
+            // The nested walk drops the fallback row, so ask the built app for
+            // a client route: `serve_static` answers with the prefixed shell,
+            // or with its refusal on a checkout without a bundle, where axum's
+            // own fallback would answer an empty 404.
+            let response = artifacts
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("{}/client/route", config.prefix))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            match status {
+                StatusCode::OK => {
+                    eprintln!("fallback shell exercised");
+                    let meta = format!("<meta name=\"chan-prefix\" content=\"{}\">", config.prefix);
+                    assert!(body.contains(&meta), "fallback served no {meta}: {body}");
+                }
+                StatusCode::NOT_FOUND => {
+                    eprintln!("fallback shell not exercised: frontend bundle unavailable");
+                    assert_eq!(
+                        body,
+                        "frontend bundle not built; run `cd web && npm install && npm run build`"
+                    );
+                }
+                other => panic!("fallback answered {other}: {body}"),
+            }
+        }
+        // The control tenant decides which commands a socket answers, and a
+        // built tenant is the only place that choice is observable: a session
+        // list is served by the workspace and refused by both terminals,
+        // whether or not they serve Files.
+        let socket = |artifacts: &AppArtifacts| {
+            artifacts
+                .control_socket
+                .as_ref()
+                .unwrap()
+                .socket_path()
+                .to_path_buf()
+        };
+        match control_round_trip(&socket(&workspace_app), "{\"type\":\"session_list\"}").await {
+            ControlResponse::Ok { message } => assert_eq!(message, "[]"),
+            other => panic!("workspace tenant did not serve the session list: {other:?}"),
+        }
+        for terminal in [&terminal_app, &files_app] {
+            match control_round_trip(&socket(terminal), "{\"type\":\"session_list\"}").await {
+                ControlResponse::Error { message } => assert_eq!(
+                    message,
+                    "cs session list is only available in a workspace window; this is a \
+                     standalone terminal. Standalone terminals have no shared session to lead."
+                ),
+                other => panic!("terminal tenant did not refuse the session list: {other:?}"),
+            }
         }
         assert!(workspace_app.mcp_bridge.is_some());
         assert!(terminal_app.mcp_bridge.is_none());
+        assert!(files_app.mcp_bridge.is_none());
         assert_eq!(workspace_app.state.workspace_root, workspace_root);
         assert_eq!(workspace_app.state.token.as_ref(), Some(&persisted_token));
         assert_eq!(
@@ -2090,8 +2205,30 @@ mod tenant_builder_tests {
         assert_ne!(terminal_app.state.token, workspace_app.state.token);
         assert!(workspace_app.state.workspace_cell.read().unwrap().is_some());
         assert!(terminal_app.state.workspace_cell.read().unwrap().is_none());
+        assert!(files_app.state.workspace_cell.read().unwrap().is_none());
+        // Only the durable terminal carries its session store and the Files
+        // surface, and the surface follows the platform gate the builder
+        // applies.
+        assert!(workspace_app.state.terminal_session_dir.is_none());
+        assert!(workspace_app.state.standalone_files.is_none());
+        assert!(terminal_app.state.terminal_session_dir.is_none());
+        assert!(terminal_app.state.standalone_files.is_none());
+        assert_eq!(
+            files_app.state.terminal_session_dir.as_deref(),
+            Some(session_dir.path())
+        );
+        assert_eq!(
+            files_app.state.standalone_files.is_some(),
+            standalone_files_supported()
+        );
+        // Every owned task is joined on shutdown, so a flusher or reconciler
+        // that falls out of the owner's list outlives its tenant.
+        assert_eq!(workspace_app.tasks.task_count(), 8);
+        assert_eq!(terminal_app.tasks.task_count(), 4);
+        assert_eq!(files_app.tasks.task_count(), 4);
         workspace_app.tasks.shutdown().await;
         terminal_app.tasks.shutdown().await;
+        files_app.tasks.shutdown().await;
     }
 }
 

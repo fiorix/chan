@@ -298,6 +298,15 @@ impl TenantTaskOwner {
             let _ = self.shutdown_tx.send(true);
         }
     }
+
+    /// How many task handles this owner joins on shutdown. Test-only: the
+    /// route layer's builder pin reads it to prove every per-tenant task is
+    /// owned, since a handle that falls out of the list keeps its task
+    /// running past the tenant.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn task_count(&self) -> usize {
+        self.handles.len()
+    }
 }
 
 impl Drop for TenantTaskOwner {
