@@ -1753,24 +1753,13 @@ impl Workspace {
                 Vec::new()
             };
         }
-        let mut out = Vec::new();
         // Filtered so we don't waste time collecting paths under
         // `node_modules/` etc. that were never indexed in the first
         // place; symmetric with the filtered index/graph build.
         let policy = self.scope_policy();
-        for entry in fs_ops::walk_workspace_scoped(abs, &policy) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel_path = match entry.path().strip_prefix(&self.entry.root_path) {
-                Ok(p) => p.to_string_lossy().replace('\\', "/"),
-                Err(_) => continue,
-            };
-            if fs_ops::is_indexable_text(&rel_path) {
-                out.push(rel_path);
-            }
-        }
-        out
+        fs_ops::indexable_rel_files(&self.entry.root_path, abs, &policy)
+            .map(|(rel_path, _)| rel_path)
+            .collect()
     }
 
     /// Drop graph rows and search-index entries for a path that
@@ -1861,17 +1850,7 @@ impl Workspace {
         // `node_modules/` / `target/` subtree does not re-index a
         // dependency tree the index deliberately excludes.
         let policy = self.scope_policy();
-        for entry in fs_ops::walk_workspace_scoped(&abs, &policy) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel_path = match entry.path().strip_prefix(&self.entry.root_path) {
-                Ok(p) => p.to_string_lossy().replace('\\', "/"),
-                Err(_) => continue,
-            };
-            if !fs_ops::is_indexable_text(&rel_path) {
-                continue;
-            }
+        for (rel_path, _) in fs_ops::indexable_rel_files(&self.entry.root_path, &abs, &policy) {
             if let Err(e) = self.index_file(&rel_path) {
                 tracing::warn!(rel = %rel_path, ?e, "restore: index_file failed");
             }
@@ -3644,17 +3623,7 @@ impl Workspace {
         let policy = self.scope_policy();
         let mut disk_files: std::collections::HashMap<String, (Option<i64>, Option<i64>)> =
             std::collections::HashMap::new();
-        for entry in fs_ops::walk_workspace_scoped(self.root(), &policy) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = match entry.path().strip_prefix(self.root()) {
-                Ok(p) => p.to_string_lossy().replace('\\', "/"),
-                Err(_) => continue,
-            };
-            if !fs_ops::is_indexable_text(&rel) {
-                continue;
-            }
+        for (rel, entry) in fs_ops::indexable_rel_files(self.root(), self.root(), &policy) {
             #[cfg(test)]
             if walk_skip.as_deref() == Some(&rel) {
                 continue;

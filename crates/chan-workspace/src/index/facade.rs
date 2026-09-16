@@ -1410,15 +1410,8 @@ fn wipe_vectors_dir(index_dir: &Path) -> Result<(), IndexError> {
 /// editor gate (which also covers `.py`, `.json`, Makefile, ...)
 /// must not pull arbitrary source/config text into the index.
 fn list_indexable(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<String>, IndexError> {
-    let mut out: Vec<String> = fs_ops::walk_workspace_scoped(root, policy)
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| {
-            e.path()
-                .strip_prefix(root)
-                .ok()
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        })
-        .filter(|rel| fs_ops::is_indexable_text(rel))
+    let mut out: Vec<String> = fs_ops::indexable_rel_files(root, root, policy)
+        .map(|(rel, _)| rel)
         .collect();
     // Shallow paths first, so root-level and top-level notes become
     // searchable before deep leaf directories (the file browser shows the

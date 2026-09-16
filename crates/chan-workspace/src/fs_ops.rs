@@ -852,6 +852,29 @@ pub fn walk_workspace_scoped<'a>(
         })
 }
 
+/// Every regular file under `walk_from` that the index ingests: inside
+/// `policy` and classified as indexable text. Yields the path relative
+/// to `root` with forward slashes on every platform, the key the index
+/// and the graph share, beside the walk entry so a caller that needs
+/// metadata does not stat again.
+pub(crate) fn indexable_rel_files<'a>(
+    root: &'a Path,
+    walk_from: &'a Path,
+    policy: &'a IndexScopePolicy,
+) -> impl Iterator<Item = (String, DirEntry)> + 'a {
+    walk_workspace_scoped(walk_from, policy)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(move |entry| {
+            let rel = entry
+                .path()
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            is_indexable_text(&rel).then_some((rel, entry))
+        })
+}
+
 fn walk_workspace_with<'a>(
     root: &Path,
     filter: Option<&'a WalkFilter>,

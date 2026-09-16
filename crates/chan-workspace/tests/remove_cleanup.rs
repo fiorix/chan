@@ -265,3 +265,59 @@ fn remove_non_editable_file_keeps_inbound_edges() {
         "post.md's outgoing edge is preserved: {post_edges:?}",
     );
 }
+
+#[test]
+fn restore_directory_indexes_only_in_scope_indexable_text() {
+    let cfg = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+    lib.register_workspace(workspace_root.path()).unwrap();
+    let workspace = lib.open_workspace(workspace_root.path()).unwrap();
+
+    // One file of each kind the restore walk has to decide on: indexable
+    // text in scope, indexable text under an excluded directory name, and
+    // a non-text file in scope.
+    workspace
+        .write_text("pkg/keep.md", "# Keep\n\nkeeptoken body\n")
+        .unwrap();
+    workspace
+        .write_text("pkg/node_modules/dep.md", "# Dep\n\ndeptoken body\n")
+        .unwrap();
+    workspace
+        .write_bytes("pkg/blob.bin", b"blobtoken\n")
+        .unwrap();
+    workspace.reindex(None).unwrap();
+
+    let paths = |term: &str| -> Vec<String> {
+        workspace
+            .search(term, &SearchOpts::default())
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|h| h.path)
+            .collect()
+    };
+    assert_eq!(paths("keeptoken"), ["pkg/keep.md"]);
+    assert!(
+        paths("deptoken").is_empty(),
+        "the rebuild indexed under an excluded directory name"
+    );
+
+    workspace.remove("pkg").unwrap();
+    assert!(
+        paths("keeptoken").is_empty(),
+        "stale BM25 row for pkg/keep.md after dir remove"
+    );
+
+    let id = workspace.trash_list().unwrap()[0].id.clone();
+    workspace.trash_restore(&id).unwrap();
+    assert_eq!(paths("keeptoken"), ["pkg/keep.md"]);
+    assert!(
+        paths("deptoken").is_empty(),
+        "restore must not index under an excluded directory name"
+    );
+    assert!(
+        paths("blobtoken").is_empty(),
+        "restore must not index a non-text file"
+    );
+}
