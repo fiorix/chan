@@ -676,7 +676,8 @@ struct TerminalWsOptions {
 const MAX_NAME_CHARS: usize = 128;
 
 /// Longest window, pane or tab id kept, in characters. These labels are trimmed,
-/// blank values are dropped, and the remainder is capped at this length.
+/// then capped at this length. Blank values are dropped, except that terminal
+/// restart refuses a blank window id with 400.
 const MAX_ID_CHARS: usize = 256;
 
 /// Trim `raw`, drop a blank result, and keep at most `max_chars` characters.

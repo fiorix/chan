@@ -648,7 +648,8 @@ fn scoped_local_windows(
 /// `chan list` shows, read live from the host library, the source of truth),
 /// each stamped with its live serve state and sorted by id for a stable list.
 /// `GET /api/library/workspaces` returns these and then appends connected
-/// devservers' rows; the scoped library snapshot returns them alone.
+/// devservers' rows; the scoped library snapshot's `workspaces` field carries
+/// them without feed rows.
 fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
     let library_id = host.library_id().to_string();
     let mut rows: Vec<_> = host
