@@ -655,8 +655,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(index.skipped_entries(), 1);
-        // A skipped entry has no known path, so a scoped snapshot cannot
-        // claim to be complete: every scope reports the index's count.
+        // The index keeps no per-path record of skips, so no scope can tell
+        // whether a skip fell inside it: every scope reports the index's count.
         for scope in [
             Scope::All,
             Scope::Prefix("src".into()),

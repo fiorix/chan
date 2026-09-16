@@ -450,6 +450,11 @@ mod tests {
         );
     }
 
+    /// Pins `ReportState::open` alone: a cache that records skips loads
+    /// without a scan, and the open's eager flush rewrites it from the
+    /// loaded index. A workspace opened through `Library` also schedules
+    /// the persisted-report rescan on its recovery worker, outside this
+    /// state.
     #[cfg(unix)]
     #[test]
     fn a_cache_recording_skips_loads_without_a_rescan() {
@@ -458,6 +463,7 @@ mod tests {
         let jsonl = root.join(".chan/report.jsonl");
         flush_a_scan_with_one_skip(root, &jsonl);
         fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+        let before = meta_line(&jsonl);
         let policy = Arc::new(
             IndexScopePolicy::new(
                 root.to_path_buf(),
@@ -473,9 +479,14 @@ mod tests {
             "opening over a cache that records skips must not rescan"
         );
         // Dropping the state joins the writer after its eager flush, so the
-        // rewritten cache is complete here.
+        // rewritten cache is complete here. Its meta line carries a new
+        // generated_at, which is what proves the rewrite happened.
         drop(state);
         let meta = meta_line(&jsonl);
+        assert_ne!(
+            meta, before,
+            "the open's eager flush must rewrite the cache"
+        );
         assert!(
             meta.contains("\"skipped_entries\":1"),
             "the rewritten cache must keep the stored count: {meta}"

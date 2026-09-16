@@ -38,9 +38,10 @@ pub struct ReportMeta {
     pub schema: u32,
     /// Entries the scan that produced the index skipped because walking
     /// or counting them failed. Every snapshot carries the index's count
-    /// whatever its scope: a skipped entry has no known path, so no scope
-    /// can claim to be complete. Absent from the record when zero, so a
-    /// record without it describes a scan that skipped nothing.
+    /// whatever its scope: the index keeps no per-path record of skips, so
+    /// no scope can tell whether a skip fell inside it. Absent from the
+    /// record when zero, so a record without it describes a scan that
+    /// skipped nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped_entries: usize,
 }
