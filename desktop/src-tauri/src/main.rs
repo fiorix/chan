@@ -3073,51 +3073,6 @@ pub(crate) async fn open_devserver_terminal_impl(
     Ok(())
 }
 
-/// Re-open a devserver's open workspace windows with fresh tenant URLs after
-/// the devserver rotated its token, each under its original label so the
-/// remote restores its `?w=<label>` session (the rebuild replaces the stale
-/// webview in place). The standalone terminal is not re-opened here (its
-/// tenant is gone after a restart); the user reopens one from the recovered
-/// section.
-// Imperative reconnect orchestrator superseded by the devserver watcher (the
-// reconcile re-surfaces workspace windows).
-#[allow(dead_code)]
-fn reopen_devserver_workspace_windows(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    id: &str,
-    rows: &[devserver::DevserverWorkspaceRow],
-) {
-    let windows = state
-        .devserver_windows
-        .lock()
-        .unwrap()
-        .get(id)
-        .cloned()
-        .unwrap_or_default();
-    let fresh: HashMap<&str, &str> = rows
-        .iter()
-        .map(|r| (r.prefix.as_str(), r.url.as_str()))
-        .collect();
-    for window in windows {
-        let Some(prefix) = window.prefix.as_deref() else {
-            continue;
-        };
-        let Some(url) = fresh.get(prefix) else {
-            continue; // tenant no longer mounted
-        };
-        let entry = RemoteReopen {
-            url: url.to_string(),
-            base_title: serve::remote_window_title(url),
-            menu_title: String::new(),
-            config_key: config::remote_window_key(&window.window_id),
-            connecting: true,
-            devserver: None,
-        };
-        let _ = serve::reopen_remote_window(app, &window.label, &entry);
-    }
-}
-
 /// Try to recover a connected devserver that went unreachable: re-acquire its
 /// (possibly rotated) token, confirm it answers, and if the token changed,
 /// re-open its workspace windows with fresh URLs. Returns true on recovery,
