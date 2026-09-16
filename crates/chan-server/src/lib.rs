@@ -415,14 +415,23 @@ fn start_control_socket(
     }
 }
 
-/// Everything one workspace tenant's app is built from, other than the serve
-/// config. Grouped rather than passed positionally: the set is long enough
-/// that a caller reading a bare argument list cannot tell which `Option` or
-/// which `Arc` is which, and every caller supplies all of it.
-struct AppBuild {
+/// Tenant-specific capabilities and their backing stores.
+enum TenantKind {
+    Workspace {
+        workspace: Arc<Workspace>,
+        extension_catalog: Arc<extensions::ExtensionCatalog>,
+    },
+    Terminal {
+        session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
+    },
+}
+
+/// Inputs shared by workspace and terminal tenant construction. Named fields
+/// distinguish the host handles and optional control identity at call sites.
+struct TenantBuild {
     library: Library,
-    workspace: Arc<Workspace>,
-    extension_catalog: Arc<extensions::ExtensionCatalog>,
+    tenant: TenantKind,
     desktop: crate::desktop_window_ops::DesktopBridge,
     unserve: chan_library::UnserveMode,
     control_identity: Option<String>,
@@ -441,11 +450,13 @@ async fn build_app(
     unserve: chan_library::UnserveMode,
     control_identity: Option<String>,
 ) -> Result<AppArtifacts, Error> {
-    build_app_with_extensions(
-        AppBuild {
+    build_tenant_app(
+        TenantBuild {
             library,
-            workspace,
-            extension_catalog: extensions::empty_catalog(),
+            tenant: TenantKind::Workspace {
+                workspace,
+                extension_catalog: extensions::empty_catalog(),
+            },
             desktop,
             unserve,
             control_identity,
@@ -456,57 +467,49 @@ async fn build_app(
     .await
 }
 
-/// Build the full axum app: state assembly, channels, watcher,
-/// indexer, config loads, router. Shared by `serve()` (local TCP
-/// listener) and the `WorkspaceHost` tenant builder (the devserver and
-/// chan-desktop mount their tenants through it) so every path serves
-/// byte-identical request handling.
-async fn build_app_with_extensions(
-    build: AppBuild,
-    config: &ServeConfig,
-) -> Result<AppArtifacts, Error> {
-    let AppBuild {
+fn load_editor_prefs() -> EditorPrefs {
+    EditorPrefs::load().unwrap_or_else(|e| {
+        tracing::warn!("malformed editor preferences, falling back to defaults: {e}");
+        EditorPrefs::default()
+    })
+}
+
+/// Build the tenant's state, owned tasks, local sockets and prefixed router.
+/// Workspace tenants own indexing and editor authorities; terminal tenants
+/// serve the standalone terminal and optional Files surface.
+async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<AppArtifacts, Error> {
+    let TenantBuild {
         library,
-        workspace,
-        extension_catalog,
+        tenant,
         desktop,
         unserve,
         control_identity,
         bulk_transfer,
     } = build;
-    // Captured before `workspace` is moved into AppState below; the standalone
-    // unserve scope names this root.
-    let unserve_root = workspace.root().to_path_buf();
     let token = if config.no_token {
         None
     } else {
-        Some(load_or_create_token(workspace.paths())?)
+        Some(match &tenant {
+            TenantKind::Workspace { workspace, .. } => load_or_create_token(workspace.paths())?,
+            // Terminal tenants have no workspace token directory.
+            TenantKind::Terminal { .. } => random_token(),
+        })
     };
 
-    // Seed the per-machine model cache from the embedded bundle if
-    // this build shipped one (`--features embed-model`). Cheap on
-    // every launch: skipped if the default model is already laid out
-    // at the target. No-op (compile-gated out) on default builds;
-    // they ship without the bundle and rely on the chan-workspace
-    // runtime resolver + the model download flow instead.
     #[cfg(feature = "embed-model")]
-    embed_seed::seed_models_from_bundle();
+    if matches!(tenant, TenantKind::Workspace { .. }) {
+        embed_seed::seed_models_from_bundle();
+    }
 
-    // Server config: same fall-back-on-malformed policy as the
-    // editor preferences. Load before spawning the indexer so its
-    // resource profile applies from the initial boot rebuild.
+    // The indexer consumes the server's resource profile at boot.
     let server_config = ServerConfig::load().unwrap_or_else(|e| {
         tracing::warn!("malformed server config, falling back to defaults: {e}");
         ServerConfig::default()
     });
-    let search_aggression = server_config.effective_search_aggression(config.search_aggression);
-
-    // Install any per-agent submit-chord overrides from
-    // `<config>/chan/submit.toml` into chan-shell, so a client changing its
-    // submit behavior is a config edit, not a rebuild. Missing/malformed
-    // file falls back to the built-in defaults. Env CHAN_SUBMIT_<AGENT>
-    // still wins at chord-application time.
     submit_config::install();
+    // Workspace preferences load after indexer startup; terminals load them
+    // before constructing their event channels and standalone file surface.
+    let terminal_prefs = matches!(tenant, TenantKind::Terminal { .. }).then(load_editor_prefs);
 
     // Unified event stream: every /ws subscriber gets watcher and
     // progress events from the same channel. Producers serialize to
@@ -532,72 +535,81 @@ async fn build_app_with_extensions(
     // Arc is stored on AppState for the /ws handler and survives a
     // storage reset (the rebuilt bridge re-references it).
     let scope_registry = Arc::new(bus::ScopeRegistry::new());
-    // Detect a cold (empty) index before the potentially slow pre-URL work
-    // (the watcher registration on a large tree). On a cold start, print one
-    // heads-up line here so a foreground `chan serve` on a large tree shows a
-    // sign of life instead of a silent gap before the URL. A warm restart
-    // leaves the index non-empty and stays quiet. The same flag gates the
-    // stderr progress tee below.
-    let cold_index = workspace.num_indexed().map(|n| n == 0).unwrap_or(false);
-    if cold_index {
-        eprintln!(
-            "chan: first run on this workspace; the search index builds in the \
-             background after the URL below, so the editor and terminal are \
-             usable right away even on a large tree."
+    let workspace_setup = if let TenantKind::Workspace { workspace, .. } = &tenant {
+        let search_aggression = server_config.effective_search_aggression(config.search_aggression);
+        // Detect a cold (empty) index before the potentially slow pre-URL work
+        // (the watcher registration on a large tree). On a cold start, print one
+        // heads-up line here so a foreground `chan serve` on a large tree shows a
+        // sign of life instead of a silent gap before the URL. A warm restart
+        // leaves the index non-empty and stays quiet. The same flag gates the
+        // stderr progress tee below.
+        let cold_index = workspace.num_indexed().map(|n| n == 0).unwrap_or(false);
+        if cold_index {
+            eprintln!(
+                "chan: first run on this workspace; the search index builds in the \
+                     background after the URL below, so the editor and terminal are \
+                     usable right away even on a large tree."
+            );
+        }
+        // The watch bridge fans filesystem events onto the /ws broadcast and the
+        // indexer feed. Registering the watcher is the one repo-size-scaling step on
+        // the boot path: `notify`'s recursive registration walks the whole tree, and
+        // on Linux inotify has no native recursive watch, so it installs one watch
+        // per directory. The report's content scan, the larger cost, stays off this
+        // path (it runs lazily on the first report query). Registration runs just
+        // below, after the cell exists.
+        let bridge = make_watch_bridge(
+            &events_tx,
+            &index_events_tx,
+            &self_writes,
+            &scope_registry,
+            workspace.root().to_path_buf(),
         );
-    }
-    // The watch bridge fans filesystem events onto the /ws broadcast and the
-    // indexer feed. Registering the watcher is the one repo-size-scaling step on
-    // the boot path: `notify`'s recursive registration walks the whole tree, and
-    // on Linux inotify has no native recursive watch, so it installs one watch
-    // per directory. The report's content scan, the larger cost, stays off this
-    // path (it runs lazily on the first report query). Registration runs just
-    // below, after the cell exists.
-    let bridge = make_watch_bridge(
-        &events_tx,
-        &index_events_tx,
-        &self_writes,
-        &scope_registry,
-        workspace.root().to_path_buf(),
-    );
-    let workspace_root = workspace.root().to_path_buf();
-    // Background indexer: subscribes to index_events_tx, runs the
-    // initial build if the index is empty, debounces incremental
-    // reindexes 1s per path. Lives for the server's lifetime.
-    // Progress fan-out: every `Workspace::reindex_with` tick (per-file
-    // index, graph rebuild, embed batch) lands on the same /ws
-    // stream as watch + LLM frames, with `type: "progress"`. The
-    // status bar in the web app subscribes to drive the live
-    // indexer pill. On a cold start we also tee that progress to stderr
-    // so the background build isn't silent in the terminal.
-    let broadcast_sink = make_progress_broadcast(&events_tx);
-    let progress_sink: Arc<dyn ProgressCallback> = if cold_index {
-        Arc::new(TeeProgress(vec![
-            broadcast_sink,
-            Arc::new(StderrIndexProgress {
-                verbose: config.verbose,
-                started: Instant::now(),
-                last_emit: Mutex::new(None),
-            }),
-        ]))
+        let workspace_root = workspace.root().to_path_buf();
+        // Background indexer: subscribes to index_events_tx, runs the
+        // initial build if the index is empty, debounces incremental
+        // reindexes 1s per path. Lives for the server's lifetime.
+        // Progress fan-out: every `Workspace::reindex_with` tick (per-file
+        // index, graph rebuild, embed batch) lands on the same /ws
+        // stream as watch + LLM frames, with `type: "progress"`. The
+        // status bar in the web app subscribes to drive the live
+        // indexer pill. On a cold start we also tee that progress to stderr
+        // so the background build isn't silent in the terminal.
+        let broadcast_sink = make_progress_broadcast(&events_tx);
+        let progress_sink: Arc<dyn ProgressCallback> = if cold_index {
+            Arc::new(TeeProgress(vec![
+                broadcast_sink,
+                Arc::new(StderrIndexProgress {
+                    verbose: config.verbose,
+                    started: Instant::now(),
+                    last_emit: Mutex::new(None),
+                }),
+            ]))
+        } else {
+            broadcast_sink
+        };
+        let indexer = Arc::new(indexer::Indexer::spawn(
+            workspace.clone(),
+            index_events_tx.subscribe(),
+            true,
+            search_aggression,
+            progress_sink,
+        ));
+        Some((workspace.clone(), workspace_root, bridge, indexer))
     } else {
-        broadcast_sink
+        None
     };
-    let indexer = Arc::new(indexer::Indexer::spawn(
-        workspace.clone(),
-        index_events_tx.subscribe(),
-        true,
-        search_aggression,
-        progress_sink,
-    ));
-    // Editor preferences: fonts / theme / pane widths / line spacing /
-    // date format. The unified view returned over /api/workspace and
-    // /api/config joins these with ServerConfig.
-    let editor_prefs = EditorPrefs::load().unwrap_or_else(|e| {
-        tracing::warn!("malformed editor preferences, falling back to defaults: {e}");
-        EditorPrefs::default()
-    });
-
+    let editor_prefs = terminal_prefs.unwrap_or_else(load_editor_prefs);
+    // Files belongs only to a durable shared terminal tenant. Capability
+    // advertisement follows successful construction, including on platforms
+    // where the file surface cannot be served.
+    let standalone_files = match &tenant {
+        TenantKind::Terminal {
+            session_dir: Some(_),
+            drafts_store_root,
+        } => construct_standalone_files(&library, &scope_registry, drafts_store_root.as_deref()),
+        _ => None,
+    };
     let last_activity = Arc::new(AtomicU64::new(now_unix_secs()));
     let prefix = Arc::new(RwLock::new(config.prefix.clone()));
     // Shutdown channel: sender lives in artifacts so the serve loop
@@ -607,80 +619,100 @@ async fn build_app_with_extensions(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_tx = Arc::new(shutdown_tx);
 
-    // Try to bring up the MCP socket bridge before building
-    // AppState, so the resolved socket path (or `None` on failure)
-    // is part of the immutable state every handler observes.
-    let socket_path = mcp_bridge::pick_socket_path();
-    // Clone the workspace handle for the watcher registration before the cell
-    // takes ownership of the original below.
-    let watch_workspace = workspace.clone();
-    let state_for_bridge: Arc<RwLock<Option<WorkspaceCell>>> =
-        Arc::new(RwLock::new(Some(WorkspaceCell {
-            workspace,
-            // Filled by the registration step immediately below.
-            watch_handle: None,
-            indexer,
-        })));
-    // Register the filesystem watcher on the blocking pool and await it, so the
-    // cell carries a live handle before this function returns and no detached
-    // task is left holding a strong workspace handle (and its writer flock)
-    // across a later close. This step is the notify registration only: the
-    // report's content scan is lazy (first report query), so the awaited work
-    // is bounded by `notify`'s recursive directory registration. A registration
-    // failure (most often the Linux inotify watch limit,
-    // fs.inotify.max_user_watches) leaves the watcher absent and external edits
-    // reconcile on demand, rather than failing the boot.
-    let watch_cell = state_for_bridge.clone();
-    // Boot-timing anchor: on Linux this recursive registration installs one
-    // inotify watch per directory, so it is the step most sensitive to tree
-    // size now that the report scan is off this path.
-    let watch_t0 = Instant::now();
-    match tokio::task::spawn_blocking(move || watch_workspace.watch(bridge)).await {
-        Ok(Ok(handle)) => {
-            tracing::debug!(
-                t_watch_registered_ms = watch_t0.elapsed().as_millis() as u64,
-                "boot: filesystem watcher registered"
-            );
-            if let Ok(mut cell) = watch_cell.write() {
-                if let Some(cell) = cell.as_mut() {
-                    cell.watch_handle = Some(handle);
+    let (workspace_root, workspace_cell, mcp_socket_path, mcp_bridge) =
+        if let Some((workspace, workspace_root, bridge, indexer)) = workspace_setup {
+            // Try to bring up the MCP socket bridge before building
+            // AppState, so the resolved socket path (or `None` on failure)
+            // is part of the immutable state every handler observes.
+            let socket_path = mcp_bridge::pick_socket_path();
+            // Clone the workspace handle for the watcher registration before the cell
+            // takes ownership of the original below.
+            let watch_workspace = workspace.clone();
+            let state_for_bridge: Arc<RwLock<Option<WorkspaceCell>>> =
+                Arc::new(RwLock::new(Some(WorkspaceCell {
+                    workspace,
+                    // Filled by the registration step immediately below.
+                    watch_handle: None,
+                    indexer,
+                })));
+            // Register the filesystem watcher on the blocking pool and await it, so the
+            // cell carries a live handle before this function returns and no detached
+            // task is left holding a strong workspace handle (and its writer flock)
+            // across a later close. This step is the notify registration only: the
+            // report's content scan is lazy (first report query), so the awaited work
+            // is bounded by `notify`'s recursive directory registration. A registration
+            // failure (most often the Linux inotify watch limit,
+            // fs.inotify.max_user_watches) leaves the watcher absent and external edits
+            // reconcile on demand, rather than failing the boot.
+            let watch_cell = state_for_bridge.clone();
+            // Boot-timing anchor: on Linux this recursive registration installs one
+            // inotify watch per directory, so it is the step most sensitive to tree
+            // size.
+            let watch_t0 = Instant::now();
+            match tokio::task::spawn_blocking(move || watch_workspace.watch(bridge)).await {
+                Ok(Ok(handle)) => {
+                    tracing::debug!(
+                        t_watch_registered_ms = watch_t0.elapsed().as_millis() as u64,
+                        "boot: filesystem watcher registered"
+                    );
+                    if let Ok(mut cell) = watch_cell.write() {
+                        if let Some(cell) = cell.as_mut() {
+                            cell.watch_handle = Some(handle);
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("filesystem watcher registration failed: {e}");
+                    eprintln!(
+                        "NOTE: live file-watching is unavailable ({e}); external edits \
+                         reconcile on demand. On Linux, raise fs.inotify.max_user_watches \
+                         to re-enable it."
+                    );
+                }
+                Err(join_err) => {
+                    tracing::warn!("filesystem watcher registration task panicked: {join_err}");
                 }
             }
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("filesystem watcher registration failed: {e}");
-            eprintln!(
-                "NOTE: live file-watching is unavailable ({e}); external edits \
-                 reconcile on demand. On Linux, raise fs.inotify.max_user_watches \
-                 to re-enable it."
-            );
-        }
-        Err(join_err) => {
-            tracing::warn!("filesystem watcher registration task panicked: {join_err}");
-        }
-    }
-    let bridge_workspace_cell = state_for_bridge.clone();
-    let bridge = mcp_bridge::start(socket_path.clone(), move || {
-        let cell = match bridge_workspace_cell.read() {
-            Ok(cell) => cell,
-            Err(_) => {
-                tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell poisoned");
-                return None;
-            }
+            let bridge_workspace_cell = state_for_bridge.clone();
+            let bridge = mcp_bridge::start(socket_path.clone(), move || {
+                let cell = match bridge_workspace_cell.read() {
+                    Ok(cell) => cell,
+                    Err(_) => {
+                        tracing::warn!(
+                            "mcp bridge cannot snapshot workspace: workspace_cell poisoned"
+                        );
+                        return None;
+                    }
+                };
+                let Some(cell) = cell.as_ref() else {
+                    tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell missing");
+                    return None;
+                };
+                Some(cell.workspace.clone())
+            });
+            let (mcp_socket_path, mcp_bridge) = match bridge {
+                Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
+                Err(e) => {
+                    tracing::warn!("mcp bridge bind failed at {}: {e}", socket_path.display());
+                    (None, None)
+                }
+            };
+            (
+                workspace_root,
+                state_for_bridge,
+                mcp_socket_path,
+                mcp_bridge,
+            )
+        } else {
+            // Standalone terminals start in the user's home directory and
+            // expose no workspace or MCP bridge.
+            (
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+                Arc::new(RwLock::new(None)),
+                None,
+                None,
+            )
         };
-        let Some(cell) = cell.as_ref() else {
-            tracing::warn!("mcp bridge cannot snapshot workspace: workspace_cell missing");
-            return None;
-        };
-        Some(cell.workspace.clone())
-    });
-    let (mcp_socket_path, mcp_bridge) = match bridge {
-        Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
-        Err(e) => {
-            tracing::warn!("mcp bridge bind failed at {}: {e}", socket_path.display());
-            (None, None)
-        }
-    };
     // The terminal registry is built below (it needs the resolved control
     // socket path for $CHAN_CONTROL_SOCKET), so the control socket gets an
     // empty cell now and we fill it once the registry exists. Category-2
@@ -714,290 +746,15 @@ async fn build_app_with_extensions(
         events_tx.clone(),
         shutdown_rx.clone(),
     );
-    // A standalone serve unserves by exiting the process (its shutdown
-    // signal); a hosted tenant unserves by unmounting itself from the host.
+    // A standalone workspace exits on unserve. A terminal has no workspace
+    // to unmount; hosted tenants delegate the decision to their host.
     let unserve_scope = match unserve {
-        chan_library::UnserveMode::Standalone => chan_library::UnserveScope::Standalone {
-            root: unserve_root,
-            shutdown_tx: shutdown_tx.clone(),
-        },
-        chan_library::UnserveMode::Host(weak) => chan_library::UnserveScope::Host(weak),
-        chan_library::UnserveMode::Unsupported => chan_library::UnserveScope::Unsupported,
-    };
-    let (control_socket_path, control_socket) = start_control_socket(
-        control_identity.as_deref(),
-        &config.prefix,
-        control_socket::ControlSocketCtx {
-            workspace_cell: state_for_bridge.clone(),
-            events_tx: events_tx.clone(),
-            self_writes: self_writes.clone(),
-            terminal_registry: terminal_registry_cell.clone(),
-            survey_bus: survey_bus.clone(),
-            window_bus: window_bus.clone(),
-            session_registry: session_registry.clone(),
-            handover_bus: handover_bus.clone(),
-            desktop: desktop.clone(),
-            tenant: control_socket::ControlTenant::Workspace,
-            unserve: unserve_scope,
-            standalone_files: None,
-        },
-    );
-    prime_terminal_shell();
-    let terminal_sessions = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
-        workspace_root: workspace_root.clone(),
-        mcp_socket_path: mcp_socket_path.clone(),
-        control_socket_path: control_socket_path.clone(),
-        terminal: server_config.terminal.clone(),
-    }));
-    // Hand the live registry to the control socket so cs term write / list
-    // can resolve sessions. Set-once; ignore a second set (never happens).
-    let _ = terminal_registry_cell.set(terminal_sessions.clone());
-    let terminal_sessions_handle = terminal_sessions.clone();
-    let terminal_pruner = terminal_sessions.clone().spawn_pruner(shutdown_rx.clone());
-    // Drain the per-session `cs terminal write` queues (deliver each next
-    // poke when its agent goes idle). Sibling of the pruner.
-    let terminal_drainer = terminal_sessions.clone().spawn_drainer(shutdown_rx.clone());
-    // Push cross-window roster snapshots onto `/ws` on every change.
-    let terminal_roster_broadcaster = spawn_roster_broadcaster(
-        terminal_sessions.clone(),
-        events_tx.clone(),
-        shutdown_rx.clone(),
-    );
-
-    let state = Arc::new(AppState {
-        library,
-        workspace_root,
-        workspace_cell: state_for_bridge.clone(),
-        token: token.clone(),
-        prefix: prefix.clone(),
-        settings_disabled: config.settings_disabled,
-        events_tx,
-        index_events_tx,
-        bulk_transfer: bulk_transfer
-            .tenant()
-            .with_stall_timeout(server_config.transfer.stall_timeout()),
-        server_config: Mutex::new(server_config),
-        editor_prefs: Mutex::new(editor_prefs),
-        config_revision: AtomicU64::new(1),
-        config_write_serial: Mutex::new(()),
-        self_writes,
-        last_activity: last_activity.clone(),
-        terminal_sessions,
-        doc_sessions: Arc::new(doc_sessions::DocRegistry::new()),
-        scene_sessions: Arc::new(scene_sessions::SceneRegistry::new()),
-        shutdown_rx,
-        scope_registry,
-        survey_bus,
-        window_bus,
-        handover_bus,
-        ephemeral_sessions: Mutex::new(std::collections::HashMap::new()),
-        ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
-        terminal_session_dir: None,
-        window_presence,
-        session_registry,
-        pending_window_commands: Arc::new(Default::default()),
-        window_transfers,
-        window_titles: desktop.window_titles.clone(),
-        instance_id: random_token(),
-        standalone_files: None,
-    });
-    // Doc-session background tasks: the flusher debounces dirty
-    // sessions to atomic CAS disk writes and runs the detach-grace
-    // reaper; the reconciler folds raw watcher events back into live
-    // sessions as synthetic `$disk` updates. Workspace apps only: the
-    // terminal-only app has no workspace, no doc route, nothing to
-    // flush.
-    let doc_flusher = doc_sessions::spawn_flusher(
-        state.doc_sessions.clone(),
-        state.workspace_cell.clone(),
-        state.self_writes.clone(),
-        state.shutdown_rx.clone(),
-    );
-    let doc_reconciler = doc_sessions::spawn_reconciler(
-        state.doc_sessions.clone(),
-        state.workspace_cell.clone(),
-        state.index_events_tx.subscribe(),
-        state.shutdown_rx.clone(),
-    );
-    // Scene-session background tasks: the same flusher/reconciler shape
-    // for the Excalidraw authority (element-level sessions instead of
-    // update logs). Workspace apps only, like the doc tasks above.
-    let scene_flusher = scene_sessions::spawn_flusher(
-        state.scene_sessions.clone(),
-        state.workspace_cell.clone(),
-        state.self_writes.clone(),
-        state.shutdown_rx.clone(),
-    );
-    let scene_reconciler = scene_sessions::spawn_reconciler(
-        state.scene_sessions.clone(),
-        state.workspace_cell.clone(),
-        state.index_events_tx.subscribe(),
-        state.shutdown_rx.clone(),
-    );
-    // Nest under the prefix so `--prefix=/foo` makes every existing
-    // route reachable at `/foo<route>` without changing any handler.
-    // axum strips the prefix from the inner URI, so handlers continue
-    // to see paths starting with `/api`, `/ws`, etc.
-    let inner = router_with_extensions(state.clone(), extension_catalog);
-    let app = if config.prefix.is_empty() {
-        inner
-    } else {
-        Router::new().nest(&config.prefix, inner)
-    };
-    let tasks = chan_library::TenantTaskOwner::new(
-        shutdown_tx.clone(),
-        vec![
-            terminal_pruner,
-            terminal_drainer,
-            terminal_roster_broadcaster,
-            session_reaper,
-            doc_flusher,
-            doc_reconciler,
-            scene_flusher,
-            scene_reconciler,
-        ],
-    );
-
-    Ok(AppArtifacts {
-        app,
-        token,
-        last_activity,
-        workspace_cell: state_for_bridge.clone(),
-        tasks,
-        bulk_transfer,
-        prefix,
-        mcp_bridge,
-        control_socket,
-        terminal_sessions: terminal_sessions_handle,
-        state,
-        shutdown_tx,
-    })
-}
-
-/// Build a workspace-less "terminal-only" tenant: the same axum
-/// surface a [`WorkspaceHost`] mounts, minus everything that needs an
-/// `Arc<Workspace>`. Sibling to [`build_app`]; the embedded host calls
-/// this from `open_terminal_session` to back a standalone terminal
-/// window (a desktop webview loading the chan SPA in `?kind=terminal`
-/// mode).
-///
-/// Deliberately omits the watcher, indexer, and MCP bridge: there is
-/// no workspace to watch / index / expose. It DOES start a control
-/// socket so `cs` works inside standalone terminals -- terminal / pane
-/// / survey / window commands; workspace commands refuse with the
-/// terminal-only message. The terminal registry's PTY cwd is `$HOME`,
-/// so a new pane lands in the user's home directory rather than a
-/// workspace root. The SLIM router (see [`terminal_router`]) mounts only the
-/// terminal, optional Files, and window-session routes, so a workspace-only
-/// request (`/api/graph`, `/api/index/status`, ...) 404s instead of panicking on the
-/// missing `workspace_cell`.
-#[allow(clippy::too_many_arguments)]
-async fn build_terminal_app(
-    library: Library,
-    config: &ServeConfig,
-    desktop: crate::desktop_window_ops::DesktopBridge,
-    unserve: chan_library::UnserveMode,
-    session_dir: Option<std::path::PathBuf>,
-    drafts_store_root: Option<std::path::PathBuf>,
-    control_identity: Option<String>,
-    bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
-) -> Result<AppArtifacts, Error> {
-    let token = if config.no_token {
-        None
-    } else {
-        // In-memory only: a terminal tenant has no workspace token dir
-        // to persist into, and each window mints a fresh tenant anyway.
-        Some(random_token())
-    };
-
-    // Same fall-back-on-malformed policy as `build_app`. Only the
-    // `terminal` sub-config is consumed here (it seeds the registry);
-    // the indexer profile / editor prefs join is irrelevant with no
-    // workspace.
-    let server_config = ServerConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("malformed server config, falling back to defaults: {e}");
-        ServerConfig::default()
-    });
-    // Install submit-chord overrides for the terminal poke path, same
-    // as `build_app`; this is workspace-independent config.
-    submit_config::install();
-
-    // Editor preferences still seed the SPA shell (theme / fonts) even
-    // in terminal mode, so load them with the same fall-back policy.
-    let editor_prefs = EditorPrefs::load().unwrap_or_else(|e| {
-        tracing::warn!("malformed editor preferences, falling back to defaults: {e}");
-        EditorPrefs::default()
-    });
-
-    // Same unified event channels as `build_app`: `/ws` subscribers get
-    // the JSON-envelope broadcast (pane bus, terminal frames), and the
-    // raw WatchEvent feed exists so AppState stays shape-compatible even
-    // though no watcher producer is wired in terminal mode.
-    let (events_tx, _) = broadcast::channel::<String>(256);
-    let (index_events_tx, _) = broadcast::channel::<WatchEvent>(1024);
-    let self_writes = Arc::new(SelfWrites::new());
-    let scope_registry = Arc::new(bus::ScopeRegistry::new());
-
-    // The standalone Files application rides the SHARED terminal tenant
-    // (the one with a durable layout store); control tenants and
-    // unsupported platforms serve plain terminals only. Construction
-    // failure degrades to a terminal-only tenant rather than refusing to
-    // serve: the capability advertisement and the mint validation both
-    // read the constructed state, so nothing downstream can assume it.
-    let standalone_files = if session_dir.is_some() {
-        construct_standalone_files(&library, &scope_registry, drafts_store_root.as_deref())
-    } else {
-        None
-    };
-
-    let last_activity = Arc::new(AtomicU64::new(now_unix_secs()));
-    let prefix = Arc::new(RwLock::new(config.prefix.clone()));
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let shutdown_tx = Arc::new(shutdown_tx);
-
-    // PTY cwd = $HOME (fallback "/"): a terminal window is not anchored
-    // to a workspace, so new sessions open in the user's home dir. No
-    // MCP bridge (nothing to expose without a workspace).
-    let workspace_root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-
-    // Workspace-less cell: `try_workspace` reports `Missing`, and the slim
-    // router mounts no workspace-content route. The serve loop's
-    // indexer-cancel side task tolerates a `None` cell (it no-ops), so the
-    // shared shutdown wiring is safe.
-    // Created before the control socket, which shares it (and reports
-    // the terminal-only refusal for workspace commands).
-    let workspace_cell: Arc<RwLock<Option<WorkspaceCell>>> = Arc::new(RwLock::new(None));
-
-    // Control socket: same first-party `cs` surface as a workspace
-    // serve, scoped to what a terminal tenant can answer. Terminal /
-    // pane / survey / window commands work, and so do the cwd-scoped
-    // upload / download; workspace-content commands (open / graph /
-    // search / team) refuse with the terminal-only message, except
-    // `cs open` which points at `chan serve {path}`. The buses are shared with AppState below
-    // so SPA replies (`/api/window/reply`, `/api/survey/reply`)
-    // complete the blocked `cs pane` / `cs terminal survey` calls.
-    // Socket paths are pid+random-suffixed (`/tmp/chan-control-<pid>-
-    // <8hex>.sock`) so concurrent serves and the desktop's workspace
-    // tenants can't collide, except on a host with a stable control
-    // identity (the devserver), whose per-tenant paths are stable
-    // across restarts instead (see `start_control_socket`).
-    let survey_bus = Arc::new(survey::SurveyBus::new());
-    let window_bus = Arc::new(window_bus::WindowBus::new());
-    let handover_bus = Arc::new(handover_bus::HandoverBus::new());
-    let window_presence = Arc::new(window_presence::WindowPresence::new());
-    let window_transfers = Arc::new(window_transfers::WindowTransfers::new());
-    let session_registry = Arc::new(session_presence::SessionRegistry::new());
-    let session_reaper = session_roster::spawn_session_reaper(
-        session_registry.clone(),
-        events_tx.clone(),
-        shutdown_rx.clone(),
-    );
-    let terminal_registry_cell: control_socket::TerminalRegistryCell =
-        Arc::new(std::sync::OnceLock::new());
-    // A terminal tenant has no workspace to unserve, so a standalone
-    // terminal refuses; a hosted terminal still carries the host handle so an
-    // Unserve that lands on its socket can unmount the right WORKSPACE tenant.
-    let unserve_scope = match unserve {
+        chan_library::UnserveMode::Standalone if matches!(tenant, TenantKind::Workspace { .. }) => {
+            chan_library::UnserveScope::Standalone {
+                root: workspace_root.clone(),
+                shutdown_tx: shutdown_tx.clone(),
+            }
+        }
         chan_library::UnserveMode::Host(weak) => chan_library::UnserveScope::Host(weak),
         chan_library::UnserveMode::Standalone | chan_library::UnserveMode::Unsupported => {
             chan_library::UnserveScope::Unsupported
@@ -1016,7 +773,10 @@ async fn build_terminal_app(
             session_registry: session_registry.clone(),
             handover_bus: handover_bus.clone(),
             desktop: desktop.clone(),
-            tenant: control_socket::ControlTenant::TerminalOnly,
+            tenant: match &tenant {
+                TenantKind::Workspace { .. } => control_socket::ControlTenant::Workspace,
+                TenantKind::Terminal { .. } => control_socket::ControlTenant::TerminalOnly,
+            },
             unserve: unserve_scope,
             standalone_files: standalone_files.clone(),
         },
@@ -1024,41 +784,45 @@ async fn build_terminal_app(
     prime_terminal_shell();
     let terminal_sessions = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
         workspace_root: workspace_root.clone(),
-        mcp_socket_path: None,
-        // Injected into every PTY as $CHAN_CONTROL_SOCKET so `cs`
-        // works inside standalone terminals.
-        control_socket_path,
+        mcp_socket_path: mcp_socket_path.clone(),
+        control_socket_path: control_socket_path.clone(),
         terminal: server_config.terminal.clone(),
     }));
-    // A terminal-only tenant is long-lived but has neither the workspace
-    // settings route nor its config-change push path. Pull the preference at
-    // each PTY spawn instead. `ServerConfig::load` reads the same
-    // `config::default_path()` that the workspace PATCH persists through
-    // `ServerConfig::save`; that path has one authority,
-    // `chan_workspace::paths::config_dir()`, including its CHAN_HOME override.
-    // A malformed or unreadable store returns None, so the registry keeps its
-    // last good value and creation stays available (possibly stale until the
-    // store becomes readable again).
-    terminal_sessions.install_terminal_backend_resolver(TerminalBackendResolver::new(|| {
-        ServerConfig::load()
-            .ok()
-            .map(|config| config.terminal.ghostty)
-    }));
-    // The same pull for the user's declared profiles. Without it this tenant
-    // spawns from the boot-time snapshot while `GET /api/terminal/shells`
-    // answers from the live config, so the picker offers a profile that
-    // clicking it does not open.
-    terminal_sessions.install_terminal_profiles_resolver(TerminalProfilesResolver::new(|| {
-        ServerConfig::load()
-            .ok()
-            .map(|config| TerminalProfilePrefs {
-                profiles: config.terminal.profiles,
-                default_profile: config.terminal.default_profile,
-            })
-    }));
-    // Hand the live registry to the control socket so cs term
-    // write / list can resolve sessions (mirrors build_app).
+    if matches!(tenant, TenantKind::Terminal { .. }) {
+        // A terminal-only tenant is long-lived but has neither the workspace
+        // settings route nor its config-change push path. Pull the preference at
+        // each PTY spawn instead. `ServerConfig::load` reads the same
+        // `config::default_path()` that the workspace PATCH persists through
+        // `ServerConfig::save`; that path has one authority,
+        // `chan_workspace::paths::config_dir()`, including its CHAN_HOME override.
+        // A malformed or unreadable store returns None, so the registry keeps its
+        // last good value and creation stays available (possibly stale until the
+        // store becomes readable again).
+        terminal_sessions.install_terminal_backend_resolver(TerminalBackendResolver::new(|| {
+            ServerConfig::load()
+                .ok()
+                .map(|config| config.terminal.ghostty)
+        }));
+        // The same pull for the user's declared profiles. Without it this tenant
+        // spawns from the boot-time snapshot while `GET /api/terminal/shells`
+        // answers from the live config, so the picker offers a profile that
+        // clicking it does not open.
+        terminal_sessions.install_terminal_profiles_resolver(TerminalProfilesResolver::new(|| {
+            ServerConfig::load()
+                .ok()
+                .map(|config| TerminalProfilePrefs {
+                    profiles: config.terminal.profiles,
+                    default_profile: config.terminal.default_profile,
+                })
+        }));
+    }
+    // Hand the live registry to the control socket so cs term write / list
+    // can resolve sessions. Set-once; ignore a second set (never happens).
     let _ = terminal_registry_cell.set(terminal_sessions.clone());
+    let session_dir = match &tenant {
+        TenantKind::Workspace { .. } => None,
+        TenantKind::Terminal { session_dir, .. } => session_dir.clone(),
+    };
     // A durable layout store (the launcher's devserver terminal session dir)
     // means this tenant's window layouts live in `terminal_blob`. Wire the blob
     // reaper so an EXPLICIT window discard (cs window rm / a watcher reconcile)
@@ -1079,7 +843,10 @@ async fn build_terminal_app(
     }
     let terminal_sessions_handle = terminal_sessions.clone();
     let terminal_pruner = terminal_sessions.clone().spawn_pruner(shutdown_rx.clone());
+    // Drain the per-session `cs terminal write` queues (deliver each next
+    // poke when its agent goes idle). Sibling of the pruner.
     let terminal_drainer = terminal_sessions.clone().spawn_drainer(shutdown_rx.clone());
+    // Push cross-window roster snapshots onto `/ws` on every change.
     let terminal_roster_broadcaster = spawn_roster_broadcaster(
         terminal_sessions.clone(),
         events_tx.clone(),
@@ -1087,10 +854,6 @@ async fn build_terminal_app(
     );
 
     let state = Arc::new(AppState {
-        // The host's shared registry handle: no terminal route reaches it,
-        // but `/api/config` joins the workspace list into the global config
-        // view, so reuse the live handle rather than leaking a throwaway per
-        // window.
         library,
         workspace_root,
         workspace_cell: workspace_cell.clone(),
@@ -1118,36 +881,73 @@ async fn build_terminal_app(
         handover_bus,
         ephemeral_sessions: Mutex::new(std::collections::HashMap::new()),
         ephemeral_files_sessions: Mutex::new(std::collections::HashMap::new()),
-        // A persisted devserver terminal sets this (its launcher session
-        // store); a control / desktop-local terminal passes None.
-        terminal_session_dir: session_dir.clone(),
+        terminal_session_dir: session_dir,
         window_presence,
         session_registry,
         pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
         instance_id: random_token(),
-        standalone_files: standalone_files.clone(),
+        standalone_files,
     });
-
-    // Nest under the prefix exactly like `build_app` so the host's
-    // prefix dispatch reaches `/terminal-<seq><route>` and handlers
-    // still see workspace-relative paths (`/api/...`, `/ws`).
-    let inner = terminal_router(state.clone());
+    let mut task_handles = vec![
+        terminal_pruner,
+        terminal_drainer,
+        terminal_roster_broadcaster,
+        session_reaper,
+    ];
+    if matches!(tenant, TenantKind::Workspace { .. }) {
+        // Doc-session background tasks: the flusher debounces dirty
+        // sessions to atomic CAS disk writes and runs the detach-grace
+        // reaper; the reconciler folds raw watcher events back into live
+        // sessions as synthetic `$disk` updates. Workspace apps only: the
+        // terminal-only app has no workspace, no doc route, nothing to
+        // flush.
+        let doc_flusher = doc_sessions::spawn_flusher(
+            state.doc_sessions.clone(),
+            state.workspace_cell.clone(),
+            state.self_writes.clone(),
+            state.shutdown_rx.clone(),
+        );
+        let doc_reconciler = doc_sessions::spawn_reconciler(
+            state.doc_sessions.clone(),
+            state.workspace_cell.clone(),
+            state.index_events_tx.subscribe(),
+            state.shutdown_rx.clone(),
+        );
+        // Scene-session background tasks: the same flusher/reconciler shape
+        // for the Excalidraw authority (element-level sessions instead of
+        // update logs). Workspace apps only, like the doc tasks above.
+        let scene_flusher = scene_sessions::spawn_flusher(
+            state.scene_sessions.clone(),
+            state.workspace_cell.clone(),
+            state.self_writes.clone(),
+            state.shutdown_rx.clone(),
+        );
+        let scene_reconciler = scene_sessions::spawn_reconciler(
+            state.scene_sessions.clone(),
+            state.workspace_cell.clone(),
+            state.index_events_tx.subscribe(),
+            state.shutdown_rx.clone(),
+        );
+        task_handles.extend([doc_flusher, doc_reconciler, scene_flusher, scene_reconciler]);
+    }
+    // Nest under the prefix so `--prefix=/foo` makes every existing
+    // route reachable at `/foo<route>` without changing any handler.
+    // axum strips the prefix from the inner URI, so handlers continue
+    // to see paths starting with `/api`, `/ws`, etc.
+    let inner = match tenant {
+        TenantKind::Workspace {
+            extension_catalog, ..
+        } => router_with_extensions(state.clone(), extension_catalog),
+        TenantKind::Terminal { .. } => terminal_router(state.clone()),
+    };
     let app = if config.prefix.is_empty() {
         inner
     } else {
         Router::new().nest(&config.prefix, inner)
     };
-    let tasks = chan_library::TenantTaskOwner::new(
-        shutdown_tx.clone(),
-        vec![
-            terminal_pruner,
-            terminal_drainer,
-            terminal_roster_broadcaster,
-            session_reaper,
-        ],
-    );
+    let tasks = chan_library::TenantTaskOwner::new(shutdown_tx.clone(), task_handles);
 
     Ok(AppArtifacts {
         app,
@@ -1157,9 +957,7 @@ async fn build_terminal_app(
         tasks,
         bulk_transfer,
         prefix,
-        // No workspace to MCP-bridge; the control socket above IS the
-        // local CLI surface (terminal-scoped).
-        mcp_bridge: None,
+        mcp_bridge,
         control_socket,
         terminal_sessions: terminal_sessions_handle,
         state,
@@ -1444,7 +1242,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
 
 /// chan-server's implementation of chan-library's tenant-construction boundary.
 /// `WorkspaceHost` holds an `Arc<dyn TenantBuilder>` and calls these to mount a
-/// tenant; they wrap [`build_app`]/[`build_terminal_app`] and adapt the
+/// tenant; they wrap [`build_tenant_app`] and adapt the
 /// route-layer `AppArtifacts` to the host-facing `TenantArtifacts`.
 pub(crate) struct RouteLayer {
     extension_catalog: Arc<extensions::ExtensionCatalog>,
@@ -1567,11 +1365,13 @@ impl chan_library::TenantBuilder for RouteLayer {
         unserve: chan_library::UnserveMode,
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
-        let artifacts = build_app_with_extensions(
-            AppBuild {
+        let artifacts = build_tenant_app(
+            TenantBuild {
                 library,
-                workspace,
-                extension_catalog: self.extension_catalog.clone(),
+                tenant: TenantKind::Workspace {
+                    workspace,
+                    extension_catalog: self.extension_catalog.clone(),
+                },
                 desktop,
                 unserve,
                 control_identity,
@@ -1594,15 +1394,19 @@ impl chan_library::TenantBuilder for RouteLayer {
         drafts_store_root: Option<PathBuf>,
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
-        let artifacts = build_terminal_app(
-            library,
+        let artifacts = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir,
+                    drafts_store_root,
+                },
+                desktop,
+                unserve,
+                control_identity,
+                bulk_transfer: self.bulk_transfer.clone(),
+            },
             config,
-            desktop,
-            unserve,
-            session_dir,
-            drafts_store_root,
-            control_identity,
-            self.bulk_transfer.clone(),
         )
         .await?;
         // The tenant's terminals run `command` (when set) rather than the
@@ -1744,11 +1548,13 @@ pub async fn serve(
     // bridge and an empty (unwritten) title map. No stable control
     // identity either -- a window-spawned serve's control socket dies
     // with the process by design.
-    let mut artifacts = build_app_with_extensions(
-        AppBuild {
+    let mut artifacts = build_tenant_app(
+        TenantBuild {
             library,
-            workspace,
-            extension_catalog: extension_runtime.catalog(),
+            tenant: TenantKind::Workspace {
+                workspace,
+                extension_catalog: extension_runtime.catalog(),
+            },
             desktop: crate::desktop_window_ops::DesktopBridge::default(),
             unserve: chan_library::UnserveMode::Standalone,
             control_identity: None,
@@ -2160,6 +1966,138 @@ mod bulk_transfer_construction_tests {
 }
 
 #[cfg(test)]
+mod tenant_builder_tests {
+    use super::*;
+    use crate::route_authority::{
+        test_support::mounted_routes, Verb, FALLBACK, TERMINAL_TENANT, WORKSPACE_TENANT,
+    };
+    use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn tenant_builders_preserve_routes_and_state() {
+        const CHILD: &str = "CHAN_TEST_TENANT_BUILDERS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Config and shell discovery use process-wide caches and paths.
+            let home = tempfile::tempdir().unwrap();
+            let output = tokio::time::timeout(
+                Duration::from_secs(60),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tenant_builder_tests::tenant_builders_preserve_routes_and_state",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CHAN_HOME", home.path())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("tenant builder child timed out")
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "tenant builder child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(home.join("library.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.stop_open_recovery();
+        let workspace_root = workspace.root().to_path_buf();
+        let persisted_token = load_or_create_token(workspace.paths()).unwrap();
+        let config = ServeConfig {
+            addr: ([127, 0, 0, 1], 0).into(),
+            prefix: "/builder-proof".into(),
+            no_token: false,
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let mut workspace_app = build_app(
+            library.clone(),
+            workspace,
+            &config,
+            DesktopBridge::default(),
+            chan_library::UnserveMode::Standalone,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut terminal_app = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir: None,
+                    drafts_store_root: None,
+                },
+                desktop: DesktopBridge::default(),
+                unserve: chan_library::UnserveMode::Standalone,
+                control_identity: None,
+                bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+
+        for (artifacts, inner, table) in [
+            (
+                &workspace_app,
+                router(workspace_app.state.clone()),
+                WORKSPACE_TENANT,
+            ),
+            (
+                &terminal_app,
+                terminal_router(terminal_app.state.clone()),
+                TERMINAL_TENANT,
+            ),
+        ] {
+            let expected: BTreeSet<_> = table
+                .iter()
+                .map(|(verb, path, _)| (*verb, format!("{}{path}", config.prefix)))
+                .collect();
+            // The Debug walker sees nested method routes but not the nested
+            // fallback. Include that row by walking the tenant's inner router.
+            let inner_routes: BTreeSet<_> = mounted_routes(&inner)
+                .into_iter()
+                .map(|(verb, path)| (verb, format!("{}{path}", config.prefix)))
+                .collect();
+            assert_eq!(inner_routes, expected);
+            let mut nested_expected = expected;
+            assert!(nested_expected.remove(&(Verb::Any, format!("{}{FALLBACK}", config.prefix))));
+            assert_eq!(mounted_routes(&artifacts.app), nested_expected);
+            assert!(artifacts.control_socket.is_some());
+            assert!(artifacts.state.token.is_some());
+            assert_eq!(artifacts.state.token, artifacts.token);
+            assert!(artifacts.state.terminal_session_dir.is_none());
+            assert!(artifacts.state.standalone_files.is_none());
+        }
+        assert!(workspace_app.mcp_bridge.is_some());
+        assert!(terminal_app.mcp_bridge.is_none());
+        assert_eq!(workspace_app.state.workspace_root, workspace_root);
+        assert_eq!(workspace_app.state.token.as_ref(), Some(&persisted_token));
+        assert_eq!(
+            terminal_app.state.workspace_root,
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+        );
+        assert_ne!(terminal_app.state.token, workspace_app.state.token);
+        assert!(workspace_app.state.workspace_cell.read().unwrap().is_some());
+        assert!(terminal_app.state.workspace_cell.read().unwrap().is_none());
+        workspace_app.tasks.shutdown().await;
+        terminal_app.tasks.shutdown().await;
+    }
+}
+
+#[cfg(test)]
 mod terminal_router_tests {
     use super::*;
     use crate::terminal_sessions::{
@@ -2247,15 +2185,19 @@ mod terminal_router_tests {
             settings_disabled: false,
             verbose: false,
         };
-        let mut artifacts = build_terminal_app(
-            library,
+        let mut artifacts = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir: None,
+                    drafts_store_root: None,
+                },
+                desktop: DesktopBridge::default(),
+                unserve: chan_library::UnserveMode::Unsupported,
+                control_identity: None,
+                bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+            },
             &config,
-            DesktopBridge::default(),
-            chan_library::UnserveMode::Unsupported,
-            None,
-            None,
-            None,
-            crate::bulk_transfer::BulkTransferLane::new(),
         )
         .await
         .expect("build terminal app");

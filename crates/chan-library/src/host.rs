@@ -1312,13 +1312,10 @@ impl WorkspaceHost {
     /// Mount a workspace-less "terminal-only" tenant under
     /// `config.prefix`, optionally running `command` on its PTY.
     ///
-    /// Mirrors [`open_workspace`](Self::open_workspace) but backs the
-    /// mount with `build_terminal_app` instead of `build_app`: no
-    /// `Arc<Workspace>`, no watcher / indexer / MCP bridge / control
-    /// socket. The slim tenant serves only the terminal + window-session
-    /// routes plus the SPA shell, so a standalone terminal window
-    /// (desktop webview in `?kind=terminal` mode) gets a PTY surface
-    /// without a workspace behind it.
+    /// Calls [`TenantBuilder::build_terminal`] without an `Arc<Workspace>`,
+    /// workspace watcher, indexer or MCP bridge. The tenant serves terminal,
+    /// optional Files and window-session routes plus the SPA shell, with a
+    /// control socket for the local CLI.
     ///
     /// `command` is one shell command line, run through the login shell so
     /// an interactive script (host-key / password prompts) gets a real
@@ -1435,7 +1432,7 @@ impl WorkspaceHost {
         }
         // Root reported for diagnostics / desktop correlation: the PTY
         // cwd is the user's home dir, so surface that. Falls back to "/"
-        // to match `build_terminal_app`'s registry root resolution.
+        // to match the terminal tenant's registry root resolution.
         let root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let handle = ServeHandle {
             addr: config.addr,
