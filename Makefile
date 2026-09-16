@@ -326,9 +326,11 @@ ifeq ($(UNAME_S),Linux)
 	#
 	# gateway-lint compiles every gateway test target without executing it;
 	# gateway-doc renders the gateway docs the root rustdoc step never
-	# reaches; gateway-test executes the database-free subset and reports
-	# the seven Postgres-backed integration-test files as not run;
-	# gateway-build only compiles the release crates.
+	# reaches; gateway-test executes the database-free subset (every
+	# library's unit tests, devserver-proxy's tests and every gateway
+	# binary's unit tests) and reports the seven Postgres-backed
+	# integration-test files as not run; gateway-build only compiles the
+	# release crates.
 	$(MAKE) gateway-fmt
 	$(MAKE) gateway-lint
 	$(MAKE) gateway-doc
@@ -502,8 +504,9 @@ gateway-doc: gateway-spa ## Rustdoc the separate gateway workspace with warnings
 	# catches: an intra-doc link that does not resolve, a public doc that
 	# links a private item, prose parsed as HTML. Depends on gateway-spa
 	# because cargo doc compiles identity, which embeds web/dist. RUSTFLAGS
-	# matches gateway-lint so the step shares its dependency artifacts
-	# instead of building a second set.
+	# matches gateway-lint so the step reuses its dependency artifacts
+	# rather than rebuilding every one (tokio's test-util dev feature still
+	# splits a few units).
 	cd gateway && RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --no-deps --workspace
 
 .PHONY: gateway-test
@@ -512,13 +515,14 @@ gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
 	@printf '%s\n' \
 		'gateway-test: EXECUTE: all gateway library unit tests' \
 		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
-		'gateway-test: EXECUTE: admin CLI binary unit tests' \
+		'gateway-test: EXECUTE: unit tests of every gateway binary' \
 		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
 	cd gateway && $(CARGO) test --workspace --lib
 	cd gateway && $(CARGO) test -p devserver-proxy
-	# admin is a binary crate with no library target, so --lib above never
-	# selects its tests.
-	cd gateway && $(CARGO) test -p admin --bins
+	# --lib above never selects a binary target's unit tests: admin is a
+	# binary crate with no library target, and the identity and profile
+	# service binaries keep tests of their own beside their libraries.
+	cd gateway && $(CARGO) test --workspace --bins
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.
