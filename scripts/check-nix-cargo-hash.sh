@@ -32,10 +32,10 @@
 # survives the pin.
 #
 # A pinned value is accepted as written: only a Nix build can prove it.
-# Harvest it with `make nix-sdme-check NIX_PACKAGE=chan` on Linux from a
-# clean worktree at the branch head, or `make nix-check` where Nix is
-# installed; on any other host, take the got: value CI's Nix job reports on
-# the pull request.
+# Harvest it with `make nix-sdme-check NIX_PACKAGE=chan` on Linux, or
+# `make nix-check` where Nix is installed, with the Cargo.lock you will pin
+# in the working tree; a host without Linux or Nix harvests in a Linux
+# container, or asks a maintainer to.
 #
 # Usage: scripts/check-nix-cargo-hash.sh [check]
 #        scripts/check-nix-cargo-hash.sh pin sha256-<43 base64 characters>=
@@ -56,7 +56,7 @@ SRI='^sha256-[A-Za-z0-9+/]{43}=$'
 FAKE_HASH="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 # One line of the digest file, as sha256sum prints it.
 DIGEST_LINE='^[0-9a-f]{64}  Cargo\.lock$'
-HARVEST="harvest the value with 'make nix-sdme-check NIX_PACKAGE=chan' on Linux from a clean worktree at the branch head, or 'make nix-check' where Nix is installed (on any other host take the got: value CI's Nix job reports), then pin it with 'make nix-hash-pin CARGO_HASH=sha256-...'"
+HARVEST="harvest the value with 'make nix-sdme-check NIX_PACKAGE=chan' on Linux, or 'make nix-check' where Nix is installed, with the Cargo.lock you will pin in the working tree (a host without Linux or Nix harvests in a Linux container, or asks a maintainer to), then pin it with 'make nix-hash-pin CARGO_HASH=sha256-...'"
 
 problems=()
 pin=""
