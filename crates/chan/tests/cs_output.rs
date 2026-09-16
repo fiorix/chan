@@ -372,12 +372,27 @@ struct Run {
     request: ControlRequest,
 }
 
+/// When the fake server answers, relative to the client's half-close. A real
+/// control server reads the request line, dispatches, writes its reply and
+/// closes without waiting for the client's EOF.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// Only after `cs` has half-closed its write side, so the fake's close
+    /// can never land before the client's shutdown and the byte-level cases
+    /// are deterministic on every platform.
+    AfterClientEof,
+    /// Straight after the request line, closing without reading to the
+    /// client's EOF: the real server's order. It races the client's
+    /// shutdown, which macOS refuses with ENOTCONN when the close lands
+    /// first.
+    AtOnce,
+}
+
 /// Run `cs <args> <mode flags>` against a one-shot fake control server that
-/// answers `reply` as one `Ok` line once `cs` has half-closed its write side,
-/// the order a real server's dispatch imposes. The socket lives under the
-/// system temp dir with a short name, inside the Unix socket path limit on
-/// macOS.
-async fn run_cs(case: &Case, reply: &str, mode: &[&str]) -> Run {
+/// answers `reply` as one `Ok` line, timed by `answer`. The socket lives
+/// under the system temp dir with a short name, inside the Unix socket path
+/// limit on macOS.
+async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let socket: PathBuf = std::env::temp_dir().join(format!(
         "cs-out-{}-{}.sock",
@@ -403,21 +418,28 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str]) -> Run {
             .await
             .expect("cs sends its request within the budget")
             .expect("read request line");
-        // `cs` half-closes its write side right after the request line and
-        // only then reads the reply; a real server is still dispatching at
-        // that point. Answer only after that EOF: the reply plus this task's
-        // exit closes the socket, and a close that lands before the client's
-        // shutdown makes macOS refuse the shutdown with ENOTCONN.
-        let mut trailing = Vec::new();
-        timeout(BUDGET, reader.read_to_end(&mut trailing))
-            .await
-            .expect("cs half-closes its write side within the budget")
-            .expect("read to the client's EOF");
-        assert!(
-            trailing.is_empty(),
-            "cs sent bytes after its request line: {trailing:?}"
-        );
-        write.write_all(line.as_bytes()).await.expect("write reply");
+        match answer {
+            // `cs` half-closes its write side right after the request line
+            // and only then reads the reply. Waiting for that EOF keeps this
+            // task's exit, which closes the socket, behind the client's
+            // shutdown.
+            Answer::AfterClientEof => {
+                let mut trailing = Vec::new();
+                timeout(BUDGET, reader.read_to_end(&mut trailing))
+                    .await
+                    .expect("cs half-closes its write side within the budget")
+                    .expect("read to the client's EOF");
+                assert!(
+                    trailing.is_empty(),
+                    "cs sent bytes after its request line: {trailing:?}"
+                );
+            }
+            Answer::AtOnce => {}
+        }
+        // A `cs` that failed between its request and its read is already
+        // gone and the write breaks the pipe. Let that show as `cs`'s own
+        // stderr through the exit assertions, not as a panic in this task.
+        let _ = write.write_all(line.as_bytes()).await;
         request
     });
 
@@ -451,7 +473,7 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str]) -> Run {
 /// The exact stdout of a successful run, with the request checked first so
 /// a wrong environment shows up as the request it produced, not as output.
 async fn stdout_of(case: &Case, mode: &[&str]) -> String {
-    let run = run_cs(case, case.reply, mode).await;
+    let run = run_cs(case, case.reply, mode, Answer::AfterClientEof).await;
     assert!(
         (case.request)(&run.request),
         "{}: unexpected request {:?}",
@@ -504,7 +526,7 @@ async fn markdown_is_the_renderer_output_without_an_extra_newline() {
 async fn search_prints_then_fails_when_the_result_carries_errors() {
     let case = search_with_errors();
     for (label, mode) in MODES {
-        let run = run_cs(&case, case.reply, mode).await;
+        let run = run_cs(&case, case.reply, mode, Answer::AfterClientEof).await;
         assert!((case.request)(&run.request), "{label}: {:?}", run.request);
         let expected = match label {
             "--json" => format!("{}\n", case.reply),
@@ -528,14 +550,54 @@ async fn search_prints_then_fails_when_the_result_carries_errors() {
     }
 }
 
+/// The real server's order: the reply and the close land as soon as the
+/// request line is read, without waiting for `cs` to half-close. When that
+/// close arrives first, macOS answers the client's shutdown with ENOTCONN,
+/// and `cs` must still print the reply it already has. Which side wins is
+/// a scheduling race, so the fastest command runs several times to make a
+/// regression likely to show; on Linux the shutdown never fails either way.
+#[tokio::test]
+async fn a_server_that_answers_and_closes_at_once_still_gets_its_reply_printed() {
+    let case = cases()
+        .into_iter()
+        .find(|case| case.name == "window list")
+        .expect("the window list case");
+    let expected = format!("{}\n", case.reply);
+    for round in 0..16 {
+        let run = run_cs(&case, case.reply, &["--json"], Answer::AtOnce).await;
+        assert!(
+            (case.request)(&run.request),
+            "round {round}: unexpected request {:?}",
+            run.request
+        );
+        assert!(
+            run.output.status.success(),
+            "round {round}: exit {:?}, stderr: {}",
+            run.output.status,
+            String::from_utf8_lossy(&run.output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.output.stdout).expect("utf-8 stdout"),
+            expected,
+            "round {round}"
+        );
+    }
+}
+
 /// A reply that is not JSON: plain `--json` still prints it verbatim and
 /// exits zero, since nothing parses it; `--json --pretty` fails naming the
 /// reply. `cs search` parses before printing, so it fails in both modes.
 #[tokio::test]
 async fn json_pretty_names_the_reply_it_could_not_parse() {
     for case in cases() {
-        let plain = run_cs(&case, "not json", &["--json"]).await;
-        let pretty = run_cs(&case, "not json", &["--json", "--pretty"]).await;
+        let plain = run_cs(&case, "not json", &["--json"], Answer::AfterClientEof).await;
+        let pretty = run_cs(
+            &case,
+            "not json",
+            &["--json", "--pretty"],
+            Answer::AfterClientEof,
+        )
+        .await;
         let parse_error = format!("parsing {} JSON", case.noun);
         if case.name == "search" {
             for (label, run) in [("--json", &plain), ("--json --pretty", &pretty)] {
