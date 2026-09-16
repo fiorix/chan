@@ -2215,14 +2215,7 @@ impl Workspace {
         //     it's brought back into scope by this rename.
         let mut effective: HashMap<String, String> = self.rename_log.lock().unwrap().clone();
         for (old, new) in &mapping {
-            // Transitive close: anything previously redirected at `old`
-            // now redirects at `new`.
-            for v in effective.values_mut() {
-                if v == old {
-                    *v = new.clone();
-                }
-            }
-            effective.insert(old.clone(), new.clone());
+            redirect(&mut effective, old, new);
         }
 
         // Wiki-link targets are stored in the graph extensionless
@@ -2324,12 +2317,7 @@ impl Workspace {
         {
             let mut log = self.rename_log.lock().unwrap();
             for (old, new) in &mapping {
-                for v in log.values_mut() {
-                    if v == old {
-                        *v = new.clone();
-                    }
-                }
-                log.insert(old.clone(), new.clone());
+                redirect(&mut log, old, new);
             }
             if let Err(e) = persist_rename_log(&self.paths.graph_dir, &log) {
                 tracing::warn!(
@@ -2356,12 +2344,7 @@ impl Workspace {
     /// re-reading the disk).
     fn rename_log_append(&self, old: &str, new: &str) {
         let mut log = self.rename_log.lock().unwrap();
-        for v in log.values_mut() {
-            if v == old {
-                *v = new.to_string();
-            }
-        }
-        log.insert(old.to_string(), new.to_string());
+        redirect(&mut log, old, new);
         // Persist before releasing the mutex so a concurrent reader
         // never sees a divergence between memory and disk. Failure
         // here is logged at warn but does not propagate: the rename
@@ -4300,6 +4283,17 @@ fn path_under(path: &str, prefix: &str) -> bool {
     path_b[..pb.len()].eq_ignore_ascii_case(pb) && path_b[pb.len()] == b'/'
 }
 
+/// Transitive close: entries targeting `old` are redirected to `new` before
+/// inserting the pair. `new` is used verbatim, even if it is already a key.
+fn redirect(map: &mut HashMap<String, String>, old: &str, new: &str) {
+    for v in map.values_mut() {
+        if v == old {
+            *v = new.to_string();
+        }
+    }
+    map.insert(old.to_string(), new.to_string());
+}
+
 /// Read the persisted rename log from `graph_dir/rename_log.json`.
 /// Best-effort: a missing file returns an empty map (fresh workspace,
 /// or a clean reindex landed since the last process exit), and a
@@ -5126,6 +5120,30 @@ mod tests {
             workspace.read_text("blob.weird"),
             Err(ChanError::NotEditableText(_))
         ));
+    }
+
+    #[test]
+    fn rename_log_redirect_closes_chains_without_resolving_destination_keys() {
+        let mut log = HashMap::new();
+        redirect(&mut log, "a", "b");
+        redirect(&mut log, "b", "c");
+        assert_eq!(
+            log,
+            HashMap::from([
+                ("a".to_string(), "c".to_string()),
+                ("b".to_string(), "c".to_string()),
+            ])
+        );
+
+        redirect(&mut log, "d", "a");
+        assert_eq!(
+            log,
+            HashMap::from([
+                ("a".to_string(), "c".to_string()),
+                ("b".to_string(), "c".to_string()),
+                ("d".to_string(), "a".to_string()),
+            ])
+        );
     }
 
     #[test]
