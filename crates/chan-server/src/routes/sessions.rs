@@ -14,6 +14,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::error::err_from;
+use crate::routes::blocking_response;
 use crate::state::AppState;
 use crate::util::raw_json_response;
 
@@ -70,20 +71,6 @@ fn ephemeral_map_lock(
         None => &state.ephemeral_sessions,
     };
     map.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-async fn blocking_response(
-    f: impl FnOnce() -> Response + Send + 'static,
-    label: &'static str,
-) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// Broadcast a `session_changed` frame on the per-tenant `/ws` bus after a

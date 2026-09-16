@@ -65,6 +65,25 @@ pub(crate) mod windows;
 mod workspace;
 mod ws;
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+/// Runs a response-producing closure on the blocking pool and maps a panicked
+/// task to a text/plain 500 carrying `label`.
+pub(crate) async fn blocking_response(
+    f: impl FnOnce() -> Response + Send + 'static,
+    label: &'static str,
+) -> Response {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(response) => response,
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{label} task panicked: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 pub use attachments::api_post_attachment;
 pub use build_info::api_build_info;
 pub use contacts::{api_get_contacts, api_post_contacts_import};
@@ -130,3 +149,33 @@ pub use window::api_window_reply;
 pub use windows::api_list_windows;
 pub use workspace::{api_cloud_workspaces, api_get_workspace, api_workspace_bootstrap};
 pub use ws::ws_upgrade;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header;
+
+    #[tokio::test]
+    async fn blocking_response_maps_a_panicked_task_to_a_labelled_500() {
+        let response = blocking_response(|| panic!("boom"), "probe").await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "unexpected content type: {content_type:?}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(
+            body.starts_with("probe task panicked: "),
+            "unexpected body: {body:?}"
+        );
+    }
+}

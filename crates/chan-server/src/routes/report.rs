@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::error::{err_from, err_state};
+use crate::routes::blocking_response;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -80,20 +81,6 @@ enum ReportFileStreamEvent<'a> {
 enum ReportFileStreamMessage {
     Data(Bytes),
     Error(chan_workspace::ChanError),
-}
-
-async fn blocking_response(
-    f: impl FnOnce() -> Response + Send + 'static,
-    label: &'static str,
-) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 fn query_flag(value: &Option<String>) -> bool {

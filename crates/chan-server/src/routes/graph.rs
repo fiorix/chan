@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::error::{err_from, err_state};
+use crate::routes::blocking_response;
 use crate::routes::fs_graph::{build_fs_graph, FsGraphScope};
 use crate::state::AppState;
 
@@ -43,20 +44,6 @@ pub struct LinkTargetsParams {
 
 fn default_link_limit() -> u32 {
     20
-}
-
-async fn blocking_response(
-    f: impl FnOnce() -> Response + Send + 'static,
-    label: &'static str,
-) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 fn query_flag(value: &Option<String>) -> bool {

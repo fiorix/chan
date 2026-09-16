@@ -24,21 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{err_from, err_state};
 use crate::indexer::IndexStatus;
+use crate::routes::blocking_response;
 use crate::state::AppState;
-
-async fn blocking_response(
-    f: impl FnOnce() -> Response + Send + 'static,
-    label: &'static str,
-) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        )
-            .into_response(),
-    }
-}
 
 /// Missing-file recovery params. `q` is the complete basename.
 #[derive(Deserialize)]
