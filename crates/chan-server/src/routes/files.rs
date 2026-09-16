@@ -14,13 +14,11 @@ use tokio::sync::mpsc;
 
 use chan_workspace::{AtomicWriteKind, BoundedFileReader, FileStat};
 
-use crate::doc_sessions::{flush_session, DocSession, HttpReplaceOutcome as DocHttpReplaceOutcome};
+use crate::collab_sessions::{HttpReplaceOutcome, HttpWriteView};
+use crate::doc_sessions::{flush_session, DocSession};
 use crate::error::{err, err_from, err_state};
 use crate::scene_sessions::scene::SceneError;
-use crate::scene_sessions::{
-    flush_session as flush_scene_session, HttpReplaceOutcome as SceneHttpReplaceOutcome,
-    SceneSession,
-};
+use crate::scene_sessions::{flush_session as flush_scene_session, SceneSession};
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
 use crate::state::AppState;
 use crate::static_assets::content_type_for;
@@ -2026,6 +2024,69 @@ pub async fn api_write_file(
     .into_response()
 }
 
+fn session_replace_response(
+    outcome: HttpReplaceOutcome,
+    view: impl FnOnce() -> HttpWriteView,
+) -> Option<Response> {
+    match outcome {
+        HttpReplaceOutcome::Applied => None,
+        HttpReplaceOutcome::PreconditionRequired {
+            current_version,
+            disk_mtime_ns,
+        } => Some(write_precondition_response(
+            StatusCode::PRECONDITION_REQUIRED,
+            disk_mtime_ns,
+            Some(current_version),
+            false,
+        )),
+        HttpReplaceOutcome::Stale {
+            current_version,
+            disk_mtime_ns,
+        } => Some(session_write_conflict_response(
+            disk_mtime_ns,
+            current_version,
+            false,
+        )),
+        HttpReplaceOutcome::Conflicted { disk_mtime_ns } => {
+            let version = view().authority_version;
+            Some(session_write_conflict_response(
+                disk_mtime_ns,
+                version,
+                true,
+            ))
+        }
+    }
+}
+
+fn session_write_flush_response(
+    flushed: bool,
+    view: impl FnOnce() -> HttpWriteView,
+    noun: &'static str,
+) -> Response {
+    // A conflict that arrives between replace and flush is still a
+    // 409. Other failed forced flushes answer 503: the content is
+    // authoritative in the session and every client (a retried PUT
+    // re-applies idempotently), but a 200 must keep meaning "bytes on
+    // disk".
+    let view = view();
+    if !flushed {
+        if let Some(disk_mtime_ns) = view.conflict_mtime_ns {
+            return session_write_conflict_response(disk_mtime_ns, view.authority_version, true);
+        }
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{noun} session accepted the write but the disk flush failed; retry"),
+        );
+    }
+    Json(WriteResponse {
+        mtime: view.disk_mtime_ns.map(|ns| ns / 1_000_000_000),
+        mtime_ns: view.disk_mtime_ns.map(|ns| ns.to_string()),
+        authority_version: Some(view.authority_version),
+        disk_conflicted: false,
+    })
+    .into_response()
+}
+
 /// Write an attached path through its doc session: CAS against the
 /// session token, apply as a `$http` update, force and await a flush,
 /// answer with the post-flush token. Status shapes (200 WriteResponse,
@@ -2043,59 +2104,20 @@ async fn write_via_session(
     preconditions: WritePreconditions,
     content: &str,
 ) -> Response {
-    match session.apply_http_replace("$http", content, preconditions) {
-        Ok(DocHttpReplaceOutcome::Applied) => {}
-        Ok(DocHttpReplaceOutcome::PreconditionRequired {
-            current_version,
-            disk_mtime_ns,
-        }) => {
-            return write_precondition_response(
-                StatusCode::PRECONDITION_REQUIRED,
-                disk_mtime_ns,
-                Some(current_version),
-                false,
-            );
-        }
-        Ok(DocHttpReplaceOutcome::Stale {
-            current_version,
-            disk_mtime_ns,
-        }) => {
-            return session_write_conflict_response(disk_mtime_ns, current_version, false);
-        }
-        Ok(DocHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
-            let version = session.http_write_view().authority_version;
-            return session_write_conflict_response(disk_mtime_ns, version, true);
-        }
+    let outcome = match session.apply_http_replace("$http", content, preconditions) {
+        Ok(outcome) => outcome,
         Err(e) => {
             // DocTooLarge is the only reachable variant here:
             // replace_diff trims on char boundaries and spans the
             // document exactly.
             return err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string());
         }
+    };
+    if let Some(response) = session_replace_response(outcome, || session.http_write_view()) {
+        return response;
     }
-    // A conflict that arrives between replace and flush is still a
-    // 409. Other failed forced flushes answer 503: the content is
-    // authoritative in the session and every client (a retried PUT
-    // re-applies idempotently), but a 200 must keep meaning "bytes on
-    // disk".
-    if !flush_session(session, workspace, &state.self_writes).await {
-        let view = session.http_write_view();
-        if let Some(disk_mtime_ns) = view.conflict_mtime_ns {
-            return session_write_conflict_response(disk_mtime_ns, view.authority_version, true);
-        }
-        return err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "doc session accepted the write but the disk flush failed; retry".into(),
-        );
-    }
-    let view = session.http_write_view();
-    Json(WriteResponse {
-        mtime: view.disk_mtime_ns.map(|ns| ns / 1_000_000_000),
-        mtime_ns: view.disk_mtime_ns.map(|ns| ns.to_string()),
-        authority_version: Some(view.authority_version),
-        disk_conflicted: false,
-    })
-    .into_response()
+    let flushed = flush_session(session, workspace, &state.self_writes).await;
+    session_write_flush_response(flushed, || session.http_write_view(), "doc")
 }
 
 /// Write an attached path through its scene session: CAS against the
@@ -2112,59 +2134,20 @@ async fn write_via_scene_session(
     preconditions: WritePreconditions,
     content: &str,
 ) -> Response {
-    match session.apply_http_replace(content, preconditions) {
-        Ok(SceneHttpReplaceOutcome::Applied) => {}
-        Ok(SceneHttpReplaceOutcome::PreconditionRequired {
-            current_version,
-            disk_mtime_ns,
-        }) => {
-            return write_precondition_response(
-                StatusCode::PRECONDITION_REQUIRED,
-                disk_mtime_ns,
-                Some(current_version),
-                false,
-            );
-        }
-        Ok(SceneHttpReplaceOutcome::Stale {
-            current_version,
-            disk_mtime_ns,
-        }) => {
-            return session_write_conflict_response(disk_mtime_ns, current_version, false);
-        }
-        Ok(SceneHttpReplaceOutcome::Conflicted { disk_mtime_ns }) => {
-            let version = session.http_write_view().authority_version;
-            return session_write_conflict_response(disk_mtime_ns, version, true);
-        }
+    let outcome = match session.apply_http_replace(content, preconditions) {
+        Ok(outcome) => outcome,
         Err(e) => {
             return match e {
                 SceneError::Invalid(_) => err(StatusCode::BAD_REQUEST, e.to_string()),
                 SceneError::TooLarge { .. } => err(StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
             };
         }
+    };
+    if let Some(response) = session_replace_response(outcome, || session.http_write_view()) {
+        return response;
     }
-    // A conflict that arrives between replace and flush is still a
-    // 409. Other failed forced flushes answer 503: the content is
-    // authoritative in the session and every client (a retried PUT
-    // re-applies idempotently), but a 200 must keep meaning "bytes on
-    // disk".
-    if !flush_scene_session(session, workspace, &state.self_writes).await {
-        let view = session.http_write_view();
-        if let Some(disk_mtime_ns) = view.conflict_mtime_ns {
-            return session_write_conflict_response(disk_mtime_ns, view.authority_version, true);
-        }
-        return err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "scene session accepted the write but the disk flush failed; retry".into(),
-        );
-    }
-    let view = session.http_write_view();
-    Json(WriteResponse {
-        mtime: view.disk_mtime_ns.map(|ns| ns / 1_000_000_000),
-        mtime_ns: view.disk_mtime_ns.map(|ns| ns.to_string()),
-        authority_version: Some(view.authority_version),
-        disk_conflicted: false,
-    })
-    .into_response()
+    let flushed = flush_scene_session(session, workspace, &state.self_writes).await;
+    session_write_flush_response(flushed, || session.http_write_view(), "scene")
 }
 
 pub(crate) fn parse_optional_mtime_ns(value: Option<&str>) -> Result<Option<i64>, String> {
@@ -6542,8 +6525,8 @@ mod doc_divert_tests {
         let session = handle.session().clone();
         let token0 = session.token().expect("seeded token");
 
-        // Make the workspace root unwritable so the flush's temp-file
-        // rename fails underneath the accepted write.
+        // The workspace preflight refuses a read-only destination directory,
+        // including when the test runs as root.
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
         let resp = api_write_file(
             State(state.clone()),
@@ -6561,6 +6544,10 @@ mod doc_divert_tests {
         // disk is untouched, and a retry (writable again) succeeds and
         // lands it.
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body_json(resp).await["error"],
+            "doc session accepted the write but the disk flush failed; retry"
+        );
         assert_eq!(session.authority_view().0, "two\n");
         assert_eq!(
             std::fs::read_to_string(root.path().join("n.md")).unwrap(),
@@ -6811,6 +6798,70 @@ mod scene_divert_tests {
         )
         .unwrap();
         assert_eq!(on_disk["elements"][0]["angle"], 30);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_divert_answers_503_when_the_forced_scene_flush_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let (_cfg, root, state) = divert_app();
+            let workspace = state.try_workspace().unwrap();
+            let baseline = scene_body(json!([elem("x", 1, 1, "a1")]));
+            workspace.write_text("b.excalidraw", &baseline).unwrap();
+            let mut handle = state
+                .scene_sessions
+                .attach(&workspace, "b.excalidraw", "win-1")
+                .await
+                .unwrap();
+            let _frames = handle.take_frames();
+            let session = handle.session().clone();
+            let token0 = session.token().expect("seeded token");
+            let mut edited = elem("x", 2, 2, "a1");
+            edited["angle"] = json!(30);
+
+            // The workspace preflight rejects read-only parents even for root.
+            let permissions = std::fs::metadata(root.path()).unwrap().permissions();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let resp = api_write_file(
+                State(state.clone()),
+                AxumPath("b.excalidraw".into()),
+                Json(WriteBody {
+                    content: scene_body(json!([edited])),
+                    expected_mtime: None,
+                    expected_mtime_ns: Some(token0.to_string()),
+                }),
+            )
+            .await;
+            std::fs::set_permissions(root.path(), permissions).unwrap();
+
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                body_json(resp).await["error"],
+                "scene session accepted the write but the disk flush failed; retry"
+            );
+            let authority = session.authority_view().0;
+            let value: Value = serde_json::from_str(&authority).unwrap();
+            assert_eq!(value["elements"][0]["angle"], 30);
+            assert_eq!(workspace.read_text("b.excalidraw").unwrap(), baseline);
+            let resp = api_write_file(
+                State(state.clone()),
+                AxumPath("b.excalidraw".into()),
+                Json(WriteBody {
+                    content: authority,
+                    expected_mtime: None,
+                    expected_mtime_ns: None,
+                }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let disk: Value =
+                serde_json::from_str(&workspace.read_text("b.excalidraw").unwrap()).unwrap();
+            assert_eq!(disk["elements"][0]["angle"], 30);
+        })
+        .await
+        .expect("scene flush refusal and retry finish within the bound");
     }
 
     #[tokio::test]
