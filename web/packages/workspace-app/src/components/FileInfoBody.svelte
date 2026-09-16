@@ -541,10 +541,11 @@
   }
 
   /// A draft FILE is scratch space, so the classifier yields only the
-  /// terminal action. Its handler opens a terminal seeded with
-  /// {cursor}{space}{relative-path-of-the-draft}: drafts are in-root files,
-  /// so the shared fromHere seed applies with cwd at the workspace root. The
-  /// {cursor}{space} prefix is added by TerminalTab's seed mechanism.
+  /// terminal action. Its handler opens a terminal in the draft's parent
+  /// directory with the draft's basename seeded, the same fromHere target a
+  /// regular file gets (drafts are in-root files); TerminalTab adds the
+  /// leading space and cursor-to-start on top of the seedInput. It differs
+  /// from newTerminalHere only in skipping the host's onNewTerminal override.
   function draftTerminalHere(): void {
     if (!entry) return;
     openTerminalInActivePane(terminalFromHereTarget(entry.path, false));
@@ -590,9 +591,8 @@
       case "newTerminal": {
         // Drafts are scratch space, but the two draft shapes route
         // differently: a draft DIRECTORY roots the terminal in the
-        // directory itself (newTerminalHere), while a draft FILE keeps
-        // the absolute-path seed with the workspace root as cwd
-        // (draftTerminalHere).
+        // directory itself (newTerminalHere); a draft FILE opens in its
+        // parent directory with its basename seeded (draftTerminalHere).
         const isDraft = e.path === draftsDir() || isDraftPath(e.path);
         if (isDraft) {
           return e.is_dir

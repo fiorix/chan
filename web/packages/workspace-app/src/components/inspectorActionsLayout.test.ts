@@ -121,10 +121,16 @@ describe("shared actions section under the filename", () => {
     expect(fileInfo).toMatch(
       /function newTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, entry\.is_dir\)/,
     );
-    expect(fileInfo).toMatch(
-      /function draftTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, false\)/,
-    );
-    expect(fileInfo).not.toMatch(/abs_path|shellQuotePath/);
+    // The shell-quoting ban is scoped to the draft handler, the slice the
+    // positive check reads, so a quoted path elsewhere in the component (a
+    // copy action, say) is not a terminal-action failure.
+    const draftHandler = fileInfo.match(
+      /function draftTerminalHere\(\): void \{[\s\S]*?\n  \}/,
+    )?.[0];
+    expect(draftHandler).toBeDefined();
+    expect(draftHandler).toMatch(/terminalFromHereTarget\(entry\.path, false\)/);
+    expect(draftHandler).not.toMatch(/shellQuotePath/);
+    expect(fileInfo).not.toMatch(/abs_path/);
     expect(fileInfo).toMatch(
       /import \{[^}]*\bterminalFromHereTarget\b[^}]*\} from "\.\.\/terminal\/fromHere";/,
     );
