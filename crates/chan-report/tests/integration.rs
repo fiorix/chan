@@ -605,6 +605,57 @@ fn file_bucket_absent_in_old_jsonl_loads_as_none() {
 }
 
 #[test]
+fn a_meta_record_without_a_skip_count_loads_as_zero() {
+    // A `meta` record without `skipped_entries` describes a scan that
+    // skipped nothing, so the loaded index reports zero.
+    let d = tempdir().unwrap();
+    let complete = format!(
+        "{{\"kind\":\"meta\",\"schema\":{},\"root\":\"/abs\",\"generated_at\":\"2026-05-12T12:00:00Z\"}}\n\
+         {{\"kind\":\"file\",\"path\":\"src/lib.rs\",\"language\":\"Rust\",\"code\":10,\"comments\":2,\"blanks\":1,\"complexity\":3,\"bytes\":120}}\n",
+        SCHEMA_VERSION
+    );
+    let opts = ReportOptions::new(d.path());
+    let idx = Index::load_jsonl(Cursor::new(complete.as_bytes()), &opts).unwrap();
+    assert_eq!(idx.skipped_entries(), 0);
+    assert!(idx.file("src/lib.rs").is_some(), "other records unaffected");
+}
+
+#[test]
+fn a_persisted_skip_count_is_restored_on_load() {
+    let d = tempdir().unwrap();
+    let partial = format!(
+        "{{\"kind\":\"meta\",\"schema\":{},\"root\":\"/abs\",\"generated_at\":\"2026-05-12T12:00:00Z\",\"skipped_entries\":2}}\n\
+         {{\"kind\":\"file\",\"path\":\"src/lib.rs\",\"language\":\"Rust\",\"code\":10,\"comments\":2,\"blanks\":1,\"complexity\":3,\"bytes\":120}}\n",
+        SCHEMA_VERSION
+    );
+    let opts = ReportOptions::new(d.path());
+    let idx = Index::load_jsonl(Cursor::new(partial.as_bytes()), &opts).unwrap();
+    assert_eq!(
+        idx.skipped_entries(),
+        2,
+        "the loaded index must report the stored count"
+    );
+}
+
+#[test]
+fn a_complete_index_writes_no_skip_count() {
+    let d = tempdir().unwrap();
+    write(d.path(), "x.py", "def foo():\n    pass\n");
+    let idx = Index::scan(&ReportOptions::new(d.path())).unwrap();
+    assert_eq!(idx.skipped_entries(), 0);
+    let mut buf = Vec::new();
+    idx.write_jsonl(&mut buf, &Scope::All, &CocomoParams::default())
+        .unwrap();
+    let text = std::str::from_utf8(&buf).unwrap();
+    let meta = text.lines().next().unwrap();
+    assert!(meta.contains("\"kind\":\"meta\""));
+    assert!(
+        !meta.contains("skipped_entries"),
+        "a complete index must write no skip count: {meta}"
+    );
+}
+
+#[test]
 fn schema_mismatch_is_reported() {
     let d = tempdir().unwrap();
     let opts = ReportOptions::new(d.path());

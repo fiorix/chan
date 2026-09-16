@@ -36,6 +36,17 @@ pub struct ReportMeta {
     pub root: String,
     pub generated_at: String,
     pub schema: u32,
+    /// Entries the scan that produced the index skipped because walking
+    /// or counting them failed. Every snapshot carries the index's count
+    /// whatever its scope: a skipped entry has no known path, so no scope
+    /// can claim to be complete. Absent from the record when zero, so a
+    /// record without it describes a scan that skipped nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_entries: usize,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// Per-file row. Mirrors the JSONL `kind: "file"` shape.

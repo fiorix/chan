@@ -180,8 +180,10 @@ impl Index {
         Ok(idx)
     }
 
-    /// Entries skipped because walking or counting failed during the initial scan.
-    /// This count is not persisted and is zero for indexes loaded from JSONL.
+    /// Entries skipped because walking or counting failed during the scan
+    /// that produced this index. The count rides in the JSONL `meta` record,
+    /// so an index loaded from JSONL reports the count of the scan that
+    /// wrote it. Per-file updates never change it.
     pub fn skipped_entries(&self) -> usize {
         self.skipped_entries
     }
@@ -320,6 +322,7 @@ impl Index {
                 root: self.root.display().to_string(),
                 generated_at: Utc::now().to_rfc3339(),
                 schema: summary::SCHEMA_VERSION,
+                skipped_entries: self.skipped_entries,
             },
             totals,
             by_language,
@@ -350,7 +353,8 @@ impl Index {
 
     /// Reconstruct an `Index` from a previously written JSONL
     /// stream. `opts` provides the live filter; the schema field
-    /// in the loaded `meta` record must match the current build.
+    /// in the loaded `meta` record must match the current build,
+    /// and its skip count becomes the index's.
     pub fn load_jsonl<R: BufRead>(r: R, opts: &ReportOptions) -> Result<Self, ChanReportError> {
         let (meta, files) = jsonl::read_file_rows(r)?;
         if meta.schema != summary::SCHEMA_VERSION {
@@ -371,7 +375,7 @@ impl Index {
             filter,
             files: map,
             dirs: HashMap::new(),
-            skipped_entries: 0,
+            skipped_entries: meta.skipped_entries,
         };
         idx.rebuild_dirs();
         Ok(idx)
@@ -408,6 +412,7 @@ impl Index {
                 root: self.root.display().to_string(),
                 generated_at: Utc::now().to_rfc3339(),
                 schema: summary::SCHEMA_VERSION,
+                skipped_entries: self.skipped_entries,
             },
             totals,
             by_language,
@@ -627,6 +632,40 @@ mod tests {
             .write_jsonl(&mut jsonl, &Scope::All, &opts.cocomo)
             .unwrap();
         let loaded = Index::load_jsonl(std::io::Cursor::new(jsonl), &opts).unwrap();
-        assert_eq!(loaded.skipped_entries(), 0);
+        assert_eq!(
+            loaded.skipped_entries(),
+            1,
+            "the JSONL round trip must carry the scan's skip count"
+        );
+    }
+
+    #[test]
+    fn every_snapshot_carries_the_index_skip_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "fn b() {}\n").unwrap();
+        let opts = ReportOptions::new(dir.path());
+        let index = Index::scan_with(&opts, |root, rel| {
+            if rel == "a.rs" {
+                Err(ChanReportError::Io("injected count failure".into()))
+            } else {
+                count::count_file_impl(root, rel)
+            }
+        })
+        .unwrap();
+        assert_eq!(index.skipped_entries(), 1);
+        // A skipped entry has no known path, so a scoped snapshot cannot
+        // claim to be complete: every scope reports the index's count.
+        for scope in [
+            Scope::All,
+            Scope::Prefix("src".into()),
+            Scope::Files(vec!["src/b.rs".into()]),
+        ] {
+            let report = index.snapshot(&scope, &opts.cocomo);
+            assert_eq!(report.meta.skipped_entries, 1, "scope {scope:?}");
+        }
+        let dir_report = index.dir_report("src", &opts.cocomo).unwrap();
+        assert_eq!(dir_report.meta.skipped_entries, 1);
     }
 }
