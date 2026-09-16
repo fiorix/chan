@@ -2804,7 +2804,10 @@ mod tests {
         .unwrap();
         assert_eq!(cli.operator_token.as_deref(), Some("operator-secret"));
         assert_eq!(cli.profile_token.as_deref(), Some("profile-secret"));
-        assert_eq!(cli.identity_token, None);
+        // clap's `env` feature may have filled it from the shell, so the pin
+        // is that the alias never lands here, not that the field is empty.
+        let from_shell = std::env::var("CHAN_ADMIN_IDENTITY_TOKEN").ok();
+        assert_eq!(cli.identity_token, from_shell);
     }
 
     #[test]
