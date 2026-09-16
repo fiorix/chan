@@ -145,11 +145,11 @@ impl Bm25Index {
         self.index_chunks(rel_path, &chunks)
     }
 
-    /// Same as `index_file` but takes pre-computed chunks. Used by
-    /// `Index::build_all`'s parallel walker so chunking can happen
-    /// off the writer thread, avoiding the per-file double parse
-    /// the previous `index_file`-only path was paying. Empty chunk
-    /// slice still drops any prior documents for `rel_path` so a
+    /// Same as `index_file` but takes pre-computed chunks, so a caller
+    /// that already parsed the text does not parse it twice:
+    /// `Index::build_all`'s parallel walker chunks off the writer
+    /// thread, and `Index::write_file` embeds the same chunks. Empty
+    /// chunk slice still drops any prior documents for `rel_path` so a
     /// file that became empty is removed from the index.
     pub fn index_chunks(&self, rel_path: &str, chunks: &[Chunk]) -> Result<usize, Bm25Error> {
         self.delete_file(rel_path)?;

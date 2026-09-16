@@ -1000,15 +1000,14 @@ impl Index {
         Ok(())
     }
 
-    /// One-file write path used by both `build_all` and `index_one`.
-    /// Chunks once, persists vectors first, then hands the same
-    /// chunks to BM25. Caller commits BM25; that commit is the
-    /// durable boundary for the pair. A crash between vector
-    /// persist and BM25 commit drops the BM25 write entirely
-    /// (tantivy never persisted it) and leaves the vector shard on
-    /// disk, which the next reindex overwrites. The opposite
-    /// ordering would let a committed BM25 row reference a chunk
-    /// whose vector never reached disk: silent semantic-search
+    /// One-file write path behind `index_one`. Chunks the text once,
+    /// persists vectors first, then hands the same chunks to BM25.
+    /// Caller commits BM25; that commit is the durable boundary for
+    /// the pair. A crash between vector persist and BM25 commit drops
+    /// the BM25 write entirely (tantivy never persisted it) and leaves
+    /// the vector shard on disk, which the next reindex overwrites. The
+    /// opposite ordering would let a committed BM25 row reference a
+    /// chunk whose vector never reached disk: silent semantic-search
     /// drift that the user only notices when results disappear.
     fn write_file(
         &self,
@@ -1066,7 +1065,7 @@ impl Index {
         }
         #[cfg(not(feature = "embeddings"))]
         let _ = model;
-        self.bm25.index_file(rel_path, text, &chunking_cfg)?;
+        self.bm25.index_chunks(rel_path, &chunks)?;
         Ok(chunks.len())
     }
 

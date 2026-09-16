@@ -7643,6 +7643,37 @@ mod tests {
     }
 
     #[test]
+    fn index_file_writes_one_bm25_chunk_per_heading_section() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text(
+                "sections.md",
+                "# One\n\nalphaterm body\n\n# Two\n\nbetaterm body\n\n# Three\n\ngammaterm body\n",
+            )
+            .unwrap();
+        workspace.index_file("sections.md").unwrap();
+        let opts = SearchOpts::default();
+        let mut chunk_ids = Vec::new();
+        for term in ["alphaterm", "betaterm", "gammaterm"] {
+            let hits = workspace.search(term, &opts).unwrap().hits;
+            assert_eq!(
+                hits.len(),
+                1,
+                "{term} must live in exactly one chunk: {hits:?}"
+            );
+            assert_eq!(hits[0].path, "sections.md");
+            chunk_ids.push(hits[0].chunk_id.clone());
+        }
+        chunk_ids.sort();
+        chunk_ids.dedup();
+        assert_eq!(
+            chunk_ids,
+            ["h-0", "h-1", "h-2"],
+            "one BM25 chunk per ATX section, none duplicated"
+        );
+    }
+
+    #[test]
     fn remove_then_restore_round_trips() {
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("notes/a.md", "hello").unwrap();
