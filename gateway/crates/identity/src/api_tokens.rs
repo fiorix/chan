@@ -420,7 +420,7 @@ impl ApiTokenService {
         Ok(validated)
     }
 
-    /// [`validate`] minus the `used` audit row: the same single
+    /// [`Self::validate`] minus the `used` audit row: the same single
     /// UPDATE..RETURNING, so `last_used_at` still bumps (a roster
     /// poll is real token use and keeps the token visibly active in
     /// the SPA), but nothing lands in `api_token_audit`. Serves only

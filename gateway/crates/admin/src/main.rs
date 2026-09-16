@@ -263,7 +263,7 @@ enum FlagCmd {
         #[arg(long, help = "skip the y/N prompt")]
         yes: bool,
     },
-    /// Grant a flag to one user. <ident> is a uuid, email, or
+    /// Grant a flag to one user. `<ident>` is a uuid, email, or
     /// username. Defaults to --enabled; pass --disabled to record
     /// an explicit "deny" override when the flag default is on.
     Grant {
@@ -314,7 +314,7 @@ enum ProxyCmd {
 enum UserCmd {
     /// List users with optional filters.
     List(UserListArgs),
-    /// Show one user. <ident> is a uuid, email, or username.
+    /// Show one user. `<ident>` is a uuid, email, or username.
     Get { ident: String },
     /// Create a user (provisioned without OAuth identities).
     Create {
@@ -1241,7 +1241,7 @@ impl AdminClient {
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
     }
 
-    /// Resolve <ident> -> User. Order: uuid, email substring (must
+    /// Resolve `<ident>` -> User. Order: uuid, email substring (must
     /// match exactly one row), username exact match. The list
     /// endpoint enforces case-insensitivity for both fields.
     async fn resolve_user(&self, ident: &str) -> anyhow::Result<User> {

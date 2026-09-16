@@ -4,7 +4,7 @@
 //! The endpoint shape:
 //!
 //!   POST /internal/v1/tokens/validate
-//!   Authorization: Bearer <shared internal bearer>
+//!   Authorization: Bearer `<shared internal bearer>`
 //!   Content-Type: application/json
 //!   { "token": "<chan_pat_*>" }
 //!

@@ -280,7 +280,7 @@ pub struct ResolvedBinding {
     pub target: ExtensionTarget,
     /// The principal's authority for this request: its identity and expiry
     /// are the live session's, its client is the binding's (see
-    /// [`ExtensionBinding::client`]), and cancellation and the operation
+    /// `ExtensionBinding::client`), and cancellation and the operation
     /// registry are the binding's own, so revoking the binding stops its
     /// transports.
     pub authorization: SessionRecord,

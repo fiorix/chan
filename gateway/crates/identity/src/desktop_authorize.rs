@@ -28,8 +28,9 @@
 //!     the pending params.
 //!   * `POST /desktop/authorize/confirm` -- handles the `Authorize` /
 //!     `Cancel` action. Consumes the pending params + CSRF; on
-//!     `allow` mints a PAT through [`ApiTokenService::create`] with
-//!     [`TokenOrigin::Desktop`], stashes it in the
+//!     `allow` mints a PAT through
+//!     [`ApiTokenService::create`](crate::api_tokens::ApiTokenService::create)
+//!     with [`TokenOrigin::Desktop`], stashes it in the
 //!     [`RedemptionStore`] under a one-time code bound to the PKCE
 //!     challenge, and answers 200 with a handoff page that navigates
 //!     the browser to `http://127.0.0.1:<port>/auth/callback?code=&state=`
@@ -48,7 +49,7 @@
 //!   * `POST /desktop/authorize/redeem` -- swaps a one-time code plus
 //!     the PKCE verifier for the minted PAT (`{"code": ...,
 //!     "code_verifier": ...}` -> `{id, secret, label, expires_at}`).
-//!     Single-use with a [`REDEEM_TTL`] lifetime; unknown, expired,
+//!     Single-use with a `REDEEM_TTL` lifetime; unknown, expired,
 //!     replayed codes and a code presented with the wrong verifier all
 //!     answer 410.
 //!
@@ -64,7 +65,7 @@
 //!   * `redirect_uri` must be a loopback callback
 //!     (`http://127.0.0.1:<port>/auth/callback` or the `[::1]` form),
 //!     validated by parsed-enum host equality (see
-//!     [`validate_loopback_redirect_uri`]). A bad redirect_uri returns
+//!     `validate_loopback_redirect_uri`). A bad redirect_uri returns
 //!     400; the port is the only free field.
 //!   * `code_challenge_method` must be exactly `S256` and
 //!     `code_challenge` a 43-char base64url-no-pad value decoding to
@@ -72,8 +73,8 @@
 //!     stored challenge in constant time.
 //!   * `state` must be present and bounded; without it the desktop
 //!     client cannot tie the response to its request.
-//!   * `expires_in` is clamped to [`MAX_EXPIRES_IN_SECS`].
-//!   * `scopes` are checked against [`ALLOWED_SCOPES`]. The general
+//!   * `expires_in` is clamped to `MAX_EXPIRES_IN_SECS`.
+//!   * `scopes` are checked against `ALLOWED_SCOPES`. The general
 //!     `/api/tokens` path only checks scope shape; this stricter list
 //!     applies here because the desktop flow is unattended and we
 //!     want a known-bounded capability surface.
@@ -739,7 +740,7 @@ pub struct ConfirmForm {
 }
 
 /// `POST /desktop/authorize/confirm` -- handles allow / deny. Every
-/// outcome answers 200 with a [`Handoff`] page (see the module doc for
+/// outcome answers 200 with a `Handoff` page (see the module doc for
 /// why THIS response, alone in the flow, is not a redirect).
 pub async fn confirm(
     State(state): State<AppState>,
