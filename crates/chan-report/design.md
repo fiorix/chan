@@ -89,7 +89,7 @@ The JSONL `file` records alone are sufficient to reconstruct the index; the `lan
 `Index::update(rel)`:
 
   - Applies the cached `Filter` to `rel`. Standalone indexes use hidden / gitignore / exclude-glob options; embedded indexes use the caller's `ReportPathPolicy`. If rejected and a row exists, drops the row and returns `Removed`; otherwise `Skipped`.
-  - Calls `count_file` against the stored root. If the file vanished, counting failed or the counter rejected it, removes any existing row (`Removed`) or returns `Skipped`. Counting errors do not leave stale rows behind or abort a rename after its source was removed.
+  - Calls `count_file_impl` against the stored root. If the file vanished, counting failed or the counter rejected it, removes any existing row (`Removed`) or returns `Skipped`. Counting errors do not leave stale rows behind or abort a rename after its source was removed.
   - Compares the new `FileStats` against the existing row. Returns `Unchanged` when identical; otherwise inserts or updates and returns `Inserted` / `Updated`.
 
 `Index::remove(rel)` is unconditional: drops the row if present and returns `Removed`, else `Unchanged`.

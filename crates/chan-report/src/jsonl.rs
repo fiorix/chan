@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::cocomo::CocomoSummary;
 use crate::error::ChanReportError;
-use crate::summary::{FileStats, LanguageStats, Report, ReportMeta, Totals};
+use crate::summary::{FileStats, LanguageStats, ReportMeta, Totals};
 
 /// Write a full report (meta + every file row + roll-ups +
 /// cocomo) to `w`. One JSON object per line, LF-terminated.
@@ -84,22 +84,6 @@ pub(crate) fn read_file_rows<R: BufRead>(
         message: "missing meta record".into(),
     })?;
     Ok((meta, files))
-}
-
-/// Convenience for one-shot serialization to a `String`. Equivalent
-/// to constructing a `Vec<u8>`, calling `write_report` on it, and
-/// converting via `String::from_utf8`.
-pub fn report_to_jsonl_string(report: &Report) -> Result<String, ChanReportError> {
-    let mut buf = Vec::new();
-    write_report(
-        &mut buf,
-        &report.meta,
-        &report.files,
-        &report.by_language,
-        &report.totals,
-        &report.cocomo,
-    )?;
-    String::from_utf8(buf).map_err(|e| ChanReportError::Io(e.to_string()))
 }
 
 fn write_tagged<W: Write, T: serde::Serialize>(

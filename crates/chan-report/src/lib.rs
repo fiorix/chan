@@ -19,7 +19,6 @@ mod walk;
 
 pub use cocomo::{CocomoModel, CocomoParams, CocomoSummary};
 pub use error::ChanReportError;
-pub use jsonl::report_to_jsonl_string;
 pub use summary::{
     FileBucket, FileStats, LanguageStats, Report, ReportMeta, Totals, SCHEMA_VERSION,
 };
@@ -543,25 +542,6 @@ fn sort_by_language(by_language: &mut [LanguageStats]) {
             .then_with(|| b.files.cmp(&a.files))
             .then_with(|| a.name.cmp(&b.name))
     });
-}
-
-/// One-shot helper for the common "scan once, get a report" flow.
-/// Equivalent to `Index::scan(opts)?.snapshot(&Scope::All, &opts.cocomo)`.
-pub fn run(opts: &ReportOptions) -> Result<Report, ChanReportError> {
-    let idx = Index::scan(opts)?;
-    Ok(idx.snapshot(&Scope::All, &opts.cocomo))
-}
-
-/// Count one file from disk without applying the walker's filter.
-/// Shared by `Index::scan` and `Index::update`. Recognized files over
-/// 16 MiB retain metadata-only rows with zero line counts and complexity.
-/// Returns `None` for unrecognized, non-regular or vanished files, including
-/// disappearance after stat. Oversized files are recognized by path only.
-/// Other extensionless files need a complete shebang in a bounded prefix
-/// before their body is read. Other I/O errors are returned to the caller;
-/// scans count them as skips and updates remove any existing row.
-pub fn count_file(root: &Path, rel: &str) -> Result<Option<FileStats>, ChanReportError> {
-    count::count_file_impl(root, rel)
 }
 
 fn roll_up(files: &[FileStats]) -> (Vec<LanguageStats>, Totals) {
