@@ -53,11 +53,8 @@ impl TestApp {
                 "test-profile-admin-token".into(),
             )
             .unwrap();
+        profile::revocation::spawn_worker(app.pool.clone(), workspace_admin);
         app.router = profile::http::router(profile::http::AppState {
-            revocations: profile::revocation::RevocationCoordinator::spawn(
-                app.pool.clone(),
-                workspace_admin,
-            ),
             pool: app.pool.clone(),
             auth_token: TOKEN.to_string(),
             admin_token: Some(ADMIN_TOKEN.to_string()),
@@ -3002,4 +2999,52 @@ async fn settling_cut_gets_a_fresh_retry_window_after_a_late_first_cut() {
         assert_eq!(audits, 0);
         assert_eq!(retry_window, chrono::Duration::minutes(5));
     }).await.expect("revocation retry-window test timed out");
+}
+
+#[tokio::test]
+async fn revocation_worker_starts_with_the_app() {
+    let control = Router::new().fallback(|| async {
+        axum::Json(json!({
+            "killed": 0,
+            "revoked": 0,
+            "proxies_confirmed": 1,
+            "proxies_expected": 1
+        }))
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    // The fixture is the only thing that starts the worker: this test never
+    // calls process_once, so the claim below can only come from that task.
+    let app = TestApp::new_with_control(&control_url).await;
+    let uid: Uuid = mk_user(&app, "worker-start@x.com").await.parse().unwrap();
+    profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(uid))
+        .await
+        .unwrap();
+    let key = format!("subject:{uid}");
+
+    // A fresh reservation has no deadline; the worker's claim sets one, and
+    // the confirmed first cut moves the row to settling.
+    let bound = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (phase, attempts, claimed): (String, i32, bool) = sqlx::query_as(
+            "SELECT phase, attempts, deadline IS NOT NULL \
+             FROM control_revocation_jobs WHERE job_key = $1",
+        )
+        .bind(&key)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        if phase == "settling" {
+            assert!(claimed);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < bound,
+            "worker never settled the job: phase={phase} attempts={attempts} claimed={claimed}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    app.cleanup().await;
+    server.abort();
 }

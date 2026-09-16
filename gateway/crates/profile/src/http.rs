@@ -65,7 +65,6 @@ pub struct AppState {
     /// route 401, which is the safe default if the env var was
     /// forgotten on a fresh deploy.
     pub admin_token: Option<String>,
-    pub revocations: crate::revocation::RevocationCoordinator,
 }
 
 pub fn router(state: AppState) -> Router {

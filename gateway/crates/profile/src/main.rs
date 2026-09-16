@@ -74,11 +74,9 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!("devserver registry sweeper disabled by DEVSERVER_RETENTION_MINUTES=0");
     }
 
+    profile::revocation::spawn_worker(pool.clone(), cfg.workspace_admin.clone());
+
     let app = http::router(http::AppState {
-        revocations: profile::revocation::RevocationCoordinator::spawn(
-            pool.clone(),
-            cfg.workspace_admin.clone(),
-        ),
         pool,
         auth_token: cfg.auth_token.clone(),
         admin_token: cfg.admin_token.clone(),

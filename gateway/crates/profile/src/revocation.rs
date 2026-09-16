@@ -68,21 +68,13 @@ impl RevocationJob {
     }
 }
 
-#[derive(Clone)]
-pub struct RevocationCoordinator {
-    pool: PgPool,
-}
-
-impl RevocationCoordinator {
-    pub fn spawn(pool: PgPool, client: DevserverControlClient) -> Self {
-        tokio::spawn(run(pool.clone(), client));
-        Self { pool }
-    }
-
-    /// Durable coalescing outside a larger mutation transaction.
-    pub async fn enqueue(&self, job: RevocationJob) -> sqlx::Result<()> {
-        reserve(&self.pool, &job).await
-    }
+/// Start the durable revocation worker: one `process_once` pass per second
+/// that claims due outbox rows and drives their cuts through `client`. The
+/// loop runs detached for the life of the process; process shutdown is its
+/// cancellation path, and a row it was mid-way through is resumed by the
+/// next process from the outbox.
+pub fn spawn_worker(pool: PgPool, client: DevserverControlClient) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run(pool, client))
 }
 
 /// Reserve a durable job in the caller's denial transaction. Every generation
