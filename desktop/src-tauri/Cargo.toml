@@ -26,7 +26,6 @@ tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 dirs = { workspace = true }
 # Native clipboard for the terminal's right-click "Paste" (read_clipboard_text)
 # and the `cs copy` / `cs paste` bridge, bypassing WKWebView's DOM-paste "Paste"
@@ -116,6 +115,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The ACL parity tests parse permissions/app.toml; no non-test code in this
+# crate parses TOML.
+toml = { workspace = true }
 # The mock runtime (`tauri::test`) drives real IPC `on_message` dispatch
 # against the app's generated ACL context without a display server; the
 # runtime_capability pins ride it. Feature-only: pulls no extra crates.
