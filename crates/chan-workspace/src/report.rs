@@ -60,8 +60,9 @@ impl ReportState {
 
         // Try the persisted form first. Any error (missing file,
         // schema mismatch, parse error, partial write) falls
-        // through to a full scan. A complete scan replaces the bad file
-        // on the next flush; an incomplete scan invalidates the cache.
+        // through to a full scan, which replaces the bad file on the
+        // next flush. A cache whose scan skipped entries loads like
+        // any other and reports the stored count.
         let loaded = match std::fs::File::open(jsonl_path) {
             Ok(f) => Index::load_jsonl(BufReader::new(f), &opts).ok(),
             Err(_) => None,
@@ -93,8 +94,9 @@ impl ReportState {
                 .map_err(|e| ChanError::Report(format!("spawn writer thread: {e}")))?
         };
 
-        // Eagerly persist complete scans and invalidate incomplete caches.
-        // Best-effort: failures only warn; the writer retries on a flush.
+        // Eagerly persist the index so a fresh scan is cached before the
+        // first watch event. Best-effort: failures only warn; the writer
+        // retries on a flush.
         let _ = flush_tx.send(());
 
         Ok(Arc::new(Self {
@@ -340,7 +342,7 @@ fn writer_loop(
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        if let Err(error) = persist_report(&jsonl_path, idx.skipped_entries(), |buf| {
+        if let Err(error) = persist_report(&jsonl_path, |buf| {
             let result = idx.write_jsonl(buf, &Scope::All, &cocomo);
             drop(idx); // Release the index before syncing the cache to disk.
             result
@@ -352,21 +354,8 @@ fn writer_loop(
 
 fn persist_report(
     jsonl_path: &Path,
-    skipped_entries: usize,
     serialize: impl FnOnce(&mut Vec<u8>) -> std::result::Result<(), chan_report::ChanReportError>,
 ) -> Result<()> {
-    if skipped_entries != 0 {
-        // Release any captured index guard before filesystem I/O.
-        drop(serialize);
-        // Skips stay attached to this index through later updates. Remove
-        // any older cache too, so the next open must attempt a full scan.
-        match std::fs::remove_file(jsonl_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        return Ok(());
-    }
     let mut buf = Vec::new();
     serialize(&mut buf).map_err(|error| ChanError::Report(error.to_string()))?;
     if let Some(parent) = jsonl_path.parent() {
@@ -381,37 +370,93 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Turns `sub` into a regular file while the walker lists `sub/x.rs`,
+    /// so counting that path fails with an error other than NotFound. The
+    /// path policy is the only hook a scan offers between listing a file
+    /// and counting it, and this is the one counting failure a test can
+    /// provoke without file permissions, which root ignores. Windows maps
+    /// the error to NotFound, which the counter treats as a vanished file,
+    /// so the tests that inject it are Unix-only.
+    #[cfg(unix)]
+    struct SubdirBecomesFile(PathBuf);
+
+    #[cfg(unix)]
+    impl chan_report::ReportPathPolicy for SubdirBecomesFile {
+        fn generation(&self) -> u64 {
+            0
+        }
+
+        fn includes(&self, rel: &str, _is_dir: bool) -> bool {
+            if rel == "sub/x.rs" {
+                let sub = self.0.join("sub");
+                fs::remove_dir_all(&sub).unwrap();
+                fs::write(&sub, "").unwrap();
+            }
+            true
+        }
+    }
+
+    /// Scan `root` with one injected counting failure and flush the index
+    /// through the writer thread once. Closing the channel ends the loop
+    /// after the flush, so the join waits for the write.
+    #[cfg(unix)]
+    fn flush_a_scan_with_one_skip(root: &Path, jsonl: &Path) {
+        fs::write(root.join("keep.rs"), "fn keep() {}\n").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/x.rs"), "fn x() {}\n").unwrap();
+        let mut opts = ReportOptions::new(root);
+        opts.path_policy = Some(Arc::new(SubdirBecomesFile(root.to_path_buf())));
+        let index = Index::scan(&opts).unwrap();
+        assert_eq!(
+            index.skipped_entries(),
+            1,
+            "the injected counting failure must be skipped"
+        );
+        assert!(index.file("keep.rs").is_some());
+        let (tx, rx) = mpsc::channel::<()>();
+        let index = Arc::new(RwLock::new(index));
+        let writer = thread::spawn({
+            let index = index.clone();
+            let jsonl = jsonl.to_path_buf();
+            move || writer_loop(rx, index, jsonl, CocomoParams::default())
+        });
+        tx.send(()).unwrap();
+        drop(tx);
+        writer.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    fn meta_line(jsonl: &Path) -> String {
+        let text = fs::read_to_string(jsonl).expect("the cache must exist after a flush");
+        text.lines().next().unwrap_or_default().to_string()
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn incomplete_scans_never_persist_and_invalidate_cached_reports() {
+    fn incomplete_scans_persist_with_their_skip_count() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
-        let opts = ReportOptions::new(root);
-        let index = Index::scan(&opts).unwrap();
         let jsonl = root.join(".chan/report.jsonl");
-        let write = |buf: &mut Vec<u8>| index.write_jsonl(buf, &Scope::All, &opts.cocomo);
-
-        persist_report(&jsonl, 1, write).unwrap();
+        flush_a_scan_with_one_skip(root, &jsonl);
         assert!(
-            !jsonl.exists(),
-            "an eager incomplete scan must not be cached"
+            jsonl.exists(),
+            "a scan that skipped entries must still be cached"
         );
-        persist_report(&jsonl, 0, write).unwrap();
-        assert!(jsonl.exists(), "a complete scan must be cached");
-        persist_report(&jsonl, 1, |_| {
-            panic!("an incomplete replacement must not serialize")
-        })
-        .unwrap();
+        let meta = meta_line(&jsonl);
+        assert!(meta.contains("\"kind\":\"meta\""), "{meta}");
         assert!(
-            !jsonl.exists(),
-            "an incomplete policy scan must invalidate an existing cache"
+            meta.contains("\"skipped_entries\":1"),
+            "the cache must record the skip count: {meta}"
         );
-        persist_report(&jsonl, 1, |_| {
-            panic!("later updates cannot make an incomplete scan complete")
-        })
-        .unwrap();
-        assert!(!jsonl.exists());
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_recording_skips_loads_without_a_rescan() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let jsonl = root.join(".chan/report.jsonl");
+        flush_a_scan_with_one_skip(root, &jsonl);
         fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
         let policy = Arc::new(
             IndexScopePolicy::new(
@@ -422,9 +467,24 @@ mod tests {
             .unwrap(),
         );
         let state = ReportState::open(root, &jsonl, policy).unwrap();
+        assert!(lang_of(&state, "keep.rs").is_some(), "the cache must load");
         assert!(
-            lang_of(&state, "b.rs").is_some(),
-            "the next open must rescan"
+            lang_of(&state, "b.rs").is_none(),
+            "opening over a cache that records skips must not rescan"
+        );
+        // Dropping the state joins the writer after its eager flush, so the
+        // rewritten cache is complete here.
+        drop(state);
+        let meta = meta_line(&jsonl);
+        assert!(
+            meta.contains("\"skipped_entries\":1"),
+            "the rewritten cache must keep the stored count: {meta}"
+        );
+        assert!(
+            !fs::read_to_string(&jsonl)
+                .unwrap()
+                .contains("\"path\":\"b.rs\""),
+            "the rewritten cache must come from the loaded index"
         );
     }
 
