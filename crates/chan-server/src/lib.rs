@@ -2280,6 +2280,9 @@ mod tenant_builder_tests {
         // `chan serve` guidance before any window is looked at; with it, as on
         // a workspace, the request reaches the connected-window check, which
         // this never-connected window fails. Neither answer touches a window.
+        // The Files terminal's answer follows the surface the builder built,
+        // so a surface missing on a host that supports one is caught by the
+        // state assertion below, which names it, not by this probe.
         let opened = workspace_root.join("builder-proof.md");
         let open = serde_json::json!({
             "type": "open_path",
@@ -2293,19 +2296,21 @@ mod tenant_builder_tests {
              Run 'chan serve {}' to load it as a workspace window.",
             opened.display()
         );
-        let files_answer = if standalone_files_supported() {
+        let files_answer = if files_app.state.standalone_files.is_some() {
             &not_connected
         } else {
             &guidance
         };
-        for (artifacts, expected) in [
-            (&workspace_app, &not_connected),
-            (&terminal_app, &guidance),
-            (&files_app, files_answer),
+        for (kind, artifacts, expected) in [
+            ("workspace", &workspace_app, &not_connected),
+            ("terminal", &terminal_app, &guidance),
+            ("files terminal", &files_app, files_answer),
         ] {
             match control_round_trip(&socket(artifacts), &open).await {
-                ControlResponse::Error { message } => assert_eq!(&message, expected),
-                other => panic!("open_path probe was not refused: {other:?}"),
+                ControlResponse::Error { message } => {
+                    assert_eq!(&message, expected, "{kind}: open_path refusal")
+                }
+                other => panic!("{kind}: open_path probe was not refused: {other:?}"),
             }
         }
         assert!(workspace_app.mcp_bridge.is_some());
@@ -2334,7 +2339,8 @@ mod tenant_builder_tests {
         );
         assert_eq!(
             files_app.state.standalone_files.is_some(),
-            standalone_files_supported()
+            standalone_files_supported(),
+            "the Files surface follows the platform gate: a supported host builds it"
         );
         // The blob reaper is what makes an explicit window discard drop a
         // durable terminal's saved layout, and only the built tenant wires it

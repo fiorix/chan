@@ -3822,7 +3822,9 @@ fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<S
 }
 
 /// The `terminal_broadcast` frame for `POST /api/terminals/{session}/broadcast`,
-/// the one chan-server window-command producer outside this module. Going
+/// the one chan-server route that sends a window command on `events_tx`
+/// itself (`POST /api/open` also produces window commands, but it hands
+/// the build and the send to `open_path` and `open_graph_link` here). Going
 /// through the typed frame keeps it on the `type, window_id` prefix the `/ws`
 /// pump scans, so it reaches the owning window's socket and no other.
 pub(crate) fn terminal_broadcast_frame(

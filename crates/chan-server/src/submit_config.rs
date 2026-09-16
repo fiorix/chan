@@ -66,9 +66,10 @@ impl SubmitOverridesFile {
 }
 
 /// Load `<config>/chan/submit.toml` (if present) and install any per-agent
-/// chord template overrides into chan-shell. Missing file: no-op (the
-/// built-in defaults stand). Malformed file: logged and ignored, matching
-/// the fall-back-on-malformed policy of the editor/server configs.
+/// chord template overrides into chan-shell. Missing file: no-op, so
+/// whatever an earlier install in this process set stands (the built-in
+/// defaults until one installs some). Malformed file: logged and ignored,
+/// matching the fall-back-on-malformed policy of the editor/server configs.
 pub fn install() {
     let path = chan_workspace::paths::config_dir().join("submit.toml");
     let file: SubmitOverridesFile = match crate::store::load_toml(&path) {
