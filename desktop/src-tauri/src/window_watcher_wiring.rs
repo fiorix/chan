@@ -1227,7 +1227,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_devserver_feeds_dial_the_listener_with_the_bearer() {
+    async fn raw_devserver_feed_requests_carry_the_bearer_and_feed_wording() {
         let conn = DevserverConn {
             host: "127.0.0.1".into(),
             port: 4321,
@@ -1270,15 +1270,22 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut refused = conn.clone();
         refused.port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let dial = tokio::time::timeout(
-            Duration::from_secs(10),
-            connect_raw_ws(&refused, "/api/library/windows/watch", "watch", "/watch"),
-        )
+        // Hold the port until the dial connects, then drop the accepted stream
+        // to fail the WebSocket handshake without a port-reuse race.
+        let dial = tokio::time::timeout(Duration::from_secs(10), async {
+            let (dial, ()) = tokio::join!(
+                connect_raw_ws(&refused, "/api/library/windows/watch", "watch", "/watch"),
+                async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    drop(stream);
+                },
+            );
+            dial
+        })
         .await
-        .expect("a closed port refuses within the bound");
+        .expect("the dropped connection fails the handshake within the bound");
         let err = match dial {
-            Ok(_) => panic!("nothing listens on the closed port"),
+            Ok(_) => panic!("a dropped connection cannot complete the WebSocket handshake"),
             Err(err) => err,
         };
         assert!(err.starts_with("connect /watch: "), "{err}");

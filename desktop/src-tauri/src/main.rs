@@ -1115,7 +1115,8 @@ async fn seed_devserver_color(
 /// `rows` when the connect fetched them already, then start the workspace
 /// poll and the colour watch on the watcher's `cancel` and keep its view and
 /// stop handle, so the close handler buries windows through the view and a
-/// disconnect stops all three tasks with one send. The seed sits after
+/// disconnect stops the watcher's tasks, the poll and the colour watch with
+/// one send. The seed sits after
 /// `register_windows`, because `library_id_of` resolves through the registered
 /// snapshot, and before the poll starts, so the poll's fresher list is never
 /// overwritten by it.
@@ -8713,16 +8714,22 @@ mod tests {
         // The three connect paths share one post-watcher sequence (down flag,
         // snapshot, poll, colour watch, view and stop handle), so each must
         // call the helper and none may register the snapshot on its own.
-        for (start, end) in [
+        for (start, end, seeds_rows) in [
             (
                 "\nasync fn connect_rostered_devserver(",
                 "\nasync fn connect_devserver_impl_inner(",
+                true,
             ),
             (
                 "\nasync fn connect_devserver_impl_inner(",
                 "\nasync fn list_devserver_workspaces(",
+                false,
             ),
-            ("\nasync fn reconnect_devserver(", "\n/// Forget (unmount)"),
+            (
+                "\nasync fn reconnect_devserver(",
+                "\n/// Forget (unmount)",
+                false,
+            ),
         ] {
             let connect = source_region(MAIN_RS, start, end);
             assert!(
@@ -8733,7 +8740,35 @@ mod tests {
                 !connect.contains("register_windows("),
                 "{start:?} registers no window snapshot on its own"
             );
+            assert_eq!(connect.matches("wire_devserver_watcher(").count(), 1);
+            let (_, call) = connect.split_once("wire_devserver_watcher(").unwrap();
+            let (args, _) = call.split_once(");").expect("the helper call ends");
+            assert_eq!(
+                args.contains("Some("),
+                seeds_rows,
+                "only the rostered connect passes workspace rows: {start:?}",
+            );
+            assert!(args.contains(if seeds_rows { "Some(rows)" } else { "None" }));
         }
+
+        let wiring = source_region(
+            MAIN_RS,
+            "\nfn wire_devserver_watcher(",
+            "\nfn spawn_devserver_workspace_poll(",
+        );
+        let register = wiring
+            .find("register_windows(")
+            .expect("register the snapshot");
+        let seed = wiring
+            .find("set_workspaces(")
+            .expect("seed the workspace rows");
+        let poll = wiring
+            .find("spawn_devserver_workspace_poll(")
+            .expect("start the workspace poll");
+        assert!(
+            register < seed && seed < poll,
+            "register the snapshot before seeding rows, and seed before starting the poll",
+        );
     }
 
     #[test]
