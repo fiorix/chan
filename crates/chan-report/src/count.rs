@@ -224,7 +224,10 @@ fn shebang_language(abs: &Path) -> std::io::Result<Option<LanguageType>> {
 
 /// Tokei's shebang rules applied to a bounded probe. The probe must hold
 /// the complete first line, valid UTF-8 and starting with `#!` after
-/// leading whitespace; a longer or non-UTF-8 first line is not a shebang.
+/// leading whitespace. A first line not ended by `\n` within the probe
+/// (longer than 255 bytes, or ended by EOF or by a bare `\r`) is not a
+/// shebang here, where tokei reads such a line to its end and detects
+/// the language; a non-UTF-8 first line is a shebang for neither.
 /// The line then matches the way tokei matches: its first
 /// whitespace-separated word must equal one of a language's `#!` paths, or
 /// be `#!/usr/bin/env` followed by a word equal to a known interpreter
@@ -375,7 +378,7 @@ mod tests {
         for name in TOKEI_ENV_INTERPRETERS {
             cases.push((format!("#!/usr/bin/env {name}\n").into_bytes(), None));
         }
-        let edges: [(&[u8], Option<LanguageType>); 19] = [
+        let edges: [(&[u8], Option<LanguageType>); 22] = [
             (b"  #!/bin/sh\n", Some(LanguageType::Sh)),
             (b"\t#!/usr/bin/env python\n", Some(LanguageType::Python)),
             (b"#!/bin/sh\r\n", Some(LanguageType::Sh)),
@@ -388,6 +391,9 @@ mod tests {
             (b"#!/usr/bin/env -S python\n", None),
             (b"#!/usr/bin/env python3.12\n", None),
             (b"#!/usr/bin/python3\n", None),
+            (b"#!/bin/sh5\n", None),
+            (b"#!/usr/bin/perl5\n", None),
+            (b"#!/usr/bin/env python3x\n", None),
             (b"#! /bin/sh\n", None),
             (b"#!\n", None),
             (b"#!/BIN/SH\n", None),
@@ -418,6 +424,20 @@ mod tests {
             if let Some(expected) = expected {
                 assert_eq!(detected, *expected, "shebang detection for {line:?}");
             }
+        }
+        // A first line ended by EOF or by a bare `\r` inside the probe has
+        // no `\n`, so the probe rejects it where tokei reads the line to
+        // its end and detects the language.
+        for line in [&b"#!/bin/sh"[..], b"#!/bin/sh\r"] {
+            let abs = dir.path().join("eof-probe");
+            fs::write(&abs, line).unwrap();
+            let shown = String::from_utf8_lossy(line);
+            assert_eq!(shebang_probe_language(line), None, "{shown:?}");
+            assert_eq!(
+                LanguageType::from_shebang(&abs),
+                Some(LanguageType::Sh),
+                "tokei detects {shown:?}"
+            );
         }
     }
 
