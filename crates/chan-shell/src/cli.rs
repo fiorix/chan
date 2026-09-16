@@ -1215,6 +1215,46 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
     }
 }
 
+/// Print a control reply the way every JSON-answering `cs` command does:
+/// `--json` is the server's bytes verbatim, `--json --pretty` re-indents
+/// them through a `serde_json::Value` (whose maps are ordered, so the keys
+/// come out sorted), and the default is `render`'s markdown, which ends its
+/// own output. `noun` names the reply in the parse and format errors.
+fn print_reply(
+    raw: &str,
+    json: bool,
+    pretty: bool,
+    noun: &str,
+    render: impl FnOnce(&str) -> Result<String>,
+) -> Result<()> {
+    if !json {
+        print!("{}", render(raw)?);
+        return Ok(());
+    }
+    let value: Option<serde_json::Value> = if pretty {
+        Some(serde_json::from_str(raw).with_context(|| format!("parsing {noun} JSON"))?)
+    } else {
+        None
+    };
+    print_json(raw, noun, value.as_ref())
+}
+
+/// The `--json` half of a reply: `pretty` re-serializes `value` (a typed
+/// result keeps its field order; a `serde_json::Value` sorts its keys), and
+/// `None` prints the server's bytes as they came. Both go to stdout so the
+/// output pipes cleanly.
+fn print_json<T: serde::Serialize>(raw: &str, noun: &str, pretty: Option<&T>) -> Result<()> {
+    match pretty {
+        Some(value) => {
+            let text = serde_json::to_string_pretty(value)
+                .with_context(|| format!("formatting {noun} JSON"))?;
+            println!("{text}");
+        }
+        None => println!("{raw}"),
+    }
+    Ok(())
+}
+
 /// `cs window list`: fetch the library's authoritative window set (the same
 /// `WindowRecord` feed the desktop watcher and launcher reconcile to) and
 /// print it. Session-scoped like `cs terminal list`: needs only
@@ -1223,21 +1263,13 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
 async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
     let socket = control_socket_env()?;
     let raw = send_control_request(&socket, ControlRequest::WindowList).await?;
-    if json {
-        if pretty {
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).context("parsing window list JSON")?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).context("formatting window list JSON")?
-            );
-        } else {
-            println!("{raw}");
-        }
-    } else {
-        print!("{}", render_window_list_markdown(&raw)?);
-    }
-    Ok(())
+    print_reply(
+        &raw,
+        json,
+        pretty,
+        "window list",
+        render_window_list_markdown,
+    )
 }
 
 /// `cs window <new|open|rm|hide>`: send a one-shot window-lifecycle
@@ -1295,21 +1327,13 @@ fn render_window_list_markdown(raw: &str) -> Result<String> {
 async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
     let socket = control_socket_env()?;
     let raw = send_control_request(&socket, ControlRequest::SessionList).await?;
-    if json {
-        if pretty {
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).context("parsing session list JSON")?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).context("formatting session list JSON")?
-            );
-        } else {
-            println!("{raw}");
-        }
-    } else {
-        print!("{}", render_session_list_markdown(&raw)?);
-    }
-    Ok(())
+    print_reply(
+        &raw,
+        json,
+        pretty,
+        "session list",
+        render_session_list_markdown,
+    )
 }
 
 /// `cs session <handover|takeover>`: send a session command and print the
@@ -1346,21 +1370,15 @@ async fn cmd_session_self(
     .await?;
     if !is_query {
         println!("{raw}");
-    } else if json {
-        if pretty {
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).context("parsing session self JSON")?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).context("formatting session self JSON")?
-            );
-        } else {
-            println!("{raw}");
-        }
-    } else {
-        print!("{}", render_session_self_markdown(&raw)?);
+        return Ok(());
     }
-    Ok(())
+    print_reply(
+        &raw,
+        json,
+        pretty,
+        "session self",
+        render_session_self_markdown,
+    )
 }
 
 /// Render the `cs session list` rows (`{window_id, name, role, status}`) as a
@@ -1436,15 +1454,7 @@ async fn cmd_shell_search(request: WorkspaceSearchRequest, json: bool, pretty: b
     let result: WorkspaceSearchResult =
         serde_json::from_str(&raw).context("parsing workspace search JSON")?;
     if json {
-        if pretty {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&result)
-                    .context("formatting workspace search JSON")?
-            );
-        } else {
-            println!("{raw}");
-        }
+        print_json(&raw, "workspace search", pretty.then_some(&result))?;
     } else {
         print!("{}", render_workspace_search_markdown(&result));
     }
@@ -1644,21 +1654,16 @@ async fn cmd_pane(
         },
     };
     let raw = send_control_request(&socket, request).await?;
-    if json {
-        // Compact by default; --pretty re-indents. Both go to stdout so the
-        // output pipes cleanly.
-        if pretty {
-            let value: serde_json::Value =
-                serde_json::from_str(&raw).context("parsing pane reply JSON")?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).context("formatting pane reply JSON")?
-            );
-        } else {
-            println!("{raw}");
-        }
-    } else if is_query {
-        print!("{}", render_pane_layout_markdown(&raw)?);
+    // JSON is the reply as is, whatever the action; only a query renders the
+    // layout, a mutation renders its exec result below.
+    if json || is_query {
+        print_reply(
+            &raw,
+            json,
+            pretty,
+            "pane reply",
+            render_pane_layout_markdown,
+        )?;
     } else if is_new {
         let value: serde_json::Value =
             serde_json::from_str(&raw).context("parsing pane new reply")?;
@@ -2136,24 +2141,13 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
         TerminalAction::List { json, pretty } => {
             let socket = control_socket_env()?;
             let raw = send_control_request(&socket, ControlRequest::TermList).await?;
-            if json {
-                // Compact by default; --pretty re-indents. Both go to
-                // stdout so the output pipes cleanly.
-                if pretty {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&raw).context("parsing terminal list JSON")?;
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&value)
-                            .context("formatting terminal list JSON")?
-                    );
-                } else {
-                    println!("{raw}");
-                }
-            } else {
-                print!("{}", render_terminal_list_markdown(&raw)?);
-            }
-            Ok(())
+            print_reply(
+                &raw,
+                json,
+                pretty,
+                "terminal list",
+                render_terminal_list_markdown,
+            )
         }
         TerminalAction::Restart {
             tab_name,
