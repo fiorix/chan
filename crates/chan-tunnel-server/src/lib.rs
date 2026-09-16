@@ -450,9 +450,13 @@ mod tests {
     }
 
     /// The per-user cap counts devserver registrations, and the refusal
-    /// says so in the bytes the client reads. The registry's own error
-    /// and the server error render the same text, so the message does
-    /// not depend on which of the two checks refused the dial.
+    /// says so in the bytes the client reads. The refusal text,
+    /// `ServerError`'s `Display` and the registry's `RegisterCapped` all
+    /// carry the same message, so the wire, the listener's log line and
+    /// the registry error cannot drift apart. Only the pre-ack admission
+    /// check puts it on the wire: a refusal at the registry insert comes
+    /// after `HelloAck::Ok`, so that client gets no message and the text
+    /// is only logged.
     #[test]
     fn per_user_cap_refusal_names_devserver_registrations() {
         const MESSAGE: &str = "user alice reached max concurrent devserver registrations (2)";

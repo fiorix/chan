@@ -58,9 +58,11 @@ pub enum OpenError {
     Disconnected,
 }
 
-/// Returned by `Registry::register_checked` when registering would
-/// take the user over the per-user devserver registration cap. Carries
-/// the username and the cap so the listener can log / report context.
+/// Returned by `Registry::register_authorized_with_id_and_cap`, and by
+/// its test-only wrappers `register_with_cap` and
+/// `register_with_id_and_cap`, when registering would take the user over
+/// the per-user devserver registration cap. Carries the username and the
+/// cap so the listener can log / report context.
 #[derive(Debug, thiserror::Error)]
 #[error("user {user} reached max concurrent devserver registrations ({max})")]
 pub struct RegisterCapped {
