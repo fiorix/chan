@@ -8711,6 +8711,14 @@ mod tests {
     #[test]
     fn every_devserver_connect_wires_its_watcher_through_one_helper() {
         const MAIN_RS: &str = include_str!("main.rs");
+        let (production, _) = MAIN_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        assert_eq!(
+            production.matches("wire_devserver_watcher(").count(),
+            4,
+            "one definition and three connect calls",
+        );
         // The three connect paths share one post-watcher sequence (down flag,
         // snapshot, poll, colour watch, view and stop handle), so each must
         // call the helper and none may register the snapshot on its own.

@@ -1268,13 +1268,13 @@ mod tests {
         assert!(err.starts_with("bad colour watch url: "), "{err}");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut refused = conn.clone();
-        refused.port = listener.local_addr().unwrap().port();
+        let mut dropped = conn.clone();
+        dropped.port = listener.local_addr().unwrap().port();
         // Hold the port until the dial connects, then drop the accepted stream
         // to fail the WebSocket handshake without a port-reuse race.
         let dial = tokio::time::timeout(Duration::from_secs(10), async {
             let (dial, ()) = tokio::join!(
-                connect_raw_ws(&refused, "/api/library/windows/watch", "watch", "/watch"),
+                connect_raw_ws(&dropped, "/api/library/windows/watch", "watch", "/watch"),
                 async {
                     let (stream, _) = listener.accept().await.unwrap();
                     drop(stream);
