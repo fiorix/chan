@@ -129,7 +129,7 @@ pub struct Index {
     skipped_entries: usize,
 }
 
-/// Internal per-directory aggregate. Mirrors `Totals` plus a
+/// Internal per-directory aggregate: the directory's `Totals` plus a
 /// per-language sub-rollup so a directory inspector can render
 /// "Rust 60%, Python 30%, TypeScript 10%" alongside totals
 /// without scanning the file map.
@@ -140,12 +140,7 @@ pub struct Index {
 /// `Vec<LanguageStats>` shape the whole-tree roll-up returns.
 #[derive(Default)]
 struct DirEntry {
-    files: u64,
-    bytes: u64,
-    code: u64,
-    comments: u64,
-    blanks: u64,
-    complexity: u64,
+    totals: Totals,
     by_language: HashMap<String, LanguageStats>,
 }
 
@@ -405,14 +400,7 @@ impl Index {
     pub fn dir_report(&self, dir: &str, params: &CocomoParams) -> Option<Report> {
         let key = normalize_dir(dir);
         let entry = self.dirs.get(&key)?;
-        let totals = Totals {
-            files: entry.files,
-            bytes: entry.bytes,
-            code: entry.code,
-            comments: entry.comments,
-            blanks: entry.blanks,
-            complexity: entry.complexity,
-        };
+        let totals = entry.totals.clone();
         let mut by_language: Vec<LanguageStats> = entry.by_language.values().cloned().collect();
         sort_by_language(&mut by_language);
         let cocomo = cocomo::compute(totals.code, params);
@@ -446,25 +434,15 @@ impl Index {
     fn apply_file_to_dirs(&mut self, rel: &str, stats: &FileStats) {
         for anc in ancestor_dirs(rel) {
             let entry = self.dirs.entry(anc).or_default();
-            entry.files += 1;
-            entry.bytes += stats.bytes;
-            entry.code += stats.code;
-            entry.comments += stats.comments;
-            entry.blanks += stats.blanks;
-            entry.complexity += stats.complexity;
-            let lang = entry
+            entry.totals.add(stats);
+            entry
                 .by_language
                 .entry(stats.language.clone())
                 .or_insert_with(|| LanguageStats {
                     name: stats.language.clone(),
                     ..Default::default()
-                });
-            lang.files += 1;
-            lang.bytes += stats.bytes;
-            lang.code += stats.code;
-            lang.comments += stats.comments;
-            lang.blanks += stats.blanks;
-            lang.complexity += stats.complexity;
+                })
+                .add(stats);
         }
     }
 
@@ -483,19 +461,9 @@ impl Index {
                 let Some(entry) = self.dirs.get_mut(&anc) else {
                     continue;
                 };
-                entry.files = entry.files.saturating_sub(1);
-                entry.bytes = entry.bytes.saturating_sub(stats.bytes);
-                entry.code = entry.code.saturating_sub(stats.code);
-                entry.comments = entry.comments.saturating_sub(stats.comments);
-                entry.blanks = entry.blanks.saturating_sub(stats.blanks);
-                entry.complexity = entry.complexity.saturating_sub(stats.complexity);
+                entry.totals.sub(stats);
                 let drop_lang = if let Some(lang) = entry.by_language.get_mut(&stats.language) {
-                    lang.files = lang.files.saturating_sub(1);
-                    lang.bytes = lang.bytes.saturating_sub(stats.bytes);
-                    lang.code = lang.code.saturating_sub(stats.code);
-                    lang.comments = lang.comments.saturating_sub(stats.comments);
-                    lang.blanks = lang.blanks.saturating_sub(stats.blanks);
-                    lang.complexity = lang.complexity.saturating_sub(stats.complexity);
+                    lang.sub(stats);
                     lang.files == 0
                 } else {
                     false
@@ -503,7 +471,7 @@ impl Index {
                 if drop_lang {
                     entry.by_language.remove(&stats.language);
                 }
-                entry.files == 0
+                entry.totals.files == 0
             };
             if drop_entry {
                 self.dirs.remove(&anc);
@@ -600,25 +568,14 @@ fn roll_up(files: &[FileStats]) -> (Vec<LanguageStats>, Totals) {
     let mut by_lang: HashMap<String, LanguageStats> = HashMap::new();
     let mut totals = Totals::default();
     for f in files {
-        let entry = by_lang
+        by_lang
             .entry(f.language.clone())
             .or_insert_with(|| LanguageStats {
                 name: f.language.clone(),
                 ..Default::default()
-            });
-        entry.files += 1;
-        entry.bytes += f.bytes;
-        entry.code += f.code;
-        entry.comments += f.comments;
-        entry.blanks += f.blanks;
-        entry.complexity += f.complexity;
-
-        totals.files += 1;
-        totals.bytes += f.bytes;
-        totals.code += f.code;
-        totals.comments += f.comments;
-        totals.blanks += f.blanks;
-        totals.complexity += f.complexity;
+            })
+            .add(f);
+        totals.add(f);
     }
     let mut by_language: Vec<LanguageStats> = by_lang.into_values().collect();
     sort_by_language(&mut by_language);

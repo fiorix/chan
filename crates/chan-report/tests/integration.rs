@@ -6,7 +6,8 @@ use std::fs;
 use std::io::Cursor;
 
 use chan_report::{
-    CocomoParams, FileBucket, Index, Report, ReportOptions, Scope, UpdateOutcome, SCHEMA_VERSION,
+    CocomoParams, FileBucket, FileStats, Index, LanguageStats, Report, ReportOptions, Scope,
+    Totals, UpdateOutcome, SCHEMA_VERSION,
 };
 
 use tempfile::tempdir;
@@ -313,24 +314,63 @@ fn incremental_remove_clears_ancestor_chain_when_last_file_leaves() {
     assert!(idx.dir_report("", &p).is_none());
 }
 
+/// Sum the per-file rows field by field, independently of the crate's
+/// own roll-up arithmetic, so a cache or roll-up that drops a field is
+/// caught by name.
+fn totals_of(rows: &[FileStats]) -> Totals {
+    Totals {
+        files: rows.len() as u64,
+        bytes: rows.iter().map(|f| f.bytes).sum(),
+        code: rows.iter().map(|f| f.code).sum(),
+        comments: rows.iter().map(|f| f.comments).sum(),
+        blanks: rows.iter().map(|f| f.blanks).sum(),
+        complexity: rows.iter().map(|f| f.complexity).sum(),
+    }
+}
+
 #[test]
 fn incremental_update_applies_delta_to_ancestors() {
     // Modifying an existing file applies the *delta* against the
     // ancestor chain, not a re-add. Confirms the subtract-then-add
-    // shape inside Index::update.
+    // shape inside Index::update. Both versions of the file carry a
+    // comment, a blank line and a branch keyword so every aggregate
+    // field is non-zero on both sides of the delta: a subtraction that
+    // skips a field leaves the old value behind, and an addition that
+    // skips one never reaches the expected sum. A second file shares
+    // every ancestor so the delta is applied to a surviving entry: a
+    // directory whose last file is subtracted is dropped and rebuilt,
+    // which would hide a skipped field.
     let d = tempdir().unwrap();
-    write(d.path(), "src/lib.rs", "fn x() {}\n");
+    write(
+        d.path(),
+        "src/lib.rs",
+        "// x\n\nfn x() {\n    if true {}\n}\n",
+    );
+    write(
+        d.path(),
+        "src/other.rs",
+        "// o\n\nfn o() {\n    if true {}\n}\n",
+    );
     let mut idx = Index::scan(&ReportOptions::new(d.path())).unwrap();
     let p = CocomoParams::default();
 
     let before = idx.dir_report("src", &p).unwrap();
-    assert_eq!(before.totals.files, 1);
+    assert_eq!(before.totals.files, 2);
+    let old_row = idx.file("src/lib.rs").unwrap().clone();
+    assert!(
+        old_row.comments > 0 && old_row.blanks > 0 && old_row.complexity > 0,
+        "fixture must exercise every field before the update: {old_row:?}"
+    );
 
-    write(d.path(), "src/lib.rs", "fn x() {}\nfn y() {}\nfn z() {}\n");
+    write(
+        d.path(),
+        "src/lib.rs",
+        "// x\n// y\n\n\nfn x() {\n    if true {}\n    if false {}\n}\nfn y() {}\n",
+    );
     assert_eq!(idx.update("src/lib.rs").unwrap(), UpdateOutcome::Updated);
 
     let after = idx.dir_report("src", &p).unwrap();
-    assert_eq!(after.totals.files, 1, "still one file, just bigger");
+    assert_eq!(after.totals.files, 2, "still two files, one just bigger");
     assert!(
         after.totals.code > before.totals.code,
         "code total reflects the larger file"
@@ -338,6 +378,41 @@ fn incremental_update_applies_delta_to_ancestors() {
     assert!(
         after.totals.bytes > before.totals.bytes,
         "bytes total reflects the larger file"
+    );
+
+    // The maintained cache and the whole-tree roll-up must both equal a
+    // field-by-field sum of the rows, computed here rather than by the
+    // crate.
+    let new_row = idx.file("src/lib.rs").unwrap();
+    assert!(
+        new_row.comments > 0 && new_row.blanks > 0 && new_row.complexity > 0,
+        "fixture must exercise every field after the update: {new_row:?}"
+    );
+    let all = idx.snapshot(&Scope::All, &p);
+    let expected = totals_of(&all.files);
+    let root = idx
+        .dir_report("", &p)
+        .expect("root tracked after the update");
+    assert_eq!(root.totals, expected, "root cache after the update");
+    assert_eq!(all.totals, expected, "whole-tree roll-up after the update");
+    let expected_rust = LanguageStats {
+        name: "Rust".into(),
+        files: expected.files,
+        bytes: expected.bytes,
+        code: expected.code,
+        comments: expected.comments,
+        blanks: expected.blanks,
+        complexity: expected.complexity,
+    };
+    assert_eq!(
+        root.by_language,
+        vec![expected_rust.clone()],
+        "root per-language cache after the update"
+    );
+    assert_eq!(
+        all.by_language,
+        vec![expected_rust],
+        "whole-tree per-language roll-up after the update"
     );
 }
 

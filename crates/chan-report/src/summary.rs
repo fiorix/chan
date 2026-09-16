@@ -73,6 +73,30 @@ pub struct LanguageStats {
     pub complexity: u64,
 }
 
+impl LanguageStats {
+    /// Fold one file's row into this roll-up.
+    pub(crate) fn add(&mut self, f: &FileStats) {
+        self.files += 1;
+        self.bytes += f.bytes;
+        self.code += f.code;
+        self.comments += f.comments;
+        self.blanks += f.blanks;
+        self.complexity += f.complexity;
+    }
+
+    /// Take one file's row back out of this roll-up. Saturates rather
+    /// than wraps so drift in a caller's bookkeeping degrades to a
+    /// wrong number, never a panic.
+    pub(crate) fn sub(&mut self, f: &FileStats) {
+        self.files = self.files.saturating_sub(1);
+        self.bytes = self.bytes.saturating_sub(f.bytes);
+        self.code = self.code.saturating_sub(f.code);
+        self.comments = self.comments.saturating_sub(f.comments);
+        self.blanks = self.blanks.saturating_sub(f.blanks);
+        self.complexity = self.complexity.saturating_sub(f.complexity);
+    }
+}
+
 /// Whole-scope roll-up.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Totals {
@@ -83,6 +107,30 @@ pub struct Totals {
     pub comments: u64,
     pub blanks: u64,
     pub complexity: u64,
+}
+
+impl Totals {
+    /// Fold one file's row into this roll-up.
+    pub(crate) fn add(&mut self, f: &FileStats) {
+        self.files += 1;
+        self.bytes += f.bytes;
+        self.code += f.code;
+        self.comments += f.comments;
+        self.blanks += f.blanks;
+        self.complexity += f.complexity;
+    }
+
+    /// Take one file's row back out of this roll-up. Saturates rather
+    /// than wraps so drift in a caller's bookkeeping degrades to a
+    /// wrong number, never a panic.
+    pub(crate) fn sub(&mut self, f: &FileStats) {
+        self.files = self.files.saturating_sub(1);
+        self.bytes = self.bytes.saturating_sub(f.bytes);
+        self.code = self.code.saturating_sub(f.code);
+        self.comments = self.comments.saturating_sub(f.comments);
+        self.blanks = self.blanks.saturating_sub(f.blanks);
+        self.complexity = self.complexity.saturating_sub(f.complexity);
+    }
 }
 
 /// Owned report returned by `Index::snapshot`. Plain data; safe
