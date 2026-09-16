@@ -346,12 +346,24 @@ pub async fn api_terminal_ws(
     ws: WebSocketUpgrade,
 ) -> Response {
     let size = pty_size(query.cols, query.rows);
-    let tab_name = query.tab_name.as_deref().and_then(normalize_tab_name);
+    let tab_name = query
+        .tab_name
+        .as_deref()
+        .and_then(|name| normalize_label(name, MAX_NAME_CHARS));
     let tab_group = query.tab_group.as_deref().and_then(normalize_tab_group);
-    let window_id = query.window_id.as_deref().and_then(normalize_window_id);
-    let pane_id = query.pane_id.as_deref().and_then(normalize_layout_id);
+    let window_id = query
+        .window_id
+        .as_deref()
+        .and_then(|id| normalize_label(id, MAX_ID_CHARS));
+    let pane_id = query
+        .pane_id
+        .as_deref()
+        .and_then(|id| normalize_label(id, MAX_ID_CHARS));
     let side = query.side;
-    let tab_id = query.tab_id.as_deref().and_then(normalize_layout_id);
+    let tab_id = query
+        .tab_id
+        .as_deref()
+        .and_then(|id| normalize_label(id, MAX_ID_CHARS));
     // MCP env is off by default. An explicit `?mcp_env=on|off` query
     // wins (the SPA can force a per-terminal choice); when absent we fall
     // back to the non-team server-config default, which itself defaults
@@ -461,7 +473,7 @@ pub async fn api_create_terminal(
                 .into_response()
         }
     };
-    let name = match normalize_terminal_name(&body.name) {
+    let name = match normalize_label(&body.name, MAX_NAME_CHARS) {
         Some(name) => name,
         None => return (StatusCode::BAD_REQUEST, "terminal name is required").into_response(),
     };
@@ -476,7 +488,10 @@ pub async fn api_create_terminal(
         size: pty_size(None, None),
         tab_name: Some(name.clone()),
         tab_group: body.group.as_deref().and_then(normalize_tab_group),
-        window_id: body.window_id.as_deref().and_then(normalize_window_id),
+        window_id: body
+            .window_id
+            .as_deref()
+            .and_then(|id| normalize_label(id, MAX_ID_CHARS)),
         // Off by default; honor the non-team server-config opt-in.
         mcp_env: state
             .server_config
@@ -521,7 +536,7 @@ pub async fn api_restart_terminal(
 ) -> Response {
     let overrides = if let Some(Json(body)) = body {
         let tab_name = match body.name.as_deref() {
-            Some(name) => match normalize_tab_name(name) {
+            Some(name) => match normalize_label(name, MAX_NAME_CHARS) {
                 Some(name) => Some(name),
                 None => {
                     return (StatusCode::BAD_REQUEST, "terminal name is required").into_response()
@@ -534,7 +549,7 @@ pub async fn api_restart_terminal(
         // `Some(Some(g))` sets group g.
         let tab_group = body.group.as_deref().map(normalize_tab_group);
         let window_id = match body.window_id.as_deref() {
-            Some(id) => match normalize_window_id(id) {
+            Some(id) => match normalize_label(id, MAX_ID_CHARS) {
                 Some(id) => Some(id),
                 None => {
                     return (StatusCode::BAD_REQUEST, "terminal window id is required")
@@ -657,12 +672,23 @@ struct TerminalWsOptions {
     profile: Option<String>,
 }
 
-fn normalize_terminal_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
+/// Longest terminal or tab name kept, in characters.
+const MAX_NAME_CHARS: usize = 128;
+
+/// Longest window, pane or tab id kept, in characters. These are opaque SPA
+/// placement labels carried for `cs terminal list`, not validated against any
+/// registry, so the cap is the only check they get.
+const MAX_ID_CHARS: usize = 256;
+
+/// Trim `raw`, drop a blank result, and keep at most `max_chars` characters.
+/// The cap counts characters, not bytes, so a multibyte label is cut on a
+/// character boundary.
+fn normalize_label(raw: &str, max_chars: usize) -> Option<String> {
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    Some(trimmed.chars().take(128).collect())
+    Some(trimmed.chars().take(max_chars).collect())
 }
 
 pub(crate) fn normalize_terminal_command(command: &str) -> Option<String> {
@@ -884,9 +910,9 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                             }) => {
                                 state.terminal_sessions.update_session_layout(
                                     session.id(),
-                                    pane_id.and_then(|id| normalize_layout_id(&id)),
+                                    pane_id.and_then(|id| normalize_label(&id, MAX_ID_CHARS)),
                                     side,
-                                    tab_id.and_then(|id| normalize_layout_id(&id)),
+                                    tab_id.and_then(|id| normalize_label(&id, MAX_ID_CHARS)),
                                 );
                             }
                             Ok(ClientFrame::Rename { name, group }) => {
@@ -1162,7 +1188,7 @@ fn rename_terminal_session(
     name: &str,
     group: Option<&str>,
 ) -> Result<crate::terminal_sessions::LiveTerminalMetadata, String> {
-    let Some(name) = normalize_tab_name(name) else {
+    let Some(name) = normalize_label(name, MAX_NAME_CHARS) else {
         return Err("terminal name is required".to_string());
     };
     let group = group.and_then(normalize_tab_group);
@@ -1234,33 +1260,6 @@ fn pty_size(cols: Option<u16>, rows: Option<u16>) -> PtySize {
         pixel_width: 0,
         pixel_height: 0,
     }
-}
-
-fn normalize_tab_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.chars().take(128).collect())
-}
-
-fn normalize_window_id(id: &str) -> Option<String> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.chars().take(256).collect())
-}
-
-/// Normalize an opaque SPA layout id (pane or tab) the same way as a window id:
-/// trim, drop blank, cap length. These are best-effort placement labels carried
-/// for `cs terminal list`, not validated against any registry.
-fn normalize_layout_id(id: &str) -> Option<String> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.chars().take(256).collect())
 }
 
 /// Normalize a broadcast group. Blank / "default" resolve to `None` so the
@@ -1453,6 +1452,31 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn label_normalizers_trim_drop_blank_and_cap_by_character() {
+        assert_eq!(MAX_NAME_CHARS, 128);
+        assert_eq!(MAX_ID_CHARS, 256);
+        // (cap in characters, oversized input length)
+        for (cap, oversized) in [(MAX_NAME_CHARS, 200), (MAX_ID_CHARS, 300)] {
+            let normalize = |raw: &str| normalize_label(raw, cap);
+            assert_eq!(normalize(""), None);
+            assert_eq!(normalize(" \t\r\n "), None);
+            assert_eq!(
+                normalize("  padded label  ").as_deref(),
+                Some("padded label")
+            );
+            let ascii = "a".repeat(oversized);
+            assert_eq!(normalize(&ascii).unwrap().chars().count(), cap);
+            // e-acute is two bytes in UTF-8, so a byte cap would split a
+            // character; the cap counts characters.
+            let multibyte = "\u{e9}".repeat(oversized);
+            let kept = normalize(&multibyte).unwrap();
+            assert_eq!(kept.chars().count(), cap);
+            assert_eq!(kept.len(), cap * 2);
+            assert!(kept.chars().all(|c| c == '\u{e9}'));
+        }
+    }
 
     // The terminal heartbeat vocabulary is shared with the watcher socket
     // (routes/ws.rs): client `{"type":"ping"}` -> server `{"type":"pong"}`.
