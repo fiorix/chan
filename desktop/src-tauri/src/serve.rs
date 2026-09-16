@@ -1253,249 +1253,14 @@ fn build_workspace_window_with_completion(
                 let key_for_close = config_key.clone();
                 let session_for_close = session_owned.clone();
                 window.on_window_event(move |event| match event {
-                    // The OS close (red) button on a LIVE workspace/terminal
-                    // window PROMPTS before acting: hold the close and eval an
-                    // `app.window.confirmClose` into the still-alive webview,
-                    // where the SPA shows a Hide / Close / Cancel overlay and
-                    // calls back (`hide_window_from_close_confirm` for Hide,
-                    // `request_close_window` for Close). No bury happens here
-                    // until the SPA decides. A few cases REAL-close with no
-                    // prompt (there is no live SPA to ask, or nothing to keep): a
-                    // standalone terminal window with NO live shells, a control
-                    // terminal still CONNECTING, and a window still on the pre-SPA
-                    // connecting/retry screen.
-                    // Programmatic closes (the SPA's empty-window cascade,
-                    // workspace-off teardown) call `destroy()`
-                    // and never reach this branch.
-                    WindowEvent::CloseRequested { api, .. } => {
-                        let state = app_for_close.state::<Arc<AppState>>();
-                        // A launcher Hide action (or `cs window hide`) routes
-                        // through this same close path but is an explicit hide
-                        // gesture, not a red-dot: consume its one-shot flag here
-                        // and, once the transfer guards below clear, bury directly,
-                        // skipping the prompt. A genuine red-dot finds no flag and
-                        // asks. Read (not act) first so the transfer guards below
-                        // still run for a silent hide -- a hide mid-transfer must
-                        // not tear the transfer down without the prompt.
-                        let silent_hide = state.take_silent_hide(&label_for_close);
-                        // Active-transfer guard (BEFORE any bury/close path): a
-                        // window with an in-flight upload/download must never close
-                        // silently and kill the transfer. A LOCAL window reports its
-                        // count through the embedded host (keyed on the `?w=` session
-                        // id), and its red-dot close DESTROYS it -- so the prompt
-                        // offers "Cancel transfer & close" vs "Keep open". A
-                        // connected-DEVSERVER window's transfer lives in the remote
-                        // SPA + server, surfaced via the `active_transfer` feed bit
-                        // (cached, keyed by composite label); its red-dot close only
-                        // HIDES it (the transfer keeps running in the live webview),
-                        // so that prompt is "Hide" vs "Keep open" -- the desktop never
-                        // cancels a remote transfer (the user does, from the SPA).
-                        if state
-                            .embedded
-                            .get()
-                            .map(|e| e.window_has_active_transfer(&session_for_close))
-                            .unwrap_or(false)
-                        {
-                            api.prevent_close();
-                            prompt_transfer_close(&app_for_close, &state, &label_for_close);
-                            return;
-                        }
-                        if state.devserver_window_has_active_transfer(&label_for_close) {
-                            api.prevent_close();
-                            prompt_devserver_transfer_close(
-                                &app_for_close,
-                                &state,
-                                &label_for_close,
-                            );
-                            return;
-                        }
-                        // The explicit hide gesture buries directly, no prompt.
-                        // HOLD the close first: the hide-in-place families (a
-                        // connected `control-terminal-`, a standalone `terminal-`,
-                        // an `outbound-` webview) bury via `window.hide()` and need
-                        // the webview ALIVE to reopen. An un-prevented close
-                        // proceeds to destroy it the moment this handler returns,
-                        // and the launcher eye's `/open` then 409s on a window
-                        // that no longer exists. The watcher families bury through
-                        // their view's reconcile, which closes the native window
-                        // itself, so holding the OS close is correct for them too.
-                        if silent_hide {
-                            api.prevent_close();
-                            bury_window_now(
-                                &app_for_close,
-                                &state,
-                                &label_for_close,
-                                &key_for_close,
-                            );
-                            return;
-                        }
-                        // A devserver window still on the connecting page has no
-                        // SPA command handler to answer a prompt. Route its OS
-                        // close through the same pending-delete path as the
-                        // page's close chords and Disconnect button.
-                        let on_connecting =
-                            window_on_connecting_screen(&app_for_close, &label_for_close);
-                        if on_connecting && label_for_close.starts_with("lib-") {
-                            api.prevent_close();
-                            if let Some(window) =
-                                app_for_close.get_webview_window(&label_for_close)
-                            {
-                                let app = app_for_close.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    if let Err(e) = crate::request_close_window(app, window).await {
-                                        tracing::warn!(error = %e, "closing connecting devserver window failed");
-                                    }
-                                });
-                            }
-                            return;
-                        }
-                        // Decide whether there is a live workspace SPA to ASK. A
-                        // `local::` or connected `lib-` watcher window has one. A
-                        // standalone `terminal-` with no live shells, a
-                        // `control-terminal-` still connecting, and any window
-                        // still on the pre-SPA connecting screen have nothing to
-                        // keep or no SPA to ask, so they real-close (return without
-                        // prevent_close; the Destroyed branch cleans up).
-                        let ask = if label_for_close.starts_with("local::")
-                            || label_for_close.starts_with("lib-")
-                        {
-                            true
-                        } else if label_for_close.starts_with("terminal-") {
-                            state
-                                .embedded
-                                .get()
-                                .map(|e| e.terminal_window_has_live_shells(&label_for_close))
-                                .unwrap_or(false)
-                        } else if let Some(id) = label_for_close.strip_prefix("control-terminal-") {
-                            // A control terminal KEPT at "process exited" (its
-                            // devserver's reconnect is blocked on it): the red
-                            // button IS the explicit close that unblocks
-                            // reconnect. Run the same cleanup as Cmd+W / the SPA
-                            // Close (reaps the row + tenant, clears the block),
-                            // then let the real close proceed. Without this the
-                            // destroy leaves the block set with no terminal left
-                            // to close, and connect stays walled off.
-                            let control_terminal_dead =
-                                state.control_terminal_dead.lock().unwrap().contains(id);
-                            if control_terminal_dead {
-                                let app_for_terminal_close = app_for_close.clone();
-                                let state_for_terminal_close = Arc::clone(&state);
-                                let id_for_terminal_close = id.to_string();
-                                tauri::async_runtime::spawn(async move {
-                                    crate::close_devserver_control_terminal(
-                                        &app_for_terminal_close,
-                                        &state_for_terminal_close,
-                                        &id_for_terminal_close,
-                                    )
-                                    .await;
-                                });
-                                false
-                            } else {
-                                // Closed (red button) WHILE STILL CONNECTING: must
-                                // NOT prompt or bury. A hidden control window
-                                // leaves the connect script running and strands
-                                // the launcher on "Connecting..." (the connect
-                                // flow's scrape loop keeps polling a window it can
-                                // still see). Destroy instead so the scrape loop
-                                // sees it gone, aborts, and surveys
-                                // (abandon/edit/retry). Once connected, the
-                                // overlay is fine: the PTY is the live connection
-                                // endpoint and stays warm, hidden, reopenable;
-                                // only an actual Close (^W / script exit) takes
-                                // the connection down via request_close_window.
-                                state.devservers.is_connected(id)
-                            }
-                        } else {
-                            !on_connecting
-                        };
-                        if !ask {
-                            // Real close; the Destroyed branch cleans up.
-                            return;
-                        }
-                        // A live workspace SPA: hold the OS close and hand the
-                        // decision to it. `w.eval` dispatches the host-agnostic
-                        // `chan:command` bridge (origin-agnostic, no ACL -- the same
-                        // channel the menu chords use); the SPA shows the Hide /
-                        // Close / Cancel overlay and calls back. Nothing is buried
-                        // until it does.
-                        api.prevent_close();
-                        let Some(window) = app_for_close.get_webview_window(&label_for_close)
-                        else {
-                            return;
-                        };
-                        let _ = window.unminimize();
-                        if let Err(e) = window.show() {
-                            tracing::warn!(label = %label_for_close, error = %e, "raising close-confirm window failed");
-                        }
-                        if let Err(e) = window.set_focus() {
-                            tracing::warn!(label = %label_for_close, error = %e, "focusing close-confirm window failed");
-                        }
-                        let _ = window.eval(CONFIRM_CLOSE_DISPATCH_JS);
-                    }
-                    // Single cleanup point for EVERY destroy path: the
-                    // no-live-shells close above, the SPA cascade destroy,
-                    // workspace-off / outbound-forget
-                    // teardown, and app exit. Frees the display number,
-                    // drops the zoom entry, and clears a stale buried
-                    // registry entry if the window died while hidden.
-                    WindowEvent::Destroyed => {
-                        let state = app_for_close.state::<Arc<AppState>>();
-                        state.release_window_number(&label_for_close);
-                        // Drop the registered OS title so `cs window list`
-                        // stops showing one for a window that's gone. The
-                        // `cs window title` override is intentionally KEPT:
-                        // a best-effort reopen reuses the same label and
-                        // should restore the custom title.
-                        if let Some(embedded) = state.embedded.get() {
-                            embedded.window_titles().remove(&label_for_close);
-                        }
-                        state
-                            .live_window_zooms
-                            .lock()
-                            .unwrap()
-                            .remove(&label_for_close);
-                        let _cleanup =
-                            crate::download::drop_generated_downloads_for_window(&label_for_close);
-                        // A watcher-buried window destroyed here was buried by its
-                        // reconcile (the user hid it); KEEP it in the reopen menu.
-                        // Check the LOCAL view for `local::` windows and the owning
-                        // DEVSERVER view for `lib-<hex>::…` windows; a hidden
-                        // devserver window is reopenable while connected. Only a
-                        // real teardown/discard (in NO watcher bury set -- e.g. the
-                        // view was already dropped on disconnect) drops it.
-                        let watcher_buried = if label_for_close.starts_with("lib-") {
-                            let library_id = label_for_close
-                                .split("::")
-                                .next()
-                                .unwrap_or(&label_for_close);
-                            state
-                                .devserver_feed
-                                .devserver_id_for_library(library_id)
-                                .and_then(|ds_id| {
-                                    state
-                                        .devserver_watcher_views
-                                        .lock()
-                                        .unwrap()
-                                        .get(&ds_id)
-                                        .map(|v| v.is_buried(&label_for_close))
-                                })
-                                .unwrap_or(false)
-                        } else {
-                            state
-                                .local_watcher_view()
-                                .map(|v| v.is_buried(&label_for_close))
-                                .unwrap_or(false)
-                        };
-                        if !watcher_buried && state.remove_buried(&label_for_close) {
-                            crate::rebuild_window_menu(&app_for_close);
-                        }
-                        // A destroyed remote-backed window may now be a
-                        // reopenable `saved && !connected` row on the
-                        // remote -- re-poll so the menu offers it.
-                        if label_for_close.starts_with("outbound-") {
-                            crate::refresh_remote_windows_menu(&app_for_close);
-                        }
-                    }
+                    WindowEvent::CloseRequested { api, .. } => on_close_requested(
+                        &app_for_close,
+                        &label_for_close,
+                        &key_for_close,
+                        &session_for_close,
+                        api,
+                    ),
+                    WindowEvent::Destroyed => on_destroyed(&app_for_close, &label_for_close),
                     _ => {}
                 });
                 Ok(())
@@ -1513,6 +1278,233 @@ fn build_workspace_window_with_completion(
         completion(result);
     });
     res.map_err(|e| format!("scheduling workspace window for {window_label}: {e}"))
+}
+
+/// The OS close (red) button on a LIVE workspace/terminal
+/// window PROMPTS before acting: hold the close and eval an
+/// `app.window.confirmClose` into the still-alive webview,
+/// where the SPA shows a Hide / Close / Cancel overlay and
+/// calls back (`hide_window_from_close_confirm` for Hide,
+/// `request_close_window` for Close). No bury happens here
+/// until the SPA decides. A few cases REAL-close with no
+/// prompt (there is no live SPA to ask, or nothing to keep): a
+/// standalone terminal window with NO live shells, a control
+/// terminal still CONNECTING, and a window still on the pre-SPA
+/// connecting/retry screen.
+/// Programmatic closes (the SPA's empty-window cascade,
+/// workspace-off teardown) call `destroy()`
+/// and never reach this handler.
+fn on_close_requested(
+    app: &AppHandle,
+    label: &str,
+    config_key: &str,
+    session_id: &str,
+    api: &tauri::CloseRequestApi,
+) {
+    let state = app.state::<Arc<AppState>>();
+    // A launcher Hide action (or `cs window hide`) routes
+    // through this same close path but is an explicit hide
+    // gesture, not a red-dot: consume its one-shot flag here
+    // and, once the transfer guards below clear, bury directly,
+    // skipping the prompt. A genuine red-dot finds no flag and
+    // asks. Read (not act) first so the transfer guards below
+    // still run for a silent hide -- a hide mid-transfer must
+    // not tear the transfer down without the prompt.
+    let silent_hide = state.take_silent_hide(label);
+    // Active-transfer guard (BEFORE any bury/close path): a
+    // window with an in-flight upload/download must never close
+    // silently and kill the transfer. A LOCAL window reports its
+    // count through the embedded host (keyed on the `?w=` session
+    // id), and its red-dot close DESTROYS it -- so the prompt
+    // offers "Cancel transfer & close" vs "Keep open". A
+    // connected-DEVSERVER window's transfer lives in the remote
+    // SPA + server, surfaced via the `active_transfer` feed bit
+    // (cached, keyed by composite label); its red-dot close only
+    // HIDES it (the transfer keeps running in the live webview),
+    // so that prompt is "Hide" vs "Keep open" -- the desktop never
+    // cancels a remote transfer (the user does, from the SPA).
+    if state
+        .embedded
+        .get()
+        .map(|e| e.window_has_active_transfer(session_id))
+        .unwrap_or(false)
+    {
+        api.prevent_close();
+        prompt_transfer_close(app, &state, label);
+        return;
+    }
+    if state.devserver_window_has_active_transfer(label) {
+        api.prevent_close();
+        prompt_devserver_transfer_close(app, &state, label);
+        return;
+    }
+    // The explicit hide gesture buries directly, no prompt.
+    // HOLD the close first: the hide-in-place families (a
+    // connected `control-terminal-`, a standalone `terminal-`,
+    // an `outbound-` webview) bury via `window.hide()` and need
+    // the webview ALIVE to reopen. An un-prevented close
+    // proceeds to destroy it the moment this handler returns,
+    // and the launcher eye's `/open` then 409s on a window
+    // that no longer exists. The watcher families bury through
+    // their view's reconcile, which closes the native window
+    // itself, so holding the OS close is correct for them too.
+    if silent_hide {
+        api.prevent_close();
+        bury_window_now(app, &state, label, config_key);
+        return;
+    }
+    // A devserver window still on the connecting page has no
+    // SPA command handler to answer a prompt. Route its OS
+    // close through the same pending-delete path as the
+    // page's close chords and Disconnect button.
+    let on_connecting = window_on_connecting_screen(app, label);
+    if on_connecting && label.starts_with("lib-") {
+        api.prevent_close();
+        if let Some(window) = app.get_webview_window(label) {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::request_close_window(app, window).await {
+                    tracing::warn!(error = %e, "closing connecting devserver window failed");
+                }
+            });
+        }
+        return;
+    }
+    // Decide whether there is a live workspace SPA to ASK. A
+    // `local::` or connected `lib-` watcher window has one. A
+    // standalone `terminal-` with no live shells, a
+    // `control-terminal-` still connecting, and any window
+    // still on the pre-SPA connecting screen have nothing to
+    // keep or no SPA to ask, so they real-close (return without
+    // prevent_close; the Destroyed branch cleans up).
+    let ask = if label.starts_with("local::") || label.starts_with("lib-") {
+        true
+    } else if label.starts_with("terminal-") {
+        state
+            .embedded
+            .get()
+            .map(|e| e.terminal_window_has_live_shells(label))
+            .unwrap_or(false)
+    } else if let Some(id) = label.strip_prefix("control-terminal-") {
+        // A control terminal KEPT at "process exited" (its
+        // devserver's reconnect is blocked on it): the red
+        // button IS the explicit close that unblocks
+        // reconnect. Run the same cleanup as Cmd+W / the SPA
+        // Close (reaps the row + tenant, clears the block),
+        // then let the real close proceed. Without this the
+        // destroy leaves the block set with no terminal left
+        // to close, and connect stays walled off.
+        let control_terminal_dead = state.control_terminal_dead.lock().unwrap().contains(id);
+        if control_terminal_dead {
+            let app_for_terminal_close = app.clone();
+            let state_for_terminal_close = Arc::clone(&state);
+            let id_for_terminal_close = id.to_string();
+            tauri::async_runtime::spawn(async move {
+                crate::close_devserver_control_terminal(
+                    &app_for_terminal_close,
+                    &state_for_terminal_close,
+                    &id_for_terminal_close,
+                )
+                .await;
+            });
+            false
+        } else {
+            // Closed (red button) WHILE STILL CONNECTING: must
+            // NOT prompt or bury. A hidden control window
+            // leaves the connect script running and strands
+            // the launcher on "Connecting..." (the connect
+            // flow's scrape loop keeps polling a window it can
+            // still see). Destroy instead so the scrape loop
+            // sees it gone, aborts, and surveys
+            // (abandon/edit/retry). Once connected, the
+            // overlay is fine: the PTY is the live connection
+            // endpoint and stays warm, hidden, reopenable;
+            // only an actual Close (^W / script exit) takes
+            // the connection down via request_close_window.
+            state.devservers.is_connected(id)
+        }
+    } else {
+        !on_connecting
+    };
+    if !ask {
+        // Real close; the Destroyed branch cleans up.
+        return;
+    }
+    // A live workspace SPA: hold the OS close and hand the
+    // decision to it. `w.eval` dispatches the host-agnostic
+    // `chan:command` bridge (origin-agnostic, no ACL -- the same
+    // channel the menu chords use); the SPA shows the Hide /
+    // Close / Cancel overlay and calls back. Nothing is buried
+    // until it does.
+    api.prevent_close();
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let _ = window.unminimize();
+    if let Err(e) = window.show() {
+        tracing::warn!(label = %label, error = %e, "raising close-confirm window failed");
+    }
+    if let Err(e) = window.set_focus() {
+        tracing::warn!(label = %label, error = %e, "focusing close-confirm window failed");
+    }
+    let _ = window.eval(CONFIRM_CLOSE_DISPATCH_JS);
+}
+
+/// Single cleanup point for EVERY destroy path: the
+/// no-live-shells close in `on_close_requested`, the SPA cascade destroy,
+/// workspace-off / outbound-forget
+/// teardown, and app exit. Frees the display number,
+/// drops the zoom entry, and clears a stale buried
+/// registry entry if the window died while hidden.
+fn on_destroyed(app: &AppHandle, label: &str) {
+    let state = app.state::<Arc<AppState>>();
+    state.release_window_number(label);
+    // Drop the registered OS title so `cs window list`
+    // stops showing one for a window that's gone. The
+    // `cs window title` override is intentionally KEPT:
+    // a best-effort reopen reuses the same label and
+    // should restore the custom title.
+    if let Some(embedded) = state.embedded.get() {
+        embedded.window_titles().remove(label);
+    }
+    state.live_window_zooms.lock().unwrap().remove(label);
+    let _cleanup = crate::download::drop_generated_downloads_for_window(label);
+    // A watcher-buried window destroyed here was buried by its
+    // reconcile (the user hid it); KEEP it in the reopen menu.
+    // Check the LOCAL view for `local::` windows and the owning
+    // DEVSERVER view for `lib-<hex>::...` windows; a hidden
+    // devserver window is reopenable while connected. Only a
+    // real teardown/discard (in NO watcher bury set -- e.g. the
+    // view was already dropped on disconnect) drops it.
+    let watcher_buried = if label.starts_with("lib-") {
+        let library_id = label.split("::").next().unwrap_or(label);
+        state
+            .devserver_feed
+            .devserver_id_for_library(library_id)
+            .and_then(|ds_id| {
+                state
+                    .devserver_watcher_views
+                    .lock()
+                    .unwrap()
+                    .get(&ds_id)
+                    .map(|v| v.is_buried(label))
+            })
+            .unwrap_or(false)
+    } else {
+        state
+            .local_watcher_view()
+            .map(|v| v.is_buried(label))
+            .unwrap_or(false)
+    };
+    if !watcher_buried && state.remove_buried(label) {
+        crate::rebuild_window_menu(app);
+    }
+    // A destroyed remote-backed window may now be a
+    // reopenable `saved && !connected` row on the
+    // remote -- re-poll so the menu offers it.
+    if label.starts_with("outbound-") {
+        crate::refresh_remote_windows_menu(app);
+    }
 }
 
 /// Compose the browser-facing URL for a freshly minted BROWSER window record:
@@ -3567,9 +3559,8 @@ mod tests {
     #[test]
     fn close_requested_arm_prompts_a_buryable_window_and_real_closes_the_rest() {
         const SERVE_RS: &str = include_str!("serve.rs");
-        // The refactor collapses the three inline bury bodies into one reusable
-        // helper the two callers (the silent-hide gesture, the SPA Hide callback)
-        // share.
+        // bury_window_now is the one bury body the two callers (the silent-hide
+        // gesture, the SPA Hide callback) share.
         assert!(
             SERVE_RS.contains("pub(crate) fn bury_window_now("),
             "bury_window_now must exist for the silent-hide + Hide-callback paths",
@@ -3579,16 +3570,17 @@ mod tests {
             SERVE_RS.contains("name: 'app.window.confirmClose'"),
             "the close-confirm eval must dispatch app.window.confirmClose",
         );
-        // Isolate the CloseRequested arm and assert its new shape. The arm region
-        // is bounded to the closure body (this test module sits far below the
-        // Destroyed branch), so its scoped absence checks never self-match.
-        let arm = SERVE_RS
-            .split("WindowEvent::CloseRequested { api, .. } => {")
-            .nth(1)
-            .expect("CloseRequested arm exists")
-            .split("WindowEvent::Destroyed")
-            .next()
-            .expect("arm ends before the Destroyed branch");
+        // Isolate on_close_requested, the body of the CloseRequested arm. The
+        // slice runs from its signature line to its closing brace at column 0,
+        // so it covers that one function and the scoped absence check never
+        // self-matches this test module. Both bounds must be found: a missing
+        // end would otherwise stretch the slice to the end of the file.
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn on_close_requested(")
+            .expect("on_close_requested exists");
+        let (arm, _) = rest
+            .split_once("\n}\n")
+            .expect("on_close_requested ends at a column-0 brace");
         // The arm must not bury and then show a hidden-window notice: the
         // close-confirm prompt asks before anything is hidden.
         assert!(
@@ -3597,7 +3589,7 @@ mod tests {
         );
         // An explicit hide gesture still buries directly, no prompt -- but only
         // after the active-transfer guards run (read the flag, act later).
-        assert!(arm.contains("let silent_hide = state.take_silent_hide(&label_for_close);"));
+        assert!(arm.contains("let silent_hide = state.take_silent_hide(label);"));
         assert!(arm.contains("if silent_hide {"));
         assert!(arm.contains("bury_window_now("));
         // The silent-hide bury must HOLD the close before burying: the
@@ -3606,7 +3598,7 @@ mod tests {
         // the webview right after the handler returns, leaving the launcher eye
         // pointing at a window that 409s on reopen.
         assert!(
-            arm.contains("if silent_hide {\n                            api.prevent_close();"),
+            arm.contains("if silent_hide {\n        api.prevent_close();"),
             "the silent-hide branch must prevent_close before bury_window_now",
         );
         // A live SPA is HELD (prevent_close) and ASKED via the confirm eval;
@@ -3639,14 +3631,47 @@ mod tests {
     #[test]
     fn destroyed_window_drops_its_generated_downloads() {
         const SERVE_RS: &str = include_str!("serve.rs");
-        let arm = SERVE_RS
-            .split("WindowEvent::Destroyed")
-            .nth(1)
-            .expect("Destroyed arm exists")
-            .split("_ => {}")
-            .next()
-            .expect("Destroyed arm ends before the fallback branch");
+        // on_destroyed is the body of the Destroyed arm; the slice runs from
+        // its signature line to its closing brace at column 0.
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn on_destroyed(")
+            .expect("on_destroyed exists");
+        let (arm, _) = rest
+            .split_once("\n}\n")
+            .expect("on_destroyed ends at a column-0 brace");
         assert!(arm.contains("drop_generated_downloads_for_window("));
+    }
+
+    #[test]
+    fn the_window_event_closure_only_delegates_to_its_handlers() {
+        // The closure build_workspace_window_with_completion registers on each
+        // window is a dispatch table: the CloseRequested arm is one call into
+        // on_close_requested and the Destroyed arm one call into on_destroyed,
+        // so the pins on those two functions cover the whole close and destroy
+        // behaviour. An arm that grew a body of its own would sit outside them.
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn build_workspace_window_with_completion(")
+            .expect("build_workspace_window_with_completion exists");
+        let (build, _) = rest
+            .split_once("\n}\n")
+            .expect("build_workspace_window_with_completion ends at a column-0 brace");
+        let (_, rest) = build
+            .split_once("window.on_window_event(move |event| match event {")
+            .expect("the build function registers the window-event closure");
+        let (closure, _) = rest
+            .split_once("_ => {}")
+            .expect("the closure ends with the fallback arm");
+        assert!(closure.contains("WindowEvent::CloseRequested { api, .. } =>"));
+        assert!(closure.contains("on_close_requested("));
+        assert!(closure.contains("WindowEvent::Destroyed =>"));
+        assert!(closure.contains("on_destroyed("));
+        for inlined in ["take_silent_hide", "prevent_close", "release_window_number"] {
+            assert!(
+                !closure.contains(inlined),
+                "the window-event closure must delegate, not carry {inlined} itself",
+            );
+        }
     }
 
     #[test]
@@ -3851,14 +3876,13 @@ mod tests {
         // record becomes a pending delete, while the page offers the same path
         // from Cmd/Ctrl+W, Ctrl+D, and Disconnect.
         const SERVE_RS: &str = include_str!("serve.rs");
-        let close_arm = SERVE_RS
-            .split("WindowEvent::CloseRequested { api, .. } => {")
-            .nth(1)
-            .expect("CloseRequested arm exists")
-            .split("WindowEvent::Destroyed")
-            .next()
-            .expect("close arm ends before Destroyed");
-        assert!(close_arm.contains("if on_connecting && label_for_close.starts_with(\"lib-\")"));
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn on_close_requested(")
+            .expect("on_close_requested exists");
+        let (close_arm, _) = rest
+            .split_once("\n}\n")
+            .expect("on_close_requested ends at a column-0 brace");
+        assert!(close_arm.contains("if on_connecting && label.starts_with(\"lib-\")"));
         assert!(close_arm.contains("crate::request_close_window(app, window)"));
         // KEY_BRIDGE_JS claims the close chord (window capture +
         // stopImmediatePropagation) before BOTH the page's listener and
