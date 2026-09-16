@@ -2240,6 +2240,70 @@ mod tenant_builder_tests {
                 other => panic!("terminal tenant did not refuse the session list: {other:?}"),
             }
         }
+        // The unserve scope decides what a close landing on this socket does,
+        // and only a built tenant shows the choice. A close for a path nothing
+        // here serves is refused before any teardown: a standalone workspace
+        // names the root it serves instead of firing its shutdown signal, and
+        // a standalone terminal has no teardown at all.
+        let unserved = session_dir.path().to_path_buf();
+        let close = serde_json::json!({ "type": "close", "path": unserved }).to_string();
+        match control_round_trip(&socket(&workspace_app), &close).await {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                format!(
+                    "this server does not serve {} (it serves {})",
+                    unserved.display(),
+                    workspace_root.display()
+                )
+            ),
+            other => panic!("workspace tenant did not scope the close to its root: {other:?}"),
+        }
+        for terminal in [&terminal_app, &files_app] {
+            match control_round_trip(&socket(terminal), &close).await {
+                ControlResponse::Error { message } => assert_eq!(
+                    message,
+                    format!(
+                        "cannot unserve {} from here: this process exposes no control-socket \
+                         teardown",
+                        unserved.display()
+                    )
+                ),
+                other => panic!("terminal tenant did not refuse the close: {other:?}"),
+            }
+        }
+        // The Files surface handed to the control socket is what lets `cs open
+        // PATH` run on a terminal. Without it the request is refused with the
+        // `chan serve` guidance before any window is looked at; with it, as on
+        // a workspace, the request reaches the connected-window check, which
+        // this never-connected window fails. Neither answer touches a window.
+        let opened = workspace_root.join("builder-proof.md");
+        let open = serde_json::json!({
+            "type": "open_path",
+            "window_id": "builder-proof",
+            "path": opened,
+        })
+        .to_string();
+        let not_connected = String::from("window \"builder-proof\" is not connected");
+        let guidance = format!(
+            "cs open is only available in a workspace window; this is a standalone terminal. \
+             Run 'chan serve {}' to load it as a workspace window.",
+            opened.display()
+        );
+        let files_answer = if standalone_files_supported() {
+            &not_connected
+        } else {
+            &guidance
+        };
+        for (artifacts, expected) in [
+            (&workspace_app, &not_connected),
+            (&terminal_app, &guidance),
+            (&files_app, files_answer),
+        ] {
+            match control_round_trip(&socket(artifacts), &open).await {
+                ControlResponse::Error { message } => assert_eq!(&message, expected),
+                other => panic!("open_path probe was not refused: {other:?}"),
+            }
+        }
         assert!(workspace_app.mcp_bridge.is_some());
         assert!(terminal_app.mcp_bridge.is_none());
         assert!(files_app.mcp_bridge.is_none());
@@ -2267,6 +2331,39 @@ mod tenant_builder_tests {
         assert_eq!(
             files_app.state.standalone_files.is_some(),
             standalone_files_supported()
+        );
+        // The blob reaper is what makes an explicit window discard drop a
+        // durable terminal's saved layout, and only the built tenant wires it
+        // to its session directory. A layout stored under the window id in
+        // both namespaces survives the kinds that install no reaper and is
+        // gone once the durable terminal's registry reaps that id. The reap
+        // runs the hook inline, so there is nothing to wait for.
+        let blob_dir = session_dir.path();
+        let files_blob_dir = terminal_blob::files_dir(blob_dir);
+        terminal_blob::put(blob_dir, "builder-proof", b"{}").unwrap();
+        terminal_blob::put(&files_blob_dir, "builder-proof", b"{}").unwrap();
+        workspace_app
+            .state
+            .terminal_sessions
+            .reap_window_layout("builder-proof");
+        terminal_app
+            .state
+            .terminal_sessions
+            .reap_window_layout("builder-proof");
+        assert!(terminal_blob::get(blob_dir, "builder-proof")
+            .unwrap()
+            .is_some());
+        assert!(terminal_blob::get(&files_blob_dir, "builder-proof")
+            .unwrap()
+            .is_some());
+        files_app
+            .state
+            .terminal_sessions
+            .reap_window_layout("builder-proof");
+        assert_eq!(terminal_blob::get(blob_dir, "builder-proof").unwrap(), None);
+        assert_eq!(
+            terminal_blob::get(&files_blob_dir, "builder-proof").unwrap(),
+            None
         );
         // Every owned task is joined on shutdown, so a flusher or reconciler
         // that falls out of the owner's list outlives its tenant.
