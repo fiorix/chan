@@ -1588,6 +1588,44 @@ impl DevserverServeArm {
     }
 }
 
+/// The line `run_devserver` prints once startup reaches `Ready`, before it
+/// notifies systemd.
+///
+/// Other programs read these lines: the desktop scrapes the
+/// [`DEVSERVER_TOKEN_MARKER`] line for the bearer, and the e2e harnesses wait
+/// for the listening line, so their text and their position in the startup
+/// sequence are part of the devserver's interface.
+enum ReadyBanner {
+    /// A bound local listener: the launch URL, then the marker line.
+    Listening {
+        local_addr: SocketAddr,
+        token: String,
+    },
+    /// No local listener; the tunnel at this URL publishes the library.
+    TunnelOnly(String),
+    /// Neither a local listener nor a tunnel; only the discovery socket is
+    /// reachable.
+    DiscoveryOnly,
+}
+
+impl ReadyBanner {
+    fn print(&self) {
+        match self {
+            Self::Listening { local_addr, token } => {
+                println!("chan devserver: listening on http://{local_addr}/?t={token}");
+                println!("{DEVSERVER_TOKEN_MARKER}{token}");
+            }
+            Self::TunnelOnly(url) => {
+                println!("chan devserver: tunnel-only (no local listener); publishing via {url}")
+            }
+            Self::DiscoveryOnly => println!(
+                "chan devserver: no local listener and no tunnel; only the chan-open \
+                 discovery socket is reachable"
+            ),
+        }
+    }
+}
+
 /// Resolve the boot token in `persisted`, minting or rotating in place.
 /// Pure over (`persisted`, `now`) so the age rule is testable without a
 /// boot: empty mints, an unknown or over-age mint time rotates, and a
@@ -1854,11 +1892,11 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         spawn_devserver_tunnel(tunnel, tunnel_app, &signal_tx)
     });
 
-    match listener {
+    let serve_signal = signal_tx.clone();
+    let serve_startup = state.startup.clone();
+    let (serve_arm, ready_banner) = match listener {
         Some(listener) => {
             let local_addr = local_addr.expect("listening devserver has a bound address");
-            let serve_signal = signal_tx.clone();
-            let serve_startup = state.startup.clone();
             let serve_arm = DevserverServeArm::Listener(tokio::spawn(async move {
                 let result =
                     crate::signal::graceful_serve(listener, app, serve_signal.clone()).await;
@@ -1866,155 +1904,84 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
                 let _ = serve_signal.send(true);
                 result
             }));
-            let restore =
-                WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
-            let restore_join = restore.join().await;
-            if restore_join.is_err() {
-                state.startup.stop();
-                let _ = signal_tx.send(true);
-            }
-            let ready = if restore_join.is_ok()
-                && state.startup.begin_fdstore_apply_after_restore().await
-            {
-                // Persisted workspaces are mounted now, so every inherited PTY
-                // can resolve its tenant. Tenant routes remain gated until the
-                // adoption and parking manifest are both complete.
-                fdstore_restore.apply(&state);
-                if let Some(parker) = &fd_parker {
-                    parker.activate();
-                }
-                state.startup.advance(StartupPhase::Ready).is_ok()
-            } else {
-                false
-            };
-            let notify_result = if ready {
-                println!("chan devserver: listening on http://{local_addr}/?t={token}");
-                println!("{DEVSERVER_TOKEN_MARKER}{token}");
-                fdstore::notify_ready()
-            } else {
-                Ok(())
-            };
-            if notify_result.is_err() {
-                state.startup.stop();
-                let _ = signal_tx.send(true);
-            }
-            let watchdog_pings = (ready && notify_result.is_ok())
-                .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
-            let serve_join = serve_arm.join(watchdog_pings).await;
-            // Aborted rather than joined: a probe stuck in a stalled mount's
-            // `lstat` is uninterruptible, and shutdown must not wait on it.
-            probe_task.abort();
-            let cancel_join = cancel_task.await;
-            let tunnel_join = match tunnel_task {
-                Some(task) => Some(task.await),
-                None => None,
-            };
-            // Graceful shutdown: seal parking (no further parks, one final
-            // manifest write), then detach the parked sessions so tenant
-            // teardown kills only the rest. Systemd decides what the store does
-            // next: restart re-feeds the fds, stop releases them.
-            if let Some(parker) = fd_parker {
-                let detached = parker.seal_flush_detach();
-                if detached > 0 {
-                    eprintln!(
-                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
-                );
-                }
-                parker.stop().await;
-            }
-            let hosted_shutdown = host.shutdown_all().await;
-            state.startup.stop();
-            state.startup.stopped();
-            restore_join.context("joining workspace startup restore")?;
-            notify_result?;
-            cancel_join.context("joining devserver shutdown observer")?;
-            if let Some(tunnel_join) = tunnel_join {
-                tunnel_join.context("joining devserver tunnel task")?;
-            }
-            hosted_shutdown.context("shutting down hosted tenants")?;
-            serve_join?;
+            (serve_arm, ReadyBanner::Listening { local_addr, token })
         }
         None => {
-            let serve_signal = signal_tx.clone();
-            let serve_startup = state.startup.clone();
             let serve_arm = DevserverServeArm::Wait(tokio::spawn(async move {
                 crate::signal::graceful_wait(serve_signal.clone()).await;
                 serve_startup.stop();
                 let _ = serve_signal.send(true);
             }));
-            let restore =
-                WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
-            let restore_join = restore.join().await;
-            if restore_join.is_err() {
-                state.startup.stop();
-                let _ = signal_tx.send(true);
-            }
-            let ready = if restore_join.is_ok()
-                && state.startup.begin_fdstore_apply_after_restore().await
-            {
-                fdstore_restore.apply(&state);
-                if let Some(parker) = &fd_parker {
-                    parker.activate();
-                }
-                state.startup.advance(StartupPhase::Ready).is_ok()
-            } else {
-                false
+            let banner = match tunnel_url {
+                Some(url) => ReadyBanner::TunnelOnly(url),
+                None => ReadyBanner::DiscoveryOnly,
             };
-            let notify_result = if ready {
-                match &tunnel_url {
-                    Some(url) => println!(
-                        "chan devserver: tunnel-only (no local listener); publishing via {url}"
-                    ),
-                    None => println!(
-                        "chan devserver: no local listener and no tunnel; only the chan-open \
-                         discovery socket is reachable"
-                    ),
-                }
-                fdstore::notify_ready()
-            } else {
-                Ok(())
-            };
-            if notify_result.is_err() {
-                state.startup.stop();
-                let _ = signal_tx.send(true);
-            }
-            let watchdog_pings = (ready && notify_result.is_ok())
-                .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
-            let serve_join = serve_arm.join(watchdog_pings).await;
-            // Aborted rather than joined: a probe stuck in a stalled mount's
-            // `lstat` is uninterruptible, and shutdown must not wait on it.
-            probe_task.abort();
-            let cancel_join = cancel_task.await;
-            let tunnel_join = match tunnel_task {
-                Some(task) => Some(task.await),
-                None => None,
-            };
-            // Graceful shutdown: seal parking (no further parks, one final
-            // manifest write), then detach the parked sessions so tenant
-            // teardown kills only the rest. Systemd decides what the store does
-            // next: restart re-feeds the fds, stop releases them.
-            if let Some(parker) = fd_parker {
-                let detached = parker.seal_flush_detach();
-                if detached > 0 {
-                    eprintln!(
-                    "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
-                );
-                }
-                parker.stop().await;
-            }
-            let hosted_shutdown = host.shutdown_all().await;
-            state.startup.stop();
-            state.startup.stopped();
-            restore_join.context("joining workspace startup restore")?;
-            notify_result?;
-            cancel_join.context("joining devserver shutdown observer")?;
-            if let Some(tunnel_join) = tunnel_join {
-                tunnel_join.context("joining devserver tunnel task")?;
-            }
-            hosted_shutdown.context("shutting down hosted tenants")?;
-            serve_join?;
+            (serve_arm, banner)
         }
+    };
+    let restore = WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
+    let restore_join = restore.join().await;
+    if restore_join.is_err() {
+        state.startup.stop();
+        let _ = signal_tx.send(true);
     }
+    let ready = if restore_join.is_ok() && state.startup.begin_fdstore_apply_after_restore().await {
+        // Persisted workspaces are mounted now, so every inherited PTY
+        // can resolve its tenant. Tenant routes remain gated until the
+        // adoption and parking manifest are both complete.
+        fdstore_restore.apply(&state);
+        if let Some(parker) = &fd_parker {
+            parker.activate();
+        }
+        state.startup.advance(StartupPhase::Ready).is_ok()
+    } else {
+        false
+    };
+    let notify_result = if ready {
+        ready_banner.print();
+        fdstore::notify_ready()
+    } else {
+        Ok(())
+    };
+    if notify_result.is_err() {
+        state.startup.stop();
+        let _ = signal_tx.send(true);
+    }
+    let watchdog_pings = (ready && notify_result.is_ok())
+        .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
+    let serve_join = serve_arm.join(watchdog_pings).await;
+    // Aborted rather than joined: a probe stuck in a stalled mount's
+    // `lstat` is uninterruptible, and shutdown must not wait on it.
+    probe_task.abort();
+    let cancel_join = cancel_task.await;
+    let tunnel_join = match tunnel_task {
+        Some(task) => Some(task.await),
+        None => None,
+    };
+    // Graceful shutdown: seal parking (no further parks, one final
+    // manifest write), then detach the parked sessions so tenant
+    // teardown kills only the rest. Systemd decides what the store does
+    // next: restart re-feeds the fds, stop releases them.
+    if let Some(parker) = fd_parker {
+        let detached = parker.seal_flush_detach();
+        if detached > 0 {
+            eprintln!(
+                "chan devserver: systemd fdstore: detached {detached} parked terminal(s) for handover"
+            );
+        }
+        parker.stop().await;
+    }
+    let hosted_shutdown = host.shutdown_all().await;
+    state.startup.stop();
+    state.startup.stopped();
+    restore_join.context("joining workspace startup restore")?;
+    notify_result?;
+    cancel_join.context("joining devserver shutdown observer")?;
+    if let Some(tunnel_join) = tunnel_join {
+        tunnel_join.context("joining devserver tunnel task")?;
+    }
+    hosted_shutdown.context("shutting down hosted tenants")?;
+    serve_join?;
     extension_runtime.shutdown().await;
     Ok(())
 }
