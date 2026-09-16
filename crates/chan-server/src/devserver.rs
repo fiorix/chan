@@ -1588,7 +1588,7 @@ impl DevserverServeArm {
     }
 }
 
-/// The line `run_devserver` prints once startup reaches `Ready`, before it
+/// The lines `run_devserver` prints once startup reaches `Ready`, before it
 /// notifies systemd.
 ///
 /// Other programs read these lines: the desktop scrapes the
