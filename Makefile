@@ -304,11 +304,13 @@ ifeq ($(UNAME_S),Linux)
 	# ci-linux is what covers these, and it is the gate CI runs for them.
 	#
 	# gateway-lint compiles every gateway test target without executing it;
-	# gateway-test executes the database-free subset and reports the seven
-	# Postgres-backed integration-test files as not run; gateway-build only
-	# compiles the release crates.
+	# gateway-doc renders the gateway docs the root rustdoc step never
+	# reaches; gateway-test executes the database-free subset and reports
+	# the seven Postgres-backed integration-test files as not run;
+	# gateway-build only compiles the release crates.
 	$(MAKE) gateway-fmt
 	$(MAKE) gateway-lint
+	$(MAKE) gateway-doc
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-test
 	RUSTFLAGS="-D warnings" $(MAKE) gateway-build
 endif
@@ -470,6 +472,18 @@ gateway-lint: gateway-version-pin-check gateway-spa ## Clippy all gateway target
 	# stale pin or a broken packaging contract should not cost an SPA build
 	# and a full clippy pass to discover.
 	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
+
+.PHONY: gateway-doc
+gateway-doc: gateway-spa ## Rustdoc the separate gateway workspace with warnings denied.
+	$(LINUX_ONLY)
+	# The root rustdoc step never reaches this workspace, for the reason
+	# gateway-lint gives about clippy, and clippy sees none of what rustdoc
+	# catches: an intra-doc link that does not resolve, a public doc that
+	# links a private item, prose parsed as HTML. Depends on gateway-spa
+	# because cargo doc compiles identity, which embeds web/dist. RUSTFLAGS
+	# matches gateway-lint so the step shares its dependency artifacts
+	# instead of building a second set.
+	cd gateway && RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --no-deps --workspace
 
 .PHONY: gateway-test
 gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.

@@ -4,8 +4,8 @@ name: Gateway CI
 # Postgres-backed, server-side only (linux amd64/arm64), and NOT a
 # member of the root chan workspace. The main ci.yml therefore never
 # builds or tests it. This gate runs the gateway's own fmt + clippy +
-# tests (against a Postgres service) plus the SPA type-check, scoped to
-# changes under gateway/. ci.yml carries the mirror-image
+# rustdoc + tests (against a Postgres service) plus the SPA type-check,
+# scoped to changes under gateway/. ci.yml carries the mirror-image
 # paths-ignore so the two gates do not both run on a given change.
 
 on:
@@ -116,6 +116,12 @@ jobs:
       - name: clippy
         working-directory: chan/gateway
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: doc
+        working-directory: chan/gateway
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --workspace
 
       - name: test
         working-directory: chan/gateway
