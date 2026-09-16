@@ -4551,7 +4551,7 @@ fn split_path_suffix(href: &str) -> (&str, &str) {
 #[cfg(test)]
 mod cap_err_tests {
     use crate::error::ChanError;
-    use crate::rooted_fs::map_cap_err;
+    use crate::fs_ops::map_cap_err;
     use std::io;
     use std::path::Path;
 

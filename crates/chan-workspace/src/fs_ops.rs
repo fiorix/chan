@@ -1512,8 +1512,9 @@ pub(crate) fn atomic_create_in(
     let parent_dir;
     let target_dir = match parent {
         Some(parent) => {
-            dir.create_dir_all(parent).map_err(|e| map_cap(e, rel))?;
-            parent_dir = dir.open_dir(parent).map_err(|e| map_cap(e, rel))?;
+            dir.create_dir_all(parent)
+                .map_err(|e| map_cap_err(e, rel))?;
+            parent_dir = dir.open_dir(parent).map_err(|e| map_cap_err(e, rel))?;
             &parent_dir
         }
         None => dir,
@@ -1535,7 +1536,7 @@ pub(crate) fn atomic_create_in(
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             ChanError::PathAlreadyExists(rel.to_string_lossy().into_owned())
         } else {
-            map_cap(e, rel)
+            map_cap_err(e, rel)
         }
     })?;
     stage.close()?;
@@ -1555,7 +1556,8 @@ where
 {
     if let Some(parent) = rel.parent() {
         if !parent.as_os_str().is_empty() {
-            dir.create_dir_all(parent).map_err(|e| map_cap(e, rel))?;
+            dir.create_dir_all(parent)
+                .map_err(|e| map_cap_err(e, rel))?;
         }
     }
     let preserved = capture_metadata_in(dir, rel);
@@ -1566,13 +1568,13 @@ where
     let parent_dir;
     let target_dir: &cap_std::fs::Dir = match parent {
         Some(p) => {
-            parent_dir = dir.open_dir(p).map_err(|e| map_cap(e, rel))?;
+            parent_dir = dir.open_dir(p).map_err(|e| map_cap_err(e, rel))?;
             &parent_dir
         }
         None => dir,
     };
     let leaf = rel.file_name().ok_or(ChanError::PathEmpty)?;
-    let tmp = cap_tempfile::TempFile::new(target_dir).map_err(|e| map_cap(e, rel))?;
+    let tmp = cap_tempfile::TempFile::new(target_dir).map_err(|e| map_cap_err(e, rel))?;
     let mut sink = AtomicStreamSink::new(tmp, kind, limit, validate_utf8);
     feed(&mut sink)?;
     sink.finish()?;
@@ -1583,18 +1585,24 @@ where
         .sync_all()
         .map_err(|e| ChanError::io_with_context(e, "fsync tmp"))?;
     let tmp = sink.take_temp();
-    tmp.replace(leaf).map_err(|e| map_cap(e, rel))?;
+    tmp.replace(leaf).map_err(|e| map_cap_err(e, rel))?;
     apply_metadata_in(dir, rel, preserved);
     sync_dir_handle(target_dir)?;
     Ok(())
 }
 
-/// Map a cap-std `io::Error` into our error enum, distinguishing
-/// "you tried to escape the sandbox" from generic I/O. cap-std
-/// signals an escape via the message string, or via `ENOTCAPABLE`
-/// where the kernel resolved the path (see `map_cap_err` in
-/// `rooted_fs.rs` for the symmetric mapping on the Workspace side).
-fn map_cap(err: std::io::Error, rel: &Path) -> ChanError {
+/// Map a `std::io::Error` returned by a cap-std op into our error
+/// enum. cap-std rejects sandbox escapes (mid-path symlink pointing
+/// outside the dir handle, absolute path passed as rel, `..` that
+/// would walk above the root) with a generic io::Error, and how it
+/// says so depends on who did the resolving. Where cap-std walks the
+/// path itself the only signal is the message it produces ("a path
+/// led outside of the filesystem"), which is fragile if cap-std
+/// changes the string; a regression test pins it. On FreeBSD the
+/// kernel does the resolving through `O_RESOLVE_BENEATH` and refuses
+/// with `ENOTCAPABLE`, which carries no such message, so that errno
+/// is matched first.
+pub(crate) fn map_cap_err(err: std::io::Error, rel: &Path) -> ChanError {
     // The kernel-resolved escape, per the note above: no message to match on.
     #[cfg(target_os = "freebsd")]
     if err.raw_os_error() == Some(rustix::io::Errno::NOTCAPABLE.raw_os_error()) {
@@ -2093,24 +2101,6 @@ mod tests {
         semantic_write_budget, AtomicWriteKind, WorkspacePath, BINARY_STREAM_CHUNK_SIZE,
     };
     use tempfile::TempDir;
-
-    #[test]
-    fn missing_kind_survives_atomic_cap_error_mapping() {
-        for message in [
-            "The system cannot find the file specified. (os error 2)",
-            "The system cannot find the path specified. (os error 3)",
-        ] {
-            let mapped = map_cap(
-                std::io::Error::new(std::io::ErrorKind::NotFound, message),
-                Path::new("notes/x.md"),
-            );
-            assert_eq!(mapped.to_string(), format!("io error: {message}"));
-            assert!(
-                matches!(mapped, ChanError::NotFound(_)),
-                "kind lost: {mapped:?}"
-            );
-        }
-    }
 
     fn workspace_fixture() -> (TempDir, TempDir, std::sync::Arc<crate::Workspace>) {
         let cfg = TempDir::new().unwrap();

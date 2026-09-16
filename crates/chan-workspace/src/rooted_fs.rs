@@ -5,7 +5,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::error::{ChanError, Result};
-use crate::fs_ops::{self, AtomicWriteKind, AtomicWriteSink};
+use crate::fs_ops::{self, map_cap_err, AtomicWriteKind, AtomicWriteSink};
 use crate::workspace::{
     semantic_write_budget, BoundedFileReader, CopyOutcome, DirEntry, FileStat, TextReadEvent,
     WorkspacePath, WritableFile,
@@ -1368,30 +1368,6 @@ where
             Ok(true)
         }
     }
-}
-
-/// Map a `std::io::Error` returned by a cap-std op into our error
-/// enum. cap-std rejects sandbox escapes (mid-path symlink pointing
-/// outside the dir handle, absolute path passed as rel, `..` that
-/// would walk above the root) with a generic io::Error, and how it
-/// says so depends on who did the resolving. Where cap-std walks the
-/// path itself the only signal is the message it produces ("a path
-/// led outside of the filesystem"), which is fragile if cap-std
-/// changes the string; a regression test pins it. On FreeBSD the
-/// kernel does the resolving through `O_RESOLVE_BENEATH` and refuses
-/// with `ENOTCAPABLE`, which carries no such message, so that errno
-/// is matched first.
-pub(crate) fn map_cap_err(err: std::io::Error, rel: &std::path::Path) -> ChanError {
-    // The kernel-resolved escape, per the note above: no message to match on.
-    #[cfg(target_os = "freebsd")]
-    if err.raw_os_error() == Some(rustix::io::Errno::NOTCAPABLE.raw_os_error()) {
-        return ChanError::SymlinkEscape(rel.to_path_buf());
-    }
-    let msg = err.to_string();
-    if msg.contains("outside of the filesystem") || msg.contains("path escape") {
-        return ChanError::SymlinkEscape(rel.to_path_buf());
-    }
-    ChanError::from(err)
 }
 
 /// cap-std variant of `mtime_secs` for `cap_std::fs::Metadata`.
