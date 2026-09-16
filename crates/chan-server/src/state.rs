@@ -34,15 +34,11 @@ pub struct AppState {
     pub token: Option<String>,
     /// Canonical URL prefix the SPA prepends to fetch and WebSocket
     /// URLs, injected into the shell as `<meta name="chan-prefix">`.
-    /// Initialized from `ServeConfig::prefix`, and shared with `TenantArtifacts`
-    /// when a host mounts the tenant (a standalone `chan serve` never does).
-    /// Devserver tenants retain their own prefixes when the tunnel connects.
-    /// Empty when served at root.
-    ///
-    /// Note: this is the SPA-facing prefix only; the axum router is
-    /// already nested under `ServeConfig::prefix` at build time, so
-    /// changing this value does not re-route handlers.
-    pub prefix: Arc<RwLock<String>>,
+    /// Immutable, initialized from `ServeConfig::prefix` alongside the axum
+    /// router's nesting, and shared with `TenantArtifacts` when a host mounts
+    /// the tenant. Devserver tenants retain their own prefixes when the
+    /// tunnel connects. Empty when served at root.
+    pub prefix: Arc<str>,
     /// Snapshot of `ServeConfig::settings_disabled`. Immutable for
     /// the server's lifetime: true only on a `--no-settings` serve (the
     /// kiosk / shared-workstation mode where the operator at the keyboard
@@ -375,7 +371,7 @@ pub(crate) mod test_support {
             workspace_root: workspace_root.clone(),
             workspace_cell: Arc::new(RwLock::new(None)),
             token: None,
-            prefix: Arc::new(RwLock::new(String::new())),
+            prefix: Arc::from(""),
             settings_disabled: false,
             events_tx,
             index_events_tx,

@@ -232,13 +232,11 @@ struct AppArtifacts {
     /// them.
     bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
     /// The URL prefix injected into the SPA shell as
-    /// `<meta name="chan-prefix">`. The app builders set it once from
-    /// `ServeConfig::prefix` and nothing writes it afterwards: a
-    /// devserver tenant already serves at its public slug, so a tunnel
-    /// connecting leaves it unchanged. Shared with `AppState::prefix`
-    /// (same Arc), and with `TenantArtifacts::prefix` when a host
-    /// mounts the tenant.
-    prefix: Arc<RwLock<String>>,
+    /// `<meta name="chan-prefix">`. Immutable, set from `ServeConfig::prefix`
+    /// at construction: a devserver tenant serves at its public slug even
+    /// when a tunnel connects. Shared with `AppState::prefix` and with
+    /// `TenantArtifacts::prefix` when a host mounts the tenant.
+    prefix: Arc<str>,
     /// MCP socket bridge handle. Held here (not on AppState) so the
     /// accept-loop closures don't have to keep the AppState alive
     /// past serve() unwind. Drop = abort accept loop + unlink socket.
@@ -611,7 +609,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         _ => None,
     };
     let last_activity = Arc::new(AtomicU64::new(now_unix_secs()));
-    let prefix = Arc::new(RwLock::new(config.prefix.clone()));
+    let prefix: Arc<str> = config.prefix.as_str().into();
     // Shutdown channel: sender lives in artifacts so the serve loop
     // can fire it from SIGINT and the idle watcher; receivers live on
     // AppState (for ws_pump et al) and in serve() itself for the

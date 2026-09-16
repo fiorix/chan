@@ -82,12 +82,6 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     } else {
         candidate
     };
-    let prefix = match state.prefix.read() {
-        Ok(prefix) => prefix.clone(),
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "prefix lock poisoned").into_response();
-        }
-    };
     let settings_disabled = state.settings_disabled;
     // A workspace tenant's file surface rides its workspace; the shared
     // standalone terminal tenant carries this one, and only when the host
@@ -102,7 +96,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
         let body = if is_index {
             inject_chan_meta(
                 &file.data,
-                &prefix,
+                &state.prefix,
                 settings_disabled,
                 files,
                 drafts,
@@ -120,7 +114,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
     if let Some(file) = WebAssets::get("index.html") {
         let body = inject_chan_meta(
             &file.data,
-            &prefix,
+            &state.prefix,
             settings_disabled,
             files,
             drafts,
@@ -507,6 +501,43 @@ mod tests {
 
         let uri: axum::http::Uri = "/index.html?chan-renderer=unknown".parse().unwrap();
         assert_eq!(webgl_renderer_hint(&uri), None);
+    }
+
+    #[tokio::test]
+    async fn served_shell_carries_the_tenant_prefix() {
+        use axum::body::to_bytes;
+
+        let mut state = crate::state::test_support::make_test_state(false);
+        Arc::get_mut(&mut state).unwrap().prefix = Arc::from("/tenant-prefix-proof");
+        let embedded = WebAssets::get("index.html").is_some();
+        for uri in ["/", "/index.html", "/client/route"] {
+            let response = serve_static(State(state.clone()), uri.parse().unwrap()).await;
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            // Clean Rust-only checkouts have no SPA bundle. Pin the refusal
+            // there and exercise injection when the frontend is available.
+            if !embedded {
+                eprintln!("prefix injection not exercised: frontend bundle unavailable ({uri})");
+                assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+                assert_eq!(
+                    body,
+                    "frontend bundle not built; run `cd web && npm install && npm run build`"
+                );
+                continue;
+            }
+            eprintln!("prefix injection exercised: {uri}");
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(
+                body.matches("<meta name=\"chan-prefix\"").count(),
+                1,
+                "{uri}"
+            );
+            assert!(
+                body.contains("<meta name=\"chan-prefix\" content=\"/tenant-prefix-proof\">"),
+                "{uri}: {body}"
+            );
+        }
     }
 
     #[tokio::test]

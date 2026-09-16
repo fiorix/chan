@@ -3826,7 +3826,7 @@ mod tests {
             token: None,
             terminal_sessions: fake_registry(),
             tasks: TenantTaskOwner::new(shutdown_tx, Vec::new()),
-            prefix: Arc::new(RwLock::new(String::new())),
+            prefix: Arc::from(""),
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),

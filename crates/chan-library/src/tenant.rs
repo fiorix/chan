@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -353,10 +353,9 @@ pub struct TenantArtifacts {
     /// The bounded owner of the existing terminal/session/document/scene tasks
     /// and their existing cooperative shutdown sender.
     pub tasks: TenantTaskOwner,
-    /// SPA-facing URL prefix. The tenant builder fills it with the tenant's
-    /// route prefix and nothing writes it afterwards. Shared Arc with the
-    /// tenant's `AppState`.
-    pub prefix: Arc<RwLock<String>>,
+    /// Immutable SPA-facing URL prefix, set from the tenant's route prefix
+    /// at construction and shared with its `AppState`.
+    pub prefix: Arc<str>,
     /// Which window ids hold a live `/ws` socket -- the `connected` source for
     /// the window-record assembly.
     pub window_presence: Arc<WindowPresence>,
