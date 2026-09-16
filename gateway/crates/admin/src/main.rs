@@ -2908,6 +2908,47 @@ mod tests {
     }
 
     #[test]
+    fn proxy_view_pins_the_admin_wire_field_names() {
+        // devserver-control's state::ProxyView is the producer and this
+        // CLI is its only consumer, so a producer-side rename would
+        // surface as `proxy ps` failing to parse the fleet. The status
+        // stays the wire string because the CLI renders it verbatim.
+        let v: ProxyView = serde_json::from_str(
+            r#"{
+                "proxy_id": "p1",
+                "proxy_base_url": "https://p1.proxy.chan.app",
+                "package_version": "0.72.0",
+                "boot_id": "550e8400-e29b-41d4-a716-446655440000",
+                "connected_at": "2026-07-15T00:00:00Z",
+                "last_seen_at": "2026-07-15T00:00:05Z",
+                "tunnel_count": 3,
+                "status": "active"
+            }"#,
+        )
+        .expect("admin proxy wire shape parses");
+        assert_eq!(v.proxy_id, "p1");
+        assert_eq!(v.tunnel_count, 3);
+        assert_eq!(v.status, "active");
+
+        // The joining state round-trips too; the fleet publishes it
+        // while a proxy's snapshot is still staging.
+        let joining: ProxyView = serde_json::from_str(
+            r#"{
+                "proxy_id": "p2",
+                "proxy_base_url": "https://p2.proxy.chan.app",
+                "package_version": "0.72.0",
+                "boot_id": "550e8400-e29b-41d4-a716-446655440001",
+                "connected_at": "2026-07-15T00:00:00Z",
+                "last_seen_at": "2026-07-15T00:00:05Z",
+                "tunnel_count": 0,
+                "status": "joining"
+            }"#,
+        )
+        .expect("joining status parses");
+        assert_eq!(joining.status, "joining");
+    }
+
+    #[test]
     fn empty_scoped_token_fails_closed() {
         assert!(required_token(None, "TOKEN_ENV", "--token-flag").is_err());
         assert!(required_token(Some(""), "TOKEN_ENV", "--token-flag").is_err());

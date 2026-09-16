@@ -13,7 +13,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -330,11 +330,6 @@ fn validate_bindings(
         return Err(DevserverGateError::WrongOwner);
     }
     Ok(())
-}
-
-/// Convenience: when did this token issue?
-pub fn issued_at(claims: &Claims) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp(claims.iat, 0).unwrap_or_else(Utc::now)
 }
 
 #[cfg(test)]

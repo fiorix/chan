@@ -82,21 +82,6 @@ impl std::fmt::Debug for TunnelView {
     }
 }
 
-/// One connected proxy node as devserver-control reports it. Mirrors
-/// devserver-control's `state::ProxyView` for the same decoupling
-/// reason as [`TunnelView`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProxyView {
-    pub proxy_id: String,
-    pub proxy_base_url: String,
-    pub package_version: String,
-    pub boot_id: Uuid,
-    pub connected_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
-    pub tunnel_count: usize,
-    pub status: ProxyStatus,
-}
-
 #[derive(Debug, Clone)]
 pub struct SessionRevocationResult {
     pub tenant_sessions_revoked: usize,
@@ -151,39 +136,7 @@ enum SessionRevocationRequest<'a> {
     Owner {
         owner_user_id: Uuid,
     },
-    SessionId {
-        admin_session_id: Uuid,
-    },
     All,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BrowserSessionView {
-    pub id: Uuid,
-    pub subject_user_id: Uuid,
-    pub owner_user_id: Uuid,
-    pub devserver_id: String,
-    pub proxy_id: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ControlOverview {
-    pub generated_at: DateTime<Utc>,
-    pub proxies_connected: usize,
-    pub proxies_ready: usize,
-    pub devservers_connected: usize,
-    pub tenant_sessions_active: usize,
-}
-
-/// Session state the controller publishes for a proxy. Serialized
-/// snake_case on the wire (`joining` / `active`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyStatus {
-    Joining,
-    Active,
 }
 
 #[derive(Clone)]
@@ -200,24 +153,6 @@ impl std::fmt::Debug for DevserverControlClient {
             // token deliberately elided
             .finish()
     }
-}
-
-/// Percent-encode one path segment. Usernames are normally
-/// `[a-z0-9-]` but the admin tree may have to handle pre-normalized
-/// inputs (transient migration data, future relaxed validators), so
-/// any byte outside the unreserved set per RFC 3986 §2.3 is escaped.
-/// `url::Url::set_path` does not handle this automatically.
-fn encode_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 impl DevserverControlClient {
@@ -247,26 +182,6 @@ impl DevserverControlClient {
         }
         let body: KillResponse = res.json().await?;
         Ok(body.killed)
-    }
-
-    /// Force-evict one immutable owner/devserver tuple.
-    pub async fn kill_tunnel(
-        &self,
-        owner_user_id: Uuid,
-        devserver_id: &str,
-    ) -> DevserverControlResult<()> {
-        let mut url = self.base.clone();
-        let devserver_id = encode_segment(devserver_id);
-        url.set_path(&format!(
-            "/admin/v1/tunnels/{owner_user_id}/{devserver_id}/kill"
-        ));
-        let res = self.http.post(url).bearer_auth(&self.token).send().await?;
-        let status = res.status();
-        if status == StatusCode::NO_CONTENT {
-            return Ok(());
-        }
-        tracing::warn!(%status, "devserver-control admin upstream error");
-        Err(DevserverControlError::Upstream(format!("{status}")))
     }
 
     /// Snapshot of EVERY live tunnel across all users and proxies
@@ -312,23 +227,6 @@ impl DevserverControlClient {
         Ok(tunnels)
     }
 
-    /// Snapshot of every proxy node currently connected to the
-    /// controller (`GET /admin/v1/proxies`). Same fail-closed rule as
-    /// the tunnel reads: a controller error is an upstream failure,
-    /// never an empty fleet.
-    pub async fn list_proxies(&self) -> DevserverControlResult<Vec<ProxyView>> {
-        let mut url = self.base.clone();
-        url.set_path("/admin/v1/proxies");
-        let res = self.http.get(url).bearer_auth(&self.token).send().await?;
-        let status = res.status();
-        if !status.is_success() {
-            tracing::warn!(%status, "devserver-control admin upstream error");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
-        }
-        let proxies: Vec<ProxyView> = res.json().await?;
-        Ok(proxies)
-    }
-
     pub async fn revoke_sessions_exact(
         &self,
         subject_user_id: Uuid,
@@ -359,14 +257,6 @@ impl DevserverControlClient {
             .await
     }
 
-    pub async fn revoke_session_id(
-        &self,
-        admin_session_id: Uuid,
-    ) -> DevserverControlResult<SessionRevocationResult> {
-        self.revoke_sessions(SessionRevocationRequest::SessionId { admin_session_id })
-            .await
-    }
-
     pub async fn revoke_all_sessions(&self) -> DevserverControlResult<SessionRevocationResult> {
         self.revoke_sessions(SessionRevocationRequest::All).await
     }
@@ -382,47 +272,6 @@ impl DevserverControlClient {
         }
         let body: KillAllResponse = res.json().await?;
         Ok(body.tunnels_evicted)
-    }
-
-    pub async fn list_browser_sessions(
-        &self,
-        subject_user_id: Option<Uuid>,
-        owner_user_id: Option<Uuid>,
-        proxy_id: Option<&str>,
-    ) -> DevserverControlResult<Vec<BrowserSessionView>> {
-        let mut url = self.base.clone();
-        url.set_path("/admin/v1/browser-sessions");
-        {
-            let mut query = url.query_pairs_mut();
-            if let Some(subject_user_id) = subject_user_id {
-                query.append_pair("subject_user_id", &subject_user_id.to_string());
-            }
-            if let Some(owner_user_id) = owner_user_id {
-                query.append_pair("owner_user_id", &owner_user_id.to_string());
-            }
-            if let Some(proxy_id) = proxy_id {
-                query.append_pair("proxy_id", proxy_id);
-            }
-        }
-        let res = self.http.get(url).bearer_auth(&self.token).send().await?;
-        let status = res.status();
-        if !status.is_success() {
-            tracing::warn!(%status, "devserver-control browser-session list failed");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
-        }
-        Ok(res.json().await?)
-    }
-
-    pub async fn overview(&self) -> DevserverControlResult<ControlOverview> {
-        let mut url = self.base.clone();
-        url.set_path("/admin/v1/overview");
-        let res = self.http.get(url).bearer_auth(&self.token).send().await?;
-        let status = res.status();
-        if !status.is_success() {
-            tracing::warn!(%status, "devserver-control overview failed");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
-        }
-        Ok(res.json().await?)
     }
 
     async fn revoke_sessions(
@@ -526,43 +375,6 @@ mod tests {
             missing_proxy.is_err(),
             "proxy_id and proxy_base_url are required"
         );
-    }
-
-    #[test]
-    fn proxy_view_pins_the_admin_wire_field_names() {
-        let v: ProxyView = serde_json::from_str(
-            r#"{
-                "proxy_id": "p1",
-                "proxy_base_url": "https://p1.proxy.chan.app",
-                "package_version": "0.72.0",
-                "boot_id": "550e8400-e29b-41d4-a716-446655440000",
-                "connected_at": "2026-07-15T00:00:00Z",
-                "last_seen_at": "2026-07-15T00:00:05Z",
-                "tunnel_count": 3,
-                "status": "active"
-            }"#,
-        )
-        .expect("admin proxy wire shape parses");
-        assert_eq!(v.proxy_id, "p1");
-        assert_eq!(v.tunnel_count, 3);
-        assert_eq!(v.status, ProxyStatus::Active);
-
-        // The joining state round-trips too; the fleet publishes it
-        // while a proxy's snapshot is still staging.
-        let joining: ProxyView = serde_json::from_str(
-            r#"{
-                "proxy_id": "p2",
-                "proxy_base_url": "https://p2.proxy.chan.app",
-                "package_version": "0.72.0",
-                "boot_id": "550e8400-e29b-41d4-a716-446655440001",
-                "connected_at": "2026-07-15T00:00:00Z",
-                "last_seen_at": "2026-07-15T00:00:05Z",
-                "tunnel_count": 0,
-                "status": "joining"
-            }"#,
-        )
-        .expect("joining status parses");
-        assert_eq!(joining.status, ProxyStatus::Joining);
     }
 
     #[test]
