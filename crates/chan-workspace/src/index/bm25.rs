@@ -26,7 +26,8 @@ use tantivy::{
 };
 use thiserror::Error;
 
-use super::chunking::{self, Chunk};
+use super::chunking::Chunk;
+#[cfg(test)]
 use super::config::Chunking;
 use super::facade::Hit;
 
@@ -121,24 +122,28 @@ impl Bm25Index {
         Ok(())
     }
 
-    /// Re-index a single file. Deletes its previous chunks and writes
-    /// new ones according to `chunking`. Caller commits.
-    pub fn index_file(
+    /// Re-index a single file from its text. Deletes its previous chunks
+    /// and writes new ones according to `chunking`. Caller commits.
+    /// Test-only: the library parses each file once and hands the chunks
+    /// to `index_chunks`.
+    #[cfg(test)]
+    pub(crate) fn index_file(
         &self,
         rel_path: &str,
         content: &str,
         chunking: &Chunking,
     ) -> Result<usize, Bm25Error> {
-        let chunks = chunking::chunk(content, chunking);
+        let chunks = super::chunking::chunk(content, chunking);
         self.index_chunks(rel_path, &chunks)
     }
 
-    /// Same as `index_file` but takes pre-computed chunks, so a caller
-    /// that already parsed the text does not parse it twice:
-    /// `Index::build_all`'s parallel walker chunks off the writer
-    /// thread, and `Index::write_file` embeds the same chunks. Empty
-    /// chunk slice still drops any prior documents for `rel_path` so a
-    /// file that became empty is removed from the index.
+    /// Re-index a single file from its pre-computed chunks: delete its
+    /// previous documents and write one per chunk. Caller commits.
+    /// `Index::build_all`'s parallel walker chunks off the writer thread,
+    /// and `Index::write_file` embeds the same chunks it hands here, so no
+    /// text is parsed twice. An empty chunk slice still drops any prior
+    /// documents for `rel_path`, so a file that became empty is removed
+    /// from the index.
     pub fn index_chunks(&self, rel_path: &str, chunks: &[Chunk]) -> Result<usize, Bm25Error> {
         self.delete_file(rel_path)?;
         if chunks.is_empty() {

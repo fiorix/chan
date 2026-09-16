@@ -302,6 +302,10 @@ fn restore_directory_indexes_only_in_scope_indexable_text() {
         paths("deptoken").is_empty(),
         "the rebuild indexed under an excluded directory name"
     );
+    assert!(
+        paths("blobtoken").is_empty(),
+        "the rebuild indexed a non-text file"
+    );
 
     workspace.remove("pkg").unwrap();
     assert!(

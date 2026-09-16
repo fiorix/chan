@@ -103,9 +103,9 @@ impl Mode {
 }
 
 /// One search hit. `Bm25Index::search` and `VectorStore::search` both
-/// return it, so fusion blends the two lists without translation, and
-/// its field names match the API response shape so the server layer
-/// can serialize it directly.
+/// return it, so fusion blends the two lists without translation.
+/// chan-server does not serialize it as is: its `ContentHit` mirrors
+/// these field names with `start_line` narrowed to `u32`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Hit {
     pub path: String,
