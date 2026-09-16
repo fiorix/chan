@@ -2,21 +2,11 @@
 identifier = "main-window"
 description = "Allows the launcher window to call Chan Desktop app commands."
 permissions = [
-  "allow-list-workspaces",
-  "allow-add-workspace",
-  "allow-remove-workspace",
-  "allow-set-workspace-on",
-  "allow-get-config",
-  "allow-home-dir",
-  "allow-reveal-in-finder",
   "allow-reload-window",
   "allow-open-devtools",
   "allow-zoom-in",
   "allow-zoom-out",
   "allow-zoom-reset",
-  "allow-open-local-workspace",
-  "allow-list-devserver-workspaces",
-  "allow-reconnect-devserver",
   "allow-restart-desktop-after-update",
 ]
 
@@ -48,41 +38,6 @@ permissions = [
   "allow-focus-library-window",
   "allow-native-vocabulary",
 ]
-
-[[permission]]
-identifier = "allow-list-workspaces"
-description = "Enables the list_workspaces command."
-commands.allow = ["list_workspaces"]
-
-[[permission]]
-identifier = "allow-add-workspace"
-description = "Enables the add_workspace command."
-commands.allow = ["add_workspace"]
-
-[[permission]]
-identifier = "allow-remove-workspace"
-description = "Enables the remove_workspace command."
-commands.allow = ["remove_workspace"]
-
-[[permission]]
-identifier = "allow-set-workspace-on"
-description = "Enables the set_workspace_on command."
-commands.allow = ["set_workspace_on"]
-
-[[permission]]
-identifier = "allow-get-config"
-description = "Enables the get_config command."
-commands.allow = ["get_config"]
-
-[[permission]]
-identifier = "allow-home-dir"
-description = "Enables the home_dir command."
-commands.allow = ["home_dir"]
-
-[[permission]]
-identifier = "allow-reveal-in-finder"
-description = "Enables the reveal_in_finder command."
-commands.allow = ["reveal_in_finder"]
 
 [[permission]]
 identifier = "allow-reload-window"
@@ -138,11 +93,6 @@ commands.allow = ["zoom_out"]
 identifier = "allow-zoom-reset"
 description = "Enables the zoom_reset command."
 commands.allow = ["zoom_reset"]
-
-[[permission]]
-identifier = "allow-open-local-workspace"
-description = "Enables the open_local_workspace command."
-commands.allow = ["open_local_workspace"]
 
 [[permission]]
 identifier = "allow-probe-url"
@@ -270,16 +220,6 @@ commands.allow = ["finish_generated_download"]
 identifier = "allow-cancel-generated-download"
 description = "Cancels and cleans an SPA-generated download."
 commands.allow = ["cancel_generated_download"]
-
-[[permission]]
-identifier = "allow-list-devserver-workspaces"
-description = "Enables the list_devserver_workspaces command."
-commands.allow = ["list_devserver_workspaces"]
-
-[[permission]]
-identifier = "allow-reconnect-devserver"
-description = "Enables the reconnect_devserver command."
-commands.allow = ["reconnect_devserver"]
 
 [[permission]]
 identifier = "allow-restart-desktop-after-update"

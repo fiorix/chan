@@ -136,28 +136,6 @@ pub async fn start<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Stop a running serve. No-op if the workspace isn't running. The live map
-/// entry is removed only after the host accepts the close, so a live-terminal
-/// refusal leaves desktop state consistent with the still-running tenant.
-pub async fn stop(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    key: &str,
-    force: bool,
-) -> Result<WorkspaceLifecycleOutcome, String> {
-    if !state.serves.lock().unwrap().contains_key(key) {
-        return Ok(WorkspaceLifecycleOutcome::NotFound);
-    }
-    let outcome = stop_handle(app, state, key, force).await?;
-    if matches!(
-        outcome,
-        WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound
-    ) {
-        state.serves.lock().unwrap().remove(key);
-    }
-    Ok(outcome)
-}
-
 /// Drain every embedded tenant on normal process shutdown while preserving the
 /// workspace overlay. The host starts all tenant shutdowns together, so shared
 /// terminal and control-terminal tenants are included without multiplying the
@@ -2606,8 +2584,8 @@ mod tests {
             "serves must agree with the live mount",
         );
 
-        // And the recorded state is usable: a normal stop drains the tenant.
-        let outcome = stop(None, &state, &key, false).await.expect("stop");
+        // And the recorded state is usable: a normal close drains the tenant.
+        let outcome = stop_handle(None, &state, &key, false).await.expect("stop");
         assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(!embedded.is_root_mounted(root.path()));
     }
@@ -3090,9 +3068,9 @@ mod tests {
 
     #[test]
     fn registry_commands_run_in_process_not_via_chan_cli() {
-        // chan-desktop runs without a `chan` binary: `add_workspace`
-        // writes through the embedded host's shared `Library`, and
-        // `remove_workspace` routes through the embedded host lifecycle.
+        // chan-desktop runs without a `chan` binary: a registry add
+        // writes through the embedded host's shared `Library`, and a
+        // remove routes through the embedded host lifecycle.
         // Pin the in-process call shape so a future change can't silently
         // reintroduce a subprocess dependency, and assert the deleted
         // subprocess argument shapes are gone.
@@ -3103,7 +3081,7 @@ mod tests {
         );
         assert!(
             MAIN_RS.contains("register_workspace") && MAIN_RS.contains("remove_workspace_root"),
-            "add_workspace/remove_workspace must use embedded in-process registry operations",
+            "registry add/remove must use embedded in-process registry operations",
         );
         assert!(
             !MAIN_RS.contains("read_features_via_chan_index_status"),
@@ -3440,8 +3418,8 @@ mod tests {
     }
 
     /// Command identifiers registered in `generate_handler![]`, module paths
-    /// stripped (`auth::auth_status` -> `auth_status`), comments and cfg
-    /// attributes dropped.
+    /// stripped (`devserver::gateway_csrf_token` -> `gateway_csrf_token`),
+    /// comments and cfg attributes dropped.
     fn invoke_handler_commands(main_rs: &str) -> Vec<String> {
         let marker = "generate_handler![";
         let start = main_rs.find(marker).expect("generate_handler! present") + marker.len();

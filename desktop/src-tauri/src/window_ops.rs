@@ -160,9 +160,8 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
 
 /// `cs window new` (workspace tenant): open another window of the
 /// workspace rooted at `key` by minting a window into the library registry
-/// (the watcher opens it), the same way `open_local_workspace` does. Errors
-/// when that workspace isn't currently running locally. Returns the new
-/// window's composite native label.
+/// (the watcher opens it). Errors when that workspace isn't currently
+/// running locally. Returns the new window's composite native label.
 async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String, String> {
     let canon = crate::canonical_key(Path::new(key));
     if !state.serves.lock().unwrap().contains_key(&canon) {

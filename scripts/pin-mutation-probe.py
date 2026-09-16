@@ -49,19 +49,19 @@ MUTATIONS = [
             # The slice [rostered_conn -> inner] loses its end too: the
             # inner now precedes rostered_conn as well.
             PIN_TESTS[1]: "red",
-            # The slice [inner -> list_devserver_workspaces] still binds,
+            # The slice [inner -> open_devserver_workspace_impl] still binds,
             # and the ordering inside the moved body is untouched.
             PIN_TESTS[2]: "green",
         },
     ),
     (
-        "workspaces-before-inner",
-        "async fn list_devserver_workspaces(",
+        "open-impl-before-inner",
+        "pub(crate) async fn open_devserver_workspace_impl(",
         "async fn connect_devserver_impl_inner(",
         {
             PIN_TESTS[0]: "green",
             PIN_TESTS[1]: "green",
-            # The slice [inner -> list_devserver_workspaces] loses its end.
+            # The slice [inner -> open_devserver_workspace_impl] loses its end.
             PIN_TESTS[2]: "red",
         },
     ),

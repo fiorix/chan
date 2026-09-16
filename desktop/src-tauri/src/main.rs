@@ -40,11 +40,10 @@ use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use config::{Config, ConfigStore, Devserver, OutboundWorkspace, WindowConfig, WindowGeometry};
+use config::{ConfigStore, Devserver, WindowConfig, WindowGeometry};
 use serve::ServeHandle;
 use window_watcher_wiring::DevserverWatcherStop;
 
-const CHAN_BUSY_CHANGED: &str = "chan-busy";
 const SYSTEM_NOTICE: &str = "system-notice";
 
 /// The commit this binary was built from, stamped by build.rs ("unknown"
@@ -1248,127 +1247,6 @@ fn spawn_devserver_workspace_poll(
     });
 }
 
-/// Merged workspace view returned to the frontend. Two flavours share
-/// the wire shape so the existing renderer can iterate one list:
-///
-/// * `kind = "local"`: a chan-registry entry, backed by a
-///   workspace mounted into the embedded server. Includes the canonical
-///   filesystem path and live URL.
-/// * `kind = "outbound"`: a remote `chan serve` explicitly attached
-///   by URL. No desktop-owned lifecycle; `id` points at the stored
-///   attachment row.
-///
-/// `id` / `label` are specific to outbound rows and optional so the JSON
-/// shape is a strict superset of the local row; the renderer reads `kind`
-/// once and chooses which optionals to surface.
-#[derive(Debug, Clone, Serialize)]
-struct Workspace {
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    path: String,
-    on: bool,
-    url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-#[tauri::command]
-fn list_workspaces(state: State<Arc<AppState>>) -> Result<Vec<Workspace>, String> {
-    let serves = state.serves.lock().unwrap();
-    let entries = registry::read().map_err(err)?;
-
-    // `on` is derived from a live serve handle, never persisted.
-    // That way a desktop restart comes up with everything off
-    // (matching reality: nothing is actually running yet) and
-    // there is no chance of a stale on=true sticking around after
-    // chan died unexpectedly.
-    let mut merged: Vec<Workspace> = entries
-        .into_iter()
-        .map(|e| {
-            let key = canonical_key(&e.root_path);
-            let display_path = key.clone();
-            let handle = serves.get(&key);
-            let on = handle.is_some();
-            let url = handle.and_then(|h| h.url.clone()).unwrap_or_default();
-            Workspace {
-                kind: "local",
-                id: None,
-                path: display_path,
-                on,
-                url,
-                label: None,
-            }
-        })
-        .collect();
-
-    let outbound_workspaces = state.store.lock().unwrap().get().map_err(err)?.outbound;
-    for outbound in outbound_workspaces {
-        let label = outbound_label(&outbound);
-        let id = outbound.id;
-        let url = outbound.url;
-        merged.push(Workspace {
-            kind: "outbound",
-            id: Some(id),
-            path: url.clone(),
-            on: true,
-            url,
-            label,
-        });
-    }
-
-    Ok(merged)
-}
-
-/// Register a local workspace folder and open it. Registration is
-/// lean (BM25-only, no reports): the SPA's onboarding card enables
-/// the optional Semantic / Reports layers post-boot.
-#[tauri::command]
-async fn add_workspace(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<(), String> {
-    let path = canonical_key(Path::new(&path));
-    let Some(embedded) = state.embedded.get() else {
-        return Err("embedded local server is unavailable".to_string());
-    };
-    // Route through the SINGLE embedded Library so the in-memory
-    // registry the host opens workspaces against learns about the new
-    // row immediately. A subprocess `chan workspace add` would mutate only
-    // the on-disk registry, leaving the host's boot-time snapshot
-    // stale, which is the "workspace not registered" bug this replaces.
-    let library = embedded.library().clone();
-    let path_for_block = path.clone();
-
-    emit_chan_busy(&app, true, "add", &path);
-    // register_workspace writes the registry on disk; run it off the
-    // async executor.
-    let result =
-        tokio::task::spawn_blocking(move || register_workspace_path(&library, &path_for_block))
-            .await;
-    emit_chan_busy(&app, false, "add", &path);
-    match result {
-        Ok(inner) => inner?,
-        Err(e) => return Err(format!("registering workspace panicked: {e}")),
-    }
-
-    // Auto-start: opening a workspace from the desktop is the user's
-    // way of saying "make this workspace usable now". Spinning up the
-    // serve immediately is what they expect; otherwise the freshly
-    // added row sits there with On=off and Launch disabled, which
-    // looks broken.
-    // A user add opens one new window after mounting the workspace.
-    serve::start(
-        app,
-        Arc::clone(&state),
-        path,
-        serve::WorkspaceOpenMode::OpenWindow,
-    )
-    .await?;
-    Ok(())
-}
-
 /// Register `path` with the shared embedded Library, creating the
 /// directory for a fresh path. No workspace handle is held when this
 /// returns, so the immediately-following `serve::start` can mount the
@@ -1384,69 +1262,6 @@ fn register_workspace_path(library: &chan_workspace::Library, path: &str) -> Res
     library
         .register_workspace(root)
         .map_err(|e| format!("registering workspace {path}: {e}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn remove_workspace(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<(), String> {
-    let key = canonical_key(Path::new(&path));
-    if state.embedded.get().is_none() {
-        return Err("embedded local server is unavailable".to_string());
-    }
-    emit_chan_busy(&app, true, "remove", &key);
-    let result = state
-        .embedded
-        .get()
-        .expect("embedded availability checked above")
-        .remove_workspace_root(Path::new(&key), false)
-        .await;
-    emit_chan_busy(&app, false, "remove", &key);
-    let outcome = result?;
-    match outcome {
-        chan_server::WorkspaceLifecycleOutcome::Completed
-        | chan_server::WorkspaceLifecycleOutcome::NotFound => {
-            state.serves.lock().unwrap().remove(&key);
-            let _ = app.emit(serve::SERVES_CHANGED, ());
-            Ok(())
-        }
-        chan_server::WorkspaceLifecycleOutcome::Refused { active_terminals } => Err(format!(
-            "refusing to remove {key}: {active_terminals} live terminal(s)"
-        )),
-    }
-}
-
-#[tauri::command]
-async fn set_workspace_on(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-    path: String,
-    on: bool,
-) -> Result<(), String> {
-    let key = canonical_key(Path::new(&path));
-    if on {
-        // A user turn-on restores saved windows and opens one new window last.
-        serve::start(
-            app,
-            Arc::clone(&state),
-            key,
-            serve::WorkspaceOpenMode::OpenWindow,
-        )
-        .await?;
-    } else {
-        // The host runs its bounded flock verifier on Tokio's blocking pool,
-        // so the async close can be awaited directly without blocking Tauri.
-        let outcome = serve::stop(Some(&app), &state, &key, false).await?;
-        if let chan_server::WorkspaceLifecycleOutcome::Refused { active_terminals } = outcome {
-            return Err(format!(
-                "refusing to stop {path}: {active_terminals} live terminal(s)"
-            ));
-        }
-    }
-    persist_workspaces(&state);
     Ok(())
 }
 
@@ -1486,26 +1301,12 @@ fn persist_workspaces(state: &AppState) {
     overlay.replace(rows);
 }
 
-#[tauri::command]
-fn get_config(state: State<Arc<AppState>>) -> Result<Config, String> {
-    state.store.lock().unwrap().get().map_err(err)
-}
-
 fn devserver_url_token(raw: &str) -> Option<String> {
     let parsed = url::Url::parse(raw).ok()?;
     parsed
         .query_pairs()
         .find_map(|(key, value)| (key == "t").then(|| value.trim().to_string()))
         .filter(|token| !token.is_empty())
-}
-
-fn outbound_label(outbound: &OutboundWorkspace) -> Option<String> {
-    let label = outbound.label.trim();
-    if label.is_empty() {
-        None
-    } else {
-        Some(label.to_string())
-    }
 }
 
 /// Window-menu title for a record with no live webview to read a title from (a
@@ -2884,20 +2685,6 @@ async fn connect_devserver_impl_inner(
     Ok(())
 }
 
-/// The live workspace rows for a connected devserver, each with an assembled
-/// tenant URL. Empty when the devserver is not connected. The launcher polls
-/// this on an interval to track serve-driven additions and removals.
-#[tauri::command]
-async fn list_devserver_workspaces(
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<Vec<devserver::DevserverWorkspaceRow>, String> {
-    let Some(conn) = state.devservers.get(&id) else {
-        return Ok(Vec::new());
-    };
-    devserver::fetch_workspaces(&conn).await
-}
-
 /// Open a devserver workspace window by MINTING it on the devserver's library
 /// (`POST /api/library/windows {Workspace, path}`). The window watcher then
 /// reconciles the new record open, so the window is feed-driven: it persists
@@ -2937,83 +2724,6 @@ pub(crate) async fn open_devserver_terminal_impl(
         .ok_or_else(|| format!("devserver {id} is not connected"))?;
     devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
     Ok(())
-}
-
-/// Try to recover a connected devserver that went unreachable: re-acquire its
-/// (possibly rotated) token, confirm it answers, and if the token changed,
-/// re-open its workspace windows with fresh URLs. Returns true on recovery,
-/// false if it is still unreachable. The launcher calls this when a workspace
-/// poll fails.
-#[tauri::command]
-async fn reconnect_devserver(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-    id: String,
-) -> Result<bool, String> {
-    let Some(conn) = state.devservers.get(&id) else {
-        return Ok(false);
-    };
-    if conn.gateway.is_some() {
-        if devserver::fetch_workspaces(&conn).await.is_ok() {
-            state.devserver_feed.set_down(&id, false);
-            let _ = app.emit(serve::SERVES_CHANGED, ());
-            return Ok(true);
-        }
-        return Ok(false);
-    }
-    // Try the current token first (a transient network blip keeps it valid),
-    // then the local devserver's config token (a local restart rotates it). A
-    // remote devserver's token is not in the local config, so it stays
-    // unreachable until its control terminal re-runs the connect script (which
-    // re-emits the CHAN_DEVSERVER_TOKEN= marker the desktop scrapes fresh).
-    let mut candidates = vec![conn.token.clone()];
-    if let Ok(local) = devserver::read_local_token() {
-        if local != conn.token {
-            candidates.push(local);
-        }
-    }
-    for token in candidates {
-        let mut probe = conn.clone();
-        probe.token = token.clone();
-        // `fetch_workspaces` is the connectivity probe (does this token auth?);
-        // its rows are not consumed (the watcher re-surfaces the windows).
-        if devserver::fetch_workspaces(&probe).await.is_ok() {
-            // A disconnect that landed mid-probe already tore the windows
-            // down; do not resurrect the connection or re-open them.
-            if !state.devservers.is_connected(&id) {
-                return Ok(false);
-            }
-            let rotated = token != conn.token;
-            state.devservers.set(id.clone(), probe.clone());
-            if rotated {
-                // A rotated token means the devserver restarted: its old tenants
-                // are gone AND the running watcher's feed task can't auth with
-                // the stale token. RESPAWN the watcher on the fresh conn -- cancel
-                // the old subscription without closing its windows, then spawn
-                // anew so its first snapshot refreshes the restarted devserver's
-                // persisted set in place.
-                // (A non-rotated reconnect needs nothing: the feed task's own
-                // reconnect-on-drop self-heals with the same token.)
-                if let Some(cancel) = state.devserver_watchers.lock().unwrap().remove(&id) {
-                    let _ = cancel.send(DevserverWatcherStop::RetireKeepWindows);
-                }
-                let (cancel, snapshot, view) =
-                    window_watcher_wiring::spawn_devserver_window_watcher(
-                        id.clone(),
-                        app.clone(),
-                        probe.clone(),
-                    )
-                    .await?;
-                // Re-point the launcher feed at the fresh snapshot, a poll and a
-                // colour watch on the rotated token; the old ones stopped on the
-                // cancel above.
-                wire_devserver_watcher(&app, &state, &id, probe, (cancel, snapshot, view), None);
-            }
-            let _ = app.emit(serve::SERVES_CHANGED, ());
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Forget (unmount) a workspace on a connected devserver via its management
@@ -3108,28 +2818,6 @@ fn devserver_is_local(state: &AppState, id: &str) -> bool {
                 .map(|d| d.script.trim().is_empty())
         })
         .unwrap_or(false)
-}
-
-/// Open an additional in-app Tauri webview for a running local
-/// workspace. The first window is auto-opened by the serve supervisor
-/// when chan prints its URL; subsequent clicks on Launch reach
-/// here and add new windows alongside it. Errors if the workspace is
-/// not currently running (no URL captured yet).
-#[tauri::command]
-fn open_local_workspace(state: State<Arc<AppState>>, path: String) -> Result<(), String> {
-    let key = canonical_key(Path::new(&path));
-    // Mint the window into the library registry; the watcher opens it (the
-    // registry is the sole window-creation authority, so a reconnect/relaunch
-    // can never duplicate it). Require the workspace running so the minted
-    // record resolves a live tenant to attach to.
-    if !state.serves.lock().unwrap().contains_key(&key) {
-        return Err(format!("workspace {key} is not running"));
-    }
-    state
-        .embedded()
-        .ok_or_else(|| "embedded local server is unavailable".to_string())?
-        .mint_window(chan_server::WindowKind::Workspace, Some(key))?;
-    Ok(())
 }
 
 /// Resolve a `chan devserver connect|disconnect|forget` TARGET (or the
@@ -3382,9 +3070,9 @@ fn register_devserver_from_handoff(
 /// Open a workspace in a native window in response to a CLI handoff
 /// request (`chan serve <workspace>` while this desktop is running).
 ///
-/// Mirrors the `add_workspace` flow: register + boot the workspace through the
-/// shared embedded Library, then `serve::start` mounts it, restores persisted
-/// windows, and mints one new window. If the workspace is already running,
+/// Registers and boots the workspace through the shared embedded Library, then
+/// `serve::start` mounts it, restores persisted windows, and mints one new
+/// window. If the workspace is already running,
 /// `serve::start` returns early, so this function mints the requested window
 /// directly. The watcher opens the newly minted row in both cases.
 ///
@@ -4455,42 +4143,6 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
     run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
 }
 
-/// User's home directory as a plain string, for the Computers window
-/// to abbreviate paths to `~/...`. Returns an empty string when the
-/// platform can't resolve it.
-#[tauri::command]
-fn home_dir() -> String {
-    dirs::home_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-}
-
-/// Open the given folder in the OS file manager. macOS: Finder,
-/// Linux: default file manager, Windows: Explorer. Used by the
-/// Computers window's path cell so users can jump to the workspace folder
-/// from the row. Trusts the caller to pass a path the user just saw
-/// in the list -- paths come from `list_workspaces`, which sources from
-/// the chan registry; no shell interpolation, args are passed as
-/// argv to the OS open command.
-#[tauri::command]
-fn reveal_in_finder(path: String) -> Result<(), String> {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    let status = std::process::Command::new(opener)
-        .arg(&path)
-        .status()
-        .map_err(|e| format!("opening {path}: {e}"))?;
-    if !status.success() {
-        return Err(format!("opening {path}: {opener} exited with {status}"));
-    }
-    Ok(())
-}
-
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
         w.show().map_err(err)?;
@@ -5055,13 +4707,6 @@ fn canonical_key(p: &Path) -> String {
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
-}
-
-fn emit_chan_busy(app: &tauri::AppHandle, busy: bool, op: &str, path: &str) {
-    let _ = app.emit(
-        CHAN_BUSY_CHANGED,
-        serde_json::json!({ "busy": busy, "op": op, "path": path }),
-    );
 }
 
 fn emit_system_notice(app: &tauri::AppHandle, level: &str, message: impl Into<String>) {
@@ -6112,12 +5757,6 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            list_workspaces,
-            add_workspace,
-            remove_workspace,
-            set_workspace_on,
-            get_config,
-            home_dir,
             platform_os,
             read_clipboard_text,
             write_clipboard_text,
@@ -6125,7 +5764,6 @@ fn main() {
             write_clipboard_image,
             read_clipboard_html,
             write_clipboard_html,
-            reveal_in_finder,
             reload_window,
             open_devtools,
             open_new_window,
@@ -6165,11 +5803,8 @@ fn main() {
             zoom_in,
             zoom_out,
             zoom_reset,
-            open_local_workspace,
             probe_url,
             devserver::gateway_csrf_token,
-            list_devserver_workspaces,
-            reconnect_devserver,
         ])
         .build(app_context())
         .expect("error building tauri application");
@@ -7245,7 +6880,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
 /// one-way, so we recover the workspace key by matching
 /// `serve::workspace_window_prefix(key)` against the focused window's
 /// label across the running `serves` map, then mint another window for
-/// it (the watcher opens it), like `open_local_workspace`.
+/// it (the watcher opens it).
 ///
 /// A focused `outbound-*` window opens a new window on the
 /// SAME remote (the connection is recovered from the label's hash
@@ -8504,7 +8139,7 @@ mod tests {
         let poll = source_region(
             MAIN_RS,
             "\nfn spawn_devserver_workspace_poll(",
-            "\n/// Merged workspace view",
+            "\n/// Register `path` with the shared embedded Library",
         );
         assert!(poll.contains("DEVSERVER_CONTROL_ATTENTION_EVENT"));
         assert!(poll.contains("DEVSERVER_CONTROL_RESTORED_EVENT"));
@@ -8553,16 +8188,11 @@ mod tests {
     }
 
     #[test]
-    fn token_rotation_retires_old_watcher_without_closing_windows() {
+    fn devserver_disconnect_closes_its_windows() {
+        // A disconnect stops the watcher AND closes the devserver's native
+        // windows; only the control-exit path retires the watcher and keeps
+        // them (pinned by the control-exit test above).
         const MAIN_RS: &str = include_str!("main.rs");
-        let reconnect = source_region(
-            MAIN_RS,
-            "\nasync fn reconnect_devserver(",
-            "\n/// Forget (unmount)",
-        );
-        assert!(reconnect.contains("DevserverWatcherStop::RetireKeepWindows"));
-        assert!(!reconnect.contains("DevserverWatcherStop::CloseWindows"));
-
         let disconnect = source_region(
             MAIN_RS,
             "\nfn remove_devserver_windows(",
@@ -8579,10 +8209,10 @@ mod tests {
             .expect("the test module separates the production code");
         assert_eq!(
             production.matches("wire_devserver_watcher(").count(),
-            4,
-            "one definition and three connect calls",
+            3,
+            "one definition and two connect calls",
         );
-        // The three connect paths share one post-watcher sequence (down flag,
+        // Both connect paths share one post-watcher sequence (down flag,
         // snapshot, poll, colour watch, view and stop handle), so each must
         // call the helper and none may register the snapshot on its own.
         for (start, end, seeds_rows) in [
@@ -8593,12 +8223,7 @@ mod tests {
             ),
             (
                 "\nasync fn connect_devserver_impl_inner(",
-                "\nasync fn list_devserver_workspaces(",
-                false,
-            ),
-            (
-                "\nasync fn reconnect_devserver(",
-                "\n/// Forget (unmount)",
+                "\npub(crate) async fn open_devserver_workspace_impl(",
                 false,
             ),
         ] {
@@ -9277,7 +8902,7 @@ mod tests {
         let inner = source_region(
             MAIN_RS,
             "\nasync fn connect_devserver_impl_inner(",
-            "\nasync fn list_devserver_workspaces(",
+            "\npub(crate) async fn open_devserver_workspace_impl(",
         );
         let dispatch = inner
             .find("parse_synthesized_id")
