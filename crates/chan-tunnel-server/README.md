@@ -19,7 +19,7 @@ RegistrationAdmission        controller-backed pre-insert permit + fence
 
 serve_tunnel_listener(
     listener, validator,
-    registry, max_workspaces_per_user)
+    registry, max_registrations_per_user)
                               accept loop on a TCP listener; runs h2
                               server, validates, registers, workspaces
 serve_tunnel_listener_with_admission

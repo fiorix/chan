@@ -59,10 +59,10 @@ pub enum OpenError {
 }
 
 /// Returned by `Registry::register_checked` when registering would
-/// take the user over the per-user workspace cap. Carries the username
-/// and the cap so the listener can log / report context.
+/// take the user over the per-user devserver registration cap. Carries
+/// the username and the cap so the listener can log / report context.
 #[derive(Debug, thiserror::Error)]
-#[error("user {user} reached max concurrent workspaces ({max})")]
+#[error("user {user} reached max concurrent devserver registrations ({max})")]
 pub struct RegisterCapped {
     pub user: String,
     pub max: usize,
@@ -309,7 +309,7 @@ impl Registry {
 
     /// Register a new tunnel and enforce a per-user cap on concurrent
     /// devserver registrations atomically with the insert.
-    /// `max_workspaces_per_user == 0` disables the check. The cap is
+    /// `max_registrations_per_user == 0` disables the check. The cap is
     /// enforced under the same lock acquisition that performs the
     /// eviction + insert, so two parallel dials from the same user
     /// cannot both observe `count == max - 1` and both succeed.
@@ -324,7 +324,7 @@ impl Registry {
         workspace: Arc<str>,
         peer_addr: Option<SocketAddr>,
         gateway_assertion_key: Option<AssertionKey>,
-        max_workspaces_per_user: usize,
+        max_registrations_per_user: usize,
     ) -> Result<
         (
             TunnelHandle,
@@ -339,7 +339,7 @@ impl Registry {
             peer_addr,
             gateway_assertion_key,
             Uuid::new_v4(),
-            max_workspaces_per_user,
+            max_registrations_per_user,
         )
     }
 
@@ -351,7 +351,7 @@ impl Registry {
         peer_addr: Option<SocketAddr>,
         gateway_assertion_key: Option<AssertionKey>,
         registration_id: Uuid,
-        max_workspaces_per_user: usize,
+        max_registrations_per_user: usize,
     ) -> Result<
         (
             TunnelHandle,
@@ -369,7 +369,7 @@ impl Registry {
             Uuid::nil(),
             None,
             None,
-            max_workspaces_per_user,
+            max_registrations_per_user,
         )
     }
 
@@ -384,7 +384,7 @@ impl Registry {
         owner_user_id: Uuid,
         admission_lease: Option<Arc<str>>,
         admission_lease_expires_at: Option<DateTime<Utc>>,
-        max_workspaces_per_user: usize,
+        max_registrations_per_user: usize,
     ) -> Result<
         (
             TunnelHandle,
@@ -415,9 +415,9 @@ impl Registry {
         let evicted = {
             let mut g = self.inner.lock();
             let workspaces = g.users.entry(user.clone()).or_default();
-            if max_workspaces_per_user > 0
+            if max_registrations_per_user > 0
                 && !workspaces.contains_key(&workspace)
-                && workspaces.len() >= max_workspaces_per_user
+                && workspaces.len() >= max_registrations_per_user
             {
                 // Clean up the inner map we may have just created
                 // via `or_default` so a capped attempt doesn't leave
@@ -427,7 +427,7 @@ impl Registry {
                 }
                 return Err(RegisterCapped {
                     user: user.to_string(),
-                    max: max_workspaces_per_user,
+                    max: max_registrations_per_user,
                 });
             }
             let evicted = workspaces.insert(workspace.clone(), entry);

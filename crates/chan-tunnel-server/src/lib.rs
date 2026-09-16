@@ -79,8 +79,8 @@ pub enum ServerError {
     #[error("handshake: {0}")]
     Handshake(String),
 
-    #[error("user {user} reached max concurrent workspaces ({max})")]
-    TooManyWorkspaces { user: String, max: usize },
+    #[error("user {user} reached max concurrent devserver registrations ({max})")]
+    TooManyRegistrations { user: String, max: usize },
 
     #[error("user {user} reached the fleet-wide devserver limit")]
     AdmissionAtCapacity { user: String },
@@ -372,9 +372,9 @@ fn refusal_for(e: &ServerError) -> (&'static str, String) {
             error_code::CONTROL_UNAVAILABLE,
             "devserver control is unavailable".to_string(),
         ),
-        ServerError::TooManyWorkspaces { user, max } => (
+        ServerError::TooManyRegistrations { user, max } => (
             error_code::TOO_MANY_WORKSPACES,
-            format!("user {user} reached max concurrent workspaces ({max})"),
+            format!("user {user} reached max concurrent devserver registrations ({max})"),
         ),
         ServerError::AdmissionAtCapacity { user } => (
             error_code::TOO_MANY_WORKSPACES,
@@ -447,6 +447,28 @@ mod tests {
         });
         assert_eq!(code, chan_tunnel_proto::error_code::TOO_MANY_WORKSPACES);
         assert_eq!(message, "user alice reached the fleet-wide devserver limit");
+    }
+
+    /// The per-user cap counts devserver registrations, and the refusal
+    /// says so in the bytes the client reads. The registry's own error
+    /// and the server error render the same text, so the message does
+    /// not depend on which of the two checks refused the dial.
+    #[test]
+    fn per_user_cap_refusal_names_devserver_registrations() {
+        const MESSAGE: &str = "user alice reached max concurrent devserver registrations (2)";
+        let error = ServerError::TooManyRegistrations {
+            user: "alice".into(),
+            max: 2,
+        };
+        let (code, message) = refusal_for(&error);
+        assert_eq!(code, chan_tunnel_proto::error_code::TOO_MANY_WORKSPACES);
+        assert_eq!(message, MESSAGE);
+        assert_eq!(error.to_string(), MESSAGE);
+        let capped = registry::RegisterCapped {
+            user: "alice".into(),
+            max: 2,
+        };
+        assert_eq!(capped.to_string(), MESSAGE);
     }
 
     #[test]

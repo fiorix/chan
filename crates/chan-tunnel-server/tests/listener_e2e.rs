@@ -84,7 +84,10 @@ struct Harness {
     _task: tokio::task::JoinHandle<()>,
 }
 
-async fn spawn_listener(validator: Arc<dyn Validator>, max_workspaces_per_user: usize) -> Harness {
+async fn spawn_listener(
+    validator: Arc<dyn Validator>,
+    max_registrations_per_user: usize,
+) -> Harness {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
     let port = listener.local_addr().unwrap().port();
     let registry = Registry::new();
@@ -94,7 +97,7 @@ async fn spawn_listener(validator: Arc<dyn Validator>, max_workspaces_per_user: 
             listener,
             validator,
             registry_for_task,
-            max_workspaces_per_user,
+            max_registrations_per_user,
         )
         .await;
     });
@@ -331,7 +334,10 @@ async fn per_user_cap_blocks_third_devserver() {
             ref message,
         } => {
             assert_eq!(code, error_code::TOO_MANY_WORKSPACES);
-            assert!(message.contains("alice"), "got: {message}");
+            assert_eq!(
+                message,
+                "user alice reached max concurrent devserver registrations (2)"
+            );
         }
         other => panic!("expected RemoteRefusal, got {other:?}"),
     }

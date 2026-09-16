@@ -38,7 +38,7 @@ use crate::{
 
 struct LocalAdmission {
     registry: Arc<Registry>,
-    max_workspaces_per_user: usize,
+    max_registrations_per_user: usize,
 }
 
 /// The h2 server builder with the shared tunnel flow-control windows.
@@ -61,15 +61,15 @@ impl RegistrationAdmission for LocalAdmission {
         validated: &Validated,
         registration_id: uuid::Uuid,
     ) -> Result<RegistrationPermit, ServerError> {
-        if self.max_workspaces_per_user > 0 {
+        if self.max_registrations_per_user > 0 {
             let registered = self.registry.list_workspaces_for(&validated.username);
             let already_present = registered
                 .iter()
                 .any(|row| row.workspace.as_ref() == validated.devserver_id.as_str());
-            if !already_present && registered.len() >= self.max_workspaces_per_user {
-                return Err(ServerError::TooManyWorkspaces {
+            if !already_present && registered.len() >= self.max_registrations_per_user {
+                return Err(ServerError::TooManyRegistrations {
                     user: validated.username.clone(),
-                    max: self.max_workspaces_per_user,
+                    max: self.max_registrations_per_user,
                 });
             }
         }
@@ -105,26 +105,26 @@ const MAX_DRAINER_REJECTIONS: u32 = 16;
 /// the listener dying only sees it when it has. Per-connection
 /// failures after accept are logged and never bubble up.
 ///
-/// `max_workspaces_per_user` caps the number of distinct workspaces a
-/// single user may have registered concurrently. `0` disables the
-/// limit. A reconnect of a workspace the user already has registered is
-/// always allowed; the registry's last-writer-wins policy evicts
-/// the stale entry before the count is checked again.
+/// `max_registrations_per_user` caps the number of distinct devserver
+/// registrations (devserver ids) a single user may hold concurrently.
+/// `0` disables the limit. A reconnect of a devserver the user already
+/// has registered is always allowed; the registry's last-writer-wins
+/// policy evicts the stale entry before the count is checked again.
 pub async fn serve_tunnel_listener(
     listener: TcpListener,
     validator: Arc<dyn Validator>,
     registry: Arc<Registry>,
-    max_workspaces_per_user: usize,
+    max_registrations_per_user: usize,
 ) -> std::io::Result<()> {
     serve_tunnel_listener_with_admission(
         listener,
         validator,
         Arc::new(LocalAdmission {
             registry: registry.clone(),
-            max_workspaces_per_user,
+            max_registrations_per_user,
         }),
         registry,
-        max_workspaces_per_user,
+        max_registrations_per_user,
     )
     .await
 }
@@ -134,14 +134,14 @@ pub async fn serve_tunnel_listener_with_admission(
     validator: Arc<dyn Validator>,
     admission: Arc<dyn RegistrationAdmission>,
     registry: Arc<Registry>,
-    max_workspaces_per_user: usize,
+    max_registrations_per_user: usize,
 ) -> std::io::Result<()> {
     serve_accepted(
         || listener.accept(),
         validator,
         admission,
         registry,
-        max_workspaces_per_user,
+        max_registrations_per_user,
     )
     .await
 }
@@ -154,7 +154,7 @@ async fn serve_accepted<A, F>(
     validator: Arc<dyn Validator>,
     admission: Arc<dyn RegistrationAdmission>,
     registry: Arc<Registry>,
-    max_workspaces_per_user: usize,
+    max_registrations_per_user: usize,
 ) -> std::io::Result<()>
 where
     A: FnMut() -> F,
@@ -190,7 +190,7 @@ where
                 validator,
                 admission,
                 registry,
-                max_workspaces_per_user,
+                max_registrations_per_user,
                 permit,
             )
             .await
@@ -211,7 +211,7 @@ async fn handle_tunnel_conn(
     validator: Arc<dyn Validator>,
     admission: Arc<dyn RegistrationAdmission>,
     registry: Arc<Registry>,
-    max_workspaces_per_user: usize,
+    max_registrations_per_user: usize,
     inflight_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(), ServerError> {
     let _ = tcp.set_nodelay(true);
@@ -382,7 +382,7 @@ async fn handle_tunnel_conn(
         validated.user_id,
         validated.admission_lease.as_deref().map(Arc::from),
         validated.admission_lease_expires_at,
-        max_workspaces_per_user,
+        max_registrations_per_user,
     ) {
         Ok(triple) => triple,
         Err(capped) => {
@@ -393,7 +393,7 @@ async fn handle_tunnel_conn(
                 "tunnel registration raced past admission and hit the local cap",
             );
             drop(yconn);
-            return Err(ServerError::TooManyWorkspaces {
+            return Err(ServerError::TooManyRegistrations {
                 user: capped.user,
                 max: capped.max,
             });
