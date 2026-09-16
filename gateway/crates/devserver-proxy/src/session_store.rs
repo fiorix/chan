@@ -567,40 +567,7 @@ impl SessionStore {
             (revoked, bindings)
         };
 
-        // Bindings first: a request resolving a binding between the two steps
-        // then meets a cancelled binding rather than one whose sessions just
-        // went dead, which it would discard instead of leaving the tombstone
-        // a retried command must find.
-        for binding in &bindings {
-            binding.revoke_authority();
-        }
-        for (_, record) in &revoked {
-            record.revoke_authority();
-        }
-        let deadline = Instant::now() + REVOCATION_DRAIN_TIMEOUT;
-        for (_, record) in &revoked {
-            if !record.operations.wait_drained(deadline).await {
-                return Err(RevokeError::DrainTimedOut);
-            }
-        }
-        for binding in &bindings {
-            if !binding.operations.wait_drained(deadline).await {
-                return Err(RevokeError::DrainTimedOut);
-            }
-        }
-
-        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        for binding in &bindings {
-            binding.remove_from(&mut state);
-        }
-        for (id, _) in &revoked {
-            if let Some(record) = remove_session(&mut state, id) {
-                let _ = self
-                    .events
-                    .send(SessionEvent::Down(record.admin_session_id));
-            }
-        }
-        Ok(revoked.len())
+        self.finish_revocation(revoked, bindings).await
     }
 
     pub async fn clear(&self) -> Result<usize, RevokeError> {
@@ -618,14 +585,30 @@ impl SessionStore {
             (cleared, binding_handles(&state, |_| true))
         };
 
+        self.finish_revocation(cleared, bindings).await
+    }
+
+    /// The tail every revocation shares once its sessions and bindings are
+    /// selected: cancel, drain, then remove. A drain that times out returns
+    /// before anything is removed, so the cancelled records and bindings stay
+    /// in the store as the tombstone a retried revocation must find.
+    async fn finish_revocation(
+        &self,
+        selected: Vec<(String, SessionRecord)>,
+        bindings: Vec<BindingHandle>,
+    ) -> Result<usize, RevokeError> {
+        // Bindings first: a request resolving a binding between the two steps
+        // then meets a cancelled binding rather than one whose sessions just
+        // went dead, which it would discard instead of leaving the tombstone
+        // a retried command must find.
         for binding in &bindings {
             binding.revoke_authority();
         }
-        for (_, record) in &cleared {
+        for (_, record) in &selected {
             record.revoke_authority();
         }
         let deadline = Instant::now() + REVOCATION_DRAIN_TIMEOUT;
-        for (_, record) in &cleared {
+        for (_, record) in &selected {
             if !record.operations.wait_drained(deadline).await {
                 return Err(RevokeError::DrainTimedOut);
             }
@@ -640,14 +623,14 @@ impl SessionStore {
         for binding in &bindings {
             binding.remove_from(&mut state);
         }
-        for (id, _) in &cleared {
+        for (id, _) in &selected {
             if let Some(record) = remove_session(&mut state, id) {
                 let _ = self
                     .events
                     .send(SessionEvent::Down(record.admin_session_id));
             }
         }
-        Ok(cleared.len())
+        Ok(selected.len())
     }
 
     /// Bind an extension link to `principal`, which must hold a live session,
