@@ -1218,8 +1218,9 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
 /// Print a control reply the way every JSON-answering `cs` command does:
 /// `--json` is the server's bytes verbatim, `--json --pretty` re-indents
 /// them through a `serde_json::Value` (keys are sorted because serde_json is
-/// built without `preserve_order`), and the default is `render`'s markdown, which ends its
-/// own output. `noun` names the reply in the parse and format errors.
+/// built without `preserve_order`), and the default is `render`'s markdown,
+/// which ends its own output. `noun` names the reply in the parse and format
+/// errors.
 fn print_reply(
     raw: &str,
     json: bool,
@@ -1241,9 +1242,9 @@ fn print_reply(
 
 /// The `--json` half of a reply: `Some(value)` is re-serialized (a typed
 /// result keeps its field order; a `serde_json::Value` sorts its keys because
-/// serde_json is built without `preserve_order`), and
-/// `None` prints the server's bytes as they came. Both go to stdout so the
-/// output pipes cleanly.
+/// serde_json is built without `preserve_order`), and `None` prints the
+/// server's bytes as they came. Both go to stdout so the output pipes
+/// cleanly.
 fn print_json<T: serde::Serialize>(raw: &str, noun: &str, pretty: Option<&T>) -> Result<()> {
     match pretty {
         Some(value) => {

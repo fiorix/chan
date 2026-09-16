@@ -139,11 +139,49 @@ fn first_response_outcome(response: ControlResponse) -> Result<String> {
     }
 }
 
+/// Judge the half-close that follows a fully written request. The server
+/// replies and closes once it has dispatched the request, without waiting
+/// for this half-close, and when its close lands first macOS refuses the
+/// half-close with ENOTCONN. The request is fully written and the reply, if
+/// any, is already queued, so `NotConnected` is not a failure of the request
+/// and the caller reads on; a server that closed without answering fails
+/// the read or the decode on its own. Any other refusal is the error it is.
+fn half_close_outcome(result: std::io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+        Err(err) => Err(err).context("closing control request"),
+    }
+}
+
+/// Read the server's first response line and map it to the request's
+/// outcome. Shared by the one-shot and streaming paths so a server that
+/// closed without answering is reported in the same words by both, and so
+/// both surface the same typed errors through [`first_response_outcome`].
+async fn read_first_response<R>(reader: &mut R) -> Result<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+
+    let mut line = String::new();
+    let n = reader
+        .read_line(&mut line)
+        .await
+        .context("reading control response")?;
+    if n == 0 {
+        anyhow::bail!("the server closed the control socket before answering");
+    }
+    let response: ControlResponse =
+        serde_json::from_str(&line).context("decoding control response")?;
+    first_response_outcome(response)
+}
+
 /// Connect to the control socket, write one JSON request line, and return
 /// the server's reply message (or its error, surfaced as an `Err`).
 /// Platform-neutral over the `transport` module.
 pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Result<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let (read, mut write) = connect_control(socket).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
@@ -155,25 +193,9 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
     // Harmless on both paths: a Unix stream half-closes its write side;
     // tokio's named-pipe `poll_shutdown` is a no-op (the `\n` already frames
     // the request, so the server reads it regardless).
-    if let Err(err) = write.shutdown().await {
-        // The server replies and closes as soon as it has read the request,
-        // and when its close lands first macOS refuses this half-close with
-        // ENOTCONN. The request is fully written and the reply, if any, is
-        // already queued, so read on; a server that closed without answering
-        // fails the read or the decode below on its own.
-        if err.kind() != std::io::ErrorKind::NotConnected {
-            return Err(err).context("closing control request");
-        }
-    }
+    half_close_outcome(write.shutdown().await)?;
 
-    let mut line = String::new();
-    BufReader::new(read)
-        .read_line(&mut line)
-        .await
-        .context("reading control response")?;
-    let response: ControlResponse =
-        serde_json::from_str(&line).context("decoding control response")?;
-    first_response_outcome(response)
+    read_first_response(&mut BufReader::new(read)).await
 }
 
 /// The still-open control connection behind a long-lived request
@@ -236,7 +258,7 @@ pub async fn send_control_request_streaming(
     socket: &Path,
     request: ControlRequest,
 ) -> Result<TunnelSession> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let (read, mut write) = connect_control(socket).await?;
     let mut payload = serde_json::to_vec(&request).context("encoding control request")?;
@@ -247,17 +269,7 @@ pub async fn send_control_request_streaming(
         .context("writing control request")?;
 
     let mut reader = BufReader::new(read);
-    let mut line = String::new();
-    let n = reader
-        .read_line(&mut line)
-        .await
-        .context("reading control response")?;
-    if n == 0 {
-        anyhow::bail!("the server closed the control socket before answering");
-    }
-    let response: ControlResponse =
-        serde_json::from_str(&line).context("decoding control response")?;
-    let ack = first_response_outcome(response)?;
+    let ack = read_first_response(&mut reader).await?;
     Ok(TunnelSession {
         ack,
         reader,
@@ -482,11 +494,38 @@ mod tests {
         );
     }
 
+    /// The half-close after a written request: a peer that closed first
+    /// (macOS answers the client's `shutdown(2)` with ENOTCONN) is not a
+    /// failure of the request; any other refusal is, with the io error kept
+    /// as its cause under the closing context.
+    #[test]
+    fn half_close_tolerates_only_a_peer_that_closed_first() {
+        use std::io::{Error, ErrorKind};
+
+        half_close_outcome(Ok(())).unwrap();
+        half_close_outcome(Err(Error::from(ErrorKind::NotConnected))).unwrap();
+        for kind in [ErrorKind::BrokenPipe, ErrorKind::InvalidInput] {
+            let err = half_close_outcome(Err(Error::from(kind))).unwrap_err();
+            assert!(
+                err.chain()
+                    .any(|cause| cause.to_string() == "closing control request"),
+                "{kind:?}: {err:#}"
+            );
+            let cause = err
+                .downcast_ref::<Error>()
+                .unwrap_or_else(|| panic!("{kind:?}: io error kept as the cause: {err:#}"));
+            assert_eq!(cause.kind(), kind);
+        }
+    }
+
     /// The real control server's order: it reads the request line, writes
     /// its reply and returns, closing the socket without waiting for the
-    /// client's half-close. The reply must come back whichever side closes
-    /// first; a half-close the peer's close has already made impossible is
-    /// not a failure of the request.
+    /// client's half-close. On the current_thread test runtime the fake is
+    /// not polled between the client's request bytes and its shutdown, so
+    /// its close cannot land first and the half-close always succeeds: what
+    /// this pins is the `Ok` round trip against a server that never reads
+    /// to the client's EOF. The refused half-close has its own test on
+    /// `half_close_outcome`.
     #[cfg(unix)]
     #[tokio::test]
     async fn send_control_request_accepts_a_reply_from_a_server_that_closes_at_once() {
@@ -506,8 +545,8 @@ mod tests {
                 .write_all(b"{\"status\":\"ok\",\"message\":\"[]\"}\n")
                 .await
                 .unwrap();
-            // Returning drops both halves: the socket closes right behind
-            // the reply, without reading to the client's EOF.
+            // Returning drops the write half and closes the socket right
+            // behind the reply, without reading to the client's EOF.
         });
 
         let reply = send_control_request(&socket, ControlRequest::WindowList)
@@ -517,6 +556,39 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
 
         assert_eq!(reply, "[]");
+    }
+
+    /// A server that reads the request and closes without writing a reply:
+    /// the one-shot path names that in the streaming path's words, not as a
+    /// decode error over an empty line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_control_request_names_a_server_that_closed_without_answering() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let socket =
+            std::env::temp_dir().join(format!("chan-cs-no-answer-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(conn);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.ends_with('\n'), "request line is newline-framed");
+            // Returning drops the connection unanswered.
+        });
+
+        let err = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&socket);
+
+        assert_eq!(
+            err.to_string(),
+            "the server closed the control socket before answering"
+        );
     }
 
     /// A `ControlRequest::Tunnel` for the streaming tests; the fake servers
