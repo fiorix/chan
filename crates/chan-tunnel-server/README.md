@@ -17,11 +17,6 @@ ServerError                   token, scope, identity, I/O, handshake,
                               capacity, and control-plane errors
 RegistrationAdmission        controller-backed pre-insert permit + fence
 
-handshake(socket, token,
-          validator, pre_ack) free function: validate + Hello/HelloAck
-                              over any tokio duplex
-handshake_validated(...)      same, with already-validated identity
-
 serve_tunnel_listener(
     listener, validator,
     registry, max_workspaces_per_user)

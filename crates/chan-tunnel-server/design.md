@@ -107,7 +107,7 @@ sequenceDiagram
             H-->>C: 200 OK (body open)
             H->>C: handshake_validated_with_admission reads Hello (15s)
             C->>H: Hello frame
-            Note over H,C: protocol/workspace/pre_ack failures refused in-band (HelloAck Refused)
+            Note over H,C: protocol/workspace/admission failures refused in-band (HelloAck Refused)
             H->>C: HelloAck Ok
             H->>R: register_authorized_with_id_and_cap (authoritative per-user cap)
             alt raced past cap
@@ -134,7 +134,7 @@ sequenceDiagram
 7. Call `validator.validate_registration(token, registration_id).await` under `VALIDATE_TIMEOUT` (10s, independent of any timeout the `Validator` impl enforces internally). On timeout, reply 504. On error: 401 (`InvalidToken`), 502 (`Identity`), or 500. Validation runs before the 200 so authentication failures are not collapsed into generic transport failures.
 8. Verify the validated token's `scopes` contains `"tunnel"`; otherwise send an empty 401 and return `ServerError::MissingScope` to the listener.
 9. Send 200 (response headers, body open). Wrap `(SendStream, recv_body)` in `H2Duplex`.
-10. `handshake_validated_with_admission(duplex, validated, admission, registration_id)` (`handshake_validated` + `pre_ack` remain the embedder-facing free functions):
+10. `handshake_validated_with_admission(duplex, validated, admission, registration_id)`:
    - Defense-in-depth username check (`is_valid_username`).
    - `read_frame::<Hello>` with `HELLO_READ_TIMEOUT` (15s) bound.
    - Reject non-V1 protocol and invalid workspace names. Each rejection writes a `HelloAck::Refused { code, message }` frame (best-effort) before returning so the client receives a structured error instead of a transport disconnect.
@@ -206,8 +206,8 @@ The wire format is owned by chan-tunnel-proto. See [`chan-tunnel-proto/design.md
 
 Server-specific notes:
 
-- The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator and tunnel-scope gate run. This split is the reason `handshake_validated` exists alongside `handshake`: the listener needs to return a uniform 401 for authentication failures prior to committing to the body.
-- Failures after the 200 (bad protocol, bad workspace name, `pre_ack` policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyWorkspaces` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
+- The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator and tunnel-scope gate run. This split is why `handshake_validated_with_admission` takes an already-validated identity: the listener needs to return a uniform 401 for authentication failures prior to committing to the body.
+- Failures after the 200 (bad protocol, bad workspace name, admission policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyWorkspaces` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
 - `HELLO_READ_TIMEOUT = 15s` bounds slow-loris-style peers that connect, get the 200, and never frame a `Hello`. 15s is plenty for trans-pacific; tighter would risk false positives on slow mobile uplinks.
 - The yamux config caps each tunnel at 256 concurrent streams and a 64 MiB aggregate receive window. A visitor opening many slow requests is bounded without reducing normal browser concurrency.
 - `HelloAckOk.prefix` is `/{devserver_id}` (the resolved id the registration is keyed on; the devserver client ignores it; tenants self-prefix at their public slugs). The username travels in the wildcard host on the public side, not in the path.

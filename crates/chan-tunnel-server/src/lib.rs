@@ -9,9 +9,6 @@
 //! yamux, the registered workspace is inserted into the shared
 //! `Registry`, and the server side opens new substreams to forward
 //! public requests.
-//!
-//! For the wire test the handshake is exposed as a free function
-//! over any tokio duplex.
 
 #![forbid(unsafe_code)]
 
@@ -263,106 +260,19 @@ fn make_prefix(_username: &str, key: &str) -> String {
     format!("/{key}")
 }
 
-/// Drive the Hello/HelloAck round-trip over `socket`. Validate the bearer `token` via `validator` and build the acknowledged prefix from the token-resolved devserver id. Return the yamux server connection ready to open outbound substreams.
+/// Finish the wire handshake over `socket` for an identity the listener
+/// has already validated: read the Hello, check the protocol and the
+/// workspace name, obtain the admission permit, write the HelloAck and
+/// wrap the duplex in yamux server mode. Validation happens before the
+/// call so the listener can answer 401 before it commits to the 200
+/// response body; everything after the 200 is refused in-band with a
+/// `HelloAck::Refused` frame instead of a transport error.
 ///
-/// `pre_ack` runs after the token is validated and before the
-/// HelloAck is written. Returning an error from it aborts the
-/// handshake without registering anything; the caller uses it for
-/// post-validate policy checks (per-user workspace limits, etc.).
-///
-/// Order of operations: validator runs first, *then* the Hello is
-/// read and the workspace name validated. The tunnel listener
-/// (`handle_tunnel_conn`) needs that order to send 401 on bad
-/// tokens before committing to the body, and consistency keeps the
-/// two paths from diverging.
-pub async fn handshake<S, V, F>(
-    socket: S,
-    token: &str,
-    validator: &V,
-    pre_ack: F,
-) -> Result<(Hello, Validated, YamuxConnection<Compat<S>>), ServerError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    V: Validator + ?Sized,
-    F: FnOnce(&Hello, &Validated) -> Result<(), ServerError>,
-{
-    let validated = validator.validate(token).await?;
-    if !validated.scopes.iter().any(|s| s == TUNNEL_SCOPE) {
-        return Err(ServerError::MissingScope);
-    }
-    handshake_validated(socket, validated, pre_ack).await
-}
-
-/// Like `handshake` but takes an already-validated identity. Used
-/// by the tunnel listener to validate the token *before* sending
-/// the 200 response so a 401 can come back when validation fails;
-/// once we've replied 200, this finishes the wire dance (Hello in,
-/// workspace-name check, pre_ack, HelloAck out, yamux wrap).
-pub async fn handshake_validated<S, F>(
-    mut socket: S,
-    validated: Validated,
-    pre_ack: F,
-) -> Result<(Hello, Validated, YamuxConnection<Compat<S>>), ServerError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    F: FnOnce(&Hello, &Validated) -> Result<(), ServerError>,
-{
-    // Defense-in-depth: the validator has already authenticated the
-    // token, but the username it returns flows into the `{owner}--{disc}`
-    // first label of the public host
-    // (`{owner}--{disc}.{proxy}.proxy.{domain}`). If the upstream identity
-    // service ever emits a username with `/`, `..`, whitespace, or other
-    // host-affecting bytes, the fronting proxy would mis-route or
-    // leak it. Refuse here so the rest of the pipeline can
-    // assume the username is URL-safe.
-    if !chan_tunnel_proto::is_valid_username(&validated.username) {
-        return Err(ServerError::Handshake(format!(
-            "validator returned an unsafe username for the public path: {:?}",
-            validated.username
-        )));
-    }
-    let hello: Hello = match tokio::time::timeout(HELLO_READ_TIMEOUT, read_frame(&mut socket)).await
-    {
-        Ok(r) => r?,
-        Err(_) => {
-            return Err(ServerError::Handshake(format!(
-                "timed out waiting for Hello after {HELLO_READ_TIMEOUT:?}"
-            )));
-        }
-    };
-    if hello.protocol != ProtocolVersion::V1 {
-        let msg = format!("client requested unsupported protocol {:?}", hello.protocol);
-        write_refusal(&mut socket, error_code::UNSUPPORTED_PROTOCOL, &msg).await;
-        return Err(ServerError::Handshake(msg));
-    }
-    if !chan_tunnel_proto::is_valid_workspace_name(&hello.workspace) {
-        let msg = format!("invalid workspace name {:?}", hello.workspace);
-        write_refusal(&mut socket, error_code::INVALID_WORKSPACE_NAME, &msg).await;
-        return Err(ServerError::Handshake(msg));
-    }
-
-    if let Err(e) = pre_ack(&hello, &validated) {
-        let (code, msg) = refusal_for(&e);
-        write_refusal(&mut socket, code, &msg).await;
-        return Err(e);
-    }
-
-    // Identity is token-resolved: the registration keys on `devserver_id`,
-    // not the client's `Hello.workspace` placeholder. The ack echoes the
-    // resolved id so the client + registry + admin view all agree.
-    let ack = HelloAck::Ok(chan_tunnel_proto::HelloAckOk {
-        protocol: ProtocolVersion::V1,
-        prefix: make_prefix(&validated.username, &validated.devserver_id),
-        user: validated.username.clone(),
-        workspace: validated.devserver_id.clone(),
-        owner_user_id: validated.user_id.to_string(),
-    });
-    write_frame(&mut socket, &ack).await?;
-
-    let yamux = YamuxConnection::new(socket.compat(), tunnel_yamux_config(), Mode::Server);
-    Ok((hello, validated, yamux))
-}
-
+/// The username check is defense-in-depth: the validator has already
+/// authenticated the token, but the username it returns flows into the
+/// `{owner}--{disc}` first label of the public host, so a value with `/`,
+/// `..`, whitespace or other host-affecting bytes is refused here rather
+/// than trusted downstream.
 async fn handshake_validated_with_admission<S>(
     mut socket: S,
     validated: Validated,
@@ -469,10 +379,10 @@ fn refusal_for(e: &ServerError) -> (&'static str, String) {
             format!("user {user} reached the fleet-wide devserver limit"),
         ),
         // Other variants (InvalidToken, MissingScope, Identity, Io,
-        // Handshake) are handled at the listener layer before
-        // handshake_validated is called or do not normally flow into
-        // policy admission; surface them as INTERNAL so the wire shape stays
-        // tight without silently swallowing the diagnostic.
+        // Handshake) are answered by the listener before it sends the
+        // 200, or do not normally flow into policy admission; surface
+        // them as INTERNAL so the wire shape stays tight without
+        // silently swallowing the diagnostic.
         _ => (error_code::INTERNAL, e.to_string()),
     }
 }

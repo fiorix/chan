@@ -323,8 +323,8 @@ async fn per_user_cap_blocks_third_devserver() {
         .await
         .map(|_| ())
         .expect_err("third dial should hit the cap");
-    // Refusal is in pre_ack; the server emits a structured
-    // HelloAck::Refused so the client surfaces code + message.
+    // The refusal comes from admission, after the 200; the server emits
+    // a structured HelloAck::Refused so the client surfaces code + message.
     match err {
         ClientError::RemoteRefusal {
             ref code,
