@@ -80,8 +80,25 @@ def check_make_contract() -> None:
         "pre-push",
         (
             "$(MAKE) build-matrix-check",
+            "$(MAKE) nix-hash-contract-check",
+            "$(MAKE) nix-hash-check",
             "$(MAKE) host-build-check WEB_ALREADY_BUILT=1",
         ),
+    )
+    require_target(
+        makefile,
+        "nix-hash-check",
+        ("scripts/check-nix-cargo-hash.sh",),
+    )
+    require_target(
+        makefile,
+        "nix-hash-contract-check",
+        ("scripts/test-check-nix-cargo-hash.sh",),
+    )
+    require_target(
+        makefile,
+        "nix-hash-pin",
+        ('scripts/check-nix-cargo-hash.sh pin "$(CARGO_HASH)"',),
     )
     require_target(
         makefile,
