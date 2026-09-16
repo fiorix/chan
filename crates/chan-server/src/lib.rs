@@ -421,19 +421,21 @@ enum TenantKind {
         extension_catalog: Arc<extensions::ExtensionCatalog>,
     },
     /// The workspace-less tenant behind standalone terminal windows: the
-    /// shared `/terminal` tenant the desktop and the devserver each mount
-    /// once per library, whose windows load the SPA in `?kind=terminal`
-    /// mode, and the desktop's control terminals. It omits the watcher,
-    /// indexer and MCP bridge, since there is no workspace to watch, index or
-    /// expose, and its PTYs start in the user's home directory rather than a
-    /// workspace root. The slim router mounts no workspace-content route, so
-    /// a workspace-only request (`/api/graph`, `/api/index/status`, ...) 404s
-    /// instead of reaching the empty `workspace_cell`. It still binds a
-    /// control socket so `cs` works inside its terminals: terminal, pane,
-    /// survey and window commands run, and workspace commands refuse with the
-    /// standalone-terminal message. `session_dir` is the durable layout store
-    /// of a shared terminal, which is also what makes it serve Files; `None`
-    /// keeps layouts in memory and serves terminals only.
+    /// library's shared terminal tenant (the desktop mounts it at
+    /// `/terminal`, the devserver at `/api/terminal`), whose windows load the
+    /// SPA in `?kind=terminal` mode, and the desktop's control terminals. It
+    /// omits the watcher, indexer and MCP bridge, since there is no workspace
+    /// to watch, index or expose, and its PTYs start in the user's home
+    /// directory rather than a workspace root. The slim router mounts no
+    /// workspace-content route, so a workspace-only request (`/api/graph`,
+    /// `/api/index/status`, ...) 404s instead of reaching the empty
+    /// `workspace_cell`. It still binds a control socket so `cs` works inside
+    /// its terminals: terminal, pane, survey and window commands run, and
+    /// workspace commands refuse with the standalone-terminal message.
+    /// `session_dir` is the durable layout store of a shared terminal, which
+    /// is also what lets it serve Files where the platform supports the
+    /// surface and its construction succeeds; `None` keeps layouts in memory
+    /// and serves terminals only.
     Terminal {
         session_dir: Option<PathBuf>,
         drafts_store_root: Option<PathBuf>,
@@ -531,9 +533,10 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     // Install any per-agent submit-chord overrides from
     // `<config>/chan/submit.toml` into chan-shell, so a client changing its
     // submit behavior is a config edit, not a rebuild. A missing or malformed
-    // file leaves the built-in defaults; `CHAN_SUBMIT_<AGENT>` still wins at
-    // chord-application time. Workspace-independent, so both kinds install
-    // it.
+    // file installs nothing, so the overrides already installed in this
+    // process stand (the built-in defaults until a build installs some);
+    // `CHAN_SUBMIT_<AGENT>` still wins at chord-application time.
+    // Workspace-independent, so both kinds install it.
     submit_config::install();
     // Editor preferences (theme, fonts, pane widths, line spacing, date
     // format) join `ServerConfig` in the unified view over `/api/workspace`
@@ -784,10 +787,11 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         shutdown_rx.clone(),
     );
     // A standalone workspace unserves by exiting the process (its shutdown
-    // signal); a hosted tenant unmounts itself from the host. A terminal has
-    // no workspace to unserve, so a standalone terminal refuses, while a
-    // hosted terminal still carries the host handle so a close that lands on
-    // its socket can unmount the right workspace tenant by root.
+    // signal); a hosted tenant asks the host to unmount the workspace tenant
+    // serving the named root. A terminal has no workspace to unserve, so a
+    // standalone terminal refuses, while a hosted terminal still carries the
+    // host handle so a close that lands on its socket can unmount the right
+    // workspace tenant by root.
     let unserve_scope = match unserve {
         chan_library::UnserveMode::Standalone if matches!(tenant, TenantKind::Workspace { .. }) => {
             chan_library::UnserveScope::Standalone {
