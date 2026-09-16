@@ -60,6 +60,22 @@ const FILENAME_LANGUAGES: &[(&str, LanguageType)] = &[
     ("sconscript", LanguageType::Scons),
 ];
 
+// Interpreter names tokei 12.1.2 recognizes after `#!/usr/bin/env`, from the
+// `env` field of its languages.json. Tokei exposes its `#!` paths through
+// `LanguageType::shebangs` but has no accessor for these.
+const ENV_LANGUAGES: &[(&str, LanguageType)] = &[
+    ("bash", LanguageType::Bash),
+    ("csh", LanguageType::CShell),
+    ("crystal", LanguageType::Crystal),
+    ("elvish", LanguageType::Elvish),
+    ("fish", LanguageType::Fish),
+    ("python", LanguageType::Python),
+    ("python2", LanguageType::Python),
+    ("python3", LanguageType::Python),
+    ("ruby", LanguageType::Ruby),
+    ("sh", LanguageType::Sh),
+];
+
 // Tokei's detector only reads shebangs for extensionless paths. Mirror
 // those named-file rules so oversized files need no read; dotted names
 // use tokei's filename and extension rules directly.
@@ -107,16 +123,12 @@ fn count_file_after_stat(
             if meta.len() > READ_CAP || abs.extension().is_some() {
                 return Ok(None);
             }
-            match has_shebang_prefix(&abs) {
-                Ok(true) => {}
-                Ok(false) => return Ok(None),
+            match shebang_language(&abs) {
+                Ok(Some(language)) => language,
+                Ok(None) => return Ok(None),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error.into()),
             }
-            let Some(language) = LanguageType::from_shebang(&abs) else {
-                return Ok(None);
-            };
-            language
         }
     };
 
@@ -202,16 +214,41 @@ fn decode_like_tokei(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-/// Probe at most 256 bytes. Tokei is only asked to inspect a shebang when
-/// the probe contains its complete first line, so other extensionless
-/// files never enter the body reader.
-fn has_shebang_prefix(abs: &Path) -> std::io::Result<bool> {
-    let mut prefix = Vec::with_capacity(256);
-    fs::File::open(abs)?.take(256).read_to_end(&mut prefix)?;
-    let Some(end) = prefix.iter().position(|byte| *byte == b'\n') else {
-        return Ok(false);
-    };
-    Ok(std::str::from_utf8(&prefix[..end]).is_ok_and(|line| line.trim_start().starts_with("#!")))
+/// Probe at most 256 bytes and detect the language from the shebang
+/// within them, so other extensionless files never enter the body reader.
+fn shebang_language(abs: &Path) -> std::io::Result<Option<LanguageType>> {
+    let mut probe = Vec::with_capacity(256);
+    fs::File::open(abs)?.take(256).read_to_end(&mut probe)?;
+    Ok(shebang_probe_language(&probe))
+}
+
+/// Tokei's shebang rules applied to a bounded probe. The probe must hold
+/// the complete first line, valid UTF-8 and starting with `#!` after
+/// leading whitespace; a longer or non-UTF-8 first line is not a shebang.
+/// The line then matches the way tokei matches: its first
+/// whitespace-separated word must equal one of a language's `#!` paths, or
+/// be `#!/usr/bin/env` followed by a word equal to a known interpreter
+/// name. Arguments after the match are ignored, and a space after `#!`, a
+/// version suffix or an `env` option make the line match nothing.
+fn shebang_probe_language(probe: &[u8]) -> Option<LanguageType> {
+    let end = probe.iter().position(|byte| *byte == b'\n')?;
+    let line = std::str::from_utf8(&probe[..end]).ok()?;
+    if !line.trim_start().starts_with("#!") {
+        return None;
+    }
+    let mut words = line.split_whitespace();
+    let first = words.next()?;
+    if first == "#!/usr/bin/env" {
+        let interpreter = words.next()?;
+        return ENV_LANGUAGES
+            .iter()
+            .find(|(name, _)| *name == interpreter)
+            .map(|&(_, language)| language);
+    }
+    LanguageType::list()
+        .iter()
+        .copied()
+        .find(|language| language.shebangs().contains(&first))
 }
 
 /// Read at most one byte beyond the cap to detect growth after stat.
@@ -309,6 +346,78 @@ mod tests {
                 LanguageType::from_path(&abs, &Config::default()),
                 "path detector parity for {name}"
             );
+        }
+    }
+
+    #[test]
+    fn shebang_detection_matches_tokei() {
+        // The interpreter names in tokei 12.1.2's languages.json `env`
+        // fields, held apart from ENV_LANGUAGES so a missing table entry
+        // fails here.
+        const TOKEI_ENV_INTERPRETERS: &[&str] = &[
+            "bash", "csh", "crystal", "elvish", "fish", "python", "python2", "python3", "ruby",
+            "sh",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let mut cases: Vec<(Vec<u8>, Option<Option<LanguageType>>)> = Vec::new();
+        for &language in LanguageType::list() {
+            for shebang in language.shebangs() {
+                cases.push((format!("{shebang}\n").into_bytes(), Some(Some(language))));
+                cases.push((format!("{shebang} -x\n").into_bytes(), Some(Some(language))));
+            }
+        }
+        for &(name, language) in ENV_LANGUAGES {
+            cases.push((
+                format!("#!/usr/bin/env {name}\n").into_bytes(),
+                Some(Some(language)),
+            ));
+        }
+        for name in TOKEI_ENV_INTERPRETERS {
+            cases.push((format!("#!/usr/bin/env {name}\n").into_bytes(), None));
+        }
+        let edges: [(&[u8], Option<LanguageType>); 19] = [
+            (b"  #!/bin/sh\n", Some(LanguageType::Sh)),
+            (b"\t#!/usr/bin/env python\n", Some(LanguageType::Python)),
+            (b"#!/bin/sh\r\n", Some(LanguageType::Sh)),
+            (b"#!/usr/bin/env python\r\n", Some(LanguageType::Python)),
+            (b"#!/usr/bin/env python -u\n", Some(LanguageType::Python)),
+            (b"#!/usr/bin/env\tpython\n", Some(LanguageType::Python)),
+            (b"#!/bin/bash -x\tscript\n", Some(LanguageType::Bash)),
+            (b"#!/usr/bin/env\n", None),
+            (b"#!/usr/bin/env unknown-interpreter\n", None),
+            (b"#!/usr/bin/env -S python\n", None),
+            (b"#!/usr/bin/env python3.12\n", None),
+            (b"#!/usr/bin/python3\n", None),
+            (b"#! /bin/sh\n", None),
+            (b"#!\n", None),
+            (b"#!/BIN/SH\n", None),
+            (b"\xef\xbb\xbf#!/bin/sh\n", None),
+            (b"\n#!/bin/sh\n", None),
+            (b"#!/bin/sh \xff\n", None),
+            (b"license text\n", None),
+        ];
+        for (line, expected) in edges {
+            cases.push((line.to_vec(), Some(expected)));
+        }
+        for (i, (line, expected)) in cases.iter().enumerate() {
+            let abs = dir.path().join(format!("probe-{i}"));
+            fs::write(&abs, line).unwrap();
+            let mut probe = Vec::new();
+            fs::File::open(&abs)
+                .unwrap()
+                .take(256)
+                .read_to_end(&mut probe)
+                .unwrap();
+            let detected = shebang_probe_language(&probe);
+            let line = String::from_utf8_lossy(line);
+            assert_eq!(
+                detected,
+                LanguageType::from_shebang(&abs),
+                "shebang parity with tokei for {line:?}"
+            );
+            if let Some(expected) = expected {
+                assert_eq!(detected, *expected, "shebang detection for {line:?}");
+            }
         }
     }
 
