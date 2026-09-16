@@ -1965,7 +1965,8 @@ fn list_tree_scoped_inner(
 }
 
 /// Collect walked entries into tree entries, refusing with
-/// `ListingTooLarge` once `iter` yields more than `limit` of them.
+/// `ListingTooLarge` when an entry arrives after `limit` entries are collected.
+/// Entries whose metadata read fails are skipped and not counted.
 fn tree_entries<'a>(
     root: &Path,
     iter: impl Iterator<Item = DirEntry> + 'a,

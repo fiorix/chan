@@ -124,8 +124,8 @@ impl Bm25Index {
 
     /// Re-index a single file from its text. Deletes its previous chunks
     /// and writes new ones according to `chunking`. Caller commits.
-    /// Test-only: the library parses each file once and hands the chunks
-    /// to `index_chunks`.
+    /// Test-only: production callers chunk the text themselves and pass
+    /// the chunks to `index_chunks`.
     #[cfg(test)]
     pub(crate) fn index_file(
         &self,
@@ -168,7 +168,7 @@ impl Bm25Index {
         Ok(())
     }
 
-    /// Flush pending writes. Call after a batch of `index_file` /
+    /// Flush pending writes. Call after a batch of `index_chunks` /
     /// `delete_file`. Synchronously reloads the reader so subsequent
     /// `search` calls see the new data; tantivy's default reload
     /// policy is async, which is wrong for our caller's expectations.
