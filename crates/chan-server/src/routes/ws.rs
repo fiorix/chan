@@ -34,7 +34,7 @@ pub struct WsQuery {
 }
 
 /// The target window id of a compact `window_command` or `transfer_queue` frame, or `None` for other frames. Both put `type` and `window_id` first, so the id can be read without parsing the remaining payload, which can include multi-MB clipboard data. An unrecognized prefix broadcasts the frame. The SPA re-checks `window_id` only for `window_command`; it matches `transfer_queue` frames by transfer id.
-fn window_command_target(frame: &str) -> Option<&str> {
+pub(crate) fn window_command_target(frame: &str) -> Option<&str> {
     const PREFIXES: [&str; 2] = [
         "{\"type\":\"window_command\",\"window_id\":\"",
         "{\"type\":\"transfer_queue\",\"window_id\":\"",

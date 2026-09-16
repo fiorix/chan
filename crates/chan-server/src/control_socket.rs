@@ -191,6 +191,16 @@ enum WindowCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         destination: Option<TabDestination>,
     },
+    // `POST /api/terminals/{session}/broadcast`: another window asked to flip
+    // the broadcast toggle of a terminal THIS window owns. The broadcast state
+    // lives in the owning window's tab (its `set-broadcast` WS frame drives
+    // the flag), so the route addresses that window instead of flipping the
+    // flag itself, and the window flips its tab, which re-syncs the flag and
+    // lights the sign. Fire-and-forget, like the `open_*` commands.
+    TerminalBroadcast {
+        session_id: String,
+        on: bool,
+    },
     // `cs session handover`: a follower asked to take leadership; prompt THIS
     // (leader) window to accept or reject. The SPA shows the handover overlay
     // and POSTs the answer to `/api/session/handover/reply` echoing
@@ -3809,6 +3819,21 @@ fn serialize_window_command(window_id: &str, command: WindowCommand) -> Result<S
         command,
     };
     serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))
+}
+
+/// The `terminal_broadcast` frame for `POST /api/terminals/{session}/broadcast`,
+/// the one window-command producer outside this module. Going through the
+/// typed frame keeps it on the `type, window_id` prefix the `/ws` pump scans,
+/// so it reaches the owning window's socket and no other.
+pub(crate) fn terminal_broadcast_frame(
+    window_id: &str,
+    session_id: String,
+    on: bool,
+) -> Result<String, String> {
+    serialize_window_command(
+        window_id,
+        WindowCommand::TerminalBroadcast { session_id, on },
+    )
 }
 
 fn send_window_command_if_live(

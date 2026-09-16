@@ -640,17 +640,15 @@ pub async fn api_set_terminal_broadcast(
         }
         None => return (StatusCode::NOT_FOUND, "terminal session not found").into_response(),
     };
-    // Same envelope as control_socket's window commands: `{type, window_id,
-    // command, ...}`. Built inline (the WindowCommand enum is private to
-    // control_socket) to keep this route decoupled from that module.
-    let frame = serde_json::json!({
-        "type": "window_command",
-        "window_id": window_id,
-        "command": "terminal_broadcast",
-        "session_id": session,
-        "on": body.on,
-    });
-    let _ = state.events_tx.send(frame.to_string());
+    // The typed frame is what the `/ws` pump addresses to one window; a
+    // hand-built object would serialize its keys sorted, miss the pump's
+    // prefix scan, and reach every socket of the tenant.
+    let frame = match crate::control_socket::terminal_broadcast_frame(&window_id, session, body.on)
+    {
+        Ok(frame) => frame,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
+    let _ = state.events_tx.send(frame);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2333,6 +2331,13 @@ mod tests {
         assert_eq!(v["command"], "terminal_broadcast");
         assert_eq!(v["session_id"], session);
         assert_eq!(v["on"], true);
+        // The pump reads the target off the frame's fixed prefix; a frame it
+        // cannot address goes to every socket instead of the owning window.
+        assert_eq!(
+            crate::routes::ws::window_command_target(&raw),
+            Some("win-7"),
+            "frame is not addressed to the owning window: {raw}"
+        );
 
         state
             .terminal_sessions
