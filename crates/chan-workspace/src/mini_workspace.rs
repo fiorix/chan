@@ -544,22 +544,7 @@ impl MiniWorkspace {
             }
             return Ok(());
         }
-        let mut reader = self.fs.read_bytes_bounded(from)?;
-        self.fs
-            .write_atomic_stream(to, AtomicWriteKind::Bytes, |sink| {
-                if reader.stat().size > sink.limit() {
-                    return Err(ChanError::WriteTooLarge {
-                        kind: "bytes",
-                        size: reader.stat().size,
-                        limit: sink.limit(),
-                    });
-                }
-                for chunk in reader.by_ref() {
-                    sink.write_chunk(&chunk?)?;
-                }
-                Ok(())
-            })?;
-        Ok(())
+        self.fs.copy_file_stream(from, to)
     }
 }
 
@@ -929,6 +914,47 @@ mod tests {
             .filter(|n| n.contains("chan-copy"))
             .collect();
         assert!(leftovers.is_empty(), "no temp trees remain: {leftovers:?}");
+    }
+
+    #[test]
+    fn copy_plain_refuses_above_transfer_cap_without_partial_destination() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        stdfs::create_dir_all(root.join("home/user")).unwrap();
+        let start = root.join("home/user");
+        let cap = 4096;
+        let mini = MiniWorkspace::open(&root, &start, cap).expect("open");
+        stdfs::File::create(root.join("huge.bin"))
+            .unwrap()
+            .set_len(cap + 1)
+            .unwrap();
+
+        let error = mini.copy_plain("huge.bin", "copy.bin").unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ChanError::WriteTooLarge {
+                    kind: "bytes",
+                    size,
+                    limit,
+                } if size == cap + 1 && limit == cap
+            ),
+            "{error:?}"
+        );
+        assert!(!root.join("copy.bin").exists(), "no destination");
+        let mut names: Vec<String> = mini
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["home".to_string(), "huge.bin".to_string()],
+            "a rejected copy must leave no temp sibling"
+        );
     }
 
     #[test]

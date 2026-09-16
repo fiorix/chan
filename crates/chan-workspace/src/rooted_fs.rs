@@ -1200,6 +1200,30 @@ impl RootedFs {
         )))
     }
 
+    /// Copy one regular file from `from` to `to` (both root-relative)
+    /// through the bounded reader and the bytes-mode atomic sink. The sink
+    /// supplies the real binary budget, incremental UTF-8 validation for
+    /// editable destinations, same-directory atomic commit, and temp cleanup
+    /// for every source-read or sink failure; a source larger than the
+    /// budget is refused before any chunk is written.
+    pub(crate) fn copy_file_stream(&self, from: &str, to: &str) -> Result<()> {
+        let mut reader = self.read_bytes_bounded(from)?;
+        self.write_atomic_stream(to, AtomicWriteKind::Bytes, |sink| {
+            if reader.stat().size > sink.limit() {
+                return Err(ChanError::WriteTooLarge {
+                    kind: "bytes",
+                    size: reader.stat().size,
+                    limit: sink.limit(),
+                });
+            }
+            for chunk in reader.by_ref() {
+                sink.write_chunk(&chunk?)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Copy one regular file from `src_rel` to `dst_rel` (both relative
     /// to `self.dir()`), recording the destination's workspace-rooted POSIX
     /// path in `created`.
@@ -1216,23 +1240,7 @@ impl RootedFs {
         let dst_str = dst_rel
             .to_str()
             .ok_or_else(|| ChanError::Io("destination contains a non-UTF-8 name".into()))?;
-        let mut reader = self.read_bytes_bounded(src_str)?;
-        // The semantic sink supplies the real binary budget, incremental UTF-8
-        // validation for editable destinations, same-directory atomic commit,
-        // and temp cleanup for every source-read or sink failure.
-        self.write_atomic_stream(dst_str, AtomicWriteKind::Bytes, |sink| {
-            if reader.stat().size > sink.limit() {
-                return Err(ChanError::WriteTooLarge {
-                    kind: "bytes",
-                    size: reader.stat().size,
-                    limit: sink.limit(),
-                });
-            }
-            for chunk in reader.by_ref() {
-                sink.write_chunk(&chunk?)?;
-            }
-            Ok(())
-        })?;
+        self.copy_file_stream(src_str, dst_str)?;
         created.push(dst_canon.to_string());
         Ok(())
     }
