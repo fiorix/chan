@@ -25,6 +25,8 @@ AUR_REV ?= HEAD
 WINDOWS_CROSS_ROOTFS ?= ubuntu
 NIX_PACKAGE ?= all
 NIX_SDME_ROOTFS ?= ubuntu
+# The harvested cargoHash that nix-hash-pin writes into both Nix derivations.
+CARGO_HASH ?=
 LINUX_TARGET ?= x86_64-unknown-linux-gnu
 FREEBSD_TARGET ?= x86_64-unknown-freebsd
 FREEBSD_SYSROOT ?=
@@ -271,6 +273,18 @@ nix-sdme-contract-check: ## Check the sdme Nix driver without starting a guest.
 	$(LINUX_ONLY)
 	TMPDIR=/var/tmp packaging/nix/test-build-with-sdme.sh
 
+.PHONY: nix-hash-check
+nix-hash-check: ## Fail when Cargo.lock is not the lock the Nix cargoHash pins were harvested for.
+	scripts/check-nix-cargo-hash.sh
+
+.PHONY: nix-hash-contract-check
+nix-hash-contract-check: ## Check the Nix cargoHash checker and pin helper against a throwaway tree.
+	scripts/test-check-nix-cargo-hash.sh
+
+.PHONY: nix-hash-pin
+nix-hash-pin: ## Pin CARGO_HASH in both Nix derivations and record the Cargo.lock digest it was harvested for.
+	scripts/check-nix-cargo-hash.sh pin "$(CARGO_HASH)"
+
 .PHONY: pre-push
 pre-push: ## Run the local pre-push gate.
 	# The static checks run first: they are seconds-long, they cover the
@@ -286,6 +300,13 @@ ifeq ($(UNAME_S),Linux)
 	# build first. The gateway steps stay below because they ARE compiles.
 	$(MAKE) nix-sdme-contract-check
 endif
+	# The Nix cargoHash pins are the one gate input a Cargo.lock change
+	# invalidates that no cargo step reads. The contract check proves the
+	# checker and the pin helper against a throwaway tree, then the check
+	# compares the live Cargo.lock with the digest recorded when the pins
+	# were harvested; on every host, since files are all it reads.
+	$(MAKE) nix-hash-contract-check
+	$(MAKE) nix-hash-check
 	$(MAKE) web-lock-check
 	$(CARGO) fmt --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
