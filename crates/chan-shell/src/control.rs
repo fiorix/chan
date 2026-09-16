@@ -155,7 +155,16 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
     // Harmless on both paths: a Unix stream half-closes its write side;
     // tokio's named-pipe `poll_shutdown` is a no-op (the `\n` already frames
     // the request, so the server reads it regardless).
-    write.shutdown().await.context("closing control request")?;
+    if let Err(err) = write.shutdown().await {
+        // The server replies and closes as soon as it has read the request,
+        // and when its close lands first macOS refuses this half-close with
+        // ENOTCONN. The request is fully written and the reply, if any, is
+        // already queued, so read on; a server that closed without answering
+        // fails the read or the decode below on its own.
+        if err.kind() != std::io::ErrorKind::NotConnected {
+            return Err(err).context("closing control request");
+        }
+    }
 
     let mut line = String::new();
     BufReader::new(read)
@@ -471,6 +480,43 @@ mod tests {
             refusal.message,
             "queued at position 1; Sh is a shell session: no codex chord applied"
         );
+    }
+
+    /// The real control server's order: it reads the request line, writes
+    /// its reply and returns, closing the socket without waiting for the
+    /// client's half-close. The reply must come back whichever side closes
+    /// first; a half-close the peer's close has already made impossible is
+    /// not a failure of the request.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_control_request_accepts_a_reply_from_a_server_that_closes_at_once() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let socket =
+            std::env::temp_dir().join(format!("chan-cs-early-close-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (read, mut write) = conn.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            assert!(line.ends_with('\n'), "request line is newline-framed");
+            write
+                .write_all(b"{\"status\":\"ok\",\"message\":\"[]\"}\n")
+                .await
+                .unwrap();
+            // Returning drops both halves: the socket closes right behind
+            // the reply, without reading to the client's EOF.
+        });
+
+        let reply = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&socket);
+
+        assert_eq!(reply, "[]");
     }
 
     /// A `ControlRequest::Tunnel` for the streaming tests; the fake servers
