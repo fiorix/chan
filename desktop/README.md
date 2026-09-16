@@ -26,7 +26,7 @@ The desktop app stores its config at `~/.chan/desktop/config.json` -- the same `
 ## Workspace modes
 
 - Local embedded: desktop owns the local workspace runtime through its embedded `chan-server` host.
-- Remote outbound: desktop opens an already-running `chan serve` URL pasted by the user. The remote server owns its own lifecycle.
+- Remote outbound: desktop opens an already-running `chan serve` URL listed in its config file (`outbound[]`). The remote server owns its own lifecycle.
 
 There is no local sidecar fallback mode. Running `chan serve` directly is still supported, but desktop treats it as a remote attachment.
 

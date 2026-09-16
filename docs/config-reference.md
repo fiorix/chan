@@ -283,11 +283,11 @@ Source: `desktop/src-tauri/src/config.rs`.
 
 | Field | Type | Default | Reachability | Consumers |
 |-------|------|---------|--------------|-----------|
-| `outbound[]` | `Vec<OutboundWorkspace>` | empty | Attach URL panel | explicit non-owned remote URL attachments |
-| `outbound[].id` | `String` | generated UUID | Attach URL panel | row actions + outbound window restore key |
-| `outbound[].url` | `String` | required | Attach URL panel | token-bearing HTTP(S) URL opened by desktop |
-| `outbound[].label` | `String` | `""` | Attach URL panel | optional launcher/window label |
-| `outbound[].added_at` | `u64` | current millis | Attach URL panel | diagnostics and future sorting |
+| `outbound[]` | `Vec<OutboundWorkspace>` | empty | hand-edited JSON only | explicit non-owned remote URL attachments |
+| `outbound[].id` | `String` | generated UUID | hand-edited JSON only | row actions + outbound window restore key |
+| `outbound[].url` | `String` | required | hand-edited JSON only | token-bearing HTTP(S) URL opened by desktop |
+| `outbound[].label` | `String` | `""` | hand-edited JSON only | optional launcher/window label |
+| `outbound[].added_at` | `u64` | current millis | hand-edited JSON only | diagnostics and future sorting |
 | `tunnel.preferred_port` | `u16` | `0` (OS-assigned) | Tunnel listener UI | tunnel listen-bind hint |
 | `tunnel.preferred_label` | `String` | `""` | Tunnel listener UI | bearer/label default |
 | `tunnel.preferred_workspace` | `String` | `""` | Tunnel listener UI | workspace name default |
