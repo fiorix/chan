@@ -536,6 +536,9 @@ where
         Ok(0) => Response::Error {
             message: "empty registration request".into(),
         },
+        Ok(_) if !line.ends_with('\n') => Response::Error {
+            message: "invalid registration request: line is not newline-terminated".into(),
+        },
         Ok(_) => match serde_json::from_str::<Request>(&line) {
             Ok(req) => dispatch(req, handler).await,
             Err(e) => Response::Error {
@@ -943,6 +946,54 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn registration_request_deadline_does_not_limit_a_slow_handler() {
         request_handler_case(true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registration_request_without_a_trailing_newline_is_refused() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for over_cap in [false, true] {
+                let request = Request::RegisterWorkspace {
+                    protocol: PROTOCOL_VERSION,
+                    cli_version: CHAN_VERSION.into(),
+                    workspace_path: if over_cap {
+                        "x".repeat(MAX_REGISTRATION_REQUEST_BYTES as usize)
+                    } else {
+                        "notes".into()
+                    },
+                };
+                let request = serde_json::to_vec(&request).unwrap();
+                let (mut client, peer) = tokio::io::duplex(request.len().max(1024));
+                let (read, write) = tokio::io::split(peer);
+                client.write_all(&request).await.unwrap();
+                client.shutdown().await.unwrap();
+                let calls = std::sync::atomic::AtomicUsize::new(0);
+                serve_connection(read, write, &|_| {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async {
+                        Response::Registered {
+                            devserver_version: CHAN_VERSION.into(),
+                            prefix: "/workspace".into(),
+                        }
+                    }
+                })
+                .await;
+                let mut reply = Vec::new();
+                client.read_to_end(&mut reply).await.unwrap();
+                let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(
+                    serde_json::from_slice::<Response>(&reply).unwrap(),
+                    Response::Error {
+                        message: "invalid registration request: line is not newline-terminated"
+                            .into(),
+                    },
+                    "over_cap={over_cap}, handler calls={calls}"
+                );
+                assert_eq!(calls, 0, "an incomplete request must not reach the handler");
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(start_paused = true)]
