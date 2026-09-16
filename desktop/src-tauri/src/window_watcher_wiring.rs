@@ -522,12 +522,6 @@ impl WindowFeed for DevserverWindowFeed {
     }
 }
 
-/// The raw devserver window-feed WS URL. Gateway-backed devservers use the
-/// gateway proxy origin instead.
-fn watch_ws_url(host: &str, port: u16) -> String {
-    format!("ws://{host}:{port}/api/library/windows/watch")
-}
-
 type GatewayWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -595,6 +589,45 @@ async fn connect_gateway_ws(conn: &DevserverConn, path: &str) -> Result<GatewayW
         }
         Err(e) => Err(format!("connect gateway watch: {e}")),
     }
+}
+
+/// The bearer upgrade request for `path` on a raw devserver: a `ws://` URL on
+/// the dialed host and port plus `Authorization: Bearer <token>`. `what` names
+/// the feed in the error for a URL the client rejects, so each feed's
+/// reconnect log keeps its own wording. Gateway-backed devservers build theirs
+/// through [`gateway_ws_request`] instead.
+fn raw_ws_request(
+    conn: &DevserverConn,
+    path: &str,
+    what: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{}:{}{path}", conn.host, conn.port)
+        .into_client_request()
+        .map_err(|e| format!("bad {what} url: {e}"))?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", conn.token)
+            .parse()
+            .map_err(|e| format!("bad bearer header: {e}"))?,
+    );
+    Ok(request)
+}
+
+/// Open `path` on a raw devserver with the bearer upgrade. `what` names the
+/// feed in the URL error and `target` names it in the connect error; the two
+/// reach the feed loop's reconnect log, which is why each feed keeps its own.
+async fn connect_raw_ws(
+    conn: &DevserverConn,
+    path: &str,
+    what: &str,
+    target: &str,
+) -> Result<GatewayWs, String> {
+    let request = raw_ws_request(conn, path, what)?;
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(ws, _)| ws)
+        .map_err(|e| format!("connect {target}: {e}"))
 }
 
 /// Keepalive cadence for a devserver feed socket: send a WS Ping after this long
@@ -836,24 +869,10 @@ async fn stream_window_feed(
     saw_frame: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws = if conn.gateway.is_some() {
         connect_gateway_ws(conn, "/api/library/windows/watch").await?
     } else {
-        let url = watch_ws_url(&conn.host, conn.port);
-        let mut request = url
-            .into_client_request()
-            .map_err(|e| format!("bad watch url: {e}"))?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {}", conn.token)
-                .parse()
-                .map_err(|e| format!("bad bearer header: {e}"))?,
-        );
-        tokio_tungstenite::connect_async(request)
-            .await
-            .map(|(ws, _)| ws)
-            .map_err(|e| format!("connect /watch: {e}"))?
+        connect_raw_ws(conn, "/api/library/windows/watch", "watch", "/watch").await?
     };
     let mut saw_snapshot = false;
     keepalive_pump(&mut ws, FEED_PING_INTERVAL, FEED_MAX_MISSED, |text| {
@@ -975,27 +994,16 @@ async fn stream_color_feed(
     id: &str,
     conn: &DevserverConn,
 ) -> Result<(), String> {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws = if conn.gateway.is_some() {
         connect_gateway_ws(conn, "/api/library/local-color/watch").await?
     } else {
-        let url = format!(
-            "ws://{}:{}/api/library/local-color/watch",
-            conn.host, conn.port
-        );
-        let mut request = url
-            .into_client_request()
-            .map_err(|e| format!("bad colour watch url: {e}"))?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {}", conn.token)
-                .parse()
-                .map_err(|e| format!("bad bearer header: {e}"))?,
-        );
-        tokio_tungstenite::connect_async(request)
-            .await
-            .map(|(ws, _)| ws)
-            .map_err(|e| format!("connect colour watch: {e}"))?
+        connect_raw_ws(
+            conn,
+            "/api/library/local-color/watch",
+            "colour watch",
+            "colour watch",
+        )
+        .await?
     };
     // Same keepalive Ping + read-deadline as the window feed so a half-open
     // colour socket self-heals instead of pending forever. The colour feed does
@@ -1216,6 +1224,64 @@ mod tests {
             gateway_ws_origin(&conn).unwrap(),
             "https://alice--0123456789ab.p1.proxy.chan.app"
         );
+    }
+
+    #[tokio::test]
+    async fn raw_devserver_feeds_dial_the_listener_with_the_bearer() {
+        let conn = DevserverConn {
+            host: "127.0.0.1".into(),
+            port: 4321,
+            token: "tok-raw".into(),
+            name: "box".into(),
+            gateway: None,
+        };
+        for path in [
+            "/api/library/windows/watch",
+            "/api/library/local-color/watch",
+        ] {
+            let request = raw_ws_request(&conn, path, "watch").expect("a raw feed request builds");
+            let uri = request.uri();
+            assert_eq!(uri.scheme_str(), Some("ws"));
+            assert_eq!(uri.host(), Some("127.0.0.1"));
+            assert_eq!(uri.port_u16(), Some(4321));
+            assert_eq!(uri.path(), path);
+            assert_eq!(uri.to_string(), format!("ws://127.0.0.1:4321{path}"));
+            assert_eq!(
+                request
+                    .headers()
+                    .get("Authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer tok-raw")
+            );
+        }
+
+        // Each feed's own wording survives the shared builder: the URL error
+        // carries `what` and the connect error carries `target`.
+        let mut unparsable = conn.clone();
+        unparsable.host = "not a host".into();
+        let err = raw_ws_request(
+            &unparsable,
+            "/api/library/local-color/watch",
+            "colour watch",
+        )
+        .expect_err("a host with spaces is not a URL");
+        assert!(err.starts_with("bad colour watch url: "), "{err}");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut refused = conn.clone();
+        refused.port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let dial = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_raw_ws(&refused, "/api/library/windows/watch", "watch", "/watch"),
+        )
+        .await
+        .expect("a closed port refuses within the bound");
+        let err = match dial {
+            Ok(_) => panic!("nothing listens on the closed port"),
+            Err(err) => err,
+        };
+        assert!(err.starts_with("connect /watch: "), "{err}");
     }
 
     #[test]
