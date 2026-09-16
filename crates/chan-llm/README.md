@@ -24,7 +24,7 @@ ToolContext          { workspace: Arc<Workspace> }
 ToolOutcome          Ok(json)
 tools::execute(name, args, &ctx) -> Result<ToolOutcome>
 
-prompts::*           Shared MCP prompt/tool descriptions.
+prompts::*           Shared tool descriptions.
 
 feature "mcp":
   mcp::Server::new(Arc<Workspace>)

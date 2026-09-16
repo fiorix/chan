@@ -347,8 +347,8 @@ fn parse_content_length(header: &[u8]) -> std::io::Result<usize> {
 //
 // Descriptions on the params types are surfaced to the MCP client
 // as JSON-schema field descriptions; the tool-level descriptions
-// below explain the action itself. We keep both terse; claude
-// already gets richer guidance from `prompts::SYSTEM_PROMPT`.
+// (the `prompts::*_DESC` constants) explain the action itself, so
+// the field descriptions stay terse.
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadFileParams {

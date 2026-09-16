@@ -1,12 +1,12 @@
 # chan-llm design
 
-`chan-llm` is the MCP-facing tool sandbox for chan workspaces: shared prompt text, JSON tool dispatch, and an MCP server that exposes both to external agents. It does not own an in-app chat session, transcript persistence, agent subprocess management, or app settings.
+`chan-llm` is the MCP-facing tool sandbox for chan workspaces: shared tool descriptions, JSON tool dispatch, and an MCP server that exposes both to external agents. It does not own an in-app chat session, transcript persistence, agent subprocess management, or app settings.
 
 ## Scope
 
 In scope:
 
-  - Shared prompt text and tool descriptions for chan workspace access: the default system prompt, a no-tools variant, a session directive for external MCP agents, and the per-tool description constants.
+  - Shared tool descriptions for chan workspace access: one description constant per tool, used by the standard tool schemas and the MCP server alike.
   - Direct tool dispatch through `tools::execute`.
   - MCP stdio / async-I/O hosting behind the optional `mcp` feature, including the standalone `chan-llm-mcp` binary.
   - Media reads for MCP clients, capped by server policy.
