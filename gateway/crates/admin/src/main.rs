@@ -789,10 +789,10 @@ async fn user(c: &AdminClient, json: bool, cmd: UserCmd) -> anyhow::Result<()> {
             unreachable!("UserCmd::Delete must be intercepted in run()");
         }
         UserCmd::Block { .. } => {
-            // Handled in `run` so it can use both profile + workspace
-            // clients (profile.block_user followed by workspace.kill_
-            // user_tunnels). Reaching this arm means the dispatch
-            // forgot to intercept; fail loudly.
+            // Handled in `run` so it can use both profile + identity
+            // clients (profile blocks the account, then identity revokes
+            // its live access and reports the drain). Reaching this arm
+            // means the dispatch forgot to intercept; fail loudly.
             unreachable!("UserCmd::Block must be intercepted in run()");
         }
         UserCmd::Unblock { ident } => {
