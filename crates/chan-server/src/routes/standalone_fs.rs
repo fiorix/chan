@@ -50,11 +50,11 @@ use crate::util::{slugify_for_filename, split_filename};
 use super::files::{
     accumulate_text_body, basename, consume_transfer_body, join_rel, ndjson_bytes,
     ndjson_error_bytes, normalize_dir_query, parent_dir, parse_optional_mtime_ns, project_kind,
-    resolve_range, stream_binary_plan, upload_leaf_filename, with_upload_destination,
-    write_precondition_response, BinaryPlan, CreateBody, FileResponse, FileStreamEvent,
-    FileStreamMessage, ListFilesQuery, MoveBody, MoveResponse, RangeOutcome, RequestBodyMessage,
-    TransferBody, TransferItem, TransferOp, TransferResponse, TreeEntryView, UploadDestination,
-    UploadDestinationParts, UploadFileResponse, WriteResponse,
+    resolve_range, stream_binary_plan, stream_upload_tracked, upload_leaf_filename,
+    with_upload_destination, write_precondition_response, BinaryPlan, CreateBody, FileResponse,
+    FileStreamEvent, FileStreamMessage, ListFilesQuery, MoveBody, MoveResponse, RangeOutcome,
+    RequestBodyMessage, TransferBody, TransferItem, TransferOp, TransferResponse, TreeEntryView,
+    UploadDestination, UploadDestinationParts, UploadFileResponse, WriteResponse,
 };
 use super::transfer::TransferTracking;
 
@@ -724,66 +724,28 @@ pub(crate) async fn standalone_upload_file(
     .await
 }
 
-/// Admit one Files upload and write it inside a single lane job, exactly
-/// like the terminal and workspace lanes: the job is the writer, admitted
-/// before the first body byte is pulled, and an early return drops the job
-/// which cancels it and releases its slot.
+/// The Files lane on the shared upload job; the writer is
+/// `standalone_upload_stream_sync` and the refusals keep their structured
+/// bodies through `standalone_err`.
 async fn stream_standalone_upload(
     state: &Arc<AppState>,
     files: Arc<StandaloneFilesState>,
     w: Option<String>,
     destination: UploadDestination,
     headers: &HeaderMap,
-    mut field: Field<'_>,
+    field: Field<'_>,
 ) -> Response {
-    let (tx, mut rx) = mpsc::channel(8);
-    let job_files = files.clone();
-    let job = match state.bulk_transfer.submit(move |cancel| {
-        standalone_upload_stream_sync(&job_files, w.as_deref(), &destination, &mut rx, cancel)
-    }) {
-        Ok(job) => job,
-        Err(full) => return full.into_response(),
-    };
-    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
-    if let Some(tracking) = TransferTracking::from_headers(headers) {
-        crate::routes::ws::spawn_transfer_queue_reporter(
-            state.events_tx.clone(),
-            tracking.window_id,
-            tracking.transfer_id,
-            job.tracker(),
-            alive_rx,
-        );
-    }
-    let feed = async move {
-        loop {
-            let message = match field.chunk().await {
-                Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
-                Ok(None) => RequestBodyMessage::Complete,
-                Err(error) => RequestBodyMessage::Failed(error.to_string()),
-            };
-            let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
-            if tx.send(message).await.is_err() || terminal {
-                break;
-            }
-        }
-        drop(tx);
-    };
-    let outcome = job.outcome();
-    tokio::pin!(feed, outcome);
-    let result = tokio::select! {
-        result = &mut outcome => result,
-        () = &mut feed => outcome.await,
-    };
-    match result {
-        BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
-        BulkOutcome::Done(Err(error)) => standalone_err(&error),
-        // Cancellation, lane shutdown, and a panicked job are reported
-        // identically; all three mean nothing was persisted.
-        BulkOutcome::Cancelled => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "upload did not complete".into(),
-        ),
-    }
+    stream_upload_tracked(
+        &state.bulk_transfer,
+        Some(state.events_tx.clone()),
+        TransferTracking::from_headers(headers),
+        field,
+        move |cancel, mut rx| {
+            standalone_upload_stream_sync(&files, w.as_deref(), &destination, &mut rx, cancel)
+        },
+        standalone_err,
+    )
+    .await
 }
 
 fn standalone_upload_stream_sync(

@@ -27,7 +27,6 @@ use axum::body::{Body, Bytes};
 use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -35,8 +34,9 @@ use tokio::sync::mpsc;
 use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
 use crate::error::{err, err_from};
 use crate::routes::files::{
-    content_disposition_archive, content_disposition_attachment, download_filename, query_flag,
-    upload_leaf_filename, with_upload_destination, UploadDestinationParts,
+    consume_transfer_body, content_disposition_archive, content_disposition_attachment,
+    download_filename, query_flag, stream_upload_tracked, upload_leaf_filename,
+    with_upload_destination, RequestBodyMessage, UploadDestinationParts,
 };
 use crate::static_assets::content_type_for;
 
@@ -654,22 +654,9 @@ pub(crate) async fn filesystem_upload_response(
     .await
 }
 
-enum TerminalUploadMessage {
-    Chunk(Bytes),
-    Complete,
-    Failed(String),
-}
-
-/// Admit one terminal upload and write it inside a SINGLE lane job.
+/// The terminal lane on the shared upload job; the writer is
+/// `terminal_upload_stream_sync`.
 ///
-/// The job is the writer. It is admitted before the first body byte is pulled,
-/// so a refusal has read nothing, opened nothing, and left no temp file, and
-/// the disk work runs on the transfer lane rather than the pool that serves
-/// editor saves and terminal spawns. The async half only moves the multipart
-/// field into the job's bounded channel; that channel is also the backpressure,
-/// so a queued upload stalls its sender instead of buffering the body.
-///
-/// Returning early drops the job, which cancels it and releases its slot.
 /// `limit` is the server-reported effective transfer ceiling. The terminal
 /// tenant writes outside any workspace, so it cannot inherit the budget
 /// `Workspace::write_atomic_stream` applies and has to be handed the same
@@ -682,57 +669,17 @@ async fn stream_terminal_upload(
     abs_dir: PathBuf,
     filename: String,
     limit: u64,
-    mut field: Field<'_>,
+    field: Field<'_>,
 ) -> Response {
-    let (tx, rx) = mpsc::channel(8);
-    let job = match bulk
-        .submit(move |cancel| terminal_upload_stream_sync(&abs_dir, &filename, rx, limit, cancel))
-    {
-        Ok(job) => job,
-        Err(full) => return full.into_response(),
-    };
-    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
-    if let (Some(events), Some(tracking)) = (events, tracking) {
-        crate::routes::ws::spawn_transfer_queue_reporter(
-            events,
-            tracking.window_id,
-            tracking.transfer_id,
-            job.tracker(),
-            alive_rx,
-        );
-    }
-    let feed = async move {
-        loop {
-            let message = match field.chunk().await {
-                Ok(Some(bytes)) => TerminalUploadMessage::Chunk(bytes),
-                Ok(None) => TerminalUploadMessage::Complete,
-                Err(error) => TerminalUploadMessage::Failed(error.to_string()),
-            };
-            let terminal = !matches!(message, TerminalUploadMessage::Chunk(_));
-            if tx.send(message).await.is_err() || terminal {
-                break;
-            }
-        }
-        drop(tx);
-    };
-    let outcome = job.outcome();
-    tokio::pin!(feed, outcome);
-    let result = tokio::select! {
-        result = &mut outcome => result,
-        () = &mut feed => outcome.await,
-    };
-    match result {
-        BulkOutcome::Done(Ok(response)) => Json(response).into_response(),
-        BulkOutcome::Done(Err(error)) => err_from(&error),
-        // Cancellation, lane shutdown, and a panicked job are reported
-        // identically and cannot be told apart here. All three mean the write
-        // did not complete and nothing was persisted, so the caller is told to
-        // retry rather than given a result that never existed.
-        BulkOutcome::Cancelled => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "upload did not complete".into(),
-        ),
-    }
+    stream_upload_tracked(
+        bulk,
+        events,
+        tracking,
+        field,
+        move |cancel, rx| terminal_upload_stream_sync(&abs_dir, &filename, rx, limit, cancel),
+        err_from,
+    )
+    .await
 }
 
 /// Directory that a staged post-commit sync failure applies to.
@@ -764,7 +711,7 @@ fn post_commit_sync_dir(abs_dir: &Path) -> chan_workspace::Result<()> {
 fn terminal_upload_stream_sync(
     abs_dir: &Path,
     original_name: &str,
-    mut rx: mpsc::Receiver<TerminalUploadMessage>,
+    mut rx: mpsc::Receiver<RequestBodyMessage>,
     limit: u64,
     cancel: &BulkCancel,
 ) -> chan_workspace::Result<TerminalUploadResponse> {
@@ -785,47 +732,29 @@ fn terminal_upload_stream_sync(
     let mut temp =
         tempfile::NamedTempFile::new_in(abs_dir).map_err(chan_workspace::ChanError::from)?;
     let mut written = 0u64;
-    loop {
-        match cancel
-            .recv(&mut rx)
-            .map_err(chan_workspace::ChanError::from)?
-        {
-            Some(TerminalUploadMessage::Chunk(bytes)) => {
-                // Checked per chunk rather than once at the start: an abandoned
-                // upload must return its admission slot within one chunk's work
-                // instead of holding it for a transfer nobody is waiting on. The
-                // temp file is dropped unpersisted, so nothing is left behind.
-                if cancel.is_cancelled() {
-                    return Err(chan_workspace::ChanError::Io(
-                        "upload cancelled before it completed".into(),
-                    ));
-                }
-                let attempted =
-                    written.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                if attempted > limit {
-                    return Err(chan_workspace::ChanError::WriteTooLarge {
-                        kind: "bytes",
-                        size: attempted,
-                        limit,
-                    });
-                }
-                temp.write_all(&bytes)
-                    .map_err(chan_workspace::ChanError::from)?;
-                written = attempted;
-            }
-            Some(TerminalUploadMessage::Complete) => break,
-            Some(TerminalUploadMessage::Failed(error)) => {
-                return Err(chan_workspace::ChanError::Io(format!(
-                    "multipart read failed: {error}"
-                )));
-            }
-            None => {
-                return Err(chan_workspace::ChanError::Io(
-                    "multipart body ended before completion".into(),
-                ));
-            }
+    consume_transfer_body(&mut rx, cancel, |bytes| {
+        // Checked per chunk rather than once at the start: an abandoned
+        // upload must return its admission slot within one chunk's work
+        // instead of holding it for a transfer nobody is waiting on. The
+        // temp file is dropped unpersisted, so nothing is left behind.
+        if cancel.is_cancelled() {
+            return Err(chan_workspace::ChanError::Io(
+                "upload cancelled before it completed".into(),
+            ));
         }
-    }
+        let attempted = written.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if attempted > limit {
+            return Err(chan_workspace::ChanError::WriteTooLarge {
+                kind: "bytes",
+                size: attempted,
+                limit,
+            });
+        }
+        temp.write_all(bytes)
+            .map_err(chan_workspace::ChanError::from)?;
+        written = attempted;
+        Ok(())
+    })?;
     temp.as_file()
         .sync_all()
         .map_err(|error| chan_workspace::ChanError::io_with_context(error, "fsync tmp"))?;
@@ -861,9 +790,9 @@ mod tests {
         bytes: &[u8],
     ) -> chan_workspace::Result<TerminalUploadResponse> {
         let (tx, rx) = mpsc::channel(2);
-        tx.try_send(TerminalUploadMessage::Chunk(Bytes::copy_from_slice(bytes)))
+        tx.try_send(RequestBodyMessage::Chunk(Bytes::copy_from_slice(bytes)))
             .unwrap();
-        tx.try_send(TerminalUploadMessage::Complete).unwrap();
+        tx.try_send(RequestBodyMessage::Complete).unwrap();
         drop(tx);
         terminal_upload_stream_sync(
             abs_dir,
@@ -1194,10 +1123,10 @@ mod tests {
             })
             .expect("an idle lane admits");
 
-        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"first")))
+        tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"first")))
             .await
             .unwrap();
-        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"second")))
+        tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"second")))
             .await
             .unwrap();
 
@@ -1207,10 +1136,10 @@ mod tests {
         // having read a chunk with cancellation already visible to it.
         for _ in 0..4 {
             let _ = tx
-                .send(TerminalUploadMessage::Chunk(Bytes::from_static(b"more")))
+                .send(RequestBodyMessage::Chunk(Bytes::from_static(b"more")))
                 .await;
         }
-        let _ = tx.send(TerminalUploadMessage::Complete).await;
+        let _ = tx.send(RequestBodyMessage::Complete).await;
         drop(tx);
 
         assert!(
@@ -1307,14 +1236,14 @@ mod tests {
             terminal_upload_stream_sync(&abs_dir, "seam.bin", rx, u64::MAX, &cancel)
         });
 
-        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"first")))
+        tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"first")))
             .await
             .unwrap();
         // Capacity 1, so this returns only once the writer has taken the first
         // chunk: the flag below is therefore set strictly after the writer
         // entered its loop, which a check placed before the loop would already
         // have passed.
-        tx.send(TerminalUploadMessage::Chunk(Bytes::from_static(b"second")))
+        tx.send(RequestBodyMessage::Chunk(Bytes::from_static(b"second")))
             .await
             .unwrap();
 
@@ -1322,10 +1251,10 @@ mod tests {
 
         for _ in 0..4 {
             let _ = tx
-                .send(TerminalUploadMessage::Chunk(Bytes::from_static(b"more")))
+                .send(RequestBodyMessage::Chunk(Bytes::from_static(b"more")))
                 .await;
         }
-        let _ = tx.send(TerminalUploadMessage::Complete).await;
+        let _ = tx.send(RequestBodyMessage::Complete).await;
         drop(tx);
 
         let error = writer.join().unwrap().unwrap_err();
@@ -1429,7 +1358,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target_dir = dir.path().to_path_buf();
         let (tx, rx) = mpsc::channel(1);
-        tx.try_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"partial")))
+        tx.try_send(RequestBodyMessage::Chunk(Bytes::from_static(b"partial")))
             .unwrap();
         let cancel = crate::bulk_transfer::test_support::with_stall_timeout(
             std::time::Duration::from_millis(25),
@@ -1482,11 +1411,11 @@ mod tests {
     fn terminal_stream_upload_overflow_removes_temp_and_target() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel(8);
-        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"12345")))
+        tx.blocking_send(RequestBodyMessage::Chunk(Bytes::from_static(b"12345")))
             .unwrap();
-        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"67890")))
+        tx.blocking_send(RequestBodyMessage::Chunk(Bytes::from_static(b"67890")))
             .unwrap();
-        tx.blocking_send(TerminalUploadMessage::Complete).unwrap();
+        tx.blocking_send(RequestBodyMessage::Complete).unwrap();
         drop(tx);
 
         let error = terminal_upload_stream_sync(
@@ -1510,7 +1439,7 @@ mod tests {
     fn terminal_stream_upload_disconnect_removes_temp_and_target() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel(8);
-        tx.blocking_send(TerminalUploadMessage::Chunk(Bytes::from_static(b"partial")))
+        tx.blocking_send(RequestBodyMessage::Chunk(Bytes::from_static(b"partial")))
             .unwrap();
         drop(tx);
 
@@ -1525,6 +1454,36 @@ mod tests {
 
         assert!(error.to_string().contains("before completion"));
         assert!(!dir.path().join("cancelled.bin").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// The 500 for a sender that goes away mid-body names the request body in
+    /// the words every upload lane uses for that failure, and the temp file
+    /// is gone with the target untouched.
+    #[tokio::test]
+    async fn terminal_upload_reports_a_dropped_sender_as_the_body_ending_early() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        tx.try_send(RequestBodyMessage::Chunk(Bytes::from_static(b"partial")))
+            .unwrap();
+        drop(tx);
+
+        let target_dir = dir.path().to_path_buf();
+        let cancel = crate::bulk_transfer::test_support::uncancelled();
+        let error = tokio::task::spawn_blocking(move || {
+            terminal_upload_stream_sync(&target_dir, "dropped.bin", rx, 1024, &cancel)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        let response = err_from(&error);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error_body(response).await,
+            "io error: request body ended before completion"
+        );
+        assert!(!dir.path().join("dropped.bin").exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 

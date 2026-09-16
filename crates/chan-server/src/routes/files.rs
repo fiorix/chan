@@ -2409,30 +2409,43 @@ where
     )
 }
 
-/// Admit one workspace upload and write it inside a SINGLE lane job.
+/// Admit one upload and write it inside a SINGLE lane job.
 ///
-/// Mirrors the terminal upload: the job is the writer, admitted before the
-/// first body byte is pulled, so a refusal has read nothing and resolved no
-/// destination, and the async half only moves the multipart field into the
-/// job's bounded channel. Returning early drops the job, which cancels it and
+/// The job is the writer. It is admitted before the first body byte is
+/// pulled, so a refusal has read nothing, opened nothing and left no temp
+/// file, and the disk work runs on the transfer lane rather than the pool
+/// that serves editor saves and terminal spawns. The async half only moves
+/// the multipart field into the job's bounded channel; that channel is also
+/// the backpressure, so a queued upload stalls its sender instead of
+/// buffering the body. Returning early drops the job, which cancels it and
 /// releases its slot.
-async fn stream_workspace_upload(
+///
+/// `write` is the lane's writer, run on the lane with the job's cancellation
+/// signal and the channel's receiving end. `map_err` renders its error, so a
+/// lane with structured refusals of its own keeps them.
+pub(crate) async fn stream_upload_tracked<T, W>(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
     tracking: Option<crate::routes::transfer::TransferTracking>,
-    workspace: Arc<chan_workspace::Workspace>,
-    self_writes: Arc<crate::self_writes::SelfWrites>,
-    destination: UploadDestination,
     mut field: Field<'_>,
-) -> Response {
-    let (tx, mut rx) = mpsc::channel(8);
-    let job = match bulk.submit(move |cancel| {
-        workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel)
-    }) {
+    write: W,
+    map_err: fn(&chan_workspace::ChanError) -> Response,
+) -> Response
+where
+    T: Serialize + Send + 'static,
+    W: FnOnce(
+            &crate::bulk_transfer::BulkCancel,
+            mpsc::Receiver<RequestBodyMessage>,
+        ) -> chan_workspace::Result<T>
+        + Send
+        + 'static,
+{
+    let (tx, rx) = mpsc::channel(8);
+    let job = match bulk.submit(move |cancel| write(cancel, rx)) {
         Ok(job) => job,
         Err(full) => return full.into_response(),
     };
-    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
+    let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
     if let (Some(events), Some(tracking)) = (events, tracking) {
         crate::routes::ws::spawn_transfer_queue_reporter(
             events,
@@ -2465,15 +2478,40 @@ async fn stream_workspace_upload(
     };
     match result {
         crate::bulk_transfer::BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
-        crate::bulk_transfer::BulkOutcome::Done(Err(error)) => err_from(&error),
+        crate::bulk_transfer::BulkOutcome::Done(Err(error)) => map_err(&error),
         // Cancellation, lane shutdown and a panicked job are reported
         // identically and cannot be told apart here. All three mean the write
-        // did not complete and nothing was persisted.
+        // did not complete and nothing was persisted, so the caller is told to
+        // retry rather than given a result that never existed.
         crate::bulk_transfer::BulkOutcome::Cancelled => err(
             StatusCode::SERVICE_UNAVAILABLE,
             "upload did not complete".into(),
         ),
     }
+}
+
+/// The workspace lane on the shared upload job; the writer is
+/// `workspace_upload_stream_sync`.
+async fn stream_workspace_upload(
+    bulk: &crate::bulk_transfer::BulkTransferTenant,
+    events: Option<tokio::sync::broadcast::Sender<String>>,
+    tracking: Option<crate::routes::transfer::TransferTracking>,
+    workspace: Arc<chan_workspace::Workspace>,
+    self_writes: Arc<crate::self_writes::SelfWrites>,
+    destination: UploadDestination,
+    field: Field<'_>,
+) -> Response {
+    stream_upload_tracked(
+        bulk,
+        events,
+        tracking,
+        field,
+        move |cancel, mut rx| {
+            workspace_upload_stream_sync(&workspace, &self_writes, &destination, &mut rx, cancel)
+        },
+        err_from,
+    )
+    .await
 }
 
 fn workspace_upload_stream_sync(
