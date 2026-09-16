@@ -140,10 +140,10 @@ impl Bm25Index {
     /// Re-index a single file from its pre-computed chunks: delete its
     /// previous documents and write one per chunk. Caller commits.
     /// `Index::build_all`'s parallel walker chunks off the writer thread,
-    /// and `Index::write_file` embeds the same chunks it hands here, so no
-    /// text is parsed twice. An empty chunk slice still drops any prior
-    /// documents for `rel_path`, so a file that became empty is removed
-    /// from the index.
+    /// and `Index::write_file` embeds the same chunks it hands here, so
+    /// neither path parses the text twice. An empty chunk slice still drops
+    /// any prior documents for `rel_path`, so a file that became empty is
+    /// removed from the index.
     pub fn index_chunks(&self, rel_path: &str, chunks: &[Chunk]) -> Result<usize, Bm25Error> {
         self.delete_file(rel_path)?;
         if chunks.is_empty() {
