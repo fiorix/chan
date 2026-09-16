@@ -74,13 +74,14 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!("devserver registry sweeper disabled by DEVSERVER_RETENTION_MINUTES=0");
     }
 
-    profile::revocation::spawn_worker(pool.clone(), cfg.workspace_admin.clone());
-
-    let app = http::router(http::AppState {
-        pool,
-        auth_token: cfg.auth_token.clone(),
-        admin_token: cfg.admin_token.clone(),
-    });
+    let app = http::app(
+        http::AppState {
+            pool,
+            auth_token: cfg.auth_token.clone(),
+            admin_token: cfg.admin_token.clone(),
+        },
+        cfg.workspace_admin.clone(),
+    );
 
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     axum::serve(listener, app)

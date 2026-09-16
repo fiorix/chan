@@ -53,12 +53,14 @@ impl TestApp {
                 "test-profile-admin-token".into(),
             )
             .unwrap();
-        profile::revocation::spawn_worker(app.pool.clone(), workspace_admin);
-        app.router = profile::http::router(profile::http::AppState {
-            pool: app.pool.clone(),
-            auth_token: TOKEN.to_string(),
-            admin_token: Some(ADMIN_TOKEN.to_string()),
-        });
+        app.router = profile::http::app(
+            profile::http::AppState {
+                pool: app.pool.clone(),
+                auth_token: TOKEN.to_string(),
+                admin_token: Some(ADMIN_TOKEN.to_string()),
+            },
+            workspace_admin,
+        );
         app
     }
 

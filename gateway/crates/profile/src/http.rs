@@ -4,6 +4,7 @@ use axum::middleware::{self, Next};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use gateway_common::devserver_control_client::DevserverControlClient;
 use gateway_common::validators::{valid_username, MAX_USERNAME_EDITS};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -67,7 +68,11 @@ pub struct AppState {
     pub admin_token: Option<String>,
 }
 
-pub fn router(state: AppState) -> Router {
+/// Start the durable revocation worker and build the HTTP application from the same pool.
+/// The worker runs detached for the life of the process.
+pub fn app(state: AppState, client: DevserverControlClient) -> Router {
+    crate::revocation::spawn_worker(state.pool.clone(), client);
+
     let api = Router::new()
         .route("/v1/users", post(create_user))
         .route(
