@@ -68,8 +68,9 @@ pub struct AppState {
     pub admin_token: Option<String>,
 }
 
-/// Start the durable revocation worker and build the HTTP application from the same pool.
-/// The worker runs detached for the life of the process.
+/// Start the durable revocation worker and build the HTTP application from
+/// the same pool. The worker runs detached for the life of the process.
+/// Call this inside a Tokio runtime: spawning the worker panics outside one.
 pub fn app(state: AppState, client: DevserverControlClient) -> Router {
     crate::revocation::spawn_worker(state.pool.clone(), client);
 

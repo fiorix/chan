@@ -73,8 +73,8 @@ impl RevocationJob {
 /// loop runs detached for the life of the process; process shutdown is its
 /// cancellation path, and a row it was mid-way through is resumed by the
 /// next process from the outbox.
-pub fn spawn_worker(pool: PgPool, client: DevserverControlClient) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(pool, client))
+pub(crate) fn spawn_worker(pool: PgPool, client: DevserverControlClient) {
+    tokio::spawn(run(pool, client));
 }
 
 /// Reserve a durable job in the caller's denial transaction. Every generation
