@@ -257,17 +257,10 @@ fn inode_key(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 fn file_kind_label(path: &str, is_contact: bool) -> &'static str {
-    if is_contact {
-        return "contact";
-    }
-    // Only Markdown (.md) is a "document"; .txt is editable + searchable
-    // text but not a graph document, so it labels as "text". Mirrors
-    // `routes::files::project_kind` and the graph ingest gate.
-    match chan_workspace::fs_ops::classify(path) {
-        FileClass::EditableText if chan_workspace::fs_ops::is_markdown_file(path) => "document",
-        FileClass::EditableText | FileClass::Text => "text",
-        FileClass::Image | FileClass::Pdf => "media",
-        FileClass::Other => "binary",
+    // The inspector has no content sniff, so an unknown file counts as binary.
+    match super::files::project_kind(path, false, is_contact) {
+        Some("pending") | None => "binary",
+        Some(kind) => kind,
     }
 }
 
@@ -276,8 +269,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// `file_kind_label` must agree with `routes::files::project_kind`:
-    /// only Markdown (.md) is `document`; .txt is `text`.
+    /// Only Markdown (.md) is `document`; .txt is `text`. Unknown files
+    /// count as `binary` here while `routes::files::project_kind` is `pending`.
     #[test]
     fn file_kind_label_marks_only_markdown_as_document() {
         assert_eq!(file_kind_label("notes/a.md", false), "document");
