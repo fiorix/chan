@@ -419,6 +419,20 @@ enum TenantKind {
         workspace: Arc<Workspace>,
         extension_catalog: Arc<extensions::ExtensionCatalog>,
     },
+    /// The workspace-less tenant behind standalone terminal windows: the
+    /// shared `/terminal` tenant the desktop and the devserver each mount
+    /// once per library, whose windows load the SPA in `?kind=terminal`
+    /// mode, and the desktop's control terminals. It omits the watcher,
+    /// indexer and MCP bridge, since there is no workspace to watch, index or
+    /// expose, and its PTYs start in the user's home directory rather than a
+    /// workspace root. The slim router mounts no workspace-content route, so
+    /// a workspace-only request (`/api/graph`, `/api/index/status`, ...) 404s
+    /// instead of reaching the empty `workspace_cell`. It still binds a
+    /// control socket so `cs` works inside its terminals: terminal, pane,
+    /// survey and window commands run, and workspace commands refuse with the
+    /// standalone-terminal message. `session_dir` is the durable layout store
+    /// of a shared terminal, which is also what makes it serve Files; `None`
+    /// keeps layouts in memory and serves terminals only.
     Terminal {
         session_dir: Option<PathBuf>,
         drafts_store_root: Option<PathBuf>,
@@ -474,7 +488,10 @@ fn load_editor_prefs() -> EditorPrefs {
 
 /// Build the tenant's state, owned tasks, local sockets and prefixed router.
 /// Workspace tenants own indexing and editor authorities; terminal tenants
-/// serve the standalone terminal and optional Files surface.
+/// serve the standalone terminal and optional Files surface. Shared by
+/// `serve()` and the `RouteLayer` tenant builder, through which the devserver
+/// and chan-desktop mount their tenants, so every path serves byte-identical
+/// request handling.
 async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<AppArtifacts, Error> {
     let TenantBuild {
         library,
@@ -494,6 +511,12 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         })
     };
 
+    // Seed the per-machine model cache from the embedded bundle when this
+    // build ships one (`--features embed-model`). Cheap on every launch:
+    // skipped once the default model is laid out at the target. Default
+    // builds compile it out and rely on the chan-workspace runtime resolver
+    // and the model download flow instead. Workspace tenants only: the model
+    // backs the search index, and a terminal spawns no indexer.
     #[cfg(feature = "embed-model")]
     if matches!(tenant, TenantKind::Workspace { .. }) {
         embed_seed::seed_models_from_bundle();
@@ -504,9 +527,19 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         tracing::warn!("malformed server config, falling back to defaults: {e}");
         ServerConfig::default()
     });
+    // Install any per-agent submit-chord overrides from
+    // `<config>/chan/submit.toml` into chan-shell, so a client changing its
+    // submit behavior is a config edit, not a rebuild. A missing or malformed
+    // file leaves the built-in defaults; `CHAN_SUBMIT_<AGENT>` still wins at
+    // chord-application time. Workspace-independent, so both kinds install
+    // it.
     submit_config::install();
-    // Workspace preferences load after indexer startup; terminals load them
-    // before constructing their event channels and standalone file surface.
+    // Editor preferences (theme, fonts, pane widths, line spacing, date
+    // format) join `ServerConfig` in the unified view over `/api/workspace`
+    // and `/api/config`, and the terminal router mounts `/api/config` too, so
+    // both kinds load them with the same fall-back policy. Workspace
+    // preferences load after indexer startup; terminals load them before
+    // constructing their event channels and standalone file surface.
     let terminal_prefs = matches!(tenant, TenantKind::Terminal { .. }).then(load_editor_prefs);
 
     // Unified event stream: every /ws subscriber gets watcher and
@@ -520,7 +553,9 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     // Indexer feed: raw WatchEvent for the background indexer
     // task. Larger buffer than the JSON channel because the
     // indexer's debounce loop drains every 200ms; bursts during
-    // git pull / mass rsync land here without lagging.
+    // git pull / mass rsync land here without lagging. A terminal tenant
+    // wires no producer to it; the feed exists so `AppState` keeps one shape
+    // for both kinds.
     let (index_events_tx, _) = broadcast::channel::<WatchEvent>(1024);
     // Shared dedupe queue: server writes note their path here, the
     // watcher bridge consults it before forwarding so save->reload
@@ -703,7 +738,10 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
             )
         } else {
             // Standalone terminals start in the user's home directory and
-            // expose no workspace or MCP bridge.
+            // expose no workspace or MCP bridge. The empty cell makes
+            // `try_workspace` report `Missing` on any path that reaches it;
+            // the control socket refuses workspace commands before that, by
+            // tenant kind.
             (
                 dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
                 Arc::new(RwLock::new(None)),
@@ -744,8 +782,11 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         events_tx.clone(),
         shutdown_rx.clone(),
     );
-    // A standalone workspace exits on unserve. A terminal has no workspace
-    // to unmount; hosted tenants delegate the decision to their host.
+    // A standalone workspace unserves by exiting the process (its shutdown
+    // signal); a hosted tenant unmounts itself from the host. A terminal has
+    // no workspace to unserve, so a standalone terminal refuses, while a
+    // hosted terminal still carries the host handle so a close that lands on
+    // its socket can unmount the right workspace tenant by root.
     let unserve_scope = match unserve {
         chan_library::UnserveMode::Standalone if matches!(tenant, TenantKind::Workspace { .. }) => {
             chan_library::UnserveScope::Standalone {
@@ -783,6 +824,8 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     let terminal_sessions = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
         workspace_root: workspace_root.clone(),
         mcp_socket_path: mcp_socket_path.clone(),
+        // Injected into every PTY as `$CHAN_CONTROL_SOCKET`, so `cs` works
+        // inside this tenant's terminals.
         control_socket_path: control_socket_path.clone(),
         terminal: server_config.terminal.clone(),
     }));
@@ -852,6 +895,9 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     );
 
     let state = Arc::new(AppState {
+        // The host's live registry handle, shared by every tenant: a terminal
+        // has no workspace of its own, but `/api/config` still joins the
+        // library's workspace list and transfer cap into the global view.
         library,
         workspace_root,
         workspace_cell: workspace_cell.clone(),
