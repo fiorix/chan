@@ -2970,7 +2970,7 @@ async fn settling_cut_gets_a_fresh_retry_window_after_a_late_first_cut() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
-        // This test owns every claim, so the background coordinator must not race process_once.
+        // This test owns every claim, so the background worker must not race process_once.
         let app = TestApp::new_database().await;
         let uid: Uuid = sqlx::query_scalar("INSERT INTO users (email, username) VALUES ('late-cut@x.com', 'late-cut') RETURNING id")
             .fetch_one(&app.pool).await.unwrap();
@@ -3005,48 +3005,57 @@ async fn settling_cut_gets_a_fresh_retry_window_after_a_late_first_cut() {
 
 #[tokio::test]
 async fn revocation_worker_starts_with_the_app() {
-    let control = Router::new().fallback(|| async {
-        axum::Json(json!({
-            "killed": 0,
-            "revoked": 0,
-            "proxies_confirmed": 1,
-            "proxies_expected": 1
-        }))
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let control_url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
-    // The fixture is the only thing that starts the worker: this test never
-    // calls process_once, so the claim below can only come from that task.
-    let app = TestApp::new_with_control(&control_url).await;
-    let uid: Uuid = mk_user(&app, "worker-start@x.com").await.parse().unwrap();
-    profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(uid))
-        .await
-        .unwrap();
-    let key = format!("subject:{uid}");
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let control = Router::new().fallback(|| async {
+            axum::Json(json!({
+                "killed": 0,
+                "revoked": 0,
+                "proxies_confirmed": 1,
+                "proxies_expected": 1
+            }))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+        // Production and the fixture share app startup. This test never calls
+        // process_once, so only the app's worker can confirm the first cut.
+        let app = TestApp::new_with_control(&control_url).await;
+        let mut observed = None;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let uid: Uuid = sqlx::query_scalar(
+                "INSERT INTO users (email, username) VALUES ('worker-start@x.com', 'worker-start') RETURNING id",
+            )
+            .fetch_one(&app.pool)
+            .await?;
+            profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(uid))
+                .await?;
+            let key = format!("subject:{uid}");
 
-    // A fresh reservation has no deadline; the worker's claim sets one, and
-    // the confirmed first cut moves the row to settling.
-    let bound = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let (phase, attempts, claimed): (String, i32, bool) = sqlx::query_as(
-            "SELECT phase, attempts, deadline IS NOT NULL \
-             FROM control_revocation_jobs WHERE job_key = $1",
-        )
-        .bind(&key)
-        .fetch_one(&app.pool)
-        .await
-        .unwrap();
-        if phase == "settling" {
-            assert!(claimed);
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < bound,
-            "worker never settled the job: phase={phase} attempts={attempts} claimed={claimed}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    app.cleanup().await;
-    server.abort();
+            // A fresh reservation has no deadline; the worker's claim sets one,
+            // and the confirmed first cut moves the row to settling.
+            loop {
+                let row: (String, i32, bool) = sqlx::query_as(
+                    "SELECT phase, attempts, deadline IS NOT NULL \
+                     FROM control_revocation_jobs WHERE job_key = $1",
+                )
+                .bind(&key)
+                .fetch_one(&app.pool)
+                .await?;
+                let settled = row.0 == "settling";
+                observed = Some(row);
+                if settled {
+                    return Ok::<(), sqlx::Error>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        server.abort();
+        app.cleanup().await;
+        result
+            .unwrap_or_else(|_| panic!("worker never settled the job: last (phase, attempts, claimed)={observed:?}"))
+            .expect("reserve and observe the revocation job");
+    })
+    .await
+    .expect("revocation worker startup test timed out");
 }
