@@ -110,9 +110,11 @@ describe("shared actions section under the filename", () => {
     );
   });
 
-  test("New terminal here maps to the fromHere helper, draft files to the abs-path seed", () => {
+  test("New terminal here and the draft terminal both map to the fromHere helper", () => {
     // Draft directories root the terminal in the directory via
-    // newTerminalHere; only draft files take the abs-path seed.
+    // newTerminalHere; a draft file seeds the same helper as a file. Drafts
+    // are in-root, so the inspector payload carries no absolute path and
+    // the component derives nothing from one.
     expect(fileInfo).toMatch(
       /case "newTerminal":[\s\S]{1,450}\{ label: "Terminal from here", onClick: newTerminalHere \}[\s\S]{1,120}\{ label: "Terminal from here", onClick: draftTerminalHere \}[\s\S]{1,120}\{ label: "New terminal here", onClick: newTerminalHere \}/,
     );
@@ -120,8 +122,9 @@ describe("shared actions section under the filename", () => {
       /function newTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, entry\.is_dir\)/,
     );
     expect(fileInfo).toMatch(
-      /function draftTerminalHere\(\): void \{[\s\S]{1,300}shellQuotePath\(draftAbs\)/,
+      /function draftTerminalHere\(\): void \{[\s\S]{1,200}terminalFromHereTarget\(entry\.path, false\)/,
     );
+    expect(fileInfo).not.toMatch(/abs_path|shellQuotePath/);
     expect(fileInfo).toMatch(
       /import \{[^}]*\bterminalFromHereTarget\b[^}]*\} from "\.\.\/terminal\/fromHere";/,
     );

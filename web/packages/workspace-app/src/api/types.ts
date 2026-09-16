@@ -989,10 +989,6 @@ export type InspectorPayload = {
   size: number;
   mtime: number | null;
   path_class: PathClass;
-  /// Absolute on-disk path, present ONLY for Drafts (which live outside the
-  /// workspace root, so the SPA can't derive it). Used to seed the draft
-  /// "Terminal from here". Absent for in-root paths.
-  abs_path?: string | null;
   frontmatter_kind: string | null;
   report_file?: ReportFileStats | null;
   report_summary?: InspectorReportSummary | null;

@@ -39,12 +39,6 @@ pub struct InspectorPayload {
     pub size: u64,
     pub mtime: Option<i64>,
     pub path_class: PathClass,
-    /// Always `None` now that drafts are real in-root files: the SPA
-    /// derives the absolute path from `workspace.info.root` + the
-    /// relative path for every path. Field kept on the payload to keep
-    /// the wire shape stable; do not rely on it being populated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub abs_path: Option<String>,
     pub frontmatter_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_file: Option<ReportFileStats>,
@@ -100,12 +94,7 @@ pub fn build_inspector_payload(
     requested_path: &str,
 ) -> chan_workspace::Result<InspectorPayload> {
     let path = normalize_path(requested_path)?;
-    // Drafts are now real in-root files under the configured drafts dir,
-    // so the root-relative `classify_path` resolves them like any other
-    // path. `abs_path` stays None: the SPA derives the absolute path from
-    // `workspace.info.root` + the relative path.
     let path_class = chan_workspace::classify_path(workspace.root(), &path)?;
-    let abs_path: Option<String> = None;
     let stat = if path.is_empty() {
         None
     } else {
@@ -145,7 +134,6 @@ pub fn build_inspector_payload(
         size: stat.as_ref().map(|s| s.size).unwrap_or(0),
         mtime: stat.as_ref().and_then(|s| s.mtime),
         path_class,
-        abs_path,
         frontmatter_kind,
         report_file,
         report_summary,

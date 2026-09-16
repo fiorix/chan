@@ -60,7 +60,7 @@
     tree,
   } from "../state/store.svelte";
   import { openTerminalInActivePane } from "../state/tabs.svelte";
-  import { terminalFromHereTarget, shellQuotePath } from "../terminal/fromHere";
+  import { terminalFromHereTarget } from "../terminal/fromHere";
   import { classifyEntry } from "../state/kinds";
   import {
     classifyFileActions,
@@ -542,18 +542,12 @@
 
   /// A draft FILE is scratch space, so the classifier yields only the
   /// terminal action. Its handler opens a terminal seeded with
-  /// {cursor}{space}{ABSOLUTE-path-of-the-draft}. The absolute path comes
-  /// from the inspector payload (abs_path); cwd is the workspace root, so the
-  /// location-independent absolute seed is what reaches the prompt. The
+  /// {cursor}{space}{relative-path-of-the-draft}: drafts are in-root files,
+  /// so the shared fromHere seed applies with cwd at the workspace root. The
   /// {cursor}{space} prefix is added by TerminalTab's seed mechanism.
   function draftTerminalHere(): void {
     if (!entry) return;
-    const draftAbs = inspectorPayload?.abs_path ?? null;
-    openTerminalInActivePane(
-      draftAbs
-        ? { cwd: "", seedInput: shellQuotePath(draftAbs) }
-        : terminalFromHereTarget(entry.path, false),
-    );
+    openTerminalInActivePane(terminalFromHereTarget(entry.path, false));
   }
 
   /// Maps a classifier action id to this surface's handlers and
