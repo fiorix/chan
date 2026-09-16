@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 chrono = { workspace = true }
+encoding_rs_io = "0.1"
 ignore = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }

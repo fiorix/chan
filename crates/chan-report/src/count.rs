@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use encoding_rs_io::DecodeReaderBytesBuilder;
 use tokei::{Config, LanguageType};
 
 use crate::complexity;
@@ -146,23 +147,20 @@ fn count_file_after_stat(
                 cx,
             )
         }
-        Some(TextRead::NonUtf8) => {
-            // Tokei's slice parser does not decode non-UTF-8 input. Its
-            // path decoder reopens and reads without a limit, so growth
-            // during this fallback can exceed the initial bounded read.
+        Some(TextRead::NonUtf8(bytes)) => {
+            // Tokei's slice parser does not decode non-UTF-8 input, so the
+            // bounded bytes are decoded in memory the way tokei's path parser
+            // decodes a file: BOM sniffing, no explicit encoding, invalid
+            // sequences replaced, and raw passthrough without a BOM.
             // Complexity needs UTF-8 and remains zero here.
-            #[cfg(test)]
-            record_content_read();
-            match language.parse(abs, &cfg) {
-                Ok(r) => (
-                    r.stats.code as u64,
-                    r.stats.comments as u64,
-                    r.stats.blanks as u64,
-                    0,
-                ),
-                Err((error, _)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err((error, _)) => return Err(error.into()),
-            }
+            let decoded = decode_like_tokei(&bytes)?;
+            let stats = language.parse_from_slice(&decoded, &cfg);
+            (
+                stats.code as u64,
+                stats.comments as u64,
+                stats.blanks as u64,
+                0,
+            )
         }
         None | Some(TextRead::Oversize) => (0, 0, 0, 0),
     };
@@ -187,8 +185,21 @@ fn count_file_after_stat(
 
 enum TextRead {
     Text(String),
-    NonUtf8,
+    NonUtf8(Vec<u8>),
     Oversize,
+}
+
+/// Transcode bytes to UTF-8 with the decoder options tokei's path parser
+/// uses: `DecodeReaderBytesBuilder::new()` (BOM sniffing on, no explicit
+/// encoding, no UTF-8 passthrough, BOM removed by the decoder). Without a
+/// BOM the bytes pass through unchanged, so the output is not necessarily
+/// valid UTF-8 and is counted by tokei's slice parser.
+fn decode_like_tokei(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(bytes.len());
+    DecodeReaderBytesBuilder::new()
+        .build(bytes)
+        .read_to_end(&mut decoded)?;
+    Ok(decoded)
 }
 
 /// Probe at most 256 bytes. Tokei is only asked to inspect a shebang when
@@ -218,7 +229,7 @@ fn read_text(abs: &Path) -> std::io::Result<(TextRead, fs::Metadata)> {
     }
     let content = match String::from_utf8(buf) {
         Ok(content) => TextRead::Text(content),
-        Err(_) => TextRead::NonUtf8,
+        Err(error) => TextRead::NonUtf8(error.into_bytes()),
     };
     Ok((content, meta))
 }
@@ -447,5 +458,80 @@ mod tests {
             );
             assert_eq!(stats.language, language.name());
         }
+    }
+
+    #[test]
+    fn non_utf8_counts_match_tokei_path_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "# leading comment\nif True:\n\n    pass  # trailing\n# caf\u{e9}\n";
+        let mut utf16le = vec![0xff, 0xfe];
+        let mut utf16be = vec![0xfe, 0xff];
+        for unit in text.encode_utf16() {
+            utf16le.extend_from_slice(&unit.to_le_bytes());
+            utf16be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let latin1: Vec<u8> = text
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap())
+            .collect();
+        let mut utf8_bom_invalid = vec![0xef, 0xbb, 0xbf];
+        utf8_bom_invalid.extend_from_slice(&latin1);
+        let fixtures = [
+            ("utf16le-bom.py", utf16le),
+            ("utf16be-bom.py", utf16be),
+            ("latin1.py", latin1),
+            ("utf8-bom-invalid.py", utf8_bom_invalid),
+        ];
+        for (name, bytes) in fixtures {
+            assert!(
+                std::str::from_utf8(&bytes).is_err(),
+                "{name} must not be valid UTF-8"
+            );
+            let abs = dir.path().join(name);
+            fs::write(&abs, &bytes).unwrap();
+            let expected = LanguageType::Python
+                .parse(abs.clone(), &Config::default())
+                .unwrap()
+                .stats;
+            assert!(
+                expected.comments > 0 && expected.code > 0,
+                "{name} fixture must exercise comments and code"
+            );
+            let stats = count_file_impl(dir.path(), name)
+                .unwrap()
+                .expect("non-UTF-8 source is counted");
+            assert_eq!(stats.language, LanguageType::Python.name());
+            assert_eq!(
+                (stats.code, stats.comments, stats.blanks),
+                (
+                    expected.code as u64,
+                    expected.comments as u64,
+                    expected.blanks as u64
+                ),
+                "{name} counts match tokei's path parser"
+            );
+            assert_eq!(stats.complexity, 0);
+            assert_eq!(stats.bytes, bytes.len() as u64);
+        }
+    }
+
+    #[test]
+    fn a_small_non_utf8_file_is_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "# comment\nif True:\n    pass\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(dir.path().join("encoded.py"), &bytes).unwrap();
+        CONTENT_READS.set(0);
+        let stats = count_file_impl(dir.path(), "encoded.py")
+            .unwrap()
+            .expect("UTF-16 source is counted");
+        assert_eq!(
+            CONTENT_READS.get(),
+            1,
+            "non-UTF-8 content is decoded from the one bounded read"
+        );
+        assert_eq!((stats.code, stats.comments), (2, 1));
     }
 }

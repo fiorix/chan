@@ -1094,6 +1094,7 @@ name = "chan-report"
 version = "0.98.0"
 dependencies = [
  "chrono",
+ "encoding_rs_io",
  "ignore",
  "serde",
  "serde_json",
