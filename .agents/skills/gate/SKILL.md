@@ -30,11 +30,12 @@ The gate runs, in order:
 10. `cargo build --no-default-features` (with `RUSTFLAGS=-D warnings`)
 11. `make gateway-lint` (clippy over the SEPARATE gateway workspace, warnings denied; the root clippy run does not reach it). Its prerequisite `make gateway-version-pin-check` runs first and in well under a second: the gateway deb version pins (`check-package-version-pins.sh`) and the static packaging isolation contracts (`check-packaging-isolation.sh`, both in `packaging/gateway/scripts/`)
 12. `make gateway-doc` (rustdoc over the SEPARATE gateway workspace, warnings denied: the same check as step 8, for the crates the root `--workspace` never selects. Its prerequisite `make gateway-spa` builds the identity SPA bundle first, because `cargo doc` compiles `identity`, which embeds `web/dist` through rust-embed and does not build without it)
-13. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
-14. `make web-check` (svelte-check + vitest + production build)
-15. `make web-marketing-check` (marketing site build + smokes)
-16. `make shortcuts-check`
-17. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
+13. `make gateway-test` (executes the database-free gateway tests: every crate's library unit tests, all of devserver-proxy's unit, integration and doc tests, and the admin CLI binary's unit tests, which live in the binary because that crate has no library. The seven Postgres-backed profile and identity integration-test files are reported as NOT RUN, since the gate runs without a database; Gateway CI executes them against its Postgres service)
+14. `make gateway-build` (the SEPARATE gateway Cargo workspace; builds its SPA then its release crates)
+15. `make web-check` (svelte-check + vitest + production build)
+16. `make web-marketing-check` (marketing site build + smokes)
+17. `make shortcuts-check`
+18. `make host-build-check` (release CLI build plus a foreground-devserver health smoke, followed by a native AppImage on Linux or an ad-hoc-signed `.app` on macOS)
 
 Steps 1 and 2 lint `packaging/`, `scripts/`, and the workflows; step 3 additionally proves that every shipped build surface still has an automatic native, distro, or container build edge.
 

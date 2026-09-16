@@ -491,9 +491,13 @@ gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
 	@printf '%s\n' \
 		'gateway-test: EXECUTE: all gateway library unit tests' \
 		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
+		'gateway-test: EXECUTE: admin CLI binary unit tests' \
 		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
 	cd gateway && $(CARGO) test --workspace --lib
 	cd gateway && $(CARGO) test -p devserver-proxy
+	# admin is a binary crate with no library target, so --lib above never
+	# selects its tests.
+	cd gateway && $(CARGO) test -p admin --bins
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.
