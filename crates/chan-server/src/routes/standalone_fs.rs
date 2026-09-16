@@ -50,11 +50,11 @@ use crate::util::{slugify_for_filename, split_filename};
 use super::files::{
     accumulate_text_body, basename, consume_transfer_body, join_rel, ndjson_bytes,
     ndjson_error_bytes, normalize_dir_query, parent_dir, parse_optional_mtime_ns, project_kind,
-    read_multipart_text_field, resolve_range, stream_binary_plan, upload_leaf_filename,
+    resolve_range, stream_binary_plan, upload_leaf_filename, with_upload_destination,
     write_precondition_response, BinaryPlan, CreateBody, FileResponse, FileStreamEvent,
     FileStreamMessage, ListFilesQuery, MoveBody, MoveResponse, RangeOutcome, RequestBodyMessage,
     TransferBody, TransferItem, TransferOp, TransferResponse, TreeEntryView, UploadDestination,
-    UploadFileResponse, WriteResponse,
+    UploadDestinationParts, UploadFileResponse, WriteResponse,
 };
 use super::transfer::TransferTracking;
 
@@ -714,66 +714,14 @@ pub(crate) async fn standalone_upload_file(
     let Some(files) = standalone_state(&state) else {
         return files_not_served();
     };
-    let mut dir = String::new();
-    let mut replace_path: Option<String> = None;
-    let mut destination_seen = false;
-    loop {
-        match multipart.next_field().await {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or("").to_owned();
-                match name.as_str() {
-                    "file" => {
-                        if !destination_seen {
-                            return err(
-                                StatusCode::BAD_REQUEST,
-                                "`dir` or `path` must precede the streaming `file` part".into(),
-                            );
-                        }
-                        let filename = field.file_name().unwrap_or("").to_owned();
-                        return stream_standalone_upload(
-                            &state,
-                            files,
-                            w,
-                            UploadDestination {
-                                dir,
-                                replace_path,
-                                filename,
-                            },
-                            &headers,
-                            field,
-                        )
-                        .await;
-                    }
-                    "dir" => match read_multipart_text_field(field).await {
-                        Ok(s) => {
-                            dir = s;
-                            destination_seen = true;
-                        }
-                        Err(e) => {
-                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
-                        }
-                    },
-                    "path" => match read_multipart_text_field(field).await {
-                        Ok(s) => {
-                            replace_path = Some(s);
-                            destination_seen = true;
-                        }
-                        Err(e) => {
-                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            Ok(None) => break,
-            Err(e) => return err(StatusCode::BAD_REQUEST, format!("multipart parse: {e}")),
-        }
-    }
-
-    err(
-        StatusCode::BAD_REQUEST,
-        "missing `file` part in multipart body".into(),
+    with_upload_destination(
+        &mut multipart,
+        UploadDestinationParts::DirOrPath,
+        async |destination, field| {
+            stream_standalone_upload(&state, files, w, destination, &headers, field).await
+        },
     )
+    .await
 }
 
 /// Admit one Files upload and write it inside a single lane job, exactly
@@ -1906,6 +1854,54 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(fx.root.join("up.bin")).unwrap(),
+            "replaced"
+        );
+    }
+
+    /// The destination parts precede the streaming `file` part. A body that
+    /// leads with the file is refused before a byte is written, and the
+    /// refusal names both parts this lane accepts.
+    #[tokio::test]
+    async fn standalone_upload_prologue_refuses_file_before_a_destination() {
+        let fx = files_fixture();
+        let response = router(&fx)
+            .oneshot(multipart_request(
+                "/api/fs/upload?app=files",
+                &[("file", Some("early.bin"), "no-write"), ("dir", None, "")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error": "`dir` or `path` must precede the streaming `file` part"})
+        );
+        assert!(!fx.root.join("early.bin").exists());
+    }
+
+    /// `path` on its own is a destination on this lane: it names the file the
+    /// upload replaces, so no `dir` part is needed.
+    #[tokio::test]
+    async fn standalone_upload_prologue_accepts_path_as_the_destination() {
+        let fx = files_fixture();
+        std::fs::write(fx.root.join("note.bin"), b"original").unwrap();
+        let response = router(&fx)
+            .oneshot(multipart_request(
+                "/api/fs/upload?app=files",
+                &[
+                    ("path", None, "note.bin"),
+                    ("file", Some("ignored.bin"), "replaced"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await,
+            json!({"path": "note.bin", "size": 8})
+        );
+        assert_eq!(
+            std::fs::read_to_string(fx.root.join("note.bin")).unwrap(),
             "replaced"
         );
     }

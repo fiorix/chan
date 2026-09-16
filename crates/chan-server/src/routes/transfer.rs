@@ -36,7 +36,7 @@ use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
 use crate::error::{err, err_from};
 use crate::routes::files::{
     content_disposition_archive, content_disposition_attachment, download_filename, query_flag,
-    read_multipart_text_field, upload_leaf_filename,
+    upload_leaf_filename, with_upload_destination, UploadDestinationParts,
 };
 use crate::static_assets::content_type_for;
 
@@ -635,54 +635,23 @@ pub(crate) async fn filesystem_upload_response(
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let mut dir = String::new();
-    let mut dir_seen = false;
-    loop {
-        match multipart.next_field().await {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or("").to_owned();
-                match name.as_str() {
-                    "file" => {
-                        if !dir_seen {
-                            return err(
-                                StatusCode::BAD_REQUEST,
-                                "`dir` must precede the streaming `file` part".into(),
-                            );
-                        }
-                        let filename = field.file_name().unwrap_or("").to_owned();
-                        let abs_dir = abs_from_terminal_path(&dir);
-                        return stream_terminal_upload(
-                            &state.bulk_transfer,
-                            Some(state.events_tx.clone()),
-                            TransferTracking::from_headers(&headers),
-                            abs_dir,
-                            filename,
-                            state.library.transfer_max_bytes(),
-                            field,
-                        )
-                        .await;
-                    }
-                    "dir" => match read_multipart_text_field(field).await {
-                        Ok(s) => {
-                            dir = s;
-                            dir_seen = true;
-                        }
-                        Err(e) => {
-                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"))
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            Ok(None) => break,
-            Err(e) => return err(StatusCode::BAD_REQUEST, format!("multipart parse: {e}")),
-        }
-    }
-
-    err(
-        StatusCode::BAD_REQUEST,
-        "missing `file` part in multipart body".into(),
+    with_upload_destination(
+        &mut multipart,
+        UploadDestinationParts::DirOnly,
+        async |destination, field| {
+            stream_terminal_upload(
+                &state.bulk_transfer,
+                Some(state.events_tx.clone()),
+                TransferTracking::from_headers(&headers),
+                abs_from_terminal_path(&destination.dir),
+                destination.filename,
+                state.library.transfer_max_bytes(),
+                field,
+            )
+            .await
+        },
     )
+    .await
 }
 
 enum TerminalUploadMessage {
@@ -950,6 +919,94 @@ mod tests {
             std::fs::read(dir.path().join("note.bin")).unwrap(),
             b"terminal-stream"
         );
+    }
+
+    /// Post one hand-built multipart body to the terminal tenant's real
+    /// router, so the pin covers the mount and the dispatch, not a handler
+    /// called by hand.
+    async fn post_terminal_upload(boundary: &str, body: String) -> Response {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = crate::terminal_router(crate::state::test_support::make_test_state(false));
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/fs/upload")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn error_body(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        body["error"].as_str().unwrap().to_owned()
+    }
+
+    /// The `dir` part precedes the streaming `file` part. A body that leads
+    /// with the file is refused before a byte is written, and the refusal
+    /// names the one destination part this lane accepts.
+    #[tokio::test]
+    async fn terminal_upload_prologue_refuses_file_before_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let boundary = "terminal-prologue-file-first";
+        let rooted_dir = dir.path().display().to_string();
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"early.bin\"\r\n\r\n\
+             no-write\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             {rooted_dir}\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = post_terminal_upload(boundary, body).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_body(response).await,
+            "`dir` must precede the streaming `file` part"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// This lane has no replace flow, so a `path` part is not a destination:
+    /// a body carrying `path` and `file` but no `dir` is refused like one with
+    /// no destination at all. Counting `path` would admit the upload with an
+    /// empty `dir`, which resolves to the filesystem root.
+    #[tokio::test]
+    async fn terminal_upload_prologue_ignores_path_and_refuses_file_without_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let boundary = "terminal-prologue-path";
+        let rooted_path = dir.path().join("unrooted.bin").display().to_string();
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"path\"\r\n\r\n\
+             {rooted_path}\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"unrooted.bin\"\r\n\r\n\
+             no-write\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = post_terminal_upload(boundary, body).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_body(response).await,
+            "`dir` must precede the streaming `file` part"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

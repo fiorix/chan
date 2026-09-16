@@ -2267,6 +2267,85 @@ async fn workspace_upload_response(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
+    with_upload_destination(
+        &mut multipart,
+        UploadDestinationParts::DirOrPath,
+        async |destination, field| {
+            let workspace = match state.try_workspace() {
+                Ok(workspace) => workspace,
+                Err(e) => return err_state(&e),
+            };
+            stream_workspace_upload(
+                &state.bulk_transfer,
+                Some(state.events_tx.clone()),
+                crate::routes::transfer::TransferTracking::from_headers(&headers),
+                workspace,
+                Arc::clone(&state.self_writes),
+                destination,
+                field,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// Where one upload lands, as the multipart parts named it and before the
+/// target is resolved. Grouped so the admitted path stays inside clippy's
+/// argument budget without an allow.
+pub(crate) struct UploadDestination {
+    pub(crate) dir: String,
+    pub(crate) replace_path: Option<String>,
+    pub(crate) filename: String,
+}
+
+/// Which multipart parts may name an upload's destination. A `file` part
+/// that arrives before one of them is refused with a message naming exactly
+/// these parts, so the choice carries its own refusal text.
+#[derive(Clone, Copy)]
+pub(crate) enum UploadDestinationParts {
+    /// `dir` creates under a directory and `path` replaces a file: the
+    /// workspace and Files lanes.
+    DirOrPath,
+    /// `dir` alone: the terminal lane targets a directory and has no replace
+    /// flow, so a `path` part is not a destination. Counting it would admit a
+    /// body with no `dir`, and an empty `dir` resolves to the filesystem root
+    /// on that lane.
+    DirOnly,
+}
+
+impl UploadDestinationParts {
+    fn accepts_path(self) -> bool {
+        matches!(self, Self::DirOrPath)
+    }
+
+    fn file_first_refusal(self) -> &'static str {
+        match self {
+            Self::DirOrPath => "`dir` or `path` must precede the streaming `file` part",
+            Self::DirOnly => "`dir` must precede the streaming `file` part",
+        }
+    }
+}
+
+/// The multipart prologue every streaming upload route runs: the destination
+/// parts are read until the `file` part arrives, and `then` receives that
+/// part still live, so the lane consumes it chunk by chunk. The file part is
+/// handed to a continuation rather than returned because it borrows the
+/// multipart the loop polls again on the metadata arms; a returned field
+/// would hold that borrow across the next `next_field`.
+///
+/// Every refusal here is a 400 and nothing has been admitted or written: a
+/// `file` part before a destination part, a metadata part that fails to read
+/// or exceeds its bound, a malformed body, and a body with no `file` part. A
+/// part the lane does not accept is skipped unread.
+pub(crate) async fn with_upload_destination<F>(
+    multipart: &mut Multipart,
+    accepted: UploadDestinationParts,
+    then: F,
+) -> Response
+where
+    F: for<'f> AsyncFnOnce(UploadDestination, Field<'f>) -> Response,
+{
     let mut dir = String::new();
     let mut replace_path: Option<String> = None;
     let mut destination_seen = false;
@@ -2279,20 +2358,11 @@ async fn workspace_upload_response(
                         if !destination_seen {
                             return err(
                                 StatusCode::BAD_REQUEST,
-                                "`dir` or `path` must precede the streaming `file` part".into(),
+                                accepted.file_first_refusal().into(),
                             );
                         }
                         let filename = field.file_name().unwrap_or("").to_owned();
-                        let workspace = match state.try_workspace() {
-                            Ok(workspace) => workspace,
-                            Err(e) => return err_state(&e),
-                        };
-                        return stream_workspace_upload(
-                            &state.bulk_transfer,
-                            Some(state.events_tx.clone()),
-                            crate::routes::transfer::TransferTracking::from_headers(&headers),
-                            workspace,
-                            Arc::clone(&state.self_writes),
+                        return then(
                             UploadDestination {
                                 dir,
                                 replace_path,
@@ -2311,15 +2381,20 @@ async fn workspace_upload_response(
                             return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
                         }
                     },
-                    "path" => match read_multipart_text_field(field).await {
-                        Ok(s) => {
-                            replace_path = Some(s);
-                            destination_seen = true;
+                    "path" if accepted.accepts_path() => {
+                        match read_multipart_text_field(field).await {
+                            Ok(s) => {
+                                replace_path = Some(s);
+                                destination_seen = true;
+                            }
+                            Err(e) => {
+                                return err(
+                                    StatusCode::BAD_REQUEST,
+                                    format!("multipart read: {e}"),
+                                );
+                            }
                         }
-                        Err(e) => {
-                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
-                        }
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -2332,15 +2407,6 @@ async fn workspace_upload_response(
         StatusCode::BAD_REQUEST,
         "missing `file` part in multipart body".into(),
     )
-}
-
-/// Where one upload lands, as the multipart parts named it and before the
-/// target is resolved. Grouped so the admitted path stays inside clippy's
-/// argument budget without an allow.
-pub(crate) struct UploadDestination {
-    pub(crate) dir: String,
-    pub(crate) replace_path: Option<String>,
-    pub(crate) filename: String,
 }
 
 /// Admit one workspace upload and write it inside a SINGLE lane job.
@@ -5597,6 +5663,92 @@ mod doc_divert_tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!root.path().join("wrong.bin").exists());
         assert!(!root.path().join("docs/wrong.bin").exists());
+    }
+
+    /// The destination parts precede the streaming `file` part. A body that
+    /// leads with the file is refused before a byte is written, and the
+    /// refusal names both parts this lane accepts.
+    #[tokio::test]
+    async fn workspace_upload_prologue_refuses_file_before_a_destination() {
+        let (_cfg, root, state) = divert_app();
+        let boundary = "workspace-prologue-file-first";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"early.bin\"\r\n\r\n\
+             no-write\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"dir\"\r\n\r\n\
+             \r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/fs/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(response).await["error"],
+            "`dir` or `path` must precede the streaming `file` part"
+        );
+        assert!(!root.path().join("early.bin").exists());
+    }
+
+    /// `path` on its own is a destination on this lane: it names the file the
+    /// upload replaces, so no `dir` part is needed.
+    #[tokio::test]
+    async fn workspace_upload_prologue_accepts_path_as_the_destination() {
+        let (_cfg, root, state) = divert_app();
+        state
+            .try_workspace()
+            .unwrap()
+            .write_text("note.txt", "original")
+            .unwrap();
+        let boundary = "workspace-prologue-path";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"path\"\r\n\r\n\
+             note.txt\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"ignored.bin\"\r\n\r\n\
+             replaced\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/fs/upload")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = body_json(response).await;
+        assert_eq!(response_body["path"], "note.txt");
+        assert_eq!(response_body["size"], 8);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("note.txt")).unwrap(),
+            "replaced"
+        );
     }
 
     #[tokio::test]
