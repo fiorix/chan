@@ -1853,7 +1853,7 @@ pub(crate) async fn register_devserver_row(
     if !scopes.iter().any(|s| s == TUNNEL_SCOPE) {
         return;
     }
-    let devserver_id = crate::api_tokens::devserver_id_from_pat(secret);
+    let devserver_id = chan_tunnel_proto::gateway_assertion::devserver_id_from_token(secret);
     if let Err(e) = state
         .cfg
         .profile_client
