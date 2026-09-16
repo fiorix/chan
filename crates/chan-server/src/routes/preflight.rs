@@ -338,8 +338,8 @@ fn workspace_and_indexer(
 
 /// The snapshot a preflight handler answers with: `build_snapshot` over
 /// `status`, plus the onboarding summary. The onboarding summary describes an
-/// OPEN workspace, so attach it only once ready (also keeps the per-poll work
-/// off the cold-build path).
+/// OPEN workspace, so attach it only when both phase and readiness are ready.
+/// Build or reindex work on an already-ready generation does not withhold it.
 fn settled_snapshot(
     workspace: &chan_workspace::Workspace,
     status: &IndexStatus,

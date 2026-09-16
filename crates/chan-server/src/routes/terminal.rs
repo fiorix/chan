@@ -675,9 +675,8 @@ struct TerminalWsOptions {
 /// Longest terminal or tab name kept, in characters.
 const MAX_NAME_CHARS: usize = 128;
 
-/// Longest window, pane or tab id kept, in characters. These are opaque SPA
-/// placement labels carried for `cs terminal list`, not validated against any
-/// registry, so the cap is the only check they get.
+/// Longest window, pane or tab id kept, in characters. These labels are trimmed,
+/// blank values are dropped, and the remainder is capped at this length.
 const MAX_ID_CHARS: usize = 256;
 
 /// Trim `raw`, drop a blank result, and keep at most `max_chars` characters.
