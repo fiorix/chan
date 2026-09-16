@@ -84,7 +84,6 @@ uuid = { workspace = true, features = ["v4"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
-semver = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Raw Win32 FFI, no higher-level wrapper needed:
@@ -100,25 +99,20 @@ semver = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# `MainThreadMarker`: the AppKit calls below are main-thread-only and take
+# the marker as proof.
 objc2 = "0.6"
-# `NSPrintInfo` + `NSPrintOperation` drive the silent save-to-PDF print
-# job (see src/pdf.rs). The other features cover the offscreen NSWindow the
-# webview is parented in for layout. `NSPasteboard` backs the drag-
-# pasteboard read in src/dropped_paths.rs. `NSAlert` + `NSButton` back the
-# native Return-to-default confirm dialogs in src/native_dialog.rs.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "NSPrintInfo", "NSPrintOperation"] }
-# `NSURL` builds the destination file URL and `NSDictionary` inserts it
-# into the print info's attributes dictionary under `NSPrintJobSavingURL`.
-# `NSArray` carries the drag pasteboard's filename property list.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL", "objc2-core-foundation"] }
-# Paginating PDF export from the desktop shell. `win.print()` is a no-op
-# in WKWebView, so chan-desktop renders the themed print HTML through
-# WKWebView's native print pipeline (`printOperationWithPrintInfo:`, see
-# src/pdf.rs), which honors `@page`, CSS auto-pagination, and page breaks.
-# The `objc2-app-kit` feature exposes that method and the NSPrint* types;
-# objc2-core-foundation pumps the main run loop while the page loads.
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "WKWebView", "WKWebViewConfiguration", "WKNavigation", "objc2-app-kit"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFDate"] }
+# `NSAlert`, `NSApplication` and `NSButton` back the native confirm dialog
+# in src/native_dialog.rs; `NSPasteboard` backs the drag-pasteboard read in
+# src/dropped_paths.rs. objc2 declares a class under the features of its
+# superclasses, so `NSControl`, `NSView` and `NSResponder` gate `NSButton`
+# (what `addButtonWithTitle` returns) and `NSResponder` gates
+# `NSApplication`; the dialog's calls on both types sit behind them.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView"] }
+# `NSString` carries the dialog text and the pasteboard names and types;
+# `NSArray` carries the drag pasteboard's filename property list, and
+# `NSEnumerator` gates the `NSArray::iter` that walks it.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

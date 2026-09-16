@@ -12,7 +12,7 @@
 //! alert's window key and main and spins its own nested event loop, so Return
 //! reaches the default button and -- unlike rfd's *blocking* show, which would
 //! wedge the outer event loop -- it cannot deadlock the main thread (it pumps
-//! itself, the same way `pdf.rs` pumps the run loop synchronously).
+//! itself).
 //!
 //! Off macOS the plugin path is kept verbatim (rfd routes Return fine on
 //! GTK / Win32), so `confirm` is cfg-split internally and callers stay

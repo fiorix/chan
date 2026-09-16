@@ -4268,11 +4268,9 @@ fn probe_error_detail(e: &reqwest::Error) -> String {
 }
 
 /// Host OS the desktop shell is running on, as `std::env::consts::OS`
-/// (`"macos"`, `"linux"`, `"windows"`, ...). The SPA branches features
-/// that only exist on one platform; "Export to PDF" uses this to keep
-/// the native WKWebView `createPDF` path on macOS and hide the button
-/// elsewhere. Sourced from the compiled-in target triple rather than a
-/// `navigator.userAgent` sniff so the answer is exact and cannot be
+/// (`"macos"`, `"linux"`, `"windows"`, ...), for SPA features that exist
+/// on one platform only. Sourced from the compiled-in target triple rather
+/// than a `navigator.userAgent` sniff so the answer is exact and cannot be
 /// spoofed by a webview UA string.
 #[tauri::command]
 fn platform_os() -> String {
