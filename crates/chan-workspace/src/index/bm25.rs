@@ -14,7 +14,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::Serialize;
 use tantivy::collector::TopDocs;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery};
@@ -29,24 +28,13 @@ use thiserror::Error;
 
 use super::chunking::{self, Chunk};
 use super::config::Chunking;
+use super::facade::Hit;
 
 /// Memory budget per writer batch. tantivy's recommendation is
 /// 50 MB minimum; our corpora are small so this is more than enough.
 const WRITER_BUDGET: usize = 50_000_000;
 const TANTIVY_MIN_MEMORY_PER_THREAD: usize = 15_000_000;
 const TANTIVY_MAX_AUTO_THREADS: usize = 8;
-
-/// One search hit. Field naming matches the API response shape so
-/// the server layer can serialize these directly.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Hit {
-    pub path: String,
-    pub chunk_id: String,
-    pub heading: String,
-    pub start_line: u64,
-    pub snippet: String,
-    pub score: f32,
-}
 
 #[derive(Debug, Error)]
 pub enum Bm25Error {

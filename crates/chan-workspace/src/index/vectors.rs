@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::chunking::Chunk;
+use super::facade::Hit;
 
 /// Storage-format version inside the per-file bin. v2 added
 /// `body_hash` so `Index::build_all` can skip re-embedding files
@@ -66,18 +67,6 @@ struct ShardMeta {
     model: String,
     body_hash: [u8; 32],
     chunks: Vec<EmbeddedChunk>,
-}
-
-/// One semantic-search result. Field set matches `bm25::Hit` so the
-/// fusion step can blend the two without translation.
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Hit {
-    pub path: String,
-    pub chunk_id: String,
-    pub heading: String,
-    pub start_line: u64,
-    pub snippet: String,
-    pub score: f32,
 }
 
 #[derive(Debug, Error)]

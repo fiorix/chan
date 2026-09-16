@@ -102,8 +102,10 @@ impl Mode {
     }
 }
 
-/// Unified search hit. Both BM25 and semantic results are converted
-/// to this shape before being returned to the CLI / API.
+/// One search hit. `Bm25Index::search` and `VectorStore::search` both
+/// return it, so fusion blends the two lists without translation, and
+/// its field names match the API response shape so the server layer
+/// can serialize it directly.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Hit {
     pub path: String,
@@ -112,32 +114,6 @@ pub struct Hit {
     pub start_line: u64,
     pub snippet: String,
     pub score: f32,
-}
-
-impl From<super::bm25::Hit> for Hit {
-    fn from(h: super::bm25::Hit) -> Self {
-        Self {
-            path: h.path,
-            chunk_id: h.chunk_id,
-            heading: h.heading,
-            start_line: h.start_line,
-            snippet: h.snippet,
-            score: h.score,
-        }
-    }
-}
-
-impl From<super::vectors::Hit> for Hit {
-    fn from(h: super::vectors::Hit) -> Self {
-        Self {
-            path: h.path,
-            chunk_id: h.chunk_id,
-            heading: h.heading,
-            start_line: h.start_line,
-            snippet: h.snippet,
-            score: h.score,
-        }
-    }
 }
 
 /// Search-result envelope used by both the CLI and the API.
@@ -1142,22 +1118,12 @@ impl Index {
             Mode::Bm25 => Ok(SearchResult {
                 ready: true,
                 mode: mode.label(),
-                hits: self
-                    .bm25
-                    .search(query, limit)?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
+                hits: self.bm25.search(query, limit)?,
             }),
             #[cfg(feature = "embeddings")]
             Mode::Semantic => {
                 let qv = self.embedder()?.embed_query(query)?;
-                let hits = self
-                    .vectors
-                    .search(&qv, limit)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
+                let hits = self.vectors.search(&qv, limit);
                 Ok(SearchResult {
                     ready: true,
                     mode: mode.label(),
@@ -1169,19 +1135,9 @@ impl Index {
                 // Over-fetch each side so RRF has material to fuse.
                 // 2x the user-requested limit, with a floor of 20.
                 let buffer = (limit * 2).max(20);
-                let bm25_hits: Vec<Hit> = self
-                    .bm25
-                    .search(query, buffer)?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
+                let bm25_hits = self.bm25.search(query, buffer)?;
                 let qv = self.embedder()?.embed_query(query)?;
-                let sem_hits: Vec<Hit> = self
-                    .vectors
-                    .search(&qv, buffer)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
+                let sem_hits = self.vectors.search(&qv, buffer);
                 let fused = fusion::rrf(&[bm25_hits, sem_hits], limit);
                 Ok(SearchResult {
                     ready: true,
@@ -1196,12 +1152,7 @@ impl Index {
             Mode::Semantic | Mode::Hybrid => Ok(SearchResult {
                 ready: false,
                 mode: mode.label(),
-                hits: self
-                    .bm25
-                    .search(query, limit)?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
+                hits: self.bm25.search(query, limit)?,
             }),
         }
     }
@@ -1789,6 +1740,30 @@ mod tests {
         let err = IndexError::Embed(EmbedError::Candle("synthetic".into()));
         let out = Index::handle_embed_load_error(err);
         assert!(matches!(out, Err(IndexError::Embed(EmbedError::Candle(_)))));
+    }
+
+    #[test]
+    fn search_result_json_shape_is_pinned() {
+        let result = SearchResult {
+            ready: true,
+            mode: "bm25",
+            hits: vec![Hit {
+                path: "notes/a.md".into(),
+                chunk_id: "h-0".into(),
+                heading: "Alpha".into(),
+                start_line: 3,
+                snippet: "<b>alpha</b> body".into(),
+                score: 1.5,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            concat!(
+                r#"{"ready":true,"mode":"bm25","hits":[{"path":"notes/a.md","#,
+                r#""chunk_id":"h-0","heading":"Alpha","start_line":3,"#,
+                r#""snippet":"<b>alpha</b> body","score":1.5}]}"#
+            )
+        );
     }
 
     #[test]
