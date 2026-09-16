@@ -104,12 +104,14 @@ write_digest() {
     printf '%s  %s\n' "$(lock_digest)" "$LOCK" >"$TREE/$DIGEST_FILE"
 }
 
-# Run the checker from DIR (the tree by default) with the given arguments.
+# Run the checker from DIR (the tree by default) with the given arguments,
+# under RUN_PATH when a case sets one (a hidden digest tool, a stub in front).
+RUN_PATH=""
 run_in() {
     local dir="$1"
     shift
     set +e
-    (cd "$dir" && "$TREE/scripts/check-nix-cargo-hash.sh" "$@") >"$OUT" 2>&1
+    (cd "$dir" && PATH="${RUN_PATH:-$PATH}" "$TREE/scripts/check-nix-cargo-hash.sh" "$@") >"$OUT" 2>&1
     STATUS=$?
     set -e
 }
@@ -187,6 +189,7 @@ for malformed in \
     "$(lock_digest) $LOCK" \
     "$(lock_digest | cut -c1-63)  $LOCK" \
     "$(lock_digest | tr 'a-f' 'A-F')  $LOCK" \
+    "$(lock_digest)  Cargo_lock" \
     "$(lock_digest)" \
     ""; do
     printf '%s\n' "$malformed" >"$TREE/$DIGEST_FILE"
@@ -221,7 +224,8 @@ for placeholder in \
     "\"${HASH_A}\" " \
     '"sha512-QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUF="' \
     "\"${HASH_A%=}\"" \
-    "\"${HASH_A}=\""; do
+    "\"${HASH_A}=\"" \
+    "\"xsha256-${HASH_A#sha256-}\""; do
     write_nix "$CHAN_NIX" "$placeholder"
     run_check
     assert_status 1 "cargoHash = $placeholder; in chan.nix fails"
@@ -303,6 +307,37 @@ run_check
 assert_status 0 "the tree passes after the repeated pin"
 reset_fixture
 
+# The stale pin. A Nix build prints the value both files carry as
+# `specified:` beside the harvested `got:`, and copying the wrong line pins
+# a value harvested for another lock: refused, with nothing written. The
+# refusal needs both files at the value and a well-formed digest file that
+# names another lock; a value one file carries, or a digest file that cannot
+# name a lock, is not that slip.
+write_lock root-crate-bumped
+snapshot_tree
+run_check pin "$HASH_A"
+assert_status 1 "re-pinning the value both files carry over a changed lock is refused"
+assert_out "^nix cargo hash: FAIL: '$HASH_A' is the value both $CHAN_NIX and $DESKTOP_NIX pin, harvested for a $LOCK that is not the live one \\(live digest $(lock_digest), $DIGEST_FILE records [0-9a-f]{64}\\): a Nix build prints that stale pin as 'specified:' beside the harvested value as 'got:', so copy the got: line; .*; nothing was written\$" "the refusal names the specified: slip and the got: line to copy"
+assert_untouched "the refused stale re-pin left every file as it was"
+run_check pin "$HASH_B"
+assert_status 0 "a value that differs from the stale pin is accepted over the changed lock"
+reset_fixture
+
+for stale_in in "$CHAN_NIX" "$DESKTOP_NIX"; do
+    write_lock root-crate-bumped
+    write_nix "$stale_in" "lib.fakeHash"
+    run_check pin "$HASH_A"
+    assert_status 0 "the value one file carries beside a placeholder in $stale_in is not the stale pin"
+    reset_fixture
+done
+
+write_lock root-crate-bumped
+printf 'not a digest line\n' >"$TREE/$DIGEST_FILE"
+run_check pin "$HASH_A"
+assert_status 0 "a malformed digest file names no lock, so the value both files carry pins and the file is rewritten"
+[ "$(cat "$TREE/$DIGEST_FILE")" = "$(lock_digest)  $LOCK" ] || fail "the pin over a malformed digest file recorded the live digest: $(cat "$TREE/$DIGEST_FILE")"
+reset_fixture
+
 write_lock root-crate-bumped
 run_in "$TREE/packaging" pin "$HASH_B"
 assert_status 0 "the pin runs from a subdirectory"
@@ -316,6 +351,58 @@ assert_status 0 "the pin creates an absent digest file"
 [ "$(cat "$TREE/$DIGEST_FILE")" = "$(lock_digest)  $LOCK" ] || fail "the created digest file carries the live digest: $(cat "$TREE/$DIGEST_FILE")"
 reset_fixture
 
+# A second attribute on the cargoHash line: the value ends at the first `;`,
+# and the pin replaces that value alone.
+write_nix "$CHAN_NIX" "\"$HASH_A\"; doCheck = false"
+run_check
+assert_status 0 "a second attribute after the cargoHash value is not a malformed pin"
+assert_out "both pins carry \"$HASH_A\"\$" "the value before the first ; is the pin"
+write_lock root-crate-bumped
+write_nix "$DESKTOP_NIX" "lib.fakeHash; doCheck = false"
+snapshot_tree
+run_check pin "$HASH_B"
+assert_status 0 "the pin over lines with a second attribute succeeds"
+for file in "$CHAN_NIX" "$DESKTOP_NIX"; do
+    sed "s|^  cargoHash = .*; doCheck = false;\$|  cargoHash = \"$HASH_B\"; doCheck = false;|" "$BEFORE/$file" >"$TMP/expected"
+    cmp -s "$TMP/expected" "$TREE/$file" || fail "the pin kept the second attribute on the cargoHash line of $file: $(diff "$TMP/expected" "$TREE/$file")"
+done
+run_check
+assert_status 0 "the tree with second attributes passes after the pin"
+reset_fixture
+
+# A write failure leaves both originals, the digest file, and no temporary
+# file behind. The helper renders both files to temporaries beside the
+# originals and only then renames them into place, so the failure is
+# injected through the tools it calls, which works as root (a permission
+# would not) and on every host: a cp that refuses the second file, with one
+# temporary rendered, and an mv that refuses the first rename, with both.
+STUB_CP="$TMP/stub-cp"
+STUB_MV="$TMP/stub-mv"
+mkdir -p "$STUB_CP" "$STUB_MV"
+REAL_CP="$(command -v cp)"
+cat >"$STUB_CP/cp" <<STUB
+#!/usr/bin/env bash
+case "\$*" in *chan-desktop.nix*) echo "cp: stub refusal: \$*" >&2; exit 1 ;; esac
+exec "$REAL_CP" "\$@"
+STUB
+printf '#!/usr/bin/env bash\necho "mv: stub refusal: $*" >&2\nexit 1\n' >"$STUB_MV/mv"
+chmod +x "$STUB_CP/cp" "$STUB_MV/mv"
+write_lock root-crate-bumped
+snapshot_tree
+RUN_PATH="$STUB_CP:$PATH"
+run_check pin "$HASH_B"
+RUN_PATH=""
+assert_status 1 "a failure rendering the second file fails the pin"
+assert_out "^nix cargo hash: FAIL: cannot copy $DESKTOP_NIX to $DESKTOP_NIX\\.[A-Za-z0-9]+; nothing was written\$" "the failed render says nothing was written"
+assert_untouched "the failed render left both originals and no temporary file"
+RUN_PATH="$STUB_MV:$PATH"
+run_check pin "$HASH_B"
+RUN_PATH=""
+assert_status 1 "a failure renaming the first file fails the pin"
+assert_out "^nix cargo hash: FAIL: cannot replace $CHAN_NIX; nothing was written\$" "the failed rename says nothing was written"
+assert_untouched "the failed rename left both originals and no temporary file"
+reset_fixture
+
 # Every refusal leaves the tree as it was, digest file included.
 write_lock root-crate-bumped
 snapshot_tree
@@ -327,6 +414,7 @@ for refused in \
     "sha256-abc=" \
     "${HASH_B%=}" \
     "$HASH_B=" \
+    "x$HASH_B" \
     "sha512-QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUF="; do
     run_check pin "$refused"
     assert_status 1 "the pin refuses '$refused'"
@@ -366,6 +454,42 @@ assert_status 1 "the pin refuses when the lock is absent"
 assert_out "^nix cargo hash: FAIL: $LOCK is absent; nothing was written\$" "the refusal names the absent lock"
 assert_untouched "the refused pin without a lock left every file as it was"
 reset_fixture
+
+# The digest tools. A PATH holding only the commands the checker runs, minus
+# sha256sum, exercises the shasum fallback on a host that has both; minus
+# shasum as well, the checker refuses before it writes.
+NOSUM="$TMP/nosum"
+NOTOOL="$TMP/notool"
+mkdir -p "$NOSUM" "$NOTOOL"
+for tool in bash dirname cat sed mktemp cp mv rm; do
+    ln -s "$(command -v "$tool")" "$NOSUM/$tool"
+    ln -s "$(command -v "$tool")" "$NOTOOL/$tool"
+done
+if command -v shasum >/dev/null 2>&1; then
+    ln -s "$(command -v shasum)" "$NOSUM/shasum"
+    RUN_PATH="$NOSUM"
+    run_check
+    assert_status 0 "the check digests through shasum when sha256sum is not on PATH"
+    assert_out "^nix cargo hash: PASS: $LOCK is the lock the cargoHash pins were harvested for \\(sha256 $(lock_digest | cut -c1-12)\\)" "shasum gives the digest sha256sum recorded"
+    write_lock root-crate-bumped
+    run_check pin "$HASH_B"
+    assert_status 0 "the pin digests through shasum when sha256sum is not on PATH"
+    [ "$(cat "$TREE/$DIGEST_FILE")" = "$(lock_digest)  $LOCK" ] || fail "the shasum pin recorded the digest sha256sum computes: $(cat "$TREE/$DIGEST_FILE")"
+    RUN_PATH=""
+    reset_fixture
+else
+    echo "skip - shasum is not on PATH, so the shasum fallback is not exercised" >&2
+fi
+snapshot_tree
+RUN_PATH="$NOTOOL"
+run_check
+assert_status 1 "the check fails without sha256sum or shasum"
+assert_out "^nix cargo hash: FAIL: need sha256sum or shasum on PATH to digest $LOCK\$" "the missing digest tool is named"
+run_check pin "$HASH_B"
+assert_status 1 "the pin fails without sha256sum or shasum"
+assert_out "^nix cargo hash: FAIL: need sha256sum or shasum on PATH to digest $LOCK\$" "the pin names the missing digest tool"
+assert_untouched "the pin without a digest tool wrote nothing"
+RUN_PATH=""
 
 snapshot_tree
 run_check bogus

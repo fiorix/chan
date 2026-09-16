@@ -54,6 +54,30 @@ def require_target(makefile: str, name: str, needles: tuple[str, ...]) -> None:
         require(body, needle, f"Makefile target {name}")
 
 
+def require_unconditional_step(makefile: str, name: str, step: str) -> None:
+    """STEP is a live recipe line of target NAME that runs on every host.
+
+    A substring match would accept the line commented out, or moved inside a
+    conditional block, and the gate would still read as wired. The line has
+    to be exactly a tab and the step (no leading `#`, `@` or `-`), outside
+    every `ifeq`/`ifneq`/`ifdef`/`ifndef` ... `endif` span of the target.
+    """
+    where = f"Makefile target {name}"
+    depth = 0
+    seen = False
+    for line in make_target(makefile, name).splitlines():
+        if re.match(r"^if(eq|neq|def|ndef)\b", line):
+            depth += 1
+        elif line.startswith("endif"):
+            depth -= 1
+        elif line == f"\t{step}":
+            if depth > 0:
+                raise ContractError(f"{where}: {step!r} runs inside a conditional block")
+            seen = True
+    if not seen:
+        raise ContractError(f"{where}: missing the live unconditional recipe line {step!r}")
+
+
 def workflow_job(workflow: str, name: str, path: str) -> str:
     lines = workflow.splitlines()
     marker = f"  {name}:"
@@ -80,11 +104,14 @@ def check_make_contract() -> None:
         "pre-push",
         (
             "$(MAKE) build-matrix-check",
-            "$(MAKE) nix-hash-contract-check",
-            "$(MAKE) nix-hash-check",
             "$(MAKE) host-build-check WEB_ALREADY_BUILT=1",
         ),
     )
+    # The Nix cargoHash steps read files only, so they run on every host;
+    # the sdme contract beside them is Linux-only, and a step that slid into
+    # that block would still match as a substring.
+    for step in ("$(MAKE) nix-hash-contract-check", "$(MAKE) nix-hash-check"):
+        require_unconditional_step(makefile, "pre-push", step)
     require_target(
         makefile,
         "nix-hash-check",

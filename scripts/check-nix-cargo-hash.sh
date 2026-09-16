@@ -22,8 +22,14 @@
 # digest file from the live Cargo.lock, so the correct state after a harvest
 # is one command. VALUE passes the same test a pin has to pass under `check`,
 # and every refusal (a placeholder, a malformed value, a .nix file without
-# exactly one cargoHash line, no Cargo.lock) comes before the first write, so
-# a refused run leaves every file as it was.
+# exactly one cargoHash line, no Cargo.lock, or the value both files already
+# pin offered for a Cargo.lock that is not the one it was harvested for,
+# which is the `specified:` line a Nix build prints beside `got:`) comes
+# before the first write, so a refused run leaves every file as it was. Both
+# files are rendered to temporary files before either is replaced, a failure
+# before the replacement removes them, and only the value between `=` and
+# the first `;` of the cargoHash line is replaced, so the rest of the line
+# survives the pin.
 #
 # A pinned value is accepted as written: only a Nix build can prove it.
 # Harvest it with `make nix-sdme-check NIX_PACKAGE=chan` on Linux from a
@@ -54,6 +60,9 @@ HARVEST="harvest the value with 'make nix-sdme-check NIX_PACKAGE=chan' on Linux 
 
 problems=()
 pin=""
+# The files `pin` renders beside the originals, removed on every exit so a
+# failed run leaves nothing behind.
+temps=()
 
 usage() {
     echo "usage: $0 [check] | $0 pin sha256-<43 base64 characters>=" >&2
@@ -67,6 +76,12 @@ die() {
 
 problem() {
     problems+=("$*")
+}
+
+remove_temps() {
+    if [ "${#temps[@]}" -gt 0 ]; then
+        rm -f "${temps[@]}"
+    fi
 }
 
 # The lowercase hex digest of FILE, from whichever tool the host has.
@@ -89,9 +104,10 @@ harvestable() {
 }
 
 # The cargoHash value as written, quotes included, so a `lib.fakeHash`
-# placeholder is a value of its own rather than a missing line.
+# placeholder is a value of its own rather than a missing line. The value
+# ends at the first `;`; whatever follows on the line is not the pin's.
 cargo_hash_lines() {
-    sed -n 's/^[[:space:]]*cargoHash[[:space:]]*=[[:space:]]*\(.*\);[[:space:]]*$/\1/p'
+    sed -n 's/^[[:space:]]*cargoHash[[:space:]]*=[[:space:]]*\([^;]*\);.*$/\1/p'
 }
 
 # Sets `pin` to the one cargoHash value of FILE. A missing line and a
@@ -172,23 +188,48 @@ check() {
 }
 
 pin_hash() {
-    local value="$1" file tmp digest
+    local value="$1" file tmp digest recorded="" chan_pin desktop_pin
 
     harvestable "$value" || die "'$value' is not a harvested cargoHash value: expected the bare SRI form a Nix build reports as got:, 'sha256-' followed by 43 base64 characters and '=', and not the lib.fakeHash placeholder; nothing was written"
-    for file in "$CHAN_NIX" "$DESKTOP_NIX"; do
-        read_pin "$file" || die "${problems[0]}; nothing was written"
-    done
+    read_pin "$CHAN_NIX" || die "${problems[0]}; nothing was written"
+    chan_pin="$pin"
+    read_pin "$DESKTOP_NIX" || die "${problems[0]}; nothing was written"
+    desktop_pin="$pin"
     [ -f "$LOCK" ] || die "$LOCK is absent; nothing was written"
     digest="$(sha256_of "$LOCK")"
 
+    # The value both files already pin, offered for a lock that is not the
+    # one it was harvested for, is the stale pin: a Nix build prints it as
+    # `specified:` right beside the harvested `got:` value, and the easy slip
+    # is to copy that line. A digest file that is absent or malformed cannot
+    # tell the two locks apart, so it does not refuse.
+    if [ -f "$DIGEST_FILE" ]; then
+        recorded="$(cat "$DIGEST_FILE")"
+        if [[ $recorded =~ $DIGEST_LINE ]]; then
+            recorded="${recorded%%  *}"
+        else
+            recorded=""
+        fi
+    fi
+    if [ -n "$recorded" ] && [ "$recorded" != "$digest" ] && [ "$chan_pin" = "\"$value\"" ] && [ "$desktop_pin" = "\"$value\"" ]; then
+        die "'$value' is the value both $CHAN_NIX and $DESKTOP_NIX pin, harvested for a $LOCK that is not the live one (live digest $digest, $DIGEST_FILE records $recorded): a Nix build prints that stale pin as 'specified:' beside the harvested value as 'got:', so copy the got: line; if both files were edited by hand to the harvested value, set them to lib.fakeHash and pin again; nothing was written"
+    fi
+
+    # Both files are rendered before either original is replaced, so a
+    # failure up to the first rename leaves the tree as it was, and the trap
+    # removes whatever was rendered. The copy keeps the original's mode and
+    # owner, and only the value between `=` and the first `;` is replaced,
+    # so anything else on the line survives the pin.
+    trap remove_temps EXIT
     for file in "$CHAN_NIX" "$DESKTOP_NIX"; do
-        tmp="$(mktemp "$file.XXXXXX")"
-        sed "s|^\([[:space:]]*cargoHash[[:space:]]*=[[:space:]]*\).*;[[:space:]]*\$|\1\"$value\";|" "$file" >"$tmp"
-        # Copied over rather than moved into place, so the file keeps its
-        # inode and mode.
-        cat "$tmp" >"$file"
-        rm -f "$tmp"
+        tmp="$(mktemp "$file.XXXXXX")" || die "cannot create a temporary file beside $file; nothing was written"
+        temps+=("$tmp")
+        cp -p "$file" "$tmp" || die "cannot copy $file to $tmp; nothing was written"
+        sed "s|^\([[:space:]]*cargoHash[[:space:]]*=[[:space:]]*\)[^;]*;|\1\"$value\";|" "$file" >"$tmp" || die "cannot render $tmp; nothing was written"
     done
+    mv -f "${temps[0]}" "$CHAN_NIX" || die "cannot replace $CHAN_NIX; nothing was written"
+    mv -f "${temps[1]}" "$DESKTOP_NIX" || die "cannot replace $DESKTOP_NIX: $CHAN_NIX is pinned and $DESKTOP_NIX is not, so pin again"
+    temps=()
     printf '%s  %s\n' "$digest" "$LOCK" >"$DIGEST_FILE"
     echo "$TAG: pinned $value in $CHAN_NIX and $DESKTOP_NIX and recorded the $LOCK digest in $DIGEST_FILE"
     check
