@@ -244,12 +244,10 @@ pub fn user_shell() -> String {
 
 /// Build the spawn command for a terminal.
 ///
-/// `profile` names an explicit shell (a picker selection); `None` keeps the
-/// historical behaviour of spawning the machine's single default shell. The
-/// default path is unchanged on both platforms -- on Windows it still reads the
-/// warm [`windows_shell`] `OnceLock`, on unix it still defers to
-/// `portable_pty`'s own `$SHELL` resolution -- so adding the parameter does not
-/// move the default.
+/// `profile` names an explicit shell (a picker selection); `None` spawns the
+/// machine's single default shell. On Windows the default reads the warm
+/// [`windows_shell`] `OnceLock`; on unix it uses `portable_pty`'s own `$SHELL`
+/// resolution.
 pub(super) fn command_builder(
     profile: Option<&ShellProfile>,
     command: Option<&str>,

@@ -58,8 +58,7 @@ pub struct PendingWindowCommands {
     /// fact as the park, with the same lifetime, and because the drain is the
     /// natural place to forget it. Nothing persists: the mint and the first
     /// attach are seconds apart in one process, and a restart in that gap
-    /// degrades to a window that seeds a terminal -- the old behaviour, which
-    /// is the right failure.
+    /// degrades safely to a window that seeds a terminal.
     routed: Mutex<std::collections::HashSet<String>>,
 }
 

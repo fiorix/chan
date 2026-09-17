@@ -2472,9 +2472,9 @@ impl Registry {
     }
 
     /// Reap sessions whose window can never come back. Persistence-driven, NOT
-    /// activity-driven (a busy detached session refreshes `last_activity` on
-    /// every output byte, so the old activity timer kept htop / a `for` loop
-    /// immortal). The rule:
+    /// activity-driven: a busy detached session refreshes `last_activity` on
+    /// every output byte, so activity alone would keep htop or a `for` loop
+    /// immortal. The rule:
     ///
     /// - **attached** (`attach_count > 0`) -- keep; a client is live on it.
     /// - **detached, window persisted** (a durable layout blob exists, tracked
@@ -5960,9 +5960,8 @@ mod tests {
 
     #[test]
     fn enqueue_prompt_is_all_or_nothing_at_cap() {
-        // A 2-write message (gemini) near the cap must not split: the old
-        // per-write path enqueued the body at 99/100 and silently dropped
-        // the CR. The whole message is rejected, the queue untouched.
+        // A two-write message (gemini) near the cap must not split. The whole
+        // message is rejected and the queue remains untouched.
         let session = test_session_with_ring(1024);
         for _ in 1..WRITE_QUEUE_CAP {
             session.enqueue_cs_write("x".into(), None);
@@ -6480,12 +6479,10 @@ mod tests {
             .collect()
     }
 
-    /// THE htop-after-reload regression. A live PTY running htop set DECCKM(1) +
-    /// mouse(1000;1006) + alt-screen(1049) at startup; a fresh client reattaching
-    /// in alt-screen replays no scrollback, so the prelude is the ONLY chance to
-    /// restore those modes. Before the fix the prelude re-asserted ONLY alt-screen,
-    /// so arrows (DECCKM) and wheel/clicks (mouse) died. The reattach must now
-    /// re-assert the live INPUT modes -- and NOT alt-screen (handled separately).
+    /// A live PTY running htop enables DECCKM(1), mouse(1000;1006), and
+    /// alt-screen(1049). A fresh client reattaching in alt-screen replays no
+    /// scrollback, so the prelude is its only source for the live input modes.
+    /// Reattach must re-assert DECCKM and mouse; alt-screen is handled separately.
     #[test]
     fn reattach_reasserts_htop_input_modes() {
         let session = test_session_with_ring(4096);

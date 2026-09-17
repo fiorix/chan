@@ -101,10 +101,8 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Two workspaces that share a basename but live under different
-    /// parents key off the canonical root, so they get DISTINCT prefixes and
-    /// both mount -- the old basename-only slug collided and rejected the
-    /// second.
+    /// Two workspaces that share a basename but live under different parents key
+    /// off the canonical root, so they get distinct prefixes and both mount.
     #[test]
     fn same_basename_distinct_roots_get_distinct_prefixes() {
         let p1 = tempfile::tempdir().expect("parent 1");

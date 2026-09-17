@@ -5520,11 +5520,9 @@ mod tests {
 
     #[tokio::test]
     async fn by_root_resolution_sees_a_non_slug_mount() {
-        // B1b regression: the desktop mounts a workspace tenant at
-        // `workspace-<hash>`, NOT at its slug prefix, so the old slug-membership
-        // on-check read `off` there. `is_root_mounted` / `mounted_prefix_for_root`
-        // resolve by canonical ROOT, so they see the real mount whatever scheme
-        // mounted it.
+        // The desktop mounts a workspace tenant at `workspace-<hash>`, not at its
+        // slug prefix. `is_root_mounted` / `mounted_prefix_for_root` resolve by
+        // canonical root, so they see the real mount under either prefix scheme.
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
@@ -6381,10 +6379,10 @@ mod tests {
         let term = registry.create(WindowKind::Terminal, None);
         host.install_window_registry(registry, "local".into());
 
-        // The terminal window now resolves to the shared tenant's prefix -- the
-        // old empty stub is gone -- so the desktop watcher can open it. (token is
-        // empty here only because the test serve_config sets no_token; in
-        // production the tenant carries a token so should_show opens the window.)
+        // The terminal window resolves to the shared tenant's prefix so the
+        // desktop watcher can open it. (token is empty here only because the test
+        // serve_config sets no_token; in production the tenant carries a token so
+        // should_show opens the window.)
         let records = host.assemble_window_records();
         let term_rec = records
             .iter()

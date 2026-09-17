@@ -464,10 +464,9 @@ fn discover_cmd() -> Option<ShellProfile> {
 
 /// Git for Windows BASH.
 ///
-/// Recovered from the pre-`4e8893ed` Git-BASH-only terminal, which resolved it
-/// four ways for good reasons that still hold. Order matters: `git --exec-path`
-/// first because it cannot be fooled by the WSL `bash.exe`, and the `where`
-/// fallback last precisely *because* it can -- hence [`is_wsl_bash_launcher`].
+/// Resolves four ways. Order matters: `git --exec-path` comes first because it
+/// cannot be fooled by the WSL `bash.exe`, and the `where` fallback comes last
+/// precisely because it can -- hence [`is_wsl_bash_launcher`].
 #[cfg(windows)]
 fn discover_git_bash() -> Option<ShellProfile> {
     // 1. Derive the root from `git --exec-path`
@@ -634,11 +633,9 @@ fn parse_wsl_distros(output: &str) -> Vec<String> {
 /// Argument vector for a `reg query`.
 ///
 /// The `query` subcommand is **mandatory**: `reg <key> /v <name>` prints a
-/// usage message and exits 1. The pre-`4e8893ed` Git BASH discoverer this
-/// module recovers omitted it, so its registry tier could never have matched --
-/// a latent bug masked by the `git --exec-path` and Program Files tiers always
-/// resolving first. Built here, and asserted by a test, so it cannot regress
-/// back into a silently-dead code path.
+/// usage message and exits 1. The earlier `git --exec-path` and Program Files
+/// tiers can mask a dead registry tier, so all registry argument vectors are
+/// built here and pinned by a direct test.
 #[cfg(any(windows, test))]
 fn reg_query_args<'a>(key: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec!["query", key];
@@ -772,9 +769,8 @@ mod tests {
     }
 
     /// `reg` without the `query` subcommand exits 1 with a usage message, so an
-    /// argv missing it makes the whole registry tier silently dead. The
-    /// recovered pre-`4e8893ed` discoverer had exactly that bug; this pins the
-    /// fix.
+    /// argv missing it makes the whole registry tier silently dead. This pins
+    /// `query` as the first argument for every registry lookup.
     #[test]
     fn reg_args_always_lead_with_the_query_subcommand() {
         assert_eq!(
