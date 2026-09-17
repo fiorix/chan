@@ -407,8 +407,8 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
         return Ok(0);
     }
     // CHAN_HOME-aware: `$CHAN_HOME/.local/bin` when CHAN_HOME is set, else
-    // `$HOME/.local/bin` (byte-identical to the old inlined path when unset). `None`
-    // only when neither base resolves -- then there's nowhere to install, so no-op.
+    // `$HOME/.local/bin`. `None` only when neither base resolves -- then there's
+    // nowhere to install, so no-op.
     let Some(bin_dir) = chan_workspace::paths::local_bin_dir() else {
         return Ok(0);
     };
@@ -1189,10 +1189,9 @@ mod windows_shim {
             assert!(error.to_string().contains("could not be parsed"), "{error}",);
 
             // `reg.exe` writes the console code page, so a non-ASCII PATH
-            // entry is not UTF-8. The old lossy decode turned those bytes into
-            // U+FFFD and wrote the replacement characters back; now they are
-            // refused. (0x82 is `e-acute` in CP437 and a lone continuation
-            // byte in UTF-8.)
+            // entry is not UTF-8. Refuse those bytes because lossy decoding
+            // would write U+FFFD back to the user's PATH. (0x82 is `e-acute`
+            // in CP437 and a lone continuation byte in UTF-8.)
             let mut oem = Vec::new();
             oem.extend_from_slice(
                 b"\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    C:\\caf",

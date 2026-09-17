@@ -189,15 +189,14 @@ mod linux {
     /// override "disables a faster path for everyone, including users on
     /// working setups".
     ///
-    /// This layer was belt-and-braces from the start: the EGL_BAD_PARAMETER
-    /// abort that motivated this module is an AMD-on-newer-Mesa fault, and the
-    /// host-stack re-exec above is its actual fix. A user who needs the old
-    /// behavior sets the variable themselves; the value is never clobbered.
+    /// This layer covers a separate fault from the AMD-on-newer-Mesa
+    /// EGL_BAD_PARAMETER abort handled by the host-stack re-exec above. An
+    /// explicit user setting is never clobbered.
     ///
     /// `CHAN_LINUX_DMABUF` overrides the detection: `on` keeps the
     /// accelerated path whatever the driver (the knob for an NVIDIA user who
-    /// wants to try WebGL), `off` restores the old unconditional disable, and
-    /// anything else is `auto`.
+    /// wants to try WebGL), `off` disables dma-buf unconditionally, and anything
+    /// else is `auto`.
     ///
     /// A knob is needed because WebKit reads its own variable by PRESENCE,
     /// not value: measured, `WEBKIT_DISABLE_DMABUF_RENDERER=0` disables

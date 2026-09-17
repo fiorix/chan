@@ -4796,10 +4796,10 @@ fn resolve_login_shell_path() -> Option<String> {
     const MARK: &str = "__CHAN_PATH__";
     const TIMEOUT: Duration = Duration::from_secs(3);
     // Single-source the shell with the interactive terminal: $SHELL, then the
-    // passwd entry (pw_shell), then /bin/sh -- validated. Replaces the old hardcoded
-    // `/bin/zsh` guess so the PATH-harvest fallback consults the shell the user
-    // actually logs in with. `cfg(target_os = "macos")` ⊂ `cfg(unix)`, so the
-    // unix-gated symbol is in scope.
+    // passwd entry (pw_shell), then /bin/sh -- validated. The PATH-harvest
+    // fallback therefore consults the shell the user actually logs in with.
+    // `cfg(target_os = "macos")` is included in `cfg(unix)`, so the unix-gated
+    // symbol is in scope.
     let shell = chan_server::user_shell();
     let mut child = std::process::Command::new(shell)
         .args([
@@ -6326,11 +6326,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("About Chan Desktop")
     // Tall enough that the content never has to scroll; about.css centers
     // it, so any slack is split evenly above and below rather than piling
-    // up under the card. 426 was the old height, and it was the content's
-    // exact height at the time, which is why one extra line in the head
-    // (the build id) started clipping the bottom margin off.
-    //
-    // 460 is measured, not guessed: the same DOM lays out at 422 (head 67,
+    // up under the card. 460 is measured, not guessed: the DOM lays out at 422 (head 67,
     // links 20, Fund card 182, separator 1, credits 36, four 16px gaps,
     // 52px of padding), plus one wrapped line each for the links row and
     // the credits line. Those two are the only rows whose height depends
@@ -6434,8 +6430,8 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
     // window's KIND. A terminal opens ANOTHER standalone terminal; a
     // workspace mints another window for the same workspace (the watcher opens
     // it). Each minted window is an independent registry record.
-    // (A Terminal record carries no `workspace_path`, so keying on that -- the
-    // old code -- fell through to the launcher: the #2 bug.)
+    // A Terminal record carries no `workspace_path`, so the window kind is the
+    // reliable branch key.
     if focused_label.starts_with("local::") {
         let record = state.embedded().and_then(|embedded| {
             embedded
@@ -7009,10 +7005,8 @@ mod tests {
         assert_eq!(op.await, Ok("released"), "the parked operation still lands");
     }
 
-    /// Two clipboard operations must never be inside the guard at once: one
-    /// `arboard::Clipboard` at a time is what the old single-threaded invoke
-    /// path gave for free, and X11 selections / Windows OLE both misbehave
-    /// under parallel access.
+    /// Two clipboard operations must never be inside the guard at once because
+    /// X11 selections and Windows OLE both require serialized clipboard access.
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn clipboard_ops_never_overlap() {
@@ -7865,9 +7859,9 @@ mod tests {
         assert_eq!(feed.pane_color(lib), Some("#ff8800".to_string()));
         // A genuine clear (the devserver dropped its colour) still
         // propagates -- a null push removes the cache so new windows fall back to the
-        // accent. (The null-no-clobber invariant lives on the WEB live-apply side,
-        // which f407f2eb already fixed; the desktop cache must still reflect a real
-        // clear, so the eager seed mustn't blanket-ignore nulls.)
+        // accent. The web live-apply side ignores a null that would clobber its
+        // active colour, but the desktop cache must reflect a real clear, so the
+        // eager seed must not blanket-ignore nulls.
         feed.set_color("ds-1".to_string(), None);
         assert_eq!(feed.pane_color(lib), None);
     }

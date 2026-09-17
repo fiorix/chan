@@ -717,7 +717,7 @@ fn validate_gateway_entry(
 /// generic string. Every body field beyond `error` is optional on the wire: a
 /// gateway that sends no `reason` (or a non-JSON body) classifies as
 /// [`Other`](Self::Other) with the plain HTTP-status string, so both skew
-/// directions degrade to today's behavior.
+/// directions use the status-only classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayEntryError {
     /// HTTP 401: the PAT is invalid or revoked. The connect flow clears the

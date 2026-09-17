@@ -709,7 +709,7 @@ fn build_workspace_window_with_completion(
     );
     let (webview_url, init_script) = match connecting {
         Some(display_url) => {
-            // Follow the launcher's light/dark choice (WP3 local theme); null
+            // Follow the launcher's local light/dark choice; null
             // follows the OS. The connecting screen is local desktop chrome.
             let theme = app
                 .state::<Arc<AppState>>()
@@ -760,10 +760,10 @@ fn build_workspace_window_with_completion(
         let state = app_owned.state::<Arc<AppState>>();
         let window_number = state.assign_window_number(&label_owned, &title_owned);
         // Prefer the library's persisted ordinal (the `#` in `cs window list`)
-        // so the titlebar number and the registry agree; fall back to the
-        // desktop-local counter only for windows with no record (the control
-        // terminal). assign_window_number is still called above so its reservation
-        // + release-on-close bookkeeping stays balanced regardless.
+        // so the titlebar number and the registry agree. The control terminal's
+        // transient row has no persisted ordinal, so it falls back to the local
+        // counter; `compose_window_title` omits that number, and the counter only
+        // keeps reservation and release-on-close bookkeeping balanced.
         let display_number = ordinal_owned.map(u64::from).unwrap_or(window_number);
         // A `cs window title` override (kept across the bury/reopen cycle)
         // wins over the auto "{base} Window {N} [caption]" scheme; otherwise use
@@ -2636,13 +2636,9 @@ mod tests {
 
     #[test]
     fn key_bridge_invokes_tauri_ipc_via_core_invoke() {
-        // The `invokeIpc` helper grabs `window.__TAURI__.core.invoke`
-        // (Tauri 2's invoke surface; was `window.__TAURI__.invoke`
-        // in Tauri 1). Pin so a future bridge rewrite doesn't
-        // silently regress to the v1 shape. The new shape returns
-        // undefined from a webview without the v2 IPC surface
-        // attached, which silently swallows the Cmd+R / Cmd+Opt+I
-        // accelerators.
+        // The `invokeIpc` helper grabs `window.__TAURI__.core.invoke`, Tauri 2's
+        // invoke surface. A webview without that surface returns undefined and
+        // silently swallows the Cmd+R / Cmd+Opt+I accelerators.
         assert!(KEY_BRIDGE_JS.contains("window.__TAURI__"));
         assert!(KEY_BRIDGE_JS.contains("tauri.core.invoke"));
     }

@@ -59,9 +59,8 @@ pub(crate) fn confirm(
             on_result(chose_default);
         });
         if let Err(e) = scheduled {
-            // Scheduling failed: the callback never runs, so a oneshot reply it
-            // captured drops and the caller maps that to an error -- matching the
-            // old behaviour when `.show` could not be scheduled.
+            // Scheduling failed: the callback never runs, so its captured
+            // oneshot reply drops and the caller maps that to an error.
             tracing::warn!(error = %e, "scheduling native confirm dialog failed");
         }
     }
