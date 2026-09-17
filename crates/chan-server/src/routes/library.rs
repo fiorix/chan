@@ -3842,7 +3842,7 @@ mod window_op_route_tests {
 
     #[tokio::test]
     async fn close_discards_a_saved_local_row_even_without_a_live_native_window() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(2);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(4);
         let bridge = DesktopBridge {
             window_ops: Some(tx),
             window_titles: Default::default(),
@@ -3861,14 +3861,22 @@ mod window_op_route_tests {
             .mint_window(chan_library::windows::WindowKind::Terminal, None)
             .expect("mint")
             .window_id;
+        let route_discard_id = host
+            .mint_window(chan_library::windows::WindowKind::Terminal, None)
+            .expect("mint route discard")
+            .window_id;
+        let desktop_discard_id = id.clone();
         let desktop_host = Arc::clone(&host);
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
                 if let DesktopWindowOp::Close { id, reply } = op {
-                    // The real desktop discards the row before discovering
-                    // that a hidden/offline window has no native webview.
-                    let _ = desktop_host.discard_window(&id).expect("desktop discard");
-                    let _ = reply.send(Ok(false));
+                    let destroyed = id == "desktop-only";
+                    if id == desktop_discard_id {
+                        // The real desktop discards the row before discovering
+                        // that a hidden/offline window has no native webview.
+                        let _ = desktop_host.discard_window(&id).expect("desktop discard");
+                    }
+                    let _ = reply.send(Ok(destroyed));
                 }
             }
         });
@@ -3879,6 +3887,20 @@ mod window_op_route_tests {
             .assemble_window_records()
             .iter()
             .all(|record| record.window_id != id));
+
+        let (status, _) = post(&router, "/api/library/windows/desktop-only/close").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = post(
+            &router,
+            &format!("/api/library/windows/{route_discard_id}/close"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(host
+            .assemble_window_records()
+            .iter()
+            .all(|record| record.window_id != route_discard_id));
 
         let (status, _) = post(&router, "/api/library/windows/nope/close").await;
         assert_eq!(status, StatusCode::NOT_FOUND);

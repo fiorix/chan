@@ -58,8 +58,14 @@ afterEach(() => {
   target.remove();
 });
 
-function mountDeck(entry: DeckItem): void {
-  app = mount(CommandDeckHarness, { target, props: { items: [entry] } }) as Record<string, unknown>;
+function mountDeck(
+  entry: DeckItem,
+  onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>,
+): void {
+  app = mount(CommandDeckHarness, {
+    target,
+    props: { items: [entry], onChoose },
+  }) as Record<string, unknown>;
 }
 
 function closeResult(): HTMLButtonElement {
@@ -141,5 +147,51 @@ describe("CommandDeck lazy confirmation", () => {
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Checking...");
     pending.resolve(confirmation("Ready"));
     await flush();
+  });
+
+  it("retries a failed static-confirm action without confirming again", async () => {
+    const onChoose = vi
+      .fn<(entry: DeckItem) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("close failed"))
+      .mockResolvedValueOnce();
+    mountDeck(item(confirmation("Static confirmation")), onChoose);
+
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "Static confirmation",
+    );
+    const close = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
+      (button) => button.textContent === "Close",
+    );
+    close?.click();
+    await flush();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("close failed");
+
+    const retry = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
+      (button) => button.textContent === "Retry",
+    );
+    retry?.click();
+    await flush();
+
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(target.querySelector(".deck-operation")?.textContent).not.toContain(
+      "Static confirmation",
+    );
+    expect(target.querySelector(".deck-decisions")).toBeNull();
+  });
+
+  it("selects Cancel when an action returns a confirmation", async () => {
+    const onChoose = vi
+      .fn<(entry: DeckItem) => Promise<DeckConfirm>>()
+      .mockResolvedValueOnce(confirmation("Fresh confirmation"));
+    mountDeck(item(undefined), onChoose);
+
+    closeResult().click();
+    await flush();
+
+    expect(onChoose).toHaveBeenCalledOnce();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Fresh confirmation");
+    expect(target.querySelector(".deck-decisions button.chosen")?.textContent).toBe("Cancel");
   });
 });
