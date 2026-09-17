@@ -49,12 +49,9 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         }
         DesktopWindowOp::Open { id, reply } => {
             let app2 = app.clone();
-            let state2 = Arc::clone(&state);
-            let result = on_main(&app, move || {
-                serve::open_window_by_label(&app2, &state2, &id)
-            })
-            .await
-            .and_then(|inner| inner);
+            let result = on_main(&app, move || serve::open_window_by_label(&app2, &id))
+                .await
+                .and_then(|inner| inner);
             let _ = reply.send(result);
         }
         DesktopWindowOp::SetWindowLabel { id, label, reply } => {

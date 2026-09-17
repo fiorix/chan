@@ -4,11 +4,6 @@
 //! for which workspaces exist. This file holds only desktop-specific
 //! state that has no place in chan proper:
 //!
-//! - `window_configs`: LRU stack of closed-window labels + URL hashes
-//!   so a freshly-opened workspace window picks up the panes / tabs /
-//!   selections / overlay state of the previous window for that
-//!   workspace instead of starting blank.
-//!
 //! Per-workspace serve URLs are intentionally NOT persisted: chan rotates
 //! the bearer token on every `chan serve`, so a saved URL would
 //! decay to garbage between launches. The URL lives in `AppState`
@@ -30,11 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::devserver::DevserverConns;
 
-/// Cap on how many window configs we retain in the LRU stack.
-/// Newest first; older entries past the cap are evicted on save.
-/// Twenty is roomy enough for several concurrently-open workspaces
-/// without risking unbounded growth from an open-close-reopen loop.
-pub const MAX_WINDOW_CONFIGS: usize = 20;
+/// Cap on how many window geometry records we retain in the LRU stack.
+pub const MAX_WINDOW_GEOMETRY_RECORDS: usize = 20;
 
 /// Cap on how many distinct monitor signatures we remember per window in the
 /// geometry LRU. Five covers a laptop that docks / undocks across a couple of
@@ -245,51 +237,6 @@ fn gateway_enabled_default() -> bool {
     true
 }
 
-/// Per-window layout snapshot pushed when a workspace webview closes,
-/// popped when the same workspace opens its next webview. The Tauri
-/// window label is the join key: reusing it forwards the SPA's
-/// `?w=<label>` lookup so the per-window `session.json` in the
-/// workspace hydrates the panes / tabs that were open before. The URL
-/// hash carries the overlay state (file browser selection, search
-/// query, graph scope, etc.) that chan deliberately keeps out of
-/// `session.json` so shareable URLs stay shareable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowConfig {
-    /// Workspace identity:
-    ///   * local workspaces: canonical filesystem path (matches the
-    ///     `AppState.serves` key).
-    ///   * remote (devserver) workspaces: `"remote:<id>"`, namespaced by the
-    ///     desktop-local attachment id because the URL can change.
-    pub key: String,
-    /// Tauri window label this config was last bound to. The label
-    /// is hash-prefixed (`workspace-<16hex>-<seq>`) so it implicitly
-    /// encodes the workspace identity too -- reusing it produces the
-    /// same prefix and the per-workspace close-on-exit cleanup walker
-    /// still matches.
-    pub window_label: String,
-    /// URL hash (everything after `#`, without the leading hash
-    /// character). Empty when the SPA never wrote a hash. Applied
-    /// verbatim on the next open so file-browser selection, search
-    /// query, graph scope, and other overlay-encoded knobs round
-    /// trip across the close/open cycle.
-    #[serde(default)]
-    pub url_hash: String,
-    /// Browser-style zoom level, 1.0 = 100 %. Persists across the
-    /// close/open cycle so Cmd++ / Cmd+- / Cmd+0 chord state
-    /// survives a session restart. `#[serde(default
-    /// = "default_zoom")]` keeps `config.json` entries without the
-    /// field loadable (missing reads as 1.0).
-    #[serde(default = "default_zoom")]
-    pub zoom_level: f64,
-    /// Wall-clock millis when this config was pushed. Newest first
-    /// in the stack; only used for diagnostics + LRU eviction.
-    pub saved_at: u64,
-}
-
-fn default_zoom() -> f64 {
-    1.0
-}
-
 /// Plain monitor descriptor, decoupled from Tauri so the geometry math stays
 /// unit-testable without a window system (this module links no Tauri). `serve`
 /// maps each `tauri::Monitor` to one of these: the full bounds + `scale` form
@@ -401,18 +348,11 @@ pub struct Config {
     /// and a downgrade ignores the unknown field.
     #[serde(default)]
     pub gateways: Vec<Gateway>,
-    /// LRU stack of closed window configs. Newest at index 0. A
-    /// fresh workspace webview pops the most-recent matching entry on
-    /// open so the user re-enters the same panes / tabs / overlays
-    /// they left behind. Capped at `MAX_WINDOW_CONFIGS`; oldest
-    /// evicted past that.
-    #[serde(default)]
-    pub window_configs: Vec<WindowConfig>,
     /// Desktop-owned OS window geometry, one [`WindowGeometryRecord`] per window
     /// label, each with its own per-monitor-signature LRU. Geometry is keyed by
     /// the stable native label and covers every window class, since only
     /// the desktop can read / set OS window pixels. Newest record first; capped
-    /// at `MAX_WINDOW_CONFIGS` windows.
+    /// at `MAX_WINDOW_GEOMETRY_RECORDS` windows.
     #[serde(default)]
     pub window_geometry: Vec<WindowGeometryRecord>,
     /// The LOCAL library's pane-highlight colour (hex `#rrggbb`), or `None` for
@@ -508,7 +448,7 @@ pub type DevserverRemoveHook =
 /// launcher's `/api/library/devservers` routes reach through
 /// [`WorkspaceHost::devserver_registry`](chan_server::WorkspaceHost::devserver_registry).
 /// It wraps the SHARED [`ConfigStore`] handle (the same `Arc<Mutex<ConfigStore>>`
-/// the desktop's own commands and the window-config LRU use), so every config
+/// the desktop's own commands and window geometry use), so every config
 /// write -- devserver CRUD and window state -- serializes
 /// through one lock and can't lose an update to a concurrent full-file rewrite.
 ///
@@ -1300,51 +1240,6 @@ pub fn migrate_legacy_gateway_rows(
     Ok(outcome)
 }
 
-/// Identity key for a local-workspace WindowConfig. Matches the
-/// `AppState.serves` key so a window-config lookup uses the same
-/// canonical-path normalisation as the workspace registry.
-pub fn local_window_key(workspace_key: &str) -> String {
-    workspace_key.to_string()
-}
-
-/// Push a window config to the top of the LRU stack and persist.
-/// Older entries with the same `window_label` are dropped so the
-/// stack stays compact (one entry per label across all keys).
-/// Trims to `MAX_WINDOW_CONFIGS`.
-pub fn push_window_config(cfg: &mut Config, mut entry: WindowConfig) {
-    if entry.saved_at == 0 {
-        entry.saved_at = now_millis();
-    }
-    cfg.window_configs
-        .retain(|w| w.window_label != entry.window_label);
-    cfg.window_configs.insert(0, entry);
-    cfg.window_configs.truncate(MAX_WINDOW_CONFIGS);
-}
-
-/// Pop the most-recent WindowConfig matching `key` whose label is NOT
-/// currently live, removing it from the stack. Returns `None` when no
-/// such entry exists. Callers save the config afterwards; this
-/// function only mutates the in-memory `Config`.
-///
-/// `is_label_live` exists for bury-on-close: a buried (hidden) window
-/// is still a live webview AND has a fresh stack entry captured at
-/// bury time. A new same-workspace window must neither reuse that
-/// label (Tauri labels are unique per process) nor pop-and-discard the
-/// entry -- the buried window still needs it if the app quits before an
-/// unbury. Skipping live-label entries leaves them in place; across an
-/// app restart nothing is live and the stack pops normally.
-pub fn pop_window_config(
-    cfg: &mut Config,
-    key: &str,
-    is_label_live: impl Fn(&str) -> bool,
-) -> Option<WindowConfig> {
-    let pos = cfg
-        .window_configs
-        .iter()
-        .position(|w| w.key == key && !is_label_live(&w.window_label))?;
-    Some(cfg.window_configs.remove(pos))
-}
-
 /// Order-independent monitor signature: the monitor count plus each monitor's
 /// SIZE and scale factor, sorted so the OS reporting monitors in a different
 /// order doesn't change the string. The scale is stringified (`{:.2}`) so float
@@ -1370,7 +1265,8 @@ pub fn monitor_signature(mons: &[MonitorDesc]) -> String {
 /// move the window's record to the front. The new signature replaces any prior
 /// entry for the same signature (dedup) and goes to the front, capped at
 /// [`MAX_WINDOW_GEOMETRIES`] so flipping monitor layouts and back keeps each
-/// layout's own geometry. The records stack is capped at [`MAX_WINDOW_CONFIGS`]
+/// layout's own geometry. The records stack is capped at
+/// [`MAX_WINDOW_GEOMETRY_RECORDS`]
 /// windows. Best-effort callers save afterwards; this only mutates `cfg`.
 pub fn push_window_geometry(cfg: &mut Config, label: &str, mut geom: WindowGeometry) {
     if geom.saved_at == 0 {
@@ -1398,7 +1294,7 @@ pub fn push_window_geometry(cfg: &mut Config, label: &str, mut geom: WindowGeome
             },
         );
     }
-    cfg.window_geometry.truncate(MAX_WINDOW_CONFIGS);
+    cfg.window_geometry.truncate(MAX_WINDOW_GEOMETRY_RECORDS);
 }
 
 /// Resolve the geometry to apply for `label` under `current_sig`: an exact
@@ -1556,140 +1452,6 @@ mod tests {
         Arc::new(Mutex::new(HashSet::new()))
     }
 
-    fn entry(key: &str, label: &str, hash: &str, saved_at: u64) -> WindowConfig {
-        WindowConfig {
-            key: key.to_string(),
-            window_label: label.to_string(),
-            url_hash: hash.to_string(),
-            zoom_level: 1.0,
-            saved_at,
-        }
-    }
-
-    #[test]
-    fn push_inserts_at_front() {
-        let mut cfg = Config::default();
-        push_window_config(&mut cfg, entry("/workspace/a", "workspace-a-0", "", 100));
-        push_window_config(
-            &mut cfg,
-            entry("/workspace/b", "workspace-b-0", "files=1", 200),
-        );
-        assert_eq!(cfg.window_configs[0].window_label, "workspace-b-0");
-        assert_eq!(cfg.window_configs[1].window_label, "workspace-a-0");
-    }
-
-    #[test]
-    fn push_dedupes_by_window_label() {
-        // Pushing twice for the same label collapses to one entry
-        // at the top, not two. Prevents stack growth from
-        // re-opening + re-closing the same window in a loop.
-        let mut cfg = Config::default();
-        push_window_config(&mut cfg, entry("/workspace/a", "workspace-a-0", "old", 100));
-        push_window_config(&mut cfg, entry("/workspace/a", "workspace-a-0", "new", 200));
-        assert_eq!(cfg.window_configs.len(), 1);
-        assert_eq!(cfg.window_configs[0].url_hash, "new");
-    }
-
-    #[test]
-    fn push_caps_at_max() {
-        let mut cfg = Config::default();
-        for i in 0..MAX_WINDOW_CONFIGS + 5 {
-            let label = format!("workspace-a-{i}");
-            push_window_config(&mut cfg, entry("/workspace/a", &label, "", 100 + i as u64));
-        }
-        assert_eq!(cfg.window_configs.len(), MAX_WINDOW_CONFIGS);
-        // The five oldest got evicted; the newest stays at the top.
-        let newest = format!("workspace-a-{}", MAX_WINDOW_CONFIGS + 4);
-        assert_eq!(cfg.window_configs[0].window_label, newest);
-    }
-
-    #[test]
-    fn pop_returns_most_recent_for_key() {
-        let mut cfg = Config::default();
-        push_window_config(
-            &mut cfg,
-            entry("/workspace/a", "workspace-a-0", "older", 100),
-        );
-        push_window_config(&mut cfg, entry("/workspace/b", "workspace-b-0", "", 200));
-        push_window_config(
-            &mut cfg,
-            entry("/workspace/a", "workspace-a-1", "newer", 300),
-        );
-        let popped = pop_window_config(&mut cfg, "/workspace/a", |_| false).unwrap();
-        assert_eq!(popped.window_label, "workspace-a-1");
-        assert_eq!(popped.url_hash, "newer");
-        // The older /workspace/a entry is still on the stack.
-        let popped2 = pop_window_config(&mut cfg, "/workspace/a", |_| false).unwrap();
-        assert_eq!(popped2.window_label, "workspace-a-0");
-        // /workspace/b is untouched.
-        assert_eq!(cfg.window_configs.len(), 1);
-        assert_eq!(cfg.window_configs[0].window_label, "workspace-b-0");
-    }
-
-    #[test]
-    fn pop_returns_none_when_no_match() {
-        let mut cfg = Config::default();
-        push_window_config(&mut cfg, entry("/workspace/a", "workspace-a-0", "", 100));
-        assert!(pop_window_config(&mut cfg, "/workspace/missing", |_| false).is_none());
-        assert_eq!(cfg.window_configs.len(), 1);
-    }
-
-    #[test]
-    fn pop_skips_live_labels_and_leaves_them_on_the_stack() {
-        // Bury-on-close: `workspace-a-1` is a buried (hidden but live)
-        // window with a bury-time entry on the stack. A new window of
-        // the same workspace must pop PAST it to the older dead entry,
-        // leaving the live one in place for the quit-while-buried
-        // restore.
-        let mut cfg = Config::default();
-        push_window_config(
-            &mut cfg,
-            entry("/workspace/a", "workspace-a-0", "dead", 100),
-        );
-        push_window_config(
-            &mut cfg,
-            entry("/workspace/a", "workspace-a-1", "live", 200),
-        );
-        let popped =
-            pop_window_config(&mut cfg, "/workspace/a", |label| label == "workspace-a-1").unwrap();
-        assert_eq!(popped.window_label, "workspace-a-0");
-        assert_eq!(cfg.window_configs.len(), 1);
-        assert_eq!(cfg.window_configs[0].window_label, "workspace-a-1");
-        // Every entry live -> nothing pops, nothing is dropped.
-        assert!(pop_window_config(&mut cfg, "/workspace/a", |_| true).is_none());
-        assert_eq!(cfg.window_configs.len(), 1);
-    }
-
-    #[test]
-    fn window_config_zoom_level_defaults_to_one_on_missing_field() {
-        // A `config.json` entry without a `zoom_level` field must
-        // stay loadable as 1.0 instead of failing the load and
-        // dropping the entire window-config stack on the floor.
-        let missing_zoom = r#"{
-            "key": "/workspace/legacy",
-            "window_label": "workspace-legacy-0",
-            "url_hash": "files=1",
-            "saved_at": 12345
-        }"#;
-        let cfg: WindowConfig = serde_json::from_str(missing_zoom).expect("legacy load");
-        assert_eq!(cfg.zoom_level, 1.0);
-        assert_eq!(cfg.url_hash, "files=1");
-    }
-
-    #[test]
-    fn window_config_zoom_level_round_trips() {
-        let entry = WindowConfig {
-            key: "/workspace/a".to_string(),
-            window_label: "workspace-a-0".to_string(),
-            url_hash: String::new(),
-            zoom_level: 1.4,
-            saved_at: 0,
-        };
-        let json = serde_json::to_string(&entry).expect("serialize");
-        let back: WindowConfig = serde_json::from_str(&json).expect("deserialize");
-        assert!((back.zoom_level - 1.4).abs() < f64::EPSILON);
-    }
-
     #[test]
     fn config_ignores_retired_outbound_rows() {
         let raw = r##"{
@@ -1717,7 +1479,7 @@ mod tests {
         // A config.json that predates devservers must still load: serde
         // reads the missing key as the empty set so the load never fails
         // and drops the rest of the config.
-        let raw = r#"{ "window_configs": [] }"#;
+        let raw = r#"{}"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without devservers");
         assert!(cfg.devservers.is_empty());
     }
@@ -2231,21 +1993,21 @@ mod tests {
     #[test]
     fn push_geometry_caps_records_and_moves_touched_to_front() {
         let mut cfg = Config::default();
-        for i in 0..(MAX_WINDOW_CONFIGS + 3) {
+        for i in 0..(MAX_WINDOW_GEOMETRY_RECORDS + 3) {
             let label = format!("w{i}");
             push_window_geometry(&mut cfg, &label, geom("s", 0, 0, 1, 1, 100 + i as u64));
         }
-        // Capped at MAX_WINDOW_CONFIGS windows; newest label at the front, the
+        // Capped at MAX_WINDOW_GEOMETRY_RECORDS windows; newest label at the front, the
         // three oldest evicted.
-        assert_eq!(cfg.window_geometry.len(), MAX_WINDOW_CONFIGS);
-        let newest = format!("w{}", MAX_WINDOW_CONFIGS + 2);
+        assert_eq!(cfg.window_geometry.len(), MAX_WINDOW_GEOMETRY_RECORDS);
+        let newest = format!("w{}", MAX_WINDOW_GEOMETRY_RECORDS + 2);
         assert_eq!(cfg.window_geometry[0].window_label, newest);
         assert!(!cfg.window_geometry.iter().any(|r| r.window_label == "w0"));
         // Re-touching a surviving window moves its record to the front.
-        let survivor = format!("w{}", MAX_WINDOW_CONFIGS);
+        let survivor = format!("w{}", MAX_WINDOW_GEOMETRY_RECORDS);
         push_window_geometry(&mut cfg, &survivor, geom("s", 5, 5, 1, 1, 999));
         assert_eq!(cfg.window_geometry[0].window_label, survivor);
-        assert_eq!(cfg.window_geometry.len(), MAX_WINDOW_CONFIGS);
+        assert_eq!(cfg.window_geometry.len(), MAX_WINDOW_GEOMETRY_RECORDS);
     }
 
     #[test]
@@ -2428,7 +2190,7 @@ mod tests {
         // A config.json predating window geometry must still load: serde reads
         // the missing key as the empty set, so the load never fails and drops
         // the rest of the config.
-        let raw = r#"{ "window_configs": [] }"#;
+        let raw = r#"{}"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without window_geometry");
         assert!(cfg.window_geometry.is_empty());
     }

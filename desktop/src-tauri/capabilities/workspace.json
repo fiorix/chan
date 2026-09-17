@@ -1,11 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "workspace",
-  "description": "Capabilities for per-workspace webview windows: workspace-* are locally-supervised chan serves, terminal-* are standalone embedded-served terminal-only windows, control-terminal-* are the embedded terminal-only windows that run a devserver's connect script, local::<window_id> are watcher-opened embedded-served workspace windows, lib-<hex>::<window_id> are watcher-opened devserver windows (both the library-minted window scheme). control-terminal-* needs request_close_window so Cmd+W / the not-connected close button surveys re-run vs abandon (the connected-phase exit fires from a desktop-side watcher, no IPC).",
+  "description": "Capabilities for SPA webview windows: control-terminal-* are embedded terminal-only windows that run a devserver's connect script, local::<window_id> are watcher-opened embedded windows, and lib-<hex>::<window_id> are watcher-opened devserver windows. control-terminal-* needs request_close_window so Cmd+W and the not-connected close button can close the control row.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
-  "windows": ["workspace-*", "terminal-*", "control-terminal-*", "local::*", "lib-*"],
+  "windows": ["control-terminal-*", "local::*", "lib-*"],
   "permissions": [
     "workspace-window",
     "core:webview:allow-set-webview-zoom",

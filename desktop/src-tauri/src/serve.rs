@@ -20,7 +20,7 @@ use tauri::{
     WindowEvent,
 };
 
-use crate::config::{self, WindowConfig, WindowGeometry};
+use crate::config::{self, WindowGeometry};
 use crate::AppState;
 
 /// Tauri event emitted when any local runtime starts or stops. The
@@ -282,17 +282,12 @@ pub(crate) fn compose_window_title(
     }
 }
 
-/// True when a Tauri label belongs to an embedded-served SPA webview
-/// (workspace / standalone terminal). Both host the chan
-/// SPA and accept the `chan:command` dispatch bridge, so menu items that
-/// defer to the focused window (Settings, New Terminal's toggle branch)
-/// target any of them.
+/// True when a Tauri label belongs to a watcher-opened SPA webview that accepts
+/// the `chan:command` dispatch bridge.
 pub fn is_workspace_webview_label(label: &str) -> bool {
-    label.starts_with("workspace-")
-        || label.starts_with("terminal-")
-        // Watcher-opened local windows carry the composite native label
-        // `local::<window_id>`; they host the same embedded SPA.
-        || label.starts_with("local::")
+    // Watcher-opened local windows carry the composite native label
+    // `local::<window_id>`; they host the same embedded SPA.
+    label.starts_with("local::")
         // Watcher-opened devserver windows carry `lib-<hex>::<window_id>` -- the
         // same SPA, served by the remote devserver.
         || label.starts_with("lib-")
@@ -329,9 +324,6 @@ pub(crate) fn open_watched_local_window(
             ordinal: Some(record.ordinal),
             caption: &record.label,
             url: &url,
-            url_hash_seed: "",
-            config_key: String::new(),
-            zoom_seed: 1.0,
             connecting: None,
             kind,
         },
@@ -344,8 +336,7 @@ pub(crate) fn open_watched_local_window(
 /// at `host:port`, so the navigate target is the assembled tenant URL and the
 /// window routes through the connecting screen (the remote may be down). The
 /// native label is the composite `{library_id}::{window_id}`; `?w=` is the bare
-/// `window_id` (decoupled), carried as the SPA session id. No `config_key`: the
-/// library owns persistence (the layout blob is keyed by `window_id`).
+/// `window_id` (decoupled), carried as the SPA session id.
 pub(crate) fn open_watched_remote_window(
     app: &AppHandle,
     url: &str,
@@ -366,9 +357,6 @@ pub(crate) fn open_watched_remote_window(
             ordinal: Some(record.ordinal),
             caption: &record.label,
             url,
-            url_hash_seed: "",
-            config_key: String::new(),
-            zoom_seed: 1.0,
             connecting: Some(url),
             kind,
         },
@@ -396,7 +384,6 @@ pub(crate) fn retarget_watched_remote_window(
         &record.window_id,
         &record.library_id,
         url,
-        "",
         kind,
     )?;
     window
@@ -472,9 +459,6 @@ pub async fn spawn_control_terminal_window(
                 ordinal: None,
                 caption: "",
                 url: &url,
-                url_hash_seed: "",
-                config_key: String::new(),
-                zoom_seed: 1.0,
                 connecting: None,
                 // `control` (not `terminal`) puts the SPA in the singleton
                 // control sub-mode: terminal-only, but with the tab strip / pane
@@ -520,17 +504,15 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
     format!("control-terminal-{devserver_id}")
 }
 
-/// `cs window open`: focus a live window, un-hide a buried one, or
-/// best-effort reopen a closed-but-saved workspace window whose
-/// workspace is still running. Errors when the id names nothing the
-/// desktop can act on.
+/// `cs window open`: focus a live window or un-hide a buried one. Errors when
+/// the id names nothing the desktop can act on.
 /// Resolve the id an open/hide op carries to a native window label. The
 /// launcher's window affordance sends a BARE library-minted `window_id`
 /// (e.g. `w-1a2b`), but a watched window's native label is the composite
 /// `{library_id}::{window_id}` ([`crate::window_watcher::native_label`]) -- so a
 /// bare id never matches `get_webview_window` directly. `cs window` callers
-/// pass the full label already (composite, or a legacy `terminal-`/`workspace-`
-/// scheme), so an id that is itself a live label OR already contains `::` is
+/// pass the full composite label already, so an id that is itself a live label
+/// or already contains `::` is
 /// used verbatim. Otherwise match the native window whose label ends with
 /// `::{id}` -- among the OPEN windows, the buried list, and the connected
 /// devserver feed. A buried WATCHED window (local:: and the devserver
@@ -542,8 +524,7 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
 /// `lib-<hex>::` label. Only a bare id matching NONE of these falls back to the
 /// `local::` composite.
 pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
-    // A live window whose exact label IS `id` wins -- covers `cs window` passing a
-    // legacy `terminal-`/`workspace-` label that carries no `::`.
+    // A live window whose exact label IS `id` wins.
     if app.get_webview_window(id).is_some() {
         return id.to_string();
     }
@@ -559,10 +540,9 @@ pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
 /// OPEN windows plus the buried list). A composite label (one containing `::`) is
 /// used verbatim; a bare `window_id` matches the `{library_id}::{id}` candidate
 /// (open or buried -- a buried watched window has no live webview but its composite
-/// label is in the buried list). A bare id in a LEGACY non-composite family
-/// (`control-terminal-`/`terminal-`/`workspace-`) is its own native
-/// label and is used verbatim. Only a bare library-minted id (`w-<hex>`) matching
-/// no candidate resolves to the `local::` composite as a last resort.
+/// label is in the buried list). A full `control-terminal-` label is used
+/// verbatim. Only a bare library-minted id (`w-<hex>`) matching no candidate
+/// resolves to the `local::` composite as a last resort.
 fn resolve_label_from(id: &str, candidates: &[String]) -> String {
     if id.contains("::") {
         return id.to_string();
@@ -571,27 +551,15 @@ fn resolve_label_from(id: &str, candidates: &[String]) -> String {
     if let Some(label) = candidates.iter().find(|l| l.ends_with(&suffix)) {
         return label.clone();
     }
-    // A legacy non-composite label (a control terminal, standalone terminal,
-    // saved-workspace) IS its own native label: its
-    // `window_id` carries no `{library_id}::` prefix, so fabricating `local::{id}`
-    // points the open/hide op at a window that never exists and silently no-ops
-    // the launcher's Focus/eye. Use it verbatim, mirroring the live-label top
-    // check in `resolve_window_label`.
-    const VERBATIM_LABEL_PREFIXES: [&str; 3] = ["control-terminal-", "terminal-", "workspace-"];
-    if VERBATIM_LABEL_PREFIXES
-        .iter()
-        .any(|prefix| id.starts_with(prefix))
-    {
+    // A control terminal has no `{library_id}::` prefix, so its full native
+    // label is used verbatim.
+    if id.starts_with("control-terminal-") {
         return id.to_string();
     }
     format!("local::{id}")
 }
 
-pub fn open_window_by_label(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    label: &str,
-) -> Result<(), String> {
+pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> {
     let label = resolve_window_label(app, label);
     let label = label.as_str();
     // A watched window -- LOCAL (`local::`) OR a DEVSERVER (`lib-<hex>::`) -- un-buries
@@ -602,8 +570,8 @@ pub fn open_window_by_label(
     // live webview, so it precedes the `get_webview_window` check below. The
     // dot-show of a buried devserver STANDALONE terminal is `lib-<hex>::…` with a
     // destroyed webview -- without the `lib-` arm it missed this AND the
-    // `get_webview_window` check, and fell to the workspace-only fallback (reopening
-    // nothing). The Window menu worked because it calls `unbury_window` directly.
+    // `get_webview_window` check and resolved as a local label, reopening nothing.
+    // The Window menu worked because it calls `unbury_window` directly.
     if label.starts_with("local::") || label.starts_with("lib-") {
         crate::unbury_window(app, label);
         return Ok(());
@@ -615,61 +583,15 @@ pub fn open_window_by_label(
         crate::unbury_window(app, label);
         return Ok(());
     }
-    // Not live: best-effort reopen a saved workspace window if we can
-    // resolve a still-running workspace from the label's hash prefix.
-    // Terminal windows are ephemeral (never saved), so only workspace
-    // labels reach a useful branch here.
-    if let Some((key, url)) = running_workspace_for_label(state, label) {
-        let title = workspace_title(&key);
-        // Reuse the EXACT saved label so the SPA's `GET /api/session?w=`
-        // restores this window's panes/tabs.
-        build_workspace_window(
-            app,
-            WindowSpec {
-                label,
-                session_id: label,
-                // A running local workspace window belongs to the `local` library.
-                library_id: "local",
-                title: &title,
-                ordinal: None,
-                caption: "",
-                url: &url,
-                url_hash_seed: "",
-                config_key: config::local_window_key(&key),
-                zoom_seed: 1.0,
-                connecting: None,
-                kind: None,
-            },
-        )?;
-        return Ok(());
-    }
-    Err(format!(
-        "window {label} isn't open; if it's a saved workspace window, open its workspace first"
-    ))
-}
-
-/// (key, launch URL) of the running local workspace whose window-label
-/// family matches `label` (`workspace-<hash(key)>-<seq>`), or `None` when
-/// no running workspace owns that label.
-fn running_workspace_for_label(state: &Arc<AppState>, label: &str) -> Option<(String, String)> {
-    let serves = state.serves.lock().unwrap();
-    serves.iter().find_map(|(key, handle)| {
-        let prefix = workspace_window_prefix(key);
-        if label.starts_with(&format!("{prefix}-")) {
-            handle.url.clone().map(|url| (key.clone(), url))
-        } else {
-            None
-        }
-    })
+    Err(format!("window {label} isn't open"))
 }
 
 /// True when the webview is still showing the bundled connecting/retry
 /// screen (`connecting.html`, the remote pre-navigation page). Such a
 /// window has no per-window session, no shells, and nothing to restore,
 /// so close affordances treat it as cancel-and-really-close instead of
-/// burying. The URL read is guarded like `capture_window_config`: a
-/// dead webview's `url()` can panic on a nil URL, and any failure reads
-/// as "not the connecting screen" (bury -- the safe pre-existing path).
+/// burying. Guard the URL read because a dead webview's `url()` can panic on a
+/// nil URL; any failure reads as "not the connecting screen".
 pub fn window_on_connecting_screen(app: &AppHandle, label: &str) -> bool {
     let Some(window) = app.get_webview_window(label) else {
         return false;
@@ -694,18 +616,14 @@ struct WindowSpec<'a> {
     session_id: &'a str,
     /// The owning chan-library's id, appended as `?lib=` so the SPA can scope
     /// cross-window tab drag-and-drop to the same library (`local` for the
-    /// baked-in local disk library, `lib-<hex>` for a devserver). The SPA
-    /// defaults a missing `?lib=` to `local`, so a window with no library
-    /// identity (an outbound URL attachment) passes the empty string.
+    /// baked-in local disk library, `lib-<hex>` for a devserver).
     library_id: &'a str,
     /// Base title; the builder suffixes a reused " Window N" display number.
     title: &'a str,
     /// The library's persisted per-(kind, workspace) ordinal -- the same number
     /// `cs window list` prints as `#`. When `Some`, it is the displayed
     /// " Window N" suffix, so the titlebar and the registry agree. `None` for
-    /// windows with no library record (outbound URL attachments, imperative
-    /// reopen paths), which fall back to the desktop-local `assign_window_number`
-    /// counter.
+    /// the control terminal, which has no library window record.
     ordinal: Option<u32>,
     /// The library record's optional user caption (`WindowRecord::label`),
     /// appended to the composed title in brackets so the OS titlebar and window
@@ -714,27 +632,14 @@ struct WindowSpec<'a> {
     caption: &'a str,
     /// The workspace/terminal URL the webview ultimately shows.
     url: &'a str,
-    /// URL fragment from the window-config stack: applied verbatim so
-    /// overlay state (file browser path, search query, graph scope)
-    /// restores alongside the panes/tabs that come back from
-    /// `session.json`. Empty when there's nothing to restore.
-    url_hash_seed: &'a str,
-    /// WindowConfig identity key. Stamped onto the close handler so a
-    /// user-initiated close pushes the window's final URL hash back
-    /// into the LRU stack. Empty for terminal windows (no LRU restore).
-    config_key: String,
-    /// Zoom level to restore; 1.0 (the default) skips the IPC round-trip.
-    zoom_seed: f64,
     /// Load strategy. `None` (local) loads `url` directly via
     /// `WebviewUrl::External`: that backend is up before the window
-    /// opens. `Some(display_url)` (outbound) instead loads the bundled
+    /// opens. `Some(display_url)` (remote) instead loads the bundled
     /// `connecting.html` and hands it the display URL plus the assembled
     /// navigate target through an injected `window.__CHAN_CONNECTING__`;
     /// the page probes the remote via `probe_url` and navigates on
-    /// success. A direct External load of a down outbound remote paints a
-    /// blank white webview (WKWebView never finishes navigating, see
-    /// `capture_window_config`), which is the bug the connecting screen
-    /// fixes.
+    /// success. A direct External load of a down remote paints a blank white
+    /// webview, which is why the connecting screen owns the first load.
     connecting: Option<&'a str>,
     /// `Some("terminal")` makes the SPA boot without a workspace (no
     /// workspace fetch; the file browser and editor ride the same tenant
@@ -745,33 +650,6 @@ struct WindowSpec<'a> {
 }
 
 pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
-
-/// Build and show a chan-style workspace webview window on the main
-/// thread. Internal: watcher and control-terminal paths share it. Centralising the
-/// key-bridge JS, the size defaults, the zoom-hotkey polyfill, and
-/// the drag-drop handler off in one place means workspace UX changes
-/// don't fork between the local and outbound paths. Off macOS these
-/// windows are born menu-less (only the launcher carries a menubar);
-/// their chords ride KEY_BRIDGE_JS.
-fn build_workspace_window(app: &AppHandle, spec: WindowSpec<'_>) -> Result<(), String> {
-    let (built_tx, mut built_rx) = tokio::sync::oneshot::channel();
-    build_workspace_window_with_completion(
-        app,
-        spec,
-        Box::new(move |result| {
-            let _ = built_tx.send(result);
-        }),
-    )?;
-    // Tauri executes inline when called on its main thread. Preserve that
-    // build's actual result for synchronous callers such as imperative reopen.
-    match built_rx.try_recv() {
-        Ok(result) => result,
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => Ok(()),
-        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-            Err("window build was cancelled".to_string())
-        }
-    }
-}
 
 /// The scheduling result does not describe native window creation. Completion
 /// runs after the main-thread builder has either installed the window or failed.
@@ -788,9 +666,6 @@ fn build_workspace_window_with_completion(
         ordinal,
         caption,
         url,
-        url_hash_seed,
-        config_key,
-        zoom_seed,
         connecting,
         kind,
     } = spec;
@@ -811,19 +686,11 @@ fn build_workspace_window_with_completion(
             "build_workspace_window: ?pane= injection at mint time",
         );
     }
-    let parsed = workspace_window_target_url(
-        app,
-        window_label,
-        session_id,
-        library_id,
-        url,
-        url_hash_seed,
-        kind,
-    )?;
+    let parsed = workspace_window_target_url(app, window_label, session_id, library_id, url, kind)?;
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
-    // navigate URL (remote + ?w=<label> + restored #fragment) so the SPA's
-    // per-window state + restore survive the success navigation.
+    // navigate URL (remote + ?w=<label>) so the SPA's per-window state survives
+    // the success navigation.
     // The window kind rides the init script the same way so KEY_BRIDGE_JS
     // can route kind-dependent chords -- a control terminal's New-terminal
     // chord spawns a standalone window instead of toggling a tab it does
@@ -863,7 +730,7 @@ fn build_workspace_window_with_completion(
     // guard by it -- it diverges from the native label for watcher windows.
     let session_owned = session_id.to_string();
     // The passed kind (`terminal` / `control`) for terminal windows, else
-    // "workspace" (covers local / outbound) -- the kind `cs window list` shows.
+    // "workspace" -- the kind `cs window list` shows.
     // Captured owned so the 'static main-thread closure can hold it.
     let kind_owned = kind.unwrap_or("workspace").to_string();
     // The library ordinal (Copy) to display as " Window N", or None for windows
@@ -887,9 +754,9 @@ fn build_workspace_window_with_completion(
         let window_number = state.assign_window_number(&label_owned, &title_owned);
         // Prefer the library's persisted ordinal (the `#` in `cs window list`)
         // so the titlebar number and the registry agree; fall back to the
-        // desktop-local counter only for windows with no record (outbound /
-        // imperative reopen). assign_window_number is still called above so its
-        // reservation + release-on-close bookkeeping stays balanced regardless.
+        // desktop-local counter only for windows with no record (the control
+        // terminal). assign_window_number is still called above so its reservation
+        // + release-on-close bookkeeping stays balanced regardless.
         let display_number = ordinal_owned.map(u64::from).unwrap_or(window_number);
         // A `cs window title` override (kept across the bury/reopen cycle)
         // wins over the auto "{base} Window {N} [caption]" scheme; otherwise use
@@ -921,8 +788,7 @@ fn build_workspace_window_with_completion(
             // overlap is harmless because KEY_BRIDGE_JS's capture-
             // phase listener calls preventDefault before the
             // polyfill's bubble-phase listener sees the keydown).
-            // Requires `core:webview:allow-set-webview-zoom` on
-            // workspace-* / outbound-* windows per
+            // Requires `core:webview:allow-set-webview-zoom` on SPA windows per
             // capabilities/workspace.json.
             .zoom_hotkeys_enabled(true)
             // Hand HTML5 drag-and-drop to the page -- this must stay
@@ -969,37 +835,13 @@ fn build_workspace_window_with_completion(
                         },
                     );
                 }
-                // Restore the persisted zoom level from
-                // the popped WindowConfig (if any). 1.0 is the chan-
-                // desktop default; skip the IPC round-trip when there's
-                // nothing to apply. Best-effort: a Tauri set_zoom error
-                // here just leaves the new window at default zoom; the
-                // user can re-press Cmd++/Cmd+- to recover.
-                if (zoom_seed - 1.0).abs() > f64::EPSILON {
-                    if let Err(e) = window.set_zoom(zoom_seed) {
-                        tracing::warn!(
-                            label = %label_owned,
-                            error = %e,
-                            "restoring window zoom level failed",
-                        );
-                    } else {
-                        let state = app_owned.state::<Arc<AppState>>();
-                        state
-                            .live_window_zooms
-                            .lock()
-                            .unwrap()
-                            .insert(label_owned.clone(), zoom_seed);
-                    }
-                }
                 let app_for_close = app_owned.clone();
                 let label_for_close = label_owned.clone();
-                let key_for_close = config_key.clone();
                 let session_for_close = session_owned.clone();
                 window.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => on_close_requested(
                         &app_for_close,
                         &label_for_close,
-                        &key_for_close,
                         &session_for_close,
                         api,
                     ),
@@ -1023,24 +865,21 @@ fn build_workspace_window_with_completion(
     res.map_err(|e| format!("scheduling workspace window for {window_label}: {e}"))
 }
 
-/// The OS close (red) button on a LIVE workspace/terminal
+/// The OS close (red) button on a live SPA
 /// window PROMPTS before acting: hold the close and eval an
 /// `app.window.confirmClose` into the still-alive webview,
 /// where the SPA shows a Hide / Close / Cancel overlay and
 /// calls back (`hide_window_from_close_confirm` for Hide,
 /// `request_close_window` for Close). No bury happens here
 /// until the SPA decides. A few cases REAL-close with no
-/// prompt (there is no live SPA to ask, or nothing to keep): a
-/// standalone terminal window with NO live shells, a control
-/// terminal still CONNECTING, and a window still on the pre-SPA
-/// connecting/retry screen.
+/// prompt when there is no live SPA to ask, such as a control terminal
+/// still connecting or a window still on the pre-SPA connecting screen.
 /// Programmatic closes (the SPA's empty-window cascade,
 /// workspace-off teardown) call `destroy()`
 /// and never reach this handler.
 fn on_close_requested(
     app: &AppHandle,
     label: &str,
-    config_key: &str,
     session_id: &str,
     api: &tauri::CloseRequestApi,
 ) {
@@ -1082,10 +921,8 @@ fn on_close_requested(
         return;
     }
     // The explicit hide gesture buries directly, no prompt.
-    // HOLD the close first: the hide-in-place families (a
-    // connected `control-terminal-`, a standalone `terminal-`,
-    // an `outbound-` webview) bury via `window.hide()` and need
-    // the webview ALIVE to reopen. An un-prevented close
+    // HOLD the close first: a connected control terminal buries via
+    // `window.hide()` and needs the webview alive to reopen. An un-prevented close
     // proceeds to destroy it the moment this handler returns,
     // and the launcher eye's `/open` then 409s on a window
     // that no longer exists. The watcher families bury through
@@ -1093,7 +930,7 @@ fn on_close_requested(
     // itself, so holding the OS close is correct for them too.
     if silent_hide {
         api.prevent_close();
-        bury_window_now(app, &state, label, config_key);
+        bury_window_now(app, &state, label);
         return;
     }
     // A devserver window still on the connecting page has no
@@ -1115,19 +952,12 @@ fn on_close_requested(
     }
     // Decide whether there is a live workspace SPA to ASK. A
     // `local::` or connected `lib-` watcher window has one. A
-    // standalone `terminal-` with no live shells, a
-    // `control-terminal-` still connecting, and any window
+    // `control-terminal-` still connecting and any window
     // still on the pre-SPA connecting screen have nothing to
     // keep or no SPA to ask, so they real-close (return without
     // prevent_close; the Destroyed branch cleans up).
     let ask = if label.starts_with("local::") || label.starts_with("lib-") {
         true
-    } else if label.starts_with("terminal-") {
-        state
-            .embedded
-            .get()
-            .map(|e| e.terminal_window_has_live_shells(label))
-            .unwrap_or(false)
     } else if let Some(id) = label.strip_prefix("control-terminal-") {
         // A control terminal KEPT at "process exited" (its
         // devserver's reconnect is blocked on it): the red
@@ -1194,9 +1024,8 @@ fn on_close_requested(
 }
 
 /// Single cleanup point for EVERY destroy path: the
-/// no-live-shells close in `on_close_requested`, the SPA cascade destroy,
-/// workspace-off / outbound-forget
-/// teardown, and app exit. Frees the display number,
+/// real-close branch in `on_close_requested`, the SPA cascade destroy,
+/// workspace teardown, and app exit. Frees the display number,
 /// drops the zoom entry, and clears a stale buried
 /// registry entry if the window died while hidden.
 fn on_destroyed(app: &AppHandle, label: &str) {
@@ -1266,7 +1095,6 @@ pub(crate) fn browser_window_url(
         &record.window_id,
         &record.library_id,
         &url,
-        "",
         kind,
     )
 }
@@ -1297,7 +1125,6 @@ fn workspace_window_target_url(
     session_id: &str,
     library_id: &str,
     url: &str,
-    url_hash_seed: &str,
     kind: Option<&str>,
 ) -> Result<tauri::Url, String> {
     let Ok(mut parsed) = url.parse::<tauri::Url>() else {
@@ -1320,15 +1147,15 @@ fn workspace_window_target_url(
     // selects the singleton control sub-mode. There is no third spelling: what
     // a standalone window can reach beyond its terminals -- the file browser
     // and the editor -- is the serving tenant's answer, declared in the shell
-    // it serves. Workspace/outbound windows pass `None` and the SPA stays in
-    // full workspace mode.
+    // it serves. Workspace windows pass `None` and the SPA stays in full
+    // workspace mode.
     if let Some(kind) = kind {
         parsed.query_pairs_mut().append_pair("kind", kind);
     }
     // `lib=<library_id>` next to `?w=`/`?kind=` tells the SPA which chan-library
     // this window belongs to, so cross-window tab d&d accepts a drop only from
-    // the same library. Skipped when empty (an outbound URL attachment has no
-    // library identity; the SPA defaults a missing `?lib=` to `local`).
+    // the same library. The control terminal has no library identity, so its
+    // empty id is skipped.
     if !library_id.is_empty() {
         parsed.query_pairs_mut().append_pair("lib", library_id);
     }
@@ -1365,9 +1192,6 @@ fn workspace_window_target_url(
             parsed.query_pairs_mut().append_pair("seed", "0");
         }
     }
-    if !url_hash_seed.is_empty() {
-        parsed.set_fragment(Some(url_hash_seed));
-    }
     Ok(parsed)
 }
 
@@ -1385,24 +1209,14 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 ///     the native window) plus the legacy buried list; persist hidden=true.
 ///   - `lib-<hex>::<id>`: bury through the owning devserver's watcher view,
 ///     override the feed `connected` bit to hidden and re-push; persist.
-///   - anything else (a standalone `terminal-`, a connected `control-terminal-`,
-///     an `outbound-` webview): hide the webview in place; persist hidden=true
-///     for the labels that carry a registry row (the router no-ops the rest).
+///   - a connected `control-terminal-`: hide the webview in place and persist
+///     hidden=true for its registry row.
 ///
-/// `config_key` is the LRU restore key `capture_window_config` pushes for a
-/// buried non-terminal window; it is empty for the watcher windows (which own
-/// their own persistence). Two callers reach here: an explicit hide gesture
-/// (`cs window hide` / the launcher Hide action, via the drained `silent_hide`
-/// flag, passing the window's exact `config_key`) and the SPA's Hide choice from
-/// the close-confirm overlay (`hide_window_from_close_confirm`, which recovers
-/// the key from the label via `restore_key_for_label`). Close is the sibling
-/// choice and rides the existing `request_close_window` discard/destroy cascade.
-pub(crate) fn bury_window_now(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    label: &str,
-    config_key: &str,
-) {
+/// Two callers reach here: an explicit hide gesture (`cs window hide` / the
+/// launcher Hide action) and the SPA's Hide choice from the close-confirm
+/// overlay. Close is the sibling choice and rides the existing
+/// `request_close_window` discard/destroy cascade.
+pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &str) {
     // A watcher-managed local window (`local::<id>`): bury it through the
     // watcher view state (should_show false -> the reconcile closes the native
     // window; the record stays, reopenable from the Window menu). Mirror into
@@ -1459,40 +1273,18 @@ pub(crate) fn bury_window_now(
         crate::rebuild_window_menu(app);
         return;
     }
-    // A standalone `terminal-`, a connected `control-terminal-`, or an
-    // `outbound-` webview: hide it in place. Capture the restore snapshot NOW
-    // (webview alive, URL hash + zoom readable) for everything but a terminal
-    // window, whose layout is the live PTY, not a URL hash. The zoom stays in
-    // `live_window_zooms` (peek, not drain) -- the window is still alive and may
-    // be unburied; the Destroyed cleanup drops the entry.
-    if !label.starts_with("terminal-") {
-        capture_window_config(app, label, config_key, false);
-        capture_window_geometry(app, label);
-    }
+    // A connected control terminal is the only non-watcher SPA window. Hide it
+    // in place so the live connection endpoint stays warm and reopenable.
+    capture_window_geometry(app, label);
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
     let title = window.title().unwrap_or_else(|_| label.to_string());
     let _ = window.hide();
     state.bury_window(label, &title);
-    // Persist hidden=true for windows with a registry row -- the control terminal
-    // (routes control-terminal- -> embedded). Non-registry windows here (a
-    // standalone terminal-, an outbound webview) are a no-op in the router.
+    // Persist hidden=true for the control terminal registry row.
     crate::persist_window_hidden(state, label, true);
     crate::rebuild_window_menu(app);
-}
-
-/// The LRU restore key `bury_window_now` needs, recovered from a window label
-/// alone for the SPA-driven Hide callback (`hide_window_from_close_confirm`
-/// only has the label, not the `WindowSpec` that seeded the key at mint time).
-/// `local::`/`lib-` watcher windows and control terminals seed no key (the
-/// library / connect flow owns their persistence), and a `terminal-` window
-/// captures no config at all, so they resolve to empty; a classic
-/// `workspace-<hash>-<seq>` window keys on its running workspace.
-pub(crate) fn restore_key_for_label(state: &Arc<AppState>, label: &str) -> String {
-    running_workspace_for_label(state, label)
-        .map(|(key, _)| config::local_window_key(&key))
-        .unwrap_or_default()
 }
 
 /// The active-transfer close guard's prompt (mirror of the live-shells confirm).
@@ -1767,8 +1559,8 @@ fn reveal_window(window: &tauri::WebviewWindow, label: &str) {
 /// user left. The window is still shown here, so `scale_factor()` is its real
 /// monitor scale; converting the physical OS values to points makes the restore
 /// scale-independent. Best-effort: skips on a query error or a degenerate (zero)
-/// size; geometry is desktop-owned, so this runs for local / devserver / outbound
-/// windows alike. Logs a `WINGEO capture` line (signature + points + scale +
+/// size; geometry is desktop-owned, so this runs for local and devserver windows
+/// alike. Logs a `WINGEO capture` line (signature + points + scale +
 /// monitors) for the host.
 pub(crate) fn capture_window_geometry(app: &AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
@@ -1823,69 +1615,6 @@ pub(crate) fn capture_window_geometry(app: &AppHandle, label: &str) {
             saved_at: 0,
         },
     );
-}
-
-/// Snapshot the window's URL hash and push the resulting WindowConfig
-/// onto the LRU stack. Called at BURY time (the hide-not-close moment;
-/// webview alive, URL readable) and from any explicit capture path.
-/// Best-effort: a webview that's already torn down reports no URL and
-/// we skip the push. The hash is read from `WebviewWindow::url()`
-/// because the webview SPA writes the latest state to `location.hash`
-/// via `persistStateToHash`, and Tauri's URL reflection picks that up
-/// on platforms with the WKWebView / WebView2 backends.
-///
-/// Also captures the live zoom level for this window
-/// into `WindowConfig.zoom_level` so the next open of the same
-/// workspace restores the zoom. `drain_zoom` controls whether the
-/// `live_window_zooms` entry is removed (a window on its way out) or
-/// peeked (a buried window stays alive and keeps zooming rights; its
-/// entry is dropped by the `Destroyed` cleanup instead).
-fn capture_window_config(app: &AppHandle, window_label: &str, config_key: &str, drain_zoom: bool) {
-    let Some(window) = app.get_webview_window(window_label) else {
-        return;
-    };
-    // Reading the URL hash is best-effort and must never crash the app on a
-    // window close. A nil URL can trip a panic deep in the runtime
-    // (a nil/empty webview URL fails tauri-runtime-wry's `.parse().expect()` /
-    // wry's `.URL().unwrap()`); that panic runs on the event-loop thread and
-    // takes the WHOLE app down. The chan-side `match` below cannot catch it
-    // because the panic is upstream of the returned `Result`. Guard the read
-    // with catch_unwind and degrade to an empty hash.
-    let url_hash = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url())) {
-        Ok(Ok(u)) => u.fragment().unwrap_or("").to_string(),
-        Ok(Err(e)) => {
-            tracing::debug!(
-                label = %window_label,
-                error = %e,
-                "could not read url for closing window; pushing empty hash",
-            );
-            String::new()
-        }
-        Err(_) => {
-            tracing::warn!(
-                label = %window_label,
-                "reading url for a closing window panicked (dead webview); pushing empty hash",
-            );
-            String::new()
-        }
-    };
-    let state = app.state::<Arc<AppState>>();
-    let zoom_level = {
-        let mut zooms = state.live_window_zooms.lock().unwrap();
-        if drain_zoom {
-            zooms.remove(window_label)
-        } else {
-            zooms.get(window_label).copied()
-        }
-        .unwrap_or(1.0)
-    };
-    state.push_window_config(WindowConfig {
-        key: config_key.to_string(),
-        window_label: window_label.to_string(),
-        url_hash,
-        zoom_level,
-        saved_at: 0,
-    });
 }
 
 /// Destroy a window by its exact label, if it exists. Best-effort; used to
@@ -2555,28 +2284,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_label_keeps_a_legacy_non_composite_label_verbatim() {
-        // A control terminal / standalone terminal / saved-workspace
-        // label has no `library_id::` prefix, so it IS its own native label.
-        // Fabricating `local::{id}` (the old fallback) pointed the launcher's
-        // Focus/eye op at a window that never exists and silently no-opped (the
-        // P0). These families must resolve verbatim even with no live candidate.
+    fn resolve_label_keeps_only_a_control_terminal_label_verbatim() {
+        // A control terminal has no `library_id::` prefix, so it is its own
+        // native label even with no live candidate.
         assert_eq!(
             resolve_label_from("control-terminal-ds1", &[]),
             "control-terminal-ds1"
         );
-        assert_eq!(resolve_label_from("terminal-3", &[]), "terminal-3");
+        // Retired label families receive the ordinary local fallback rather
+        // than retaining their old parser exceptions.
+        assert_eq!(resolve_label_from("terminal-3", &[]), "local::terminal-3");
         assert_eq!(
             resolve_label_from("workspace-abc-1", &[]),
-            "workspace-abc-1"
+            "local::workspace-abc-1"
         );
-        // A bare library-minted id is NOT a legacy family, so it still falls back
-        // to the `local::` composite (no over-broadening of the verbatim rule).
         assert_eq!(resolve_label_from("w-1", &[]), "local::w-1");
     }
 
     #[test]
-    fn resolve_label_passes_a_full_composite_or_legacy_label_through_verbatim() {
+    fn resolve_label_passes_a_full_composite_label_through_verbatim() {
         // `cs window open/hide` passes the full label already; a composite is used
         // verbatim even when its native window was destroyed (not in the open set),
         // so `cs window open <composite>` reaches the view-driven reopen too.
@@ -3007,7 +2733,7 @@ mod tests {
         );
     }
 
-    // Workspace and outbound webviews host the SPA, which
+    // Watcher-opened webviews host the SPA, which
     // routes external http(s) link clicks through tauri-plugin-opener
     // via the `plugin:opener|open_url` IPC. Without these permissions
     // the IPC denies, the SPA falls back to the clipboard-copy notify
@@ -3172,9 +2898,8 @@ mod tests {
     #[test]
     fn workspace_capability_covers_control_terminal_windows() {
         // A control terminal's window label is `control-terminal-<id>`
-        // (`control_terminal_label`), which matches neither workspace-* nor
-        // terminal-* -- so without this glob the control window has
-        // no capability and Tauri denies every IPC from it, including the
+        // (`control_terminal_label`). Without this glob the control window has no
+        // capability and Tauri denies every IPC from it, including the
         // request_close_window that rules (b)/(c) of the control-terminal dialog
         // (Cmd+W / the not-connected close button) route through. Pin the grant
         // so a glob rename can't silently strand the control window again.
@@ -3248,11 +2973,10 @@ mod tests {
         assert!(arm.contains("let silent_hide = state.take_silent_hide(label);"));
         assert!(arm.contains("if silent_hide {"));
         assert!(arm.contains("bury_window_now("));
-        // The silent-hide bury must HOLD the close before burying: the
-        // hide-in-place families (connected control-terminal-, terminal-,
-        // outbound-) bury via window.hide(), and an un-prevented close destroys
-        // the webview right after the handler returns, leaving the launcher eye
-        // pointing at a window that 409s on reopen.
+        // The silent-hide bury must HOLD the close before burying. A connected
+        // control terminal buries via window.hide(), and an
+        // un-prevented close destroys the webview right after the handler
+        // returns, leaving the launcher eye pointing at a missing window.
         assert!(
             arm.contains("if silent_hide {\n        api.prevent_close();"),
             "the silent-hide branch must prevent_close before bury_window_now",
@@ -3271,10 +2995,9 @@ mod tests {
             .find("window.eval(CONFIRM_CLOSE_DISPATCH_JS)")
             .expect("the close prompt is evaluated");
         assert!(raise < focus && focus < eval);
-        // The real-close cases (terminal with no shells, control terminal still
-        // connecting, pre-SPA connecting screen) return WITHOUT prevent_close.
+        // The real-close cases (control terminal still connecting and pre-SPA
+        // connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));
-        assert!(arm.contains("terminal_window_has_live_shells"));
         assert!(arm.contains("strip_prefix(\"control-terminal-\")"));
         assert!(arm.contains("window_on_connecting_screen"));
         // A kept-dead control terminal's red button routes through the same
@@ -3335,8 +3058,8 @@ mod tests {
     fn workspace_capability_covers_watcher_opened_local_windows() {
         // Watcher-opened local windows carry the composite native label
         // `local::<window_id>` (`window_watcher::native_label`), which matches
-        // NONE of the workspace-* / outbound-* / terminal-* globs -- so without
-        // `local::*` a minted window gets no capability and Tauri denies every
+        // no other current label glob, so without `local::*` a minted window gets
+        // no capability and Tauri denies every
         // SPA IPC (the command bridge, opener, drag). Pin the grant so a glob
         // change can't silently strand minted windows.
         let windows = capability_windows(WORKSPACE_CAPABILITY_JSON);
@@ -3365,18 +3088,11 @@ mod tests {
 
     #[test]
     fn local_upload_capability_covers_every_locally_served_window_kind() {
-        // cs upload runs wherever a terminal runs: workspace windows,
-        // standalone terminals, connect-script control terminals, and
-        // watcher-opened windows (local:: and loopback lib-*). A kind
+        // cs upload runs wherever a terminal runs: connect-script control
+        // terminals and watcher-opened windows (local:: and lib-*). A kind
         // missing from this list silently loses the native picker.
         let windows = capability_windows(LOCAL_UPLOAD_CAPABILITY_JSON);
-        for expected in [
-            "workspace-*",
-            "terminal-*",
-            "control-terminal-*",
-            "local::*",
-            "lib-*",
-        ] {
+        for expected in ["control-terminal-*", "local::*", "lib-*"] {
             assert!(
                 windows.iter().any(|w| w == expected),
                 "local-upload capability must cover {expected} windows: {windows:?}",
@@ -3475,14 +3191,7 @@ mod tests {
         // The grant therefore lives in its own capability targeting
         // only the locally-served window kinds...
         let windows = capability_windows(LOCAL_DROP_CAPABILITY_JSON);
-        assert!(
-            windows.iter().any(|w| w == "workspace-*"),
-            "local-drop capability must cover workspace-* windows: {windows:?}",
-        );
-        assert!(
-            windows.iter().any(|w| w == "terminal-*"),
-            "local-drop capability must cover terminal-* windows: {windows:?}",
-        );
+        assert!(windows.iter().any(|w| w == "local::*"));
         assert!(
             windows.iter().all(|w| w != "lib-*" && w != "main"),
             "local-drop capability must stay off gateway-served and launcher windows: {windows:?}",
@@ -3704,14 +3413,13 @@ mod tests {
     ];
 
     /// The window/origin classes the desktop actually opens for workspace
-    /// SPA content. Labels mirror the real minting sites (workspace-*,
-    /// and the library scheme `lib-<hex>::<window_id>`); origins are the
+    /// SPA content. Labels mirror the library minting scheme; origins are the
     /// loopback embedded server and the gateway tunnel entry URL
     /// (`window_navigation_url`).
     const ORIGIN_CLASSES: [(&str, &str, &str); 4] = [
         (
-            "loopback workspace window",
-            "workspace-8f2c",
+            "loopback local window",
+            "local::w-1",
             "http://127.0.0.1:4090",
         ),
         (
@@ -3745,7 +3453,7 @@ mod tests {
     /// ungranted, and the handler's label, origin, and live-connection checks
     /// independently refuse callers outside that gateway binding.
     const DELIBERATE_EXCLUSIONS: [(&str, &str); 5] = [
-        ("loopback workspace window", "gateway_csrf_token"),
+        ("loopback local window", "gateway_csrf_token"),
         ("loopback lib window", "gateway_csrf_token"),
         ("loopback lib window", "read_dropped_paths"),
         ("official exact-origin lib window", "read_dropped_paths"),
@@ -4047,7 +3755,6 @@ mod tests {
         assert!(label_glob_matches("lib-*", "lib-0a1b::w-1"));
         assert!(!label_glob_matches("lib-*", "library"));
         assert!(label_glob_matches("local::*", "local::w-1"));
-        assert!(label_glob_matches("workspace-*", "workspace-8f2c"));
         assert!(label_glob_matches("main-*", "main-2"));
         assert!(!label_glob_matches("main", "main-2"));
         assert!(remote_url_matches(

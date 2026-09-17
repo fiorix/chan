@@ -253,9 +253,8 @@ impl EmbeddedServer {
     ///
     /// Keyed on the `?w=` window id (NOT the native window label: they diverge
     /// for watcher-opened windows, where the label is `{library_id}::{window_id}`
-    /// -- serve.rs:750). The serving tenant's prefix isn't on the close handler
-    /// (`config_key` is empty for watcher windows), so resolve it from the live
-    /// window records here. Local library only: a remote/devserver window's
+    /// -- serve.rs:750). Resolve the serving tenant's prefix from the live window
+    /// records here. Local library only: a remote/devserver window's
     /// transfers live on that server, so it's absent from these records and reads
     /// `false` -- correct, it's not ours to guard.
     pub fn window_has_active_transfer(&self, window_id: &str) -> bool {
@@ -381,19 +380,6 @@ impl EmbeddedServer {
         let url = hosted.handle.launch_url();
         *cached = Some(url.clone());
         Ok(url)
-    }
-
-    /// True when the shared `/terminal` tenant still has at least one
-    /// live PTY session bound to `window_label` (sessions carry the
-    /// SPA's `?w=` window id, which IS the Tauri label for desktop
-    /// windows). The close handler uses this to decide bury-vs-close
-    /// for a standalone terminal window: shells running -> hide the
-    /// window and keep them; none -> let the window really close.
-    /// Sync (read lock + roster snapshot), safe on the event-loop
-    /// thread. `false` when the tenant was never mounted.
-    pub fn terminal_window_has_live_shells(&self, window_label: &str) -> bool {
-        self.host
-            .tenant_has_window_sessions("/terminal", window_label)
     }
 
     /// Mount a fresh terminal tenant whose PTY runs `command` (a single

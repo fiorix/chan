@@ -40,7 +40,7 @@ use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use config::{ConfigStore, WindowConfig, WindowGeometry};
+use config::{ConfigStore, WindowGeometry};
 use serve::ServeHandle;
 use window_watcher_wiring::DevserverWatcherStop;
 
@@ -109,10 +109,7 @@ pub struct AppState {
     /// current zoom for every open webview keyed by window label so
     /// `zoom_in` / `zoom_out` / `zoom_reset` can compute the next
     /// level without spawning a JS eval round-trip to read the
-    /// current. Drained into `WindowConfig.zoom_level` by the close
-    /// handler so the LRU restore picks the level up on
-    /// the next open. Missing entry reads as 1.0 (the chan-desktop
-    /// default).
+    /// current. Missing entries read as 1.0 (the chan-desktop default).
     pub live_window_zooms: Mutex<HashMap<String, f64>>,
     /// Per-live-window display number, keyed by window label, with the
     /// base title it was assigned under. Drives the `"{title} Window
@@ -353,29 +350,6 @@ pub struct BuriedWindow {
     pub buried_at: u64,
 }
 
-/// Family prefix for unbury matching: the label with its trailing
-/// `-<seq>` segment removed (everything through the LAST dash).
-/// `terminal-win-3` -> `terminal-win-` (all standalone terminals are
-/// one family); `workspace-<16hex>-2` -> `workspace-<16hex>-` (one
-/// family per workspace).
-fn window_family_prefix(label: &str) -> &str {
-    match label.rfind('-') {
-        Some(idx) => &label[..=idx],
-        None => label,
-    }
-}
-
-/// Most recently buried label starting with `prefix`, scanning the
-/// bury-ordered slice from the newest end. Free function so the
-/// recency/family logic is unit-testable without an `AppState`.
-fn most_recent_buried_with_prefix<'a>(buried: &'a [BuriedWindow], prefix: &str) -> Option<&'a str> {
-    buried
-        .iter()
-        .rev()
-        .find(|b| b.label.starts_with(prefix))
-        .map(|b| b.label.as_str())
-}
-
 /// Lowest free display number (`>= 1`) for `base` among the live
 /// window-number entries, ignoring any slot already held by `label`
 /// itself (so a re-assign of the same window keeps its number stable).
@@ -452,54 +426,10 @@ impl AppState {
             .contains(native_label)
     }
 
-    /// Push a closing window's layout onto the LRU stack. Best
-    /// effort: any I/O error is logged and dropped so a flaky
-    /// config disk doesn't leak through the WindowEvent handler.
-    pub fn push_window_config(&self, entry: WindowConfig) {
-        let mut store = self.store.lock().unwrap();
-        let mut cfg = match store.get() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "loading config to push window state failed");
-                return;
-            }
-        };
-        config::push_window_config(&mut cfg, entry);
-        if let Err(e) = store.save(&cfg) {
-            tracing::warn!(error = %e, "persisting window config stack failed");
-        }
-    }
-
-    /// Pop the most-recent WindowConfig matching `key` whose label
-    /// isn't a live webview (see `config::pop_window_config`),
-    /// removing it from the stack on disk. Returns `None` when no
-    /// entry exists or the config file can't be read. Same best-effort
-    /// posture as `push_window_config`.
-    pub fn pop_window_config(
-        &self,
-        key: &str,
-        is_label_live: impl Fn(&str) -> bool,
-    ) -> Option<WindowConfig> {
-        let mut store = self.store.lock().unwrap();
-        let mut cfg = match store.get() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "loading config to pop window state failed");
-                return None;
-            }
-        };
-        let popped = config::pop_window_config(&mut cfg, key, is_label_live)?;
-        if let Err(e) = store.save(&cfg) {
-            tracing::warn!(error = %e, "persisting window config stack failed");
-        }
-        Some(popped)
-    }
-
     /// Upsert a window's freshly-captured OS geometry into the desktop-local
     /// geometry LRU (see `config::push_window_geometry`). Keyed by the stable
-    /// native window label; covers every window class (the geometry store is
-    /// separate from `window_configs`). Best-effort: any I/O
-    /// error is logged and dropped, like `push_window_config`.
+    /// native window label and covers every window class. Best-effort: any I/O
+    /// error is logged and dropped.
     pub fn push_window_geometry(&self, label: &str, geom: WindowGeometry) {
         let mut store = self.store.lock().unwrap();
         let mut cfg = match store.get() {
@@ -586,13 +516,6 @@ impl AppState {
         let before = buried.len();
         buried.retain(|b| b.label != label);
         buried.len() != before
-    }
-
-    /// Most recently buried window label whose label starts with
-    /// `prefix` (a window-family prefix, see `window_family_prefix`).
-    pub fn most_recent_buried(&self, prefix: &str) -> Option<String> {
-        let buried = self.buried_windows.lock().unwrap();
-        most_recent_buried_with_prefix(&buried, prefix).map(str::to_string)
     }
 
     /// Mark `label` so its next close-button bury skips the teaching notice
@@ -4284,14 +4207,12 @@ async fn request_close_window(
 /// and evaled `app.window.confirmClose` into the webview; this is the "Hide"
 /// answer. Mirrors the launcher Hide action, minus the (now removed) teaching
 /// notice. "Close" is the sibling answer and rides `request_close_window`
-/// (discard + destroy). The window label alone reaches the bury; its LRU restore
-/// key is recovered from the label via `serve::restore_key_for_label`.
+/// (discard + destroy).
 #[tauri::command]
 fn hide_window_from_close_confirm(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     let state = app.state::<Arc<AppState>>();
     let label = window.label().to_string();
-    let key = serve::restore_key_for_label(&state, &label);
-    serve::bury_window_now(&app, &state, &label, &key);
+    serve::bury_window_now(&app, &state, &label);
 }
 
 /// Abandon the devserver backing a workspace window (the disconnect overlay's
@@ -4352,11 +4273,8 @@ async fn reconnect_devserver_for_window(
 }
 
 /// The one library a window is allowed to act on: its own. A watcher-managed
-/// window's label is `{library_id}::{window_id}`, and a locally-supervised
-/// workspace window belongs to the local library by construction (its
-/// `WindowSpec` carries `library_id: "local"`). Every other label -- the
-/// launcher, About, or a terminal-only window -- names
-/// no library, so the commands below refuse instead of guessing one.
+/// window's label is `{library_id}::{window_id}`. Every other label names no
+/// library, so the commands below refuse instead of guessing one.
 ///
 /// Deriving this from the caller's own label rather than an argument is what
 /// keeps "may cause a native window to open" inside the Tauri capability
@@ -4366,7 +4284,7 @@ fn library_id_for_window_label(label: &str) -> Option<&str> {
     if let Some((library_id, _)) = label.split_once("::") {
         return (library_id == "local" || library_id.starts_with("lib-")).then_some(library_id);
     }
-    label.starts_with("workspace-").then_some("local")
+    None
 }
 
 /// Resolve the local library's opaque workspace id to its root path. The id is
@@ -5810,8 +5728,8 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // enable/disable: a disabled menu item still swallows the accelerator,
         // so a launcher-focused chord would dead-end). The single handler
         // routes by the FOCUSED window's kind: a launcher (main / main-*)
-        // opens a new standalone terminal window; any embedded SPA window
-        // (workspace-* / terminal-*) gets `app.terminal.toggle`
+        // opens a new standalone terminal window; any watcher-opened SPA window
+        // (`local::*` / `lib-*`) gets `app.terminal.toggle`
         // dispatched, which the SPA interprets per its mode (workspace:
         // toggle a pane terminal; terminal: add a tab).
         let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Terminal")
@@ -6444,11 +6362,9 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
 /// Open a new window of the workspace that owns the currently
 /// focused window (the Cmd/Ctrl+Shift+N "New Window" semantics).
 ///
-/// Window labels are `workspace-<hash(key)>-<seq>` and the hash is
-/// one-way, so we recover the workspace key by matching
-/// `serve::workspace_window_prefix(key)` against the focused window's
-/// label across the running `serves` map, then mint another window for
-/// it (the watcher opens it).
+/// A watcher-opened window's composite label resolves its library record. The
+/// library mints a sibling record of the focused window's kind, and its watcher
+/// opens the native window.
 ///
 /// With the launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
 /// terminal window instead -- the launcher is a singleton, never
@@ -6505,12 +6421,6 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
 }
 
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
-    // Buried workspace windows take precedence in their family:
-    // Cmd+Shift+N on a window whose family has a hidden sibling REOPENS that
-    // sibling (most recent first) instead of spawning a fresh window. Local
-    // `local::` windows are independent registry records -- no family unbury;
-    // a focused one mints/opens a fresh window (branched on kind below), and a
-    // focused launcher (or nothing) opens a standalone terminal.
     let Some(focused) = app
         .webview_windows()
         .into_values()
@@ -6531,8 +6441,7 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
     // A watcher-opened local window (`local::<window_id>`): branch on the
     // window's KIND. A terminal opens ANOTHER standalone terminal; a
     // workspace mints another window for the same workspace (the watcher opens
-    // it). Each minted window is an independent registry record, so there is no
-    // `<kind>-<hash>-<seq>` family to unbury (unlike the schemes below).
+    // it). Each minted window is an independent registry record.
     // (A Terminal record carries no `workspace_path`, so keying on that -- the
     // old code -- fell through to the launcher: the #2 bug.)
     if focused_label.starts_with("local::") {
@@ -6575,34 +6484,7 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
         });
         return Ok(());
     }
-    // Family unbury first: legacy workspace windows group by their
-    // `workspace-<16hex>-` label prefix.
-    if let Some(buried) = state.most_recent_buried(window_family_prefix(focused_label)) {
-        if unbury_window(app, &buried) {
-            return Ok(());
-        }
-    }
-    let resolved = {
-        let serves = state.serves.lock().unwrap();
-        serves.iter().find_map(|(key, handle)| {
-            let prefix = serve::workspace_window_prefix(key);
-            if focused_label.starts_with(&format!("{prefix}-")) {
-                handle.url.clone().map(|url| (key.clone(), url))
-            } else {
-                None
-            }
-        })
-    };
-    match resolved {
-        // Mint another window for the workspace; the watcher opens it.
-        Some((key, _url)) => state
-            .embedded()
-            .ok_or_else(|| "embedded local server is unavailable".to_string())?
-            .mint_window(chan_server::WindowKind::Workspace, Some(key))
-            .map(|_| ()),
-        // Workspace runtime gone under a live window: surface the picker.
-        None => show_window(app, "main"),
-    }
+    show_window(app, "main")
 }
 
 /// Mint another window for the devserver window that owns `focused_label`
@@ -6899,7 +6781,7 @@ fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
 /// macOS-only, where the single global menubar serves every window (the
 /// off-mac shapes carry per-window items that need no focus routing).
 ///
-/// - An embedded SPA window (workspace-* / terminal-*) gets
+/// - A watcher-opened SPA window (`local::*` / `lib-*`) gets
 ///   `app.terminal.toggle` dispatched. The SPA decides
 ///   what that means: a workspace window toggles a pane terminal (its
 ///   existing behaviour); a terminal window adds a terminal tab.
@@ -6928,7 +6810,7 @@ fn handle_new_terminal(app: &tauri::AppHandle) {
 /// (plain Ctrl+W stays a terminal readline chord there, and Ctrl+Shift+W
 /// is tab close).
 ///
-/// - A focused workspace webview (workspace-* / terminal-*):
+/// - A focused watcher-opened workspace webview (`local::*` / `lib-*`):
 ///   on macOS the menu shares Cmd+W with tab-close, so it dispatches
 ///   `app.tab.close` (the active tab, not the window). Off-mac the menu
 ///   chord is the registry's window-close (Ctrl+Alt+W; tab-close is
@@ -7825,13 +7707,6 @@ mod tests {
             library_id_for_window_label("lib-0a1b::w-1"),
             Some("lib-0a1b")
         );
-        // A locally-supervised workspace window carries no `library_id::`
-        // prefix but belongs to the local library by construction.
-        assert_eq!(
-            library_id_for_window_label("workspace-8f2c-0"),
-            Some("local")
-        );
-
         // Windows that own no library must resolve to none rather than
         // defaulting into one.
         for label in [
@@ -8230,71 +8105,19 @@ mod tests {
         };
 
         // First two terminal windows get 1, 2.
-        assert_eq!(assign(&mut numbers, "terminal-win-0", "Terminal"), 1);
-        assert_eq!(assign(&mut numbers, "terminal-win-1", "Terminal"), 2);
+        assert_eq!(assign(&mut numbers, "local::w-t0", "Terminal"), 1);
+        assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);
         // A different base title starts its own sequence at 1.
-        assert_eq!(assign(&mut numbers, "workspace-aa-0", "🏠 /w"), 1);
+        assert_eq!(assign(&mut numbers, "local::w-w0", "🏠 /w"), 1);
 
         // Free the first terminal; the next terminal reuses 1, not 3.
-        numbers.remove("terminal-win-0");
-        assert_eq!(assign(&mut numbers, "terminal-win-2", "Terminal"), 1);
+        numbers.remove("local::w-t0");
+        assert_eq!(assign(&mut numbers, "local::w-t2", "Terminal"), 1);
         // The unrelated base is untouched by the terminal churn.
-        assert_eq!(assign(&mut numbers, "workspace-aa-1", "🏠 /w"), 2);
+        assert_eq!(assign(&mut numbers, "local::w-w1", "🏠 /w"), 2);
 
         // Re-assigning a live label keeps its slot (ignores itself).
-        assert_eq!(assign(&mut numbers, "terminal-win-1", "Terminal"), 2);
-    }
-
-    #[test]
-    fn window_family_prefix_strips_the_seq_segment() {
-        // All standalone terminals are one family.
-        assert_eq!(window_family_prefix("terminal-win-0"), "terminal-win-");
-        assert_eq!(window_family_prefix("terminal-win-12"), "terminal-win-");
-        // Workspace labels group per hash segment.
-        assert_eq!(
-            window_family_prefix("workspace-00deadbeef00aa11-3"),
-            "workspace-00deadbeef00aa11-",
-        );
-        // Degenerate label without a dash stays itself (never matches a
-        // family-prefixed lookup, which always ends in '-').
-        assert_eq!(window_family_prefix("main"), "main");
-    }
-
-    #[test]
-    fn buried_lookup_is_most_recent_first_within_a_family() {
-        let buried = vec![
-            BuriedWindow {
-                label: "terminal-win-0".into(),
-                title: "Terminal Window 1".into(),
-                buried_at: 100,
-            },
-            BuriedWindow {
-                label: "workspace-aa-0".into(),
-                title: "🏠 /w Window 1".into(),
-                buried_at: 200,
-            },
-            BuriedWindow {
-                label: "terminal-win-2".into(),
-                title: "Terminal Window 3".into(),
-                buried_at: 300,
-            },
-        ];
-        // Most recently buried terminal wins; the workspace family is
-        // untouched by terminal churn.
-        assert_eq!(
-            most_recent_buried_with_prefix(&buried, "terminal-win-"),
-            Some("terminal-win-2"),
-        );
-        assert_eq!(
-            most_recent_buried_with_prefix(&buried, "workspace-aa-"),
-            Some("workspace-aa-0"),
-        );
-        // A family with nothing buried finds nothing -- and a family
-        // prefix never matches another family's labels.
-        assert_eq!(
-            most_recent_buried_with_prefix(&buried, "workspace-bb-"),
-            None
-        );
+        assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);
     }
 
     #[test]

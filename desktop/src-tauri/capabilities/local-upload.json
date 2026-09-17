@@ -6,7 +6,7 @@
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
   "local": true,
-  "windows": ["workspace-*", "terminal-*", "control-terminal-*", "local::*", "lib-*"],
+  "windows": ["control-terminal-*", "local::*", "lib-*"],
   "permissions": [
     "allow-download-file-native",
     "allow-upload-files-native",
