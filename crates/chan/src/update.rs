@@ -1648,6 +1648,7 @@ mod tests {
         assert_eq!(calls, WINDOWS_RENAME_MAX_ATTEMPTS);
         assert_eq!(sleeps.len(), WINDOWS_RENAME_MAX_ATTEMPTS - 1);
         assert!(sleeps.into_iter().sum::<Duration>() <= WINDOWS_RENAME_MAX_TOTAL_SLEEP);
+        assert!(WINDOWS_RENAME_MAX_TOTAL_SLEEP <= Duration::from_secs(2));
     }
 
     #[test]
