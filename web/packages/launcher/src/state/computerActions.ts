@@ -17,6 +17,7 @@ import {
   setDevserverWorkspaceOn,
   toggleWindow,
   toggleWorkspace,
+  windowLiveTerminalCount,
 } from "./library.svelte";
 import { requestConfirm } from "./confirm.svelte";
 import { hasDesktopBridge, selfManagedWindows } from "./capabilities";
@@ -145,4 +146,8 @@ export async function setWindowShown(window: WindowRecord, shown: boolean): Prom
 
 export async function closeComputerWindow(window: WindowRecord): Promise<void> {
   await closeWindow(window, actingFor(window.prefix));
+}
+
+export async function liveTerminalCountForWindow(window: WindowRecord): Promise<number | null> {
+  return windowLiveTerminalCount(window);
 }

@@ -5,6 +5,7 @@
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
     rankDeckItems,
+    type DeckConfirm,
     type DeckItem,
     type DeckScope,
     type DeckScopeId,
@@ -39,6 +40,7 @@
     closeComputerWindow,
     connectComputer,
     focusComputerWindow,
+    liveTerminalCountForWindow,
     newTerminal,
     newWorkspaceWindow,
     setWindowShown,
@@ -132,6 +134,32 @@
     return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];
   }
 
+  function closeMessage(count: number | null): string {
+    if (count === null) return "Open sessions in this window may stop.";
+    if (count === 0) return "This window will close.";
+    return `${count} terminal session${count === 1 ? "" : "s"} in this window will stop.`;
+  }
+
+  function closeConfirmation(
+    window: WindowRecord,
+  ): DeckConfirm | (() => Promise<DeckConfirm>) {
+    const base = {
+      title: `Close ${windowRowLabel(window)}?`,
+      actionLabel: "Close",
+      danger: true,
+    };
+    if (window.control) {
+      return {
+        ...base,
+        message: "This stops the control terminal and its connection script.",
+      };
+    }
+    return async () => ({
+      ...base,
+      message: closeMessage(await liveTerminalCountForWindow(window)),
+    });
+  }
+
   /// One row per window, each a branch into that window's own actions. The
   /// machine and open-versus-hidden ride the breadcrumb: the deck is a flat
   /// listbox with no section headers.
@@ -166,14 +194,7 @@
       dismissImmediatelyOnSuccess: command === "focus",
       confirm:
         command === "close"
-          ? {
-              title: `Close ${windowRowLabel(window)}?`,
-              message: window.control
-                ? "This stops the control terminal and its connection script."
-                : "Open sessions in this window may stop.",
-              actionLabel: "Close",
-              danger: true,
-            }
+          ? closeConfirmation(window)
           : undefined,
       run:
         command === "focus"

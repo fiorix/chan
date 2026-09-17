@@ -509,9 +509,20 @@ export async function saveWindowLabel(
   await backend.setWindowLabel(w.window_id, label, actingWindowId);
 }
 
-/** Permanently close one window from the Computers command launcher. Desktop
- * surfaces retain the native live-terminal confirmation; self-managed surfaces
- * discard through the leader-gated web operation. */
+/** Read the live-terminal count used to prepare the launcher's one close
+ * confirmation. A failed query degrades to the existing generic warning, the
+ * same safe wording used for a remote row whose count is explicitly unknown. */
+export async function windowLiveTerminalCount(w: WindowRecord): Promise<number | null> {
+  try {
+    return await backend.liveTerminalCount(w.window_id);
+  } catch {
+    return null;
+  }
+}
+
+/** Permanently close one window after the Computers command launcher has shown
+ * its informed confirmation. Desktop surfaces use the forced bridge route;
+ * self-managed surfaces discard through the leader-gated web operation. */
 export async function closeWindow(w: WindowRecord, actingWindowId?: string): Promise<void> {
   if (selfManagedWindows) {
     await closeWindowRecord(w, { actingWindowId });

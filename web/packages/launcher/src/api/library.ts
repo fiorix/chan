@@ -388,8 +388,11 @@ export interface LibraryApi {
   /** Hide (bury) a window via the desktop window bridge, notification-free,
    * unlike the OS close button. Rejects with no desktop attached. */
   hideWindow(id: string): Promise<void>;
-  /** Permanently close a native window through the desktop bridge. The owning
-   * registry row is discarded; live local terminals retain the native confirm. */
+  /** Count live terminal sessions associated with a window. `null` means the
+   * row is remote and its devserver feed does not carry a count. */
+  liveTerminalCount(id: string): Promise<number | null>;
+  /** Permanently close a native window through the desktop bridge after the
+   * launcher confirms with `liveTerminalCount`. The owning row is discarded. */
   closeWindow(id: string): Promise<void>;
   /** Discard (unpersist + reap) a window record: the web-op close, distinct from
    * the desktop `/hide` bridge and reachable bridgeless. A follower never calls
@@ -602,6 +605,13 @@ export const liveApi: LibraryApi = {
     }),
   openWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/open`),
   hideWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/hide`),
+  liveTerminalCount: async (id) =>
+    (
+      await req<{ count: number | null }>(
+        "GET",
+        `/api/library/windows/${encodeURIComponent(id)}/live-terminals`,
+      )
+    ).count,
   closeWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/close`),
   discardWindow: (id, actingWindowId) =>
     req(

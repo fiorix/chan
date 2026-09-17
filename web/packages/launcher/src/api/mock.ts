@@ -659,6 +659,9 @@ export const mockApi: LibraryApi = {
     return tick(undefined);
   },
 
+  // The mock has no terminal-session registry, so it cannot claim a zero count.
+  liveTerminalCount: () => tick(null),
+
   closeWindow: (id) => {
     const i = windows.findIndex((w) => w.window_id === id);
     if (i >= 0) windows.splice(i, 1);

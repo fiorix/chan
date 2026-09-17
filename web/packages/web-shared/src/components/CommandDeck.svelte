@@ -1,6 +1,12 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { DeckDraft, DeckItem, DeckScope, DeckScopeId } from "../command-deck/model";
+  import type {
+    DeckConfirm,
+    DeckDraft,
+    DeckItem,
+    DeckScope,
+    DeckScopeId,
+  } from "../command-deck/model";
 
   let {
     open,
@@ -127,17 +133,42 @@
     onScope(scope.id);
   }
 
-  function openConfirm(item: DeckItem): void {
-    const confirm = item.confirm;
-    if (!confirm) return;
+  async function openConfirm(item: DeckItem): Promise<void> {
+    const request = item.confirm;
+    if (!request) return;
     confirmKeyReleased = false;
-    draft.operation = {
+    const executionDraft = draft;
+    let confirmation: DeckConfirm;
+    if (typeof request === "function") {
+      executionDraft.operation = { kind: "pending", itemId: item.id, title: item.title };
+      const stillPreparing = (): boolean =>
+        draft === executionDraft &&
+        executionDraft.operation?.kind === "pending" &&
+        executionDraft.operation.itemId === item.id;
+      try {
+        confirmation = await request();
+      } catch (error) {
+        if (!stillPreparing()) return;
+        executionDraft.operation = {
+          kind: "error",
+          itemId: item.id,
+          title: item.title,
+          message: errorMessage(error),
+          selected: "back",
+        };
+        return;
+      }
+      if (!stillPreparing()) return;
+    } else {
+      confirmation = request;
+    }
+    executionDraft.operation = {
       kind: "confirm",
       itemId: item.id,
-      title: confirm.title,
-      message: confirm.message,
-      actionLabel: confirm.actionLabel,
-      danger: confirm.danger === true,
+      title: confirmation.title,
+      message: confirmation.message,
+      actionLabel: confirmation.actionLabel,
+      danger: confirmation.danger === true,
       selected: "cancel",
     };
   }
@@ -183,7 +214,7 @@
   function choose(item: DeckItem | undefined): void {
     if (!item || item.disabled) return;
     if (item.confirm && draft.operation?.itemId !== item.id) {
-      openConfirm(item);
+      void openConfirm(item);
       return;
     }
     void execute(item);
@@ -198,6 +229,11 @@
     draft.operation = null;
     zone = "results";
     void tick().then(() => input?.focus());
+  }
+
+  function retry(item: DeckItem): void {
+    if (item.confirm) void openConfirm(item);
+    else void execute(item);
   }
 
   function operationEnter(event: KeyboardEvent): void {
@@ -216,7 +252,7 @@
         return;
       }
       const item = operationItem();
-      if (item) void execute(item);
+      if (item) retry(item);
     }
   }
 
@@ -446,7 +482,7 @@
                 <button
                   class:chosen={operation.selected === "retry"}
                   type="button"
-                  onclick={() => { const item = operationItem(); if (item) void execute(item); }}
+                  onclick={() => { const item = operationItem(); if (item) retry(item); }}
                 >Retry</button>
               </div>
             {/if}

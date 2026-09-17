@@ -6,6 +6,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 const actions = vi.hoisted(() => ({
   close: vi.fn(),
   focus: vi.fn(),
+  liveTerminalCount: vi.fn(),
   newTerminal: vi.fn(),
   newWorkspace: vi.fn(),
   setShown: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock("../state/computerActions", () => ({
   closeComputerWindow: actions.close,
   connectComputer: vi.fn(),
   focusComputerWindow: actions.focus,
+  liveTerminalCountForWindow: actions.liveTerminalCount,
   newTerminal: actions.newTerminal,
   newWorkspaceWindow: actions.newWorkspace,
   setWindowShown: actions.setShown,
@@ -276,7 +278,12 @@ describe("Computers command deck", () => {
     expect(result("Control terminal")).toBeTruthy();
   });
 
-  it("keeps destructive Close inside the keyboard-visible confirmation", async () => {
+  it.each([
+    [3, "3 terminal sessions in this window will stop."],
+    [0, "This window will close."],
+    [null, "Open sessions in this window may stop."],
+  ] as const)("uses the informed Close message for count %s", async (count, message) => {
+    actions.liveTerminalCount.mockResolvedValueOnce(count);
     openCommandLauncher("computers");
     flushSync();
     result("Windows").click();
@@ -284,15 +291,39 @@ describe("Computers command deck", () => {
     result("Window 1 [release checks]").click();
     await tick();
     result("Close").click();
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
     await tick();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Close Window 1 [release checks]?");
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(message);
+    expect(actions.liveTerminalCount).toHaveBeenCalledOnce();
     expect(actions.close).not.toHaveBeenCalled();
     const confirm = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
       (button) => button.textContent === "Close",
     );
     confirm?.click();
-    await settle();
-    expect(actions.close).toHaveBeenCalledWith(expect.objectContaining({ window_id: "w-project-1" }));
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    await tick();
+    expect(actions.close).toHaveBeenCalledOnce();
+    expect(actions.close).toHaveBeenCalledWith(
+      expect.objectContaining({ window_id: "w-project-1" }),
+    );
+    expect(target.querySelector(".deck-decisions")).toBeNull();
+  });
+
+  it("keeps the control-terminal Close warning without querying a count", async () => {
+    library.windows = [{ ...terminalRecord }];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Control terminal").click();
+    await tick();
+    result("Close").click();
+    await tick();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "This stops the control terminal and its connection script.",
+    );
+    expect(actions.liveTerminalCount).not.toHaveBeenCalled();
   });
 
   it("opens a running workspace from the New window submenu", async () => {

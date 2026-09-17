@@ -608,6 +608,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       notify();
       return tick(undefined);
     },
+    liveTerminalCount: () => tick(null),
     closeWindow: (id) => {
       windows = windows.filter((w) => w.window_id !== id);
       notify();

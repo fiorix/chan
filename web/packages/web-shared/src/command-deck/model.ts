@@ -9,6 +9,13 @@ const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type DeckIcon = any;
 
+export interface DeckConfirm {
+  title: string;
+  message: string;
+  actionLabel: string;
+  danger?: boolean;
+}
+
 export interface DeckItem {
   /** Stable within its command source and navigation path. */
   id: string;
@@ -29,12 +36,9 @@ export interface DeckItem {
    * this document is backgrounded, browsers may throttle the success timer.
    */
   dismissImmediatelyOnSuccess?: boolean;
-  confirm?: {
-    title: string;
-    message: string;
-    actionLabel: string;
-    danger?: boolean;
-  };
+  /** Static confirmation metadata, or a lazy query that prepares it when the
+   * command is chosen. */
+  confirm?: DeckConfirm | (() => DeckConfirm | Promise<DeckConfirm>);
 }
 
 export interface DeckScope {
