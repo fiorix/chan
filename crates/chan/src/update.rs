@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(any(test, target_os = "windows"))]
-use std::io::Read;
+use std::io::{self, Read};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1112,6 +1112,54 @@ fn extract_binary(
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_RENAME_MAX_ATTEMPTS: usize = 10;
+
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_RENAME_MAX_TOTAL_SLEEP: Duration = Duration::from_millis(1_625);
+
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_RENAME_RETRY_DELAYS: [Duration; WINDOWS_RENAME_MAX_ATTEMPTS - 1] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(250),
+    Duration::from_millis(250),
+    Duration::from_millis(250),
+    Duration::from_millis(250),
+    Duration::from_millis(250),
+];
+
+#[cfg(any(test, target_os = "windows"))]
+fn is_windows_sharing_violation(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION)
+}
+
+/// Retries a rename when a transient Windows sharing violation means another process still holds the file.
+/// The nine waits are 25, 50, 100, 200, then 250 ms for each of the five remaining retries, for at most 10 attempts and 1.625 seconds asleep.
+#[cfg(any(test, target_os = "windows"))]
+fn retry_windows_sharing_violation<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<T> {
+    debug_assert_eq!(
+        WINDOWS_RENAME_RETRY_DELAYS.iter().sum::<Duration>(),
+        WINDOWS_RENAME_MAX_TOTAL_SLEEP
+    );
+    for delay in WINDOWS_RENAME_RETRY_DELAYS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_windows_sharing_violation(&error) => sleep(delay),
+            Err(error) => return Err(error),
+        }
+    }
+    operation()
+}
+
 #[cfg(not(target_os = "windows"))]
 fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
     fs::rename(new_bin, exe_path).with_context(|| {
@@ -1154,15 +1202,20 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
             backup.display()
         );
     }
-    fs::rename(exe_path, &backup).with_context(|| {
-        format!(
-            "moving running executable {} to {}",
-            exe_path.display(),
-            backup.display()
-        )
-    })?;
-    if let Err(replace_error) = fs::rename(new_bin, exe_path) {
-        if let Err(rollback_error) = fs::rename(&backup, exe_path) {
+    retry_windows_sharing_violation(|| fs::rename(exe_path, &backup), std::thread::sleep)
+        .with_context(|| {
+            format!(
+                "moving running executable {} to {}",
+                exe_path.display(),
+                backup.display()
+            )
+        })?;
+    if let Err(replace_error) =
+        retry_windows_sharing_violation(|| fs::rename(new_bin, exe_path), std::thread::sleep)
+    {
+        if let Err(rollback_error) =
+            retry_windows_sharing_violation(|| fs::rename(&backup, exe_path), std::thread::sleep)
+        {
             bail!(
                 "replacing {} failed ({replace_error}); restoring the previous executable also \
                  failed ({rollback_error}). The previous executable remains at {}",
@@ -1548,6 +1601,81 @@ mod tests {
 
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert!(!new_bin.exists());
+    }
+
+    #[test]
+    fn test_windows_sharing_violation_retry_succeeds_when_violation_clears() {
+        let mut calls = 0;
+        let mut sleeps = Vec::new();
+
+        // Raw error 32 means EPIPE on Linux, but the Windows-only production caller treats it as
+        // ERROR_SHARING_VIOLATION.
+        let result = retry_windows_sharing_violation(
+            || {
+                calls += 1;
+                if calls <= 2 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok("replaced")
+                }
+            },
+            |duration| sleeps.push(duration),
+        );
+
+        assert_eq!(result.unwrap(), "replaced");
+        assert_eq!(calls, 3);
+        assert_eq!(sleeps, WINDOWS_RENAME_RETRY_DELAYS[..2]);
+    }
+
+    #[test]
+    fn test_windows_sharing_violation_retry_stops_at_bound() {
+        let mut calls = 0;
+        let mut sleeps = Vec::new();
+
+        let error = retry_windows_sharing_violation(
+            || {
+                calls += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(32))
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(32));
+        assert_eq!(calls, WINDOWS_RENAME_MAX_ATTEMPTS);
+        assert_eq!(sleeps.len(), WINDOWS_RENAME_MAX_ATTEMPTS - 1);
+        assert!(sleeps.into_iter().sum::<Duration>() <= WINDOWS_RENAME_MAX_TOTAL_SLEEP);
+    }
+
+    #[test]
+    fn test_windows_sharing_violation_retry_rejects_other_errors() {
+        let mut access_denied_calls = 0;
+        let mut access_denied_sleeps = Vec::new();
+        let access_denied = retry_windows_sharing_violation(
+            || {
+                access_denied_calls += 1;
+                Err::<(), _>(io::Error::from_raw_os_error(5))
+            },
+            |duration| access_denied_sleeps.push(duration),
+        )
+        .unwrap_err();
+        assert_eq!(access_denied.raw_os_error(), Some(5));
+        assert_eq!(access_denied_calls, 1);
+        assert!(access_denied_sleeps.is_empty());
+
+        let mut not_found_calls = 0;
+        let mut not_found_sleeps = Vec::new();
+        let not_found = retry_windows_sharing_violation(
+            || {
+                not_found_calls += 1;
+                Err::<(), _>(io::Error::from(io::ErrorKind::NotFound))
+            },
+            |duration| not_found_sleeps.push(duration),
+        )
+        .unwrap_err();
+        assert_eq!(not_found.kind(), io::ErrorKind::NotFound);
+        assert_eq!(not_found_calls, 1);
+        assert!(not_found_sleeps.is_empty());
     }
 
     #[test]
