@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn config_ignores_retired_outbound_rows() {
+    fn config_loads_and_drops_unknown_outbound_and_window_config_rows() {
         let raw = r##"{
             "outbound": [{
                 "id": "remote-1",
@@ -1462,11 +1462,24 @@ mod tests {
                 "label": "old remote",
                 "added_at": 42
             }],
+            "window_configs": [{
+                "key": "workspace-old-1",
+                "zoom_level": 1.25,
+                "url_hash": "#history"
+            }],
             "local_color": "#123456"
         }"##;
-        let cfg: Config =
-            serde_json::from_str(raw).expect("load config with retired outbound rows");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, raw).unwrap();
+        let mut store = ConfigStore::at_path(path.clone());
+        let cfg = store.get().expect("load config with unknown rows");
         assert_eq!(cfg.local_color.as_deref(), Some("#123456"));
+        store.save(&cfg).unwrap();
+        let saved = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(value.get("outbound").is_none());
+        assert!(value.get("window_configs").is_none());
     }
 
     #[test]

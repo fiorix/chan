@@ -566,8 +566,9 @@ pub enum WindowAction {
     },
     /// Destroy a window by id and delete its saved layout
     ///
-    /// Unlike the close button, which only hides. Refuses to kill a window with
-    /// live terminals unless `--force` is passed.
+    /// Unlike the close button, which only hides. Refuses to kill a window
+    /// hosted here when it has live terminals unless `--force` is passed. A
+    /// connected devserver's window is removed without that local check.
     #[command(verbatim_doc_comment)]
     Rm {
         /// The window id (see `cs window list`).
@@ -1277,8 +1278,9 @@ async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
 /// `cs window <new|open|rm|hide>`: send a one-shot window-lifecycle
 /// request and print the server's reply (the new window id for `new`, a
 /// short confirmation otherwise). Session-scoped like `cs window list`:
-/// needs only $CHAN_CONTROL_SOCKET, no window id. `rm` of a window with
-/// live terminals is refused unless `--force` is passed.
+/// needs only $CHAN_CONTROL_SOCKET, no window id. `rm` refuses a window hosted
+/// here when it has live terminals unless `--force` is passed. A connected
+/// devserver's window is removed without that local check.
 async fn cmd_window_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
     let message = send_control_request(&socket, req).await?;

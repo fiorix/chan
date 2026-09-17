@@ -231,15 +231,16 @@ export async function readClipboardHtml(): Promise<string | null> {
 /// called from inside a `drop` event handler -- the drag pasteboard
 /// persists until the next drag starts. Returns `[]` in a plain
 /// browser, on non-macOS desktops, when the pasteboard holds no file
-/// items, or when the ACL refuses the command (remote-served window
-/// kinds don't get it) -- every failure degrades to a silent no-op so
+/// items, or when the ACL refuses the command (devserver-served `lib-*`
+/// windows, loopback and gateway, don't get it). Every failure is a no-op, so
 /// the drop guard's no-takeover guarantee is all that remains.
 export async function readDroppedPaths(): Promise<string[]> {
   if (!isTauriDesktop()) return [];
   try {
     return await tauriInvoke<string[]>("read_dropped_paths");
   } catch {
-    // ACL refusal (gateway windows) or pre-IPC desktop build.
+    // ACL refusal (devserver-served `lib-*`, loopback or gateway) or pre-IPC
+    // desktop build.
     return [];
   }
 }

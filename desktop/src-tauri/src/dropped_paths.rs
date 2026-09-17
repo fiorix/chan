@@ -7,8 +7,9 @@
 //! handler returns `false`, and tauri-runtime-wry's handler returns
 //! `true` unconditionally -- killing the editor/file-browser drop
 //! zones and in-page tab-move DnD. So the native handler stays
-//! disabled (see `build_workspace_window`) and the SPA's terminal
-//! drop zone fetches the dropped paths through this command instead:
+//! disabled (see `build_workspace_window_with_completion`) and the
+//! SPA's terminal drop zone fetches the dropped paths through this
+//! command instead:
 //! when the DOM `drop` event fires, the macOS drag pasteboard
 //! (`NSPasteboard` name `.drag`) still holds the dragged file URLs.
 //!
@@ -21,8 +22,8 @@
 //! drag pasteboard is system-wide and persists until the NEXT drag
 //! starts. That persistence is also why the ACL scopes this command
 //! to locally-served `local::*` windows (capabilities/local-drop.json): a
-//! gateway-served SPA could otherwise poll it and harvest paths the user drags
-//! around in unrelated applications.
+//! devserver-served `lib-*` SPA (loopback or gateway) could otherwise poll it
+//! and harvest paths the user drags around in unrelated applications.
 
 /// Read the file paths currently on the macOS drag pasteboard.
 /// NSPasteboard is AppKit state, so the read runs on the main thread

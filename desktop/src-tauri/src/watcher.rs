@@ -11,11 +11,11 @@
 //! `preferences.toml` (pane widths, theme, editor knobs) and
 //! `server.toml`, plus the atomic-write `*.tmp` siblings every
 //! `store::save_toml` lands. A dir-level "anything changed" trigger
-//! therefore fires `registry-changed` on routine editing (a pane
-//! drag re-saves `preferences.toml`), which storms the launcher's
-//! library resync for no reason. We filter the debounced
-//! events down to the registry file's own name so only a real
-//! registry mutation forwards to the frontend.
+//! would therefore reload the registry and signal the library feed on
+//! routine editing (a pane drag re-saves `preferences.toml`). We filter
+//! the debounced events down to the registry file's own name so only a
+//! real registry mutation drives that refresh. The Tauri event is also
+//! emitted, but no current frontend listens for it.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -26,11 +26,12 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Event name pushed to all webviews when the registry changes.
-/// The launcher responds by resynchronizing its library view.
+/// No current frontend listens for it; the launcher refresh comes from
+/// `refresh_embedded_library` reloading and signaling the library feed.
 pub const REGISTRY_CHANGED: &str = "registry-changed";
 
 /// Spawn a debounced watcher over the chan config directory and emit
-/// `REGISTRY_CHANGED` whenever something inside changes. The returned
+/// `REGISTRY_CHANGED` whenever the registry file changes. The returned
 /// debouncer owns the background thread; drop it to stop watching.
 ///
 /// Errors from `notify` setup are returned. Errors observed during

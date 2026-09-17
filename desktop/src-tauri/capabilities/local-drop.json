@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "local-drop",
-  "description": "Drag-pasteboard read for locally served local::<window_id> SPA windows only. Gateway-served lib-* windows stay excluded because the macOS drag pasteboard is system-wide and outlives the drag.",
+  "description": "Drag-pasteboard read for locally served local::<window_id> SPA windows only. Devserver-served lib-* windows (loopback and gateway) stay excluded because the macOS drag pasteboard is system-wide and outlives the drag.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

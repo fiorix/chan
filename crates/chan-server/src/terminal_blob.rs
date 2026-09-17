@@ -1,15 +1,12 @@
 //! A tiny on-disk blob store for workspace-LESS terminal tenants.
 //!
-//! A standalone terminal window has no workspace dir, so its per-window
-//! session (pane/tab layout) blob can't ride the workspace `sessions/` store.
-//! For a *persisted* devserver terminal we want that layout to survive a
-//! devserver restart, so we mirror the workspace store -- atomic tmp+rename,
-//! flat keys -- at the launcher scope (`~/.chan/devserver/terminals/`). Keys
-//! are the `?w=<window-label>` ids; the blobs are opaque SPA layout bytes.
-//!
-//! A terminal tenant with no store dir keeps using the in-memory
-//! `AppState::ephemeral_sessions` (transient: a control terminal, or a
-//! desktop-local terminal whose layout lives in the desktop `Config`).
+//! A workspace-less terminal tenant cannot use the workspace `sessions/`
+//! store. When the host supplies a session directory, this mirrors that store
+//! with atomic tmp+rename and flat keys at launcher scope
+//! (`~/.chan/devserver/terminals/`). The desktop's shared `/terminal` tenant
+//! and persisted devserver terminals use this disk store with bare `?w=` ids;
+//! the blobs are opaque SPA layout bytes. A store-less control tenant keeps
+//! using the in-memory `AppState::ephemeral_sessions`.
 
 use std::path::{Path, PathBuf};
 
@@ -263,12 +260,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_real_window_session_key_formats() {
-        // Library windows store sessions under their bare `w-` id; a control
-        // terminal uses its full native label. validate_key also allows dots.
+    fn accepts_window_session_keys_and_safe_flat_keys() {
+        // Library windows use bare `w-<16hex>` ids. The validator also permits
+        // safe flat keys containing dots and underscores.
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        for k in ["w-7", "w-3", "control-terminal-dev1", "a.b.c", "ok_key.v2"] {
+        for k in [
+            "w-0123456789abcdef",
+            "w-fedcba9876543210",
+            "a.b.c",
+            "ok_key.v2",
+        ] {
             put(d, k, b"x").unwrap_or_else(|e| panic!("should accept {k:?}: {e}"));
             assert_eq!(get(d, k).unwrap().as_deref(), Some(&b"x"[..]), "{k:?}");
         }

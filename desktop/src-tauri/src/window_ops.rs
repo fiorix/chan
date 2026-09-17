@@ -12,8 +12,8 @@
 //! must run on the main thread, so the handlers hop there via
 //! [`on_main`]; the async terminal-open path mirrors the existing
 //! `spawn_terminal_window` flow (async-runtime task, build dispatches to
-//! main internally). Each op runs in its own task so a blocking `rm`
-//! confirmation dialog can't stall unrelated ops.
+//! main internally). Each op runs in its own task so a blocking folder
+//! picker cannot stall unrelated ops.
 
 use std::path::Path;
 use std::sync::Arc;

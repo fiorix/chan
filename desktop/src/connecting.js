@@ -9,7 +9,7 @@
 // workspace.
 //
 // Window <-> page contract (page side; the Rust/Tauri half lives in
-// serve.rs `build_workspace_window`):
+// serve.rs `build_workspace_window_with_completion`):
 //
 //   * Inputs are injected by an initialization_script that runs BEFORE
 //     this file, as a global object:

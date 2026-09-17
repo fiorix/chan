@@ -13,8 +13,9 @@
 //!     therefore stays `connected`; the server cannot distinguish
 //!     hidden from visible, so it deliberately doesn't claim to.
 //!
-//! `cs window list` uses this view to report saved and connected sessions in a
-//! terminal.
+//! This tenant-scoped saved/live session view is separate from
+//! `cs window list`, which assembles library registry rows through the control
+//! socket.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -103,7 +104,7 @@ pub(crate) fn join_windows_with_titles(
 /// blocking disk I/O, so an async caller wraps this in `spawn_blocking`. A
 /// failed saved-blob read degrades to "no saved windows" (graceful for an
 /// enumeration; the host aggregate must not fail wholesale on one tenant).
-/// Backs `GET /api/windows` (the desktop's remote-connection window menu).
+/// Backs `GET /api/windows`; no desktop or web frontend currently consumes it.
 pub(crate) fn enumerate_windows(state: &AppState) -> Vec<WindowInfo> {
     let connected = state.window_presence.connected_ids();
     let titles = state.window_titles.clone();

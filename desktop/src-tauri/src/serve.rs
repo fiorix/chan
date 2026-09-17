@@ -629,12 +629,13 @@ struct WindowSpec<'a> {
     /// The library's persisted per-(kind, workspace) ordinal -- the same number
     /// `cs window list` prints as `#`. When `Some`, it is the displayed
     /// " Window N" suffix, so the titlebar and the registry agree. `None` for
-    /// the control terminal, which has no library window record.
+    /// the control terminal, whose transient in-memory row has no persisted
+    /// ordinal.
     ordinal: Option<u32>,
     /// The library record's optional user caption (`WindowRecord::label`),
     /// appended to the composed title in brackets so the OS titlebar and window
-    /// switcher name the window the way the launcher does. Empty for windows
-    /// with no library record and for control terminals (which carry none).
+    /// switcher name the window the way the launcher does. Empty when the
+    /// library record has no caption, including for control terminals.
     caption: &'a str,
     /// The workspace/terminal URL the webview ultimately shows.
     url: &'a str,
@@ -1160,8 +1161,8 @@ fn workspace_window_target_url(
     }
     // `lib=<library_id>` next to `?w=`/`?kind=` tells the SPA which chan-library
     // this window belongs to, so cross-window tab d&d accepts a drop only from
-    // the same library. The control terminal has no library identity, so its
-    // empty id is skipped.
+    // the same library. Current builders pass an id, including `local` for
+    // control terminals. Keep the empty case as a defensive no-stamp guard.
     if !library_id.is_empty() {
         parsed.query_pairs_mut().append_pair("lib", library_id);
     }
@@ -2297,8 +2298,8 @@ mod tests {
             resolve_label_from("control-terminal-ds1", &[]),
             "control-terminal-ds1"
         );
-        // Retired label families have no parser exception and do not look like
-        // library-minted ids. Leaving them unmatched makes open return the
+        // Unrecognized label families have no parser exception and do not look
+        // like library-minted ids. Leaving them unmatched makes open return the
         // ordinary "isn't open" error rather than routing into the local watcher.
         assert_eq!(resolve_label_from("terminal-3", &[]), "terminal-3");
         assert_eq!(
@@ -3192,7 +3193,8 @@ mod tests {
     #[test]
     fn drag_pasteboard_read_is_scoped_to_locally_served_windows() {
         // The macOS drag pasteboard is system-wide and persists after
-        // the drag ends: a gateway-served SPA must
+        // the drag ends: a devserver-served `lib-*` SPA, whether loopback or
+        // gateway, must
         // NOT be able to poll `read_dropped_paths` and harvest paths the
         // user drags around in other applications.
         // The grant therefore lives in its own capability targeting
@@ -3201,7 +3203,7 @@ mod tests {
         assert!(windows.iter().any(|w| w == "local::*"));
         assert!(
             windows.iter().all(|w| w != "lib-*" && w != "main"),
-            "local-drop capability must stay off gateway-served and launcher windows: {windows:?}",
+            "local-drop capability must stay off devserver-served and launcher windows: {windows:?}",
         );
         let perms = capability_permissions(LOCAL_DROP_CAPABILITY_JSON);
         assert!(

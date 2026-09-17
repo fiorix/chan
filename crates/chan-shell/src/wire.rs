@@ -259,8 +259,9 @@ pub enum ControlRequest {
         id: String,
     },
     // `cs window rm`: truly DESTROY a window (unlike the OS close button,
-    // which buries it) and delete its saved layout. The server refuses a
-    // window with live terminal shells unless `force` is set.
+    // which buries it) and delete its saved layout. The local host refuses a
+    // window it owns when live terminal shells exist unless `force` is set. A
+    // connected devserver's window is removed without that local check.
     WindowClose {
         id: String,
         #[serde(default)]

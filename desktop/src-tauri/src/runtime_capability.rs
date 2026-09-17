@@ -510,7 +510,7 @@ mod tests {
         let foreign = lib_window(&app, "foreign-3", WATCHED_PAGE);
         assert!(
             invoke_from(&foreign, WATCHED_PAGE, "create_library_window").is_err(),
-            "a URL attachment on the same origin is not a library window"
+            "an unregistered lib-* label on the same origin is not a library window"
         );
     }
 

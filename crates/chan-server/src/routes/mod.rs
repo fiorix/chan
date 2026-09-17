@@ -58,9 +58,8 @@ mod terminal;
 pub(crate) mod transfer;
 mod tunnel;
 mod window;
-// pub(crate) so the `cs window list` control-socket handler
-// (`crate::control_socket`) reuses `join_windows` + `WindowInfo` and
-// the CLI sees the exact rows `GET /api/windows` serves.
+// Tenant-scoped `GET /api/windows` saved/live session view, separate from the
+// control socket's library rows.
 pub(crate) mod windows;
 mod workspace;
 mod ws;

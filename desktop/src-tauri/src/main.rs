@@ -122,10 +122,10 @@ pub struct AppState {
     /// hidden-in-place control terminal keeps its number until destruction.
     pub window_numbers: Mutex<HashMap<String, (String, u64)>>,
     /// Custom window titles set via `cs window title <id> <title>`, keyed
-    /// by window label. Consulted by `build_workspace_window` so the
-    /// override survives the bury/reopen cycle (the auto "{base} Window
-    /// {N}" scheme applies only when there's no override). Session-scoped:
-    /// not persisted across an app restart, like the display numbers.
+    /// by window label. Consulted by `build_workspace_window_with_completion`
+    /// so the override survives the bury/reopen cycle (the auto "{base} Window
+    /// {N}" scheme applies only when there's no override). Session-scoped: not
+    /// persisted across an app restart, like the display numbers.
     pub window_title_overrides: Mutex<HashMap<String, String>>,
     /// Windows hidden ("buried") by the OS close button, in bury order (most
     /// recent last). Watcher-managed windows close their native surface but keep
@@ -481,7 +481,7 @@ impl AppState {
     }
 
     /// The custom OS-title override for `label`, if any (read by
-    /// `build_workspace_window`).
+    /// `build_workspace_window_with_completion`).
     pub fn window_title_override(&self, label: &str) -> Option<String> {
         self.window_title_overrides
             .lock()
@@ -1169,11 +1169,10 @@ fn devserver_url_token(raw: &str) -> Option<String> {
 /// A LOCAL record composes exactly what the titlebar would show, so a window
 /// reads the same whether it is listed under Open or under Hidden. A REMOTE
 /// record cannot: the titlebar's base is built from the live connection's
-/// display name (`DevserverConn::name`), which is not the same string as the
-/// menu's `devserver_display` and is not in hand here. Rather than render a
-/// plausible-but-different title, fall back to the library-composed `title` and
-/// append the caption to it -- the pre-existing behaviour for these rows, plus
-/// the caption this is here to surface.
+/// display name (`DevserverConn::name`), which the record does not carry here.
+/// Rather than render a plausible-but-different title, fall back to the
+/// library-composed `title` and append the caption to it -- the pre-existing
+/// behaviour for these rows, plus the caption this is here to surface.
 fn record_menu_title(record: &chan_server::WindowRecord) -> String {
     if record.library_id == "local" {
         return serve::watched_window_title(record, None);
@@ -1544,10 +1543,10 @@ async fn scrape_control_terminal_token(
     };
     const MAX_ATTEMPTS: usize = 40;
     const BACKOFF: std::time::Duration = std::time::Duration::from_millis(1500);
-    // `build_workspace_window` registers the control window on the main thread
-    // AFTER its spawn returns, so the first poll(s) here can run before the
-    // window exists. Latch once we've seen it, so a later disappearance reads as
-    // a user close (below) rather than the build race.
+    // `build_workspace_window_with_completion` registers the control window on
+    // the main thread AFTER its spawn returns, so the first poll(s) here can run
+    // before the window exists. Latch once we've seen it, so a later
+    // disappearance reads as a user close (below) rather than the build race.
     let mut window_seen = false;
     for _ in 0..MAX_ATTEMPTS {
         // The scrollback is read BEFORE the exit probe: a daemonizing connect
@@ -4073,7 +4072,7 @@ fn open_devtools(window: tauri::WebviewWindow) {
 /// and live on the connecting screen, where the SPA command bus is dead.
 /// The routing mirrors the launcher menu's New Window item but keyed on
 /// the INVOKING window's label instead of focus: a workspace-class
-/// window (workspace / standalone terminal / watcher-opened)
+/// window (a watcher-opened `local::` or `lib-` window)
 /// opens another window of its OWN connection; anything else (a control
 /// terminal) spawns a standalone terminal.
 #[tauri::command]
@@ -5920,8 +5919,7 @@ const BURIED_MENU_HEADER_ID: &str = "buried-header";
 /// this prefix + the Tauri window label, so a click recovers the label and
 /// raises the live window. Same prefix+label scheme as `buried:`.
 const OPEN_MENU_ID_PREFIX: &str = "open:";
-/// Disabled section header above the open-window entries (a `-{ds_id}` suffix
-/// per devserver group, so the cleanup matches it by prefix).
+/// Disabled section header above all open-window entries.
 const OPEN_MENU_HEADER_ID: &str = "open-header";
 /// Linux/Windows Window-submenu id (macOS uses the system
 /// `WINDOW_SUBMENU_ID` from `Menu::default`). The launcher's menubar --
@@ -6064,8 +6062,8 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
             if let Ok(items) = submenu.items() {
                 for item in items {
                     let id = item.id().as_ref();
-                    // Buried and open headers are one per group (local + each
-                    // devserver), so match those header ids by prefix.
+                    // The single buried and open headers use exact ids; their
+                    // rows use the corresponding prefixes.
                     if id.starts_with(BURIED_MENU_HEADER_ID)
                         || id.starts_with(OPEN_MENU_HEADER_ID)
                         || id.starts_with(BURIED_MENU_ID_PREFIX)
@@ -6102,7 +6100,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 });
             };
         // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
-        // window -- not just reopen a hidden or remote one. The library's own
+        // window in addition to reopening a hidden one. The library's own
         // window set is the source of truth (local rows now; each connected
         // devserver's rows once its feed merges in via `DevserverFeedSource`). A
         // row counts as open when its native webview is alive AND visible: a

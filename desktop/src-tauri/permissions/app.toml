@@ -169,8 +169,9 @@ description = "Enables an exact-origin gateway window to read its current CSRF t
 commands.allow = ["gateway_csrf_token"]
 
 # Deliberately NOT in the workspace-window set: the macOS drag
-# pasteboard is system-wide, so this is granted only to locally-served
-# windows via capabilities/local-drop.json, never to gateway-served webviews.
+# pasteboard is system-wide, so this is granted only to locally-served windows
+# via capabilities/local-drop.json, never to devserver-served `lib-*` webviews
+# (loopback or gateway).
 [[permission]]
 identifier = "allow-read-dropped-paths"
 description = "Enables the read_dropped_paths command (drag-pasteboard read at drop time)."
