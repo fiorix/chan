@@ -332,13 +332,13 @@ mod tests {
         );
     }
 
-    /// A gateway-attached tunnel presents the session the gateway's desktop
-    /// entry route minted for this connection's PAT, and no other: the
-    /// desktop dials the legs natively and never borrows a session from its
-    /// webviews. The devserver opens the legs only to the owner on a desktop
-    /// session, which is what that route mints, so a tunnel from any other
-    /// session source would be refused. A refreshed session comes from the
-    /// same route.
+    /// A gateway-attached native tunnel presents the cached session that the
+    /// gateway's desktop entry route minted for this connection's PAT. The
+    /// session publisher also installs the same cookie values in the webview
+    /// store, so a main-frame script at the tenant origin can present that
+    /// admitted owner-desktop session too. The leg gate refuses a grantee's
+    /// desktop session and the owner's browser session. A refreshed desktop
+    /// session comes from the same entry route.
     #[tokio::test]
     async fn a_gateway_tunnel_presents_the_session_the_desktop_entry_route_minted() {
         use axum::http::{HeaderMap, StatusCode};
