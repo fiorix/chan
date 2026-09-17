@@ -1172,6 +1172,114 @@ mod windows_shim {
             assert_eq!(parse_reg_query_path(path_ext), None);
         }
 
+        struct UserPathRestore {
+            existed: bool,
+            value: String,
+            kind: String,
+            active: bool,
+        }
+
+        impl UserPathRestore {
+            fn restore(&mut self) -> std::io::Result<()> {
+                use std::process::Command;
+
+                let status = if self.existed {
+                    Command::new("reg")
+                        .args([
+                            "add",
+                            "HKCU\\Environment",
+                            "/v",
+                            "Path",
+                            "/t",
+                            &self.kind,
+                            "/d",
+                            &self.value,
+                            "/f",
+                        ])
+                        .status()?
+                } else {
+                    Command::new("reg")
+                        .args(["delete", "HKCU\\Environment", "/v", "Path", "/f"])
+                        .status()?
+                };
+                if !status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "restoring HKCU\\Environment Path exited with {status}"
+                    )));
+                }
+                self.active = false;
+                Ok(())
+            }
+        }
+
+        impl Drop for UserPathRestore {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = self.restore();
+                }
+            }
+        }
+
+        #[test]
+        fn ensure_on_user_path_writes_and_restores_the_registry_value() {
+            const RUN_REAL_REGISTRY_TEST: &str = "CHAN_TEST_REAL_USER_PATH";
+            if std::env::var_os(RUN_REAL_REGISTRY_TEST).as_deref()
+                != Some(std::ffi::OsStr::new("1"))
+            {
+                eprintln!("SKIP {RUN_REAL_REGISTRY_TEST} is not enabled");
+                return;
+            }
+
+            use std::process::Command;
+
+            let original = Command::new("reg")
+                .args(["query", "HKCU\\Environment", "/v", "Path"])
+                .output()
+                .expect("query the user PATH");
+            let existed = original.status.success();
+            let (value, kind) =
+                decode_user_path(existed, &original.stdout).expect("decode the original user PATH");
+            let mut restore = UserPathRestore {
+                existed,
+                value,
+                kind,
+                active: true,
+            };
+
+            let dir =
+                std::env::temp_dir().join(format!("chan-user-path-proof-{}", uuid::Uuid::new_v4()));
+            let dir = dir.to_string_lossy().into_owned();
+            assert!(
+                path_with_dir_appended(&restore.value, &dir).is_some(),
+                "the unique test directory must not already be on PATH"
+            );
+
+            ensure_on_user_path(Path::new(&dir)).expect("write the user PATH");
+            let (written, written_kind) = read_user_path().expect("read back the user PATH");
+            let normalized = dir.trim_end_matches(['\\', '/']).to_lowercase();
+            assert!(
+                written
+                    .split(';')
+                    .map(|entry| entry.trim().trim_end_matches(['\\', '/']).to_lowercase())
+                    .any(|entry| entry == normalized),
+                "the registry PATH must contain the test directory: {written}"
+            );
+            assert_eq!(written_kind, restore.kind);
+
+            restore.restore().expect("restore the original user PATH");
+            let restored = Command::new("reg")
+                .args(["query", "HKCU\\Environment", "/v", "Path"])
+                .output()
+                .expect("query the restored user PATH");
+            assert_eq!(restored.status.success(), restore.existed);
+            if restore.existed {
+                let (restored_value, restored_kind) =
+                    decode_user_path(true, &restored.stdout).expect("decode restored user PATH");
+                assert_eq!(restored_value, restore.value);
+                assert_eq!(restored_kind, restore.kind);
+            }
+        }
+
         #[test]
         fn reading_the_user_path_fails_closed_instead_of_reporting_empty() {
             // A non-zero exit is the ONLY "this user has no Path value".

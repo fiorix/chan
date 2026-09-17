@@ -122,6 +122,7 @@ jobs:
     runs-on: windows-latest
     env:
       PYTHON: python
+      CHAN_TEST_REAL_USER_PATH: '1'
     steps:
       - uses: actions/checkout@v6
         with:
