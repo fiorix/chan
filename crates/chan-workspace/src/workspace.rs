@@ -605,20 +605,21 @@ impl Drop for RecoveryWorker {
 }
 
 struct OpenRecoveryPause {
-    root: std::path::PathBuf,
     reached: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
 }
 
-static OPEN_RECOVERY_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<OpenRecoveryPause>>> =
-    std::sync::OnceLock::new();
+static OPEN_RECOVERY_PAUSES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, OpenRecoveryPause>>,
+> = std::sync::OnceLock::new();
 
 /// Arm a one-shot barrier before the startup worker claims recovery.
 ///
 /// This remains available outside `cfg(test)` because chan-server's unit tests
-/// link chan-workspace as a normal dependency. A second outstanding armer
-/// panics instead of silently replacing the first. The worker also leaves the
-/// barrier when stopped, so teardown does not depend on releasing it.
+/// link chan-workspace as a normal dependency. Pauses are keyed by canonical
+/// workspace root, and a second outstanding armer for the same root panics
+/// instead of silently replacing the first. The worker also leaves the barrier
+/// when stopped, so teardown does not depend on releasing it.
 #[doc(hidden)]
 pub fn arm_open_recovery_pause_for_test(
     root: std::path::PathBuf,
@@ -628,32 +629,29 @@ pub fn arm_open_recovery_pause_for_test(
 ) {
     let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let slot = OPEN_RECOVERY_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
-    let mut slot = slot.lock().unwrap();
-    assert!(slot.is_none(), "open recovery pause already armed");
-    *slot = Some(OpenRecoveryPause {
-        root,
-        reached: reached_tx,
-        release: release_rx,
-    });
+    let pauses = OPEN_RECOVERY_PAUSES.get_or_init(Default::default);
+    let mut pauses = pauses.lock().unwrap();
+    match pauses.entry(root) {
+        std::collections::hash_map::Entry::Occupied(entry) => {
+            let root = entry.key().display().to_string();
+            drop(pauses);
+            panic!("open recovery pause already armed for {root}");
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(OpenRecoveryPause {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        }
+    }
     (reached_rx, release_tx)
 }
 
 fn open_recovery_pause_for_test(workspace: &Workspace, stop: &AtomicBool) {
-    let Some(slot) = OPEN_RECOVERY_PAUSE.get() else {
+    let Some(pauses) = OPEN_RECOVERY_PAUSES.get() else {
         return;
     };
-    let pause = {
-        let mut pause = slot.lock().unwrap();
-        if pause
-            .as_ref()
-            .is_some_and(|pause| pause.root == workspace.root())
-        {
-            pause.take()
-        } else {
-            None
-        }
-    };
+    let pause = pauses.lock().unwrap().remove(workspace.root());
     let Some(pause) = pause else {
         return;
     };
@@ -5018,6 +5016,25 @@ mod tests {
             &chan_home,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn open_recovery_pause_rejects_a_duplicate_root_without_poisoning() {
+        let root = TempDir::new().unwrap().path().canonicalize().unwrap();
+        let (_reached, _release) = arm_open_recovery_pause_for_test(root.clone());
+
+        let duplicate = std::panic::catch_unwind(|| {
+            arm_open_recovery_pause_for_test(root.clone());
+        });
+        assert!(duplicate.is_err());
+
+        let removed = OPEN_RECOVERY_PAUSES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&root);
+        assert!(removed.is_some());
     }
 
     #[test]
