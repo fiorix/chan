@@ -57,23 +57,32 @@ def require_target(makefile: str, name: str, needles: tuple[str, ...]) -> None:
 def require_unconditional_step(makefile: str, name: str, step: str) -> None:
     """STEP is a live recipe line of target NAME that runs on every host.
 
-    A substring match would accept the line commented out, or moved inside a
-    conditional block, and the gate would still read as wired. The line has
-    to be exactly a tab and the step (no leading `#`, `@` or `-`), outside
-    every `ifeq`/`ifneq`/`ifdef`/`ifndef` ... `endif` span of the target.
+    A substring match would accept the line commented out, moved inside a
+    conditional block, or folded into the line above it, and the gate would
+    still read as wired. The line has to be exactly a tab and the step (no
+    leading `#`, `@` or `-`), outside every `ifeq`/`ifneq`/`ifdef`/`ifndef`
+    ... `endif` span of the target, and not continued from the line above
+    it. make honours a directive behind leading spaces, but reads a tab-led
+    `ifeq` or `endif` as a recipe line, so a directive is one whose first
+    character is not a tab. A line ending in a backslash, a comment
+    included, swallows the line after it.
     """
     where = f"Makefile target {name}"
     depth = 0
     seen = False
+    continued = False
     for line in make_target(makefile, name).splitlines():
-        if re.match(r"^if(eq|neq|def|ndef)\b", line):
+        if re.match(r"^(?!\t)\s*(ifeq|ifneq|ifdef|ifndef)\b", line):
             depth += 1
-        elif line.startswith("endif"):
+        elif re.match(r"^(?!\t)\s*endif\b", line):
             depth -= 1
         elif line == f"\t{step}":
+            if continued:
+                raise ContractError(f"{where}: {step!r} is a continuation of the line above it")
             if depth > 0:
                 raise ContractError(f"{where}: {step!r} runs inside a conditional block")
             seen = True
+        continued = line.endswith("\\")
     if not seen:
         raise ContractError(f"{where}: missing the live unconditional recipe line {step!r}")
 
