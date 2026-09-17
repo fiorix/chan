@@ -1647,7 +1647,7 @@ async fn token_create_rejects_expires_in_outside_i64() {
         .mount(&app.profile)
         .await;
 
-    let (status, _, _, _) = c
+    let (status, headers, body, _) = c
         .send(
             Method::POST,
             "/api/tokens",
@@ -1658,6 +1658,21 @@ async fn token_create_rejects_expires_in_outside_i64() {
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Json extractor rejections are text/plain; every identity handler error
+    // is application/json, and none maps to 422.
+    let content_type = headers
+        .iter()
+        .find_map(|(key, value)| (key == "content-type").then_some(value.as_str()));
+    assert_eq!(
+        content_type,
+        Some("text/plain; charset=utf-8"),
+        "422 must come from the Json extractor, not a handler error: {headers:?}"
+    );
+    assert_eq!(
+        body,
+        Value::Null,
+        "extractor rejection must not be a JSON error envelope"
+    );
 
     let (status, _, body, _) = c.send(Method::GET, "/api/tokens", None).await;
     assert_eq!(status, StatusCode::OK);
