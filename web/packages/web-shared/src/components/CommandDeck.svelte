@@ -31,7 +31,7 @@
     bodyKey?: string;
     direction?: "forward" | "back" | "still";
     onClose: () => void;
-    onChoose: (item: DeckItem) => void | Promise<void>;
+    onChoose: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
     onBack: () => void;
     onScope: (scope: DeckScopeId) => void;
     onClearScope: () => void;
@@ -48,6 +48,7 @@
   let scopeIndex = $state(0);
   let wasOpen = false;
   let confirmKeyReleased = true;
+  let preparationToken: object | null = null;
 
   const activeIndex = $derived(pointerIndex ?? keyboardIndex);
   const availableScopes = $derived(scopes.filter((scope) => scope.available !== false));
@@ -138,17 +139,21 @@
     if (!request) return;
     confirmKeyReleased = false;
     const executionDraft = draft;
+    const token = {};
+    preparationToken = token;
     let confirmation: DeckConfirm;
     if (typeof request === "function") {
-      executionDraft.operation = { kind: "pending", itemId: item.id, title: item.title };
+      executionDraft.operation = { kind: "preparing", itemId: item.id, title: item.title };
       const stillPreparing = (): boolean =>
+        preparationToken === token &&
         draft === executionDraft &&
-        executionDraft.operation?.kind === "pending" &&
+        executionDraft.operation?.kind === "preparing" &&
         executionDraft.operation.itemId === item.id;
       try {
         confirmation = await request();
       } catch (error) {
         if (!stillPreparing()) return;
+        preparationToken = null;
         executionDraft.operation = {
           kind: "error",
           itemId: item.id,
@@ -162,6 +167,7 @@
     } else {
       confirmation = request;
     }
+    if (preparationToken === token) preparationToken = null;
     executionDraft.operation = {
       kind: "confirm",
       itemId: item.id,
@@ -186,11 +192,23 @@
     }
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
-      await onChoose(item);
+      const result = await onChoose(item);
       // A hidden pending command can finish after the draft it started with
       // was cleared and swapped for a fresh one. Never paint that result into
       // the new draft.
       if (draft !== executionDraft) return;
+      if (result) {
+        executionDraft.operation = {
+          kind: "confirm",
+          itemId: item.id,
+          title: result.title,
+          message: result.message,
+          actionLabel: result.actionLabel,
+          danger: result.danger === true,
+          selected: "cancel",
+        };
+        return;
+      }
       if (item.dismissImmediatelyOnSuccess) {
         onSuccess?.(item);
         return;
@@ -226,14 +244,20 @@
   }
 
   function operationBack(): void {
+    preparationToken = null;
     draft.operation = null;
     zone = "results";
     void tick().then(() => input?.focus());
   }
 
   function retry(item: DeckItem): void {
-    if (item.confirm) void openConfirm(item);
+    if (typeof item.confirm === "function") void openConfirm(item);
     else void execute(item);
+  }
+
+  function dismissPreparation(): void {
+    preparationToken = null;
+    draft.operation = null;
   }
 
   function operationEnter(event: KeyboardEvent): void {
@@ -271,9 +295,13 @@
     event.stopPropagation();
     if (event.key === "Escape") {
       event.preventDefault();
-      // `pending` is the one operation kind with no button of its own, so
-      // Escape has to release it here or the deck has no way out. This drops
-      // the blocking view; the command it was waiting on keeps running.
+      // Escape cancels confirmation preparation without hiding the deck. An
+      // executing command also releases its blocking view while its promise
+      // continues in the background.
+      if (draft.operation?.kind === "preparing") {
+        dismissPreparation();
+        return;
+      }
       if (draft.operation?.kind === "pending") {
         draft.operation = null;
         return;
@@ -464,6 +492,12 @@
                     if (item) void execute(item);
                   }}
                 >{operation.actionLabel}</button>
+              </div>
+            {:else if operation.kind === "preparing"}
+              <span class="deck-spinner" aria-hidden="true"></span>
+              <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Checking...</span></div>
+              <div class="deck-decisions">
+                <button type="button" onclick={dismissPreparation}>Dismiss</button>
               </div>
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>

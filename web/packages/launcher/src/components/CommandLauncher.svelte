@@ -74,7 +74,7 @@
     /// The deck path this branch navigates to, absolute rather than a single
     /// step: the tree is three levels deep at `windows > <library>:<window>`.
     next?: string[];
-    run?: () => void | Promise<void>;
+    run?: () => void | DeckConfirm | Promise<void | DeckConfirm>;
   }
 
   let direction: "forward" | "back" | "still" = $state("still");
@@ -83,6 +83,7 @@
   // A window key is library-qualified: window ids are unique only within the
   // library that minted them, and this deck aggregates several.
   const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
+  const confirmedCloseCounts = new Map<string, unknown>();
 
   function windowKey(window: WindowRecord): string {
     return `${window.library_id}:${window.window_id}`;
@@ -134,30 +135,56 @@
     return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];
   }
 
-  function closeMessage(count: number | null): string {
-    if (count === null) return "Open sessions in this window may stop.";
+  function closeMessage(count: unknown): string {
+    if (typeof count !== "number") return "Open sessions in this window may stop.";
     if (count === 0) return "This window will close.";
     return `${count} terminal session${count === 1 ? "" : "s"} in this window will stop.`;
+  }
+
+  function informedCloseConfirmation(window: WindowRecord, count: unknown): DeckConfirm {
+    return {
+      title: `Close ${windowRowLabel(window)}?`,
+      message: closeMessage(count),
+      actionLabel: "Close",
+      danger: true,
+    };
+  }
+
+  async function readCloseCount(window: WindowRecord): Promise<unknown> {
+    try {
+      return await liveTerminalCountForWindow(window);
+    } catch {
+      return null;
+    }
   }
 
   function closeConfirmation(
     window: WindowRecord,
   ): DeckConfirm | (() => Promise<DeckConfirm>) {
-    const base = {
-      title: `Close ${windowRowLabel(window)}?`,
-      actionLabel: "Close",
-      danger: true,
-    };
     if (window.control) {
       return {
-        ...base,
+        ...informedCloseConfirmation(window, null),
         message: "This stops the control terminal and its connection script.",
       };
     }
-    return async () => ({
-      ...base,
-      message: closeMessage(await liveTerminalCountForWindow(window)),
-    });
+    return async () => {
+      const count = await readCloseCount(window);
+      confirmedCloseCounts.set(windowKey(window), count);
+      return informedCloseConfirmation(window, count);
+    };
+  }
+
+  async function closeAfterFreshConfirmation(window: WindowRecord): Promise<void | DeckConfirm> {
+    const key = windowKey(window);
+    const recorded = confirmedCloseCounts.get(key);
+    const hadRecorded = confirmedCloseCounts.has(key);
+    const fresh = await readCloseCount(window);
+    if (!hadRecorded || fresh !== recorded) {
+      confirmedCloseCounts.set(key, fresh);
+      return informedCloseConfirmation(window, fresh);
+    }
+    confirmedCloseCounts.delete(key);
+    await closeComputerWindow(window);
   }
 
   /// One row per window, each a branch into that window's own actions. The
@@ -203,7 +230,7 @@
             ? () => setWindowShown(window, false)
             : command === "show"
               ? () => setWindowShown(window, true)
-              : () => closeComputerWindow(window),
+              : () => closeAfterFreshConfirmation(window),
     };
   }
 
@@ -546,7 +573,7 @@
     }
   }
 
-  async function choose(item: DeckItem): Promise<void> {
+  async function choose(item: DeckItem): Promise<void | DeckConfirm> {
     const entry = visibleEntries.find((candidate) => candidate.id === item.id);
     if (!entry) throw new Error("That command is no longer available");
     if (entry.next) {
@@ -556,11 +583,12 @@
       return;
     }
     clearError();
-    await entry.run?.();
+    const result = await entry.run?.();
     if (!entry.awaitResult) {
       closeDeck();
       clearDeck();
     }
+    return result;
   }
 
   function succeeded(): void {

@@ -3,6 +3,10 @@
   "version": "0.98.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
   "exports": {
     "./api": "./src/api.ts",
     "./initial": "./src/initial.ts",

@@ -58,6 +58,7 @@ export type DeckOperation =
       danger: boolean;
       selected: "cancel" | "action";
     }
+  | { kind: "preparing"; itemId: string; title: string }
   | { kind: "pending"; itemId: string; title: string }
   | { kind: "success"; itemId: string; title: string }
   | { kind: "error"; itemId: string; title: string; message: string; selected: "back" | "retry" };
@@ -100,12 +101,11 @@ function parseOperation(value: unknown): DeckOperation | null {
   const itemId = boundedString(raw.itemId, 512);
   const title = boundedString(raw.title, 256);
   if (!itemId || !title) return null;
-  // `pending` and `success` describe an execution that is in flight or has
-  // just landed. The promise behind them does not survive a hide, a reload, or
-  // a handover to another source, so restoring either paints a state nothing
-  // will ever clear. A background execution that really did fail is persisted
-  // by the host as `error`, which does restore.
-  if (raw.kind === "pending" || raw.kind === "success") return null;
+  // `preparing`, `pending`, and `success` describe work backed by a promise
+  // that does not survive a hide, reload, or handover to another source.
+  // Restoring one would paint a state nothing can clear. A background
+  // execution that really failed is persisted by the host as `error`.
+  if (raw.kind === "preparing" || raw.kind === "pending" || raw.kind === "success") return null;
   if (raw.kind === "confirm") {
     const message = boundedString(raw.message, 1024);
     const actionLabel = boundedString(raw.actionLabel, 128);

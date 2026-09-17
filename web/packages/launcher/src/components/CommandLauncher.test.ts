@@ -140,6 +140,19 @@ async function settle(): Promise<void> {
   await tick();
 }
 
+async function flushPromises(): Promise<void> {
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+  await tick();
+}
+
+function closeDecision(): HTMLButtonElement {
+  const button = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
+    (candidate) => candidate.textContent === "Close",
+  );
+  if (!button) throw new Error("missing Close decision");
+  return button;
+}
+
 beforeEach(() => {
   sessionStorage.clear();
   target = document.createElement("div");
@@ -162,7 +175,7 @@ afterEach(() => {
   unmount(app);
   target.remove();
   closeCommandLauncher();
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("Computers command deck", () => {
@@ -283,7 +296,7 @@ describe("Computers command deck", () => {
     [0, "This window will close."],
     [null, "Open sessions in this window may stop."],
   ] as const)("uses the informed Close message for count %s", async (count, message) => {
-    actions.liveTerminalCount.mockResolvedValueOnce(count);
+    actions.liveTerminalCount.mockResolvedValue(count);
     openCommandLauncher("computers");
     flushSync();
     result("Windows").click();
@@ -291,8 +304,7 @@ describe("Computers command deck", () => {
     result("Window 1 [release checks]").click();
     await tick();
     result("Close").click();
-    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
-    await tick();
+    await flushPromises();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("Close Window 1 [release checks]?");
     expect(target.querySelector(".deck-operation")?.textContent).toContain(message);
     expect(actions.liveTerminalCount).toHaveBeenCalledOnce();
@@ -301,13 +313,106 @@ describe("Computers command deck", () => {
       (button) => button.textContent === "Close",
     );
     confirm?.click();
-    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
-    await tick();
+    await flushPromises();
     expect(actions.close).toHaveBeenCalledOnce();
     expect(actions.close).toHaveBeenCalledWith(
       expect.objectContaining({ window_id: "w-project-1" }),
     );
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(2);
     expect(target.querySelector(".deck-decisions")).toBeNull();
+  });
+
+  it("re-confirms with a grown terminal count before closing", async () => {
+    actions.liveTerminalCount
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(2);
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "This window will close.",
+    );
+
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "2 terminal sessions in this window will stop.",
+    );
+
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).toHaveBeenCalledOnce();
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-confirms a restored Close card before closing", async () => {
+    actions.liveTerminalCount.mockResolvedValue(1);
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    const draft = activeCommandLauncherDraft();
+    draft.operation = {
+      kind: "confirm",
+      itemId: "computers:close:lib-local-live-shape:w-project-1",
+      title: "Close Window 1 [release checks]?",
+      message: "This window will close.",
+      actionLabel: "Close",
+      danger: true,
+      selected: "cancel",
+    };
+    await tick();
+
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "1 terminal session in this window will stop.",
+    );
+
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).toHaveBeenCalledOnce();
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([undefined, "two"])("uses the generic Close message for payload %s", async (count) => {
+    actions.liveTerminalCount.mockResolvedValueOnce(count);
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "Open sessions in this window may stop.",
+    );
+  });
+
+  it("uses the generic Close message when the count request fails", async () => {
+    actions.liveTerminalCount.mockRejectedValueOnce(new Error("HTTP 503"));
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "Open sessions in this window may stop.",
+    );
   });
 
   it("keeps the control-terminal Close warning without querying a count", async () => {

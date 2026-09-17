@@ -21,7 +21,9 @@ import {
   stopWatching,
   toggleWorkspace,
   updateGateway,
+  windowLiveTerminalCount,
 } from "./library.svelte";
+import { ApiError } from "../api/library";
 import { beginPending, clearAllPending, dsKey, isPending } from "./pending.svelte";
 
 // Pin the in-memory mock as the backend so these tests drive the registry +
@@ -95,6 +97,20 @@ describe("loadLibrary", () => {
     watch.mockRestore();
     workspaces.mockRestore();
     devservers.mockRestore();
+  });
+});
+
+describe("window live-terminal count", () => {
+  it.each([
+    new Error("count unavailable"),
+    new ApiError(404, "missing window"),
+  ])("treats a failed count request as unknown", async (error) => {
+    const { backend } = await import("../api/backend");
+    const count = vi.spyOn(backend, "liveTerminalCount").mockRejectedValueOnce(error);
+
+    await expect(windowLiveTerminalCount(library.windows[0]!)).resolves.toBeNull();
+    expect(count).toHaveBeenCalledOnce();
+    count.mockRestore();
   });
 });
 
