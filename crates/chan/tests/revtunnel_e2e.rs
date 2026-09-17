@@ -591,6 +591,36 @@ impl TunnelRig {
         .await
         .unwrap_or_else(|e| panic!("desktop client open failed: {e}"))
     }
+
+    async fn open_raw_desktop(
+        &self,
+        trigger: &TriggerFrame,
+        cs: &mut CsTunnel,
+        conn_id: &str,
+    ) -> (SpaSocket, SpaSocket) {
+        let mut control = self
+            .connect_tunnel_ws(&format!("{CONTROL_PATH}?tunnel={}", trigger.tunnel_id))
+            .await;
+        let ready = serde_json::to_string(&ControlFrame::Ready {
+            bound: "127.0.0.1:1".to_string(),
+        })
+        .expect("encode ready frame");
+        within(
+            "raw desktop ready frame",
+            control.send(Message::text(ready)),
+        )
+        .await
+        .expect("send ready frame");
+        cs.expect_ok("tunnel ready ack").await;
+
+        let data = self
+            .connect_tunnel_ws(&format!(
+                "{CONN_PATH}?tunnel={}&conn={conn_id}&half_close=true",
+                trigger.tunnel_id
+            ))
+            .await;
+        (control, data)
+    }
 }
 
 /// The still-open `cs tunnel` control connection. Dropping it closes both
@@ -1239,6 +1269,162 @@ async fn half_close_data_leg_moves_large_full_duplex_streams_independently() {
     assert_eq!(received_response, response);
 
     drop(control);
+    drop(cs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devserver_data_leg_closes_after_local_tcp_failure() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind resetting origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let (_control, mut data) = rig
+        .open_raw_desktop(&trigger, &mut cs, "local-tcp-failure")
+        .await;
+
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.expect("accept data-leg dial");
+        let mut request = [0u8; 5];
+        socket
+            .read_exact(&mut request)
+            .await
+            .expect("read reset trigger");
+        rustix::net::sockopt::set_socket_linger(&socket, Some(Duration::ZERO))
+            .expect("set reset-on-close linger");
+        request
+    });
+    within(
+        "raw desktop reset trigger",
+        data.send(Message::binary(b"reset".to_vec())),
+    )
+    .await
+    .expect("send reset trigger");
+    assert_eq!(
+        within("origin resets its socket", origin_task)
+            .await
+            .expect("origin task"),
+        *b"reset"
+    );
+
+    let frame = within("devserver Close after local TCP reset", data.next())
+        .await
+        .expect("data socket stays open through the Close frame")
+        .expect("valid data-leg frame");
+    assert!(
+        matches!(frame, Message::Close(_)),
+        "unexpected frame: {frame:?}"
+    );
+    drop(cs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devserver_data_leg_enforces_frame_cap_after_peer_marker() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind frame-cap origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let (_control, mut data) = rig
+        .open_raw_desktop(&trigger, &mut cs, "post-marker-frame-cap")
+        .await;
+
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.expect("accept data-leg dial");
+        let mut request = Vec::new();
+        socket
+            .read_to_end(&mut request)
+            .await
+            .expect("read request through peer marker");
+        (socket, request)
+    });
+    within(
+        "raw desktop request marker",
+        data.send(Message::text(HALF_CLOSE_MARKER)),
+    )
+    .await
+    .expect("send request marker");
+    let (origin_socket, request) = within("origin observes peer marker", origin_task)
+        .await
+        .expect("origin task");
+    assert!(request.is_empty());
+
+    within(
+        "oversized post-marker frame",
+        data.send(Message::binary(vec![0; MAX_DATA_FRAME_BYTES + 1])),
+    )
+    .await
+    .expect("send oversized frame");
+    let frame = within("devserver Close after oversized frame", data.next())
+        .await
+        .expect("data socket stays open through the Close frame")
+        .expect("valid data-leg frame");
+    assert!(
+        matches!(frame, Message::Close(_)),
+        "unexpected frame: {frame:?}"
+    );
+    drop(origin_socket);
+    drop(cs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devserver_data_leg_notices_peer_close_after_peer_marker() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind peer-close origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let (_control, mut data) = rig
+        .open_raw_desktop(&trigger, &mut cs, "peer-close-after-marker")
+        .await;
+
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.expect("accept data-leg dial");
+        let mut request = Vec::new();
+        socket
+            .read_to_end(&mut request)
+            .await
+            .expect("read request through peer marker");
+        (socket, request)
+    });
+    within(
+        "raw desktop request marker",
+        data.send(Message::text(HALF_CLOSE_MARKER)),
+    )
+    .await
+    .expect("send request marker");
+    let (origin_socket, request) = within("origin observes peer marker", origin_task)
+        .await
+        .expect("origin task");
+    assert!(request.is_empty());
+
+    within("raw desktop close", data.close(None))
+        .await
+        .expect("send peer Close");
+    let frame = within("devserver answers peer Close after marker", data.next())
+        .await
+        .expect("data socket stays open through the Close reply")
+        .expect("valid data-leg frame");
+    assert!(
+        matches!(frame, Message::Close(_)),
+        "unexpected frame: {frame:?}"
+    );
+    drop(origin_socket);
     drop(cs);
 }
 

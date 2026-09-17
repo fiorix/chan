@@ -221,27 +221,42 @@ fn half_close_inbound_chunk(message: Message) -> Result<Option<Vec<u8>>, ()> {
 
 /// Move negotiated data and directional end markers over the WebSocket.
 ///
-/// The outbound task stays independent of a blocked inbound channel send.
-/// After an inbound marker, later data frames are discarded while the stream
-/// remains polled for transport closure until the outbound direction ends.
+/// The adapter owns an outbound task that stays independent of a blocked
+/// inbound channel send. After an inbound marker, valid later data frames are
+/// discarded while the stream remains polled for transport closure until the
+/// outbound direction ends. Before that marker, inbound channel backpressure
+/// can pause stream polling. Oversized Binary frames end the leg in either
+/// state.
 async fn shuttle_half_close(
     socket: WebSocket,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     in_tx: mpsc::Sender<Vec<u8>>,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let mut outbound = tokio::spawn(async move {
-        while let Some(chunk) = out_rx.recv().await {
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+    let mut outbound = tokio::task::JoinSet::new();
+    outbound.spawn(async move {
+        let orderly = loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = &mut stop_rx => break false,
+                chunk = out_rx.recv() => chunk,
+            };
+            let Some(chunk) = chunk else { break false };
             let ended = chunk.is_empty();
-            if sink.send(half_close_outbound_message(chunk)).await.is_err() {
-                return None;
+            let sent = tokio::select! {
+                biased;
+                _ = &mut stop_rx => false,
+                result = sink.send(half_close_outbound_message(chunk)) => result.is_ok(),
+            };
+            if !sent {
+                break false;
             }
             if ended {
-                return Some(sink);
+                break true;
             }
-        }
-        // The pump always sends a marker before an orderly close.
-        None
+        };
+        (sink, orderly)
     });
     let mut outbound_finished = false;
     let mut finished_sink = None;
@@ -251,23 +266,27 @@ async fn shuttle_half_close(
             break;
         }
         tokio::select! {
-            result = &mut outbound, if !outbound_finished => {
+            result = outbound.join_next(), if !outbound_finished => {
                 outbound_finished = true;
                 match result {
-                    Ok(Some(sink)) => finished_sink = Some(sink),
-                    Ok(None) | Err(_) => break,
+                    Some(Ok((sink, true))) => finished_sink = Some(sink),
+                    Some(Ok((sink, false))) => {
+                        finished_sink = Some(sink);
+                        break;
+                    }
+                    Some(Err(_)) | None => return,
                 }
             }
             inbound = stream.next() => match inbound {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(message)) => {
-                    let Some(tx) = in_tx.as_ref() else {
-                        continue;
-                    };
                     let chunk = match half_close_inbound_chunk(message) {
                         Ok(Some(chunk)) => chunk,
                         Ok(None) => continue,
                         Err(()) => break,
+                    };
+                    let Some(tx) = in_tx.as_ref() else {
+                        continue;
                     };
                     let ended = chunk.is_empty();
                     if tx.send(chunk).await.is_err() {
@@ -280,13 +299,17 @@ async fn shuttle_half_close(
             },
         }
     }
-    if !outbound_finished {
-        outbound.abort();
-        let _ = outbound.await;
-    }
-    if let Some(mut sink) = finished_sink {
-        let _ = sink.close().await;
-    }
+    let mut sink = match finished_sink {
+        Some(sink) => sink,
+        None => {
+            let _ = stop_tx.send(());
+            match outbound.join_next().await {
+                Some(Ok((sink, _))) => sink,
+                Some(Err(_)) | None => return,
+            }
+        }
+    };
+    let _ = sink.close().await;
 }
 
 #[cfg(test)]
