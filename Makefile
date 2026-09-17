@@ -377,18 +377,16 @@ ci-macos: ## Run the focused macOS CI validation target.
 .PHONY: ci-windows
 ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
-	# The Rust test run is scoped to chan-library and chan-desktop, the two
-	# crates whose Windows behavior is worth testing: chan-library carries
-	# the `#[cfg(windows)]` ConPTY child-reaping tests that no other arm can
-	# execute, and chan-desktop is the Windows shell itself. The rest of the
-	# workspace (chan-workspace, chan-server, the tunnel crates, and so on)
-	# is platform-neutral logic whose test harnesses assume a Unix host
-	# (verbatim-vs-normalized path identity, POSIX shell commands, real-PTY
-	# tests that drive a shell to completion). Those suites have never run on
-	# Windows and porting their harnesses tests the port, not the product;
-	# running them here surfaced a backlog of Unix assumptions with no
-	# Windows-specific coverage to show for it. See the roadmap draft on a
-	# full Windows test port.
+	# The Rust test run covers chan-library and chan-desktop, plus the named
+	# chan-server tests whose harnesses use Windows transports. The chan-library
+	# tests include the Windows ConPTY child-reaping paths, chan-desktop includes
+	# the registry-backed user-PATH assertion, and chan-server covers the tenant
+	# builder's named-pipe control socket, the handoff named-pipe path and
+	# upgrade cases, and the devserver named-pipe path and registration round
+	# trip. The remaining chan-server, chan-workspace, and tunnel harnesses stay
+	# outside this Windows-specific subset: they are Unix-only, exercise Unix
+	# facilities such as POSIX shells, Unix-domain sockets, `/tmp` path semantics,
+	# or real PTYs, or have no Windows transport arm to exercise.
 	#
 	# The release CLI is built first because `desktop/src-tauri` is a
 	# workspace member, so compiling chan-desktop's tests pulls in its
@@ -414,6 +412,12 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# connect -- plus the plain fact that chan.exe reaches `main` at all. It is
 	# a few seconds and is not the deferred full-suite Windows port.
 	scripts/smoke-windows-cli.sh target/release/chan.exe
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact tenant_builder_tests::tenant_builders_preserve_routes_and_state
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::well_known_path_is_named_pipe_on_windows
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::listener_round_trip_upgrade_checked_pipe
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::unserved_pipe_is_no_desktop
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact devserver_handoff::tests::listener_round_trip_registered_pipe
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe

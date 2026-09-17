@@ -1336,6 +1336,30 @@ mod tests {
         assert!(!unix_candidate_name("0123456789abcde.sock"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn instance_socket_names_are_stable_short_and_scoped() {
+        let path =
+            devserver_socket_path("lib-0011223344556677", 8787).expect("Windows devserver path");
+        let name = path.to_string_lossy();
+        let prefix = format!(r"\\.\pipe\{}-", windows_pipe_prefix());
+        assert!(name.starts_with(&prefix), "unexpected path: {name}");
+        let hash = &name[prefix.len()..];
+        assert!(lower_hex_16(hash));
+        assert_eq!(
+            path,
+            devserver_socket_path("lib-0011223344556677", 8787).unwrap()
+        );
+        assert_ne!(
+            devserver_socket_path("lib-0011223344556677", 8787),
+            devserver_socket_path("lib-0011223344556677", 9999)
+        );
+        assert_ne!(
+            devserver_socket_path("lib-0011223344556677", 8787),
+            devserver_socket_path("lib-other", 8787)
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn old_client_gets_clean_version_skew_from_new_server() {
@@ -1428,6 +1452,37 @@ mod tests {
                 assert_eq!(version, CHAN_VERSION);
             }
             other => panic!("expected Identified, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listener_round_trip_registered_pipe() {
+        let pipe = PathBuf::from(format!(
+            r"\\.\pipe\chan-test-devserver-{}",
+            std::process::id()
+        ));
+        let _handle = start_listener(pipe.clone(), |request| async move {
+            match request {
+                Request::RegisterWorkspace { workspace_path, .. } => {
+                    assert_eq!(workspace_path, "notes");
+                    Response::Registered {
+                        devserver_version: CHAN_VERSION.into(),
+                        prefix: "/api/notes-1a2b3c".into(),
+                    }
+                }
+                Request::Identify { .. } => Response::Error {
+                    message: "unexpected identify".into(),
+                },
+            }
+        })
+        .expect("bind named-pipe listener");
+
+        match request_endpoint(&pipe, &registration_request()).await {
+            EndpointReply::Response(Response::Registered { prefix, .. }) => {
+                assert_eq!(prefix, "/api/notes-1a2b3c")
+            }
+            other => panic!("expected Registered, got {other:?}"),
         }
     }
 
