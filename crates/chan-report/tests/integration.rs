@@ -435,9 +435,9 @@ fn incremental_update_unchanged_does_not_drift_ancestors() {
 #[test]
 fn rename_moves_stats_between_ancestor_chains() {
     // A rename across directories must subtract from the old
-    // ancestor chain AND add to the new one. Catches the bug
-    // where Index::rename only ran update(to) without unwinding
-    // from's contribution.
+    // ancestor chain AND add to the new one: a rename that only runs
+    // update(to) without unwinding from's contribution leaves the old
+    // chain's totals inflated.
     let d = tempdir().unwrap();
     write(d.path(), "old/a.rs", "fn a() {}\n");
     let mut idx = Index::scan(&ReportOptions::new(d.path())).unwrap();
