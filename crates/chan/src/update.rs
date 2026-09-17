@@ -1139,8 +1139,11 @@ fn is_windows_sharing_violation(error: &io::Error) -> bool {
     error.raw_os_error() == Some(WINDOWS_ERROR_SHARING_VIOLATION)
 }
 
-/// Retries a rename when a transient Windows sharing violation means another process still holds the file.
-/// The nine waits are 25, 50, 100, 200, then 250 ms for each of the five remaining retries, for at most 10 attempts and 1.625 seconds asleep.
+/// Retries `operation` while it returns raw OS error 32, the Windows
+/// sharing-violation code. Any other error is returned immediately, and the
+/// result of the tenth attempt is returned unchanged. The schedule waits 25,
+/// 50, 100, and 200 ms, then 250 ms five times, for at most 1.625 seconds of
+/// requested sleep.
 #[cfg(any(test, target_os = "windows"))]
 fn retry_windows_sharing_violation<T>(
     mut operation: impl FnMut() -> io::Result<T>,
@@ -1608,8 +1611,8 @@ mod tests {
         let mut calls = 0;
         let mut sleeps = Vec::new();
 
-        // Raw error 32 means EPIPE on Linux, but the Windows-only production caller treats it as
-        // ERROR_SHARING_VIOLATION.
+        // Raw error 32 is EPIPE on Linux and macOS, but the Windows-only
+        // production caller treats it as ERROR_SHARING_VIOLATION.
         let result = retry_windows_sharing_violation(
             || {
                 calls += 1;
