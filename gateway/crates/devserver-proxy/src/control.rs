@@ -2466,8 +2466,8 @@ mod tests {
         assert_eq!(rows, 1);
 
         // The first paced step lets the supervisor consume SnapshotAccepted.
-        // Fifteen seconds then carries us beyond the old disconnect grace,
-        // proving that acceptance armed a distinct convergence deadline.
+        // Fifteen seconds carries the total disconnect past 30 seconds while
+        // convergence remains pending, proving acceptance armed its own deadline.
         advance_paced(Duration::from_secs(15)).await;
         assert!(proxy.registry.get("alice", "ds-1").is_some());
         assert_eq!(proxy.sessions.len(), 1);

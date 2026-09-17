@@ -1115,11 +1115,9 @@ async fn session_cookie_for_wrong_devserver_is_404() {
     app.cleanup().await;
 }
 
-// Regression: identity mints entry JWTs with `sub = caller.user_id`
-// (owner or accepted grantee). devserver-proxy used to compare `sub`
-// against the registry-cached owner_id and 404 every grantee; the gate
-// now trusts identity's mint-time `devserver_access` check and admits any
-// signed entry with the right aud + drv.
+// Identity mints entry JWTs with `sub = caller.user_id` (owner or accepted
+// grantee). The proxy gate relies on identity's mint-time `devserver_access`
+// check and admits any signed entry with the right aud + drv.
 #[tokio::test]
 async fn entry_token_for_grantee_mints_session_carrying_grantee_sub() {
     let app = TestApp::new().await;
