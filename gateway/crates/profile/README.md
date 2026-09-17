@@ -62,7 +62,7 @@ Service API (`/v1/users/*`, `/v1/auth-audit`):
 | POST   | `/v1/users`                           | create user                        |
 | GET    | `/v1/users/{id}`                      | fetch one user                     |
 | PATCH  | `/v1/users/{id}`                      | update mutable fields              |
-| DELETE | `/v1/users/{id}`                      | durable account-delete denial (202) |
+| DELETE | `/v1/users/{id}`                      | durable account-delete denial (202; same operation as pending-delete) |
 | POST   | `/v1/users/{id}/pending-delete`       | durable account-delete denial      |
 | POST   | `/v1/users/{id}/tokens/{token_id}/revoke` | owned PAT revoke + durable session cut |
 | PATCH  | `/v1/users/{id}/username`             | rename handle (cap 4)              |
