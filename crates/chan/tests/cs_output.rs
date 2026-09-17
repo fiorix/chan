@@ -551,14 +551,13 @@ async fn search_prints_then_fails_when_the_result_carries_errors() {
     }
 }
 
-/// The real server's order: the reply and the close land as soon as the
-/// request line is read, without waiting for `cs` to half-close. When that
-/// close arrives first, macOS answers the client's shutdown with ENOTCONN,
-/// and `cs` must still print the reply it already has. Which side wins is
-/// a scheduling race, so one command runs several times to make a
-/// regression likely to show; the fake answers every command alike, and
-/// `window list` needs no environment beyond the socket. On Linux the
-/// shutdown never fails either way.
+/// The real server dispatches the request, then replies and closes without
+/// waiting for `cs` to half-close. When that close arrives first, macOS
+/// answers the client's shutdown with ENOTCONN, and `cs` must still print the
+/// reply it already has. Which side wins is a scheduling race, so one command
+/// runs several times to make a regression likely to show; the fake answers
+/// every command alike, and `window list` needs no environment beyond the
+/// socket. On Linux the shutdown never fails either way.
 #[tokio::test]
 async fn a_server_that_answers_and_closes_at_once_still_gets_its_reply_printed() {
     let case = cases()

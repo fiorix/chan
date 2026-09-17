@@ -195,8 +195,9 @@ async fn auth_response(port: u16, token: &str) -> (http::StatusCode, Vec<u8>) {
 
 /// Spin-wait briefly for the listener to insert the registration.
 /// The client's `dial` returns the moment it reads HelloAck, but
-/// the server side does `register_with_cap` a few statements later;
-/// without a wait, tests querying the registry can race that gap.
+/// the server side does `register_authorized_with_id_and_cap` a few
+/// statements later; without a wait, tests querying the registry can race
+/// that gap.
 async fn wait_registered(reg: &Registry, user: &str, workspace: &str) -> bool {
     for _ in 0..100 {
         if reg.get(user, workspace).is_some() {

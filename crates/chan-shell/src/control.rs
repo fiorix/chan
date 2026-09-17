@@ -144,8 +144,9 @@ fn first_response_outcome(response: ControlResponse) -> Result<String> {
 /// for this half-close, and when its close lands first macOS refuses the
 /// half-close with ENOTCONN. The request is fully written and the reply, if
 /// any, is already queued, so `NotConnected` is not a failure of the request
-/// and the caller reads on; a server that closed without answering fails
-/// the read or the decode on its own. Any other refusal is the error it is.
+/// and the caller reads on; a server that closed without answering is reported
+/// by `read_first_response`, and any other broken reply fails its read or
+/// decode. Any other refusal is the error it is.
 fn half_close_outcome(result: std::io::Result<()>) -> Result<()> {
     match result {
         Ok(()) => Ok(()),

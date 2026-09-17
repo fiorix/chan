@@ -369,10 +369,10 @@ async fn handle_tunnel_conn(
     // authoritative identity), not the ignored `Hello.workspace` label.
     let devserver: Arc<str> = Arc::from(validated.devserver_id.as_str());
     // Final local-cap race fence. `LocalAdmission` makes the friendly
-    // pre-ack check, then `register_with_cap` repeats the count and insert
-    // under one lock acquisition. Controller-backed callers disable this
-    // local authority with zero. A local-cap loser here has already
-    // received HelloAck, so dropping `yconn` closes the transport.
+    // pre-ack check, then `register_authorized_with_id_and_cap` repeats the
+    // count and insert under one lock acquisition. Controller-backed callers
+    // disable this local authority with zero. A local-cap loser here has
+    // already received HelloAck, so dropping `yconn` closes the transport.
     let (handle, open_rx, shutdown_rx) = match registry.register_authorized_with_id_and_cap(
         user.clone(),
         devserver.clone(),
