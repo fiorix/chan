@@ -40,7 +40,7 @@
 //! TODO: hold a registration through a grace window instead of failing at
 //! once, and let the desktop redial by tunnel id to resume it. That makes the
 //! tunnel id a resumable credential, so it lands with the authority question
-//! on the routes (see `require_tunnel_owner` in chan-server), not before it.
+//! on the routes (see `require_owner_desktop` in chan-server), not before it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

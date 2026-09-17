@@ -118,7 +118,8 @@ pub enum ControlFrame {
     /// listening authority, which matters when the request asked for port 0.
     Ready { bound: String },
     /// Desktop -> devserver, first frame on failure. The listener never came
-    /// up; the reason is user-facing (a port collision, a refused consent).
+    /// up; the reason is user-facing (a port collision or another listener
+    /// setup failure).
     Failed { message: String },
     /// Devserver -> desktop: stop listening and drop every bridge. Sent when
     /// the foreground `cs tunnel` ends, so the desktop learns the difference
