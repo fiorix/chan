@@ -16,7 +16,7 @@
 //! `Workspace::ensure_writable`.
 //!
 //! The configured transfer ceiling governs both directions on this tenant.
-//! Single-file reads and writes are bounded by it. Directory plans refuse when
+//! Single-file reads and writes are bounded by it. Archive plans refuse when
 //! the encoded archive bound already exceeds it. That bound assumes each
 //! regular file's metadata length matches its content. The tar writer keeps a
 //! source that changes after preflight from passing the ceiling mid-flight.
@@ -109,14 +109,19 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// sparse-aware tar stream, but preserves the conservative preflight bound.
 pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
     let archive_name = download_filename(&abs.to_string_lossy());
-    verify_readable_fs_entry(abs, Path::new(&archive_name), true)
+    verify_readable_fs_entry(abs, Path::new(&archive_name), ArchiveEntryPosition::Root)
         .map(|size| size.saturating_add(TAR_END_OF_ARCHIVE_BYTES))
+}
+
+enum ArchiveEntryPosition {
+    Root,
+    Child,
 }
 
 fn verify_readable_fs_entry(
     abs: &Path,
     archive_path: &Path,
-    is_archive_root: bool,
+    position: ArchiveEntryPosition,
 ) -> Result<u64, String> {
     let meta = std::fs::symlink_metadata(abs)
         .map_err(|e| format!("cannot access {}: {e}", abs.display()))?;
@@ -130,10 +135,9 @@ fn verify_readable_fs_entry(
     if meta.is_dir() {
         let entries = std::fs::read_dir(abs)
             .map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
-        let header_path = if is_archive_root {
-            archive_path.join("")
-        } else {
-            archive_path.to_path_buf()
+        let header_path = match position {
+            ArchiveEntryPosition::Root => archive_path.join(""),
+            ArchiveEntryPosition::Child => archive_path.to_path_buf(),
         };
         let mut encoded_bytes = tar_entry_encoded_size(&header_path, None, 0);
         for entry in entries {
@@ -142,7 +146,7 @@ fn verify_readable_fs_entry(
             encoded_bytes = encoded_bytes.saturating_add(verify_readable_fs_entry(
                 &entry.path(),
                 &archive_path.join(entry.file_name()),
-                false,
+                ArchiveEntryPosition::Child,
             )?);
         }
         Ok(encoded_bytes)
