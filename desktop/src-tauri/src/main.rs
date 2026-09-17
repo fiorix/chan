@@ -4755,7 +4755,7 @@ mod win_console {
 /// `cs` alias detection, which scans `$PATH`) and spawned subprocesses
 /// (terminals) see binaries wherever the user actually has them -- the general
 /// fix for the launchd restricted-PATH gotcha, not `cs`-specific. Best-effort:
-/// any failure leaves the inherited PATH untouched (status quo, no regression).
+/// any failure leaves the inherited PATH untouched.
 #[cfg(target_os = "macos")]
 fn fix_macos_login_path() {
     let Some(shell_path) = resolve_login_shell_path() else {
@@ -6326,12 +6326,12 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("About Chan Desktop")
     // Tall enough that the content never has to scroll; about.css centers
     // it, so any slack is split evenly above and below rather than piling
-    // up under the card. 460 is measured, not guessed: the DOM lays out at 422 (head 67,
-    // links 20, Fund card 182, separator 1, credits 36, four 16px gaps,
-    // 52px of padding), plus one wrapped line each for the links row and
-    // the credits line. Those two are the only rows whose height depends
-    // on the platform's font: the Fund card is pinned by its 150px QR and
-    // the head by its two fixed lines. Fixed, since the window is
+    // up under the card. 460 is measured, not guessed: the DOM lays out at
+    // 422 (head 67, links 20, Fund card 182, separator 1, credits 36, four
+    // 16px gaps, 52px of padding), plus one wrapped line each for the links
+    // row and the credits line. Those two are the only rows whose height
+    // depends on the platform's font: the Fund card is pinned by its 150px
+    // QR and the head by its two fixed lines. Fixed, since the window is
     // non-resizable.
     .inner_size(420.0, 460.0)
     .min_inner_size(420.0, 380.0)
@@ -7859,9 +7859,9 @@ mod tests {
         assert_eq!(feed.pane_color(lib), Some("#ff8800".to_string()));
         // A genuine clear (the devserver dropped its colour) still
         // propagates -- a null push removes the cache so new windows fall back to the
-        // accent. The web live-apply side ignores a null that would clobber its
-        // active colour, but the desktop cache must reflect a real clear, so the
-        // eager seed must not blanket-ignore nulls.
+        // accent. The web live-apply side ignores every null and keeps its
+        // current colour, but the desktop cache must reflect a real clear, so
+        // the eager seed must not blanket-ignore nulls.
         feed.set_color("ds-1".to_string(), None);
         assert_eq!(feed.pane_color(lib), None);
     }

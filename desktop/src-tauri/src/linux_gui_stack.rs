@@ -190,8 +190,9 @@ mod linux {
     /// working setups".
     ///
     /// This layer covers a separate fault from the AMD-on-newer-Mesa
-    /// EGL_BAD_PARAMETER abort handled by the host-stack re-exec above. An
-    /// explicit user setting is never clobbered.
+    /// EGL_BAD_PARAMETER abort handled by the host-stack re-exec above. A
+    /// `WEBKIT_DISABLE_DMABUF_RENDERER` the user already set is never
+    /// clobbered.
     ///
     /// `CHAN_LINUX_DMABUF` overrides the detection: `on` keeps the
     /// accelerated path whatever the driver (the knob for an NVIDIA user who

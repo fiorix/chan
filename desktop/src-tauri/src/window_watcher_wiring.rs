@@ -941,9 +941,9 @@ async fn stream_window_feed(
 /// (`GET /api/library/local-color/watch`): on each `{ color }` push,
 /// refresh the launcher's per-devserver colour cache and -- only on a real change
 /// -- re-push the library feed, so a NEW window of this devserver reads the fresh
-/// `?pane=` colour at build. The workspace list remains polled because there is no
-/// `workspaces/watch`. Reconnects on a
-/// dropped socket until `cancel` flips true (disconnect), like the window feed.
+/// `?pane=` colour at build. The workspace list is polled because there is no
+/// `workspaces/watch`. Reconnects on a dropped socket until `cancel` flips
+/// true (disconnect), like the window feed.
 pub(crate) fn spawn_devserver_color_watch(
     state: Arc<AppState>,
     id: String,

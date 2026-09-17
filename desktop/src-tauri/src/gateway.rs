@@ -2251,7 +2251,7 @@ mod tests {
         server.abort();
     }
 
-    /// The blocker regression: park -> callback -> roster fetched -> poll
+    /// The sign-in resume end to end: park -> callback -> roster fetched -> poll
     /// running. The resume must make the parked runtime resumable before
     /// re-entering connect_gateway, or the coalesce guard reads the park
     /// as an attempt in flight and the gateway sticks Connecting forever.

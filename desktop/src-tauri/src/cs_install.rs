@@ -936,7 +936,7 @@ mod windows_shim {
             let desktop = dir.join("chan-desktop.exe");
             std::fs::write(&desktop, b"").unwrap();
 
-            // No chan.exe anywhere: fall back to the desktop exe (no regression).
+            // No chan.exe anywhere: fall back to the desktop exe.
             assert_eq!(resolve_cli_target(&desktop), desktop);
 
             // chan.exe in a `resources\` subdir is used.

@@ -709,8 +709,8 @@ fn build_workspace_window_with_completion(
     );
     let (webview_url, init_script) = match connecting {
         Some(display_url) => {
-            // Follow the launcher's local light/dark choice; null
-            // follows the OS. The connecting screen is local desktop chrome.
+            // Follow the launcher's local light/dark choice; null follows the
+            // OS. The connecting screen is local desktop chrome.
             let theme = app
                 .state::<Arc<AppState>>()
                 .embedded()
@@ -2636,9 +2636,10 @@ mod tests {
 
     #[test]
     fn key_bridge_invokes_tauri_ipc_via_core_invoke() {
-        // The `invokeIpc` helper grabs `window.__TAURI__.core.invoke`, Tauri 2's
-        // invoke surface. A webview without that surface returns undefined and
-        // silently swallows the Cmd+R / Cmd+Opt+I accelerators.
+        // The `invokeIpc` helper calls `window.__TAURI__.core.invoke`, Tauri 2's
+        // invoke surface, for the native `reload_window` and `open_devtools`
+        // commands. When that surface is missing, the helper returns before
+        // swallowing the Cmd+R / Cmd+Opt+I event.
         assert!(KEY_BRIDGE_JS.contains("window.__TAURI__"));
         assert!(KEY_BRIDGE_JS.contains("tauri.core.invoke"));
     }
