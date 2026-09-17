@@ -55,9 +55,9 @@ const MAX_NODES: usize = 10_000;
 /// bytes of node payload, whichever trips first, then hands back a
 /// `cursor` to resume. This is what keeps a large workspace
 /// (`/tmp/linux`) filling in gradually instead of blocking the UI on a
-/// single large payload. A *non-paged* request (neither param) keeps
-/// the historical whole-scope walk capped at `MAX_NODES` -- the
-/// depth-cap probe relies on that completeness.
+/// single large payload. A *non-paged* request (neither param) uses the
+/// whole-scope walk capped at `MAX_NODES`; the depth-cap probe relies on that
+/// completeness.
 const BATCH_MAX_NODES: usize = 256;
 const BATCH_MAX_BYTES: usize = 64 * 1024;
 const BATCH_MIN_NODES: usize = 16;
@@ -95,8 +95,8 @@ pub struct FsGraphParams {
     cursor: Option<String>,
     /// Switches on paged delivery: the response is bounded to one batch
     /// (`limit` nodes, clamped to `[BATCH_MIN_NODES, BATCH_MAX_NODES]`)
-    /// plus a `cursor` to fetch the next. Absent (and no `cursor`) =
-    /// the historical whole-scope walk the depth-cap probe relies on.
+    /// plus a `cursor` to fetch the next. Absent (and no `cursor`) selects the
+    /// whole-scope walk the depth-cap probe relies on.
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -304,9 +304,8 @@ pub async fn api_fs_graph(
         Err(error) => return err_state(&error),
     };
     // A request carrying `limit` or `cursor` is paged: bounded one
-    // batch at a time with a continuation token. Otherwise it is the
-    // historical whole-scope walk (the depth-cap probe needs that
-    // completeness).
+    // batch at a time with a continuation token. Otherwise it uses the
+    // whole-scope walk because the depth-cap probe needs that completeness.
     let paged = p.limit.is_some() || p.cursor.is_some();
     let result = tokio::task::spawn_blocking(move || {
         if paged {

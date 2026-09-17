@@ -56,8 +56,8 @@ pub fn err_state(e: &StateAccessError) -> Response {
     }
 }
 
-/// Map chan-workspace errors to HTTP statuses. The shape of the JSON
-/// matches the old server so frontend error handling stays unchanged.
+/// Map chan-workspace errors to HTTP statuses. The JSON shape preserves the
+/// frontend error-handling contract.
 pub fn err_from(e: &chan_workspace::ChanError) -> Response {
     use chan_workspace::ChanError as C;
     let (status, msg) = match e {

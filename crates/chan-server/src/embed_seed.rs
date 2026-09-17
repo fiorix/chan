@@ -179,8 +179,7 @@ mod tests {
 
     #[test]
     fn absent_when_only_stray_lockfile() {
-        // The old "any file present" heuristic considered this
-        // seeded; the new check rejects it.
+        // A stray lockfile does not make the cache seeded.
         let tmp = tempfile::tempdir().unwrap();
         let blobs = tmp.path().join("blobs");
         fs::create_dir_all(&blobs).unwrap();

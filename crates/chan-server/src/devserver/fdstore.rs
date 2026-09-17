@@ -1255,9 +1255,9 @@ mod linux {
             assert_eq!(parsed.version, 2);
             assert_eq!(parsed.library_id, "lib-test");
 
-            // A v1 manifest (nonce + TTL era) still PARSES -- serde ignores
-            // the retired fields -- and is rejected by the version gate, so
-            // the old binary's leftovers route to cleanup, not restore.
+            // A v1 manifest (nonce + TTL era) still parses because serde ignores
+            // the retired fields, but the version gate routes its leftovers to
+            // cleanup rather than restore.
             let v1 = serde_json::json!({
                 "version": 1,
                 "nonce": "abc",

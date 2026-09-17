@@ -2079,13 +2079,10 @@ mod tests {
 
     #[test]
     fn set_idle_reattaches_the_embed_chip_from_the_shared_signal() {
-        // An incremental reindex that lands in
-        // set_idle WHILE a cold-build embed pass is still running must
-        // RE-ATTACH the chip from the shared signal, not drop it (the old
-        // bug: set_idle hard-coded embedding: None, so any file edit during
-        // a background embed cleared the chip). With the signal cleared (the
-        // coordinator clears it when the build settles), set_idle reports
-        // embedding: None.
+        // An incremental reindex that lands in set_idle while a cold-build
+        // embed pass is still running must reattach the chip from the shared
+        // signal. With the signal cleared (the coordinator clears it when the
+        // build settles), set_idle reports embedding: None.
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody token\n").unwrap();
         apply_watch_change(&workspace, "a.md", false, false).unwrap();
@@ -2347,9 +2344,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn apply_watch_change_special_clears_prior_index_entry() {
-        // Regression: if a user replaces a regular .md with a symlink
-        // of the same name, the apply path should clean out the old
-        // index row instead of leaving it stale.
+        // Replacing a regular .md with a symlink of the same name must clear the
+        // prior index row instead of leaving it stale.
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n").unwrap();
         assert_eq!(

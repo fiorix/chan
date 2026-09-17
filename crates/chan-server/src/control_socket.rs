@@ -5752,12 +5752,9 @@ mod tests {
             .try_lock()
             .expect("holder flocks before the takeover");
 
-        // Release the holder the moment the takeover is OBSERVED to be
-        // retrying, rather than after a fixed 25ms and hoping the retry
-        // budget outlives the sleep. The old form raced a 25ms holder
-        // against a ~100ms budget (5 attempts x 25ms) decided entirely by
-        // how promptly the machine scheduled two threads, so it went red
-        // under load with nothing wrong in the takeover path.
+        // Release the holder the moment the takeover is observed retrying. This
+        // keeps the test independent of how promptly the machine schedules its
+        // two threads.
         //
         // `Option::take` drops the File -- and so releases the flock --
         // on the FIRST failed attempt and never again, so the sequence is
@@ -6435,7 +6432,8 @@ mod tests {
     }
 
     /// An existing plaintext file with a non-`.md` extension opens in the
-    /// editor (the content-aware gate replaced the old `.md`-only rule).
+    /// editor because the content-aware gate admits text independently of its
+    /// extension.
     #[test]
     fn open_path_opens_existing_text_file() {
         let cfg = tempfile::tempdir().expect("config dir");

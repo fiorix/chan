@@ -2319,14 +2319,10 @@ mod tests {
 
     #[test]
     fn link_to_non_markdown_disk_file_resolves_to_real_file() {
-        // Regression: a markdown file linking to a
-        // non-graph regular file (LICENSE, src/lib.rs, ...) was being
-        // classified as a broken link, with a synthesized ghost
-        // File { missing: true } overriding the FS layer's real entry.
-        // After the fix, disk_files participates in file_set so
-        // ghost_set stays empty for the LICENSE case, and the
-        // referenced-disk-files set picks up a `File { missing: false }`
-        // node instead.
+        // A markdown link to a non-graph regular file (LICENSE, src/lib.rs, ...)
+        // resolves to the FS layer's real `File { missing: false }` entry.
+        // `disk_files` participates in `file_set` so `ghost_set` stays empty for
+        // the LICENSE case and `referenced_disk_files` picks it up.
         let (_cfg, root, workspace) = open_workspace();
         // Use a wiki link so the dst lands on workspace-rooted "LICENSE"
         // rather than the source-relative "notes/LICENSE" that bare
@@ -2970,13 +2966,10 @@ mod tests {
 
     #[test]
     fn should_emit_contact_file_drops_unreferenced_keeps_referenced_and_non_contacts() {
-        // The contact-file emit filter pins the
-        // graph view to "who-mentions-whom". Pre-fix behaviour
-        // emitted every imported contact File node regardless of
-        // whether it was referenced; a real seed workspace had
-        // 1973 contact files vs ~49 unique @@Handle strings in
-        // markdown bodies. After the fix, only referenced contacts
-        // survive.
+        // The contact-file emit filter pins the graph view to
+        // "who-mentions-whom": only referenced contacts survive. A seed
+        // workspace can have 1973 contact files but only about 49 unique
+        // @@Handle strings in markdown bodies.
         let mut contacts = std::collections::HashSet::new();
         contacts.insert("contacts/alice.md".to_string());
         contacts.insert("contacts/bob.md".to_string());

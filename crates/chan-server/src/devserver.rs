@@ -6099,9 +6099,10 @@ mod tests {
         }
     }
 
-    // The session-role seam WP18 keys on: a request entering the tunnel clone
-    // carries `TunnelOrigin` (a Follower origin, `local == false`), while a
-    // loopback request never does (a Leader origin, `local == true`).
+    // The session-role seam keys on whether a request entering the tunnel clone
+    // carries `TunnelOrigin`: a tunnel request has a Follower origin with
+    // `local == false`, while a loopback request has a Leader origin with
+    // `local == true`.
     // `ws_upgrade` reads the same `Option<Extension<TunnelOrigin>>` extractor and
     // computes `let local = origin.is_none();`. A full `/ws` upgrade over a live
     // tunnel is a host-smoke item; this pins the marker->local mapping the role

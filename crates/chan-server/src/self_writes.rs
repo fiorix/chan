@@ -74,8 +74,8 @@ pub(crate) enum WritePreconditionError {
 /// Equal authority content is always safe to retry: callers still
 /// force or confirm durability before returning success. Changed
 /// content under a live authority requires both its version and an
-/// open-time disk token. A disk-only write preserves the historical
-/// no-token last-write-wins behavior.
+/// open-time disk token. A disk-only write uses no-token last-write-wins
+/// behavior.
 pub(crate) fn check_write_preconditions(
     current_mtime_ns: Option<i64>,
     current_authority_version: Option<u64>,

@@ -6181,9 +6181,8 @@ mod doc_divert_tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         assert_eq!(session.authority_view().0, "three\n");
 
-        // A changed write under a live authority also requires its
-        // open-time disk token. Disk-only writes retain the historical
-        // no-token last-write-wins behavior.
+        // A changed write under a live authority also requires its open-time
+        // disk token. Disk-only writes use no-token last-write-wins behavior.
         let resp = api_write_file(
             State(state.clone()),
             AxumPath("n.md".into()),

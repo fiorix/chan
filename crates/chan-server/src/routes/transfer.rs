@@ -401,10 +401,9 @@ pub async fn api_terminal_read_file(
 ) -> Response {
     // A bare GET is the standalone Files application's read lane: this
     // route owns the path, so the dispatch happens here rather than as a
-    // second registration axum would refuse at router build. On a tenant
-    // without Files state the historical refusal stands: the plain slim
-    // tenant fetches no file content inline, and the only legitimate GET
-    // is the download gesture.
+    // second registration axum would refuse at router build. A tenant without
+    // Files state fetches no file content inline; its only legitimate GET is the
+    // download gesture.
     if !query_flag(&query.download) {
         if let Some(files) = state.standalone_files.clone() {
             return crate::routes::standalone_fs::standalone_read_file(

@@ -2920,9 +2920,8 @@ mod tests {
         force_overlap_conflict(&fx, &ha, local, disk_one).await;
         drain(&mut rx);
 
-        // The disk moves AGAIN while conflicted (the vi edit the old
-        // reconciler ignored): the retained side corroborates and
-        // refreshes; authority and baseline stay frozen.
+        // The disk moves again while conflicted. The retained side corroborates
+        // and refreshes; authority and baseline stay frozen.
         fx.external_write("a.md", disk_two);
         reconcile_session(ha.session(), &fx.workspace).await;
         {
