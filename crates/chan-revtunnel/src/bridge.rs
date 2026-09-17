@@ -4,9 +4,10 @@
 //! its WebSocket through axum, the desktop dials one with tokio-tungstenite.
 //! Neither belongs in the shared contract, so this module is written against
 //! plain mpsc channels of byte vectors instead. Each side's WebSocket adapter
-//! shuttles frames into and out of those channels, which keeps this pump (the
-//! part with the tricky half-close semantics) identical on both ends and
-//! testable with no WebSocket at all.
+//! shuttles frames into and out of those channels, which keeps the pumps
+//! identical on both ends and testable with no WebSocket at all. [`splice`]
+//! ends both directions together. [`splice_half_close`] uses an empty chunk as
+//! an end-of-stream marker so each direction can finish independently.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -78,6 +79,84 @@ pub async fn splice(
         // means this side was already gone too.
         let _ = write.shutdown().await;
         let _ = downlink_stop_tx.send(true);
+    };
+
+    tokio::join!(uplink, downlink);
+}
+
+/// Splice `tcp` against a peer with independent directional shutdown.
+///
+/// A TCP EOF sends one empty chunk to `to_peer` and ends only the uplink. An
+/// empty chunk from `from_peer` shuts down the TCP write half and ends only the
+/// downlink. The splice returns after both directions end. A channel close or
+/// an I/O error ends both directions because it cannot represent an orderly
+/// half-close.
+pub async fn splice_half_close(
+    tcp: TcpStream,
+    to_peer: mpsc::Sender<Vec<u8>>,
+    mut from_peer: mpsc::Receiver<Vec<u8>>,
+) {
+    let (mut read, mut write) = tcp.into_split();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let downlink_cancel_tx = cancel_tx.clone();
+    let downlink_cancel_rx = cancel_rx.clone();
+
+    let uplink = async move {
+        let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+        let mut cancel_rx = cancel_rx;
+        loop {
+            let result = tokio::select! {
+                biased;
+                _ = cancel_rx.changed() => return,
+                result = read.read(&mut buf) => result,
+            };
+            match result {
+                Ok(0) => {
+                    if to_peer.send(Vec::new()).await.is_err() {
+                        let _ = cancel_tx.send(true);
+                    }
+                    return;
+                }
+                Ok(n) => {
+                    if to_peer.send(buf[..n].to_vec()).await.is_err() {
+                        let _ = cancel_tx.send(true);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("revtunnel: socket read ended: {e}");
+                    let _ = cancel_tx.send(true);
+                    return;
+                }
+            }
+        }
+    };
+
+    let downlink = async move {
+        let mut cancel_rx = downlink_cancel_rx;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = cancel_rx.changed() => return,
+                chunk = from_peer.recv() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                let _ = downlink_cancel_tx.send(true);
+                return;
+            };
+            if chunk.is_empty() {
+                if let Err(e) = write.shutdown().await {
+                    tracing::debug!("revtunnel: socket write shutdown failed: {e}");
+                    let _ = downlink_cancel_tx.send(true);
+                }
+                return;
+            }
+            if let Err(e) = write.write_all(&chunk).await {
+                tracing::debug!("revtunnel: socket write ended: {e}");
+                let _ = downlink_cancel_tx.send(true);
+                return;
+            }
+        }
     };
 
     tokio::join!(uplink, downlink);
@@ -290,5 +369,88 @@ mod tests {
             failures.is_empty(),
             "local EOF cancelled in-flight socket writes: {failures:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn half_close_from_tcp_keeps_the_peer_response_flowing() {
+        let (mut client, spliced) = socket_pair().await;
+        let (to_peer, mut peer_rx) = mpsc::channel(8);
+        let (peer_tx, from_peer) = mpsc::channel(8);
+        let pump = tokio::spawn(splice_half_close(spliced, to_peer, from_peer));
+
+        client.write_all(b"req").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("peer receives request")
+                .expect("uplink stays open through its end marker"),
+            b"req".to_vec()
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("peer receives TCP end marker")
+                .expect("uplink carries an end marker"),
+            Vec::<u8>::new()
+        );
+
+        peer_tx.send(b"resp".to_vec()).await.unwrap();
+        peer_tx.send(Vec::new()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("peer end marker shuts down the TCP write half")
+        .unwrap();
+        assert_eq!(response, b"resp");
+        tokio::time::timeout(std::time::Duration::from_secs(2), pump)
+            .await
+            .expect("splice returns after both directions end")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn half_close_from_peer_keeps_the_tcp_response_flowing() {
+        let (mut client, spliced) = socket_pair().await;
+        let (to_peer, mut peer_rx) = mpsc::channel(8);
+        let (peer_tx, from_peer) = mpsc::channel(8);
+        let pump = tokio::spawn(splice_half_close(spliced, to_peer, from_peer));
+
+        peer_tx.send(b"req".to_vec()).await.unwrap();
+        peer_tx.send(Vec::new()).await.unwrap();
+        let mut request = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_to_end(&mut request),
+        )
+        .await
+        .expect("peer end marker shuts down the TCP write half")
+        .unwrap();
+        assert_eq!(request, b"req");
+
+        client.write_all(b"resp").await.unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("peer receives response")
+                .expect("uplink stays open through its end marker"),
+            b"resp".to_vec()
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("peer receives TCP end marker")
+                .expect("uplink carries an end marker"),
+            Vec::<u8>::new()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), pump)
+            .await
+            .expect("splice returns after both directions end")
+            .unwrap();
     }
 }
