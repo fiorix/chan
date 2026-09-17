@@ -2417,15 +2417,14 @@ impl Registry {
     /// Reap sessions whose child PROCESS has exited and that have no client
     /// attached. A dead, unviewed session is a pure ghost -- no process, no
     /// viewer -- so keeping it only leaks the slot and HOLDS its tab name,
-    /// making a re-spawn under the same name collide and come up renamed (the
-    /// `cs terminal restart` ghost-tab regression: a killed agent's entry lingered
-    /// because the controller thread records `exit` on exit but never
-    /// removes the entry). Distinct axis from `prune_idle_at`, which times
+    /// making a re-spawn under the same name collide and come up renamed because
+    /// the controller thread records `exit` on exit but does not remove the
+    /// entry. Distinct axis from `prune_idle_at`, which times
     /// out *live* detached sessions and deliberately keeps persisted windows:
     /// a dead process can't be reattached, only re-spawned, so a persisted
     /// window comes back fresh on reconnect rather than stranding the ghost.
-    /// An attached dead session is KEPT (a client is still viewing its final
-    /// output -- no natural-`exit`-vanishes regression). Returns how many were
+    /// An attached dead session is kept so its client can continue viewing the
+    /// final output. Returns how many were
     /// reaped. Run before every [`create`](Self::create) and on the pruner tick.
     pub fn reap_exited(&self) -> usize {
         // Capture each reaped session's owning window_id alongside its id: a
@@ -5960,8 +5959,7 @@ mod tests {
 
     #[test]
     fn enqueue_prompt_is_all_or_nothing_at_cap() {
-        // A two-write message (gemini) near the cap must not split. The whole
-        // message is rejected and the queue remains untouched.
+        // A Gemini message (a body entry plus its submit chord) near the cap must not split: queuing the body without the chord would type the prompt and never submit it. The whole message is rejected and the queue remains untouched.
         let session = test_session_with_ring(1024);
         for _ in 1..WRITE_QUEUE_CAP {
             session.enqueue_cs_write("x".into(), None);
@@ -8298,7 +8296,7 @@ mod tests {
             &registry,
             dummy_session("on", Some("winB"), Some("G"), true),
         );
-        // Same group, other window, broadcast OFF -> skipped (the fix).
+        // Same group, other window, broadcast OFF -> skipped.
         insert_session(
             &registry,
             dummy_session("off", Some("winB"), Some("G"), false),
@@ -8360,8 +8358,8 @@ mod tests {
         insert_session(&reg, named_session("a", "Terminal-1"));
         insert_session(&reg, named_session("b", "Terminal-2"));
         assert_eq!(reg.next_terminal_name(), "Terminal-3");
-        // Free the middle one -> its number is REUSED (the numbering regression:
-        // open 1+2, close 2, next should be 2, not 3).
+        // Free the middle one -> its number is reused: open 1+2, close 2,
+        // and the next slot is 2.
         reg.sessions.lock().unwrap().remove("b");
         assert_eq!(reg.next_terminal_name(), "Terminal-2");
         // A gap below the max is filled before extending: live {1, 3} -> 2.

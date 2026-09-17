@@ -455,8 +455,7 @@ pub struct WorkspaceHost {
     /// Installed once via [`install_root_fallback`](Self::install_root_fallback);
     /// chan-library cannot depend on chan-server, so the embedder (devserver /
     /// desktop loopback) builds the launcher router in chan-server and hands it
-    /// in. Empty on a host with no root surface -- the root `/` then 404s, the
-    /// prior behavior.
+    /// in. Empty on a host with no root surface, where the root `/` returns 404.
     root_fallback: OnceLock<Router>,
     /// Live reverse tunnels (`cs tunnel`) across every tenant this host
     /// serves. Host-owned because the two desktop-dialed WebSocket legs
@@ -893,8 +892,8 @@ impl WorkspaceHost {
     /// when no tenant prefix matches (the launcher SPA + its `/api/library/*`
     /// surface). Idempotent set-once; the embedder (devserver / desktop
     /// loopback) builds the launcher router in chan-server and calls this once
-    /// after wrapping the host in an `Arc`, before `router()`. A host that never
-    /// installs one keeps the prior behavior: the root `/` 404s.
+    /// after wrapping the host in an `Arc`, before `router()`. The root `/`
+    /// returns 404 on a host that never installs one.
     pub fn install_root_fallback(&self, router: Router) {
         let _ = self.root_fallback.set(router);
     }
@@ -3395,7 +3394,7 @@ impl WorkspaceHost {
         }) else {
             // No tenant prefix owns this path. Serve the library root fallback
             // (the launcher SPA + `/api/library/*`) when one is installed;
-            // otherwise 404, the prior behavior.
+            // otherwise return 404.
             if let Some(fallback) = self.root_fallback.get() {
                 return match fallback.clone().oneshot(req).await {
                     Ok(response) => response,
@@ -3483,7 +3482,7 @@ async fn host_dispatch(State(host): State<Arc<WorkspaceHost>>, req: Request<Body
 
 /// Rewrite a request's URI path (keeping the query) so the trailing-slash tenant
 /// root (`/{prefix}/`) routes as the bare prefix the nest matches. A parse
-/// failure leaves the request unchanged (it then 404s, the prior behavior).
+/// failure leaves the request unchanged, so the unmatched path returns 404.
 fn rewrite_request_path(req: Request<Body>, new_path: &str) -> Request<Body> {
     let (mut parts, body) = req.into_parts();
     let target = match parts.uri.query() {
