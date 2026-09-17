@@ -26,16 +26,21 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chan_revtunnel::client::{ClientConfig, TunnelHandle};
+use chan_revtunnel::wire::{
+    ControlFrame, CONN_PATH, CONTROL_PATH, HALF_CLOSE_MARKER, MAX_DATA_FRAME_BYTES,
+};
 use chan_revtunnel::{parse_spec, Proto, SpecError, TunnelSpec};
 use chan_shell::{ControlRequest, ControlResponse};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 /// The built `chan` binary under test (Cargo points this at the target dir).
@@ -485,6 +490,33 @@ impl TunnelRig {
         let (socket, _) = within("tenant /ws connect", tokio_tungstenite::connect_async(url))
             .await
             .unwrap_or_else(|e| panic!("tenant /ws refused: {e}\n{}", self.server.out.dump()));
+        socket
+    }
+
+    /// Dial one launcher-level tunnel leg with the devserver bearer.
+    async fn connect_tunnel_ws(&self, path_and_query: &str) -> SpaSocket {
+        let url = format!("ws://{}{}", self.addr, path_and_query);
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .unwrap_or_else(|error| panic!("build tunnel WebSocket request {url}: {error}"));
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {}", self.token)
+                .parse()
+                .expect("devserver bearer header"),
+        );
+        let (socket, _) = within(
+            "tunnel WebSocket connect",
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "tunnel WebSocket {path_and_query} refused: {error}\n{}",
+                self.server.out.dump()
+            )
+        });
         socket
     }
 
@@ -1074,6 +1106,140 @@ async fn tcp_half_close_delivers_the_reply_that_follows_request_eof() {
 
     drop(cs);
     within("desktop client teardown after half-close", handle.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn half_close_data_leg_moves_large_full_duplex_streams_independently() {
+    const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
+
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind full-duplex origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    assert!(trigger.half_close, "devserver must advertise half-close");
+
+    let mut control = rig
+        .connect_tunnel_ws(&format!("{CONTROL_PATH}?tunnel={}", trigger.tunnel_id))
+        .await;
+    let ready = serde_json::to_string(&ControlFrame::Ready {
+        bound: "127.0.0.1:1".to_string(),
+    })
+    .expect("encode ready frame");
+    within(
+        "raw desktop ready frame",
+        control.send(Message::text(ready)),
+    )
+    .await
+    .expect("send ready frame");
+    cs.expect_ok("tunnel ready ack").await;
+
+    let request = patterned_payload(TRANSFER_BYTES, 0x51);
+    let response = patterned_payload(TRANSFER_BYTES, 0xa7);
+    let peer_sent = Arc::new(AtomicUsize::new(0));
+    let peer_received = Arc::new(AtomicUsize::new(0));
+    let origin_sent = Arc::new(AtomicUsize::new(0));
+    let origin_received = Arc::new(AtomicUsize::new(0));
+
+    let origin_response = response.clone();
+    let origin_sent_task = origin_sent.clone();
+    let origin_received_task = origin_received.clone();
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.expect("accept data-leg dial");
+        for chunk in origin_response.chunks(MAX_DATA_FRAME_BYTES) {
+            socket
+                .write_all(chunk)
+                .await
+                .expect("origin response write");
+            origin_sent_task.fetch_add(chunk.len(), Ordering::Relaxed);
+        }
+        socket.shutdown().await.expect("origin response half-close");
+        let mut received = Vec::with_capacity(TRANSFER_BYTES);
+        let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+        loop {
+            let n = socket.read(&mut buf).await.expect("origin request read");
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            origin_received_task.fetch_add(n, Ordering::Relaxed);
+        }
+        received
+    });
+
+    let data_path = format!(
+        "{CONN_PATH}?tunnel={}&conn=full-duplex&half_close=true",
+        trigger.tunnel_id
+    );
+    let data = rig.connect_tunnel_ws(&data_path).await;
+    let (mut data_tx, mut data_rx) = data.split();
+    let peer_sent_task = peer_sent.clone();
+    let send_request = async move {
+        for chunk in request.chunks(MAX_DATA_FRAME_BYTES) {
+            data_tx
+                .send(Message::binary(chunk.to_vec()))
+                .await
+                .expect("raw desktop request frame");
+            peer_sent_task.fetch_add(chunk.len(), Ordering::Relaxed);
+        }
+        data_tx
+            .send(Message::text(HALF_CLOSE_MARKER))
+            .await
+            .expect("raw desktop request marker");
+    };
+    let peer_received_task = peer_received.clone();
+    let receive_response = async move {
+        let mut received = Vec::with_capacity(TRANSFER_BYTES);
+        while let Some(frame) = data_rx.next().await {
+            match frame.expect("raw desktop response frame") {
+                Message::Binary(bytes) => {
+                    received.extend_from_slice(&bytes);
+                    peer_received_task.fetch_add(bytes.len(), Ordering::Relaxed);
+                }
+                Message::Text(text) if text == HALF_CLOSE_MARKER => break,
+                Message::Close(frame) => panic!("data leg closed before its marker: {frame:?}"),
+                _ => {}
+            }
+        }
+        received
+    };
+
+    let completed = tokio::time::timeout(WAIT, async {
+        let ((), received_response, received_request) =
+            tokio::join!(send_request, receive_response, async {
+                origin_task.await.expect("origin task")
+            });
+        (received_request, received_response)
+    })
+    .await;
+    let (received_request, received_response) = completed.unwrap_or_else(|_| {
+        panic!(
+            "full-duplex transfer wedged: peer_sent={}/{TRANSFER_BYTES} \
+             origin_received={}/{TRANSFER_BYTES} origin_sent={}/{TRANSFER_BYTES} \
+             peer_received={}/{TRANSFER_BYTES}",
+            peer_sent.load(Ordering::Relaxed),
+            origin_received.load(Ordering::Relaxed),
+            origin_sent.load(Ordering::Relaxed),
+            peer_received.load(Ordering::Relaxed),
+        )
+    });
+    eprintln!(
+        "full-duplex bytes: peer_sent={} origin_received={} origin_sent={} peer_received={}",
+        peer_sent.load(Ordering::Relaxed),
+        origin_received.load(Ordering::Relaxed),
+        origin_sent.load(Ordering::Relaxed),
+        peer_received.load(Ordering::Relaxed),
+    );
+    assert_eq!(received_request, patterned_payload(TRANSFER_BYTES, 0x51));
+    assert_eq!(received_response, response);
+
+    drop(control);
+    drop(cs);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
