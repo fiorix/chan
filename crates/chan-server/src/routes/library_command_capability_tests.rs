@@ -135,6 +135,24 @@ fn mint_body(fixture: &Fixture) -> serde_json::Value {
     })
 }
 
+fn count_path(capability: &str, window_id: &str) -> String {
+    format!("/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals")
+}
+
+async fn mint(router: &axum::Router, fixture: &Fixture) -> String {
+    let minted = send(
+        router,
+        "POST",
+        "/api/library/command-capabilities",
+        None,
+        Some(mint_body(fixture)),
+    )
+    .await;
+    let (status, minted) = json(minted).await;
+    assert_eq!(status, StatusCode::OK, "mint");
+    minted["token"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn mint_requires_the_same_tenant_token_and_redacts_snapshot_tokens() {
     let fixture = fixture().await;
@@ -244,6 +262,152 @@ async fn capability_dies_with_its_invoking_window() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::GONE);
+}
+
+/// The count route resolves the capability before it looks at any window, so a
+/// capability whose invoking window has gone reads no count. It gets its own
+/// fixture because the first refusal drops the capability from the live set,
+/// after which any second use is an unknown token rather than a dead one.
+#[tokio::test]
+async fn a_capability_counts_nothing_once_its_invoking_window_is_gone() {
+    let mut fixture = fixture().await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+
+    drop(fixture.presence.take());
+    let response = send(
+        &router,
+        "GET",
+        &count_path(&capability, &fixture.window_id),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::GONE);
+}
+
+/// A capability is bound to its invoking window for liveness and scoped to the
+/// library for reach: the snapshot lists every window of this library and the
+/// close action discards any non-control one. Counting a sibling window's
+/// terminals is therefore intended, not a leak, and it is strictly less than
+/// the discard the same capability already performs on that window. The figure
+/// is the launcher route's, so the two surfaces never disagree.
+#[tokio::test]
+async fn a_capability_counts_terminals_in_any_non_control_window_of_its_library() {
+    let fixture = fixture().await;
+    let sibling = fixture
+        .host
+        .mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Browser)
+        .expect("mint sibling window");
+    let tenant = fixture.host.clone().router();
+    let created = tenant
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{}/api/terminals", fixture.prefix))
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", fixture.tenant_token),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "counted",
+                        "command": "sh",
+                        "window_id": sibling.window_id,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    for (window_id, expected) in [
+        (fixture.window_id.clone(), 0),
+        (sibling.window_id.clone(), 1),
+    ] {
+        let scoped = send(
+            &router,
+            "GET",
+            &count_path(&capability, &window_id),
+            None,
+            None,
+        )
+        .await;
+        let (status, scoped) = json(scoped).await;
+        assert_eq!(status, StatusCode::OK, "window {window_id}");
+        assert_eq!(scoped["count"], expected, "window {window_id}");
+        let launcher = send(
+            &router,
+            "GET",
+            &format!("/api/library/windows/{window_id}/live-terminals"),
+            None,
+            None,
+        )
+        .await;
+        let (status, launcher) = json(launcher).await;
+        assert_eq!(status, StatusCode::OK, "window {window_id}");
+        assert_eq!(launcher["count"], scoped["count"], "window {window_id}");
+    }
+}
+
+/// The window rule is the close action's rather than the launch redirect's:
+/// this library, and not a control terminal. A connected devserver's feed row
+/// belongs to another library, and a control row is refused outright, so a
+/// capability may ask only about windows it could also close.
+#[tokio::test]
+async fn a_capability_counts_no_foreign_or_control_window() {
+    let fixture = fixture().await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+
+    for beyond in ["remote-window-must-not-leak", "no-such-window"] {
+        let response = send(&router, "GET", &count_path(&capability, beyond), None, None).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "window {beyond}");
+    }
+
+    // A control row is tagged with the FOREIGN devserver library id, so the
+    // library filter hides it on its own. Tag one with this host's id to reach
+    // the control check behind it: the close action refuses a control terminal
+    // the same way and the two rules must not drift apart.
+    fixture
+        .host
+        .mint_control_window(
+            "control-terminal-local".into(),
+            fixture.host.library_id().to_string(),
+            fixture.prefix.clone(),
+        )
+        .expect("mint control window");
+    let response = send(
+        &router,
+        "GET",
+        &count_path(&capability, "control-terminal-local"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+/// The capability is the whole credential: an unknown one is refused before any
+/// window is read, so the route adds no unauthenticated view of the library.
+#[tokio::test]
+async fn an_unknown_capability_counts_nothing() {
+    let fixture = fixture().await;
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let response = send(
+        &router,
+        "GET",
+        &count_path("not-a-capability", &fixture.window_id),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// A grant is all-or-nothing: a grantee's mint yields the capability the

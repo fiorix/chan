@@ -315,6 +315,10 @@ pub fn launcher_router(
             "/api/library/command-capabilities/{capability}/windows/{window_id}/launch",
             get(handle_library_command_launch),
         )
+        .route(
+            "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
+            get(handle_library_command_live_terminals),
+        )
         .route_layer(middleware::from_fn(command_capability_response_headers))
         .with_state(command_state);
     // Gateways: list on BOTH surfaces (a registry-less surface returns
@@ -856,6 +860,49 @@ async fn handle_library_command_action(
         .into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
+}
+
+/// `GET /api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals`:
+/// how many live terminal sessions one window of the capability's own library
+/// owns, so a browser close confirmation can name the number instead of warning
+/// in general terms. The figure is the host-wide one
+/// [`handle_library_window_live_terminals`] and the `cs window rm` guard read,
+/// so every surface states the same one.
+///
+/// The window rule is [`ScopedLibraryAction::CloseWindow`]'s rather than
+/// [`handle_library_command_launch`]'s: this library, and not a control
+/// terminal. A capability may therefore ask only about windows it may also
+/// discard, and reading a count is less than discarding. Any other window is
+/// 404, so the `None` count that route answers for a connected devserver's feed
+/// row never arises here.
+async fn handle_library_command_live_terminals(
+    State(state): State<Arc<LibraryCommandState>>,
+    AxumPath((capability, window_id)): AxumPath<(String, String)>,
+) -> Response {
+    // The capability is the whole credential; nothing below reads its fields.
+    if let Err(error) = resolve_command_capability(&state, &capability) {
+        return error.into_response();
+    }
+    let Some(record) = state
+        .host
+        .assemble_window_records()
+        .into_iter()
+        .find(|record| {
+            record.library_id == state.host.library_id() && record.window_id == window_id
+        })
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if record.control {
+        return command_capability_error(
+            StatusCode::FORBIDDEN,
+            "control terminals are not managed by a browser capability",
+        );
+    }
+    Json(LibraryWindowLiveTerminals {
+        count: Some(state.host.live_terminal_count(&window_id)),
+    })
+    .into_response()
 }
 
 async fn handle_library_command_launch(

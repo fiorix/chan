@@ -371,6 +371,11 @@ pub(crate) static LAUNCHER: RouteTable = &[
         "/api/library/command-capabilities/{capability}/windows/{window_id}/launch",
         NonOwner,
     ),
+    (
+        Get,
+        "/api/library/command-capabilities/{capability}/windows/{window_id}/live-terminals",
+        NonOwner,
+    ),
     (Get, "/api/library/gateways", NonOwner),
     (Post, "/api/library/gateways", NonOwner),
     (Put, "/api/library/gateways/{id}", NonOwner),
