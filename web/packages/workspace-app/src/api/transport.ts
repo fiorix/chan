@@ -1,4 +1,4 @@
-// API transport: HTTP+WebSocket against the local chan-server.
+// API transport: HTTP+WebSocket against chan-server.
 //
 // `chan serve` runs a real loopback server. The Tauri desktop spawns the
 // same server in-process and points its WebView at it via the same loopback
@@ -10,11 +10,10 @@
 // wire mechanics (token plumbing, fetch shape, WebSocket reconnect)
 // here.
 //
-// Loopback is required for the shared HTTP and WebSocket transport: browser
-// WebSockets require `ws:` / `wss:` URLs, while Tauri's custom URI scheme
-// cannot carry them and its event bus lacks WebSocket ordering and connection
-// state. Sending only HTTP through the custom scheme would still require the
-// loopback port for `/ws`, so both protocols use loopback.
+// Desktop local windows load this SPA from the embedded loopback server, while
+// remote windows load a tunnel origin through the connecting screen. Paths stay
+// origin-relative and WebSocket URLs select `ws:` or `wss:` from the page
+// protocol, so HTTP and WebSocket traffic use the same origin on both surfaces.
 
 import { ApiError } from "./errors";
 import type { WsClientFrame, WsPingFrame } from "./types";
