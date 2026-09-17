@@ -361,6 +361,25 @@ enum PersistedReportRefresh {
     Refreshing,
 }
 
+struct PersistedReportRefreshGuard<'a> {
+    state: &'a std::sync::Mutex<PersistedReportRefresh>,
+    settled: bool,
+}
+
+impl Drop for PersistedReportRefreshGuard<'_> {
+    fn drop(&mut self) {
+        let next = if self.settled {
+            PersistedReportRefresh::Settled
+        } else {
+            PersistedReportRefresh::Owed
+        };
+        match self.state.lock() {
+            Ok(mut state) => *state = next,
+            Err(poisoned) => *poisoned.into_inner() = next,
+        }
+    }
+}
+
 /// Executes the recovery passes a workspace parks.
 ///
 /// A parked pass carries no worker of its own. The startup worker drains the
@@ -595,8 +614,10 @@ static OPEN_RECOVERY_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<OpenReco
 
 /// Arm a one-shot barrier before the startup worker claims recovery.
 ///
-/// This supports cross-crate recovery ownership tests. The worker also leaves
-/// the barrier when stopped, so teardown does not depend on releasing it.
+/// This remains available outside `cfg(test)` because chan-server's unit tests
+/// link chan-workspace as a normal dependency. A second outstanding armer
+/// panics instead of silently replacing the first. The worker also leaves the
+/// barrier when stopped, so teardown does not depend on releasing it.
 #[doc(hidden)]
 pub fn arm_open_recovery_pause_for_test(
     root: std::path::PathBuf,
@@ -607,7 +628,9 @@ pub fn arm_open_recovery_pause_for_test(
     let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let slot = OPEN_RECOVERY_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
-    *slot.lock().unwrap() = Some(OpenRecoveryPause {
+    let mut slot = slot.lock().unwrap();
+    assert!(slot.is_none(), "open recovery pause already armed");
+    *slot = Some(OpenRecoveryPause {
         root,
         reached: reached_tx,
         release: release_rx,
@@ -1083,8 +1106,8 @@ impl Workspace {
     /// Refresh a persisted report when the open-time recovery plan requires it.
     ///
     /// Recovery claimants call this after their pass action succeeds and before
-    /// they finish the pass. A settled obligation is a no-op, and a failed
-    /// refresh remains owed for the retried pass.
+    /// they finish the pass. A settled obligation is a no-op, a failed or
+    /// unwound refresh remains owed, and a concurrent caller receives an error.
     pub fn refresh_persisted_report_if_owed(&self) -> Result<()> {
         {
             let mut refresh = self.persisted_report_refresh.lock().unwrap();
@@ -1098,16 +1121,16 @@ impl Workspace {
                 }
             }
         }
+        let mut refresh_guard = PersistedReportRefreshGuard {
+            state: &self.persisted_report_refresh,
+            settled: false,
+        };
 
         #[cfg(test)]
         let result = report_refresh_probe(self).and_then(|()| self.rescan_persisted_report());
         #[cfg(not(test))]
         let result = self.rescan_persisted_report();
-        *self.persisted_report_refresh.lock().unwrap() = if result.is_ok() {
-            PersistedReportRefresh::Settled
-        } else {
-            PersistedReportRefresh::Owed
-        };
+        refresh_guard.settled = result.is_ok();
         result
     }
 
@@ -4109,6 +4132,7 @@ fn size_to_i64(size: u64) -> i64 {
 struct ReportRefreshProbe {
     attempts: usize,
     fail_next: bool,
+    panic_next: bool,
 }
 
 #[cfg(test)]
@@ -4127,6 +4151,23 @@ fn arm_report_refresh_probe(root: std::path::PathBuf, fail_next: bool) {
             ReportRefreshProbe {
                 attempts: 0,
                 fail_next,
+                panic_next: false,
+            },
+        );
+}
+
+#[cfg(test)]
+fn arm_report_refresh_panic_probe(root: std::path::PathBuf) {
+    REPORT_REFRESH_PROBES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            root,
+            ReportRefreshProbe {
+                attempts: 0,
+                fail_next: false,
+                panic_next: true,
             },
         );
 }
@@ -4134,12 +4175,23 @@ fn arm_report_refresh_probe(root: std::path::PathBuf, fail_next: bool) {
 #[cfg(test)]
 fn report_refresh_probe(workspace: &Workspace) -> Result<()> {
     let probes = REPORT_REFRESH_PROBES.get_or_init(Default::default);
-    let mut probes = probes.lock().unwrap();
-    let Some(probe) = probes.get_mut(workspace.root()) else {
-        return Ok(());
+    let (panic_next, fail_next) = {
+        let mut probes = probes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(probe) = probes.get_mut(workspace.root()) else {
+            return Ok(());
+        };
+        probe.attempts += 1;
+        (
+            std::mem::take(&mut probe.panic_next),
+            std::mem::take(&mut probe.fail_next),
+        )
     };
-    probe.attempts += 1;
-    if std::mem::take(&mut probe.fail_next) {
+    if panic_next {
+        panic!("injected persisted report refresh panic");
+    }
+    if fail_next {
         return Err(ChanError::Io(
             "injected persisted report refresh failure".to_string(),
         ));
@@ -5060,6 +5112,25 @@ mod tests {
 
         assert!(!workspace.persisted_report_refresh_is_owed());
         assert_eq!(take_report_refresh_attempts(root.path()), 1);
+    }
+
+    #[test]
+    fn persisted_report_refresh_restores_the_obligation_after_unwind() {
+        let (_cfg, _root, lib, entry) = persisted_report_fixture();
+        let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
+        arm_report_refresh_panic_probe(workspace.root().to_path_buf());
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            workspace.refresh_persisted_report_if_owed().unwrap();
+        }));
+        assert!(unwind.is_err(), "the panic probe did not fire");
+        assert!(workspace.persisted_report_refresh_is_owed());
+
+        workspace
+            .refresh_persisted_report_if_owed()
+            .expect("the next claimant must be able to retry after an unwind");
+        assert!(!workspace.persisted_report_refresh_is_owed());
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 2);
     }
 
     #[test]
