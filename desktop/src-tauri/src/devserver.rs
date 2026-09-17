@@ -4024,7 +4024,13 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // Keep the port reserved and drop each accepted stream so every
+        // platform reports the transport failure without a refusal delay.
+        let refuser = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
         let conn = DevserverConn {
             host: "127.0.0.1".into(),
             port,
@@ -4087,6 +4093,7 @@ mod tests {
         })
         .await
         .expect("transport failures must finish");
+        refuser.abort();
     }
 
     #[tokio::test]
@@ -4109,6 +4116,53 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_raw_request(&requests[0], Method::GET, "/api/library/local-color", None);
         server.assert_responses_drained();
+    }
+
+    #[tokio::test]
+    async fn mint_library_window_decode_error_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server =
+                MockManagementServer::start(vec![mock_response(StatusCode::OK, "not json")]).await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                mint_library_window(&conn, chan_server::WindowKind::Terminal, None),
+            )
+            .await
+            .expect("window-mint request must finish")
+            .unwrap_err();
+
+            assert!(
+                error.starts_with(if gateway {
+                    "decoding minted gateway window: "
+                } else {
+                    "decoding minted window: "
+                }),
+                "error: {error:?}"
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let body = Some(serde_json::json!({ "kind": "terminal" }));
+            if gateway {
+                assert_gateway_request(
+                    &requests[0],
+                    Method::POST,
+                    "/api/library/windows",
+                    body,
+                    "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                    Some("csrf-1"),
+                );
+            } else {
+                assert_raw_request(&requests[0], Method::POST, "/api/library/windows", body);
+            }
+            server.assert_responses_drained();
+        }
     }
 
     #[tokio::test]
