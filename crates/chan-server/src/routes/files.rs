@@ -449,17 +449,16 @@ fn download_path_sync(
             chan_workspace::WorkspacePath::Special(chan_workspace::PathKind::Symlink)
         )
     {
-        // Pre-flight the tree before streaming so an unreadable entry fails fast
-        // with a clear "cannot read X" status instead of truncating a streamed
-        // archive mid-flight.
+        // Pre-flight the tree before streaming so an unreadable entry or an
+        // encoded archive over the ceiling fails before a body starts.
         #[cfg(test)]
         file_browser_listing_tests::remove_before_download_preflight(workspace, path);
-        let payload_bytes = verify_readable_workspace_tree(workspace, path)?;
+        let encoded_bytes = verify_readable_workspace_tree(workspace, path)?;
         let limit = workspace.transfer_max_bytes();
-        if payload_bytes > limit {
+        if encoded_bytes > limit {
             return Err(chan_workspace::ChanError::WriteTooLarge {
                 kind: "archive",
-                size: payload_bytes,
+                size: encoded_bytes,
                 limit,
             });
         }
@@ -903,47 +902,74 @@ fn bounded_reader_body(
     }))
 }
 
-/// Pre-flight for a directory download: confirm every file in the tree we will
-/// tar is readable before any archive work. Walks via `Workspace::list` so it
-/// visits exactly the entries `append_workspace_to_archive` will (same `.chan` /
-/// `.git` filter), and opens each backing file through the same facade call
-/// the archive walk uses, so the two agree about what the archive contains.
-/// Returns the member bytes known at preflight so the plan can refuse a tree
-/// already past the ceiling.
+/// Pre-flight for a directory download: confirm every file in the tree is
+/// readable and return the encoded archive size before any response body
+/// starts. Walks via `Workspace::list` with the same archive paths and filter as
+/// `append_workspace_to_archive`, and includes headers, long-name and long-link
+/// extensions, content padding, and termination blocks.
 ///
-/// Regular files are opened through the bounded reader; symlinks contribute
-/// no payload bytes and only their stored target is read for the header.
+/// Regular files are opened through the same bounded reader as the archive
+/// walk. Symlinks remain inert and contribute their header and stored target.
 fn verify_readable_workspace_tree(
     workspace: &chan_workspace::Workspace,
     rel: &str,
+) -> chan_workspace::Result<u64> {
+    let archive_name = download_filename(rel);
+    verify_readable_workspace_entry(workspace, rel, &archive_name)
+        .map(|size| size.saturating_add(crate::routes::transfer::TAR_END_OF_ARCHIVE_BYTES))
+}
+
+fn verify_readable_workspace_entry(
+    workspace: &chan_workspace::Workspace,
+    rel: &str,
+    archive_rel: &str,
 ) -> chan_workspace::Result<u64> {
     match workspace
         .classify_workspace_path(rel)
         .map_err(|e| name_preflight_path(rel, e))?
     {
         chan_workspace::WorkspacePath::Special(chan_workspace::PathKind::Symlink) => {
-            workspace
+            let target = workspace
                 .read_link_contents(rel)
                 .map_err(|e| name_preflight_path(rel, e))?;
-            Ok(0)
+            Ok(crate::routes::transfer::tar_entry_encoded_size(
+                std::path::Path::new(archive_rel),
+                Some(&target),
+                0,
+            ))
         }
         chan_workspace::WorkspacePath::Directory(_) => {
-            let mut payload_bytes = 0u64;
+            let mut encoded_bytes = crate::routes::transfer::tar_entry_encoded_size(
+                std::path::Path::new(archive_rel),
+                None,
+                0,
+            );
             for child in workspace
                 .list(rel)
                 .map_err(|e| name_preflight_path(rel, e))?
             {
                 let child_rel = join_rel(rel.trim_matches('/'), &child.name);
-                payload_bytes = payload_bytes
-                    .saturating_add(verify_readable_workspace_tree(workspace, &child_rel)?);
+                let child_archive = join_rel(archive_rel, &child.name);
+                encoded_bytes = encoded_bytes.saturating_add(verify_readable_workspace_entry(
+                    workspace,
+                    &child_rel,
+                    &child_archive,
+                )?);
             }
-            Ok(payload_bytes)
+            Ok(encoded_bytes)
         }
-        _ => Ok(workspace
-            .read_bytes_bounded(rel)
-            .map_err(|e| name_preflight_path(rel, e))?
-            .stat()
-            .size),
+        _ => {
+            let size = workspace
+                .read_bytes_bounded(rel)
+                .map_err(|e| name_preflight_path(rel, e))?
+                .stat()
+                .size;
+            Ok(crate::routes::transfer::tar_entry_encoded_size(
+                std::path::Path::new(archive_rel),
+                None,
+                size,
+            ))
+        }
     }
 }
 
@@ -2615,8 +2641,8 @@ pub(crate) fn upload_leaf_filename(original_name: &str) -> chan_workspace::Resul
 #[cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 mod file_browser_listing_tests {
     use super::{
-        append_workspace_to_archive, create_target_exists, download_path_sync, list_dir_entries,
-        list_files_sync, upload_leaf_filename, verify_readable_workspace_tree,
+        append_workspace_to_archive, create_target_exists, download_filename, download_path_sync,
+        list_dir_entries, list_files_sync, upload_leaf_filename, verify_readable_workspace_tree,
         workspace_path_writable, workspace_upload_stream_sync, DownloadPayload, ListFilesQuery,
         UploadDestination, UploadFileResponse,
     };
@@ -2916,6 +2942,53 @@ mod file_browser_listing_tests {
         assert!(!bytes.is_empty());
     }
 
+    #[test]
+    fn workspace_archive_preflight_matches_the_real_encoded_size() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.create_dir("archive").unwrap();
+        workspace.create_dir("archive/empty").unwrap();
+        workspace.create_dir("archive/nested").unwrap();
+        workspace.create_dir("archive/nested/deeper").unwrap();
+
+        for size in [0, 1, 511, 512, 513] {
+            workspace
+                .write_bytes(&format!("archive/size-{size}.bin"), &vec![0x5a; size])
+                .unwrap();
+        }
+
+        let archive_name = download_filename("archive");
+        for path_len in [99, 100, 101, 180] {
+            let leaf = "p".repeat(path_len - archive_name.len() - 1);
+            workspace
+                .write_bytes(&format!("archive/{leaf}"), b"x")
+                .unwrap();
+        }
+
+        #[cfg(unix)]
+        for target_len in [99, 100, 101, 180] {
+            std::os::unix::fs::symlink(
+                "t".repeat(target_len),
+                root.path().join(format!("archive/link-{target_len}")),
+            )
+            .unwrap();
+        }
+
+        let planned = verify_readable_workspace_tree(&workspace, "archive").unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            append_workspace_to_archive(&mut builder, &workspace, "archive", &archive_name)
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        assert_eq!(planned, bytes.len() as u64);
+    }
+
     /// Preflight and archive both treat link targets as inert header data.
     #[cfg(unix)]
     #[test]
@@ -2932,10 +3005,7 @@ mod file_browser_listing_tests {
         workspace.write_bytes("docs/a.txt", b"a").unwrap();
         std::os::unix::fs::symlink(&target, root.path().join("docs/escape.txt")).unwrap();
 
-        assert_eq!(
-            verify_readable_workspace_tree(&workspace, "docs").unwrap(),
-            1
-        );
+        let planned = verify_readable_workspace_tree(&workspace, "docs").unwrap();
         assert!(matches!(
             download_path_sync(&workspace, "docs", None).unwrap(),
             DownloadPayload::Archive
@@ -2946,6 +3016,7 @@ mod file_browser_listing_tests {
             append_workspace_to_archive(&mut builder, &workspace, "docs", "docs").unwrap();
             builder.finish().unwrap();
         }
+        assert_eq!(planned, bytes.len() as u64);
         let mut archive = tar::Archive::new(bytes.as_slice());
         let mut found = false;
         let mut payload = 0;
@@ -4261,13 +4332,13 @@ mod write_tests {
         )
         .unwrap();
         assert!(
-            message.contains("2049") && message.contains("2048"),
-            "the refusal must name the known payload and its ceiling: {message}"
+            message.contains("4608") && message.contains("2048"),
+            "the refusal must name the encoded archive size and its ceiling: {message}"
         );
     }
 
     #[tokio::test]
-    async fn a_workspace_archive_errors_the_body_at_the_ceiling() {
+    async fn a_workspace_archive_over_the_ceiling_by_framing_is_refused_before_the_body() {
         const CAP: u64 = 2048;
         let (_cfg, _root, workspace) = admitted_download_workspace_with_cap(CAP);
         workspace.create_dir("archive").unwrap();
@@ -4287,31 +4358,19 @@ mod write_tests {
         .await;
         assert_eq!(
             response.status(),
-            StatusCode::OK,
-            "a tree whose payload is at the ceiling cannot be refused before the tar is built"
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "tar framing over the ceiling must be refused before streaming"
         );
-
-        let mut body = response.into_body().into_data_stream();
-        let mut delivered = 0usize;
-        let mut body_error = None;
-        while let Some(next) = body.next().await {
-            match next {
-                Ok(bytes) => delivered += bytes.len(),
-                Err(error) => {
-                    body_error = Some(error.to_string());
-                    break;
-                }
-            }
-        }
-
-        let body_error = body_error.expect("the archive body must fail rather than complete");
-        assert_eq!(
-            delivered, CAP as usize,
-            "the body must stop after exactly the configured number of bytes"
-        );
+        let message = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
         assert!(
-            body_error.contains("ceiling"),
-            "the body error must name the enforced bound: {body_error}"
+            message.contains("4096") && message.contains("2048"),
+            "the refusal must name the encoded archive size and its ceiling: {message}"
         );
     }
 

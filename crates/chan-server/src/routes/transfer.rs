@@ -17,8 +17,8 @@
 //!
 //! The configured transfer ceiling governs both directions on this tenant.
 //! Single-file reads and writes are bounded by it. Directory plans refuse when
-//! their member bytes already exceed it, and the tar writer counts the encoded
-//! stream so archive framing or a live change cannot pass it mid-flight.
+//! their encoded archives already exceed it, and the tar writer keeps a source
+//! that changes after preflight from passing the ceiling mid-flight.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,41 @@ use crate::routes::files::{
     with_upload_destination, RequestBodyMessage, UploadDestinationParts,
 };
 use crate::static_assets::content_type_for;
+
+const TAR_BLOCK_BYTES: u64 = 512;
+pub(crate) const TAR_END_OF_ARCHIVE_BYTES: u64 = TAR_BLOCK_BYTES * 2;
+
+fn tar_padded_size(size: u64) -> u64 {
+    size.div_ceil(TAR_BLOCK_BYTES)
+        .saturating_mul(TAR_BLOCK_BYTES)
+}
+
+fn tar_long_extension_size(path: &Path) -> u64 {
+    let path_bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len()).unwrap_or(u64::MAX);
+    TAR_BLOCK_BYTES.saturating_add(tar_padded_size(path_bytes.saturating_add(1)))
+}
+
+/// Encoded size of one GNU tar entry, including any long-name or long-link
+/// extension and content padding. Header setters make the fit decision so this
+/// stays aligned with the tar builder rather than duplicating its thresholds.
+pub(crate) fn tar_entry_encoded_size(
+    archive_path: &Path,
+    link_name: Option<&Path>,
+    content_len: u64,
+) -> u64 {
+    let mut size = TAR_BLOCK_BYTES.saturating_add(tar_padded_size(content_len));
+    let mut header = tar::Header::new_gnu();
+    if header.set_path(archive_path).is_err() {
+        size = size.saturating_add(tar_long_extension_size(archive_path));
+    }
+    if let Some(link_name) = link_name {
+        let mut header = tar::Header::new_gnu();
+        if header.set_link_name(link_name).is_err() {
+            size = size.saturating_add(tar_long_extension_size(link_name));
+        }
+    }
+    size
+}
 
 /// Capability root selected by a window-command transfer.
 ///
@@ -64,31 +99,51 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// every directory is listable. Fails fast on the first inaccessible entry so a
 /// stable source is checked before response headers. The workspace path uses a
 /// sibling guard in `files.rs` that walks via `Workspace::list` to match the
-/// workspace tarball's `.chan`/`.git` filtering. Returns the member bytes known
-/// at preflight so the plan can refuse a tree already past the ceiling.
+/// workspace tarball's `.chan`/`.git` filtering. Returns the encoded archive
+/// size, including entry headers, long-name and long-link extensions, content
+/// padding, and termination blocks.
+///
+/// Regular files count their logical metadata length. This can overstate a
+/// sparse-aware tar stream, but preserves the conservative preflight bound.
 pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
+    let archive_name = download_filename(&abs.to_string_lossy());
+    verify_readable_fs_entry(abs, Path::new(&archive_name))
+        .map(|size| size.saturating_add(TAR_END_OF_ARCHIVE_BYTES))
+}
+
+fn verify_readable_fs_entry(abs: &Path, archive_path: &Path) -> Result<u64, String> {
     let meta = std::fs::symlink_metadata(abs)
         .map_err(|e| format!("cannot access {}: {e}", abs.display()))?;
     if meta.file_type().is_symlink() {
         // The archive stores the link itself; don't follow it (and don't fault
         // on a dangling target).
-        return Ok(0);
+        let link_name =
+            std::fs::read_link(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        return Ok(tar_entry_encoded_size(archive_path, Some(&link_name), 0));
     }
     if meta.is_dir() {
         let entries = std::fs::read_dir(abs)
             .map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
-        let mut payload_bytes = 0u64;
+        let mut encoded_bytes = tar_entry_encoded_size(archive_path, None, 0);
         for entry in entries {
             let entry =
                 entry.map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
-            payload_bytes = payload_bytes.saturating_add(verify_readable_fs(&entry.path())?);
+            encoded_bytes = encoded_bytes.saturating_add(verify_readable_fs_entry(
+                &entry.path(),
+                &archive_path.join(entry.file_name()),
+            )?);
         }
-        Ok(payload_bytes)
+        Ok(encoded_bytes)
     } else {
-        std::fs::File::open(abs)
+        let metadata = std::fs::File::open(abs)
             .and_then(|file| file.metadata())
-            .map(|metadata| metadata.len())
-            .map_err(|e| format!("cannot read {}: {e}", abs.display()))
+            .map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        let content_len = if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        };
+        Ok(tar_entry_encoded_size(archive_path, None, content_len))
     }
 }
 
@@ -558,15 +613,13 @@ fn terminal_download_plan(abs: &Path, limit: u64) -> Result<TerminalDownload, Do
     })?;
     let name = download_filename(&abs.to_string_lossy());
     if meta.is_dir() || meta.file_type().is_symlink() {
-        // Pre-flight the whole tree before streaming so an unreadable entry
-        // fails fast with a clear status instead of truncating a streamed
-        // archive mid-flight.
-        //
-        // Member sizes are the part of the eventual archive size the plan can
-        // know. Tar framing and live file changes are counted by the writer.
-        let payload_bytes = verify_readable_fs(abs).map_err(DownloadRefusal::unreadable)?;
-        if payload_bytes > limit {
-            return Err(DownloadRefusal::over_ceiling(payload_bytes, limit));
+        // Pre-flight the whole tree before streaming so an unreadable entry or
+        // encoded archive over the ceiling fails with a clear status before a
+        // body starts. A source that changes after this walk remains bounded by
+        // the tar writer.
+        let encoded_bytes = verify_readable_fs(abs).map_err(DownloadRefusal::unreadable)?;
+        if encoded_bytes > limit {
+            return Err(DownloadRefusal::over_ceiling(encoded_bytes, limit));
         }
         Ok(TerminalDownload::Archive {
             name,
@@ -1305,6 +1358,80 @@ mod tests {
     }
 
     #[test]
+    fn terminal_archive_preflight_matches_the_real_encoded_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        std::fs::create_dir_all(dir.path().join("nested/deeper")).unwrap();
+
+        for size in [0, 1, 511, 512, 513] {
+            std::fs::write(
+                dir.path().join(format!("size-{size}.bin")),
+                vec![0x5a; size],
+            )
+            .unwrap();
+        }
+
+        let archive_name = download_filename(&dir.path().to_string_lossy());
+        for path_len in [99, 100, 101, 180] {
+            let leaf = "p".repeat(path_len - archive_name.len() - 1);
+            std::fs::write(dir.path().join(leaf), b"x").unwrap();
+        }
+
+        #[cfg(unix)]
+        for target_len in [99, 100, 101, 180] {
+            std::os::unix::fs::symlink(
+                "t".repeat(target_len),
+                dir.path().join(format!("link-{target_len}")),
+            )
+            .unwrap();
+        }
+
+        let planned = verify_readable_fs(dir.path()).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            builder.follow_symlinks(false);
+            builder.append_dir_all(&archive_name, dir.path()).unwrap();
+            builder.finish().unwrap();
+        }
+
+        assert_eq!(planned, bytes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn archive_writer_stops_after_exactly_the_encoded_byte_ceiling() {
+        const CAP: u64 = 1300;
+        let (tx, mut rx) = mpsc::channel(8);
+        let cancel = crate::bulk_transfer::test_support::uncancelled();
+
+        build_tar_into(&tx, &cancel, CAP, |builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(513);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "payload.bin", &[0x5a; 513][..])
+        });
+        drop(tx);
+
+        let mut delivered = 0usize;
+        let mut body_error = None;
+        while let Some(next) = rx.recv().await {
+            match next {
+                Ok(bytes) => delivered += bytes.len(),
+                Err(error) => body_error = Some(error.to_string()),
+            }
+        }
+
+        assert_eq!(delivered, CAP as usize);
+        assert!(
+            body_error
+                .as_deref()
+                .is_some_and(|message| message.contains("1300 byte transfer ceiling")),
+            "the writer must report the encoded-byte ceiling: {body_error:?}"
+        );
+    }
+
+    #[test]
     fn terminal_upload_writes_into_dir_and_refuses_existing_target() {
         let dir = tempfile::tempdir().unwrap();
         let resp = terminal_upload(dir.path(), "note.txt", b"hello").unwrap();
@@ -1781,15 +1908,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            message.contains("2049") && message.contains("2048"),
-            "the refusal must name the known payload and its ceiling: {message}"
+            message.contains("4608") && message.contains("2048"),
+            "the refusal must name the encoded archive size and its ceiling: {message}"
         );
     }
 
     #[tokio::test]
-    async fn a_terminal_archive_errors_the_body_at_the_ceiling() {
-        use futures::StreamExt;
-
+    async fn a_terminal_archive_over_the_ceiling_by_framing_is_refused_before_the_body() {
         const CAP: u64 = 2048;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("exact.bin"), vec![0x7e; CAP as usize]).unwrap();
@@ -1799,31 +1924,19 @@ mod tests {
             stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), CAP).await;
         assert_eq!(
             response.status(),
-            StatusCode::OK,
-            "a tree whose payload is at the ceiling cannot be refused before the tar is built"
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "tar framing over the ceiling must be refused before streaming"
         );
-
-        let mut body = response.into_body().into_data_stream();
-        let mut delivered = 0usize;
-        let mut body_error = None;
-        while let Some(next) = body.next().await {
-            match next {
-                Ok(bytes) => delivered += bytes.len(),
-                Err(error) => {
-                    body_error = Some(error.to_string());
-                    break;
-                }
-            }
-        }
-
-        let body_error = body_error.expect("the archive body must fail rather than complete");
-        assert_eq!(
-            delivered, CAP as usize,
-            "the body must stop after exactly the configured number of bytes"
-        );
+        let message = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
         assert!(
-            body_error.contains("ceiling"),
-            "the body error must name the enforced bound: {body_error}"
+            message.contains("4096") && message.contains("2048"),
+            "the refusal must name the encoded archive size and its ceiling: {message}"
         );
     }
 
@@ -2087,7 +2200,7 @@ mod tests {
             root.path().join("missing")
         };
         std::os::unix::fs::symlink(&target, tree.join("link")).unwrap();
-        assert_eq!(verify_readable_fs(&tree).unwrap(), 5);
+        let planned = verify_readable_fs(&tree).unwrap();
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
         let response = stream_planned_download_tracked(&bulk, None, None, tree, CAP).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2113,6 +2226,7 @@ mod tests {
             bytes.len()
         );
         assert!(failure.is_none(), "archive must complete");
+        assert_eq!(planned, bytes.len() as u64);
         assert!(bytes.len() as u64 <= CAP);
         let mut archive = tar::Archive::new(bytes.as_slice());
         let mut found = false;
@@ -2147,7 +2261,7 @@ mod tests {
         ] {
             let link = root.path().join(name);
             std::os::unix::fs::symlink(&target, &link).unwrap();
-            assert_eq!(verify_readable_fs(&link).unwrap(), 0);
+            let planned = verify_readable_fs(&link).unwrap();
             let response = stream_planned_download_tracked(&bulk, None, None, link, 4096).await;
             assert_eq!(response.status(), StatusCode::OK, "top-level {name}");
             assert_eq!(
@@ -2157,6 +2271,7 @@ mod tests {
             let bytes = axum::body::to_bytes(response.into_body(), 4096)
                 .await
                 .unwrap();
+            assert_eq!(planned, bytes.len() as u64);
             let mut archive = tar::Archive::new(bytes.as_ref());
             let entries: Vec<_> = archive.entries().unwrap().map(Result::unwrap).collect();
             assert_eq!(entries.len(), 1);

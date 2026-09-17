@@ -2695,7 +2695,8 @@ mod terminal_router_tests {
         }
         assert_eq!(refusals[0], refusals[1]);
         assert_eq!(refusals[0].0, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(String::from_utf8_lossy(&refusals[0].1).contains("4097 bytes exceeds"));
+        assert!(String::from_utf8_lossy(&refusals[0].1).contains("6656 bytes exceeds"));
+        assert!(String::from_utf8_lossy(&refusals[0].1).contains("4096"));
     }
 
     /// The shells endpoint must be reachable from the SLIM terminal router,
