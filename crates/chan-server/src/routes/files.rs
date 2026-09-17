@@ -558,6 +558,8 @@ async fn stream_planned_workspace_download_tracked(
                 send_reader_into(&tx, cancel, reader);
             }
             DownloadPayload::Archive => {
+                #[cfg(test)]
+                file_browser_listing_tests::grow_after_download_preflight(&workspace, &path);
                 let limit = workspace.transfer_max_bytes();
                 let build_ws = workspace;
                 let build_path = path;
@@ -2676,6 +2678,8 @@ mod file_browser_listing_tests {
 
     static REMOVE_BEFORE_PREFLIGHT: std::sync::Mutex<Vec<std::path::PathBuf>> =
         std::sync::Mutex::new(Vec::new());
+    static GROW_AFTER_DOWNLOAD_PREFLIGHT: std::sync::Mutex<Vec<(std::path::PathBuf, Vec<u8>)>> =
+        std::sync::Mutex::new(Vec::new());
 
     pub(super) fn remove_before_download_preflight(
         workspace: &chan_workspace::Workspace,
@@ -2686,6 +2690,36 @@ mod file_browser_listing_tests {
         if let Some(index) = pending.iter().position(|candidate| candidate == &path) {
             pending.swap_remove(index);
             std::fs::remove_dir(path).unwrap();
+        }
+    }
+
+    pub(super) fn schedule_growth_after_download_preflight(
+        workspace: &chan_workspace::Workspace,
+        path: &str,
+        bytes: Vec<u8>,
+    ) {
+        GROW_AFTER_DOWNLOAD_PREFLIGHT
+            .lock()
+            .unwrap()
+            .push((workspace.root().join(path), bytes));
+    }
+
+    pub(super) fn grow_after_download_preflight(workspace: &chan_workspace::Workspace, path: &str) {
+        let candidate = workspace.root().join(path);
+        let bytes = {
+            let mut pending = GROW_AFTER_DOWNLOAD_PREFLIGHT.lock().unwrap();
+            pending
+                .iter()
+                .position(|(scheduled, _)| scheduled == &candidate)
+                .map(|index| pending.swap_remove(index).1)
+        };
+        if let Some(bytes) = bytes {
+            workspace
+                .write_bytes(
+                    &super::join_rel(path.trim_matches('/'), "grew-after-preflight.bin"),
+                    &bytes,
+                )
+                .unwrap();
         }
     }
 
@@ -4371,6 +4405,57 @@ mod write_tests {
         assert!(
             message.contains("4096") && message.contains("2048"),
             "the refusal must name the encoded archive size and its ceiling: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_archive_body_uses_the_configured_ceiling_after_preflight() {
+        use futures::StreamExt;
+
+        const CAP: u64 = 2048;
+        let (_cfg, _root, workspace) = admitted_download_workspace_with_cap(CAP);
+        workspace.create_dir("archive").unwrap();
+        super::file_browser_listing_tests::schedule_growth_after_download_preflight(
+            &workspace,
+            "archive",
+            vec![0x5a; CAP as usize],
+        );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response = stream_planned_workspace_download_tracked(
+            &bulk,
+            None,
+            None,
+            workspace,
+            "archive".into(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut stream = response.into_body().into_data_stream();
+        let mut delivered = 0usize;
+        let mut body_error = None;
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+        {
+            match chunk {
+                Ok(bytes) => delivered += bytes.len(),
+                Err(error) => {
+                    body_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(delivered, CAP as usize);
+        assert!(
+            body_error
+                .as_deref()
+                .is_some_and(|message| message.contains("2048 byte transfer ceiling")),
+            "the route must report its configured ceiling: {body_error:?}"
         );
     }
 

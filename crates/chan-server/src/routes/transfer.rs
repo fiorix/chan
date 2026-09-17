@@ -370,6 +370,8 @@ async fn stream_planned_download_tracked(
                 }
             }
             TerminalDownload::Archive { name, is_dir } => {
+                #[cfg(test)]
+                tests::grow_after_download_preflight(&abs);
                 let build_name = name.clone();
                 let build_abs = abs.clone();
                 if plan_tx.send(Ok(PlannedDownload::Archive { name })).is_err() {
@@ -846,6 +848,29 @@ fn terminal_upload_stream_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static GROW_AFTER_DOWNLOAD_PREFLIGHT: std::sync::Mutex<Vec<(PathBuf, Vec<u8>)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    fn schedule_growth_after_download_preflight(path: &Path, bytes: Vec<u8>) {
+        GROW_AFTER_DOWNLOAD_PREFLIGHT
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), bytes));
+    }
+
+    pub(super) fn grow_after_download_preflight(path: &Path) {
+        let bytes = {
+            let mut pending = GROW_AFTER_DOWNLOAD_PREFLIGHT.lock().unwrap();
+            pending
+                .iter()
+                .position(|(candidate, _)| candidate == path)
+                .map(|index| pending.swap_remove(index).1)
+        };
+        if let Some(bytes) = bytes {
+            std::fs::write(path.join("grew-after-preflight.bin"), bytes).unwrap();
+        }
+    }
 
     fn terminal_upload(
         abs_dir: &Path,
@@ -1997,6 +2022,46 @@ mod tests {
             stream_planned_download_tracked(&bulk, None, None, root, OLD_UNDERCOUNT).await;
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_archive_body_uses_the_configured_ceiling_after_preflight() {
+        use futures::StreamExt;
+
+        const CAP: u64 = 2048;
+        let root = tempfile::tempdir().unwrap();
+        schedule_growth_after_download_preflight(root.path(), vec![0x5a; CAP as usize]);
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response =
+            stream_planned_download_tracked(&bulk, None, None, root.path().to_path_buf(), CAP)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut stream = response.into_body().into_data_stream();
+        let mut delivered = 0usize;
+        let mut body_error = None;
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+        {
+            match chunk {
+                Ok(bytes) => delivered += bytes.len(),
+                Err(error) => {
+                    body_error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(delivered, CAP as usize);
+        assert!(
+            body_error
+                .as_deref()
+                .is_some_and(|message| message.contains("2048 byte transfer ceiling")),
+            "the route must report its configured ceiling: {body_error:?}"
+        );
     }
 
     /// The bound has to survive a file that grows after the plan measured it,
