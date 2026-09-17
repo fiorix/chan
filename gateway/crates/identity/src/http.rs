@@ -1124,15 +1124,17 @@ fn is_rustrict_allowed(candidate: &str) -> bool {
 struct CreateTokenBody {
     label: String,
     /// Lifetime in seconds. An absent or null field, zero, and
-    /// negative values mean the token never expires. A positive
-    /// lifetime too large to represent returns 400 `invalid expires_in`.
+    /// negative values mean the token never expires. A positive value
+    /// whose expiry cannot be represented as a duration or UTC instant
+    /// answers 400 `invalid expires_in`; a JSON integer that does not fit
+    /// `i64` fails extraction with 422.
     expires_in: Option<i64>,
     /// Capabilities to grant the token. When absent (or empty), the
     /// service falls back to `DEFAULT_TOKEN_SCOPES` (`["tunnel"]`),
     /// which lets the holder dial chan-tunnel. `tunnel` is the only
-    /// live scope (every devserver is authenticated). This endpoint
-    /// refuses `desktop.*` scopes; only the desktop authorize flow
-    /// mints them.
+    /// live scope this endpoint grants. A scope starting with `desktop.`
+    /// answers 400 `invalid scopes`; desktop scopes come from the desktop
+    /// authorize flow or the operator mint.
     #[serde(default)]
     scopes: Option<Vec<String>>,
 }
@@ -1733,7 +1735,8 @@ fn entry_handoff_response(proxy_origin: &str, credential: &str) -> Result<Respon
         .map_err(|error| Error::Anyhow(error.into()))
 }
 
-/// Desktop scopes are minted only by the desktop authorize flow.
+/// Prefix shared by desktop scopes. `tokens_create` refuses it; the desktop
+/// authorize flow and `admin_tokens_create` are their mint paths.
 const DESKTOP_SCOPE_PREFIX: &str = "desktop.";
 
 pub(crate) const DESKTOP_CONNECT_SCOPE: &str = "desktop.connect";

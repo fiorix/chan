@@ -75,8 +75,9 @@
 //!     client cannot tie the response to its request.
 //!   * `expires_in` is clamped to `MAX_EXPIRES_IN_SECS`.
 //!   * `scopes` are checked against `ALLOWED_SCOPES`. The general
-//!     `/api/tokens` path only checks scope shape; this stricter list
-//!     applies here because the desktop flow is unattended and we
+//!     `/api/tokens` path checks scope shape and refuses the `desktop.`
+//!     prefix, while the operator mint checks shape only; this stricter
+//!     list applies here because the desktop flow is unattended and we
 //!     want a known-bounded capability surface.
 //!   * The consent POST is gated by a 32-byte CSRF nonce stored in
 //!     the session and compared with `subtle::ConstantTimeEq`. The

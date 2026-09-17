@@ -97,7 +97,7 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 
 - Random bytes from `rand::rngs::OsRng`.
 - Hash: `SHA-256(token)` stored in `api_tokens.token_hash`. Plaintext leaves on the create response and is never persisted.
-- Scopes: each token carries a scope list (`api_tokens.scopes`), defaulting to `["tunnel"]` (dial chan-tunnel). `tunnel` is the only live tunnel scope. `POST /api/tokens` refuses every `desktop.*` scope; only the desktop-authorize flow mints `desktop.connect` / `desktop.account`. Validate returns the list and chan-tunnel-server enforces it.
+- Scopes: each token carries a scope list (`api_tokens.scopes`), defaulting to `["tunnel"]` (dial chan-tunnel). `tunnel` is the only live tunnel scope. `POST /api/tokens` refuses every `desktop.*` scope; the desktop-authorize flow and the operator mint (`POST /admin/v1/tokens`) mint `desktop.connect` / `desktop.account`. Validate returns the list and chan-tunnel-server enforces it.
 - Origin: mints record `created` (SPA), `created_via_desktop` (desktop-authorize flow), or `created_via_admin` (operator) in `api_token_audit`, so operators can tell them apart.
 - Validate (`/internal/v1/tokens/validate`):
   - Per-token-fingerprint throttle (4 rps refill, 16 burst, 4096-entry LRU map). Throttled requests return 401, identical on the wire to an unknown token.
@@ -111,7 +111,7 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 
 PAT minting uses the same policy projection. The insert locks the canonical user and fleet singleton, so concurrent block, suspend, or pause has a linear serialization point. Public mint returns 403 `devserver_access_disabled`; admin mint returns 409 with the same stable reason. Listing and revoking existing PATs remain available.
 
-SPA and operator PAT expiry arithmetic is checked: a positive lifetime that cannot be represented as a duration or UTC expiry returns 400 `invalid expires_in`. There is no lifetime cap on these routes; absent or non-positive `expires_in` (and absent or zero operator `expires_days`) means no expiry. Desktop authorize retains its separate 90-day clamp.
+SPA and operator PAT expiry arithmetic is checked: a positive lifetime accepted by the request schema whose expiry cannot be represented as a duration or UTC instant returns 400 `invalid expires_in`. A JSON integer outside the field's type fails extraction with 422. There is no lifetime cap on these routes; absent or non-positive `expires_in` (and absent or zero operator `expires_days`) means no expiry. Desktop authorize retains its separate 90-day clamp.
 
 ### OAuth-session and product control plane
 
