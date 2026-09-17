@@ -309,16 +309,7 @@ impl Registry {
         Arc::new(Self::default())
     }
 
-    /// Register a new tunnel and enforce a per-user cap on concurrent
-    /// devserver registrations atomically with the insert.
-    /// `max_registrations_per_user == 0` disables the check. The cap is
-    /// enforced under the same lock acquisition that performs the
-    /// eviction + insert, so two parallel dials from the same user
-    /// cannot both observe `count == max - 1` and both succeed.
-    ///
-    /// Reconnect of a devserver the user already holds is always
-    /// allowed: the same-key entry is evicted and replaced, and the
-    /// user's registration count is unchanged.
+    /// Test-only form that allocates a fresh registration id.
     #[cfg(test)]
     pub(crate) fn register_with_cap(
         self: &Arc<Self>,
@@ -375,6 +366,16 @@ impl Registry {
         )
     }
 
+    /// Register a new tunnel and enforce a per-user cap on concurrent
+    /// devserver registrations atomically with the insert.
+    /// `max_registrations_per_user == 0` disables the check. The cap is
+    /// enforced under the same lock acquisition that performs the
+    /// eviction + insert, so two parallel dials from the same user
+    /// cannot both observe `count == max - 1` and both succeed.
+    ///
+    /// Reconnect of a devserver the user already holds is always
+    /// allowed: the same-key entry is evicted and replaced, and the
+    /// user's registration count is unchanged.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_authorized_with_id_and_cap(
         self: &Arc<Self>,
