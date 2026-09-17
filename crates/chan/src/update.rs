@@ -1140,10 +1140,10 @@ fn is_windows_sharing_violation(error: &io::Error) -> bool {
 }
 
 /// Retries `operation` while it returns raw OS error 32, the Windows
-/// sharing-violation code. Any other error is returned immediately, and the
-/// result of the tenth attempt is returned unchanged. The schedule waits 25,
-/// 50, 100, and 200 ms, then 250 ms five times, for at most 1.625 seconds of
-/// requested sleep.
+/// sharing-violation code, which means another process still has the file
+/// open. Any other error is returned immediately, and the result of the tenth
+/// attempt is returned unchanged. The schedule waits 25, 50, 100, and 200 ms,
+/// then 250 ms five times, for at most 1.625 seconds of requested sleep.
 #[cfg(any(test, target_os = "windows"))]
 fn retry_windows_sharing_violation<T>(
     mut operation: impl FnMut() -> io::Result<T>,
