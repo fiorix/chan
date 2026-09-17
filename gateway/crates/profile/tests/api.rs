@@ -1269,11 +1269,10 @@ async fn upsert_refreshes_avatar_when_changed() {
 
 #[tokio::test]
 async fn upsert_concurrent_first_time_no_orphans() {
-    // Race regression: multiple concurrent first-time signups for
-    // the same (provider, subject) must converge on a single user
-    // row, not leave orphans behind. Runs N parallel upserts and
-    // asserts they all return the same user id and no extra users
-    // were created with that email.
+    // Concurrent first-time signups for the same (provider, subject) must
+    // converge on a single user row, not leave orphans behind. Runs N
+    // parallel upserts and asserts they all return the same user id and no
+    // extra users were created with that email.
     let app = TestApp::new().await;
     let router = std::sync::Arc::new(app.router.clone());
     let mut handles = Vec::new();
