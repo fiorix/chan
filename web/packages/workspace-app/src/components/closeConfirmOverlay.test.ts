@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 import overlay from "./CloseConfirmOverlay.svelte?raw";
 
-// WP17: the desktop red-dot close prompt. A DisconnectOverlay clone, but a
-// DECISION not a live wait: three actions, no spinner, stacked at 30002, with a
+// The desktop red-dot close prompt. Shaped like DisconnectOverlay but a
+// DECISION, not a live wait: three actions, no spinner, stacked at 30002, with a
 // destructive Close that is neither the default focus nor an Enter target.
 describe("CloseConfirmOverlay", () => {
   test("offers exactly the three Hide / Close / Cancel actions", () => {

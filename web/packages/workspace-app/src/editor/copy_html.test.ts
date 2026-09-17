@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// WP14 rich copy: a selection carrying workspace image refs writes a
+// Rich copy: a selection carrying workspace image refs writes a
 // text/plain (exact markdown) + text/html (wrapper with inlined data:
 // images) payload. Text-only selections stay byte-identical to CM6's
 // default (the handler returns false). The desktop clipboard path is

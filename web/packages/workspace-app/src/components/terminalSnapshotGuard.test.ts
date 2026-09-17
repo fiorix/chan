@@ -3,9 +3,9 @@ import terminalTab from "./TerminalTab.svelte?raw";
 
 // The control terminal must never write a scrollback snapshot: its PTY output
 // carries the CHAN_DEVSERVER_TOKEN= marker the desktop re-scrapes, and a
-// localStorage copy would keep that credential on disk for days
-// (devserver-token-rotation item). The RULE lives in
-// state/windowMode.windowModeAllowsSnapshot (unit-tested there); these pins
+// localStorage copy would keep that credential on disk until the token next
+// rotates. The RULE lives in state/windowMode.windowModeAllowsSnapshot
+// (unit-tested there); these pins
 // assert TerminalTab actually consults it, in the source-pin shape of
 // confirmCloseDispatch.test.ts. Red mutation: delete the guard call from
 // captureSnapshot.

@@ -2,14 +2,13 @@ import { describe, expect, test } from "vitest";
 import panel from "./GraphPanel.svelte?raw";
 import tagInfo from "./TagInfoBody.svelte?raw";
 
-// WP12: a mention node's "Graph from here" is now available for EVERY
-// mention, resolved or not. GraphPanel's inspector wiring rendered the
-// button only when the mention resolved to a contact note (it scoped to
-// `contact:<path>`); an unresolved mention left `onSetAsScope` undefined
-// so the button vanished. The host now falls back to the mention lens
-// (`mention:@@Name`) via `openGraphForMention`. The mention lens itself
-// (bidirectional BFS) is pinned separately in
-// graphMentionLensBidirectionalBfs.test.ts and does not move here.
+// A mention node's "Graph from here" is available for EVERY mention,
+// resolved or not. GraphPanel's inspector wiring scopes a mention that
+// resolves to a contact note to `contact:<path>` through
+// `openGraphForContact`, and one that does not to the mention lens
+// (`mention:@@Name`) through `openGraphForMention`, so the button has a
+// scope to open either way. The mention lens itself (bidirectional BFS)
+// is pinned separately in graphMentionLensBidirectionalBfs.test.ts.
 
 describe("GraphPanel wires a mention's 'Graph from here' for both branches", () => {
   test("GraphPanel imports openGraphForMention", () => {

@@ -105,13 +105,12 @@
 
   // The graph is always a first-class TAB (Pane mounts GraphPanel only
   // with a `graph`-kind tab). The pre-migration overlay variant is gone,
-  // so the scope/state come straight from the tab. With keep-alive
-  // (round 2) every graph tab in the pane stays mounted and hidden via
-  // the visibility contract, so `visible` now tracks the `active` prop
-  // (was a constant `true` when only the active tab was ever mounted).
-  // The load + depth-probe + watcher effects gate on it: a hidden graph
-  // does no background fetch/paint and reloads once on re-activation if
-  // it missed an in-scope edit while hidden.
+  // so the scope/state come straight from the tab. Every graph tab in
+  // the pane stays mounted and hidden through the visibility contract,
+  // so `visible` tracks the `active` prop. The load + depth-probe +
+  // watcher effects gate on it: a hidden graph does no background
+  // fetch/paint and reloads once on re-activation if it missed an
+  // in-scope edit while hidden.
   const graphState = $derived(tab);
   const visible = $derived(active);
 
@@ -645,7 +644,7 @@
   let seenGraphReloadNonce = graphReloadSignal.nonce;
   let graphLoadAbort: AbortController | null = null;
   let graphLoadSeq = 0;
-  // Keep-alive load gating (round 2). PLAIN locals, never rendered:
+  // Keep-alive load gating. PLAIN locals, never rendered:
   // they are read/written only inside the load + watcher effects, so
   // they cannot trip Svelte's state_unsafe_mutation guard (that fires
   // on mutating $state inside a $derived). `hasLoadedOnce` makes the

@@ -1,4 +1,4 @@
-// The session-role badge (WP18) shows ONLY when the roster is genuinely split by
+// The session-role badge shows ONLY when the roster is genuinely split by
 // ORIGIN: at least one local Leader AND at least one remote Follower. A sole-user
 // all-local roster (his standalone terminals, his workspace windows) stays quiet;
 // a mixed roster (a gateway browser joined a devserver) shows the badge, reading

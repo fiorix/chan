@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// WP14 chan-to-chan rich paste: a wrapper carrying the exact source
+// Chan-to-chan rich paste: a wrapper carrying the exact source
 // markdown + inlined images pastes with its images carried. Foreign
 // pastes upload the decoded bytes next to the destination doc and rewrite
 // the refs (preserving alt / width / align / order); same-workspace pastes

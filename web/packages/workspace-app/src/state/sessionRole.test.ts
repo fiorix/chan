@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-// isLeader/isFollower read THIS window's ORIGIN-derived role off the /ws roster
-// (WP18): a local participant reads leader, a tunnel participant follower, and a
+// isLeader/isFollower read THIS window's ORIGIN-derived role off the /ws
+// roster: a local participant reads leader, a tunnel participant follower, and a
 // window with no self row is NEITHER (a solo / not-yet-seeded window must still
 // own its own layout blob). This is a real runtime test (not a ?raw pin), so a
 // Svelte-5 reactivity regression in the derivation is caught here.
