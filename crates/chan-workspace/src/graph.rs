@@ -1359,8 +1359,7 @@ impl GraphView {
     /// `(mtime, size)` tuple. Either component is `None` when the
     /// indexer couldn't stat the file or the row predates the v5
     /// migration (size column NULL). Sorted by path. Used by
-    /// `Workspace::reconcile` to compute a strictly tighter diff than
-    /// mtime alone and detect a same-mtime-different-content rewrite.
+    /// `Workspace::reconcile` to compute a strictly tighter diff than mtime alone: a same-mtime rewrite that changes the size is caught; same mtime and same size still slips by.
     pub fn files_with_stat(&self) -> Result<Vec<FileStatRow>> {
         tracing::debug!("graph::files_with_stat");
         let conn = self.reader()?;

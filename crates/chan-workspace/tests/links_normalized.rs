@@ -20,9 +20,8 @@ fn abs_and_parent_relative_image_links_both_backlink_to_same_node() {
     //   - notes/abs.md         uses /images/foo.png  (workspace-rooted)
     //   - notes/rel.md         uses ../images/foo.png (parent-relative)
     //   - notes/wiki.md        uses [[/images/foo.png]] (wiki, abs)
-    // All three should backlink to the same canonical
-    // `images/foo.png` dst. Pre-fix, only the bare workspace-relative
-    // form matched the node and the inspector showed 0 backlinks.
+    // All three backlink to the same canonical `images/foo.png` dst so
+    // the inspector sees every source regardless of its href shape.
     workspace
         .write_bytes("images/foo.png", b"\x89PNG\r\n")
         .unwrap();

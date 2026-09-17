@@ -6554,13 +6554,12 @@ mod tests {
 
     #[test]
     fn open_picks_up_nested_file_added_offline() {
-        // Startup-level regression: a markdown file dropped into a
-        // nested subdir while no server was watching (so neither the
-        // watcher nor reconcile ran) must be in the graph after the
-        // next `open`. This drives the real consumer entry point
-        // (`Library::open_workspace` -> `Workspace::open`), NOT a
-        // direct `reconcile()` call, because the bug was that the
-        // startup path never scheduled recovery when the graph was non-empty.
+        // Guards the startup path: a markdown file dropped into a nested
+        // subdir while no server was watching must be in the graph after the
+        // next `open`. Drive the real consumer entry point
+        // (`Library::open_workspace` -> `Workspace::open`), not a direct
+        // `reconcile()` call, to verify open schedules recovery even when the
+        // graph is non-empty.
         let cfg = TempDir::new().unwrap();
         let workspace_dir = TempDir::new().unwrap();
         let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -9542,12 +9541,12 @@ mod tests {
 
     #[test]
     fn rename_with_link_rewrite_wiki_workspace_rooted_from_subdir() {
-        // Regression: a wiki link `[[friends/alice]]` from a source
-        // file that LIVES in `friends/` must still resolve to the
+        // A wiki link `[[friends/alice]]` from a source file that lives
+        // in `friends/` must resolve to the
         // workspace-rooted `friends/alice`, not to `friends/friends/alice`
         // as plain `normalize_href` would do for a bare relative path.
         // build_edges applies this rule on the index side; the rewrite
-        // callback mirrors it. After resolution, we emit the new path
+        // callback mirrors it. After resolution, emit the new path
         // as an up-relative wiki target.
         let (_cfg, root, workspace) = fixture();
         std::fs::create_dir_all(root.path().join("friends")).unwrap();
