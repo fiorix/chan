@@ -5068,7 +5068,7 @@ mod tests {
 
     #[test]
     fn persisted_report_recovery_failure_stays_owed_and_requeues() {
-        let (_cfg, root, lib, entry) = persisted_report_fixture();
+        let (_cfg, _root, lib, entry) = persisted_report_fixture();
         let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
         let pass = workspace.begin_recovery().expect("open pass is pending");
         workspace.reconcile().unwrap();
@@ -5086,12 +5086,12 @@ mod tests {
 
         assert!(workspace.persisted_report_refresh_is_owed());
         assert_eq!(workspace.recovery_status().pending, Some(pass));
-        assert_eq!(take_report_refresh_attempts(root.path()), 1);
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
     }
 
     #[test]
     fn persisted_report_recovery_refreshes_only_once() {
-        let (_cfg, root, lib, entry) = persisted_report_fixture();
+        let (_cfg, _root, lib, entry) = persisted_report_fixture();
         let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
         let pass = workspace.begin_recovery().expect("open pass is pending");
         workspace.reconcile().unwrap();
@@ -5112,7 +5112,31 @@ mod tests {
             .unwrap();
 
         assert!(!workspace.persisted_report_refresh_is_owed());
-        assert_eq!(take_report_refresh_attempts(root.path()), 1);
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_report_refresh_probe_uses_the_workspace_canonical_root() {
+        use std::os::unix::fs::symlink;
+
+        let cfg = TempDir::new().unwrap();
+        let real_root = TempDir::new().unwrap();
+        let raw_root = cfg.path().join("workspace-alias");
+        symlink(real_root.path(), &raw_root).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let entry = lib.register_workspace(&raw_root).unwrap();
+        std::fs::write(real_root.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(&raw_root).unwrap();
+        workspace.report().unwrap();
+        drop(workspace);
+
+        let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
+        assert_ne!(workspace.root(), raw_root);
+        arm_report_refresh_probe(workspace.root().to_path_buf(), false);
+        workspace.refresh_persisted_report_if_owed().unwrap();
+
+        assert_eq!(take_report_refresh_attempts(workspace.root()), 1);
     }
 
     #[test]
