@@ -11,7 +11,7 @@
 //! Every workspace is its own tokened tenant. The devserver
 //! returns each tenant's `prefix` and per-tenant `token`; the desktop
 //! assembles the tenant URL itself, `http://{host}:{port}{prefix}/index.html?t={token}`,
-//! and opens it with the same outbound-window machinery as any remote URL.
+//! and opens it through the remote devserver connecting screen.
 //! Assembling client-side keeps the desktop in control of the local tunnel
 //! port and avoids the devserver needing to know how it is reached.
 
@@ -324,7 +324,7 @@ impl SetWorkspaceOnError {
 }
 
 /// A devserver workspace as the launcher renders it: the tenant fields plus
-/// the assembled tenant URL ready for the outbound-window machinery.
+/// the assembled tenant URL ready for the remote-window watcher.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DevserverWorkspaceRow {
     pub prefix: String,

@@ -277,23 +277,18 @@ Source: `crates/chan-workspace/src/teams.rs`.
 
 ### Desktop `Config`
 
-Paths: `<config>/chan-desktop/config.json` on Linux and `<config>/Chan Desktop/config.json` elsewhere.
+Path: `~/.chan/desktop/config.json` (or `$CHAN_HOME/desktop/config.json` when `CHAN_HOME` is set).
 
 Source: `desktop/src-tauri/src/config.rs`.
 
 | Field | Type | Default | Reachability | Consumers |
 |-------|------|---------|--------------|-----------|
-| `outbound[]` | `Vec<OutboundWorkspace>` | empty | hand-edited JSON only | explicit non-owned remote URL attachments |
-| `outbound[].id` | `String` | generated UUID | hand-edited JSON only | row actions + outbound window restore key |
-| `outbound[].url` | `String` | required | hand-edited JSON only | token-bearing HTTP(S) URL opened by desktop |
-| `outbound[].label` | `String` | `""` | hand-edited JSON only | optional launcher/window label |
-| `outbound[].added_at` | `u64` | current millis | hand-edited JSON only | diagnostics and future sorting |
-| `tunnel.preferred_port` | `u16` | `0` (OS-assigned) | Tunnel listener UI | tunnel listen-bind hint |
-| `tunnel.preferred_label` | `String` | `""` | Tunnel listener UI | bearer/label default |
-| `tunnel.preferred_workspace` | `String` | `""` | Tunnel listener UI | workspace name default |
-| `window_configs[]` | `Vec<WindowConfig>` | empty | (auto on window close) | LRU pop on window open; preserves panes/tabs + URL hash + zoom level |
-
-`WindowConfig`: `key: String`, `window_label: String`, `url_hash: String`, `zoom_level: f64`, `saved_at: u64`.
+| `devservers[]` | `Vec<Devserver>` | empty | launcher Devserver form | connection recipes and per-devserver presentation state |
+| `gateways[]` | `Vec<Gateway>` | empty | launcher Gateway form | gateway recipes and exact shared-devserver trust records |
+| `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window bury/quit | per-label, per-monitor-signature OS window geometry LRU |
+| `local_color` | `Option<String>` | `null` | launcher local colour route | local library pane highlight |
+| `launcher_theme` | `Option<String>` | `null` | launcher theme route | `dark`, `light`, or follow OS when absent |
+| `collapsed_machines[]` | `Vec<String>` | empty | launcher machine-card toggle | collapsed local/devserver card ids |
 
 ## Layout pointers
 

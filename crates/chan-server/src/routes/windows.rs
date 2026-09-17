@@ -13,9 +13,7 @@
 //!     therefore stays `connected`; the server cannot distinguish
 //!     hidden from visible, so it deliberately doesn't claim to.
 //!
-//! chan-desktop polls this on remote attachments (outbound / tunnel)
-//! to offer `saved && !connected` windows in its Window menu for
-//! ad-hoc reopening; `cs window list` serves the same view in a
+//! `cs window list` uses this view to report saved and connected sessions in a
 //! terminal.
 
 use std::collections::BTreeMap;

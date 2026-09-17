@@ -103,7 +103,7 @@
     // Gateway sign-in narration. auth-error carries a display-ready string
     // (denied/cancelled sign-in, a failed resume connect, the sign-in
     // timeout) that reportError maps into an error notice; auth-changed fires
-    // when a sign-in lands or is cleared, so re-list the registries and the
+    // when a sign-in lands, so re-list the registries and the
     // waiting rows resolve without a reload.
     void onTauriEvent<string>("auth-error", reportError).then((un) => {
       unlistenAuthError = un;

@@ -33,8 +33,8 @@ use crate::{serve, AppState};
 const LOCAL_LIBRARY_ID: &str = "local";
 
 /// How a devserver watcher should stop. Disconnect closes that devserver's
-/// native windows; token-rotation handoff retires only the old watcher because a
-/// fresh watcher will refresh the same labels in place.
+/// native windows; the control-exit path retires the watcher while preserving
+/// its windows for the user's reconnect or abandon decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DevserverWatcherStop {
     Running,
@@ -1024,7 +1024,8 @@ async fn stream_color_feed(
 /// devserver's `/api/library/windows/watch` feed, opening windows as remote SPA
 /// webviews. Returns the `cancel` (a `watch::Sender`) -- send
 /// [`DevserverWatcherStop::CloseWindows`] on disconnect, or
-/// [`DevserverWatcherStop::RetireKeepWindows`] for token-rotation handoff.
+/// [`DevserverWatcherStop::RetireKeepWindows`] from
+/// `mark_devserver_control_exited` when the control process exits.
 ///
 /// The `library_id` (`lib-<hex>`) is NOT needed up front: an EMPTY feed is valid
 /// (a devserver with no windows, or one the user emptied before disconnecting),

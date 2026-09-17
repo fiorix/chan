@@ -263,17 +263,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_real_window_label_formats() {
-        // The desktop's actual labels (serve.rs): `outbound-<16hex>-<seq>` and
-        // `terminal-win-<n>`, plus a dotted key (validate_key allows `.`).
+    fn accepts_the_real_window_session_key_formats() {
+        // Library windows store sessions under their bare `w-` id; a control
+        // terminal uses its full native label. validate_key also allows dots.
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        for k in [
-            "outbound-1a2b3c4d5e6f7890-3",
-            "terminal-win-7",
-            "a.b.c",
-            "ok_key.v2",
-        ] {
+        for k in ["w-7", "w-3", "control-terminal-dev1", "a.b.c", "ok_key.v2"] {
             put(d, k, b"x").unwrap_or_else(|e| panic!("should accept {k:?}: {e}"));
             assert_eq!(get(d, k).unwrap().as_deref(), Some(&b"x"[..]), "{k:?}");
         }

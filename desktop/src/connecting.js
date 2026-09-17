@@ -1,8 +1,7 @@
-// Connecting / retry screen for outbound (remote-workspace) windows.
+// Connecting / retry screen for remote devserver windows.
 //
-// The problem this solves: chan-desktop points an outbound
-// WebviewWindow straight at a remote chan URL it does not own. When
-// that remote is down the WKWebView just shows a blank white page with
+// The problem this solves: a devserver window ultimately points at a remote
+// tenant URL. When that remote is down the WKWebView shows a blank white page with
 // no feedback. Instead the Rust side opens this local page first;
 // it shows a spinner + a live elapsed timer + one timestamped row per
 // connection attempt, retries until it succeeds (or the user closes the
@@ -18,9 +17,8 @@
 //       url    = the clean remote URL to DISPLAY ("connecting to {url}")
 //                and to hand to the probe.
 //       target = the full URL to NAVIGATE to on success: remote URL plus
-//                ?w=<window-label> plus any restored #fragment, assembled
-//                by Rust exactly like a direct workspace load, so per-window
-//                SPA state + window-config restore survive the navigation.
+//                ?w=<window-id> and ?lib=<library-id>, assembled by Rust so the
+//                library-owned per-window state survives the navigation.
 //   * Reachability is probed through a single Tauri command:
 //         invoke('probe_url', { url }) -> { reachable, status, detail }
 //     For a gateway target, reachable is false on 502/503/504 and on a

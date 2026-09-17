@@ -1,6 +1,6 @@
 [[set]]
 identifier = "main-window"
-description = "Allows the launcher window to call Chan Desktop app commands."
+description = "Defines reload, devtools, zoom, and update-restart commands for local app content in main and main-* windows; the loopback launcher uses separate remote-scoped capabilities."
 permissions = [
   "allow-reload-window",
   "allow-open-devtools",

@@ -206,13 +206,7 @@ table.workspaces tbody tr:hover { background: var(--hover-bg); }
   background: var(--border);
 }
 .conn-dot.on { background: var(--accent); }
-/* WHERE-column remote glyph. Mirrors the .path-cell home/computer rules. */
-.where-cell .ic-outbound {
-  vertical-align: -2px;
-  margin-right: 2px;
-}
-
-/* Launcher category headers: [LOCAL] over the local/outbound table, and
+/* Launcher category headers: [LOCAL] over the local workspace table, and
    one [DEVSERVER {host}] section per configured devserver. These appear
    only once a devserver exists; with none, the launcher stays the plain,
    header-less table. The label treatment mirrors the table th

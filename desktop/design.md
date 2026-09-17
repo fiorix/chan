@@ -8,12 +8,12 @@ chan-desktop is the native desktop shell for chan. For normal local workspaces i
 
 - a non-CLI user can install one signed bundle and open a folder through a familiar OS dialog instead of a terminal,
 - multiple workspaces can be supervised at once, with one launcher window acting as the inventory and on/off control,
-- local embedded workspaces and explicit remote attachments share the same editor window model.
+- local embedded workspaces and connected devservers share the same editor window model.
 
 Non-goals:
 
 - chan-desktop is not a second editor. The editor is the web app served by chan-server. The desktop manages workspaces and opens the editor in Tauri webview windows.
-- chan-desktop is not a general web browser. Workspace windows are dedicated Tauri webviews pointed at local or attached chan URLs.
+- chan-desktop is not a general web browser. Workspace windows are dedicated Tauri webviews served by the embedded host or a connected devserver.
 
 ## 2. Mental model
 
@@ -37,12 +37,11 @@ flowchart TD
 
 *One supervisor embeds a WorkspaceHost that serves many local workspaces on a single 127.0.0.1 listener under per-path-hash prefixes, each opened in a Tauri webview via a tokened URL.*
 
-There are four workspace attachment modes:
+There are three workspace attachment modes:
 
 - **Local embedded**: a local registry entry opened by chan-desktop. The desktop mounts the workspace into its embedded `WorkspaceHost` and owns the runtime.
 - **Devserver**: a headless `chan devserver` the desktop dials by URL (often over an `ssh -L` forward). The devserver owns the per-workspace runtimes and tokens; the desktop persists only the connection recipe and owns the windows.
 - **Gateway roster**: an account-level gateway connection whose authenticated devserver roster the desktop projects into the launcher (section 6.7).
-- **Outbound URL**: an already-running chan server opened by URL. A config-file-only path (the persisted attachment plus the connecting screen) with no launcher surface and no IPC command.
 
 There is no fallback serve mode. A terminal `chan serve <path>` hands the workspace to a running desktop over the CLI handoff socket instead of racing it for the workspace lock. The same socket carries the remote workspace arms: `chan workspace serve|close|forget WS --on TARGET` resolve TARGET against the registry rows (`remote_workspace.rs` holds the pure resolvers) and act on a connected devserver's management API (mount, unmount, forget) with the devserver's own live-terminal refusal; a registered but disconnected row refuses with a pointer at `chan devserver connect`.
 
@@ -76,7 +75,7 @@ stateDiagram-v2
 
 The `chan` registry at `~/.chan/config.toml` is the single source of truth for the set of known workspaces. Desktop-driven mutations (add, remove) run in-process against the embedded host's shared `chan_workspace::Library`, using the same code path the CLI uses, without spawning it. Routing everything through the one shared `Library` is what keeps a freshly-added workspace openable immediately: mutating only the on-disk registry would leave the host's in-memory snapshot stale.
 
-The desktop owns a small config of its own at `~/.chan/desktop/config.json`, under the same `~/.chan` home as the CLI registry, not a separate OS app-data directory. It holds desktop-only state: outbound URL attachments, devserver and gateway connection recipes, exact shared-devserver native-trust records `(gateway id, owner user id (UUID), full devserver id)` (the username rides along for config legibility only and never authorizes), and the closed-window restore stack (section 6.3). Gateway rosters remain volatile and authenticated; persisted trust cannot manufacture a row that is absent from the current roster. The On column is derived live from the in-memory map of active local runtimes; the on-set persists to the library-owned overlay at `~/.chan/workspaces.json` (`{path, on}` rows, shared with the devserver) on every toggle and on clean shutdown, so a restart re-serves the workspaces the user left running (the section 3.2 boot matrix). Accepted trade-off: a crash with an entry persisted re-serves it next boot; a re-serve failure there surfaces a notice and is left off (it drops from the set on the next clean shutdown).
+The desktop owns a small config of its own at `~/.chan/desktop/config.json`, under the same `~/.chan` home as the CLI registry, not a separate OS app-data directory. It holds desktop-only state: devserver and gateway connection recipes, exact shared-devserver native-trust records `(gateway id, owner user id (UUID), full devserver id)` (the username rides along for config legibility only and never authorizes), per-window OS geometry, the local pane colour, launcher theme, and collapsed machine cards. Gateway rosters remain volatile and authenticated; persisted trust cannot manufacture a row that is absent from the current roster. The On column is derived live from the in-memory map of active local runtimes; the on-set persists to the library-owned overlay at `~/.chan/workspaces.json` (`{path, on}` rows, shared with the devserver) on every toggle and on clean shutdown, so a restart re-serves the workspaces the user left running (the section 3.2 boot matrix). Accepted trade-off: a crash with an entry persisted re-serves it next boot; a re-serve failure there surfaces a notice and is left off (it drops from the set on the next clean shutdown).
 
 A filesystem watcher (`notify` + debounce) runs over `~/.chan/` for the lifetime of the process and emits a `registry-changed` Tauri event when the registry file itself changes (events are filtered to that file: `preferences.toml` churn from pane drags must not storm the launcher). On a registry change it also reloads the embedded library registry and signals the library change feed, so the launcher's `/api/library` watch re-renders. Concrete consequence: if the user runs `chan workspace add ~/notes` from a terminal, the row appears in the desktop window without any explicit refresh.
 
@@ -86,7 +85,7 @@ The launcher (Tauri label `main`, title "Chan Desktop") is a singleton: it is ne
 
 A local workspace can be named when it is added (the label rides the library add route); the watcher reflects registry changes made from a terminal.
 
-The launcher drives the desktop over the embedded server's HTTP routes and the desktop bridge. Its only Tauri invokes are `restart_desktop_after_update` and `request_app_quit`, plus the core event listen grant (section 6.1); outbound URL attach (section 11.1) has no launcher surface at all.
+The launcher SPA invokes only `restart_desktop_after_update` and `request_app_quit`, and it receives the core event listen grant (section 6.1). Its injected reload chord also tries `reload_window`; the loopback launcher is not granted that command, so the bridge falls back to `location.reload()`.
 
 ### 3.2 First launch and the [New] modal
 
@@ -130,7 +129,7 @@ Stops the serve (if running), then unregisters the workspace through `chan-works
 
 Anything that mutates `~/.chan/config.toml` shows up in the UI: `chan workspace add` / `chan workspace forget` from a terminal, a second chan-desktop process, or hand-editing the TOML.
 
-For an external `chan serve` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. The desktop does not adopt that server; outbound URL attach is a backend-only path with no launcher surface (section 11.1).
+For an external `chan serve` the registry only records that the workspace exists, not that a serve is running: the local On toggle stays off and no URL appears. The desktop does not adopt or attach to that server.
 
 ## 4. Validation
 
@@ -147,7 +146,7 @@ Local workspaces open through the embedded chan-server `WorkspaceHost`, which ow
 
 The embedded server also owns one process-wide local extension runtime shared by every mounted workspace. It starts declarations once when the server starts and shuts their process groups down after hosted tenants drain. Extension HTTP is reverse-proxied under each workspace tenant, so webviews remain on the embedded server's existing origin and no loopback-any-port frame source is required. Note the configured Tauri CSP governs only the custom protocol: workspace windows load the SPA via `WebviewUrl::External` over `http://127.0.0.1`, so no CSP applies to those windows today; `'self'` was added to the configured `frame-src` purely as insurance against a future switch to the asset protocol.
 
-The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan serve` processes are supported as explicit remote attachments (section 11), not as a local serving dependency.
+The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan serve` processes remain independent; remote desktop connections use the devserver or gateway modes (section 11).
 
 ## 6. Window model
 
@@ -156,28 +155,26 @@ The macOS artifact is a single codesigned and notarised app; Windows signs the d
 Every window is a Tauri webview with a label prefix that encodes its kind, and Tauri capabilities are granted by label glob:
 
 - `main`: the singleton launcher (section 3.1). The `main-*` glob is also covered by the launcher capability so any launcher-class window inherits the same permission set.
-- `local::<window_id>`: watcher-opened local workspace windows, labeled by the library-minted window record. The workspace's embedded route prefix stays `workspace-<hash>` (hash of the canonical path), which capability globs and teardown matching key on.
+- `local::<window_id>`: watcher-opened local workspace and standalone-terminal windows, labeled by the library-minted window record. A workspace's embedded route prefix stays `workspace-<hash>` (hash of the canonical path); it is a URL route, not a native window label.
 - `lib-<hex>::<window_id>`: watcher-opened devserver windows, the same composite `{library_id}::{window_id}` label scheme with the SPA served by the remote devserver.
 - `control-terminal-<devserver id>`: the embedded terminal-only window that runs a devserver's connect script.
-- `outbound-<hash>-<seq>`: remote workspace windows, hashed from the attachment identity, namespaced apart from local labels; the per-process `seq` makes every label unique so multi-window works.
-- `terminal-win-<seq>`: standalone terminal windows (section 6.5).
 - `about`: the bundled About window: singleton, same content on every platform (mirrors the SPA Dashboard About slide), and the target the macOS system About item is redirected to.
 
-All embedded-SPA windows load the SPA with a `?w=` session key (the bare `window_id` for watcher-opened windows, decoupled from the OS-window label, or the label for outbound windows), so per-window session state (`session.json` panes/tabs) is keyed by the window, and get a " Window N" title suffix where N is the lowest free number among live windows sharing a base title, so the OS window switcher disambiguates.
+All library-watched SPA windows load with the bare `window_id` as their `?w=` session key, decoupled from the composite OS-window label, so per-window session state (`session.json` panes/tabs) is keyed by the record. Their title suffix uses the library's persisted ordinal, keeping the OS switcher and `cs window list` aligned. The control terminal has no library record and uses the desktop-local lowest-free number only for internal bookkeeping; its title is unsuffixed.
 
-Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen, update-restart and confirm-then-quit grants (launcher-events.json, launcher-update.json, launcher-control.json); default.json's `main-window` set carries no remote scope, so those three grants are the launcher's whole native vocabulary. Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set (which includes `open_reverse_tunnel`, so `cs tunnel` reaches gateway-served `lib-*` windows) plus the native transfer commands, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. Each transfer command has its own permission entry, and the static local-transfer capability covers locally served and loopback-devserver window classes; gateway-served `lib-*` content is excluded by its loopback-only remote scope. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-supervised window kinds, never to `lib-*` or `outbound-*`. `outbound-*` webviews (arbitrary remote URLs) match no remote pattern and get no IPC at all on their remote content. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
+Capability grants are origin-aware as well as label-globbed: a capability reaches remotely-served content only when its `remote.urls` covers the loading origin, and every chan window is remotely served (the embedded server is loopback HTTP). Broad capabilities are loopback-scoped. The loopback-served launcher (`main`, `main-*`) gets the event-listen, update-restart and confirm-then-quit grants (launcher-events.json, launcher-update.json, launcher-control.json); default.json's `main-window` set carries no remote scope, so those three grants are the launcher's whole native vocabulary. Gateway-backed `lib-*` windows have no static or wildcard capability. After an authenticated entry response passes the full identity, exact-child namespace, scheme/port, same-origin entry URL, and refresh-origin checks, the desktop mints one runtime capability for that canonical exact origin. The grant carries the workspace-window command set (which includes `open_reverse_tunnel`, so `cs tunnel` reaches gateway-served `lib-*` windows) plus the native transfer commands, fullscreen, webview zoom, and opener. Official and custom gateways use this same entry-derived path. Each transfer command has its own permission entry, and the static local-transfer capability covers locally served and loopback-devserver window classes; gateway-served `lib-*` content is excluded by its loopback-only remote scope. `read_dropped_paths` is the standing exception on every origin: the macOS drag pasteboard is system-wide, so local-drop.json grants it only to locally-served `local::*` windows, never to `lib-*`. Runtime Tauri grants are additive: revocation closes managed windows and blocks reconnect immediately, while purging an already-minted origin from the process authority requires quitting and restarting Chan Desktop. serve.rs's origin-aware ACL tests pin the SPA invoke vocabulary and prove that no static or runtime grant contains a gateway wildcard.
 
 The native watcher counts dispatched window builds as pending until they complete. A failed build clears its pending label and wakes reconciliation after a 15-second retry delay, even without a library feed change. Control-terminal creation reports success only after the native window has been built. If creation fails, it closes the unregistered control tenant before returning the original error.
 
 ### 6.2 Menus and the chord bridge
 
-Workspace webviews get a native key bridge injected before any page script. It translates VS Code-style chords into the `chan:command` window event the SPA listens for, claiming each chord in capture phase so the SPA keymap cannot drift out from under it. The policy: chords whose actions are reachable through Hybrid Nav (Cmd+.) stay unbound, and the command-launcher chords stay page-owned because the SPA's inline command deck binds them identically on every surface; direct chords exist where Hybrid Nav is no substitute (tab close/reopen/jump/nav, find on page, search, splits, and the context-aware spawn family Cmd+T / Cmd+O / Cmd+P / Cmd+Shift+M). Cmd+R (reload) and Cmd+Opt+I (DevTools) bypass the SPA event bus and invoke Tauri IPC directly so a frozen SPA cannot lock the dev affordances away. Zoom chords (Cmd+= / Cmd+- / Cmd+0) ride the same IPC path; the level persists per window (section 6.3). Linux/Windows variants avoid stealing terminal chords (plain Ctrl+W / Ctrl+R reach the shell; tab close is Ctrl+Shift+W, window close Ctrl+Alt+W, reload Ctrl+Shift+R).
+Workspace webviews get a native key bridge injected before any page script. It translates VS Code-style chords into the `chan:command` window event the SPA listens for, claiming each chord in capture phase so the SPA keymap cannot drift out from under it. The policy: chords whose actions are reachable through Hybrid Nav (Cmd+.) stay unbound, and the command-launcher chords stay page-owned because the SPA's inline command deck binds them identically on every surface; direct chords exist where Hybrid Nav is no substitute (tab close/reopen/jump/nav, find on page, search, splits, and the context-aware spawn family Cmd+T / Cmd+O / Cmd+P / Cmd+Shift+M). Cmd+R (reload) and Cmd+Opt+I (DevTools) bypass the SPA event bus and invoke Tauri IPC directly so a frozen SPA cannot lock the dev affordances away. Zoom chords (Cmd+= / Cmd+- / Cmd+0) ride the same IPC path. Linux/Windows variants avoid stealing terminal chords (plain Ctrl+W / Ctrl+R reach the shell; tab close is Ctrl+Shift+W, window close Ctrl+Alt+W, reload Ctrl+Shift+R).
 
 The native menus route by the focused window's kind:
 
 - File > New Terminal (Cmd+T): SPA window focused -> dispatch `app.terminal.toggle`; launcher or nothing focused -> open a standalone terminal window.
 - File > Close Window (Cmd+W on macOS, Ctrl+Alt+W off macOS): SPA window focused -> `app.tab.close` on macOS, `app.window.close` off macOS (the connecting screen is the exception: the chord cancels and really closes); other windows close natively.
-- Window > New Window (Cmd+Shift+N): opens another window of the workspace owning the focused window (unburying the family's most recent hidden window first). A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
+- Window > New Window (Cmd+Shift+N): asks the focused window's library to mint another record of the same kind. A focused standalone terminal opens another terminal window; the launcher (or nothing) focused opens a standalone terminal. Plain Cmd+N is deliberately left to the SPA's New Draft.
 - Window > Computers: shows the launcher.
 
 Quitting prompts for confirmation once (running terminals and workspace runtimes die with the process); a confirmed quit tears down every runtime and listener.
@@ -186,7 +183,7 @@ Quitting prompts for confirmation once (running terminals and workspace runtimes
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Live: open restores record or pops LRU entry
+    [*] --> Live: watcher opens library record
     Live: Live SPA window, terminals and layout warm
     Buried: Buried hidden window, record kept
     Destroyed: Destroyed, gone
@@ -194,37 +191,37 @@ stateDiagram-v2
     Live --> CloseGate: OS close button
     state CloseGate <<choice>>
     CloseGate --> Prompt: live SPA window
-    CloseGate --> Destroyed: empty terminal, connecting screen, connecting control terminal
+    CloseGate --> Destroyed: connecting screen, connecting control terminal
     Prompt: Hide / Close / Cancel overlay
     Prompt --> Buried: Hide, persist hidden
     Prompt --> Destroyed: Close
     Prompt --> Live: Cancel
     Live --> Destroyed: programmatic close cascade
 
-    Buried --> Live: unbury via Window menu or Cmd+Shift+N
+    Buried --> Live: unbury via Window menu
     Buried --> [*]: app quit, records survive restart
     Destroyed --> [*]
 ```
 
-*OS close prompts Hide / Close / Cancel on a live SPA window; Hide buries with a persisted record, Close destroys; empty terminals, connecting screens, connecting control terminals, and programmatic closes destroy outright; the next open restores the persisted record (watcher windows) or pops a compatible LRU entry (outbound windows).*
+*OS close prompts Hide / Close / Cancel on a live SPA window; Hide buries with a persisted library record, Close destroys; connecting screens, connecting control terminals, and programmatic closes destroy outright; the next open restores the watcher-managed record.*
 
-The OS close button on a live SPA window holds the close and evals a confirm into the webview: the SPA shows a Hide / Close / Cancel overlay. Hide *buries* the window, keeping live terminals and layout warm, and Close destroys it. Buried windows are listed in the Window menu and unburied from there or by Cmd+Shift+N on their family. Three cases really close with no prompt: a standalone terminal window with no live shells, a window still on the connecting screen (burying it would leave an unkillable hidden retry loop), and a control terminal still connecting. Programmatic closes (the SPA's empty-window cascade, workspace-off teardown) destroy outright and never bury.
+The OS close button on a live SPA window holds the close and evals a confirm into the webview: the SPA shows a Hide / Close / Cancel overlay. Hide *buries* the window, keeping its library record and server-side terminals and layout, and Close destroys it. Buried windows are listed in the Window menu and unburied from there. A window still on the connecting screen and a control terminal still connecting really close with no prompt. Programmatic closes (the SPA's empty-window cascade, workspace-off teardown) destroy outright and never bury.
 
 The launcher's Computers > Windows > Close path has one separate in-SPA confirmation. It asks the library for the same live-terminal count as the `cs window rm` guard, names a known nonzero count, omits terminal wording for zero, and keeps the generic warning when a connected devserver's feed cannot supply a count. After confirmation the library close route dispatches the desktop destroy operation directly, including for a buried window; the desktop does not raise a second prompt. `cs window rm` instead refuses a live-terminal window server-side unless `--force` is passed. Neither path changes the OS close-button behavior above.
 
-Bury and restore route by window class. `local::` and `lib-` windows bury through their library's window watcher: the window record persists `hidden`, the reconcile closes the native window, and the next open (or relaunch) restores the record at its stable `window_id` so `?w=` re-hydrates the panes/tabs from `session.json`. Outbound windows bury in place and capture a restore snapshot (window label, URL hash, and zoom level) onto a small LRU stack in the desktop config, keyed by attachment identity; the next open pops a compatible entry, reuses the label, re-applies the URL hash (overlay state: file-browser path, search query, graph scope), and restores the zoom. OS window geometry restores for every window class from a per-window, per-monitor-signature LRU in the desktop config. Both stores survive restarts, so "the window I had open" comes back across a quit, and LRU entries whose label is still alive are skipped rather than popped (a buried window must keep its entry for the quit-while-buried case).
+Bury and restore route by window class. `local::` and `lib-` windows bury through their library's window watcher: the window record persists `hidden`, the reconcile closes the native window, and the next open (or relaunch) restores the record at its stable `window_id` so `?w=` re-hydrates the panes/tabs from `session.json`. A connected control terminal hides in place so its live endpoint stays warm. OS window geometry restores from a per-window, per-monitor-signature LRU in the desktop config.
 
-### 6.4 The connecting screen (outbound)
+### 6.4 The connecting screen
 
-Outbound windows do not load the remote URL directly: a down remote would paint a blank white webview (WKWebView never finishes navigating). They load a bundled connecting/retry page instead, which shows the attempt log, probes the remote through the `probe_url` IPC (any HTTP response counts as up; only transport failures retry), and on success navigates the same window to the fully-assembled target URL, including `?w=` and the restored hash, so it becomes a normal workspace window in place. The page cannot probe the remote itself: the strict CSP blocks cross-origin fetches, and Rust owns the per-attempt timeout. Cmd/Ctrl+W and the close button on the connecting screen cancel and really close.
+Devserver windows do not load the remote URL directly: a down remote would paint a blank white webview (WKWebView never finishes navigating). They load a bundled connecting/retry page instead, which shows the attempt log, probes the remote through the `probe_url` IPC, and on success navigates the same window to the fully assembled tenant URL with its `?w=` and `?lib=` identity. A loopback target treats any HTTP response as reachable; a gateway target retries on 502, 503, 504, and transport failures. The page cannot probe the remote itself because the strict CSP blocks cross-origin fetches, so Rust owns the per-attempt timeout. Cmd/Ctrl+W and the close button on the connecting screen cancel and really close.
 
 ### 6.5 Standalone terminal windows
 
-Standalone terminal windows host the SPA in terminal-only mode (`kind=terminal`: no workspace fetch, terminal panes only). All of them load the ONE shared `/terminal` tenant of the embedded server, mounted on first use and never torn down per window: PTYs live in a single registry, so a terminal tab moved between windows keeps its live PTY, and orphaned PTYs idle-prune. There is no registry entry and no On-toggle lifecycle. Sessions inherit chan-server's terminal contract, including the `cs` control socket, so `cs` works inside a desktop terminal exactly as under a standalone `chan serve`. The close button buries the window while shells are live and really closes it when none are left.
+Standalone terminal windows host the SPA in terminal-only mode (`kind=terminal`: no workspace fetch, terminal panes only). All of them load the one shared `/terminal` tenant of the embedded server, mounted on first use and never torn down per window: PTYs live in a single registry, so a terminal tab moved between windows keeps its live PTY, and orphaned PTYs idle-prune. Each terminal is a local library window record but has no workspace or On-toggle lifecycle. Sessions inherit chan-server's terminal contract, including the `cs` control socket, so `cs` works inside a desktop terminal exactly as under a standalone `chan serve`. The close button uses the same Hide / Close / Cancel flow as other live SPA windows.
 
 ### 6.6 Remote windows
 
-Remote-backed connections (outbound attachments) own their window state server-side. The desktop polls each connection's `GET /api/windows` and lists the reopenable rows (`saved` but not `connected`) in the Window menu; choosing one builds a webview with that exact label so the remote re-hydrates that window's session. The poll refreshes when remote-backed windows open or close.
+Devservers own their window records and state server-side. The desktop subscribes to each connected devserver's `/api/library/windows/watch` feed and reconciles native `lib-<hex>::<window_id>` windows from those records. Hiding persists the record as hidden and closes the native surface; showing it lets the watcher rebuild the same composite label and session id.
 
 ### 6.7 Gateway roster devservers
 
@@ -308,13 +305,7 @@ Future global settings additions are deferred until they have concrete demand. T
 
 ## 11. Remote workspaces
 
-Remote workspaces are explicit attachments. They are not a fallback for failed embedded local serving.
-
-### 11.1 Outbound URL attach
-
-Outbound attach means the server already exists and chan-desktop opens it by URL.
-
-The attachment is configured by hand in the desktop config file (`outbound[]` in `~/.chan/desktop/config.json`, section 3.0) and opens through the connecting screen (section 6.4); no launcher form and no IPC command collects the URL. An attached URL opens in a workspace webview and the desktop does not try to start, stop, reclaim, or inspect the server process. This works whether the URL points at another machine or at `127.0.0.1` on the same machine.
+Remote workspaces enter the desktop through a configured devserver or an authenticated gateway roster (sections 3.2 and 6.7). They are not a fallback for failed embedded local serving, and the desktop does not attach directly to an arbitrary `chan serve` URL.
 
 ## 12. Native file integrations
 

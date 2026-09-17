@@ -2,7 +2,7 @@
 //!
 //! Each connected library has a [`watch_loop`] that reconciles its [`WindowRecord`] snapshot with the native surface. Feed and local view changes trigger [`reconcile`]: missing windows open, removed windows close, and buried windows or pending deletions remain suppressed. Native labels combine the library and window ids, so repeated snapshots reuse the same windows.
 //!
-//! The stop action either closes the library's native windows for disconnect or preserves them for a replacement watcher.
+//! The stop action either closes the library's native windows for disconnect or preserves them while a control-exit row awaits a decision.
 //!
 //! Wiring: the local library feeds in-process via
 //! `host.assemble_window_records()` + the registry's change `Notify`; a devserver
@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 pub enum WatchLoopStop {
     /// Reconcile this watcher's known native windows away before stopping.
     CloseWindows,
-    /// Stop the watcher and leave native windows for a replacement watcher.
+    /// Stop the watcher and leave its native windows in place.
     KeepWindows,
 }
 
@@ -347,9 +347,9 @@ impl WatcherViewState {
 /// change AND every local view change (bury/unbury), until `cancel` resolves
 /// with an explicit stop action. The reconcile is idempotent (snapshot-not-delta),
 /// so reconnect = resubscribe + reconcile can never spawn a duplicate. A real
-/// disconnect reconciles to empty (detach, not reap); a watcher handoff can retire
-/// without closing native windows so the replacement watcher refreshes them in
-/// place.
+/// disconnect reconciles to empty (detach, not reap); a keep-windows stop can
+/// retire without closing native windows while the control-exit row awaits a
+/// reconnect or abandon decision.
 ///
 /// Correctness: both change `Notified`s are created BEFORE the snapshot. tokio
 /// captures the `notify_waiters()` generation at creation, so a change firing in
@@ -912,11 +912,10 @@ mod tests {
         );
     }
 
-    /// Watcher handoff semantics: token rotation starts a replacement watcher for
-    /// the same library labels. The retired watcher must stop without reconciling
-    /// to empty, or it can destroy windows the replacement watcher just refreshed.
+    /// The control-exit path retires its watcher without reconciling to empty so
+    /// its native windows remain available while the launcher asks what to do.
     #[tokio::test]
-    async fn watch_loop_keeps_its_windows_on_handoff_cancel() {
+    async fn watch_loop_keeps_its_windows_on_keep_windows_stop() {
         #[derive(Default)]
         struct RecordSurface {
             open_now: std::sync::Mutex<HashSet<String>>,
@@ -975,7 +974,7 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
             vec!["local::w-1".to_string()],
-            "the loop opens the library's window before handoff",
+            "the loop opens the library's window before the keep-windows stop",
         );
 
         cancel.notify_waiters();
@@ -990,11 +989,11 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
             vec!["local::w-1".to_string()],
-            "handoff cancel leaves existing windows for the replacement watcher",
+            "the keep-windows stop leaves existing windows in place",
         );
         assert!(
             surface.closed.lock().unwrap().is_empty(),
-            "handoff cancel must not close windows",
+            "the keep-windows stop must not close windows",
         );
     }
 

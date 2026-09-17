@@ -119,8 +119,7 @@ pub struct AppState {
     /// windows with the SAME base title, so a number freed by a closed
     /// window gets reused -- mirroring `Registry::next_terminal_name`'s
     /// lowest-free `Terminal-N` scheme. Freed on window destroy; a
-    /// BURIED (hidden) window keeps its number so its Window-menu entry
-    /// and title stay stable across the hide/reopen cycle.
+    /// hidden-in-place control terminal keeps its number until destruction.
     pub window_numbers: Mutex<HashMap<String, (String, u64)>>,
     /// Custom window titles set via `cs window title <id> <title>`, keyed
     /// by window label. Consulted by `build_workspace_window` so the
@@ -128,19 +127,15 @@ pub struct AppState {
     /// {N}" scheme applies only when there's no override). Session-scoped:
     /// not persisted across an app restart, like the display numbers.
     pub window_title_overrides: Mutex<HashMap<String, String>>,
-    /// Windows hidden ("buried") by the OS close button instead of
-    /// destroyed, in bury order (most recent last). The webview stays
-    /// alive -- live terminals keep running, layout state stays warm  --
-    /// and the Window menu lists each entry for reopening (also
-    /// Cmd/Ctrl+Shift+N, which unburies the most recent of the focused
-    /// family). Entries leave the list on unbury or window destroy.
+    /// Windows hidden ("buried") by the OS close button, in bury order (most
+    /// recent last). Watcher-managed windows close their native surface but keep
+    /// their library record; a control terminal stays hidden in place. The
+    /// Window menu lists each entry for reopening. Entries leave the list on
+    /// unbury or final window destruction.
     pub buried_windows: Mutex<Vec<BuriedWindow>>,
-    /// Native labels whose NEXT `CloseRequested`-bury should skip the
-    /// "was hidden, not closed" teaching notice. The launcher Hide action
-    /// routes through the OS close path (so the bury handler runs) but is an
-    /// explicit hide gesture of its own -- the notice teaches the red-button
-    /// gesture, so we suppress it here. One-shot: the close handler consumes the
-    /// label, so a later genuine red-button close still shows the notice.
+    /// Native labels whose next `CloseRequested` is an explicit launcher or
+    /// `cs window hide` gesture. The close handler consumes the one-shot flag and
+    /// buries directly instead of showing the red-button confirmation.
     pub silent_hides: Mutex<std::collections::HashSet<String>>,
     /// Live connections to devservers, keyed by `Devserver.id`. A devserver
     /// present here is connected (the launcher polls its workspace list and
@@ -153,8 +148,8 @@ pub struct AppState {
     pub devserver_feed: Arc<DevserverFeed>,
     /// Per connected devserver (`Devserver.id`), the stop handle for its window
     /// watcher. Disconnect stops the watcher and closes that devserver's native
-    /// windows; token-rotation handoff retires only the old watcher so the fresh
-    /// watcher can refresh existing same-label windows in place.
+    /// windows; `mark_devserver_control_exited` retires the watcher while keeping
+    /// its windows for the user's reconnect or abandon decision.
     pub(crate) devserver_watchers:
         Mutex<HashMap<String, tokio::sync::watch::Sender<DevserverWatcherStop>>>,
     /// Per connected devserver (`Devserver.id`), its window-watcher view state,
@@ -518,16 +513,15 @@ impl AppState {
         buried.len() != before
     }
 
-    /// Mark `label` so its next close-button bury skips the teaching notice
-    /// (the launcher Hide action is its own explicit gesture). Set on the
-    /// main thread just before `window.close()`; consumed by the close handler.
+    /// Mark `label` so its next close request performs an explicit hide without
+    /// the red-button confirmation. Set on the main thread just before
+    /// `window.close()`; consumed by the close handler.
     pub fn mark_silent_hide(&self, label: &str) {
         self.silent_hides.lock().unwrap().insert(label.to_string());
     }
 
-    /// Consume the silent-hide flag for `label`: returns whether this bury was
-    /// launcher-initiated (so the notice is skipped). One-shot -- a later
-    /// red-button close finds no flag and shows the notice as usual.
+    /// Consume the silent-hide flag for `label`. One-shot: a later red-button
+    /// close finds no flag and asks for confirmation as usual.
     pub fn take_silent_hide(&self, label: &str) -> bool {
         self.silent_hides.lock().unwrap().remove(label)
     }
@@ -3571,7 +3565,7 @@ fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::Sta
     })
 }
 
-/// Reachability probe for the chan-desktop connecting screen. Outbound
+/// Reachability probe for the chan-desktop connecting screen. Devserver
 /// windows load `connecting.html` instead of pointing the webview
 /// straight at the remote (a down remote paints a blank white webview);
 /// that page calls this command on a retry loop until the remote answers,

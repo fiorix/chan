@@ -4,7 +4,7 @@ Desktop edition of [chan](https://chan.app), an IDE in a single binary: a termin
 
 chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a window for managing workspaces, and a one-click "open workspace" flow without a separate per-workspace `chan serve` process.
 
-The workspace UI is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or by explicit remote attachments.
+The workspace UI is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or a configured devserver connection.
 
 ## Download
 
@@ -26,9 +26,10 @@ The desktop app stores its config at `~/.chan/desktop/config.json` -- the same `
 ## Workspace modes
 
 - Local embedded: desktop owns the local workspace runtime through its embedded `chan-server` host.
-- Remote outbound: desktop opens an already-running `chan serve` URL listed in its config file (`outbound[]`). The remote server owns its own lifecycle.
+- Devserver: desktop connects to a configured `chan devserver` and mirrors its library-managed windows.
+- Gateway: desktop signs in to a gateway and projects its authenticated devserver roster into the launcher.
 
-There is no local sidecar fallback mode. Running `chan serve` directly is still supported, but desktop treats it as a remote attachment.
+There is no local sidecar fallback mode and no arbitrary URL attachment. A standalone `chan serve` remains an independent browser-served process; when a desktop is already running, the CLI handoff asks it to open the registered workspace instead.
 
 ## License
 

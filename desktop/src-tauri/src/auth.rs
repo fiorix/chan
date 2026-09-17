@@ -68,9 +68,8 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
-/// Event emitted whenever the local sign-in state changes (after a
-/// successful callback or a sign-out). The Computers window listens
-/// and re-renders the toolbar button.
+/// Event emitted after a successful gateway sign-in callback. The launcher
+/// listens and resynchronizes its library view.
 pub const AUTH_CHANGED: &str = "auth-changed";
 
 /// Event emitted when the callback fails (state mismatch, missing

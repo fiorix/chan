@@ -521,8 +521,8 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
 /// lives in the buried list. A server-hidden devserver window from a previous
 /// session may not be locally buried either; its composite label still lives in
 /// the feed. The view-driven un-bury in [`open_window_by_label`] needs the real
-/// `lib-<hex>::` label. Only a bare id matching NONE of these falls back to the
-/// `local::` composite.
+/// `lib-<hex>::` label. Only a bare `w-` id matching none of these falls back to
+/// the `local::` composite.
 pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
     // A live window whose exact label IS `id` wins.
     if app.get_webview_window(id).is_some() {
@@ -541,8 +541,9 @@ pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
 /// used verbatim; a bare `window_id` matches the `{library_id}::{id}` candidate
 /// (open or buried -- a buried watched window has no live webview but its composite
 /// label is in the buried list). A full `control-terminal-` label is used
-/// verbatim. Only a bare library-minted id (`w-<hex>`) matching no candidate
-/// resolves to the `local::` composite as a last resort.
+/// verbatim. A bare library-minted id (`w-<hex>`) matching no candidate resolves
+/// to the `local::` composite as a last resort; any other unknown id stays
+/// unchanged so the open path returns its ordinary "isn't open" error.
 fn resolve_label_from(id: &str, candidates: &[String]) -> String {
     if id.contains("::") {
         return id.to_string();
@@ -556,7 +557,11 @@ fn resolve_label_from(id: &str, candidates: &[String]) -> String {
     if id.starts_with("control-terminal-") {
         return id.to_string();
     }
-    format!("local::{id}")
+    if id.starts_with("w-") {
+        format!("local::{id}")
+    } else {
+        id.to_string()
+    }
 }
 
 pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> {
@@ -2284,19 +2289,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_label_keeps_only_a_control_terminal_label_verbatim() {
+    fn resolve_label_qualifies_only_library_minted_bare_ids() {
         // A control terminal has no `library_id::` prefix, so it is its own
         // native label even with no live candidate.
         assert_eq!(
             resolve_label_from("control-terminal-ds1", &[]),
             "control-terminal-ds1"
         );
-        // Retired label families receive the ordinary local fallback rather
-        // than retaining their old parser exceptions.
-        assert_eq!(resolve_label_from("terminal-3", &[]), "local::terminal-3");
+        // Retired label families have no parser exception and do not look like
+        // library-minted ids. Leaving them unmatched makes open return the
+        // ordinary "isn't open" error rather than routing into the local watcher.
+        assert_eq!(resolve_label_from("terminal-3", &[]), "terminal-3");
         assert_eq!(
             resolve_label_from("workspace-abc-1", &[]),
-            "local::workspace-abc-1"
+            "workspace-abc-1"
         );
         assert_eq!(resolve_label_from("w-1", &[]), "local::w-1");
     }

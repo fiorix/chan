@@ -13,7 +13,7 @@
 //! `store::save_toml` lands. A dir-level "anything changed" trigger
 //! therefore fires `registry-changed` on routine editing (a pane
 //! drag re-saves `preferences.toml`), which storms the launcher's
-//! `list_workspaces` refresh for no reason. We filter the debounced
+//! library resync for no reason. We filter the debounced
 //! events down to the registry file's own name so only a real
 //! registry mutation forwards to the frontend.
 
@@ -26,7 +26,7 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Event name pushed to all webviews when the registry changes.
-/// Frontends should re-fetch the merged workspace list in response.
+/// The launcher responds by resynchronizing its library view.
 pub const REGISTRY_CHANGED: &str = "registry-changed";
 
 /// Spawn a debounced watcher over the chan config directory and emit

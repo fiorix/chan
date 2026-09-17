@@ -1,4 +1,4 @@
-/* Connecting / retry surface for outbound (remote-workspace) windows.
+/* Connecting / retry surface for remote devserver windows.
    Loaded by connecting.html on top of styles.css, so all theme tokens
    (--bg, --text, --brand, --border, ...) and the OS-light media query
    come from there. Only the connecting-specific layout + the spinner +

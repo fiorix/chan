@@ -2157,7 +2157,7 @@ async function healthInstanceWithRetry(): Promise<string | undefined> {
 /// blip; nothing to do. Different id = the process restarted: its PTYs
 /// and in-memory state are gone, and without a reload the window sits
 /// on a stale view with stuck terminals until a manual Cmd+R -- the
-/// reload is that Cmd+R, automated. Reported against outbound remotes
+/// reload is that Cmd+R, automated. Reported against remote devservers
 /// (^C + re-run of `chan devserver run`); health answers on every tenant
 /// (terminal-only included), so the check applies everywhere.
 /// Best-effort: a read that still fails after the bounded retry waits

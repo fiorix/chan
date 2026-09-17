@@ -568,8 +568,8 @@ fn entry_from_roster_row(
 
 /// chan-desktop's [`LocalColorStore`](chan_server::LocalColorStore): the local
 /// library's pane-highlight colour persisted in the desktop config
-/// (`~/.chan/desktop`, the same shared store the devserver registry + window LRU
-/// use, so every write serializes through one lock). The host reads it when
+/// (`~/.chan/desktop`, the same shared store the devserver registry and geometry
+/// LRU use, so every write serializes through one lock). The host reads it when
 /// minting local windows; the launcher's local-colour route writes it.
 pub struct LocalColorConfig {
     store: Arc<Mutex<ConfigStore>>,
@@ -665,7 +665,8 @@ impl chan_server::CollapsedMachinesStore for CollapsedMachinesConfig {
     }
 }
 
-/// Normalize and validate the desktop dial URL from an explicit URL or the launcher's host and port. The persisted URL identifies the connection and window-restore entry.
+/// Normalize and validate the desktop dial URL from an explicit URL or the
+/// launcher's host and port. The persisted URL identifies the connection.
 fn devserver_url(input: &DevserverInput) -> Result<String, String> {
     if let Some(url) = input
         .url

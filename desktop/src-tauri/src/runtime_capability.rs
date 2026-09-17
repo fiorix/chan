@@ -507,7 +507,7 @@ mod tests {
             invoke_from(&watched, WATCHED_PAGE, "read_dropped_paths").is_err(),
             "commands outside the granted set stay denied at these shapes"
         );
-        let foreign = lib_window(&app, "outbound-3", WATCHED_PAGE);
+        let foreign = lib_window(&app, "foreign-3", WATCHED_PAGE);
         assert!(
             invoke_from(&foreign, WATCHED_PAGE, "create_library_window").is_err(),
             "a URL attachment on the same origin is not a library window"

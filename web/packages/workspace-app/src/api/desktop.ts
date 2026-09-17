@@ -92,7 +92,7 @@ function tauriLabels(): {
 
 /// Read the current gateway connection's CSRF token from chan-desktop. Exact
 /// origin and window-label checks live on both the runtime capability and the
-/// command handler. Expected denials on browser, loopback, and outbound windows
+/// command handler. Expected denials on browser and loopback windows
 /// become `null` so the transport can continue to its readable-cookie source.
 ///
 /// A denial on a `lib-*` window is NOT expected: that window is exactly what the
@@ -239,7 +239,7 @@ export async function readDroppedPaths(): Promise<string[]> {
   try {
     return await tauriInvoke<string[]>("read_dropped_paths");
   } catch {
-    // ACL refusal (tunnel/outbound windows) or pre-IPC desktop build.
+    // ACL refusal (gateway windows) or pre-IPC desktop build.
     return [];
   }
 }

@@ -20,10 +20,9 @@
 //! Only meaningful when invoked from inside a `drop` handler: the
 //! drag pasteboard is system-wide and persists until the NEXT drag
 //! starts. That persistence is also why the ACL scopes this command
-//! to LOCALLY-served windows (`workspace-*` / `terminal-*`,
-//! capabilities/local-drop.json): a remote-served SPA (`outbound-*`)
-//! could otherwise poll it and harvest paths the user drags around in
-//! unrelated applications.
+//! to locally-served `local::*` windows (capabilities/local-drop.json): a
+//! gateway-served SPA could otherwise poll it and harvest paths the user drags
+//! around in unrelated applications.
 
 /// Read the file paths currently on the macOS drag pasteboard.
 /// NSPasteboard is AppKit state, so the read runs on the main thread
