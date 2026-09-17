@@ -1123,9 +1123,9 @@ fn is_rustrict_allowed(candidate: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct CreateTokenBody {
     label: String,
-    /// Lifetime in seconds. None = never expires; the SPA presets
-    /// 30d / 90d / 1y / never as the issue requested, but the
-    /// concrete expiry is computed client-side and sent here.
+    /// Lifetime in seconds. An absent or null field, zero, and
+    /// negative values mean the token never expires. A positive
+    /// lifetime too large to represent returns 400 `invalid expires_in`.
     expires_in: Option<i64>,
     /// Capabilities to grant the token. When absent (or empty), the
     /// service falls back to `DEFAULT_TOKEN_SCOPES` (`["tunnel"]`),
