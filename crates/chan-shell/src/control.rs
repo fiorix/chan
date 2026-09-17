@@ -199,6 +199,13 @@ pub async fn send_control_request(socket: &Path, request: ControlRequest) -> Res
     read_first_response(&mut BufReader::new(read)).await
 }
 
+/// Send a blocking request while retaining the client's write half until the
+/// first response arrives. The server may use EOF on that half to cancel work
+/// if the client exits while the request is parked.
+pub async fn send_control_request_held(socket: &Path, request: ControlRequest) -> Result<String> {
+    Ok(send_control_request_streaming(socket, request).await?.ack)
+}
+
 /// The still-open control connection behind a long-lived request
 /// (`cs tunnel`). The server's ack line has already been read; the
 /// connection stays up until [`TunnelSession::wait`] returns or the
@@ -249,12 +256,12 @@ impl TunnelSession {
     }
 }
 
-/// Connect, write one JSON request line WITHOUT half-closing the write
-/// side, read the first response line, and hand back the still-open
-/// connection. The sibling of [`send_control_request`] for requests whose
-/// connection lifetime is the request's lifetime (`cs tunnel`): the server
-/// treats this connection's EOF as the command ending, so the write half
-/// rides inside the returned [`TunnelSession`] and is only dropped with it.
+/// Connect, write one JSON request line WITHOUT half-closing the write side,
+/// read the first response line, and hand back the still-open connection. The
+/// sibling of [`send_control_request`] for requests whose connection lifetime
+/// is meaningful to the server: `cs tunnel` retains the returned session for
+/// the tunnel's lifetime, while [`send_control_request_held`] drops it after
+/// the first response to bound a parked request's lifetime.
 pub async fn send_control_request_streaming(
     socket: &Path,
     request: ControlRequest,

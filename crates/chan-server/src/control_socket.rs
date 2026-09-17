@@ -561,6 +561,7 @@ mod tenant_gate_tests {
                 accept: false,
                 reject: false,
                 timeout_secs: 0,
+                cancel_on_eof: false,
             },
             ControlRequest::SessionTakeover {
                 window_id: "w".into(),
@@ -1558,6 +1559,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             accept,
             reject,
             timeout_secs,
+            cancel_on_eof: _,
         } => {
             // None requests a handover; Some(true/false) is the leader's
             // accept/reject answer.
@@ -1636,6 +1638,7 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             tab_group,
             spec,
             timeout_secs,
+            cancel_on_eof: _,
         } => {
             handle_survey(
                 spec,
@@ -5575,6 +5578,7 @@ mod tests {
                 accept: false,
                 reject: false,
                 timeout_secs: 600,
+                cancel_on_eof: false,
             })
             .unwrap();
             request.push(b'\n');
@@ -5618,6 +5622,7 @@ mod tests {
                 accept: false,
                 reject: false,
                 timeout_secs: 600,
+                cancel_on_eof: false,
             })
             .unwrap();
             request.push(b'\n');

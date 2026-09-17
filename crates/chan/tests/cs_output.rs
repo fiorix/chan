@@ -370,6 +370,7 @@ const MODES: [(&str, &[&str]); 3] = [
 struct Run {
     output: std::process::Output,
     request: ControlRequest,
+    request_json: serde_json::Value,
 }
 
 /// When the fake server answers, relative to the client's half-close. A real
@@ -381,6 +382,10 @@ enum Answer {
     /// can never land before the client's shutdown and the byte-level cases
     /// are deterministic on every platform.
     AfterClientEof,
+    /// While the client's write side is still open. Blocking requests use
+    /// that open half as their cancellation signal, so the fake must answer
+    /// before waiting for EOF.
+    WhileClientOpen,
     /// Straight after the request line, closing without reading to the
     /// client's EOF: the real server's order. It races the client's
     /// shutdown, which macOS refuses with ENOTCONN when the close lands
@@ -434,6 +439,14 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
                     "cs sent bytes after its request line: {trailing:?}"
                 );
             }
+            Answer::WhileClientOpen => {
+                let mut trailing = [0u8; 1];
+                let read = timeout(Duration::from_secs(1), reader.read(&mut trailing)).await;
+                assert!(
+                    read.is_err(),
+                    "cs closed its write side before the blocking request received its reply"
+                );
+            }
             Answer::AtOnce => {}
         }
         // A `cs` that failed between its request and its read may already
@@ -466,9 +479,15 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
         .expect("fake server finishes within the budget")
         .expect("fake server task");
     let _ = std::fs::remove_file(&socket);
+    let request_json: serde_json::Value =
+        serde_json::from_str(request.trim_end()).expect("cs sent request JSON");
     let request: ControlRequest =
-        serde_json::from_str(request.trim_end()).expect("cs sent a control request");
-    Run { output, request }
+        serde_json::from_value(request_json.clone()).expect("cs sent a control request");
+    Run {
+        output,
+        request,
+        request_json,
+    }
 }
 
 /// The exact stdout of a successful run, with the request checked first so
@@ -582,6 +601,100 @@ async fn a_server_that_answers_and_closes_at_once_still_gets_its_reply_printed()
             String::from_utf8(run.output.stdout).expect("utf-8 stdout"),
             expected,
             "round {round}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn survey_and_handover_opt_in_to_client_eof_cancellation() {
+    let survey = Case {
+        name: "terminal survey",
+        args: &[
+            "terminal",
+            "survey",
+            "--tab-name",
+            "@@T",
+            "--option",
+            "yes",
+            "question",
+        ],
+        noun: "survey",
+        env: &[],
+        reply: "yes",
+        pretty: "",
+        markdown: "",
+        request: |_| true,
+    };
+    let handover = Case {
+        name: "session handover",
+        args: &["session", "handover"],
+        noun: "handover",
+        env: &[("CHAN_WINDOW_ID", "follower")],
+        reply: "handover rejected",
+        pretty: "",
+        markdown: "",
+        request: |_| true,
+    };
+    for case in [&survey, &handover] {
+        let run = run_cs(case, case.reply, &[], Answer::WhileClientOpen).await;
+        assert!(
+            run.output.status.success(),
+            "{}: exit {:?}, stderr: {}",
+            case.name,
+            run.output.status,
+            String::from_utf8_lossy(&run.output.stderr)
+        );
+        assert_eq!(
+            run.request_json.get("cancel_on_eof"),
+            Some(&serde_json::Value::Bool(true)),
+            "{} request did not opt in: {}",
+            case.name,
+            run.request_json
+        );
+    }
+
+    let window_list = cases()
+        .into_iter()
+        .find(|case| case.name == "window list")
+        .expect("window list case");
+    let run = run_cs(
+        &window_list,
+        window_list.reply,
+        &["--json"],
+        Answer::AfterClientEof,
+    )
+    .await;
+    assert!(run.request_json.get("cancel_on_eof").is_none());
+
+    let answers = [
+        Case {
+            name: "session handover --accept",
+            args: &["session", "handover", "--accept"],
+            noun: "handover",
+            env: &[("CHAN_WINDOW_ID", "leader")],
+            reply: "handover answered",
+            pretty: "",
+            markdown: "",
+            request: |_| true,
+        },
+        Case {
+            name: "session handover --reject",
+            args: &["session", "handover", "--reject"],
+            noun: "handover",
+            env: &[("CHAN_WINDOW_ID", "leader")],
+            reply: "handover answered",
+            pretty: "",
+            markdown: "",
+            request: |_| true,
+        },
+    ];
+    for answer in answers {
+        let run = run_cs(&answer, answer.reply, &[], Answer::AfterClientEof).await;
+        assert!(
+            run.request_json.get("cancel_on_eof").is_none(),
+            "{}: {}",
+            answer.name,
+            run.request_json
         );
     }
 }

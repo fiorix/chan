@@ -26,7 +26,7 @@ use crate::help;
 
 use crate::control::{
     absolutize, control_socket_env, open_env, open_env_from, send_control_request,
-    send_control_request_streaming, OpenEnv,
+    send_control_request_held, send_control_request_streaming, OpenEnv,
 };
 use crate::submit::SubmitAgent;
 use crate::wire::{
@@ -1188,6 +1188,7 @@ pub async fn dispatch(action: ShellAction) -> Result<()> {
                     accept,
                     reject,
                     timeout_secs: timeout,
+                    cancel_on_eof: !accept && !reject,
                 })
                 .await
             }
@@ -1344,7 +1345,18 @@ async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
 /// rejects or the timeout elapses (the CLI exits 124 on timeout).
 async fn cmd_session_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
-    let message = send_control_request(&socket, req).await?;
+    let held = matches!(
+        &req,
+        ControlRequest::SessionHandover {
+            cancel_on_eof: true,
+            ..
+        }
+    );
+    let message = if held {
+        send_control_request_held(&socket, req).await?
+    } else {
+        send_control_request(&socket, req).await?
+    };
     println!("{message}");
     Ok(())
 }
@@ -2511,13 +2523,14 @@ async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
         options: option,
     };
     let socket = control_socket_env()?;
-    let result = send_control_request(
+    let result = send_control_request_held(
         &socket,
         ControlRequest::TermSurvey {
             tab_name,
             tab_group,
             spec,
             timeout_secs,
+            cancel_on_eof: true,
         },
     )
     .await;

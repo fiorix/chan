@@ -27,6 +27,10 @@ fn default_survey_timeout_secs() -> u64 {
     DEFAULT_SURVEY_TIMEOUT_SECS
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Largest raw clipboard payload `cs copy` / `cs paste` will carry, in bytes.
 /// The clipboard is for modest content (text, a screenshot, an HTML snippet),
 /// not bulk transfer, so both sides refuse more than this rather than let an
@@ -293,7 +297,9 @@ pub enum ControlRequest {
     // (blocks for accept/reject up to timeout_secs); or the LEADER answers a
     // pending request with accept/reject (the CLI path for a non-visible
     // leader). window_id is the caller's own. `to` optionally names the target
-    // window id (default: the requester).
+    // window id (default: the requester). A requester sets `cancel_on_eof` and
+    // keeps its write half open so the server can cancel the pending handover
+    // if that client exits; answer requests omit it and remain one-shot.
     SessionHandover {
         window_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +310,8 @@ pub enum ControlRequest {
         reject: bool,
         #[serde(default)]
         timeout_secs: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        cancel_on_eof: bool,
     },
     // `cs session takeover [--force]`: become leader. Plain takeover only when
     // the leader is disconnected/gone; `--force` seizes a LIVE leader.
@@ -419,6 +427,10 @@ pub enum ControlRequest {
         /// window instead of blocking forever.
         #[serde(default = "default_survey_timeout_secs")]
         timeout_secs: u64,
+        /// Whether EOF on the open client write half cancels the parked survey.
+        /// Omitted requests retain the one-shot client's half-close behavior.
+        #[serde(default, skip_serializing_if = "is_false")]
+        cancel_on_eof: bool,
     },
     // Category 2: create or load a Team Work team from the CLI (`cs
     // terminal team new|load`). `new` carries the team's config.toml text
@@ -844,6 +856,7 @@ mod survey_wire_tests {
                 options: vec!["yes".into()],
             },
             timeout_secs: 42,
+            cancel_on_eof: true,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "term_survey");
@@ -852,6 +865,7 @@ mod survey_wire_tests {
         assert!(v.get("tab_group").is_none());
         assert_eq!(v["spec"]["bodyMarkdown"], "q");
         assert_eq!(v["timeout_secs"], 42);
+        assert_eq!(v["cancel_on_eof"], true);
         // Decodes back into the same variant (the server's path).
         let raw = serde_json::to_string(&req).unwrap();
         let back: ControlRequest = serde_json::from_str(&raw).unwrap();
@@ -877,8 +891,13 @@ mod survey_wire_tests {
         .to_string();
         let back: ControlRequest = serde_json::from_str(&raw).unwrap();
         match back {
-            ControlRequest::TermSurvey { timeout_secs, .. } => {
+            ControlRequest::TermSurvey {
+                timeout_secs,
+                cancel_on_eof,
+                ..
+            } => {
                 assert_eq!(timeout_secs, DEFAULT_SURVEY_TIMEOUT_SECS);
+                assert!(!cancel_on_eof);
             }
             other => panic!("expected TermSurvey, got {other:?}"),
         }
@@ -1347,12 +1366,14 @@ mod survey_wire_tests {
             accept: false,
             reject: false,
             timeout_secs: 30,
+            cancel_on_eof: true,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "session_handover");
         assert_eq!(v["window_id"], "w-abc");
         assert!(v.get("to").is_none());
         assert_eq!(v["timeout_secs"], 30);
+        assert_eq!(v["cancel_on_eof"], true);
         let back: ControlRequest =
             serde_json::from_str(r#"{"type":"session_handover","window_id":"w-abc"}"#).unwrap();
         assert!(matches!(
@@ -1361,6 +1382,7 @@ mod survey_wire_tests {
                 accept: false,
                 reject: false,
                 timeout_secs: 0,
+                cancel_on_eof: false,
                 ..
             }
         ));
