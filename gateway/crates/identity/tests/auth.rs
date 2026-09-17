@@ -2539,31 +2539,23 @@ async fn share_landing_unknown_owner_skips_the_caller_lookup() {
 
 #[tokio::test]
 async fn share_landing_root_grantee_denied() {
-    // Owner-only gate: a GRANTEE (caller != owner) does NOT get
-    // whole-devserver open -- they keep the per-workspace share landing. 404
-    // (same shape as unknown-handle) so it can't probe ownership. The gate
-    // fires before any devserver lookup, so no live-devserver/access mocks.
+    // A grantee who can open a shared workspace must still not reach the
+    // whole-devserver launcher. The owner-only gate keeps the refusal at the
+    // same 404 shape as an unknown handle.
     let app = TestApp::new().await;
-    let mut c = Client::new(&app);
     let caller_uid = fake_user_id();
-    happy_login(&app, &mut c, caller_uid, "grantee@x.com").await;
     let owner_uid = Uuid::new_v4();
-    Mock::given(method("GET"))
-        .and(path("/v1/users/by-username"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
-            owner_uid,
-            "owner@x.com",
-            "owner-handle",
-        )))
-        .mount(&app.profile)
-        .await;
+    let mut c =
+        signed_in_with_a_shared_devserver(&app, owner_uid, &"b".repeat(64), caller_uid, "grantee")
+            .await;
 
     let caller_path = format!("/v1/users/{caller_uid}");
     let before = profile_request_count(&app, "GET", &caller_path).await;
-    let (s, _, _, _) = c.send(Method::GET, "/s/owner-handle", None).await;
+    let (status, _, body, _) = c.send(Method::GET, "/s/owner-handle", None).await;
     let after = profile_request_count(&app, "GET", &caller_path).await;
 
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "not found"}));
     assert_eq!(
         after - before,
         0,
