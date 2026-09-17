@@ -1360,8 +1360,7 @@ impl GraphView {
     /// indexer couldn't stat the file or the row predates the v5
     /// migration (size column NULL). Sorted by path. Used by
     /// `Workspace::reconcile` to compute a strictly tighter diff than
-    /// mtime alone: a same-mtime-different-content rewrite no
-    /// longer slips past the reconcile.
+    /// mtime alone and detect a same-mtime-different-content rewrite.
     pub fn files_with_stat(&self) -> Result<Vec<FileStatRow>> {
         tracing::debug!("graph::files_with_stat");
         let conn = self.reader()?;
@@ -2087,10 +2086,8 @@ mod tests {
 
     #[test]
     fn replace_file_keeps_two_anchors_to_the_same_target() {
-        // A file that
-        // links the SAME target via two different anchors must keep BOTH
-        // edges. The old PK (src, dst, kind) collapsed them on INSERT OR
-        // IGNORE, keeping only the first; anchor is now in the PK.
+        // A file that links the same target via two different anchors must keep
+        // both edges, so the primary key includes the anchor.
         let tmp = TempDir::new().unwrap();
         let g = GraphView::open(&tmp.path().join("g.sqlite")).unwrap();
         let link = |anchor: &str| Edge {

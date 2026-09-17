@@ -71,9 +71,8 @@ mod tests {
 
     #[test]
     fn anchor_unicode_passes_through_word_chars_only() {
-        // Non-ASCII letters become separators; this matches GitHub's
-        // historical behavior for the `[A-Za-z0-9-]` slug form. We can
-        // upgrade to a Unicode-aware slug later if it matters.
+        // Non-ASCII letters become separators; this matches GitHub's ASCII
+        // `[A-Za-z0-9-]` slug form. We can adopt a Unicode-aware slug if needed.
         assert_eq!(heading_anchor("café au lait"), "caf-au-lait");
     }
 }

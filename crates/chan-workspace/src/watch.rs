@@ -1310,10 +1310,8 @@ impl WatchHandle {
                     // notify backend errors (inotify queue overflow,
                     // fseventsd disconnect, watch path vanishing)
                     // mean the event stream is no longer trustworthy.
-                    // Surface to the consumer so they can fall back
-                    // to a full reindex; the previous behavior of
-                    // logging-and-continuing left consumers silently
-                    // stale.
+                    // Surface the error so the consumer can fall back to a full
+                    // reindex instead of remaining silently stale.
                     tracing::warn!("watch error: {e}");
                     let message = e.to_string();
                     let generation = policy_source_for_cb.read().unwrap().generation();

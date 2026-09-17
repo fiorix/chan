@@ -526,8 +526,8 @@ pub fn process_alive(pid: u32) -> ProcessLiveness {
 /// Did `try_lock_exclusive` fail because the lock is already held?
 /// On Unix fs4 surfaces `WouldBlock`; on Windows it returns
 /// `ERROR_LOCK_VIOLATION` / `ERROR_SHARING_VIOLATION`, which std does
-/// not decode to `WouldBlock` -- the historical "Windows lock-contract
-/// gap". Match both so contention maps to `WorkspaceLocked` uniformly.
+/// not decode to `WouldBlock`. Match both so contention maps to
+/// `WorkspaceLocked` uniformly.
 pub(crate) fn is_contended(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::WouldBlock {
         return true;
@@ -727,10 +727,10 @@ mod tests {
         assert!(!is_locked_by_foreign_holder(tmp.path(), &root(&tmp)));
     }
 
-    // Un-gated from the old `#[cfg(unix)]`: `is_contended` now maps the
-    // Windows LockFileEx error (ERROR_LOCK_VIOLATION) to contention too,
-    // so the contract is symmetric. CI runs tests on unix today; the
-    // Windows arm is compile-checked via `cargo xwin check`.
+    // `is_contended` maps the Windows LockFileEx error
+    // (ERROR_LOCK_VIOLATION) to contention, so the contract is symmetric. CI
+    // runs tests on unix; the Windows arm is compile-checked via
+    // `cargo xwin check`.
     #[test]
     fn second_acquire_same_process_is_already_open() {
         // The contended lock's record names OUR own pid, so a second

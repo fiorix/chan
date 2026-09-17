@@ -12,11 +12,11 @@ use percent_encoding::percent_decode_str;
 
 use crate::{ContactNode, Edge, EdgeKind};
 
-/// Every contact candidate for one mention plus the compatibility winner.
+/// Every contact candidate for one mention plus the selected winner.
 ///
 /// Candidates retain `GraphView::contacts()` order. The selected path is the
-/// final candidate, matching the graph projection's historical last-writer
-/// behavior when contact basenames or aliases collide.
+/// final candidate, matching the graph projection's last-writer rule when
+/// contact basenames or aliases collide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionContactResolution {
     /// Canonical contact paths in `GraphView::contacts()` order.

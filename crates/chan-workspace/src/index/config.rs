@@ -74,17 +74,12 @@ pub fn embedding_model(id: &str) -> Option<&'static EmbeddingModelInfo> {
 /// next index open; the indexer compares against the value loaded
 /// from disk and clears `bm25/` + `embeddings/` on mismatch.
 ///
-/// v1: per-heading chunking with hybrid (BM25 + dense) retrieval,
-///     replacing the old per-file BM25 schema.
-/// v2: candle-backed embedder replaces fastembed/ort. Vector tensors
-///     are byte-compatible (same f32 layout, same BGE checkpoints)
-///     but small numerical drift between ONNX and the pure-Rust
-///     transformer kernel can shift cosine scores by epsilon, so
-///     wipe and re-embed on first open after upgrade.
-/// v3: indexer widened from `.md`-only to every `FileClass::EditableText`
-///     extension (today: `.md` + `.txt`). Existing indices were
-///     `.md`-only and would miss `.txt` content; a wipe-and-rebuild
-///     populates them.
+/// v1: per-heading chunking with hybrid (BM25 + dense) retrieval.
+/// v2: candle-backed embedding. Vector tensors have the same f32 layout and BGE
+///     checkpoints as v1, but numerical drift between kernels can shift cosine
+///     scores by epsilon, so a version mismatch wipes and re-embeds.
+/// v3: every `FileClass::EditableText` extension (today `.md` and `.txt`). A v2
+///     index contains only `.md`, so the mismatch wipe populates `.txt` content.
 pub const SCHEMA_VERSION: u32 = 3;
 
 /// How a markdown file is split into indexable units.

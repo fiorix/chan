@@ -5597,12 +5597,9 @@ mod tests {
         // The recv timeout is a DEADLOCK BACKSTOP, not a latency budget.
         // If write_text wrongly took write_serial it would block forever
         // (we hold the lock), so the test needs *some* ceiling to fail
-        // instead of hang. It is deliberately generous (seconds, not the
-        // old 150 ms) so a loaded CI runner's scheduling jitter on a
-        // tiny write cannot trip a false failure: the 150 ms budget
-        // red-lighted a release once. A
-        // correct write finishes in microseconds; only the bug path ever
-        // approaches this ceiling.
+        // instead of hang. It is deliberately generous so scheduling jitter on
+        // a loaded CI runner cannot trip a false failure. A correct write
+        // finishes in microseconds; only the bug path approaches this ceiling.
         let guard = workspace.write_serial.lock().unwrap();
         let workspace_for_write = workspace.clone();
         let (tx, rx) = std::sync::mpsc::channel();

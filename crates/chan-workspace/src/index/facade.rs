@@ -568,8 +568,7 @@ impl Index {
         // resident chunk memory: roughly that many parsed files in
         // flight at once.
         //
-        // Worker and batch budget come from `SearchAggression`.
-        // Balanced preserves the historical behavior:
+        // Worker and batch budget come from `SearchAggression`. Balanced uses
         // `available_parallelism - 2`, clamped to [1, 6].
         let budget = opts.aggression.budget();
         let worker_count = budget.worker_count;
@@ -1217,7 +1216,7 @@ pub enum SearchAggression {
     /// Minimize foreground impact: one reader/chunker, small queue,
     /// smaller embedding flushes, longer server debounce.
     Conservative,
-    /// Historical behavior and default.
+    /// Balance rebuild throughput and foreground headroom. This is the default.
     #[default]
     Balanced,
     /// Favor rebuild wall-clock over foreground headroom.

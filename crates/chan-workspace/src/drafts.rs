@@ -23,11 +23,10 @@ use crate::error::{ChanError, Result};
 use crate::fs_ops;
 use crate::trash;
 
-/// Trash original-path label prefix for a discarded draft. Drafts no
-/// longer have a virtual namespace, but the trash entry still records a
-/// stable human-readable origin label so the user can tell a trashed
-/// draft from a trashed workspace file. Kept a literal here so the
-/// caller does not have to thread the configured dir name through.
+/// Trash original-path label prefix for a discarded draft. The trash entry
+/// records a stable human-readable origin label so the user can distinguish a
+/// trashed draft from a trashed workspace file. Kept as a literal so the caller
+/// does not have to thread the configured directory name through.
 const DRAFTS_TRASH_LABEL: &str = ".Drafts";
 
 /// Handle to a single draft directory under `drafts_dir`. `name`

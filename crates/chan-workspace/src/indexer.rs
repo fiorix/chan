@@ -408,12 +408,10 @@ mod tests {
     /// ceiling is never approached; it only governs the worst case
     /// under the full parallel suite, where FSEvent delivery and the
     /// worker thread's turn on the CPU can be delayed by seconds. The
-    /// old 5s budget was too tight for that worst case (it flaked on
-    /// macOS CI under 12-way contention); 30s absorbs it without
-    /// slowing the common path, since `wait_for` returns as soon as
-    /// the condition holds. The cross-process `fs_test_lock` gate is
-    /// the primary fix (it removes the competing FS-timing load); this
-    /// budget is the backstop and should rarely be approached now.
+    /// 30-second backstop absorbs 12-way macOS CI contention without slowing
+    /// the common path, since `wait_for` returns as soon as the condition holds.
+    /// The cross-process `fs_test_lock` gate removes competing FS-timing load,
+    /// so this budget should rarely be approached.
     const FS_DELIVERY_BUDGET: Duration = Duration::from_secs(30);
 
     /// Poll a closure until it returns true or `timeout` elapses.

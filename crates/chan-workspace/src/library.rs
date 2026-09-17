@@ -523,11 +523,8 @@ impl Library {
     /// the registry. Walks the Library's captured metadata parent and deletes any immediate
     /// subdirectory whose name isn't a current metadata key.
     ///
-    /// Use cases:
-    ///   - A previous chan version `unregister`'d a workspace without
-    ///     wiping the metadata root.
-    ///   - A registry was hand-edited and the matching metadata
-    ///     roots stayed behind.
+    /// Use cases include an interrupted unregister and a hand-edited registry
+    /// whose matching metadata roots remain on disk.
     ///
     /// Cross-process safety: this routine snapshots the registry
     /// under the in-process mutex and walks each subsystem dir
@@ -778,8 +775,8 @@ mod tests {
     fn open_at_leaves_a_customized_exclusion_list_alone() {
         let cfg = TempDir::new().unwrap();
         let config_path = cfg.path().join("config.toml");
-        // One hand edit (buck-out added per the incident-relief note):
-        // no longer the stock default, so no migration.
+        // Adding buck-out makes this a customized exclusion list, so migration
+        // must leave it intact.
         std::fs::write(
             &config_path,
             "index_excluded_dirs = [\".git\", \".hg\", \".svn\", \"node_modules\", \"target\", \"__pycache__\", \".venv\", \"venv\", \".tox\", \".pytest_cache\", \".mypy_cache\", \".ruff_cache\", \".cache\", \"dist\", \"build\", \"buck-out\"]\nworkspaces = []\n",
