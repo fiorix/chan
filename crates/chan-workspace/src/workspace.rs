@@ -351,6 +351,7 @@ pub struct RecoveryPass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryOutcome {
     Complete,
+    CompleteWithReportRefreshOwed,
     Retry,
 }
 
@@ -1272,7 +1273,7 @@ impl Workspace {
             }
             status.active = None;
             match outcome {
-                RecoveryOutcome::Complete => {
+                RecoveryOutcome::Complete | RecoveryOutcome::CompleteWithReportRefreshOwed => {
                     status.completed_generation =
                         std::cmp::max(status.completed_generation, pass.generation);
                 }

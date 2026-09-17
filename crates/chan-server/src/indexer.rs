@@ -352,6 +352,16 @@ impl chan_workspace::RecoveryDriver for CoordinatorDriver {
 /// path is unaffected.
 const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// One initial refresh and one immediate retry. Persistent report-write
+/// failures must not keep the single recovery coordinator busy forever.
+const MAX_REPORT_REFRESH_ATTEMPTS: usize = 2;
+
+enum RecoveryPassResult {
+    Complete,
+    ActionFailed(chan_workspace::ChanError),
+    ReportRefreshFailed(chan_workspace::ChanError),
+}
+
 #[cfg(test)]
 static COORDINATOR_RETRY_FAILURE: std::sync::OnceLock<Mutex<Option<std::path::PathBuf>>> =
     std::sync::OnceLock::new();
@@ -378,6 +388,77 @@ fn take_coordinator_retry_failure(root: &std::path::Path) -> bool {
     }
 }
 
+#[cfg(test)]
+struct CoordinatorRefreshFailure {
+    passes: usize,
+    refreshes: usize,
+    pass_tx: tokio::sync::mpsc::UnboundedSender<usize>,
+}
+
+#[cfg(test)]
+static COORDINATOR_REFRESH_FAILURES: std::sync::OnceLock<
+    Mutex<HashMap<std::path::PathBuf, CoordinatorRefreshFailure>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn arm_coordinator_refresh_failure(
+    root: std::path::PathBuf,
+    pass_tx: tokio::sync::mpsc::UnboundedSender<usize>,
+) {
+    let previous = COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            root,
+            CoordinatorRefreshFailure {
+                passes: 0,
+                refreshes: 0,
+                pass_tx,
+            },
+        );
+    assert!(
+        previous.is_none(),
+        "coordinator refresh probe already armed"
+    );
+}
+
+#[cfg(test)]
+fn record_coordinator_refresh_failure_pass(root: &std::path::Path) {
+    let mut probes = COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    if let Some(probe) = probes.get_mut(root) {
+        probe.passes += 1;
+        let _ = probe.pass_tx.send(probe.passes);
+    }
+}
+
+#[cfg(test)]
+fn fail_coordinator_report_refresh(root: &std::path::Path) -> bool {
+    let mut probes = COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    let Some(probe) = probes.get_mut(root) else {
+        return false;
+    };
+    probe.refreshes += 1;
+    true
+}
+
+#[cfg(test)]
+fn take_coordinator_refresh_failure(root: &std::path::Path) -> (usize, usize) {
+    COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(root)
+        .map(|probe| (probe.passes, probe.refreshes))
+        .unwrap_or_default()
+}
+
 /// Coordinator task: drains recovery requests to the newest required
 /// workspace generation and keeps claiming and running passes until that
 /// generation is complete. It executes every action the workspace can park
@@ -397,6 +478,7 @@ fn spawn_coordinator(
     tokio::spawn(async move {
         let mut next_start_at = Instant::now();
         while let Some(mut required_generation) = rx.recv().await {
+            let mut report_refresh_attempts = 0;
             required_generation = drain_required_generation(&mut rx, required_generation);
             loop {
                 if shared.cancel.load(Ordering::Relaxed) {
@@ -464,8 +546,10 @@ fn spawn_coordinator(
                         bg_embed: bg_embed_w,
                     };
                     #[cfg(test)]
+                    record_coordinator_refresh_failure_pass(workspace_for_pass.root());
+                    #[cfg(test)]
                     if take_coordinator_retry_failure(workspace_for_pass.root()) {
-                        return Err(chan_workspace::ChanError::Io(
+                        return RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Io(
                             "injected coordinator retry".to_string(),
                         ));
                     }
@@ -482,19 +566,39 @@ fn spawn_coordinator(
                             workspace_for_pass.replay_pending_writes().map(|_| ())
                         }
                     };
-                    if result.is_ok() {
-                        workspace_for_pass.refresh_persisted_report_if_owed()
-                    } else {
-                        result
+                    if let Err(error) = result {
+                        return RecoveryPassResult::ActionFailed(error);
+                    }
+                    #[cfg(test)]
+                    if fail_coordinator_report_refresh(workspace_for_pass.root()) {
+                        return RecoveryPassResult::ReportRefreshFailed(
+                            chan_workspace::ChanError::Io(
+                                "injected persistent report refresh failure".to_string(),
+                            ),
+                        );
+                    }
+                    match workspace_for_pass.refresh_persisted_report_if_owed() {
+                        Ok(()) => RecoveryPassResult::Complete,
+                        Err(error) => RecoveryPassResult::ReportRefreshFailed(error),
                     }
                 })
                 .await;
 
                 *shared.bg_embed.lock().unwrap() = None;
-                let outcome = if matches!(&result, Ok(Ok(_))) {
-                    RecoveryOutcome::Complete
-                } else {
-                    RecoveryOutcome::Retry
+                let outcome = match &result {
+                    Ok(RecoveryPassResult::Complete) => {
+                        report_refresh_attempts = 0;
+                        RecoveryOutcome::Complete
+                    }
+                    Ok(RecoveryPassResult::ReportRefreshFailed(_)) => {
+                        report_refresh_attempts += 1;
+                        if report_refresh_attempts >= MAX_REPORT_REFRESH_ATTEMPTS {
+                            RecoveryOutcome::CompleteWithReportRefreshOwed
+                        } else {
+                            RecoveryOutcome::Retry
+                        }
+                    }
+                    Ok(RecoveryPassResult::ActionFailed(_)) | Err(_) => RecoveryOutcome::Retry,
                 };
                 let Some(workspace_w) = workspace.upgrade() else {
                     return;
@@ -514,7 +618,7 @@ fn spawn_coordinator(
                 required_generation = drain_required_generation(&mut rx, required_generation);
 
                 match &result {
-                    Ok(Ok(_summary)) => {
+                    Ok(RecoveryPassResult::Complete) => {
                         if recovery.is_ready()
                             && recovery.completed_generation >= required_generation
                         {
@@ -528,16 +632,31 @@ fn spawn_coordinator(
                             };
                         }
                     }
-                    Ok(Err(chan_workspace::ChanError::Cancelled)) => {
+                    Ok(RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Cancelled)) => {
                         tracing::info!("indexer: rebuild cancelled");
                         if recovery.is_ready() {
                             reconcile_idle(&workspace, &shared);
                         }
                     }
-                    Ok(Err(error)) => {
+                    Ok(RecoveryPassResult::ActionFailed(error)) => {
                         *shared.status.lock().unwrap() = IndexStatus::Error {
                             message: error.to_string(),
                         };
+                    }
+                    Ok(RecoveryPassResult::ReportRefreshFailed(error)) => {
+                        tracing::warn!(
+                            attempt = report_refresh_attempts,
+                            max_attempts = MAX_REPORT_REFRESH_ATTEMPTS,
+                            ?error,
+                            "persisted report refresh failed"
+                        );
+                        if recovery.is_ready() {
+                            reconcile_idle(&workspace, &shared);
+                        } else {
+                            *shared.status.lock().unwrap() = IndexStatus::Error {
+                                message: error.to_string(),
+                            };
+                        }
                     }
                     Err(error) => {
                         *shared.status.lock().unwrap() = IndexStatus::Error {
@@ -545,12 +664,16 @@ fn spawn_coordinator(
                         };
                     }
                 }
-                if matches!(&result, Ok(Err(chan_workspace::ChanError::Cancelled)))
-                    || shared.cancel.load(Ordering::Relaxed)
+                if matches!(
+                    &result,
+                    Ok(RecoveryPassResult::ActionFailed(
+                        chan_workspace::ChanError::Cancelled
+                    ))
+                ) || shared.cancel.load(Ordering::Relaxed)
                 {
                     break;
                 }
-                if !matches!(&result, Ok(Ok(_))) {
+                if !matches!(&result, Ok(RecoveryPassResult::Complete)) {
                     if recovery.pending.is_some() {
                         continue;
                     }
@@ -1449,6 +1572,84 @@ mod tests {
             .iter()
             .any(|file| file.path == "offline.md"));
         drop(indexer);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_report_refresh_failure_has_a_bounded_pass_count() {
+        let cfg = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(dir.path()).unwrap();
+        fs::write(dir.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        workspace.report().unwrap();
+        drop(workspace);
+
+        let canonical_root = dir.path().canonicalize().unwrap();
+        let (worker_reached, worker_release) =
+            chan_workspace::workspace::arm_open_recovery_pause_for_test(canonical_root.clone());
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        worker_reached
+            .recv_timeout(CONVERGENCE_BUDGET)
+            .expect("startup worker did not reach the pre-claim barrier");
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+        let workspace_for_stop = workspace.clone();
+        let stopper = std::thread::spawn(move || {
+            workspace_for_stop.stop_open_recovery();
+            let _ = stopped_tx.send(());
+        });
+        if stopped_rx.recv_timeout(CONVERGENCE_BUDGET).is_err() {
+            let _ = worker_release.send(());
+            stopper.join().unwrap();
+            panic!("startup worker did not stop at the pre-claim barrier");
+        }
+        stopper.join().unwrap();
+
+        let required = workspace.recovery_status().generation;
+        let status = idle_status();
+        let shared = test_shared(status.clone());
+        let cancel = shared.cancel.clone();
+        let (pass_tx, mut pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(canonical_root.clone(), pass_tx);
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(10),
+        );
+        tx.send(required).unwrap();
+
+        let observed = tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                if workspace.recovery_status().is_ready() {
+                    break None;
+                }
+                tokio::select! {
+                    pass = pass_rx.recv() => {
+                        if pass.is_some_and(|pass| pass > 2) {
+                            break pass;
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("coordinator neither converged nor exceeded the pass bound");
+        if observed.is_some() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let counts = take_coordinator_refresh_failure(&canonical_root);
+        assert!(
+            observed.is_none(),
+            "persistent refresh failure exceeded two passes: {counts:?}"
+        );
+        assert_eq!(counts, (2, 2));
+
+        drop(tx);
+        coordinator.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

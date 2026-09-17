@@ -452,6 +452,48 @@ mod tests {
     }
 
     #[test]
+    fn watcher_overflow_reconcile_leaves_persisted_report_refresh_pending() {
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let entry = lib.register_workspace(workspace_dir.path()).unwrap();
+        std::fs::write(workspace_dir.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+        workspace.report().unwrap();
+        drop(workspace);
+
+        let chan_home = lib.config_path().parent().unwrap().to_path_buf();
+        let (workspace, _plan) = Workspace::open(
+            entry,
+            lib.walk_filter(),
+            lib.drafts_dir(),
+            lib.transfer_max_bytes(),
+            &chan_home,
+        )
+        .unwrap();
+        assert!(workspace.recovery_status().pending.is_some());
+
+        let state = graph_indexer_state();
+        apply_event(
+            WatchEvent::loss(workspace.scope_policy().generation()),
+            &mut HashMap::new(),
+            &workspace,
+            &state,
+            Duration::from_millis(DEBOUNCE_TEST_MS),
+            Instant::now(),
+        );
+
+        assert_eq!(state.reconciles_total.load(Ordering::Relaxed), 1);
+        let recovery = workspace.recovery_status();
+        assert!(
+            recovery.pending.is_some(),
+            "watcher overflow must not clear the persisted-report refresh obligation: {recovery:?}"
+        );
+        assert!(recovery.active.is_none());
+        assert!(!recovery.is_ready());
+    }
+
+    #[test]
     fn directory_rename_forgets_source_subtree() {
         let (_cfg, workspace_dir, workspace) = setup_workspace();
         for (path, body) in [
