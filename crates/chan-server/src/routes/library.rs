@@ -1296,13 +1296,22 @@ async fn handle_library_window_live_terminals(
 
 /// `POST /api/library/windows/{window_id}/close`: close a native window through
 /// the desktop manager, then discard any local durable row. Remote close is
-/// routed by the desktop op to the owning devserver. The launcher has already
-/// shown the informed live-terminal confirmation; the bridge close has no
-/// second native prompt.
+/// routed by the desktop op to the owning devserver. The route does not check
+/// live terminals; callers confirm first, and the bridge close has no second
+/// native prompt.
 async fn handle_close_library_window(
     State(host): State<Arc<WorkspaceHost>>,
     AxumPath(window_id): AxumPath<String>,
 ) -> Response {
+    // A hidden local window has no webview to destroy, but the desktop still
+    // discards its row before replying false. Remember ownership so that
+    // successful discard is not mistaken for an unknown id below.
+    let owned = host.window_registry().is_some_and(|registry| {
+        registry
+            .snapshot()
+            .iter()
+            .any(|row| row.window_id == window_id)
+    });
     let destroyed = match host
         .desktop_bridge()
         .dispatch(|reply| DesktopWindowOp::Close {
@@ -1316,7 +1325,7 @@ async fn handle_close_library_window(
     };
     match host.discard_window(&window_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) if destroyed => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) if destroyed || owned => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -3852,11 +3861,13 @@ mod window_op_route_tests {
             .mint_window(chan_library::windows::WindowKind::Terminal, None)
             .expect("mint")
             .window_id;
+        let desktop_host = Arc::clone(&host);
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
-                if let DesktopWindowOp::Close { reply, .. } = op {
-                    // Hidden/offline row: no native webview was destroyed. The
-                    // route must still discard the durable library record.
+                if let DesktopWindowOp::Close { id, reply } = op {
+                    // The real desktop discards the row before discovering
+                    // that a hidden/offline window has no native webview.
+                    let _ = desktop_host.discard_window(&id).expect("desktop discard");
                     let _ = reply.send(Ok(false));
                 }
             }
