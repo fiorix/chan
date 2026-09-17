@@ -144,7 +144,7 @@ Profile does not perform the product-facing drain inside policy PUT. Identity fi
 
 `POST /v1/admin/users/{id}/block`:
 
-1. Set `users.blocked_at` if absent and set `block_reason` in the same transaction as the following steps. While an account-delete job exists, a later admin block preserves the existing deletion reason; the supplied admin reason still belongs to the audit row. Starting deletion on an already-blocked account preserves its stored reason, including null, and its original `blocked_at`.
+1. Set `users.blocked_at` if absent and update `block_reason` in the same transaction as the following steps. While an account-delete job exists, the block keeps the stored `block_reason`; otherwise it stores the supplied admin reason. The supplied admin reason is written to the audit row in either case.
 2. Update `api_tokens` to set `revoked_at = now()` for every live PAT belonging to the user.
 3. Append an `auth_audit` row with action `blocked`.
 4. Reserve a durable subject-revocation generation in the same transaction.
@@ -153,7 +153,7 @@ The handler returns 202 as soon as the transaction commits; the background worke
 
 Unblock clears `blocked_at` and `block_reason` only: PATs revoked at block time stay revoked, and the route answers 409 while an account-delete job is pending for the user.
 
-Account deletion uses the dominant `AccountDelete` outbox job. The initial transaction blocks the user and revokes PATs but retains the profile row. Only after the quiet-window cuts settle does the worker delete the user and let foreign-key cascades remove identities, indexed OAuth sessions, tokens, and grants.
+Account deletion uses the dominant `AccountDelete` outbox job. The initial transaction blocks the user and revokes PATs but retains the profile row. On an account that is already blocked it keeps the stored `block_reason`, including null, and the original `blocked_at`; otherwise it stores `account deletion pending`. Only after the quiet-window cuts settle does the worker delete the user and let foreign-key cascades remove identities, indexed OAuth sessions, tokens, and grants.
 
 ### Email rewrite is admin-only
 
