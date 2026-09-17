@@ -1034,8 +1034,8 @@ async fn devserver_discovery_routes_multiple_local_instances() {
 /// A VALUED `--devserver=<port>` under `CHAN_NO_DEVSERVER_HANDOFF` names a
 /// specific instance the environment forbids reaching: that contradiction
 /// must refuse loudly, naming both sides, and must never fall through to a
-/// silent standalone bind. (The bare flag and the env var alone keep their
-/// historical standalone behavior.)
+/// silent standalone bind. (The bare flag and the env var alone request
+/// standalone serving.)
 #[tokio::test]
 async fn valued_devserver_selector_refuses_under_handoff_opt_out() {
     let sandbox = Sandbox::new();
@@ -1275,9 +1275,9 @@ async fn chan_service_join_survives_stall_and_restart() {
         .await
         .unwrap_or_else(|| panic!("join never attached:\n{}", join.out.dump()));
 
-    // A stalled daemon (SIGSTOP) stays alive but misses health probes: the
-    // old 3-strike watchdog bailed ~6s in. The grace window narrates the
-    // outage instead, and recovers as soon as SIGCONT lets probes answer.
+    // A stalled daemon (SIGSTOP) stays alive but misses health probes. The
+    // grace window must narrate the outage without ending the join, then
+    // recover as soon as SIGCONT lets probes answer.
     // The stall lasts exactly as long as the narration takes to appear, well
     // inside the grace.
     send_signal(first_pid, "STOP");

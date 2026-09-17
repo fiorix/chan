@@ -2840,7 +2840,7 @@ fn parse_search_aggression(s: &str) -> Result<SearchAggression, String> {
 ///
 /// `--host` is authoritative when given; `-4` / `-6` only validate
 /// its family. With no `--host`, `-4` selects 127.0.0.1, `-6` selects
-/// ::1, and neither selects 127.0.0.1 (the historical default).
+/// ::1, and neither selects 127.0.0.1.
 fn resolve_listen_addr(
     host: Option<IpAddr>,
     ipv4: bool,
@@ -3092,7 +3092,8 @@ struct LiveInstances {
 /// shell), and desktop parentage hands off. With no identified parent, one live
 /// kind wins; with both kinds live, the desktop personality chooses desktop and
 /// the standalone personality chooses a devserver. With neither live, the
-/// historical standalone/desktop-personality behavior remains. A present but
+/// desktop personality chooses desktop and the standalone personality chooses
+/// standalone. A present but
 /// unidentified control socket preserves the conservative standalone fallback
 /// only when no live instance supplies a stronger signal.
 fn decide_open_route(
@@ -3119,8 +3120,8 @@ fn decide_open_route(
 
     Ok(match parentage {
         // In a devserver shell: register with the current devserver. This
-        // beats a forced-desktop env var that leaked into the session, which
-        // is what routed a devserver shell to chan-desktop before.
+        // beats a forced-desktop env var that leaked into the session, avoiding
+        // routing a devserver shell to chan-desktop.
         Parentage::Devserver { .. } => OpenTarget::Devserver,
         Parentage::Desktop => OpenTarget::Desktop,
         // No identified parent. A sole live instance wins regardless of binary
@@ -3836,9 +3837,8 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
     let devserver_opt_out = chan_server::devserver_handoff::devserver_handoff_opt_out();
     // A VALUED selector names a specific devserver; silently serving
     // standalone instead would be the wrong-instance outcome this flag exists
-    // to prevent. The bare `--devserver` keeps its historical behavior under
-    // the opt-out (skip the handoff, serve standalone), as does the env var
-    // alone.
+    // to prevent. Under the opt-out, the bare `--devserver` and the env var
+    // alone skip the handoff and serve standalone.
     if devserver_opt_out {
         if let Some(DevserverSelector::Port(port)) = flags.devserver {
             anyhow::bail!(
