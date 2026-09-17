@@ -181,6 +181,28 @@ describe("CommandDeck lazy confirmation", () => {
     expect(target.querySelector(".deck-decisions")).toBeNull();
   });
 
+  it("drops an action's confirmation after its card was dismissed", async () => {
+    const running = deferred<DeckConfirm>();
+    const onChoose = vi
+      .fn<(entry: DeckItem) => Promise<DeckConfirm>>()
+      .mockImplementationOnce(() => running.promise);
+    mountDeck(item(undefined), onChoose);
+
+    closeResult().click();
+    await tick();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
+
+    // Escape hands the card back to the list. The command keeps running, but
+    // its answer is to a question the deck has stopped asking.
+    escape();
+    await tick();
+    running.resolve(confirmation("Dismissed confirmation"));
+    await flush();
+
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(closeResult()).toBeTruthy();
+  });
+
   it("selects Cancel when an action returns a confirmation", async () => {
     const onChoose = vi
       .fn<(entry: DeckItem) => Promise<DeckConfirm>>()

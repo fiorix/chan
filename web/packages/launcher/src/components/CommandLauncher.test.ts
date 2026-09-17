@@ -481,6 +481,95 @@ describe("Computers command deck", () => {
     expect(actions.liveTerminalCount).toHaveBeenCalledTimes(3);
   });
 
+  it("does not close a window on a reading a later card replaced", async () => {
+    const recheck = deferred<unknown>();
+    const reopened = deferred<unknown>();
+    actions.liveTerminalCount
+      .mockResolvedValueOnce(5)
+      .mockImplementationOnce(() => recheck.promise)
+      .mockImplementationOnce(() => reopened.promise);
+
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "5 terminal sessions in this window will stop.",
+    );
+
+    // Confirm, dismiss the working card inside the recheck's latency, then ask
+    // again: the second card is prepared while the first recheck is still out.
+    closeDecision().click();
+    await tick();
+    await key("Escape");
+    result("Close").click();
+    await tick();
+
+    reopened.resolve(7);
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "7 terminal sessions in this window will stop.",
+    );
+
+    // The overtaken recheck still matches its own older reading. It must not
+    // close the window under the card that now names a different number.
+    recheck.resolve(5);
+    await flushPromises();
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "7 terminal sessions in this window will stop.",
+    );
+  });
+
+  it("forgets a Close reading when its window leaves the roster", async () => {
+    actions.liveTerminalCount.mockResolvedValue(2);
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "2 terminal sessions in this window will stop.",
+    );
+
+    // The window goes and comes back while this always-mounted deck watches.
+    library.windows = [{ ...terminalRecord }];
+    await tick();
+    library.windows = [{ ...windowRecord }, { ...terminalRecord }];
+    await tick();
+
+    result("Window 1 [release checks]").click();
+    await tick();
+    const draft = activeCommandLauncherDraft();
+    draft.operation = {
+      kind: "confirm",
+      itemId: "computers:close:lib-local-live-shape:w-project-1",
+      title: "Close Window 1 [release checks]?",
+      message: "2 terminal sessions in this window will stop.",
+      actionLabel: "Close",
+      danger: true,
+      selected: "cancel",
+    };
+    await tick();
+
+    // Nothing records a count for the new roster entry, so Close asks again
+    // instead of matching the reading the departed window left behind.
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "2 terminal sessions in this window will stop.",
+    );
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(2);
+  });
+
   it.each([undefined, "two"])("uses the generic Close message for payload %s", async (count) => {
     actions.liveTerminalCount.mockResolvedValueOnce(count);
     openCommandLauncher("computers");

@@ -48,7 +48,12 @@
   let scopeIndex = $state(0);
   let wasOpen = false;
   let confirmKeyReleased = true;
+  // Whoever holds the operation card owns it: a preparation between its start
+  // and its paint, an executing command between its pending card and its
+  // result. A background call whose token no longer matches has lost the card
+  // and must not paint into it.
   let preparationToken: object | null = null;
+  let executionToken: object | null = null;
 
   const activeIndex = $derived(pointerIndex ?? keyboardIndex);
   const availableScopes = $derived(scopes.filter((scope) => scope.available !== false));
@@ -141,6 +146,7 @@
     const executionDraft = draft;
     const token = {};
     preparationToken = token;
+    executionToken = null;
     let confirmation: DeckConfirm;
     if (typeof request === "function") {
       executionDraft.operation = { kind: "preparing", itemId: item.id, title: item.title };
@@ -190,6 +196,8 @@
       await onChoose(item);
       return;
     }
+    const token = {};
+    executionToken = token;
     draft.operation = { kind: "pending", itemId: item.id, title: item.title };
     try {
       const result = await onChoose(item);
@@ -198,6 +206,10 @@
       // the new draft.
       if (draft !== executionDraft) return;
       if (result) {
+        // A confirmation answers the run that asked for it. Once the card has
+        // been released or handed to a newer run, this answer describes a
+        // decision the deck is no longer offering.
+        if (executionToken !== token) return;
         executionDraft.operation = {
           kind: "confirm",
           itemId: item.id,
@@ -244,8 +256,7 @@
   }
 
   function operationBack(): void {
-    preparationToken = null;
-    draft.operation = null;
+    releaseOperation();
     zone = "results";
     void tick().then(() => input?.focus());
   }
@@ -255,8 +266,12 @@
     else void execute(item);
   }
 
-  function dismissPreparation(): void {
+  /// Give the card back to the results list. The command behind it may still
+  /// be in flight, so its ownership drops with it and its result stays off
+  /// screen.
+  function releaseOperation(): void {
     preparationToken = null;
+    executionToken = null;
     draft.operation = null;
   }
 
@@ -298,12 +313,8 @@
       // Escape cancels confirmation preparation without hiding the deck. An
       // executing command also releases its blocking view while its promise
       // continues in the background.
-      if (draft.operation?.kind === "preparing") {
-        dismissPreparation();
-        return;
-      }
-      if (draft.operation?.kind === "pending") {
-        draft.operation = null;
+      if (draft.operation?.kind === "preparing" || draft.operation?.kind === "pending") {
+        releaseOperation();
         return;
       }
       onClose();
@@ -497,13 +508,13 @@
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Checking...</span></div>
               <div class="deck-decisions">
-                <button type="button" onclick={dismissPreparation}>Dismiss</button>
+                <button type="button" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Working…</span></div>
               <div class="deck-decisions">
-                <button type="button" onclick={() => { draft.operation = null; }}>Dismiss</button>
+                <button type="button" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>

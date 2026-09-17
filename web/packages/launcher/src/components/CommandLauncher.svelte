@@ -83,6 +83,9 @@
   // A window key is library-qualified: window ids are unique only within the
   // library that minted them, and this deck aggregates several.
   const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
+  // The count a Close card was painted with, and the reading that owns that
+  // card, both keyed by (entry mode, library, window). A reading that a later
+  // one has overtaken keeps its hands off both.
   const confirmedCloseCounts = new Map<string, unknown>();
   const closePreparationVersions = new Map<string, number>();
 
@@ -155,6 +158,19 @@
     };
   }
 
+  /// Claim the next reading slot for a window's Close card. Every count read
+  /// takes one before it asks, so the reading that answers last is the only one
+  /// still entitled to describe the card.
+  function nextCloseReading(key: string): number {
+    const version = (closePreparationVersions.get(key) ?? 0) + 1;
+    closePreparationVersions.set(key, version);
+    return version;
+  }
+
+  function closeReadingIsCurrent(key: string, version: number): boolean {
+    return closePreparationVersions.get(key) === version;
+  }
+
   async function readCloseCount(window: WindowRecord): Promise<unknown> {
     try {
       return await liveTerminalCountForWindow(window);
@@ -174,21 +190,29 @@
     }
     return async () => {
       const key = closeConfirmationKey(window);
-      const version = (closePreparationVersions.get(key) ?? 0) + 1;
-      closePreparationVersions.set(key, version);
+      const version = nextCloseReading(key);
       const count = await readCloseCount(window);
-      if (closePreparationVersions.get(key) === version) {
+      if (closeReadingIsCurrent(key, version)) {
         confirmedCloseCounts.set(key, count);
       }
       return informedCloseConfirmation(window, count);
     };
   }
 
+  /// Close reads the count again and stops to confirm a second time when it
+  /// moved, so the window goes only on a number the user has just seen. The
+  /// reading is slotted like the preparation's: one overtaken by a newer read
+  /// describes a card that is no longer on screen, so it asks again rather than
+  /// closing on what it found.
   async function closeAfterFreshConfirmation(window: WindowRecord): Promise<void | DeckConfirm> {
     const key = closeConfirmationKey(window);
+    const version = nextCloseReading(key);
     const recorded = confirmedCloseCounts.get(key);
     const hadRecorded = confirmedCloseCounts.has(key);
     const fresh = await readCloseCount(window);
+    if (!closeReadingIsCurrent(key, version)) {
+      return informedCloseConfirmation(window, fresh);
+    }
     if (!hadRecorded || fresh !== recorded) {
       confirmedCloseCounts.set(key, fresh);
       return informedCloseConfirmation(window, fresh);
@@ -562,6 +586,19 @@
     draft.path = ["windows"];
     draft.selectedId = null;
     draft.operation = null;
+  });
+
+  // Close records are per window and this deck stays mounted for the life of
+  // the app, so a window that leaves the roster takes its records with it.
+  $effect(() => {
+    const live = new Set(orderedWindows.map(windowKey));
+    const gone = (key: string): boolean => !live.has(key.slice(key.indexOf(":") + 1));
+    for (const key of [...confirmedCloseCounts.keys()]) {
+      if (gone(key)) confirmedCloseCounts.delete(key);
+    }
+    for (const key of [...closePreparationVersions.keys()]) {
+      if (gone(key)) closePreparationVersions.delete(key);
+    }
   });
 
   function closeDeck(): void {
