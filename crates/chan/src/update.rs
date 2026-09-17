@@ -1648,6 +1648,26 @@ mod tests {
         assert_eq!(calls, WINDOWS_RENAME_MAX_ATTEMPTS);
         assert_eq!(sleeps.len(), WINDOWS_RENAME_MAX_ATTEMPTS - 1);
         assert!(sleeps.into_iter().sum::<Duration>() <= WINDOWS_RENAME_MAX_TOTAL_SLEEP);
+    }
+
+    #[test]
+    fn test_windows_rename_retry_constants_match_contract() {
+        assert_eq!(WINDOWS_RENAME_MAX_ATTEMPTS, 10);
+        assert_eq!(
+            WINDOWS_RENAME_RETRY_DELAYS.as_slice(),
+            [
+                Duration::from_millis(25),
+                Duration::from_millis(50),
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+                Duration::from_millis(250),
+            ]
+            .as_slice()
+        );
         assert!(WINDOWS_RENAME_MAX_TOTAL_SLEEP <= Duration::from_secs(2));
     }
 
