@@ -139,9 +139,8 @@ pub struct ValidatedToken {
     pub admission_lease_expires_at: Option<DateTime<Utc>>,
 }
 
-/// Default scope set for a freshly-issued token. `tunnel` lets the
-/// holder dial chan-tunnel; it is the only live scope (every devserver
-/// is authenticated, so there is no anonymous-readable capability).
+/// Default scope set for a freshly-issued token. It grants only `tunnel`,
+/// which chan-tunnel-server requires for tunnel admission.
 pub const DEFAULT_TOKEN_SCOPES: &[&str] = &["tunnel"];
 
 /// Request-scoped audit context recorded alongside token mutations.
@@ -209,8 +208,8 @@ impl ApiTokenService {
         self
     }
 
-    /// Single PAT-mint entry point for both the SPA and the
-    /// desktop-authorize flow; `new.origin` picks the audit action.
+    /// Single PAT-mint entry point for the SPA, desktop-authorize flow,
+    /// and operator mint; `new.origin` picks the audit action.
     pub async fn create(&self, new: NewToken<'_>, meta: &RequestMeta) -> Result<CreatedToken> {
         let label = new.label.trim();
         if label.is_empty() {
@@ -504,9 +503,9 @@ impl ApiTokenService {
 }
 
 /// Hard cap on the per-token scope list to bound row width and
-/// keep validate-time copies tiny. The live set is just `tunnel`; the
-/// cap leaves headroom for future scopes without admitting unbounded
-/// lists.
+/// keep validate-time copies tiny. Current consumers recognize `tunnel`,
+/// `desktop.connect`, and `desktop.account`; the cap leaves headroom for
+/// future scopes without admitting unbounded lists.
 const MAX_SCOPES_PER_TOKEN: usize = 16;
 /// Hard cap on the length of any single scope. Scope names are short
 /// identifiers (`tunnel`); the cap guards against pathological inputs

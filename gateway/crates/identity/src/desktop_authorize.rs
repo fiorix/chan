@@ -191,8 +191,8 @@ pub const CONSENT_PATH: &str = "/desktop/authorize/consent";
 const REDEEM_TTL: Duration = Duration::from_secs(120);
 
 /// What `/desktop/authorize/redeem` answers with, exactly once per
-/// code. Besides `POST /api/tokens`, this is the only response that
-/// ever carries a PAT secret.
+/// code. Like `POST /api/tokens` and operator `POST /admin/v1/tokens`,
+/// this response carries a PAT secret.
 #[derive(Debug, Clone, Serialize)]
 pub struct RedeemPayload {
     pub id: Uuid,
