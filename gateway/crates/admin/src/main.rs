@@ -2810,6 +2810,10 @@ mod tests {
             matches.value_source("identity_token"),
             Some(clap::parser::ValueSource::CommandLine)
         );
+        assert_eq!(
+            matches.value_source("operator_token"),
+            Some(clap::parser::ValueSource::CommandLine)
+        );
         let cli = Cli::from_arg_matches(&matches).unwrap();
         assert_eq!(cli.operator_token.as_deref(), Some("operator-secret"));
         assert_eq!(cli.profile_token.as_deref(), Some("profile-secret"));
