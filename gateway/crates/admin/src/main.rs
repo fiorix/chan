@@ -2789,25 +2789,30 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, FromArgMatches};
 
     #[test]
     fn legacy_token_flag_is_only_an_operator_alias() {
-        let cli = Cli::try_parse_from([
-            "chan-gateway-admin",
-            "--token",
-            "operator-secret",
-            "--profile-token",
-            "profile-secret",
-            "proxy",
-            "ps",
-        ])
-        .unwrap();
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "chan-gateway-admin",
+                "--token",
+                "operator-secret",
+                "--profile-token",
+                "profile-secret",
+                "proxy",
+                "ps",
+            ])
+            .unwrap();
+        // Pin the match source so a shell value cannot mask `--token` being
+        // routed to the identity-token field.
+        assert_ne!(
+            matches.value_source("identity_token"),
+            Some(clap::parser::ValueSource::CommandLine)
+        );
+        let cli = Cli::from_arg_matches(&matches).unwrap();
         assert_eq!(cli.operator_token.as_deref(), Some("operator-secret"));
         assert_eq!(cli.profile_token.as_deref(), Some("profile-secret"));
-        // clap's `env` feature may have filled it from the shell, so the pin
-        // is that the alias never lands here, not that the field is empty.
-        let from_shell = std::env::var("CHAN_ADMIN_IDENTITY_TOKEN").ok();
-        assert_eq!(cli.identity_token, from_shell);
     }
 
     #[test]
