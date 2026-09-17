@@ -726,9 +726,10 @@ mod tests {
     #[test]
     fn a_stalled_recovery_is_reported_and_offers_a_way_out() {
         // A pass parked with no claimant is `!is_ready()` exactly like a
-        // running one. It must be
-        // distinguishable from the running case above -- same readiness, same
-        // index status, different step -- and carry the rebuild that clears it.
+        // running one, so checking readiness first would report it as recovery
+        // in progress and spin the overlay forever. It must be distinguishable
+        // from the running case above -- same readiness, same index status,
+        // different step -- and carry the rebuild that clears it.
         let (_c, _r, ws) = workspace();
         ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
         assert!(

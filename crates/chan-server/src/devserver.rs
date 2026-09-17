@@ -6099,7 +6099,9 @@ mod tests {
         }
     }
 
-    // The session-role seam keys on whether a request carries TunnelOrigin: a request entering the tunnel clone carries it and reads as a Follower (local == false), while a loopback request never does and reads as a Leader (local == true).
+    // The session-role seam keys on `TunnelOrigin`: a request entering the
+    // tunnel clone carries it and reads as a Follower (`local == false`), while
+    // a loopback request does not and reads as a Leader (`local == true`).
     // `ws_upgrade` reads the same `Option<Extension<TunnelOrigin>>` extractor and
     // computes `let local = origin.is_none();`. A full `/ws` upgrade over a live
     // tunnel is a host-smoke item; this pins the marker->local mapping the role

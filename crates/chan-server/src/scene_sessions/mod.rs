@@ -3932,8 +3932,11 @@ mod tests {
         drain(&mut rx);
 
         reconcile_session(&session, &fx.workspace).await;
-        // Drive the corroborating re-check whichever way the first pass went,
-        // so every path runs the same sequence and only the fanned frames differ.
+        // If the first pass recorded a pending removal, age it past
+        // `CORROBORATE_AFTER` so the second pass would confirm it: a reconciler
+        // that reads the probe error as absence then fans `removed`, which the
+        // assertions below catch. A reconciler that records nothing runs the
+        // same two passes.
         if session
             .lock_state()
             .session_state

@@ -2323,7 +2323,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn apply_watch_change_skips_fifo() {
-        // A FIFO in the workspace (such as attach/named.pipe) must be skipped rather than passed to index_file, which would leave the indexer in IndexStatus::Error. Probe with mkfifo; skip the assertion if the binary is unavailable so test runs on minimal containers stay green.
+        // `apply_watch_change` must classify a FIFO by file type before
+        // `Workspace::index_file` runs. An indexable FIFO such as `notes.md`
+        // would fail the read with `SpecialFile`, which the watch loop maps to
+        // `IndexStatus::Error`. `attach.fifo` is not indexable text, so
+        // `index_file` would decline it by extension; this fixture pins only
+        // file-type classification. Probe with `mkfifo`; skip the assertion if
+        // the binary is unavailable so tests on minimal containers stay green.
         let (_cfg, dir, workspace) = setup_workspace();
         let fifo_path = dir.path().join("attach.fifo");
         let status = std::process::Command::new("mkfifo")

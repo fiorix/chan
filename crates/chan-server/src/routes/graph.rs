@@ -584,11 +584,12 @@ fn workspace_disk_files(
 /// Workspace-relative directory paths from the same walk
 /// `workspace_disk_files` uses. Used to recognise markdown links whose
 /// target is a directory (doc-navigation links like
-/// `[notes](../alex/)`); those don't carry between-file graph
-/// semantics and would otherwise fall through to ghost emission as
-/// `kind: file` missing nodes.
+/// `[notes](../alex/)`); those don't carry between-file graph semantics,
+/// so `build_graph_view` drops their edges.
 ///
-/// Returns an empty set on list_tree failure so callers degrade to no directory filtering (directory links then emit ghost nodes) rather than failing the request.
+/// Returns an empty set on `list_tree` failure rather than failing the
+/// request. A directory link then counts as an unresolved link target,
+/// and its edge is dropped the same way.
 fn workspace_disk_dirs(
     workspace: &chan_workspace::Workspace,
 ) -> std::collections::BTreeSet<String> {
@@ -1706,9 +1707,6 @@ fn build_graph_view(
     // referenced by any `@@mention` resolution are skipped. The
     // graph view's job is "who-mentions-whom"; an imported contact
     // never mentioned anywhere contributes nothing to that picture.
-    // Before the filter a real seed workspace surfaced 1973 contact
-    // nodes; after, only the ~49 referenced ones.
-    //
     // The first node batch intentionally skips chan-report buckets
     // so streaming callers can draw the semantic graph before the
     // report layer finishes. A later node batch re-sends final node
