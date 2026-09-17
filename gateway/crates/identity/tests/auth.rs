@@ -1631,6 +1631,41 @@ async fn token_create_rejects_overflowing_expiry() {
 }
 
 #[tokio::test]
+async fn token_create_rejects_expires_in_outside_i64() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = fake_user_id();
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            uid,
+            "octo@example.com",
+            "octocat",
+        )))
+        .mount(&app.profile)
+        .await;
+
+    let (status, _, _, _) = c
+        .send(
+            Method::POST,
+            "/api/tokens",
+            Some(json!({
+                "label": "cli",
+                "expires_in": 9_223_372_036_854_775_808_u64,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, _, body, _) = c.send(Method::GET, "/api/tokens", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn token_create_refuses_desktop_scopes() {
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
@@ -1696,16 +1731,15 @@ async fn token_create_non_positive_expires_in_never_expires() {
         .mount(&app.profile)
         .await;
 
-    for expires_in in [0, -1] {
-        let (status, _, body, _) = c
-            .send(
-                Method::POST,
-                "/api/tokens",
-                Some(json!({"label": "cli", "expires_in": expires_in})),
-            )
-            .await;
-        assert_eq!(status, StatusCode::CREATED, "expires_in={expires_in}");
-        assert!(body["expires_at"].is_null(), "expires_in={expires_in}");
+    for (case, request) in [
+        ("absent", json!({"label": "cli"})),
+        ("null", json!({"label": "cli", "expires_in": null})),
+        ("zero", json!({"label": "cli", "expires_in": 0})),
+        ("negative", json!({"label": "cli", "expires_in": -1})),
+    ] {
+        let (status, _, body, _) = c.send(Method::POST, "/api/tokens", Some(request)).await;
+        assert_eq!(status, StatusCode::CREATED, "case={case}");
+        assert_eq!(body.get("expires_at"), Some(&Value::Null), "case={case}");
     }
     app.cleanup().await;
 }
