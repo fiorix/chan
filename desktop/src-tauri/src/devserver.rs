@@ -1682,13 +1682,9 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
     if conn.gateway.is_some() {
         let resp = gateway_get(conn, "/api/library/workspaces").await?;
         if !resp.status().is_success() {
-            return Err(devserver_status_error(
-                conn,
-                resp.status(),
-                PerArmLabel {
-                    gateway: "gateway workspaces",
-                    raw: "devserver workspaces",
-                },
+            return Err(format!(
+                "gateway workspaces returned HTTP {}",
+                resp.status()
             ));
         }
         let entries = resp
@@ -1715,13 +1711,9 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
     )
     .await?;
     if !resp.status().is_success() {
-        return Err(devserver_status_error(
-            conn,
-            resp.status(),
-            PerArmLabel {
-                gateway: "gateway workspaces",
-                raw: "devserver workspaces",
-            },
+        return Err(format!(
+            "devserver workspaces returned HTTP {}",
+            resp.status()
         ));
     }
     let entries = resp
@@ -1870,6 +1862,10 @@ pub async fn mint_library_window(
         gateway: "gateway library window mint",
         raw: "library window mint",
     };
+    let decode_label = PerArmLabel {
+        gateway: "minted gateway window",
+        raw: "minted window",
+    };
     let resp = devserver_request(
         conn,
         reqwest::Method::POST,
@@ -1881,13 +1877,9 @@ pub async fn mint_library_window(
     if !resp.status().is_success() {
         return Err(devserver_status_error(conn, resp.status(), status_label));
     }
-    resp.json::<chan_server::WindowRecord>().await.map_err(|e| {
-        let label = PerArmLabel {
-            gateway: "minted gateway window",
-            raw: "minted window",
-        };
-        format!("decoding {}: {e}", label.for_conn(conn))
-    })
+    resp.json::<chan_server::WindowRecord>()
+        .await
+        .map_err(|e| format!("decoding {}: {e}", decode_label.for_conn(conn)))
 }
 
 /// `DELETE /api/library/windows/{window_id}`: discard a devserver window's
@@ -1965,13 +1957,9 @@ pub async fn forget_workspace(
             return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
         }
         if !resp.status().is_success() {
-            return Err(SetWorkspaceOnError::other(devserver_status_error(
-                conn,
-                resp.status(),
-                PerArmLabel {
-                    gateway: "gateway workspace delete",
-                    raw: "devserver workspace delete",
-                },
+            return Err(SetWorkspaceOnError::other(format!(
+                "gateway workspace delete returned HTTP {}",
+                resp.status()
             )));
         }
         return Ok(());
@@ -1996,13 +1984,9 @@ pub async fn forget_workspace(
         return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
     }
     if !resp.status().is_success() {
-        return Err(SetWorkspaceOnError::other(devserver_status_error(
-            conn,
-            resp.status(),
-            PerArmLabel {
-                gateway: "gateway workspace delete",
-                raw: "devserver workspace delete",
-            },
+        return Err(SetWorkspaceOnError::other(format!(
+            "devserver workspace delete returned HTTP {}",
+            resp.status()
         )));
     }
     Ok(())
@@ -2099,15 +2083,7 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(format!(
-                    "{}: {}",
-                    devserver_status_error(
-                        conn,
-                        status,
-                        PerArmLabel {
-                            gateway: "gateway workspace add",
-                            raw: "devserver workspace mount",
-                        },
-                    ),
+                    "gateway workspace add returned HTTP {status}: {}",
                     body.trim()
                 ));
             }
@@ -2137,15 +2113,7 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!(
-                "{}: {}",
-                devserver_status_error(
-                    conn,
-                    status,
-                    PerArmLabel {
-                        gateway: "gateway workspace add",
-                        raw: "devserver workspace mount",
-                    },
-                ),
+                "devserver workspace mount returned HTTP {status}: {}",
                 body.trim()
             ));
         }
@@ -2233,13 +2201,9 @@ pub async fn set_workspace_on(
             return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
         }
         if !resp.status().is_success() {
-            return Err(SetWorkspaceOnError::other(devserver_status_error(
-                conn,
-                resp.status(),
-                PerArmLabel {
-                    gateway: "gateway workspace on/off",
-                    raw: "devserver workspace on/off",
-                },
+            return Err(SetWorkspaceOnError::other(format!(
+                "gateway workspace on/off returned HTTP {}",
+                resp.status()
             )));
         }
         return Ok(());
@@ -2266,13 +2230,9 @@ pub async fn set_workspace_on(
         return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
     }
     if !resp.status().is_success() {
-        return Err(SetWorkspaceOnError::other(devserver_status_error(
-            conn,
-            resp.status(),
-            PerArmLabel {
-                gateway: "gateway workspace on/off",
-                raw: "devserver workspace on/off",
-            },
+        return Err(SetWorkspaceOnError::other(format!(
+            "devserver workspace on/off returned HTTP {}",
+            resp.status()
         )));
     }
     Ok(())
