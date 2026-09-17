@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 /// A coding agent whose terminal submit encoding chan knows. Selected by
 /// `cs terminal write --submit=<agent>`; absent means write pure bytes
-/// (no chord), which is the historical default and stays the default.
+/// (no chord), which is the default.
 ///
 /// The `ValueEnum` parse impl (for the client's `--submit` flag) is
 /// `client`-gated so chan-server can read the chord map without linking

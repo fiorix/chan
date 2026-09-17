@@ -6,8 +6,8 @@
 //!
 //!   - The WIRE types ([`ControlRequest`] / [`ControlResponse`]) are
 //!     always compiled (serde only). chan-server depends on chan-shell
-//!     with `default-features = false` to share them, which is what kills
-//!     the old client/server duplication.
+//!     with `default-features = false` so the client and server use the same
+//!     definitions.
 //!   - The `client` feature (default) adds the clap surface
 //!     ([`ShellAction`] / [`TerminalAction`]), the [`dispatch`] entry, the
 //!     control transport, and the agent [`SubmitAgent`] submit map. The
