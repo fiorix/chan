@@ -320,7 +320,8 @@ async fn begin_user_delete(state: &AppState, id: Uuid) -> Result<StatusCode> {
     let updated = sqlx::query(
         "UPDATE users \
          SET blocked_at = COALESCE(blocked_at, now()), \
-             block_reason = 'account deletion pending', \
+             block_reason = CASE WHEN blocked_at IS NOT NULL \
+                 THEN block_reason ELSE 'account deletion pending' END, \
              updated_at = now() \
          WHERE id = $1",
     )

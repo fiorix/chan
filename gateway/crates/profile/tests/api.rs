@@ -802,6 +802,81 @@ async fn admin_block_preserves_the_pending_deletion_reason() {
 }
 
 #[tokio::test]
+async fn user_delete_preserves_existing_admin_block_reason() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let app = TestApp::new().await;
+        for (email, reason) in [
+            ("blocked-delete-reason@x.com", Some("abuse")),
+            ("blocked-delete-null@x.com", None),
+        ] {
+            let uid: Uuid = mk_user(&app, email).await.parse().unwrap();
+            let (status, blocked) = app
+                .admin(
+                    Method::POST,
+                    &format!("/v1/admin/users/{uid}/block"),
+                    Some(json!({"reason": reason})),
+                )
+                .await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            match reason {
+                Some(reason) => assert_eq!(blocked["block_reason"], reason),
+                None => assert!(blocked["block_reason"].is_null()),
+            }
+            let original_blocked_at = blocked["blocked_at"].clone();
+            let original_blocked_at_value: chrono::DateTime<chrono::Utc> =
+                original_blocked_at.as_str().unwrap().parse().unwrap();
+
+            assert_eq!(
+                app.req(Method::DELETE, &format!("/v1/users/{uid}"), None)
+                    .await
+                    .0,
+                StatusCode::ACCEPTED
+            );
+            let (_, user) = app
+                .req(Method::GET, &format!("/v1/users/{uid}"), None)
+                .await;
+            assert_eq!(user["blocked_at"], original_blocked_at);
+            match reason {
+                Some(reason) => assert_eq!(user["block_reason"], reason),
+                None => assert!(user["block_reason"].is_null()),
+            }
+
+            let (stored_blocked_at, stored_reason): (
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<String>,
+            ) = sqlx::query_as("SELECT blocked_at, block_reason FROM users WHERE id = $1")
+                .bind(uid)
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+            assert_eq!(stored_blocked_at, Some(original_blocked_at_value));
+            assert_eq!(stored_reason.as_deref(), reason);
+
+            let job_kind: String =
+                sqlx::query_scalar("SELECT kind FROM control_revocation_jobs WHERE job_key = $1")
+                    .bind(format!("subject:{uid}"))
+                    .fetch_one(&app.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(job_kind, "account_delete");
+            assert_eq!(
+                app.admin(
+                    Method::POST,
+                    &format!("/v1/admin/users/{uid}/unblock"),
+                    None
+                )
+                .await
+                .0,
+                StatusCode::CONFLICT
+            );
+        }
+        app.cleanup().await;
+    })
+    .await
+    .expect("blocked account deletion test timed out");
+}
+
+#[tokio::test]
 async fn admin_token_revoke_and_audit() {
     let app = TestApp::new().await;
     let (_, u) = app
