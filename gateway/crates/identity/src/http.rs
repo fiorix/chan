@@ -1130,7 +1130,9 @@ struct CreateTokenBody {
     /// Capabilities to grant the token. When absent (or empty), the
     /// service falls back to `DEFAULT_TOKEN_SCOPES` (`["tunnel"]`),
     /// which lets the holder dial chan-tunnel. `tunnel` is the only
-    /// live scope (every devserver is authenticated).
+    /// live scope (every devserver is authenticated). This endpoint
+    /// refuses `desktop.*` scopes; only the desktop authorize flow
+    /// mints them.
     #[serde(default)]
     scopes: Option<Vec<String>>,
 }
@@ -1182,6 +1184,13 @@ async fn tokens_create(
     Json(body): Json<CreateTokenBody>,
 ) -> Result<(StatusCode, Json<CreatedTokenView>)> {
     let uid = current_active_user(&state, &session).await?.id;
+    if body.scopes.as_ref().is_some_and(|scopes| {
+        scopes
+            .iter()
+            .any(|scope| scope.starts_with(DESKTOP_SCOPE_PREFIX))
+    }) {
+        return Err(Error::BadRequest("invalid scopes".into()));
+    }
     let expires_at = body
         .expires_in
         .filter(|s| *s > 0)
@@ -1723,6 +1732,9 @@ fn entry_handoff_response(proxy_origin: &str, credential: &str) -> Result<Respon
         .body(axum::body::Body::from(body))
         .map_err(|error| Error::Anyhow(error.into()))
 }
+
+/// Desktop scopes are minted only by the desktop authorize flow.
+const DESKTOP_SCOPE_PREFIX: &str = "desktop.";
 
 pub(crate) const DESKTOP_CONNECT_SCOPE: &str = "desktop.connect";
 

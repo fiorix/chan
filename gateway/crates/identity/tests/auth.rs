@@ -1631,6 +1631,55 @@ async fn token_create_rejects_overflowing_expiry() {
 }
 
 #[tokio::test]
+async fn token_create_refuses_desktop_scopes() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = fake_user_id();
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            uid,
+            "octo@example.com",
+            "octocat",
+        )))
+        .mount(&app.profile)
+        .await;
+
+    for scopes in [
+        json!(["desktop.connect"]),
+        json!(["desktop.account"]),
+        json!(["tunnel", "desktop.connect"]),
+        json!(["desktop.other"]),
+    ] {
+        let (status, _, body, _) = c
+            .send(
+                Method::POST,
+                "/api/tokens",
+                Some(json!({"label": "cli", "scopes": scopes})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "scopes={scopes}");
+        assert_eq!(body["error"], "invalid scopes", "scopes={scopes}");
+    }
+
+    let (status, _, body, _) = c.send(Method::GET, "/api/tokens", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+
+    let (status, _, _, _) = c
+        .send(
+            Method::POST,
+            "/api/tokens",
+            Some(json!({"label": "cli", "scopes": ["tunnel"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn blocked_user_token_create_is_403() {
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
