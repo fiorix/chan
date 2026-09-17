@@ -1140,6 +1140,7 @@ type WindowCommandFrame =
       bind_addr: string;
       desktop_port: number;
       devserver_port: number;
+      half_close?: boolean;
     }
   | {
       type: "window_command";
@@ -1862,6 +1863,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
         bind_addr: frame.bind_addr,
         desktop_port: frame.desktop_port,
         devserver_port: frame.devserver_port,
+        half_close: frame.half_close === true,
       });
     } catch (err) {
       // The desktop refused (udp, gateway attach, no live connection) or the

@@ -262,6 +262,7 @@ enum WindowCommand {
         bind_addr: String,
         desktop_port: u16,
         devserver_port: u16,
+        half_close: bool,
     },
 }
 
@@ -3644,6 +3645,7 @@ async fn handle_tunnel<R, W>(
             bind_addr: spec.bind_addr.to_string(),
             desktop_port: spec.desktop_port,
             devserver_port: spec.devserver_port,
+            half_close: chan_revtunnel::wire::HALF_CLOSE_SUPPORTED,
         },
         &ctx.events_tx,
     ) {
@@ -9439,6 +9441,7 @@ position = { row = 0, col = 1 }
         assert_eq!(frame["bind_addr"], "127.0.0.1");
         assert_eq!(frame["desktop_port"], 8080);
         assert_eq!(frame["devserver_port"], 3000);
+        assert_eq!(frame["half_close"], true);
         let tunnel_id = frame["tunnel_id"].as_str().expect("tunnel id").to_string();
         // The id is the only thing naming this tunnel on two public paths.
         assert!(tunnel_id.len() >= 32, "guessable tunnel id: {tunnel_id}");

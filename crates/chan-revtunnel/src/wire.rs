@@ -20,8 +20,12 @@
 //!    down. The desktop dies -> the socket drops -> the devserver fails the
 //!    blocked `cs`.
 //! 3. DATA (one WebSocket per accepted connection, desktop-dialed). Binary
-//!    frames are raw TCP bytes in both directions. The devserver dials
-//!    `127.0.0.1:{devserver_port}` when the socket opens and splices.
+//!    frames are raw TCP bytes in both directions. When the trigger advertises
+//!    `TunnelOpen::half_close` and the desktop answers with
+//!    [`HALF_CLOSE_PARAM`], a Text [`HALF_CLOSE_MARKER`] ends only the sender's
+//!    direction. A missing advertisement selects the both-directions-close
+//!    contract. The devserver dials `127.0.0.1:{devserver_port}` when the
+//!    socket opens and splices.
 //!
 //! Both WebSocket paths live under `/api/library/*` deliberately:
 //! `/api/devserver/*` is 404'd by the gateway on the public wildcard, so a
@@ -42,6 +46,16 @@ pub const TUNNEL_PARAM: &str = "tunnel";
 
 /// Query parameter naming one accepted connection on [`CONN_PATH`].
 pub const CONN_PARAM: &str = "conn";
+
+/// Boolean [`CONN_PATH`] query parameter advertising desktop half-close
+/// support to the devserver.
+pub const HALF_CLOSE_PARAM: &str = "half_close";
+
+/// Text data frame representing end-of-stream in the sender's direction.
+pub const HALF_CLOSE_MARKER: &str = "half_close";
+
+/// This endpoint implements the negotiated half-close contract.
+pub const HALF_CLOSE_SUPPORTED: bool = true;
 
 /// How long the devserver waits for the desktop to answer the trigger with a
 /// control socket before giving up and failing `cs`. Long enough for a webview
@@ -71,6 +85,10 @@ pub struct TunnelOpen {
     pub bind_addr: String,
     pub desktop_port: u16,
     pub devserver_port: u16,
+    /// Whether the devserver supports half-close markers on data legs. An
+    /// absent field selects the both-directions contract.
+    #[serde(default)]
+    pub half_close: bool,
 }
 
 impl TunnelOpen {
@@ -81,6 +99,7 @@ impl TunnelOpen {
             bind_addr: spec.bind_addr.to_string(),
             desktop_port: spec.desktop_port,
             devserver_port: spec.devserver_port,
+            half_close: HALF_CLOSE_SUPPORTED,
         }
     }
 }
@@ -158,6 +177,20 @@ mod tests {
         assert_eq!(open.desktop_port, 8080);
         assert_eq!(open.devserver_port, 3000);
         assert_eq!(open.proto, Proto::Tcp);
+        assert!(open.half_close);
+    }
+
+    #[test]
+    fn an_absent_half_close_advertisement_defaults_to_false() {
+        let raw = r#"{
+            "tunnel_id":"tun-abc",
+            "proto":"tcp",
+            "bind_addr":"127.0.0.1",
+            "desktop_port":8080,
+            "devserver_port":3000
+        }"#;
+        let open: TunnelOpen = serde_json::from_str(raw).unwrap();
+        assert!(!open.half_close);
     }
 
     #[test]

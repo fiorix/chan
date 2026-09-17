@@ -16,9 +16,12 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::bridge::splice;
+use crate::bridge::{splice, splice_half_close};
 use crate::spec::{render_authority, TunnelSpec};
-use crate::wire::{ControlFrame, CONN_PARAM, CONN_PATH, CONTROL_PATH, TUNNEL_PARAM};
+use crate::wire::{
+    ControlFrame, CONN_PARAM, CONN_PATH, CONTROL_PATH, HALF_CLOSE_MARKER, HALF_CLOSE_PARAM,
+    TUNNEL_PARAM,
+};
 
 /// How often the control socket is pinged while idle. Well under the gateway
 /// bridge's 300s both-directions idle cut, matching the window feed's own
@@ -57,6 +60,8 @@ pub struct ClientConfig {
     pub origin: Option<String>,
     pub tunnel_id: String,
     pub spec: TunnelSpec,
+    /// Whether the devserver advertised the half-close data-leg contract.
+    pub half_close: bool,
 }
 
 /// A running tunnel. Dropping the handle requests shutdown, as does [`TunnelHandle::stop`]. Await [`TunnelHandle::wait`] to join the task after a stop request or wait for the devserver to close it.
@@ -243,7 +248,30 @@ async fn serve_conn(
     sock: TcpStream,
     conn_id: String,
 ) -> Result<(), String> {
-    let url = format!(
+    let url = data_url(&cfg, &conn_id);
+    let request = build_request(&cfg, &url)?;
+    let (ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|e| format!("connect tunnel data socket: {e}"))?;
+
+    let (to_peer_tx, to_peer_rx) = mpsc::channel::<Vec<u8>>(16);
+    let (from_peer_tx, from_peer_rx) = mpsc::channel::<Vec<u8>>(16);
+    if cfg.half_close {
+        tokio::join!(
+            splice_half_close(sock, to_peer_tx, from_peer_rx),
+            shuttle_half_close(ws, to_peer_rx, from_peer_tx),
+        );
+    } else {
+        tokio::join!(
+            splice(sock, to_peer_tx, from_peer_rx),
+            shuttle(ws, to_peer_rx, from_peer_tx),
+        );
+    }
+    Ok(())
+}
+
+fn data_url(cfg: &ClientConfig, conn_id: &str) -> String {
+    let mut url = format!(
         "{}{}?{}={}&{}={}",
         cfg.base_ws_url.trim_end_matches('/'),
         CONN_PATH,
@@ -252,18 +280,10 @@ async fn serve_conn(
         CONN_PARAM,
         conn_id
     );
-    let request = build_request(&cfg, &url)?;
-    let (ws, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| format!("connect tunnel data socket: {e}"))?;
-
-    let (to_peer_tx, to_peer_rx) = mpsc::channel::<Vec<u8>>(16);
-    let (from_peer_tx, from_peer_rx) = mpsc::channel::<Vec<u8>>(16);
-    tokio::join!(
-        splice(sock, to_peer_tx, from_peer_rx),
-        shuttle(ws, to_peer_rx, from_peer_tx),
-    );
-    Ok(())
+    if cfg.half_close {
+        url.push_str(&format!("&{HALF_CLOSE_PARAM}=true"));
+    }
+    url
 }
 
 /// Move bytes between the splice channels and the WebSocket.
@@ -288,6 +308,69 @@ async fn shuttle(ws: WsStream, mut out_rx: mpsc::Receiver<Vec<u8>>, in_tx: mpsc:
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
                 Some(Err(_)) => break,
+            },
+        }
+    }
+    let _ = sink.close().await;
+}
+
+fn half_close_outbound_message(chunk: Vec<u8>) -> Message {
+    if chunk.is_empty() {
+        Message::text(HALF_CLOSE_MARKER)
+    } else {
+        Message::binary(chunk)
+    }
+}
+
+fn half_close_inbound_chunk(message: Message) -> Option<Vec<u8>> {
+    match message {
+        Message::Binary(bytes) if !bytes.is_empty() => Some(bytes.to_vec()),
+        Message::Text(text) if text == HALF_CLOSE_MARKER => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// Move negotiated data and directional end markers over the WebSocket.
+async fn shuttle_half_close(
+    ws: WsStream,
+    mut out_rx: mpsc::Receiver<Vec<u8>>,
+    in_tx: mpsc::Sender<Vec<u8>>,
+) {
+    let (mut sink, mut stream) = ws.split();
+    let mut outbound_open = true;
+    let mut inbound_open = true;
+    let mut in_tx = Some(in_tx);
+    while outbound_open || inbound_open {
+        tokio::select! {
+            outbound = out_rx.recv(), if outbound_open => match outbound {
+                Some(chunk) => {
+                    let ended = chunk.is_empty();
+                    if sink.send(half_close_outbound_message(chunk)).await.is_err() {
+                        break;
+                    }
+                    if ended {
+                        outbound_open = false;
+                    }
+                }
+                // The pump always sends a marker before an orderly close.
+                None => break,
+            },
+            inbound = stream.next(), if inbound_open => match inbound {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(message)) => {
+                    let Some(chunk) = half_close_inbound_chunk(message) else {
+                        continue;
+                    };
+                    let ended = chunk.is_empty();
+                    let Some(tx) = in_tx.as_ref() else { continue };
+                    if tx.send(chunk).await.is_err() {
+                        break;
+                    }
+                    if ended {
+                        in_tx.take();
+                        inbound_open = false;
+                    }
+                }
             },
         }
     }
@@ -351,6 +434,7 @@ mod tests {
             origin: None,
             tunnel_id: "tun-test".into(),
             spec,
+            half_close: false,
         }
     }
 
@@ -376,6 +460,47 @@ mod tests {
         assert_eq!(
             request.headers().get("Authorization").unwrap(),
             "Bearer tok"
+        );
+    }
+
+    #[test]
+    fn the_data_url_advertises_half_close_only_when_enabled() {
+        let mut c = cfg(
+            "ws://127.0.0.1:1/",
+            parse_spec("0:3000", Proto::Tcp).unwrap(),
+        );
+        assert_eq!(
+            data_url(&c, "c1"),
+            "ws://127.0.0.1:1/api/library/tunnel/conn?tunnel=tun-test&conn=c1"
+        );
+        c.half_close = true;
+        assert_eq!(
+            data_url(&c, "c1"),
+            "ws://127.0.0.1:1/api/library/tunnel/conn?tunnel=tun-test&conn=c1&half_close=true"
+        );
+    }
+
+    #[test]
+    fn half_close_frames_translate_only_the_named_text_marker() {
+        assert_eq!(
+            half_close_outbound_message(Vec::new()),
+            Message::text(HALF_CLOSE_MARKER)
+        );
+        assert_eq!(
+            half_close_outbound_message(b"bytes".to_vec()),
+            Message::binary(b"bytes".to_vec())
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::text(HALF_CLOSE_MARKER)),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::text("future-control")),
+            None
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::binary(b"bytes".to_vec())),
+            Some(b"bytes".to_vec())
         );
     }
 

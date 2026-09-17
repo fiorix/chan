@@ -54,6 +54,7 @@ import {
 } from "./survey.svelte";
 import type { TreeEntry } from "../api/types";
 import * as mediaOpen from "./mediaOpen";
+import storeSource from "./store.svelte.ts?raw";
 
 function setTerminalLayout(tab: Partial<TerminalTab> = {}): void {
   const terminal: TerminalTab = {
@@ -117,6 +118,12 @@ afterEach(() => {
   surveyState.windowWide = null;
   window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
+});
+
+test("tunnel triggers default an absent half-close advertisement to false", () => {
+  expect(storeSource.replace(/\s+/g, " ")).toContain(
+    "half_close: frame.half_close === true,",
+  );
 });
 
 describe("session persistence bootstrap guard", () => {

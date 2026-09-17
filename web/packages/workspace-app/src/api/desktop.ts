@@ -414,6 +414,7 @@ export interface TunnelOpenPayload {
   bind_addr: string;
   desktop_port: number;
   devserver_port: number;
+  half_close: boolean;
 }
 
 /// Ask the native host to open the reverse tunnel a devserver's `cs tunnel`

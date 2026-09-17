@@ -75,7 +75,12 @@ fn conn_for_window(state: &AppState, label: &str) -> Result<DevserverConn, Strin
 /// Dial target and credentials for a directly attached devserver: the tunnel
 /// endpoint the desktop already dials for everything else, authenticated by
 /// the devserver-level bearer.
-fn raw_client_config(conn: &DevserverConn, tunnel_id: String, spec: TunnelSpec) -> ClientConfig {
+fn raw_client_config(
+    conn: &DevserverConn,
+    tunnel_id: String,
+    spec: TunnelSpec,
+    half_close: bool,
+) -> ClientConfig {
     ClientConfig {
         base_ws_url: format!("ws://{}:{}", conn.host, conn.port),
         bearer: Some(conn.token.clone()),
@@ -83,6 +88,7 @@ fn raw_client_config(conn: &DevserverConn, tunnel_id: String, spec: TunnelSpec) 
         origin: None,
         tunnel_id,
         spec,
+        half_close,
     }
 }
 
@@ -95,6 +101,7 @@ fn gateway_client_config(
     cookie_header: String,
     tunnel_id: String,
     spec: TunnelSpec,
+    half_close: bool,
 ) -> Result<ClientConfig, String> {
     Ok(ClientConfig {
         // Each socket appends its own path and query, so the base is the
@@ -108,6 +115,7 @@ fn gateway_client_config(
         origin: Some(crate::window_watcher_wiring::gateway_ws_origin(conn)?.to_string()),
         tunnel_id,
         spec,
+        half_close,
     })
 }
 
@@ -117,9 +125,10 @@ async fn client_config(
     conn: &DevserverConn,
     tunnel_id: String,
     spec: TunnelSpec,
+    half_close: bool,
 ) -> Result<ClientConfig, String> {
     if conn.gateway.is_none() {
-        return Ok(raw_client_config(conn, tunnel_id, spec));
+        return Ok(raw_client_config(conn, tunnel_id, spec, half_close));
     }
     // TODO: a gateway browser session expires absolutely (an hour at most) and
     // can be revoked, and the proxy force-closes the WebSocket bridges on
@@ -127,7 +136,7 @@ async fn client_config(
     // connections on it. The fix is a devserver-side grace window that holds
     // the registration open while the desktop redials it by tunnel id.
     let cookie_header = crate::devserver::gateway_cookie_header(conn).await?;
-    gateway_client_config(conn, cookie_header, tunnel_id, spec)
+    gateway_client_config(conn, cookie_header, tunnel_id, spec, half_close)
 }
 
 /// Open the reverse tunnel a devserver's `cs tunnel` asked for. `open` dials
@@ -153,7 +162,7 @@ pub async fn open_reverse_tunnel(
         // Parsing keeps a non-loopback bind valid on purpose; the edge warns.
         tracing::warn!(tunnel = %payload.tunnel_id, %spec, "reverse tunnel binds beyond loopback");
     }
-    let cfg = client_config(&conn, payload.tunnel_id.clone(), spec).await?;
+    let cfg = client_config(&conn, payload.tunnel_id.clone(), spec, payload.half_close).await?;
     match chan_revtunnel::client::open(cfg).await {
         Ok(handle) => {
             tracing::info!(tunnel = %payload.tunnel_id, bound = %handle.bound, "reverse tunnel listening");
@@ -190,6 +199,7 @@ mod tests {
             bind_addr: bind_addr.into(),
             desktop_port: 8080,
             devserver_port: 3000,
+            half_close: true,
         }
     }
 
@@ -259,7 +269,7 @@ mod tests {
 
     #[test]
     fn a_direct_devserver_is_dialed_at_its_own_authority_with_its_bearer() {
-        let cfg = raw_client_config(&raw_conn(), "tun-test".into(), spec());
+        let cfg = raw_client_config(&raw_conn(), "tun-test".into(), spec(), true);
         assert_eq!(
             control_url(&cfg),
             "ws://127.0.0.1:8787/api/library/tunnel/control?tunnel=tun-test"
@@ -267,6 +277,7 @@ mod tests {
         assert_eq!(cfg.bearer.as_deref(), Some("devserver-token"));
         assert_eq!(cfg.cookie, None);
         assert_eq!(cfg.origin, None);
+        assert!(cfg.half_close);
     }
 
     #[test]
@@ -277,6 +288,7 @@ mod tests {
             "__Host-devserver_gate=g".into(),
             "t-1".into(),
             spec(),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -295,6 +307,7 @@ mod tests {
         // The devserver-level bearer stays on the machine's own connection
         // record: the gateway hop authenticates the browser session.
         assert_eq!(cfg.bearer, None);
+        assert!(cfg.half_close);
     }
 
     #[test]
@@ -305,6 +318,7 @@ mod tests {
             "__Host-devserver_gate=g".into(),
             "t-1".into(),
             spec(),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -425,7 +439,9 @@ mod tests {
             gateway: Some(Box::new(gateway)),
         };
 
-        let cfg = client_config(&conn, "tun-1".into(), spec()).await.unwrap();
+        let cfg = client_config(&conn, "tun-1".into(), spec(), true)
+            .await
+            .unwrap();
         let first = "__Host-devserver_gate=gate-for-desktop-entry-credential-0; \
                      __Host-devserver_csrf=csrf-for-desktop-entry-credential-0";
         assert_eq!(cfg.cookie.as_deref(), Some(first));
@@ -434,7 +450,9 @@ mod tests {
         crate::devserver::refresh_gateway_session_if_current(&conn, first)
             .await
             .expect("refresh through the desktop entry route");
-        let cfg = client_config(&conn, "tun-1".into(), spec()).await.unwrap();
+        let cfg = client_config(&conn, "tun-1".into(), spec(), true)
+            .await
+            .unwrap();
         assert_eq!(
             cfg.cookie.as_deref(),
             Some(
@@ -462,7 +480,7 @@ mod tests {
     async fn a_direct_devserver_needs_no_gateway_session() {
         // The attach shape decides the credentials: this path must not reach
         // for a gateway session (there is none to mint, and the call is I/O).
-        let cfg = client_config(&raw_conn(), "tun-test".into(), spec())
+        let cfg = client_config(&raw_conn(), "tun-test".into(), spec(), true)
             .await
             .unwrap();
         assert_eq!(cfg.base_ws_url, "ws://127.0.0.1:8787");

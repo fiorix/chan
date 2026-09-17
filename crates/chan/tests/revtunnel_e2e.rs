@@ -526,6 +526,15 @@ impl TunnelRig {
     /// against the devserver, authenticated with the same bearer the desktop's
     /// connection record carries for a raw attach.
     async fn open_desktop(&self, trigger: &TriggerFrame) -> TunnelHandle {
+        self.open_desktop_with_half_close(trigger, trigger.half_close)
+            .await
+    }
+
+    async fn open_desktop_with_half_close(
+        &self,
+        trigger: &TriggerFrame,
+        half_close: bool,
+    ) -> TunnelHandle {
         let spec = TunnelSpec {
             proto: Proto::Tcp,
             bind_addr: trigger
@@ -544,6 +553,7 @@ impl TunnelRig {
                 origin: None,
                 tunnel_id: trigger.tunnel_id.clone(),
                 spec,
+                half_close,
             }),
         )
         .await
@@ -616,6 +626,7 @@ struct TriggerFrame {
     bind_addr: String,
     desktop_port: u16,
     devserver_port: u16,
+    half_close: bool,
 }
 
 /// Read frames until the `tunnel_open` window_command arrives, skipping the
@@ -659,6 +670,7 @@ async fn next_tunnel_open(socket: &mut SpaSocket) -> TriggerFrame {
             bind_addr: text_field("bind_addr"),
             desktop_port: port_field("desktop_port"),
             devserver_port: port_field("devserver_port"),
+            half_close: value["half_close"].as_bool().unwrap_or(false),
         };
     }
 }
@@ -879,6 +891,51 @@ impl Drop for CloseAfterReadServer {
     }
 }
 
+/// A devserver-side service that answers only after its peer ends the request.
+struct ReplyAfterEofServer {
+    port: u16,
+    received: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ReplyAfterEofServer {
+    async fn bind(request: &'static [u8], response: &'static [u8]) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let (received_tx, received) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut bytes = Vec::new();
+            if sock.read_to_end(&mut bytes).await.is_ok() {
+                let matches_request = bytes == request;
+                let _ = received_tx.send(bytes).await;
+                if matches_request {
+                    let _ = sock.write_all(response).await;
+                }
+            }
+        });
+        Ok(Self {
+            port,
+            received,
+            task,
+        })
+    }
+
+    async fn received(&mut self) -> Vec<u8> {
+        within("origin receives request EOF", self.received.recv())
+            .await
+            .expect("origin reports request")
+    }
+}
+
+impl Drop for ReplyAfterEofServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 async fn write_then_close(bound: SocketAddr, payload: &[u8]) -> Result<(), String> {
     let mut sock = tokio::time::timeout(WAIT, TcpStream::connect(bound))
         .await
@@ -980,6 +1037,84 @@ async fn tunnel_round_trips_tcp_both_ways_for_concurrent_connections() {
     // client task winds down without being told anything else.
     drop(cs);
     within("desktop client teardown on cs exit", handle.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_half_close_delivers_the_reply_that_follows_request_eof() {
+    const REQUEST: &[u8] = b"request body";
+    const RESPONSE: &[u8] = b"reply after eof";
+
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = ReplyAfterEofServer::bind(REQUEST, RESPONSE)
+        .await
+        .expect("bind reply-after-eof origin");
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    assert!(trigger.half_close, "devserver must advertise half-close");
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let mut caller = within("desktop listener connect", TcpStream::connect(handle.bound))
+        .await
+        .expect("connect desktop listener");
+    within("request write", caller.write_all(REQUEST))
+        .await
+        .expect("write request");
+    within("request half-close", caller.shutdown())
+        .await
+        .expect("half-close request");
+    let mut response = Vec::new();
+    within("reply after request EOF", caller.read_to_end(&mut response))
+        .await
+        .expect("read reply");
+    assert_eq!(response, RESPONSE);
+
+    drop(cs);
+    within("desktop client teardown after half-close", handle.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_desktop_advertisement_keeps_the_full_close_contract() {
+    const REQUEST: &[u8] = b"legacy request";
+    const RESPONSE: &[u8] = b"reply after eof";
+
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut origin = ReplyAfterEofServer::bind(REQUEST, RESPONSE)
+        .await
+        .expect("bind reply-after-eof origin");
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    assert!(trigger.half_close, "devserver must advertise half-close");
+    let handle = rig.open_desktop_with_half_close(&trigger, false).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let mut caller = within("desktop listener connect", TcpStream::connect(handle.bound))
+        .await
+        .expect("connect desktop listener");
+    within("legacy request write", caller.write_all(REQUEST))
+        .await
+        .expect("write request");
+    within("legacy request half-close", caller.shutdown())
+        .await
+        .expect("half-close request");
+    assert_eq!(origin.received().await, REQUEST);
+    let mut response = Vec::new();
+    within("legacy full close", caller.read_to_end(&mut response))
+        .await
+        .expect("read connection close");
+    assert!(
+        response.is_empty(),
+        "an unnegotiated data leg must not relay a post-EOF reply"
+    );
+
+    drop(cs);
+    within("desktop client teardown after full close", handle.wait()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

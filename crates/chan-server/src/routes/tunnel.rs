@@ -24,7 +24,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chan_revtunnel::server::{AttachError, ControlAttach, ReadyReport};
-use chan_revtunnel::wire::MAX_DATA_FRAME_BYTES;
+use chan_revtunnel::wire::{HALF_CLOSE_MARKER, MAX_DATA_FRAME_BYTES};
 use chan_revtunnel::ControlFrame;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -44,6 +44,10 @@ pub(super) struct TunnelConnQuery {
     /// Names one accepted connection in the desktop's logs and ours; the
     /// devserver only echoes it into diagnostics.
     conn: String,
+    /// The desktop opts in only after the devserver advertised support in the
+    /// trigger payload.
+    #[serde(default)]
+    half_close: bool,
 }
 
 /// An attach refusal as an HTTP status, answered INSTEAD of upgrading so the
@@ -130,7 +134,7 @@ pub(super) async fn handle_tunnel_conn(
         Ok(port) => port,
         Err(error) => return attach_refusal(error),
     };
-    ws.on_upgrade(move |socket| serve_tunnel_conn(socket, port, query.conn))
+    ws.on_upgrade(move |socket| serve_tunnel_conn(socket, port, query.conn, query.half_close))
 }
 
 /// Dial the devserver end and splice it against the data socket.
@@ -138,7 +142,7 @@ pub(super) async fn handle_tunnel_conn(
 /// A refused dial closes the just-upgraded WS immediately, so the desktop's
 /// local caller sees connect-then-EOF -- the same shape as a dead `ssh -R`
 /// forward. It never tears the tunnel down: the next connection retries.
-async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String) {
+async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String, half_close: bool) {
     let tcp = match TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
         Ok(tcp) => tcp,
         Err(error) => {
@@ -146,9 +150,18 @@ async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String) {
             return;
         }
     };
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (to_peer, mut uplink_rx) = mpsc::channel::<Vec<u8>>(8);
+    let (to_peer, uplink_rx) = mpsc::channel::<Vec<u8>>(8);
     let (downlink_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
+    if half_close {
+        let adapter = shuttle_half_close(socket, uplink_rx, downlink_tx);
+        tokio::join!(
+            chan_revtunnel::bridge::splice_half_close(tcp, to_peer, from_peer),
+            adapter,
+        );
+        return;
+    }
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut uplink_rx = uplink_rx;
     // The two WebSocket adapter halves around the shared byte pump: raw bytes
     // ride binary frames, nothing else is data.
     let uplink = tokio::spawn(async move {
@@ -186,6 +199,72 @@ async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String) {
     let _ = uplink.await;
     downlink.abort();
     let _ = downlink.await;
+}
+
+fn half_close_outbound_message(chunk: Vec<u8>) -> Message {
+    if chunk.is_empty() {
+        Message::text(HALF_CLOSE_MARKER)
+    } else {
+        Message::Binary(chunk.into())
+    }
+}
+
+fn half_close_inbound_chunk(message: Message) -> Result<Option<Vec<u8>>, ()> {
+    match message {
+        Message::Binary(bytes) if bytes.len() > MAX_DATA_FRAME_BYTES => Err(()),
+        Message::Binary(bytes) if !bytes.is_empty() => Ok(Some(bytes.to_vec())),
+        Message::Text(text) if text == HALF_CLOSE_MARKER => Ok(Some(Vec::new())),
+        _ => Ok(None),
+    }
+}
+
+/// Move negotiated data and directional end markers over the WebSocket.
+async fn shuttle_half_close(
+    socket: WebSocket,
+    mut out_rx: mpsc::Receiver<Vec<u8>>,
+    in_tx: mpsc::Sender<Vec<u8>>,
+) {
+    let (mut sink, mut stream) = socket.split();
+    let mut outbound_open = true;
+    let mut inbound_open = true;
+    let mut in_tx = Some(in_tx);
+    while outbound_open || inbound_open {
+        tokio::select! {
+            outbound = out_rx.recv(), if outbound_open => match outbound {
+                Some(chunk) => {
+                    let ended = chunk.is_empty();
+                    if sink.send(half_close_outbound_message(chunk)).await.is_err() {
+                        break;
+                    }
+                    if ended {
+                        outbound_open = false;
+                    }
+                }
+                // The pump always sends a marker before an orderly close.
+                None => break,
+            },
+            inbound = stream.next(), if inbound_open => match inbound {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(message)) => {
+                    let chunk = match half_close_inbound_chunk(message) {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => continue,
+                        Err(()) => break,
+                    };
+                    let ended = chunk.is_empty();
+                    let Some(tx) = in_tx.as_ref() else { continue };
+                    if tx.send(chunk).await.is_err() {
+                        break;
+                    }
+                    if ended {
+                        in_tx.take();
+                        inbound_open = false;
+                    }
+                }
+            },
+        }
+    }
+    let _ = sink.close().await;
 }
 
 #[cfg(test)]
@@ -268,6 +347,30 @@ mod tests {
         assert_eq!(
             attach_refusal(AttachError::NotLive).status(),
             StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn half_close_frames_translate_only_the_named_text_marker() {
+        assert_eq!(
+            half_close_outbound_message(Vec::new()),
+            Message::text(HALF_CLOSE_MARKER)
+        );
+        assert_eq!(
+            half_close_outbound_message(b"bytes".to_vec()),
+            Message::Binary(b"bytes".to_vec().into())
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::text(HALF_CLOSE_MARKER)),
+            Ok(Some(Vec::new()))
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::text("future-control")),
+            Ok(None)
+        );
+        assert_eq!(
+            half_close_inbound_chunk(Message::Binary(b"bytes".to_vec().into())),
+            Ok(Some(b"bytes".to_vec()))
         );
     }
 }
