@@ -232,11 +232,10 @@ pub enum ControlRequest {
         submit: Option<TermWriteSubmit>,
     },
     TermList,
-    // Category 2: list the windows this tenant knows about -- the same
-    // `{id, connected, saved, title?, kind?}` rows as `GET /api/windows`
-    // (saved session blobs ∪ live `/ws` presence, enriched with the
-    // desktop-supplied OS title/kind), returned as JSON in `Ok.message`
-    // for the CLI to format. Works on both workspace and terminal tenants.
+    // Category 2: return the library's window records from
+    // `WorkspaceHost::assemble_window_records` as JSON in `Ok.message` for the
+    // CLI to format. A standalone serve has no library and returns an empty
+    // list.
     WindowList,
     // Identify the serving process behind this control socket: `chan ps`
     // round-trips it to classify each served workspace's holder as a

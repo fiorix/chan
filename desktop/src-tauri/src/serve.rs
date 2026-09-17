@@ -740,8 +740,8 @@ fn build_workspace_window_with_completion(
     // "workspace" -- the kind `cs window list` shows.
     // Captured owned so the 'static main-thread closure can hold it.
     let kind_owned = kind.unwrap_or("workspace").to_string();
-    // The library ordinal (Copy) to display as " Window N", or None for windows
-    // with no library record (fall back to the desktop-local counter below).
+    // The library ordinal (Copy) to display as " Window N", or None for the
+    // control terminal, whose transient row has no persisted ordinal.
     let ordinal_owned = ordinal;
     let caption_owned = caption.to_string();
     let res = app.run_on_main_thread(move || {
