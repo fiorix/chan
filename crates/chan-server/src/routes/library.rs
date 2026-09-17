@@ -1297,8 +1297,8 @@ async fn handle_library_window_live_terminals(
 /// `POST /api/library/windows/{window_id}/close`: close a native window through
 /// the desktop manager, then discard any local durable row. Remote close is
 /// routed by the desktop op to the owning devserver. The launcher has already
-/// shown the informed live-terminal confirmation, so the bridge close is forced
-/// and cannot raise a second native prompt.
+/// shown the informed live-terminal confirmation; the bridge close has no
+/// second native prompt.
 async fn handle_close_library_window(
     State(host): State<Arc<WorkspaceHost>>,
     AxumPath(window_id): AxumPath<String>,
@@ -1307,7 +1307,6 @@ async fn handle_close_library_window(
         .desktop_bridge()
         .dispatch(|reply| DesktopWindowOp::Close {
             id: window_id.clone(),
-            force: true,
             reply,
         })
         .await
@@ -3855,8 +3854,7 @@ mod window_op_route_tests {
             .window_id;
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
-                if let DesktopWindowOp::Close { force, reply, .. } = op {
-                    assert!(force, "the launcher already obtained informed consent");
+                if let DesktopWindowOp::Close { reply, .. } = op {
                     // Hidden/offline row: no native webview was destroyed. The
                     // route must still discard the durable library record.
                     let _ = reply.send(Ok(false));

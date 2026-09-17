@@ -3496,13 +3496,12 @@ async fn handle_window_close(
         .map(|host| host.discard_window(&id).unwrap_or(false))
         .unwrap_or(false);
 
-    // Best-effort fast close of a live native window. The server already guarded,
-    // so force the desktop op (no second confirm dialog); a headless host answers
+    // Best-effort fast close of a live native window. The server already guarded;
+    // the desktop op has no second confirmation. A headless host answers
     // NO_DESKTOP and relies on the watcher reconcile above.
     let destroyed = desktop
         .dispatch(|reply| DesktopWindowOp::Close {
             id: id.clone(),
-            force: true,
             reply,
         })
         .await

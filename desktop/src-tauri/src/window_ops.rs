@@ -68,8 +68,8 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
                 .and_then(|inner| inner);
             let _ = reply.send(result);
         }
-        DesktopWindowOp::Close { id, force, reply } => {
-            close_window(app, state, id, force, reply).await;
+        DesktopWindowOp::Close { id, reply } => {
+            close_window(app, state, id, reply).await;
         }
         DesktopWindowOp::ConnectDevserver { id, reply } => {
             // The launcher's Connect button fires this over the bridge; it runs
@@ -202,16 +202,13 @@ fn hide_window(app: &AppHandle, id: &str) -> Result<(), String> {
     }
 }
 
-/// `cs window rm`: truly destroy the window. When it still has live
-/// terminal shells and `force` is unset, prompt first and only destroy on
-/// confirm -- the reply (and thus the blocked CLI) waits for the dialog.
-/// Reply: `Ok(true)` destroyed, `Ok(false)` no live window (the server
-/// then deletes any saved layout), `Err("cancelled")` declined.
+/// Truly destroy a window after the caller applies its live-terminal guard or
+/// confirmation. Reply: `Ok(true)` destroyed, `Ok(false)` no live window (the
+/// server then deletes any saved layout), or an error when destruction fails.
 async fn close_window(
     app: AppHandle,
     state: Arc<AppState>,
     id: String,
-    force: bool,
     reply: tokio::sync::oneshot::Sender<Result<bool, String>>,
 ) {
     if let Some(devserver_id) = id.strip_prefix("control-terminal-") {
@@ -230,73 +227,8 @@ async fn close_window(
     }
 
     let label = serve::resolve_window_label(&app, &id);
-    // Probe liveness / title / live-shells on the main thread.
-    let probe = {
-        let app2 = app.clone();
-        let state2 = Arc::clone(&state);
-        let label2 = label.clone();
-        on_main(&app, move || {
-            app2.get_webview_window(&label2).map(|w| {
-                let title = w.title().unwrap_or_else(|_| label2.clone());
-                let shells = serve::window_has_live_shells(&state2, &label2);
-                (title, shells)
-            })
-        })
-        .await
-    };
-    let live = match probe {
-        Ok(live) => live,
-        Err(e) => {
-            let _ = reply.send(Err(e));
-            return;
-        }
-    };
-    let Some((title, shells)) = live else {
-        // An offline or buried local row has no live webview. The HTTP route
-        // still discards its durable registry row after this false reply.
-        let _ = reply.send(Ok(false));
-        return;
-    };
-
-    if shells && !force {
-        // Confirm before killing live terminals; the result callback completes
-        // the reply (so the CLI blocks until the user answers). `native_dialog::
-        // confirm` does the main-thread hop and, on macOS, routes Return to the
-        // "Remove" default. If scheduling the modal fails, the callback never
-        // runs, the reply sender drops, and the server maps that to an error.
-        let app2 = app.clone();
-        let state2 = Arc::clone(&state);
-        let id2 = id.clone();
-        let label2 = label.clone();
-        crate::native_dialog::confirm(
-            &app,
-            "Remove window?",
-            &format!("\"{title}\" has running terminals. Removing it will end them."),
-            "Remove",
-            "Cancel",
-            move |confirmed| {
-                if confirmed {
-                    // Drop the authoritative row before destroying the view so
-                    // the watcher cannot race the HTTP route and reopen it.
-                    if let Some(embedded) = state2.embedded() {
-                        let _ = embedded.discard_window(&id2);
-                    }
-                    let destroyed = app2
-                        .get_webview_window(&label2)
-                        .map(|w| w.destroy().is_ok())
-                        .unwrap_or(false);
-                    let _ = reply.send(Ok(destroyed));
-                } else {
-                    let _ = reply.send(Err("cancelled; window not removed".to_string()));
-                }
-            },
-        );
-        return;
-    }
-
-    // No shells, or forced: destroy now.
-    // As in the confirmed branch, discard before destroy to prevent a watcher
-    // reconcile from briefly recreating the still-authoritative row.
+    // Drop the authoritative row before destroying the view so a watcher
+    // reconcile cannot briefly recreate it.
     if let Some(embedded) = state.embedded() {
         let _ = embedded.discard_window(&id);
     }

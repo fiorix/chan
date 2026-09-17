@@ -743,22 +743,6 @@ fn running_workspace_for_label(state: &Arc<AppState>, label: &str) -> Option<(St
     })
 }
 
-/// True when `label`'s window still has at least one live PTY shell -- the
-/// `cs window rm` confirmation gate. Resolves the shared terminal tenant
-/// for `terminal-*` labels and the owning workspace tenant otherwise.
-pub fn window_has_live_shells(state: &Arc<AppState>, label: &str) -> bool {
-    let Some(embedded) = state.embedded.get() else {
-        return false;
-    };
-    if label.starts_with("terminal-") {
-        embedded.terminal_window_has_live_shells(label)
-    } else if let Some((key, _)) = running_workspace_for_label(state, label) {
-        embedded.workspace_window_has_live_shells(&key, label)
-    } else {
-        false
-    }
-}
-
 /// Base window title for an outbound (we-dial-out) workspace window.
 /// pub: the remote Window-menu refresh derives the same title without
 /// opening a window.

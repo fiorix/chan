@@ -566,13 +566,13 @@ pub enum WindowAction {
     },
     /// Destroy a window by id and delete its saved layout
     ///
-    /// Unlike the close button, which only hides. Prompts before killing a
-    /// window with live terminals; `--force` skips the prompt.
+    /// Unlike the close button, which only hides. Refuses to kill a window with
+    /// live terminals unless `--force` is passed.
     #[command(verbatim_doc_comment)]
     Rm {
         /// The window id (see `cs window list`).
         id: String,
-        /// Destroy even with live terminal shells, without prompting.
+        /// Destroy even with live terminal shells.
         #[arg(long)]
         force: bool,
     },
@@ -1278,8 +1278,7 @@ async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
 /// request and print the server's reply (the new window id for `new`, a
 /// short confirmation otherwise). Session-scoped like `cs window list`:
 /// needs only $CHAN_CONTROL_SOCKET, no window id. `rm` of a window with
-/// live terminals blocks here until the desktop's confirmation dialog is
-/// answered (or `--force` was passed).
+/// live terminals is refused unless `--force` is passed.
 async fn cmd_window_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
     let message = send_control_request(&socket, req).await?;
@@ -1340,8 +1339,7 @@ async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
 
 /// `cs session <handover|takeover>`: send a session command and print the
 /// server's reply. A `handover` request BLOCKS here until the leader accepts /
-/// rejects or the timeout elapses (the CLI exits 124 on timeout, like
-/// `cs window rm` blocking on the desktop dialog).
+/// rejects or the timeout elapses (the CLI exits 124 on timeout).
 async fn cmd_session_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
     let message = send_control_request(&socket, req).await?;

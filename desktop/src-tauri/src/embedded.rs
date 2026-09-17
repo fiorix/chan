@@ -246,19 +246,10 @@ impl EmbeddedServer {
             .and_then(|mut slot| slot.take())
     }
 
-    /// True when the workspace mounted for `key` still has at least one
-    /// live PTY session bound to `window_label`. The `cs window rm`
-    /// confirmation uses this (alongside the terminal-tenant variant) to
-    /// decide whether to prompt before killing a window's shells.
-    pub fn workspace_window_has_live_shells(&self, key: &str, window_label: &str) -> bool {
-        self.host
-            .tenant_has_window_sessions(&prefix_for_key(key), window_label)
-    }
-
     /// True when the window whose `?w=` session id is `window_id` has ≥1
     /// in-flight file transfer (upload/download). The transfer-close guard
     /// (serve.rs `CloseRequested`) queries it to prompt before closing a window
-    /// mid-transfer -- the mirror of `workspace_window_has_live_shells`.
+    /// mid-transfer.
     ///
     /// Keyed on the `?w=` window id (NOT the native window label: they diverge
     /// for watcher-opened windows, where the label is `{library_id}::{window_id}`

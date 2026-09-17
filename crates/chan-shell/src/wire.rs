@@ -259,10 +259,8 @@ pub enum ControlRequest {
         id: String,
     },
     // `cs window rm`: truly DESTROY a window (unlike the OS close button,
-    // which buries it) and delete its saved layout. When the window has
-    // live terminal shells and `force` is unset, the desktop raises a
-    // confirmation dialog and this request BLOCKS until the user answers;
-    // `force` skips the prompt and kills the shells.
+    // which buries it) and delete its saved layout. The server refuses a
+    // window with live terminal shells unless `force` is set.
     WindowClose {
         id: String,
         #[serde(default)]

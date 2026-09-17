@@ -75,14 +75,12 @@ pub enum DesktopWindowOp {
         label: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Destroy a window (and let the server drop its saved layout). With
-    /// live terminal shells and `force` unset, the desktop raises a
-    /// confirmation dialog and this op BLOCKS until the user answers; the
-    /// reply is `Ok(true)` (destroyed), `Ok(false)` (no live window
-    /// found), or `Err("cancelled")` (user declined).
+    /// Destroy a window after the caller has applied its own live-terminal
+    /// guard or confirmation, and let the server drop its saved layout. The
+    /// reply is `Ok(true)` when a live window was destroyed, `Ok(false)` when
+    /// none was found, or an error when destruction failed.
     Close {
         id: String,
-        force: bool,
         reply: oneshot::Sender<Result<bool, String>>,
     },
     /// Bury (hide) a window -- the OS close-button behaviour.
