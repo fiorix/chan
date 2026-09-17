@@ -17,8 +17,9 @@
 //!
 //! The configured transfer ceiling governs both directions on this tenant.
 //! Single-file reads and writes are bounded by it. Directory plans refuse when
-//! their encoded archives already exceed it, and the tar writer keeps a source
-//! that changes after preflight from passing the ceiling mid-flight.
+//! the encoded archive bound already exceeds it. That bound assumes each
+//! regular file's metadata length matches its content. The tar writer keeps a
+//! source that changes after preflight from passing the ceiling mid-flight.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -99,9 +100,10 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// every directory is listable. Fails fast on the first inaccessible entry so a
 /// stable source is checked before response headers. The workspace path uses a
 /// sibling guard in `files.rs` that walks via `Workspace::list` to match the
-/// workspace tarball's `.chan`/`.git` filtering. Returns the encoded archive
-/// size, including entry headers, long-name and long-link extensions, content
-/// padding, and termination blocks.
+/// workspace tarball's `.chan`/`.git` filtering. For trees whose regular files'
+/// metadata lengths match their content, returns an encoded archive size bound
+/// including entry headers, long-name and long-link extensions, content padding,
+/// and termination blocks.
 ///
 /// Regular files count their logical metadata length. This can overstate a
 /// sparse-aware tar stream, but preserves the conservative preflight bound.
