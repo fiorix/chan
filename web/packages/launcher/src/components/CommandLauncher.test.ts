@@ -98,6 +98,17 @@ const terminalRecord: WindowRecord = {
   control: true,
 };
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 let target: HTMLElement;
 let app: Record<string, unknown>;
 
@@ -385,6 +396,91 @@ describe("Computers command deck", () => {
     expect(actions.liveTerminalCount).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps Close counts separate between contextual and Computers drafts", async () => {
+    actions.liveTerminalCount
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1);
+
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "This window will close.",
+    );
+    await key("Escape");
+
+    openCommandLauncher("contextual");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "1 terminal session in this window will stop.",
+    );
+    await key("Escape");
+
+    openCommandLauncher("computers");
+    flushSync();
+    closeDecision().click();
+    await flushPromises();
+
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "1 terminal session in this window will stop.",
+    );
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not let a dropped Close preparation replace the painted count", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    actions.liveTerminalCount
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise)
+      .mockResolvedValue(1);
+
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    result("Close").click();
+    await tick();
+    await key("Escape");
+    result("Close").click();
+    await tick();
+
+    second.resolve(2);
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "2 terminal sessions in this window will stop.",
+    );
+    first.resolve(1);
+    await flushPromises();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "2 terminal sessions in this window will stop.",
+    );
+
+    closeDecision().click();
+    await flushPromises();
+
+    expect(actions.close).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")?.textContent).toContain(
+      "1 terminal session in this window will stop.",
+    );
+    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(3);
+  });
+
   it.each([undefined, "two"])("uses the generic Close message for payload %s", async (count) => {
     actions.liveTerminalCount.mockResolvedValueOnce(count);
     openCommandLauncher("computers");
@@ -428,7 +524,14 @@ describe("Computers command deck", () => {
     expect(target.querySelector(".deck-operation")?.textContent).toContain(
       "This stops the control terminal and its connection script.",
     );
+    closeDecision().click();
+    await flushPromises();
+    expect(actions.close).toHaveBeenCalledOnce();
+    expect(actions.close).toHaveBeenCalledWith(
+      expect.objectContaining({ window_id: "w-terminal-2" }),
+    );
     expect(actions.liveTerminalCount).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-decisions")).toBeNull();
   });
 
   it("opens a running workspace from the New window submenu", async () => {

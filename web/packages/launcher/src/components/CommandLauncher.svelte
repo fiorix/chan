@@ -84,9 +84,14 @@
   // library that minted them, and this deck aggregates several.
   const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
   const confirmedCloseCounts = new Map<string, unknown>();
+  const closePreparationVersions = new Map<string, number>();
 
   function windowKey(window: WindowRecord): string {
     return `${window.library_id}:${window.window_id}`;
+  }
+
+  function closeConfirmationKey(window: WindowRecord): string {
+    return `${commandLauncher.entryMode}:${windowKey(window)}`;
   }
 
   const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
@@ -168,14 +173,19 @@
       };
     }
     return async () => {
+      const key = closeConfirmationKey(window);
+      const version = (closePreparationVersions.get(key) ?? 0) + 1;
+      closePreparationVersions.set(key, version);
       const count = await readCloseCount(window);
-      confirmedCloseCounts.set(windowKey(window), count);
+      if (closePreparationVersions.get(key) === version) {
+        confirmedCloseCounts.set(key, count);
+      }
       return informedCloseConfirmation(window, count);
     };
   }
 
   async function closeAfterFreshConfirmation(window: WindowRecord): Promise<void | DeckConfirm> {
-    const key = windowKey(window);
+    const key = closeConfirmationKey(window);
     const recorded = confirmedCloseCounts.get(key);
     const hadRecorded = confirmedCloseCounts.has(key);
     const fresh = await readCloseCount(window);
@@ -230,7 +240,9 @@
             ? () => setWindowShown(window, false)
             : command === "show"
               ? () => setWindowShown(window, true)
-              : () => closeAfterFreshConfirmation(window),
+              : window.control
+                ? () => closeComputerWindow(window)
+                : () => closeAfterFreshConfirmation(window),
     };
   }
 
