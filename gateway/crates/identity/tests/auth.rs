@@ -1753,6 +1753,18 @@ fn grant_body(grant_id: Uuid, owner_id: Uuid, devserver_id: &str, email: &str) -
     })
 }
 
+async fn profile_request_count(app: &TestApp, request_method: &str, request_path: &str) -> usize {
+    app.profile
+        .received_requests()
+        .await
+        .expect("profile request recording enabled")
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == request_method && request.url.path() == request_path
+        })
+        .count()
+}
+
 /// Mock the scoped controller tunnel list so `username` has one live
 /// devserver. The open routes read the live devserver_id from here to
 /// mint the gate `drv`.
@@ -2490,6 +2502,42 @@ async fn share_landing_node_base_outside_the_namespace_is_502() {
 }
 
 #[tokio::test]
+async fn share_landing_unknown_owner_skips_the_caller_lookup() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let caller_uid = fake_user_id();
+    happy_login(&app, &mut c, caller_uid, "alice@x.com").await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{caller_uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            caller_uid,
+            "alice@x.com",
+            "alice",
+        )))
+        .mount(&app.profile)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users/by-username"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
+        .mount(&app.profile)
+        .await;
+
+    let caller_path = format!("/v1/users/{caller_uid}");
+    let before = profile_request_count(&app, "GET", &caller_path).await;
+    let (status, _, body, _) = c.send(Method::GET, "/s/unknown-owner/photos", None).await;
+    let after = profile_request_count(&app, "GET", &caller_path).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "not found"}));
+    assert_eq!(
+        after - before,
+        0,
+        "unknown owner must be refused before resolving the caller"
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn share_landing_root_grantee_denied() {
     // Owner-only gate: a GRANTEE (caller != owner) does NOT get
     // whole-devserver open -- they keep the per-workspace share landing. 404
@@ -2510,8 +2558,17 @@ async fn share_landing_root_grantee_denied() {
         .mount(&app.profile)
         .await;
 
+    let caller_path = format!("/v1/users/{caller_uid}");
+    let before = profile_request_count(&app, "GET", &caller_path).await;
     let (s, _, _, _) = c.send(Method::GET, "/s/owner-handle", None).await;
+    let after = profile_request_count(&app, "GET", &caller_path).await;
+
     assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(
+        after - before,
+        0,
+        "root owner-only gate must fire before resolving the caller"
+    );
     app.cleanup().await;
 }
 

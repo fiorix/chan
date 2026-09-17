@@ -1507,35 +1507,42 @@ async fn resolve_entry_target(
     Ok(EntryTarget::Denied)
 }
 
-/// Public entry point for a copied per-tenant share link
-/// (`/s/{owner}/{workspace}`), optionally `?d=`-qualified to pick one
-/// of the owner's devservers.
-///
-/// Flow:
-///   1. If the caller has no session, stash the path and 303 to `/` so
-///      the SPA shows the OAuth picker. The callback reads the stash and
-///      303s back here after sign-in.
-///   2. With a session, resolve `{owner}` (username -> User), read the
-///      owner's LIVE devserver_id from the proxy admin tunnel list, and
-///      call profile `devserver_access?as=<self>` on it. Owner and grantee
-///      both return access; no-access (or no live devserver) returns 404.
-///      A grant gives the WHOLE devserver.
-///   3. On access, mint an entry JWT (drv = the devserver_id) against
-///      the tenant origin built from the controller row's node base
-///      (`{owner}--{disc}.{proxy}.<apex>`) and return an auto-submitting,
-///      no-store POST handoff so it sets gate cookies and serves the signed
-///      `/{workspace}/` target.
 async fn share_landing(
     State(state): State<AppState>,
     session: Session,
     Path((owner, workspace)): Path<(String, String)>,
     Query(query): Query<ShareQuery>,
 ) -> Result<Response> {
+    landing(state, session, owner, Some(workspace), query).await
+}
+
+async fn share_landing_root(
+    State(state): State<AppState>,
+    session: Session,
+    Path(owner): Path<String>,
+    Query(query): Query<ShareQuery>,
+) -> Result<Response> {
+    landing(state, session, owner, None, query).await
+}
+
+/// Public entry point for copied share links, optionally `?d=`-qualified to pick one of the owner's devservers. Both forms validate the path, sanitize the selector, and stash a login redirect before authenticated work. With a session, they resolve the owner first, apply the owner-only rule for the whole-devserver root, then resolve and refuse a missing or blocked caller. The per-workspace route admits an owner or grantee and signs `/{workspace}/`; the owner-only root signs `/`. Both mint against the controller row's tenant origin and return a no-store POST handoff.
+async fn landing(
+    state: AppState,
+    session: Session,
+    owner: String,
+    workspace: Option<String>,
+    query: ShareQuery,
+) -> Result<Response> {
     let owner = owner.trim().to_ascii_lowercase();
-    let workspace = workspace.trim().to_ascii_lowercase();
-    if !valid_username(&owner) || !is_workspace_name_shape(&workspace) {
+    let workspace = workspace.map(|workspace| workspace.trim().to_ascii_lowercase());
+    if !valid_username(&owner)
+        || workspace
+            .as_deref()
+            .is_some_and(|workspace| !is_workspace_name_shape(workspace))
+    {
         return Err(Error::NotFound);
     }
+
     // An explicit selector that cannot match any id is a dead link:
     // same 404 shape as unknown/no-access below.
     let selector = match query.d.as_deref() {
@@ -1550,9 +1557,11 @@ async fn share_landing(
         // The sanitized selector rides the stash so a `?d=`-qualified
         // link survives the sign-in round trip (hex only, safe to
         // embed).
-        let dest = match &selector {
-            Some(d) => format!("/s/{owner}/{workspace}?d={d}"),
-            None => format!("/s/{owner}/{workspace}"),
+        let dest = match (workspace.as_deref(), selector.as_deref()) {
+            (Some(workspace), Some(d)) => format!("/s/{owner}/{workspace}?d={d}"),
+            (Some(workspace), None) => format!("/s/{owner}/{workspace}"),
+            (None, Some(d)) => format!("/s/{owner}?d={d}"),
+            (None, None) => format!("/s/{owner}"),
         };
         session
             .insert(KEY_POST_LOGIN_REDIRECT, &dest)
@@ -1560,6 +1569,21 @@ async fn share_landing(
             .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
         return Ok(Redirect::to("/").into_response());
     };
+
+    // Resolve the owner handle. 404 is the same shape as "no access" and
+    // "unknown devserver", so a stranger cannot probe a handle's existence.
+    let owner_user = state
+        .cfg
+        .profile_client
+        .find_user_by_username(&owner)
+        .await?
+        .ok_or(Error::NotFound)?;
+
+    // Whole-devserver launcher mutation is owner-only. Grantees keep the
+    // per-workspace share landings (`/s/{owner}/{workspace}`).
+    if workspace.is_none() && uid != owner_user.id {
+        return Err(Error::NotFound);
+    }
 
     let caller = state
         .cfg
@@ -1570,15 +1594,6 @@ async fn share_landing(
     if caller.is_blocked() {
         return Err(Error::NotFound);
     }
-
-    // Resolve the owner handle. 404 is the same shape as "no access" and
-    // "unknown devserver", so a stranger cannot probe a handle's existence.
-    let owner_user = state
-        .cfg
-        .profile_client
-        .find_user_by_username(&owner)
-        .await?
-        .ok_or(Error::NotFound)?;
 
     // Pick the target devserver (selector, single live, or first
     // accessible). Offline, ambiguous, and no-access all collapse to
@@ -1598,12 +1613,19 @@ async fn share_landing(
             proxy_base_url,
         } => (devserver_id, proxy_id, proxy_base_url),
         EntryTarget::Offline | EntryTarget::Denied => {
-            tracing::info!(
-                owner = %owner_user.username,
-                workspace = %workspace,
-                caller = %uid,
-                "share landing: no accessible live devserver target",
-            );
+            match workspace.as_deref() {
+                Some(workspace) => tracing::info!(
+                    owner = %owner_user.username,
+                    workspace = %workspace,
+                    caller = %uid,
+                    "share landing: no accessible live devserver target",
+                ),
+                None => tracing::info!(
+                    owner = %owner_user.username,
+                    caller = %uid,
+                    "whole-devserver landing: no accessible live devserver target",
+                ),
+            }
             return Err(Error::NotFound);
         }
     };
@@ -1628,6 +1650,10 @@ async fn share_landing(
         tenant_url.scheme(),
         &tenant.authority,
     );
+    let next_path = match workspace.as_deref() {
+        Some(workspace) => format!("/{workspace}/"),
+        None => "/".to_string(),
+    };
     // A share landing is a browser navigation on the identity session, so
     // the credential is for a browser.
     let token = gateway_common::devserver_gate::encode_entry(
@@ -1638,149 +1664,25 @@ async fn share_landing(
         &devserver_id,
         &aud,
         &proxy_id,
-        &format!("/{workspace}/"),
+        &next_path,
     )
     .map_err(|e| Error::Anyhow(anyhow::anyhow!("mint entry token: {e}")))?;
 
-    tracing::info!(
-        owner = %owner_user.username,
-        workspace = %workspace,
-        caller = %uid,
-        devserver_id = %devserver_id,
-        "share landing: minting entry token",
-    );
-
-    entry_handoff_response(&tenant.origin, &token)
-}
-
-/// Whole-devserver open: land the caller on the launcher served at the
-/// devserver ROOT. Same flow as `share_landing` minus the `/{workspace}`
-/// segment: resolve the owner's one live devserver, check access (owner
-/// or grantee), mint an entry JWT (`drv` = that devserver_id) against
-/// the owning node's tenant origin, and 303 to that node's ROOT
-/// through a body-only POST handoff so the proxy sets its gate cookies and
-/// forwards `/` to the launcher. The
-/// per-workspace `share_landing` above is the same shape with a tenant path.
-async fn share_landing_root(
-    State(state): State<AppState>,
-    session: Session,
-    Path(owner): Path<String>,
-    Query(query): Query<ShareQuery>,
-) -> Result<Response> {
-    let owner = owner.trim().to_ascii_lowercase();
-    if !valid_username(&owner) {
-        return Err(Error::NotFound);
+    match workspace.as_deref() {
+        Some(workspace) => tracing::info!(
+            owner = %owner_user.username,
+            workspace = %workspace,
+            caller = %uid,
+            devserver_id = %devserver_id,
+            "share landing: minting entry token",
+        ),
+        None => tracing::info!(
+            owner = %owner_user.username,
+            caller = %uid,
+            devserver_id = %devserver_id,
+            "whole-devserver landing: minting entry token",
+        ),
     }
-    let selector = match query.d.as_deref() {
-        None => None,
-        Some(raw) => Some(sanitize_disc_selector(raw).ok_or(Error::NotFound)?),
-    };
-
-    // Unauthenticated: stash + send to login. 303 so a refresh on the SPA
-    // root doesn't re-trigger the open flow.
-    let uid = current_user_id_optional(&state, &session).await?;
-    let Some(uid) = uid else {
-        let dest = match &selector {
-            Some(d) => format!("/s/{owner}?d={d}"),
-            None => format!("/s/{owner}"),
-        };
-        session
-            .insert(KEY_POST_LOGIN_REDIRECT, &dest)
-            .await
-            .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert: {e}")))?;
-        return Ok(Redirect::to("/").into_response());
-    };
-
-    // Resolve the owner handle. 404 is the same shape as "no access" and
-    // "unknown devserver", so a stranger cannot probe a handle's existence.
-    let owner_user = state
-        .cfg
-        .profile_client
-        .find_user_by_username(&owner)
-        .await?
-        .ok_or(Error::NotFound)?;
-
-    // Whole-devserver launcher mutation is owner-only. Grantees keep the
-    // per-workspace share landings (`/s/{owner}/{workspace}`).
-    if uid != owner_user.id {
-        return Err(Error::NotFound);
-    }
-
-    let caller = state
-        .cfg
-        .profile_client
-        .get_user(uid)
-        .await?
-        .ok_or(Error::NotFound)?;
-    if caller.is_blocked() {
-        return Err(Error::NotFound);
-    }
-
-    // Pick the target devserver (selector, single live, or first
-    // accessible); its id is the drv claim. Offline and ambiguous
-    // collapse to 404 (same shape as no-access).
-    let target = resolve_entry_target(
-        &state,
-        owner_user.id,
-        &owner_user.username,
-        uid,
-        selector.as_deref(),
-    )
-    .await?;
-    let (devserver_id, proxy_id, proxy_base_url) = match target {
-        EntryTarget::Ok {
-            devserver_id,
-            proxy_id,
-            proxy_base_url,
-        } => (devserver_id, proxy_id, proxy_base_url),
-        EntryTarget::Offline | EntryTarget::Denied => {
-            tracing::info!(
-                owner = %owner_user.username,
-                caller = %uid,
-                "whole-devserver landing: no accessible live devserver target",
-            );
-            return Err(Error::NotFound);
-        }
-    };
-
-    // Same fail-closed rule as the per-workspace landing: the tenant
-    // origin comes from the controller row's node base, and a row
-    // outside the configured proxy namespace is an upstream failure.
-    let tenant = state
-        .cfg
-        .tenant_origin_for(
-            &owner_user.username,
-            &devserver_id,
-            &proxy_id,
-            &proxy_base_url,
-        )
-        .map_err(|e| Error::Upstream(e.to_string()))?;
-    let tenant_url: url::Url = tenant
-        .origin
-        .parse()
-        .map_err(|e| Error::Upstream(format!("invalid resolved tenant origin: {e}")))?;
-    let aud = chan_tunnel_proto::gateway_assertion::canonical_audience(
-        tenant_url.scheme(),
-        &tenant.authority,
-    );
-    let token = gateway_common::devserver_gate::encode_entry(
-        &state.cfg.entry_signer,
-        uid,
-        owner_user.id,
-        gateway_common::devserver_gate::ClientType::Browser,
-        &devserver_id,
-        &aud,
-        &proxy_id,
-        "/",
-    )
-    .map_err(|e| Error::Anyhow(anyhow::anyhow!("mint entry token: {e}")))?;
-
-    tracing::info!(
-        owner = %owner_user.username,
-        caller = %uid,
-        devserver_id = %devserver_id,
-        "whole-devserver landing: minting entry token",
-    );
 
     entry_handoff_response(&tenant.origin, &token)
 }
