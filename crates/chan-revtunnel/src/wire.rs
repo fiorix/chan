@@ -23,8 +23,11 @@
 //!    frames are raw TCP bytes in both directions. When the trigger advertises
 //!    `TunnelOpen::half_close` and the desktop answers with
 //!    [`HALF_CLOSE_PARAM`], a Text [`HALF_CLOSE_MARKER`] ends only the sender's
-//!    direction. A missing advertisement selects the both-directions-close
-//!    contract. The devserver dials `127.0.0.1:{devserver_port}` when the
+//!    direction; Binary data after that marker is discarded. A missing
+//!    advertisement selects the both-directions-close contract. A gateway
+//!    bridge closes a data leg after its shared 300-second both-directions idle
+//!    window, while the reverse-tunnel adapters impose no idle deadline on a
+//!    direct leg. The devserver dials `127.0.0.1:{devserver_port}` when the
 //!    socket opens and splices.
 //!
 //! Both WebSocket paths live under `/api/library/*` deliberately:
@@ -54,7 +57,9 @@ pub const HALF_CLOSE_PARAM: &str = "half_close";
 /// Text data frame representing end-of-stream in the sender's direction.
 pub const HALF_CLOSE_MARKER: &str = "half_close";
 
-/// This endpoint implements the negotiated half-close contract.
+/// The value a devserver built with this crate advertises in
+/// [`TunnelOpen::half_close`]. The desktop does not read this constant; its
+/// support is expressed by [`HALF_CLOSE_PARAM`] on each data-leg URL.
 pub const HALF_CLOSE_SUPPORTED: bool = true;
 
 /// How long the devserver waits for the desktop to answer the trigger with a

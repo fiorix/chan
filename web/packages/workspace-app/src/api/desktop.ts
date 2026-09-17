@@ -419,12 +419,13 @@ export interface TunnelOpenPayload {
 
 /// Ask the native host to open the reverse tunnel a devserver's `cs tunnel`
 /// requested: bind the listener and answer the devserver over a desktop-dialed
-/// control socket. The payload names only the tunnel and its ports; the
-/// desktop resolves WHICH devserver to dial from the invoking window's own
-/// connection record, so a page can only ask its own devserver for what that
-/// devserver could already ask. Throws off-desktop and on IPC/ACL refusal so
-/// the caller can surface a visible failure instead of leaving the blocked
-/// `cs tunnel` to time out in silence.
+/// control socket. The payload contains the tunnel request and whether the
+/// devserver advertises half-close; it does not name the devserver. The desktop
+/// resolves WHICH devserver to dial from the invoking window's own connection
+/// record, so a page can only ask its own devserver for what that devserver
+/// could already ask. Throws off-desktop and on IPC/ACL refusal so the caller
+/// can surface a visible failure instead of leaving the blocked `cs tunnel` to
+/// time out in silence.
 export async function openReverseTunnel(payload: TunnelOpenPayload): Promise<void> {
   if (!isTauriDesktop()) throw new Error("not running under Tauri");
   await tauriInvoke("open_reverse_tunnel", { payload });
