@@ -3002,13 +3002,29 @@ mod file_browser_listing_tests {
                 .unwrap();
         }
 
-        #[cfg(unix)]
-        for target_len in [99, 100, 101, 180] {
-            std::os::unix::fs::symlink(
-                "t".repeat(target_len),
-                root.path().join(format!("archive/link-{target_len}")),
-            )
+        let long_dir = "q".repeat(255);
+        let long_file = "r".repeat(248);
+        let long_archive_path = format!("archive/{long_dir}/{long_file}");
+        assert_eq!(long_archive_path.len(), 512);
+        workspace
+            .create_dir(&format!("archive/{long_dir}"))
             .unwrap();
+        workspace.write_bytes(&long_archive_path, b"x").unwrap();
+
+        #[cfg(unix)]
+        {
+            for target_len in [99, 100, 101, 180] {
+                std::os::unix::fs::symlink(
+                    "t".repeat(target_len),
+                    root.path().join(format!("archive/link-{target_len}")),
+                )
+                .unwrap();
+            }
+            let long_link = "l".repeat(101);
+            let long_target = "t".repeat(101);
+            assert!(format!("archive/{long_link}").len() > 100);
+            std::os::unix::fs::symlink(long_target, root.path().join("archive").join(long_link))
+                .unwrap();
         }
 
         let planned = verify_readable_workspace_tree(&workspace, "archive").unwrap();

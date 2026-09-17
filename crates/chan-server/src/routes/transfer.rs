@@ -1412,13 +1412,26 @@ mod tests {
             std::fs::write(dir.path().join(leaf), b"x").unwrap();
         }
 
+        let long_dir = "q".repeat(255);
+        let long_file = "r".repeat(512 - archive_name.len() - 1 - long_dir.len() - 1);
+        let long_archive_path = Path::new(&archive_name).join(&long_dir).join(&long_file);
+        assert_eq!(long_archive_path.as_os_str().as_encoded_bytes().len(), 512);
+        std::fs::create_dir(dir.path().join(&long_dir)).unwrap();
+        std::fs::write(dir.path().join(&long_dir).join(&long_file), b"x").unwrap();
+
         #[cfg(unix)]
-        for target_len in [99, 100, 101, 180] {
-            std::os::unix::fs::symlink(
-                "t".repeat(target_len),
-                dir.path().join(format!("link-{target_len}")),
-            )
-            .unwrap();
+        {
+            for target_len in [99, 100, 101, 180] {
+                std::os::unix::fs::symlink(
+                    "t".repeat(target_len),
+                    dir.path().join(format!("link-{target_len}")),
+                )
+                .unwrap();
+            }
+            let long_link = "l".repeat(101);
+            let long_target = "t".repeat(101);
+            assert!(Path::new(&archive_name).join(&long_link).as_os_str().len() > 100);
+            std::os::unix::fs::symlink(long_target, dir.path().join(long_link)).unwrap();
         }
 
         let planned = verify_readable_fs(dir.path()).unwrap();
