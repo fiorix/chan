@@ -2804,8 +2804,8 @@ mod tests {
                 "ps",
             ])
             .unwrap();
-        // Pin the match source so a shell value cannot mask `--token` being
-        // routed to the identity-token field.
+        // Pin both match sources so a shell value cannot mask `--token` landing
+        // anywhere but the operator-token field.
         assert_ne!(
             matches.value_source("identity_token"),
             Some(clap::parser::ValueSource::CommandLine)
