@@ -725,9 +725,8 @@ mod tests {
 
     #[test]
     fn a_stalled_recovery_is_reported_and_offers_a_way_out() {
-        // The defect this step exists for: a pass parked with no claimant is
-        // `!is_ready()` exactly like a running one, so the pre-fix ordering
-        // rendered it as an overlay that spins forever. It must instead be
+        // A pass parked with no claimant is `!is_ready()` exactly like a
+        // running one. It must be
         // distinguishable from the running case above -- same readiness, same
         // index status, different step -- and carry the rebuild that clears it.
         let (_c, _r, ws) = workspace();

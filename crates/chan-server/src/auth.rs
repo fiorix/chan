@@ -179,8 +179,8 @@ mod tests {
         assert_eq!(extract_token(None, &h), None);
     }
 
-    /// Regression: some on-disk state has `<state>/tokens/<key>` as a
-    /// regular file (32-byte token blob) instead of a directory.
+    /// Some on-disk state has `<state>/tokens/<key>` as a regular file
+    /// (32-byte token blob) instead of a directory.
     /// `create_dir_all` cannot turn a file into a directory, so `chan
     /// open` would die with `io: File exists (os error 17)`.
     /// `ensure_tokens_dir` must self-heal: drop the stray file, make

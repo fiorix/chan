@@ -799,11 +799,10 @@ mod tests {
         );
     }
 
-    /// The embed sweep now carries the draining file's live label, so a
-    /// known `current_file` during embedding pulses ONLY that directory -
-    /// the rest (BM25-committed) read as Indexed. This is the fix for
-    /// "every node flashes orange together, then all turn green" on a
-    /// small workspace where the whole visible pass is the embed phase.
+    /// The embed sweep carries the draining file's live label, so a known
+    /// `current_file` during embedding pulses only that directory. The remaining
+    /// BM25-committed directories read as Indexed instead of sharing one aggregate
+    /// progress state during the embed phase.
     #[test]
     fn indexing_state_embedding_sweep_with_current_file_pulses_one_dir() {
         let entries = vec![

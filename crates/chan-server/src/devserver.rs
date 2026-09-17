@@ -131,8 +131,8 @@ struct PersistedConfig {
     #[serde(default)]
     devserver_token: String,
     /// Unix seconds when `devserver_token` was minted. `0` (the default,
-    /// and every pre-rotation config) reads as "unknown age" and rotates
-    /// on the next cold start, deliberately retiring pre-fix tokens.
+    /// and every config without a mint time) reads as "unknown age" and
+    /// rotates on the next cold start so an unbounded-age bearer cannot remain authorized.
     #[serde(default)]
     token_minted_at: u64,
     /// This library's stable identity, minted once (`lib-<16hex>`) and persisted
@@ -6099,10 +6099,7 @@ mod tests {
         }
     }
 
-    // The session-role seam keys on whether a request entering the tunnel clone
-    // carries `TunnelOrigin`: a tunnel request has a Follower origin with
-    // `local == false`, while a loopback request has a Leader origin with
-    // `local == true`.
+    // The session-role seam keys on whether a request carries TunnelOrigin: a request entering the tunnel clone carries it and reads as a Follower (local == false), while a loopback request never does and reads as a Leader (local == true).
     // `ws_upgrade` reads the same `Option<Extension<TunnelOrigin>>` extractor and
     // computes `let local = origin.is_none();`. A full `/ws` upgrade over a live
     // tunnel is a host-smoke item; this pins the marker->local mapping the role

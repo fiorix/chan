@@ -3932,9 +3932,8 @@ mod tests {
         drain(&mut rx);
 
         reconcile_session(&session, &fx.workspace).await;
-        // Drive the corroborating re-check whichever way the first pass
-        // went, so the two sides of the fix run the identical sequence
-        // and only the fanned frames differ.
+        // Drive the corroborating re-check whichever way the first pass went,
+        // so every path runs the same sequence and only the fanned frames differ.
         if session
             .lock_state()
             .session_state

@@ -588,9 +588,7 @@ fn workspace_disk_files(
 /// semantics and would otherwise fall through to ghost emission as
 /// `kind: file` missing nodes.
 ///
-/// Returns an empty set on `list_tree` failure so callers degrade
-/// to "no directory filtering", i.e. the pre-fix behaviour, rather
-/// than failing the request.
+/// Returns an empty set on list_tree failure so callers degrade to no directory filtering (directory links then emit ghost nodes) rather than failing the request.
 fn workspace_disk_dirs(
     workspace: &chan_workspace::Workspace,
 ) -> std::collections::BTreeSet<String> {
@@ -880,11 +878,8 @@ fn path_class_for_graph(workspace: &chan_workspace::Workspace, path: &str) -> Op
 /// in `referenced_contact_paths` (built from the mention-edge
 /// resolution pass earlier in `api_graph`).
 ///
-/// Empirical motivation: a real workspace seed had 1973
-/// imported contact files vs only ~49 unique `@@Handle` strings
-/// in markdown bodies. The prior behaviour emitted all 1973
-/// contact File nodes; this filter collapses to the referenced
-/// subset (~49).
+/// This filter limits a large imported address book to the contacts that
+/// participate in the mention graph.
 fn should_emit_contact_file(
     path: &str,
     contact_paths: &std::collections::HashSet<String>,
@@ -1666,15 +1661,10 @@ fn build_graph_view(
     // Unresolved mentions keep their `@@name` dst and fall through to
     // the synthesized Mention node below.
     //
-    // Track the set of contact file paths that ARE
-    // referenced by some mention edge. This drives the per-file
-    // emit filter below: contact-frontmatter files that aren't
-    // referenced anywhere get skipped from the graph (vs the prior
-    // behaviour where every imported contact became a node, which
-    // exploded the graph to 1973 contact nodes against ~49 unique
-    // referenced handles on a real seed workspace). Resolved
-    // contacts ARE kept; unresolved mentions still synthesize a
-    // `@@name` Mention node via the existing mention_set loop.
+    // Track contact file paths referenced by mention edges. The per-file emit
+    // filter keeps only participating contacts. Resolved contacts remain concrete
+    // file nodes; unresolved mentions synthesize a `@@name` Mention node via the
+    // mention_set loop.
     let normalization = normalize_graph_edges(&mut all_edges, &file_set, &contact_rows);
     let referenced_contact_paths: std::collections::HashSet<String> =
         normalization.referenced_contact_paths.into_iter().collect();
@@ -1882,9 +1872,8 @@ fn build_graph_view(
             // does the formatting), and the matching tag node ids
             // we emit above use the same `#name` shape. So the
             // wire-shape target is the plain dst with no extra
-            // prefix; the previous format!("#{}", e.dst) for tag
-            // edges was double-prefixing into "##name" and orphaning
-            // every tag edge.
+            // prefix; adding another `#` would produce `##name` and
+            // orphan every tag edge.
             target: e.dst.clone(),
             kind: edge_kind_tag(e.kind),
             broken: match e.kind {
@@ -2430,9 +2419,9 @@ mod tests {
         assert!(!disk_files.contains("some-dir"));
 
         // Simulate the api_graph ghost-set check: file_set is
-        // graph_files ∪ disk_files. disk_dirs entries are absent
-        // from file_set, so the pre-fix path would have inserted
-        // `some-dir` into ghost_set. The new guard skips that.
+        // graph_files union disk_files. Directory entries are absent
+        // from file_set, so the disk_dirs guard keeps `some-dir` out
+        // of ghost_set.
         let graph_files = graph.files().unwrap();
         let graph_file_set: std::collections::BTreeSet<&str> =
             graph_files.iter().map(String::as_str).collect();
@@ -2441,8 +2430,7 @@ mod tests {
             file_set.insert(f.as_str());
         }
         assert!(!file_set.contains(link.dst.as_str()));
-        // Pre-fix: would synthesize ghost. Post-fix: directory check
-        // wins, ghost stays empty.
+        // The directory check wins, so the ghost set stays empty.
         let would_be_ghost =
             !file_set.contains(link.dst.as_str()) && !disk_dirs.contains(&link.dst);
         assert!(
@@ -2869,8 +2857,8 @@ mod tests {
 
     #[test]
     fn cross_linked_contact_keeps_contact_node_kind() {
-        // Regression: a contact file referenced only by a markdown LINK
-        // (not an @@mention) is dropped from the semantic batch by
+        // A contact file referenced only by a markdown link (not an @@mention)
+        // is dropped from the semantic batch by
         // `should_emit_contact_file`, then re-added by the filesystem
         // tree layer as a plain File node (`node_kind: None`). Without
         // the `stamp_contact_kinds` re-stamp it renders with the generic

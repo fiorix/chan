@@ -750,7 +750,7 @@ enum WatchAction {
 /// real index updates from "the path was never indexable to begin
 /// with" cases so the status reporter can stay calm. A user dropping
 /// a symlink into their workspace must not park the indexer in `Error`
-/// forever (see syseng-1 hardening pass).
+/// forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyOutcome {
     /// `Workspace::index_file` succeeded.
@@ -2323,11 +2323,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn apply_watch_change_skips_fifo() {
-        // syseng-1 fixture had `attach/named.pipe`; the pre-fix
-        // watch path called `index_file` on a FIFO and stuck
-        // `IndexStatus::Error`. Probe with `mkfifo`; skip the
-        // assertion if the binary is unavailable so test runs on
-        // minimal containers stay green.
+        // A FIFO in the workspace (such as attach/named.pipe) must be skipped rather than passed to index_file, which would leave the indexer in IndexStatus::Error. Probe with mkfifo; skip the assertion if the binary is unavailable so test runs on minimal containers stay green.
         let (_cfg, dir, workspace) = setup_workspace();
         let fifo_path = dir.path().join("attach.fifo");
         let status = std::process::Command::new("mkfifo")
