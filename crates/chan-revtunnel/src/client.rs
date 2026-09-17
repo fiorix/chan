@@ -331,50 +331,71 @@ fn half_close_inbound_chunk(message: Message) -> Option<Vec<u8>> {
 }
 
 /// Move negotiated data and directional end markers over the WebSocket.
+///
+/// The outbound task stays independent of a blocked inbound channel send.
+/// After an inbound marker, later data frames are discarded while the stream
+/// remains polled for transport closure until the outbound direction ends.
 async fn shuttle_half_close(
     ws: WsStream,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     in_tx: mpsc::Sender<Vec<u8>>,
 ) {
     let (mut sink, mut stream) = ws.split();
-    let mut outbound_open = true;
-    let mut inbound_open = true;
+    let mut outbound = tokio::spawn(async move {
+        while let Some(chunk) = out_rx.recv().await {
+            let ended = chunk.is_empty();
+            if sink.send(half_close_outbound_message(chunk)).await.is_err() {
+                return None;
+            }
+            if ended {
+                return Some(sink);
+            }
+        }
+        // The pump always sends a marker before an orderly close.
+        None
+    });
+    let mut outbound_finished = false;
+    let mut finished_sink = None;
     let mut in_tx = Some(in_tx);
-    while outbound_open || inbound_open {
+    loop {
+        if finished_sink.is_some() && in_tx.is_none() {
+            break;
+        }
         tokio::select! {
-            outbound = out_rx.recv(), if outbound_open => match outbound {
-                Some(chunk) => {
-                    let ended = chunk.is_empty();
-                    if sink.send(half_close_outbound_message(chunk)).await.is_err() {
-                        break;
-                    }
-                    if ended {
-                        outbound_open = false;
-                    }
+            result = &mut outbound, if !outbound_finished => {
+                outbound_finished = true;
+                match result {
+                    Ok(Some(sink)) => finished_sink = Some(sink),
+                    Ok(None) | Err(_) => break,
                 }
-                // The pump always sends a marker before an orderly close.
-                None => break,
-            },
-            inbound = stream.next(), if inbound_open => match inbound {
+            }
+            inbound = stream.next() => match inbound {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(message)) => {
+                    let Some(tx) = in_tx.as_ref() else {
+                        continue;
+                    };
                     let Some(chunk) = half_close_inbound_chunk(message) else {
                         continue;
                     };
                     let ended = chunk.is_empty();
-                    let Some(tx) = in_tx.as_ref() else { continue };
                     if tx.send(chunk).await.is_err() {
                         break;
                     }
                     if ended {
                         in_tx.take();
-                        inbound_open = false;
                     }
                 }
             },
         }
     }
-    let _ = sink.close().await;
+    if !outbound_finished {
+        outbound.abort();
+        let _ = outbound.await;
+    }
+    if let Some(mut sink) = finished_sink {
+        let _ = sink.close().await;
+    }
 }
 
 type WsStream =
@@ -617,5 +638,40 @@ mod tests {
             drained.is_ok(),
             "an in-flight connection outlived the tunnel that carried it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_peer_close_after_its_half_close_marker_ends_the_adapter() {
+        let (base, server) = mock_control().await;
+        let (ws, _) = tokio_tungstenite::connect_async(base)
+            .await
+            .expect("connect adapter socket");
+        let mut peer = server.await.expect("accept adapter socket");
+        let (out_tx, out_rx) = mpsc::channel(1);
+        let (in_tx, mut in_rx) = mpsc::channel(1);
+        let adapter = tokio::spawn(shuttle_half_close(ws, out_rx, in_tx));
+
+        peer.send(Message::text(HALF_CLOSE_MARKER))
+            .await
+            .expect("send inbound marker");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), in_rx.recv())
+                .await
+                .expect("adapter forwards inbound marker"),
+            Some(Vec::new())
+        );
+
+        // Data after the marker is outside that direction's stream. Keep the
+        // outbound channel live so only the peer close can end the adapter.
+        peer.send(Message::binary(b"after-marker".to_vec()))
+            .await
+            .expect("send post-marker data");
+        peer.close(None).await.expect("close peer socket");
+        tokio::time::timeout(std::time::Duration::from_secs(2), adapter)
+            .await
+            .expect("peer close ends the adapter after its marker")
+            .expect("adapter task");
+        assert_eq!(in_rx.recv().await, None);
+        drop(out_tx);
     }
 }
