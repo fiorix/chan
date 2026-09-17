@@ -1116,8 +1116,9 @@ async fn session_cookie_for_wrong_devserver_is_404() {
 }
 
 // Identity mints entry JWTs with `sub = caller.user_id` (owner or accepted
-// grantee). The proxy gate relies on identity's mint-time `devserver_access`
-// check and admits any signed entry with the right aud + drv.
+// grantee) after its `devserver_access` check. The proxy binds the entry to
+// its proxy id, aud, drv and owner but never compares `sub` with the owner,
+// so a grantee's entry must mint a session carrying the grantee's sub.
 #[tokio::test]
 async fn entry_token_for_grantee_mints_session_carrying_grantee_sub() {
     let app = TestApp::new().await;
@@ -1154,10 +1155,9 @@ async fn entry_token_for_grantee_mints_session_carrying_grantee_sub() {
     app.cleanup().await;
 }
 
-// Regression: a session cookie with a non-owner sub admits as long as
-// the signature + aud + drv match. Belongs alongside the
-// `session_cookie_for_wrong_devserver_is_404` test which still validates
-// the real bound (drv must match the live devserver id).
+// A session cookie whose principal carries a non-owner sub (a grantee) admits
+// when the session's audience, devserver id and owner match the request.
+// `session_cookie_for_wrong_devserver_is_404` pins the devserver-id side.
 #[tokio::test]
 async fn session_cookie_with_grantee_sub_admits() {
     let app = TestApp::new().await;
