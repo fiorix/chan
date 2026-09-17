@@ -3220,6 +3220,567 @@ mod tests {
         }
     }
 
+    struct MockManagementRequest {
+        method: axum::http::Method,
+        path: String,
+        headers: axum::http::HeaderMap,
+        body: axum::body::Bytes,
+    }
+
+    struct MockManagementServer {
+        addr: std::net::SocketAddr,
+        requests: Arc<Mutex<Vec<MockManagementRequest>>>,
+        responses: Arc<Mutex<std::collections::VecDeque<(axum::http::StatusCode, String)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl MockManagementServer {
+        async fn start(responses: Vec<(axum::http::StatusCode, String)>) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let queued = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
+            let requests_for_route = Arc::clone(&requests);
+            let queued_for_route = Arc::clone(&queued);
+            let proxy_origin =
+                format!("http://alice--aaaaaaaaaaaa.p1.localtest.me:{}", addr.port());
+            let proxy_for_entry = proxy_origin.clone();
+            let exchange_for_entry = format!("{proxy_origin}/_chan/entry");
+            let app = axum::Router::new()
+                .route(
+                    "/desktop/v1/devserver/entry",
+                    axum::routing::post(move || {
+                        let proxy_origin = proxy_for_entry.clone();
+                        let exchange_url = exchange_for_entry.clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "owner_user_id": test_owner_id(),
+                                "username": "alice",
+                                "devserver_id": "a".repeat(64),
+                                "proxy_origin": proxy_origin,
+                                "entry_exchange_url": exchange_url,
+                                "entry_credential": "refreshed-entry",
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/_chan/entry",
+                    axum::routing::post(|| async {
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::SEE_OTHER)
+                            .header("location", "/")
+                            .header(
+                                "set-cookie",
+                                "__Host-devserver_gate=refreshed-gate; Path=/; HttpOnly; Max-Age=120",
+                            )
+                            .header(
+                                "set-cookie",
+                                "__Host-devserver_csrf=refreshed-csrf; Path=/; Max-Age=120",
+                            )
+                            .body(axum::body::Body::empty())
+                            .unwrap()
+                    }),
+                )
+                .fallback(axum::routing::any(
+                    move |method: axum::http::Method,
+                          uri: axum::http::Uri,
+                          headers: axum::http::HeaderMap,
+                          body: axum::body::Bytes| {
+                        let requests = Arc::clone(&requests_for_route);
+                        let responses = Arc::clone(&queued_for_route);
+                        async move {
+                            requests.lock().unwrap().push(MockManagementRequest {
+                                method,
+                                path: uri.to_string(),
+                                headers,
+                                body,
+                            });
+                            let (status, body) = responses
+                                .lock()
+                                .unwrap()
+                                .pop_front()
+                                .expect("mock management response");
+                            axum::response::Response::builder()
+                                .status(status)
+                                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                                .body(axum::body::Body::from(body))
+                                .unwrap()
+                        }
+                    },
+                ));
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                addr,
+                requests,
+                responses: queued,
+                task,
+            }
+        }
+
+        fn raw_conn(&self) -> DevserverConn {
+            DevserverConn {
+                host: "127.0.0.1".into(),
+                port: self.addr.port(),
+                token: "raw-token".into(),
+                name: "raw".into(),
+                gateway: None,
+            }
+        }
+
+        fn gateway_conn(&self) -> DevserverConn {
+            let conn =
+                gateway_test_conn(format!("http://{}/desktop/v1/devserver/entry", self.addr));
+            *conn.gateway.as_ref().unwrap().session.lock().unwrap() = Some(GatewaySession {
+                gate: "opaque".into(),
+                cookie_header: "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1".into(),
+                csrf: "csrf-1".into(),
+                expires_at: Instant::now() + Duration::from_secs(60),
+            });
+            conn
+        }
+
+        fn assert_responses_drained(&self) {
+            assert!(
+                self.responses.lock().unwrap().is_empty(),
+                "every configured mock response must be consumed"
+            );
+        }
+    }
+
+    impl Drop for MockManagementServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn assert_request_shape(
+        request: &MockManagementRequest,
+        method: axum::http::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) {
+        assert_eq!(request.method, method);
+        assert_eq!(request.path, path);
+        match body {
+            Some(body) => assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+                body
+            ),
+            None => assert!(request.body.is_empty(), "body: {:?}", request.body),
+        }
+    }
+
+    fn assert_raw_request(
+        request: &MockManagementRequest,
+        method: axum::http::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) {
+        assert_request_shape(request, method, path, body);
+        assert_eq!(
+            request
+                .headers
+                .get(axum::http::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer raw-token"
+        );
+        assert!(request.headers.get(axum::http::header::COOKIE).is_none());
+        assert!(request.headers.get("x-chan-csrf").is_none());
+    }
+
+    fn assert_gateway_request(
+        request: &MockManagementRequest,
+        method: axum::http::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        cookie: &str,
+        csrf: Option<&str>,
+    ) {
+        assert_request_shape(request, method, path, body);
+        assert!(request
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .is_none());
+        assert_eq!(
+            request.headers.get(axum::http::header::COOKIE).unwrap(),
+            cookie
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-chan-csrf")
+                .map(|value| value.to_str().unwrap()),
+            csrf
+        );
+    }
+
+    fn mock_response(
+        status: axum::http::StatusCode,
+        body: impl Into<String>,
+    ) -> (axum::http::StatusCode, String) {
+        (status, body.into())
+    }
+
+    #[tokio::test]
+    async fn fetch_local_color_raw_request_contract() {
+        use axum::http::{Method, StatusCode};
+
+        let server = MockManagementServer::start(vec![
+            mock_response(StatusCode::OK, r##"{"color":"#224466"}"##),
+            mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+        ])
+        .await;
+        let conn = server.raw_conn();
+        let (color, error) = tokio::time::timeout(Duration::from_secs(10), async {
+            (
+                fetch_local_color(&conn).await,
+                fetch_local_color(&conn).await.unwrap_err(),
+            )
+        })
+        .await
+        .expect("colour requests must finish");
+
+        assert_eq!(color.unwrap().as_deref(), Some("#224466"));
+        assert_eq!(
+            error,
+            "devserver colour returned HTTP 500 Internal Server Error"
+        );
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_raw_request(request, Method::GET, "/api/library/local-color", None);
+        }
+        server.assert_responses_drained();
+    }
+
+    #[tokio::test]
+    async fn fetch_library_windows_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let row = window_row("window-1", "/terminal", "tenant-token");
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::OK, serde_json::to_string(&vec![row]).unwrap()),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (rows, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    fetch_library_windows(&conn).await,
+                    fetch_library_windows(&conn).await.unwrap_err(),
+                )
+            })
+            .await
+            .expect("window-list requests must finish");
+
+            let rows = rows.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].window_id, "window-1");
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway library windows returned HTTP 500 Internal Server Error"
+                } else {
+                    "library windows returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::GET,
+                        "/api/library/windows",
+                        None,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        None,
+                    );
+                } else {
+                    assert_raw_request(request, Method::GET, "/api/library/windows", None);
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_library_window_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let mut row = window_row("window-2", "/workspace", "tenant-token");
+            row.kind = chan_server::WindowKind::Workspace;
+            row.workspace_path = Some("/repo".into());
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::OK, serde_json::to_string(&row).unwrap()),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (minted, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    mint_library_window(
+                        &conn,
+                        chan_server::WindowKind::Workspace,
+                        Some("/repo".into()),
+                    )
+                    .await,
+                    mint_library_window(
+                        &conn,
+                        chan_server::WindowKind::Workspace,
+                        Some("/repo".into()),
+                    )
+                    .await
+                    .unwrap_err(),
+                )
+            })
+            .await
+            .expect("window-mint requests must finish");
+
+            let minted = minted.unwrap();
+            assert_eq!(minted.window_id, "window-2");
+            assert_eq!(minted.workspace_path.as_deref(), Some("/repo"));
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway library window mint returned HTTP 500 Internal Server Error"
+                } else {
+                    "library window mint returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                let body = Some(serde_json::json!({
+                    "kind": "workspace",
+                    "workspace_path": "/repo",
+                }));
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::POST,
+                        "/api/library/windows",
+                        body,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        Some("csrf-1"),
+                    );
+                } else {
+                    assert_raw_request(request, Method::POST, "/api/library/windows", body);
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_library_window_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let mut responses = vec![
+                mock_response(StatusCode::NO_CONTENT, ""),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+                mock_response(StatusCode::NOT_FOUND, "missing"),
+            ];
+            if gateway {
+                // A gateway 404 is auth-shaped, so the first one refreshes the
+                // session. This second 404 is the response returned to the
+                // discard call and must still mean the row is already gone.
+                responses.push(mock_response(StatusCode::NOT_FOUND, "still missing"));
+            }
+            let server = MockManagementServer::start(responses).await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (success, error, missing) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    discard_library_window(&conn, "window-3").await,
+                    discard_library_window(&conn, "window-3").await.unwrap_err(),
+                    discard_library_window(&conn, "window-3").await,
+                )
+            })
+            .await
+            .expect("window-discard requests must finish");
+
+            success.unwrap();
+            missing.expect("404 means the window was already discarded");
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway library window discard returned HTTP 500 Internal Server Error"
+                } else {
+                    "library window discard returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), if gateway { 4 } else { 3 });
+            for (index, request) in requests.iter().enumerate() {
+                if gateway {
+                    let refreshed = index == 3;
+                    assert_gateway_request(
+                        request,
+                        Method::DELETE,
+                        "/api/library/windows/window-3",
+                        None,
+                        if refreshed {
+                            "__Host-devserver_gate=refreshed-gate; __Host-devserver_csrf=refreshed-csrf"
+                        } else {
+                            "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1"
+                        },
+                        Some(if refreshed {
+                            "refreshed-csrf"
+                        } else {
+                            "csrf-1"
+                        }),
+                    );
+                } else {
+                    assert_raw_request(
+                        request,
+                        Method::DELETE,
+                        "/api/library/windows/window-3",
+                        None,
+                    );
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_window_visibility_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::NO_CONTENT, ""),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (success, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    set_window_visibility(&conn, "window-4", true).await,
+                    set_window_visibility(&conn, "window-4", true)
+                        .await
+                        .unwrap_err(),
+                )
+            })
+            .await
+            .expect("window-visibility requests must finish");
+
+            success.unwrap();
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway window visibility returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver window visibility returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                let body = Some(serde_json::json!({ "hidden": true }));
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::POST,
+                        "/api/library/windows/window-4/visibility",
+                        body,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        Some("csrf-1"),
+                    );
+                } else {
+                    assert_raw_request(
+                        request,
+                        Method::POST,
+                        "/api/library/windows/window-4/visibility",
+                        body,
+                    );
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_window_label_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::NO_CONTENT, ""),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (success, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    set_window_label(&conn, "window-5", "Focus").await,
+                    set_window_label(&conn, "window-5", "Focus")
+                        .await
+                        .unwrap_err(),
+                )
+            })
+            .await
+            .expect("window-label requests must finish");
+
+            success.unwrap();
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway window label returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver window label returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                let body = Some(serde_json::json!({ "label": "Focus" }));
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::PUT,
+                        "/api/library/windows/window-5/label",
+                        body,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        Some("csrf-1"),
+                    );
+                } else {
+                    assert_raw_request(
+                        request,
+                        Method::PUT,
+                        "/api/library/windows/window-5/label",
+                        body,
+                    );
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
     #[tokio::test]
     async fn navigation_url_mints_a_fresh_entry_for_a_gateway_window() {
         // The gateway path mints then exchanges a body-only credential at
