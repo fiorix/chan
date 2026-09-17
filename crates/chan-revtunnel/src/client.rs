@@ -34,6 +34,10 @@ const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 /// queued connection is served the moment the pressure clears.
 const ACCEPT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// A close flushes an in-flight frame first, so a peer that stopped reading
+/// must not retain the adapter forever.
+const HALF_CLOSE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The accept errors that mean one PEER vanished between SYN and accept
 /// rather than anything about the listener: retried immediately, exactly as
 /// axum's serve loop classifies them.
@@ -330,13 +334,18 @@ fn half_close_inbound_chunk(message: Message) -> Option<Vec<u8>> {
     }
 }
 
+async fn close_half_close<T>(close: impl std::future::Future<Output = T>) {
+    let _ = tokio::time::timeout(HALF_CLOSE_CLOSE_TIMEOUT, close).await;
+}
+
 /// Move negotiated data and directional end markers over the WebSocket.
 ///
 /// The adapter owns an outbound task that stays independent of a blocked
 /// inbound channel send. After an inbound marker, later data frames are
 /// discarded while the stream remains polled for transport closure until the
 /// outbound direction ends. Before that marker, inbound channel backpressure
-/// can pause stream polling.
+/// can pause stream polling. Every completed exit that recovers the sink makes
+/// exactly one bounded close attempt.
 async fn shuttle_half_close(
     ws: WsStream,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
@@ -417,7 +426,7 @@ async fn shuttle_half_close(
             }
         }
     };
-    let _ = sink.close().await;
+    close_half_close(sink.close()).await;
 }
 
 type WsStream =
@@ -721,6 +730,39 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), adapter)
             .await
             .expect("adapter ends after closing the data socket")
+            .expect("adapter task");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_peer_cannot_hold_a_half_close_adapter_forever() {
+        let (base, server) = mock_control().await;
+        let (ws, _) = tokio_tungstenite::connect_async(base)
+            .await
+            .expect("connect adapter socket");
+        let mut peer = server.await.expect("accept adapter socket");
+        let (out_tx, out_rx) = mpsc::channel(1);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        drop(in_rx);
+        let adapter = tokio::spawn(shuttle_half_close(ws, out_rx, in_tx));
+
+        // Once the second chunk enters the one-slot channel, the outbound
+        // worker owns the large first frame. Leaving the peer unread makes
+        // that send, and therefore SplitSink::close's flush, stay pending.
+        out_tx
+            .send(vec![0; 16 * 1024 * 1024])
+            .await
+            .expect("queue large outbound frame");
+        out_tx
+            .send(vec![1])
+            .await
+            .expect("outbound worker takes large frame");
+        peer.send(Message::binary(b"stop".to_vec()))
+            .await
+            .expect("trigger inbound channel failure");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), adapter)
+            .await
+            .expect("an unreadable peer cannot retain the adapter")
             .expect("adapter task");
     }
 }
