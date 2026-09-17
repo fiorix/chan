@@ -1312,7 +1312,7 @@ async fn gateway_get(conn: &DevserverConn, path: &str) -> Result<reqwest::Respon
         .gateway
         .as_ref()
         .ok_or_else(|| "not a gateway connection".to_string())?;
-    gateway_request(gw, reqwest::Method::GET, path, None).await
+    gateway_request(gw, reqwest::Method::GET, path, None::<&()>, None).await
 }
 
 fn gateway_auth_shaped(status: reqwest::StatusCode) -> bool {
@@ -1336,75 +1336,107 @@ fn apply_gateway_session(
     }
 }
 
-async fn gateway_request(
+fn gateway_request_builder<T: Serialize + ?Sized>(
     gw: &GatewayConn,
-    method: reqwest::Method,
+    method: &reqwest::Method,
     path: &str,
-    timeout: Option<Duration>,
-) -> Result<reqwest::Response, String> {
-    let timeout = timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS));
-    let session = gateway_session(gw).await?;
-    let resp = apply_gateway_session(
-        http_client()?
-            .request(method.clone(), gateway_url(gw, path))
-            .timeout(timeout),
-        &method,
-        &session,
-    )
-    .send()
-    .await
-    .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))?;
-    if !gateway_auth_shaped(resp.status()) {
-        return Ok(resp);
-    }
-    let session = refresh_gateway_session_after(gw, &session.cookie_header).await?;
-    apply_gateway_session(
-        http_client()?
-            .request(method.clone(), gateway_url(gw, path))
-            .timeout(timeout),
-        &method,
-        &session,
-    )
-    .send()
-    .await
-    .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))
+    body: Option<&T>,
+    timeout: Duration,
+    session: &GatewaySession,
+) -> Result<reqwest::RequestBuilder, String> {
+    let builder = http_client()?
+        .request(method.clone(), gateway_url(gw, path))
+        .timeout(timeout);
+    let builder = match body {
+        Some(body) => builder.json(body),
+        None => builder,
+    };
+    Ok(apply_gateway_session(builder, method, session))
 }
 
-async fn gateway_request_json<T: Serialize + ?Sized>(
+async fn gateway_request<T: Serialize + ?Sized>(
     gw: &GatewayConn,
     method: reqwest::Method,
     path: &str,
-    body: &T,
+    body: Option<&T>,
     timeout: Option<Duration>,
 ) -> Result<reqwest::Response, String> {
     let timeout = timeout.unwrap_or(Duration::from_secs(HTTP_TIMEOUT_SECS));
     let session = gateway_session(gw).await?;
-    let resp = apply_gateway_session(
-        http_client()?
-            .request(method.clone(), gateway_url(gw, path))
-            .json(body)
-            .timeout(timeout),
-        &method,
-        &session,
-    )
-    .send()
-    .await
-    .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))?;
+    let resp = gateway_request_builder(gw, &method, path, body, timeout, &session)?
+        .send()
+        .await
+        .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))?;
     if !gateway_auth_shaped(resp.status()) {
         return Ok(resp);
     }
     let session = refresh_gateway_session_after(gw, &session.cookie_header).await?;
-    apply_gateway_session(
-        http_client()?
-            .request(method.clone(), gateway_url(gw, path))
-            .json(body)
-            .timeout(timeout),
-        &method,
-        &session,
-    )
-    .send()
-    .await
-    .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))
+    gateway_request_builder(gw, &method, path, body, timeout, &session)?
+        .send()
+        .await
+        .map_err(|e| format!("gateway {} {path}: {e}", method.as_str()))
+}
+
+async fn raw_devserver_request<T: Serialize + ?Sized>(
+    conn: &DevserverConn,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&T>,
+    timeout: Option<Duration>,
+    transport_label: &str,
+) -> Result<reqwest::Response, String> {
+    let builder = http_client()?.request(method, url).bearer_auth(&conn.token);
+    let builder = match body {
+        Some(body) => builder.json(body),
+        None => builder,
+    };
+    let builder = match timeout {
+        Some(timeout) => builder.timeout(timeout),
+        None => builder,
+    };
+    builder
+        .send()
+        .await
+        .map_err(|e| format!("{transport_label}: {e}"))
+}
+
+async fn devserver_request<T: Serialize + ?Sized>(
+    conn: &DevserverConn,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&T>,
+    raw_transport_label: &str,
+) -> Result<reqwest::Response, String> {
+    if let Some(gw) = &conn.gateway {
+        gateway_request(gw, method, path, body, None).await
+    } else {
+        let url = format!("{}{}", base_origin(&conn.host, conn.port), path);
+        raw_devserver_request(conn, method, &url, body, None, raw_transport_label).await
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PerArmLabel<'a> {
+    gateway: &'a str,
+    raw: &'a str,
+}
+
+impl<'a> PerArmLabel<'a> {
+    fn for_conn(self, conn: &DevserverConn) -> &'a str {
+        if conn.gateway.is_some() {
+            self.gateway
+        } else {
+            self.raw
+        }
+    }
+}
+
+fn devserver_status_error(
+    conn: &DevserverConn,
+    status: reqwest::StatusCode,
+    label: PerArmLabel<'_>,
+) -> String {
+    format!("{} returned HTTP {status}", label.for_conn(conn))
 }
 
 pub async fn gateway_entry_url(conn: &DevserverConn, path: &str) -> Result<String, String> {
@@ -1650,9 +1682,13 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
     if conn.gateway.is_some() {
         let resp = gateway_get(conn, "/api/library/workspaces").await?;
         if !resp.status().is_success() {
-            return Err(format!(
-                "gateway workspaces returned HTTP {}",
-                resp.status()
+            return Err(devserver_status_error(
+                conn,
+                resp.status(),
+                PerArmLabel {
+                    gateway: "gateway workspaces",
+                    raw: "devserver workspaces",
+                },
             ));
         }
         let entries = resp
@@ -1669,16 +1705,23 @@ pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorks
         "{}/api/devserver/workspaces",
         base_origin(&conn.host, conn.port)
     );
-    let resp = http_client()?
-        .get(&url)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| format!("listing devserver workspaces: {e}"))?;
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::GET,
+        &url,
+        None::<&()>,
+        None,
+        "listing devserver workspaces",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "devserver workspaces returned HTTP {}",
-            resp.status()
+        return Err(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway workspaces",
+                raw: "devserver workspaces",
+            },
         ));
     }
     let entries = resp
@@ -1704,34 +1747,25 @@ struct LocalColorResponse {
 /// instead of flashing blue until the async colour watch pushes. The
 /// colour watch (`stream_color_feed`) keeps it live thereafter.
 pub async fn fetch_local_color(conn: &DevserverConn) -> Result<Option<String>, String> {
-    if conn.gateway.is_some() {
-        let resp = gateway_get(conn, "/api/library/local-color").await?;
-        if !resp.status().is_success() {
-            return Err(format!("gateway colour returned HTTP {}", resp.status()));
-        }
-        return resp
-            .json::<LocalColorResponse>()
-            .await
-            .map(|r| r.color)
-            .map_err(|e| format!("decoding gateway colour: {e}"));
-    }
-    let url = format!(
-        "{}/api/library/local-color",
-        base_origin(&conn.host, conn.port)
-    );
-    let resp = http_client()?
-        .get(&url)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| format!("fetching devserver colour: {e}"))?;
+    let label = PerArmLabel {
+        gateway: "gateway colour",
+        raw: "devserver colour",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::GET,
+        "/api/library/local-color",
+        None::<&()>,
+        "fetching devserver colour",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!("devserver colour returned HTTP {}", resp.status()));
+        return Err(devserver_status_error(conn, resp.status(), label));
     }
     resp.json::<LocalColorResponse>()
         .await
         .map(|r| r.color)
-        .map_err(|e| format!("decoding devserver colour: {e}"))
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))
 }
 
 /// Turn a wire `WorkspaceEntry` into a launcher row, assembling the tenant URL
@@ -1793,33 +1827,24 @@ async fn row_from_launcher(
 pub async fn fetch_library_windows(
     conn: &DevserverConn,
 ) -> Result<Vec<chan_server::WindowRecord>, String> {
-    if conn.gateway.is_some() {
-        let resp = gateway_get(conn, "/api/library/windows").await?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "gateway library windows returned HTTP {}",
-                resp.status()
-            ));
-        }
-        let rows = resp
-            .json::<Vec<chan_server::WindowRecord>>()
-            .await
-            .map_err(|e| format!("decoding gateway library windows: {e}"))?;
-        return Ok(rows);
-    }
-    let url = format!("{}/api/library/windows", base_origin(&conn.host, conn.port));
-    let resp = http_client()?
-        .get(&url)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| format!("listing library windows: {e}"))?;
+    let label = PerArmLabel {
+        gateway: "gateway library windows",
+        raw: "library windows",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::GET,
+        "/api/library/windows",
+        None::<&()>,
+        "listing library windows",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!("library windows returned HTTP {}", resp.status()));
+        return Err(devserver_status_error(conn, resp.status(), label));
     }
     resp.json::<Vec<chan_server::WindowRecord>>()
         .await
-        .map_err(|e| format!("decoding library windows: {e}"))
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))
 }
 
 /// Mint a window on a connected devserver's library
@@ -1832,33 +1857,6 @@ pub async fn mint_library_window(
     kind: chan_server::WindowKind,
     workspace_path: Option<String>,
 ) -> Result<chan_server::WindowRecord, String> {
-    if let Some(gw) = &conn.gateway {
-        let body = chan_server::CreateWindow {
-            kind,
-            workspace_path,
-            origin: chan_server::WindowOrigin::Native,
-            acting_window_id: None,
-        };
-        let resp = gateway_request_json(
-            gw,
-            reqwest::Method::POST,
-            "/api/library/windows",
-            &body,
-            None,
-        )
-        .await?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "gateway library window mint returned HTTP {}",
-                resp.status()
-            ));
-        }
-        return resp
-            .json::<chan_server::WindowRecord>()
-            .await
-            .map_err(|e| format!("decoding minted gateway window: {e}"));
-    }
-    let url = format!("{}/api/library/windows", base_origin(&conn.host, conn.port));
     let body = chan_server::CreateWindow {
         kind,
         workspace_path,
@@ -1868,22 +1866,28 @@ pub async fn mint_library_window(
         // acting id); leadership is honest-client only.
         acting_window_id: None,
     };
-    let resp = http_client()?
-        .post(&url)
-        .bearer_auth(&conn.token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("minting library window: {e}"))?;
+    let status_label = PerArmLabel {
+        gateway: "gateway library window mint",
+        raw: "library window mint",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::POST,
+        "/api/library/windows",
+        Some(&body),
+        "minting library window",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "library window mint returned HTTP {}",
-            resp.status()
-        ));
+        return Err(devserver_status_error(conn, resp.status(), status_label));
     }
-    resp.json::<chan_server::WindowRecord>()
-        .await
-        .map_err(|e| format!("decoding minted window: {e}"))
+    resp.json::<chan_server::WindowRecord>().await.map_err(|e| {
+        let label = PerArmLabel {
+            gateway: "minted gateway window",
+            raw: "minted window",
+        };
+        format!("decoding {}: {e}", label.for_conn(conn))
+    })
 }
 
 /// `DELETE /api/library/windows/{window_id}`: discard a devserver window's
@@ -1893,37 +1897,23 @@ pub async fn mint_library_window(
 /// closed devserver window must DELETE its record, else it survives server-side
 /// and reopens (empty) on restart. A 404 (already gone) is success.
 pub async fn discard_library_window(conn: &DevserverConn, window_id: &str) -> Result<(), String> {
-    if let Some(gw) = &conn.gateway {
-        let resp = gateway_request(
-            gw,
-            reqwest::Method::DELETE,
-            &format!("/api/library/windows/{window_id}"),
-            None,
-        )
-        .await?;
-        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
-            return Err(format!(
-                "gateway library window discard returned HTTP {}",
-                resp.status()
-            ));
-        }
-        return Ok(());
-    }
-    let url = format!(
-        "{}/api/library/windows/{}",
-        base_origin(&conn.host, conn.port),
-        window_id
-    );
-    let resp = http_client()?
-        .delete(&url)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| format!("discarding library window: {e}"))?;
+    let path = format!("/api/library/windows/{window_id}");
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::DELETE,
+        &path,
+        None::<&()>,
+        "discarding library window",
+    )
+    .await?;
     if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
-        return Err(format!(
-            "library window discard returned HTTP {}",
-            resp.status()
+        return Err(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway library window discard",
+                raw: "library window discard",
+            },
         ));
     }
     Ok(())
@@ -1961,6 +1951,7 @@ pub async fn forget_workspace(
             gw,
             reqwest::Method::DELETE,
             &path,
+            None::<&()>,
             Some(REMOTE_SERVE_HTTP_BUDGET),
         )
         .await
@@ -1974,22 +1965,28 @@ pub async fn forget_workspace(
             return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
         }
         if !resp.status().is_success() {
-            return Err(SetWorkspaceOnError::other(format!(
-                "gateway workspace delete returned HTTP {}",
-                resp.status()
+            return Err(SetWorkspaceOnError::other(devserver_status_error(
+                conn,
+                resp.status(),
+                PerArmLabel {
+                    gateway: "gateway workspace delete",
+                    raw: "devserver workspace delete",
+                },
             )));
         }
         return Ok(());
     }
     let url = workspace_delete_url(&conn.host, conn.port, prefix, force);
-    let resp = http_client()
-        .map_err(SetWorkspaceOnError::other)?
-        .delete(&url)
-        .timeout(REMOTE_SERVE_HTTP_BUDGET)
-        .bearer_auth(&conn.token)
-        .send()
-        .await
-        .map_err(|e| SetWorkspaceOnError::other(format!("forgetting devserver workspace: {e}")))?;
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::DELETE,
+        &url,
+        None::<&()>,
+        Some(REMOTE_SERVE_HTTP_BUDGET),
+        "forgetting devserver workspace",
+    )
+    .await
+    .map_err(SetWorkspaceOnError::other)?;
     if resp.status() == reqwest::StatusCode::CONFLICT {
         let active_terminals = resp
             .json::<ActiveTerminalsRejection>()
@@ -1999,9 +1996,13 @@ pub async fn forget_workspace(
         return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
     }
     if !resp.status().is_success() {
-        return Err(SetWorkspaceOnError::other(format!(
-            "devserver workspace delete returned HTTP {}",
-            resp.status()
+        return Err(SetWorkspaceOnError::other(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway workspace delete",
+                raw: "devserver workspace delete",
+            },
         )));
     }
     Ok(())
@@ -2017,39 +2018,24 @@ pub async fn set_window_visibility(
     window_id: &str,
     hidden: bool,
 ) -> Result<(), String> {
-    if let Some(gw) = &conn.gateway {
-        let resp = gateway_request_json(
-            gw,
-            reqwest::Method::POST,
-            &format!("/api/library/windows/{window_id}/visibility"),
-            &serde_json::json!({ "hidden": hidden }),
-            None,
-        )
-        .await?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "gateway window visibility returned HTTP {}",
-                resp.status()
-            ));
-        }
-        return Ok(());
-    }
-    let url = format!(
-        "{}/api/library/windows/{}/visibility",
-        base_origin(&conn.host, conn.port),
-        window_id
-    );
-    let resp = http_client()?
-        .post(&url)
-        .bearer_auth(&conn.token)
-        .json(&serde_json::json!({ "hidden": hidden }))
-        .send()
-        .await
-        .map_err(|e| format!("setting devserver window visibility: {e}"))?;
+    let path = format!("/api/library/windows/{window_id}/visibility");
+    let body = serde_json::json!({ "hidden": hidden });
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::POST,
+        &path,
+        Some(&body),
+        "setting devserver window visibility",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "devserver window visibility returned HTTP {}",
-            resp.status()
+        return Err(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway window visibility",
+                raw: "devserver window visibility",
+            },
         ));
     }
     Ok(())
@@ -2063,35 +2049,23 @@ pub async fn set_window_label(
     label: &str,
 ) -> Result<(), String> {
     let path = format!("/api/library/windows/{window_id}/label");
-    if let Some(gw) = &conn.gateway {
-        let resp = gateway_request_json(
-            gw,
-            reqwest::Method::PUT,
-            &path,
-            &serde_json::json!({ "label": label }),
-            None,
-        )
-        .await?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "gateway window label returned HTTP {}",
-                resp.status()
-            ));
-        }
-        return Ok(());
-    }
-    let url = format!("{}{}", base_origin(&conn.host, conn.port), path);
-    let resp = http_client()?
-        .put(&url)
-        .bearer_auth(&conn.token)
-        .json(&serde_json::json!({ "label": label }))
-        .send()
-        .await
-        .map_err(|e| format!("setting devserver window label: {e}"))?;
+    let body = serde_json::json!({ "label": label });
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::PUT,
+        &path,
+        Some(&body),
+        "setting devserver window label",
+    )
+    .await?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "devserver window label returned HTTP {}",
-            resp.status()
+        return Err(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway window label",
+                raw: "devserver window label",
+            },
         ));
     }
     Ok(())
@@ -2112,11 +2086,12 @@ const REMOTE_SERVE_HTTP_BUDGET: Duration = Duration::from_secs(70);
 pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, String> {
     let request = async {
         if let Some(gw) = &conn.gateway {
-            let resp = gateway_request_json(
+            let body = serde_json::json!({ "path": path });
+            let resp = gateway_request(
                 gw,
                 reqwest::Method::POST,
                 "/api/library/workspaces",
-                &serde_json::json!({ "path": path }),
+                Some(&body),
                 Some(REMOTE_SERVE_HTTP_BUDGET),
             )
             .await?;
@@ -2124,7 +2099,15 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(format!(
-                    "gateway workspace add returned HTTP {status}: {}",
+                    "{}: {}",
+                    devserver_status_error(
+                        conn,
+                        status,
+                        PerArmLabel {
+                            gateway: "gateway workspace add",
+                            raw: "devserver workspace mount",
+                        },
+                    ),
                     body.trim()
                 ));
             }
@@ -2138,21 +2121,31 @@ pub async fn add_workspace(conn: &DevserverConn, path: &str) -> Result<String, S
             "{}/api/devserver/workspaces",
             base_origin(&conn.host, conn.port)
         );
-        let resp = http_client()?
-            .post(&url)
-            .timeout(REMOTE_SERVE_HTTP_BUDGET)
-            .bearer_auth(&conn.token)
-            .json(&chan_server::devserver_api::OpenWorkspaceRequest {
-                path: path.to_string(),
-            })
-            .send()
-            .await
-            .map_err(|e| format!("mounting devserver workspace: {e}"))?;
+        let body = chan_server::devserver_api::OpenWorkspaceRequest {
+            path: path.to_string(),
+        };
+        let resp = raw_devserver_request(
+            conn,
+            reqwest::Method::POST,
+            &url,
+            Some(&body),
+            Some(REMOTE_SERVE_HTTP_BUDGET),
+            "mounting devserver workspace",
+        )
+        .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!(
-                "devserver workspace mount returned HTTP {status}: {}",
+                "{}: {}",
+                devserver_status_error(
+                    conn,
+                    status,
+                    PerArmLabel {
+                        gateway: "gateway workspace add",
+                        raw: "devserver workspace mount",
+                    },
+                ),
                 body.trim()
             ));
         }
@@ -2222,27 +2215,14 @@ pub async fn set_workspace_on(
 ) -> Result<(), SetWorkspaceOnError> {
     if let Some(gw) = &conn.gateway {
         let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
-        let resp = match &body {
-            Some(body) => {
-                gateway_request_json(
-                    gw,
-                    reqwest::Method::POST,
-                    &path,
-                    body,
-                    Some(REMOTE_SERVE_HTTP_BUDGET),
-                )
-                .await
-            }
-            None => {
-                gateway_request(
-                    gw,
-                    reqwest::Method::POST,
-                    &path,
-                    Some(REMOTE_SERVE_HTTP_BUDGET),
-                )
-                .await
-            }
-        }
+        let resp = gateway_request(
+            gw,
+            reqwest::Method::POST,
+            &path,
+            body.as_ref(),
+            Some(REMOTE_SERVE_HTTP_BUDGET),
+        )
+        .await
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             let active_terminals = resp
@@ -2253,25 +2233,29 @@ pub async fn set_workspace_on(
             return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
         }
         if !resp.status().is_success() {
-            return Err(SetWorkspaceOnError::other(format!(
-                "gateway workspace on/off returned HTTP {}",
-                resp.status()
+            return Err(SetWorkspaceOnError::other(devserver_status_error(
+                conn,
+                resp.status(),
+                PerArmLabel {
+                    gateway: "gateway workspace on/off",
+                    raw: "devserver workspace on/off",
+                },
             )));
         }
         return Ok(());
     }
     let url = workspace_on_url(&conn.host, conn.port, prefix);
-    let resp = http_client()
-        .map_err(SetWorkspaceOnError::other)?
-        .post(&url)
-        .timeout(REMOTE_SERVE_HTTP_BUDGET)
-        .bearer_auth(&conn.token)
-        .json(&SetWorkspaceOnRequest { on, force })
-        .send()
-        .await
-        .map_err(|e| {
-            SetWorkspaceOnError::other(format!("setting devserver workspace on/off: {e}"))
-        })?;
+    let body = SetWorkspaceOnRequest { on, force };
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::POST,
+        &url,
+        Some(&body),
+        Some(REMOTE_SERVE_HTTP_BUDGET),
+        "setting devserver workspace on/off",
+    )
+    .await
+    .map_err(SetWorkspaceOnError::other)?;
     if resp.status() == reqwest::StatusCode::CONFLICT {
         // Off blocked by live terminals: surface the count for the confirm.
         let active_terminals = resp
@@ -2282,9 +2266,13 @@ pub async fn set_workspace_on(
         return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
     }
     if !resp.status().is_success() {
-        return Err(SetWorkspaceOnError::other(format!(
-            "devserver workspace on/off returned HTTP {}",
-            resp.status()
+        return Err(SetWorkspaceOnError::other(devserver_status_error(
+            conn,
+            resp.status(),
+            PerArmLabel {
+                gateway: "gateway workspace on/off",
+                raw: "devserver workspace on/off",
+            },
         )));
     }
     Ok(())
