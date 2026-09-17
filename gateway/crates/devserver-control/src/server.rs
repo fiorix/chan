@@ -1681,9 +1681,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A proxy carrying a full browser-session registry writes 781
-    /// snapshot chunks back to back with no pacing. The limiter must admit
-    /// that bounded burst rather than treating 32 frames per second as abuse.
+    /// A proxy carrying a near-cap browser-session registry writes 781 full
+    /// snapshot chunks back to back with no pacing. Row-carrying snapshot
+    /// chunks skip the 32-frames-per-second client limiter while the session
+    /// streams its snapshot, so the burst must end in `SnapshotAccepted`
+    /// rather than a rate-limit shutdown.
     #[tokio::test]
     async fn a_full_browser_session_snapshot_joins_instead_of_being_rate_limited() {
         const CHUNKS: usize = MAX_BROWSER_SESSION_SNAPSHOT_ROWS / MAX_SNAPSHOT_CHUNK_ROWS;
