@@ -53,8 +53,8 @@ import {
   surveyState,
 } from "./survey.svelte";
 import type { TreeEntry } from "../api/types";
+import * as desktopApi from "../api/desktop";
 import * as mediaOpen from "./mediaOpen";
-import storeSource from "./store.svelte.ts?raw";
 
 function setTerminalLayout(tab: Partial<TerminalTab> = {}): void {
   const terminal: TerminalTab = {
@@ -120,10 +120,55 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-test("tunnel triggers default an absent half-close advertisement to false", () => {
-  expect(storeSource.replace(/\s+/g, " ")).toContain(
-    "half_close: frame.half_close === true,",
-  );
+test("tunnel triggers forward the half-close advertisement by behavior", async () => {
+  window.history.replaceState(null, "", "/?w=window-a");
+  const tauriWindow = window as unknown as {
+    __TAURI__?: { core: { invoke: ReturnType<typeof vi.fn> } };
+  };
+  tauriWindow.__TAURI__ = { core: { invoke: vi.fn() } };
+  const openSpy = vi
+    .spyOn(desktopApi, "openReverseTunnel")
+    .mockResolvedValue();
+  const fields = {
+    tunnel_id: "tun-test",
+    proto: "tcp",
+    bind_addr: "127.0.0.1",
+    desktop_port: 4100,
+    devserver_port: 4200,
+  };
+
+  try {
+    onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
+      command: "tunnel_open",
+      ...fields,
+      half_close: true,
+    });
+    onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
+      command: "tunnel_open",
+      ...fields,
+      half_close: false,
+    });
+    onWatchEvent({
+      type: "window_command",
+      window_id: "window-a",
+      command: "tunnel_open",
+      ...fields,
+    });
+
+    await vi.waitFor(() => expect(openSpy).toHaveBeenCalledTimes(3));
+    expect(openSpy.mock.calls.map(([payload]) => payload)).toEqual([
+      { ...fields, half_close: true },
+      { ...fields, half_close: false },
+      { ...fields, half_close: false },
+    ]);
+  } finally {
+    openSpy.mockRestore();
+    delete tauriWindow.__TAURI__;
+  }
 });
 
 describe("session persistence bootstrap guard", () => {
