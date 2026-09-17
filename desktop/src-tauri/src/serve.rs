@@ -190,8 +190,9 @@ fn workspace_title(key: &str) -> String {
 
 /// Title for a devserver (remote) webview, per spec `icon devserver / repo`:
 /// the remote glyph, the devserver's display name, then the workspace's repo
-/// (the path basename). `build_workspace_window` appends ` Window {N}`. A
-/// terminal carries no workspace, so it reads `icon devserver Terminal`. The
+/// (the path basename). `build_workspace_window_with_completion` appends
+/// ` Window {N}`. A terminal carries no workspace, so it reads
+/// `icon devserver Terminal`. The
 /// full remote path is NOT used (it would read as a meaningless local path --
 /// `workspace_title`'s local house glyph is wrong for a remote box).
 fn devserver_window_title(devserver_name: &str, record: &WindowRecord) -> String {
@@ -244,7 +245,7 @@ pub(crate) fn watched_window_kind(record: &WindowRecord) -> Option<&'static str>
 
 /// The full OS titlebar string a watcher-opened window should currently carry.
 /// The retitle path compares against this, so it must reproduce exactly what
-/// [`build_workspace_window`] composed at open time.
+/// [`build_workspace_window_with_completion`] composed at open time.
 pub(crate) fn watched_window_title(record: &WindowRecord, devserver_name: Option<&str>) -> String {
     compose_window_title(
         &watched_window_base_title(record, devserver_name),
@@ -688,7 +689,7 @@ fn build_workspace_window_with_completion(
             library_id,
             window = %window_label,
             pane_color = ?pane,
-            "build_workspace_window: ?pane= injection at mint time",
+            "build_workspace_window_with_completion: ?pane= injection at mint time",
         );
     }
     let parsed = workspace_window_target_url(app, window_label, session_id, library_id, url, kind)?;
@@ -1209,7 +1210,7 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 
 /// Bury an SPA window -- hide it, keep its record warm and reopenable -- WITHOUT
 /// asking or teaching. The label prefix selects the mechanism, mirroring the
-/// window classes `build_workspace_window` mints:
+/// window classes `build_workspace_window_with_completion` mints:
 ///   - `local::<id>`: bury through the local watcher view (its reconcile closes
 ///     the native window) plus the legacy buried list; persist hidden=true.
 ///   - `lib-<hex>::<id>`: bury through the owning devserver's watcher view,
@@ -2617,13 +2618,13 @@ mod tests {
     fn off_mac_workspace_windows_are_born_menu_less() {
         // Off-mac only the launcher carries a menubar (main.rs attaches
         // it per-window with `Window::set_menu`; there is no app-wide
-        // default), so `build_workspace_window` must attach NO menu: a
+        // default), so `build_workspace_window_with_completion` must attach NO menu: a
         // window built without one then has no bar at all. concat! so
         // the absence pin doesn't match this test's own source.
         const SERVE_RS: &str = include_str!("serve.rs");
         assert!(
             !SERVE_RS.contains(concat!("builder.", "menu(")),
-            "build_workspace_window must not attach a per-window menu",
+            "build_workspace_window_with_completion must not attach a per-window menu",
         );
         const MAIN_RS: &str = include_str!("main.rs");
         assert!(
