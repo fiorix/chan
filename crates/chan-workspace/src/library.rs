@@ -520,10 +520,13 @@ impl Library {
     }
 
     /// Reclaim metadata directories whose key no longer appears in
-    /// the registry. Walks the Library's captured metadata parent and deletes any immediate
-    /// subdirectory whose name isn't a current metadata key.
+    /// the registry. Walks the Library's captured metadata parent and
+    /// deletes any immediate subdirectory whose name isn't a current
+    /// metadata key.
     ///
-    /// Use cases include an unregister that left metadata state behind and a hand-edited registry whose matching metadata roots remain on disk.
+    /// Use cases include an unregister that left metadata state behind
+    /// and a hand-edited registry whose matching metadata roots remain
+    /// on disk.
     ///
     /// Cross-process safety: this routine snapshots the registry
     /// under the in-process mutex and walks each subsystem dir

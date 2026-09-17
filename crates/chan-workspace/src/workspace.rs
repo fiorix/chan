@@ -9541,9 +9541,9 @@ mod tests {
 
     #[test]
     fn rename_with_link_rewrite_wiki_workspace_rooted_from_subdir() {
-        // A wiki link `[[friends/alice]]` from a source file that lives
-        // in `friends/` must resolve to the
-        // workspace-rooted `friends/alice`, not to `friends/friends/alice`
+        // A wiki link `[[friends/alice]]` from a source file that lives in
+        // `friends/` must resolve to the workspace-rooted `friends/alice`, not
+        // to `friends/friends/alice`
         // as plain `normalize_href` would do for a bare relative path.
         // build_edges applies this rule on the index side; the rewrite
         // callback mirrors it. After resolution, emit the new path

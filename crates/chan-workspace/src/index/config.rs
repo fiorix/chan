@@ -75,8 +75,13 @@ pub fn embedding_model(id: &str) -> Option<&'static EmbeddingModelInfo> {
 /// from disk and clears `bm25/` + `embeddings/` on mismatch.
 ///
 /// v1: per-heading chunking with hybrid (BM25 + dense) retrieval.
-/// v2: candle-backed embedding. Vectors keep v1's f32 layout and BGE checkpoints, but v1 vectors came from the ONNX runtime and kernel drift can shift cosine scores by epsilon, so a version mismatch wipes and re-embeds.
-/// v3: every FileClass::EditableText extension (today .md and .txt). A v2 index contains only .md, so the mismatch wipe and rebuild index the .txt content.
+/// v2: candle-backed embedding. Vectors keep v1's f32 layout and BGE
+///     checkpoints, but v1 vectors came from the ONNX runtime and kernel
+///     drift can shift cosine scores by epsilon, so a version mismatch
+///     wipes and re-embeds.
+/// v3: every `FileClass::EditableText` extension (today `.md` and `.txt`).
+///     A v2 index contains only `.md`, so the mismatch wipe and rebuild
+///     index the `.txt` content.
 pub const SCHEMA_VERSION: u32 = 3;
 
 /// How a markdown file is split into indexable units.

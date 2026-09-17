@@ -568,7 +568,9 @@ impl Index {
         // resident chunk memory: roughly that many parsed files in
         // flight at once.
         //
-        // Worker and batch budget come from SearchAggression. Balanced uses available_parallelism - 2, clamped to [1, 6], then capped by fd_budget::cap_index_read_workers when file-descriptor headroom is low.
+        // Worker and batch budgets come from `SearchAggression`. `Balanced`
+        // uses `available_parallelism() - 2`, clamped to `[1, 6]`, then capped
+        // by `fd_budget::cap_index_read_workers` when descriptor headroom is low.
         let budget = opts.aggression.budget();
         let worker_count = budget.worker_count;
         let next = AtomicUsize::new(0);

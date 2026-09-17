@@ -22,11 +22,10 @@ pub use headings::{parse as parse_headings, Heading};
 pub use links::{extract_links, normalize_href, rewrite_link_targets, Link, LinkRef, LinkRefKind};
 pub use tokens::{extract_tokens, Token};
 
-/// Compute a heading anchor slug from display text. Lowercase,
-/// non-alphanumeric runs collapsed to a single `-`, leading/trailing
-/// `-` stripped. Matches the convention most markdown renderers
-/// (GitHub, Obsidian) use so wiki-link anchors round-trip with the
-/// rendered output.
+/// Compute a heading anchor slug from display text. ASCII letters are
+/// lowercased and digits retained; every other run of characters (whitespace,
+/// punctuation, non-ASCII letters) collapses to a single `-`, and
+/// leading/trailing `-` are stripped.
 pub fn heading_anchor(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last_dash = true;
@@ -71,7 +70,8 @@ mod tests {
 
     #[test]
     fn anchor_unicode_passes_through_word_chars_only() {
-        // Non-ASCII letters become separators: the slug keeps only [A-Za-z0-9-]. GitHub keeps Unicode letters in its anchors, so a heading with non-ASCII letters gets a different anchor here.
+        // Non-ASCII letters become separators, so the slug contains only ASCII
+        // alphanumerics and `-`.
         assert_eq!(heading_anchor("café au lait"), "caf-au-lait");
     }
 }

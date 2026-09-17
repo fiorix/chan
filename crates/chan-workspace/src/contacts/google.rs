@@ -30,7 +30,10 @@
 //   Phone N - Value / Type          -> phones
 //   Organization N - Name / Title   -> organizations
 //
-// Why the fallbacks: Google's current Google CSV export (as of 2025/2026) uses First Name / Middle Name / Last Name, while older exports use Given Name / Family Name. Reading only one shape leaves the name columns unread and titles every row by its email.
+// Why the fallbacks: Google's current "Google CSV" export (as of 2025/2026)
+// uses `First Name` / `Middle Name` / `Last Name`, while older exports use
+// `Given Name` / `Family Name`. Reading only one shape leaves the name columns
+// unread, so the display name falls back to the first email or phone value.
 //
 // Everything else is ignored. We don't error on unknown columns;
 // Google adds them all the time and dropping them is the right call.
