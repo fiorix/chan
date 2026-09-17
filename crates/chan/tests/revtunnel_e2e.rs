@@ -1429,6 +1429,118 @@ async fn devserver_data_leg_notices_peer_close_after_peer_marker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_client_moves_large_full_duplex_streams_independently() {
+    const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
+
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind full-duplex origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    assert!(trigger.half_close, "devserver must advertise half-close");
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("tunnel ready ack").await;
+
+    let request = patterned_payload(TRANSFER_BYTES, 0x35);
+    let response = patterned_payload(TRANSFER_BYTES, 0xc1);
+    let caller_sent = Arc::new(AtomicUsize::new(0));
+    let caller_received = Arc::new(AtomicUsize::new(0));
+    let origin_sent = Arc::new(AtomicUsize::new(0));
+    let origin_received = Arc::new(AtomicUsize::new(0));
+
+    let origin_response = response.clone();
+    let origin_sent_task = origin_sent.clone();
+    let origin_received_task = origin_received.clone();
+    let origin_task = tokio::spawn(async move {
+        let (socket, _) = origin.accept().await.expect("accept data-leg dial");
+        let (mut read, mut write) = socket.into_split();
+        let send_response = async move {
+            for chunk in origin_response.chunks(MAX_DATA_FRAME_BYTES) {
+                write.write_all(chunk).await.expect("origin response write");
+                origin_sent_task.fetch_add(chunk.len(), Ordering::Relaxed);
+            }
+            write.shutdown().await.expect("origin response half-close");
+        };
+        let receive_request = async move {
+            let mut received = Vec::with_capacity(TRANSFER_BYTES);
+            let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+            loop {
+                let n = read.read(&mut buf).await.expect("origin request read");
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                origin_received_task.fetch_add(n, Ordering::Relaxed);
+            }
+            received
+        };
+        let ((), received) = tokio::join!(send_response, receive_request);
+        received
+    });
+
+    let caller_sent_task = caller_sent.clone();
+    let caller_received_task = caller_received.clone();
+    let caller_request = request.clone();
+    let bound = handle.bound;
+    let caller = async move {
+        let mut socket = TcpStream::connect(bound)
+            .await
+            .expect("connect desktop listener");
+        for chunk in caller_request.chunks(MAX_DATA_FRAME_BYTES) {
+            socket.write_all(chunk).await.expect("caller request write");
+            caller_sent_task.fetch_add(chunk.len(), Ordering::Relaxed);
+        }
+        socket.shutdown().await.expect("caller request half-close");
+        let mut received = Vec::with_capacity(TRANSFER_BYTES);
+        let mut buf = vec![0u8; MAX_DATA_FRAME_BYTES];
+        loop {
+            let n = socket.read(&mut buf).await.expect("caller response read");
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            caller_received_task.fetch_add(n, Ordering::Relaxed);
+        }
+        received
+    };
+
+    let completed = tokio::time::timeout(WAIT, async {
+        let (received_response, received_request) =
+            tokio::join!(caller, async { origin_task.await.expect("origin task") });
+        (received_request, received_response)
+    })
+    .await;
+    let (received_request, received_response) = completed.unwrap_or_else(|_| {
+        panic!(
+            "desktop full-duplex transfer wedged: caller_sent={}/{TRANSFER_BYTES} \
+             origin_received={}/{TRANSFER_BYTES} origin_sent={}/{TRANSFER_BYTES} \
+             caller_received={}/{TRANSFER_BYTES}",
+            caller_sent.load(Ordering::Relaxed),
+            origin_received.load(Ordering::Relaxed),
+            origin_sent.load(Ordering::Relaxed),
+            caller_received.load(Ordering::Relaxed),
+        )
+    });
+    eprintln!(
+        "desktop full-duplex bytes: caller_sent={} origin_received={} origin_sent={} caller_received={}",
+        caller_sent.load(Ordering::Relaxed),
+        origin_received.load(Ordering::Relaxed),
+        origin_sent.load(Ordering::Relaxed),
+        caller_received.load(Ordering::Relaxed),
+    );
+    assert_eq!(received_request, request);
+    assert_eq!(received_response, response);
+
+    drop(cs);
+    within("desktop client teardown after full-duplex", handle.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_desktop_advertisement_keeps_the_full_close_contract() {
     const REQUEST: &[u8] = b"legacy request";
     const RESPONSE: &[u8] = b"reply after eof";
