@@ -1419,7 +1419,10 @@ mod tests {
         }
 
         let long_dir = "q".repeat(255);
-        let long_file = "r".repeat(512 - archive_name.len() - 1 - long_dir.len() - 1);
+        let long_file_len = 512usize
+            .checked_sub(archive_name.len() + 1 + long_dir.len() + 1)
+            .expect("archive path prefix leaves room for a 512-byte path fixture");
+        let long_file = "r".repeat(long_file_len);
         let long_archive_path = Path::new(&archive_name).join(&long_dir).join(&long_file);
         assert_eq!(long_archive_path.as_os_str().as_encoded_bytes().len(), 512);
         std::fs::create_dir(dir.path().join(&long_dir)).unwrap();
@@ -2030,7 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminal_archive_with_a_100_byte_root_is_refused_at_the_planned_ceiling() {
-        const OLD_UNDERCOUNT: u64 = 3072;
+        const ARCHIVE_CEILING: u64 = 3072;
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("d".repeat(100));
         std::fs::create_dir(&root).unwrap();
@@ -2038,7 +2041,7 @@ mod tests {
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
 
         let response =
-            stream_planned_download_tracked(&bulk, None, None, root, OLD_UNDERCOUNT).await;
+            stream_planned_download_tracked(&bulk, None, None, root, ARCHIVE_CEILING).await;
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
