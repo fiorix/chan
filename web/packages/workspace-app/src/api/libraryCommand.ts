@@ -140,6 +140,23 @@ export function loadScopedLibrarySnapshot(): Promise<ScopedLibrarySnapshot> {
   );
 }
 
+/** How many live terminal sessions a window of this library owns, or `null`
+ * when the server states no figure. Read at confirm time rather than off the
+ * polled snapshot, so a close confirmation names the count as it is when the
+ * user is asked. The capability may ask only about windows it may also close,
+ * so a control terminal or a window of another library answers an error. */
+export async function loadScopedWindowLiveTerminals(
+  windowId: string,
+): Promise<number | null> {
+  return withCapability(async (minted) => {
+    const body = await requestRoot<{ count: number | null }>(
+      "GET",
+      capabilityPath(minted.token, `/windows/${encodeURIComponent(windowId)}/live-terminals`),
+    );
+    return body.count;
+  });
+}
+
 export function runScopedLibraryAction(
   action: ScopedLibraryAction,
 ): Promise<ScopedLibraryActionResult | undefined> {

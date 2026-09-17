@@ -10,6 +10,7 @@ vi.mock("./client", () => ({ sessionWindowId: () => "window-live-1" }));
 
 import {
   loadScopedLibrarySnapshot,
+  loadScopedWindowLiveTerminals,
   resetScopedLibraryCapability,
   runScopedLibraryAction,
 } from "./libraryCommand";
@@ -46,6 +47,21 @@ describe("scoped library command client", () => {
       "/api/library/command-capabilities/cap-secret",
     );
     expect(sessionStorage.length).toBe(0);
+  });
+
+  test("reads a window's live terminal count under the same capability", async () => {
+    transport.requestRoot
+      .mockResolvedValueOnce({ token: "cap-secret", expires_in_seconds: 300 })
+      .mockResolvedValueOnce({ count: 2 });
+
+    // The window id rides a path segment, so it is encoded rather than
+    // interpolated raw.
+    await expect(loadScopedWindowLiveTerminals("w one")).resolves.toBe(2);
+    expect(transport.requestRoot).toHaveBeenNthCalledWith(
+      2,
+      "GET",
+      "/api/library/command-capabilities/cap-secret/windows/w%20one/live-terminals",
+    );
   });
 
   test("remints once after the server revokes a stale capability", async () => {

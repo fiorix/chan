@@ -6,6 +6,7 @@
   import {
     fuzzyDeckScore,
     rankDeckItems,
+    type DeckConfirm,
     type DeckItem,
     type DeckScope,
     type DeckScopeId,
@@ -52,6 +53,7 @@
   import { ApiError } from "../api/errors";
   import {
     loadScopedLibrarySnapshot,
+    loadScopedWindowLiveTerminals,
     runScopedLibraryAction,
     type ScopedLibrarySnapshot,
     type ScopedLibraryWindow,
@@ -73,7 +75,7 @@
     /// The deck path this branch navigates to, absolute rather than a single
     /// step: the Computers tree is three levels deep at `windows > <id>`.
     next?: string[];
-    run?: () => void | Promise<void>;
+    run?: () => void | DeckConfirm | Promise<void | DeckConfirm>;
     command?: Command;
     arg?: string;
   }
@@ -125,6 +127,11 @@
   // at the same imported state proxy; CommandDeck mutates fields, never swaps
   // the draft object.
   let deckDraft = $state(launcherDraft);
+  // The count a Close card was painted with, and the reading that owns that
+  // card, both keyed by window. A reading a later one has overtaken keeps its
+  // hands off both.
+  const confirmedCloseCounts = new Map<string, unknown>();
+  const closePreparationVersions = new Map<string, number>();
 
   const ctx = $derived(commandContext());
   // A non-empty path means the deck is inside a Computers branch. `windows`
@@ -393,20 +400,92 @@
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
       awaitResult: true,
       dismissImmediatelyOnSuccess: command === "focus" || command === "show",
-      confirm:
-        command === "close"
-          ? {
-              title: `Close ${title}?`,
-              message: "Open sessions in this window may stop.",
-              actionLabel: "Close",
-              danger: true,
-            }
-          : undefined,
+      confirm: command === "close" ? closeConfirmation(window) : undefined,
       run:
         command === "focus" || command === "show"
           ? () => focusScopedWindow(window)
-          : () => buryScopedWindow(window, command === "close"),
+          : command === "hide"
+            ? () => buryScopedWindow(window, false)
+            : () => closeAfterFreshConfirmation(window),
     };
+  }
+
+  function closeMessage(count: unknown): string {
+    if (typeof count !== "number") return "Open sessions in this window may stop.";
+    if (count === 0) return "This window will close.";
+    return `${count} terminal session${count === 1 ? "" : "s"} in this window will stop.`;
+  }
+
+  function informedCloseConfirmation(
+    window: ScopedLibraryWindow,
+    count: unknown,
+  ): DeckConfirm {
+    return {
+      title: `Close ${scopedWindowTitle(window)}?`,
+      message: closeMessage(count),
+      actionLabel: "Close",
+      danger: true,
+    };
+  }
+
+  /// Claim the next reading slot for a window's Close card. Every count read
+  /// takes one before it asks, so the reading that answers last is the only one
+  /// still entitled to describe the card.
+  function nextCloseReading(windowId: string): number {
+    const version = (closePreparationVersions.get(windowId) ?? 0) + 1;
+    closePreparationVersions.set(windowId, version);
+    return version;
+  }
+
+  function closeReadingIsCurrent(windowId: string, version: number): boolean {
+    return closePreparationVersions.get(windowId) === version;
+  }
+
+  /// The capability route answers the host-wide figure, the same one the
+  /// launcher's Close card names. A failure leaves the generic warning rather
+  /// than a number nobody can stand behind.
+  async function readCloseCount(window: ScopedLibraryWindow): Promise<unknown> {
+    try {
+      return await loadScopedWindowLiveTerminals(window.window_id);
+    } catch {
+      return null;
+    }
+  }
+
+  /// Raising the card reads the count, so the question names a number instead
+  /// of warning in general terms.
+  function closeConfirmation(window: ScopedLibraryWindow): () => Promise<DeckConfirm> {
+    return async () => {
+      const version = nextCloseReading(window.window_id);
+      const count = await readCloseCount(window);
+      if (closeReadingIsCurrent(window.window_id, version)) {
+        confirmedCloseCounts.set(window.window_id, count);
+      }
+      return informedCloseConfirmation(window, count);
+    };
+  }
+
+  /// Close reads the count again and stops to confirm a second time when it
+  /// moved, so the window goes only on a number the user has just seen. The
+  /// reading is slotted like the card's: one overtaken by a newer read
+  /// describes a card that is no longer on screen, so it asks again rather than
+  /// closing on what it found.
+  async function closeAfterFreshConfirmation(
+    window: ScopedLibraryWindow,
+  ): Promise<void | DeckConfirm> {
+    const version = nextCloseReading(window.window_id);
+    const recorded = confirmedCloseCounts.get(window.window_id);
+    const hadRecorded = confirmedCloseCounts.has(window.window_id);
+    const fresh = await readCloseCount(window);
+    if (!closeReadingIsCurrent(window.window_id, version)) {
+      return informedCloseConfirmation(window, fresh);
+    }
+    if (!hadRecorded || fresh !== recorded) {
+      confirmedCloseCounts.set(window.window_id, fresh);
+      return informedCloseConfirmation(window, fresh);
+    }
+    confirmedCloseCounts.delete(window.window_id);
+    await buryScopedWindow(window, true);
   }
 
   function scopedWorkspaceEntry(workspace: ScopedLibraryWorkspace): Entry {
@@ -568,6 +647,22 @@
     persistLauncherDraft();
   });
 
+  // Close records are per window and this deck stays mounted for the life of
+  // the window, so a window that leaves the roster takes its records with it.
+  // A snapshot that has not arrived says nothing about the roster, so it
+  // forgets nothing.
+  $effect(() => {
+    const snapshot = scopedLibrary;
+    if (!snapshot) return;
+    const live = new Set(snapshot.windows.map((window) => window.window_id));
+    for (const key of [...confirmedCloseCounts.keys()]) {
+      if (!live.has(key)) confirmedCloseCounts.delete(key);
+    }
+    for (const key of [...closePreparationVersions.keys()]) {
+      if (!live.has(key)) closePreparationVersions.delete(key);
+    }
+  });
+
   /// Say why the deck moved under the user, then clear the notice.
   function flashContextChanged(): void {
     launcherDraft.contextChanged = true;
@@ -624,7 +719,7 @@
     }
   }
 
-  async function choose(item: DeckItem): Promise<void> {
+  async function choose(item: DeckItem): Promise<void | DeckConfirm> {
     const entry = visibleEntries.find((candidate) => candidate.id === item.id);
     if (!entry) return;
     if (entry.next) {
@@ -634,8 +729,9 @@
       return;
     }
     if (!entry.command) {
-      await entry.run?.();
-      return;
+      // A run that answers with a confirmation is asking the deck to put that
+      // question instead of reporting success.
+      return await entry.run?.();
     }
     // Close first so a command-owned overlay/focus target lands on top. A
     // confirmed successful dispatch clears this draft; plain hiding does not.

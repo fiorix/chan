@@ -6,11 +6,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 const scopedLibrary = vi.hoisted(() => ({
   load: vi.fn(),
   run: vi.fn(),
+  liveTerminals: vi.fn(),
 }));
 
 vi.mock("../state/commands/install", () => ({}));
 vi.mock("../api/libraryCommand", () => ({
   loadScopedLibrarySnapshot: scopedLibrary.load,
+  loadScopedWindowLiveTerminals: scopedLibrary.liveTerminals,
   runScopedLibraryAction: scopedLibrary.run,
 }));
 
@@ -309,6 +311,34 @@ function titles(target: HTMLElement): string[] {
   return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
 }
 
+function operation(target: HTMLElement): string {
+  return target.querySelector(".deck-operation")?.textContent ?? "";
+}
+
+function decision(target: HTMLElement, label: string): HTMLButtonElement {
+  const found = [...target.querySelectorAll<HTMLButtonElement>(".deck-decisions button")].find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!found) throw new Error(`missing decision ${label}; card: ${operation(target)}`);
+  return found;
+}
+
+/// The browser close path acquires the target window's named context before
+/// the server mutation, which jsdom has no real window for.
+function stubPopup(): void {
+  vi.spyOn(window, "open").mockImplementation(
+    () => ({ close: vi.fn(), focus: vi.fn(), location: { href: "" } }) as unknown as Window,
+  );
+}
+
+function deferredCount(): { promise: Promise<unknown>; resolve: (value: unknown) => void } {
+  let resolve!: (value: unknown) => void;
+  const promise = new Promise<unknown>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function clonedSessionStorage(source: Storage): Storage {
   const values = new Map<string, string>();
   for (let index = 0; index < source.length; index += 1) {
@@ -566,6 +596,96 @@ describe("contextual command deck", () => {
     await tick();
     expect(launcherDraft.path).toEqual(["windows", "w-captioned"]);
     expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
+  });
+
+  test("the Close card names the live terminal count, read when it is raised", async () => {
+    scopedLibrary.liveTerminals.mockResolvedValue(3);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Close").click();
+    await flush();
+
+    // The figure comes from the capability count route at confirm time; the
+    // polled snapshot carries no count to read.
+    expect(scopedLibrary.liveTerminals).toHaveBeenCalledWith("w-captioned");
+    expect(operation(target)).toContain("3 terminal sessions in this window will stop.");
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
+  });
+
+  test("Close reads the count again and asks a second time when it moved", async () => {
+    stubPopup();
+    scopedLibrary.liveTerminals
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(2);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Close").click();
+    await flush();
+    expect(operation(target)).toContain("This window will close.");
+
+    decision(target, "Close").click();
+    await flush();
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
+    expect(operation(target)).toContain("2 terminal sessions in this window will stop.");
+
+    decision(target, "Close").click();
+    await flush();
+    expect(scopedLibrary.run).toHaveBeenCalledWith({
+      action: "close_window",
+      window_id: "w-captioned",
+    });
+    expect(scopedLibrary.liveTerminals).toHaveBeenCalledTimes(3);
+
+    // Let the deck's success card run its course inside this test: its timer
+    // dismisses the launcher, and a later test would otherwise lose the deck
+    // out from under it.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flush();
+    expect(launcherPanel.open).toBe(false);
+  });
+
+  test("a reading a later card replaced does not close the window", async () => {
+    stubPopup();
+    const recheck = deferredCount();
+    const reopened = deferredCount();
+    scopedLibrary.liveTerminals
+      .mockResolvedValueOnce(5)
+      .mockImplementationOnce(() => recheck.promise)
+      .mockImplementationOnce(() => reopened.promise);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Close").click();
+    await flush();
+    expect(operation(target)).toContain("5 terminal sessions in this window will stop.");
+
+    // Confirm, dismiss the working card inside the recheck's latency, then ask
+    // again: the second card is prepared while the first recheck is still out.
+    decision(target, "Close").click();
+    await tick();
+    await key(target, "Escape");
+    row(target, "Close").click();
+    await tick();
+
+    reopened.resolve(7);
+    await flush();
+    expect(operation(target)).toContain("7 terminal sessions in this window will stop.");
+
+    // The overtaken recheck still matches its own older reading. It must not
+    // close the window under the card that now names a different number.
+    recheck.resolve(5);
+    await flush();
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
+    expect(operation(target)).toContain("7 terminal sessions in this window will stop.");
   });
 
   test("a hidden window shows rather than focuses, and never offers both", async () => {
