@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "local-drop",
-  "description": "Drag-pasteboard read for LOCALLY-served SPA windows only (workspace-*, terminal-*, local::<window_id> watcher-opened workspace windows). Deliberately excludes outbound-*: those webviews render a remote-served SPA, and the macOS drag pasteboard is system-wide and outlives the drag, so a malicious remote could harvest paths the user drags in other applications.",
+  "description": "Drag-pasteboard read for locally served SPA windows only (workspace-*, terminal-*, and local::<window_id> watcher-opened workspace windows). Gateway-served lib-* windows stay excluded because the macOS drag pasteboard is system-wide and outlives the drag.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

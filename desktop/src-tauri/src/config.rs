@@ -4,9 +4,6 @@
 //! for which workspaces exist. This file holds only desktop-specific
 //! state that has no place in chan proper:
 //!
-//! - `outbound`: remote-workspace URLs the user explicitly attached.
-//!   The desktop owns only the webview/window state for these
-//!   entries, not the remote process or token lifecycle.
 //! - `window_configs`: LRU stack of closed-window labels + URL hashes
 //!   so a freshly-opened workspace window picks up the panes / tabs /
 //!   selections / overlay state of the previous window for that
@@ -45,30 +42,9 @@ pub const MAX_WINDOW_CONFIGS: usize = 20;
 /// size + position. Newest signature first; older ones evicted past the cap.
 pub const MAX_WINDOW_GEOMETRIES: usize = 5;
 
-/// An already-running chan server that chan-desktop opens by URL.
-/// The URL may carry a bearer token. It is persisted verbatim after
-/// validation because the remote server owns token rotation and
-/// shutdown; desktop owns only the attachment row and webview
-/// window state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OutboundWorkspace {
-    /// Stable desktop-local identifier used for row actions and
-    /// window restore. Not sent to the remote server.
-    pub id: String,
-    /// User-pasted HTTP(S) URL, including any bearer token.
-    pub url: String,
-    /// Optional user label for the launcher row and window title.
-    #[serde(default)]
-    pub label: String,
-    /// Wall-clock millis when the attachment was created.
-    #[serde(default)]
-    pub added_at: u64,
-}
-
 /// A devserver the desktop dials out to: a headless `chan devserver`
 /// running on some box (often reached over an `ssh -L` local forward).
-/// Unlike `OutboundWorkspace` (one remote URL = one workspace), a
-/// devserver is a multi-workspace aggregator: the desktop groups its
+/// A devserver is a multi-workspace aggregator: the desktop groups its
 /// workspaces under one `[DEVSERVER {host}]` launcher section and drives
 /// them through the devserver's management API.
 ///
@@ -379,16 +355,13 @@ pub struct WindowGeometry {
 
 /// Desktop-owned OS window geometry for one window, with a small
 /// per-monitor-signature LRU so a machine that flips monitor layout and back
-/// restores each layout's own size + position. Keyed by the (stable across a
-/// bury / reopen) native window label -- sibling to [`WindowConfig`], which holds
-/// SPA restore state for outbound windows only. Geometry lives here for ALL
-/// window classes (local / devserver / outbound) because only chan-desktop can
-/// read / set OS window pixels -- even when the SPA session itself is server-owned.
+/// restores each layout's own size + position. Keyed by the stable native
+/// window label. Geometry lives here for all window classes because only
+/// chan-desktop can read and set OS window pixels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowGeometryRecord {
-    /// Native Tauri window label -- the join key. Stable across a bury / reopen:
-    /// outbound windows reuse their label; watcher windows reopen at the same
-    /// `{library_id}::{window_id}`.
+    /// Native Tauri window label -- the join key. Watcher windows reopen at the
+    /// same `{library_id}::{window_id}`.
     pub window_label: String,
     /// Per-signature geometry LRU, newest first, capped at
     /// [`MAX_WINDOW_GEOMETRIES`].
@@ -415,10 +388,6 @@ pub enum GeometryMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    /// Explicit outbound URL attachments. These are non-owned
-    /// remote workspaces that desktop opens by URL.
-    #[serde(default)]
-    pub outbound: Vec<OutboundWorkspace>,
     /// Configured devservers (multi-workspace aggregators the desktop
     /// dials out to). Each renders its own `[DEVSERVER {host}]` launcher
     /// section. The per-workspace URLs/tokens are NOT persisted (the
@@ -440,9 +409,8 @@ pub struct Config {
     #[serde(default)]
     pub window_configs: Vec<WindowConfig>,
     /// Desktop-owned OS window geometry, one [`WindowGeometryRecord`] per window
-    /// label, each with its own per-monitor-signature LRU. Sibling to
-    /// `window_configs` (which is outbound-only SPA restore state): geometry is
-    /// keyed by the stable native label and covers every window class, since only
+    /// label, each with its own per-monitor-signature LRU. Geometry is keyed by
+    /// the stable native label and covers every window class, since only
     /// the desktop can read / set OS window pixels. Newest record first; capped
     /// at `MAX_WINDOW_CONFIGS` windows.
     #[serde(default)]
@@ -541,7 +509,7 @@ pub type DevserverRemoveHook =
 /// [`WorkspaceHost::devserver_registry`](chan_server::WorkspaceHost::devserver_registry).
 /// It wraps the SHARED [`ConfigStore`] handle (the same `Arc<Mutex<ConfigStore>>`
 /// the desktop's own commands and the window-config LRU use), so every config
-/// write -- devserver CRUD, window stack, outbound attachments -- serializes
+/// write -- devserver CRUD and window state -- serializes
 /// through one lock and can't lose an update to a concurrent full-file rewrite.
 ///
 /// The token is write-only: `add`/`update` accept it, `list` and the returned
@@ -1339,11 +1307,6 @@ pub fn local_window_key(workspace_key: &str) -> String {
     workspace_key.to_string()
 }
 
-/// Identity key for a remote (devserver) URL attachment.
-pub fn remote_window_key(id: &str) -> String {
-    format!("remote:{id}")
-}
-
 /// Push a window config to the top of the LRU stack and persist.
 /// Older entries with the same `window_label` are dropped so the
 /// stack stays compact (one entry per label across all keys).
@@ -1728,27 +1691,19 @@ mod tests {
     }
 
     #[test]
-    fn remote_window_key_namespaced_apart_from_local() {
-        let remote = remote_window_key("remote-1");
-        assert_ne!(local_window_key("remote-1"), remote);
-    }
-
-    #[test]
-    fn config_defaults_outbound_empty() {
-        let cfg = Config::default();
-        assert!(cfg.outbound.is_empty());
-    }
-
-    #[test]
-    fn outbound_workspace_label_defaults_empty() {
-        let raw = r#"{
-            "id": "remote-1",
-            "url": "http://127.0.0.1:4000/?t=abc"
-        }"#;
-        let workspace: OutboundWorkspace = serde_json::from_str(raw).expect("legacy load");
-        assert_eq!(workspace.id, "remote-1");
-        assert_eq!(workspace.label, "");
-        assert_eq!(workspace.added_at, 0);
+    fn config_ignores_retired_outbound_rows() {
+        let raw = r##"{
+            "outbound": [{
+                "id": "remote-1",
+                "url": "http://127.0.0.1:4000/?t=abc",
+                "label": "old remote",
+                "added_at": 42
+            }],
+            "local_color": "#123456"
+        }"##;
+        let cfg: Config =
+            serde_json::from_str(raw).expect("load config with retired outbound rows");
+        assert_eq!(cfg.local_color.as_deref(), Some("#123456"));
     }
 
     #[test]
@@ -1762,7 +1717,7 @@ mod tests {
         // A config.json that predates devservers must still load: serde
         // reads the missing key as the empty set so the load never fails
         // and drops the rest of the config.
-        let raw = r#"{ "outbound": [], "window_configs": [] }"#;
+        let raw = r#"{ "window_configs": [] }"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without devservers");
         assert!(cfg.devservers.is_empty());
     }
@@ -2473,7 +2428,7 @@ mod tests {
         // A config.json predating window geometry must still load: serde reads
         // the missing key as the empty set, so the load never fails and drops
         // the rest of the config.
-        let raw = r#"{ "outbound": [], "window_configs": [] }"#;
+        let raw = r#"{ "window_configs": [] }"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without window_geometry");
         assert!(cfg.window_geometry.is_empty());
     }
@@ -2530,7 +2485,7 @@ mod tests {
     fn config_loads_without_gateways_field() {
         // A config.json predating gateways must still load: serde reads the
         // missing key as the empty vec.
-        let raw = r#"{ "outbound": [], "devservers": [] }"#;
+        let raw = r#"{ "devservers": [] }"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without gateways");
         assert!(cfg.gateways.is_empty());
     }

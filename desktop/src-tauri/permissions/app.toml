@@ -170,8 +170,7 @@ commands.allow = ["gateway_csrf_token"]
 
 # Deliberately NOT in the workspace-window set: the macOS drag
 # pasteboard is system-wide, so this is granted only to locally-served
-# windows via capabilities/local-drop.json (workspace-*, terminal-*) --
-# never to the remote-served outbound-* webviews.
+# windows via capabilities/local-drop.json, never to gateway-served webviews.
 [[permission]]
 identifier = "allow-read-dropped-paths"
 description = "Enables the read_dropped_paths command (drag-pasteboard read at drop time)."
@@ -179,8 +178,7 @@ commands.allow = ["read_dropped_paths"]
 
 # Deliberately NOT in the workspace-window set: native transfers read or write
 # the user's local filesystem, so every command is granted only to locally
-# served windows plus authenticated exact gateway origins. Never grant these
-# to outbound-* remote URL attachments.
+# served windows plus authenticated exact gateway origins.
 [[permission]]
 identifier = "allow-download-file-native"
 description = "Streams a same-origin authenticated download to the Downloads folder."

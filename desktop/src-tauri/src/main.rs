@@ -40,7 +40,7 @@ use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use config::{ConfigStore, Devserver, WindowConfig, WindowGeometry};
+use config::{ConfigStore, WindowConfig, WindowGeometry};
 use serve::ServeHandle;
 use window_watcher_wiring::DevserverWatcherStop;
 
@@ -145,13 +145,6 @@ pub struct AppState {
     /// gesture, so we suppress it here. One-shot: the close handler consumes the
     /// label, so a later genuine red-button close still shows the notice.
     pub silent_hides: Mutex<std::collections::HashSet<String>>,
-    /// Reopenable REMOTE windows, keyed by remote window label: the
-    /// `saved && !connected` rows from each remote connection's
-    /// (outbound attachment) `GET /api/windows`,
-    /// refreshed by `refresh_remote_windows_menu`. The Window menu
-    /// lists them under `remote:` ids; clicking one opens a webview
-    /// with that exact label so the remote restores its session blob.
-    pub remote_reopen: Mutex<HashMap<String, RemoteReopen>>,
     /// Live connections to devservers, keyed by `Devserver.id`. A devserver
     /// present here is connected (the launcher polls its workspace list and
     /// can open its tenants); absent means disconnected. In memory only:
@@ -161,11 +154,6 @@ pub struct AppState {
     /// embedded host; populated on connect and drained on disconnect. The host
     /// reads it when assembling the launcher's window + workspace lists.
     pub devserver_feed: Arc<DevserverFeed>,
-    /// Windows the desktop opened for each devserver (its standalone terminal
-    /// and workspace tenants), keyed by `Devserver.id`. Tracked so a
-    /// disconnect tears down exactly its windows, and a reconnect re-opens its
-    /// workspace windows with a fresh token under the same label.
-    pub devserver_windows: Mutex<HashMap<String, Vec<DevserverWindow>>>,
     /// Per connected devserver (`Devserver.id`), the stop handle for its window
     /// watcher. Disconnect stops the watcher and closes that devserver's native
     /// windows; token-rotation handoff retires only the old watcher so the fresh
@@ -290,10 +278,8 @@ impl AppState {
             window_title_overrides: Mutex::new(HashMap::new()),
             buried_windows: Mutex::new(Vec::new()),
             silent_hides: Mutex::new(std::collections::HashSet::new()),
-            remote_reopen: Mutex::new(HashMap::new()),
             devservers: Arc::new(devserver::DevserverConns::default()),
             devserver_feed: Arc::new(DevserverFeed::default()),
-            devserver_windows: Mutex::new(HashMap::new()),
             devserver_watchers: Mutex::new(HashMap::new()),
             devserver_watcher_views: Mutex::new(HashMap::new()),
             pending_window_deletes: Arc::new(window_watcher::PendingDeleteState::default()),
@@ -354,44 +340,10 @@ pub struct ControlTerminalRun {
     pub script_based: bool,
 }
 
-/// One reopenable remote window: see `AppState::remote_reopen`.
-#[derive(Debug, Clone)]
-pub struct RemoteReopen {
-    /// The connection's webview URL (outbound URL with its token).
-    pub url: String,
-    /// Base window title (`📤 <url>`); the build
-    /// suffixes " Window N".
-    pub base_title: String,
-    /// Menu entry text (base title + the remote window's tail).
-    pub menu_title: String,
-    /// WindowConfig identity key for the connection (close/bury of the
-    /// reopened window captures restore state under it).
-    pub config_key: String,
-    /// Route through the connecting screen (outbound remotes; a down
-    /// remote must not paint a blank webview).
-    pub connecting: bool,
-    /// Set when this is a CLOSED devserver-tenant window enumerated for the
-    /// Window menu (L10) rather than an outbound attachment: the reopen
-    /// re-creates it at its label AND re-tracks it under the devserver so a
-    /// later disconnect tears it down. `None` for outbound reopens.
-    pub devserver: Option<DevserverReopen>,
-}
-
-/// The devserver context a menu-reopened workspace window needs (see
-/// `RemoteReopen`): which devserver owns it and how to re-create + track it.
-#[derive(Debug, Clone)]
-pub struct DevserverReopen {
-    /// Devserver id -- the teardown key (a disconnect closes this window).
-    pub id: String,
-    /// Tenant route prefix -- the tracking `window_id` for a workspace window.
-    pub prefix: String,
-}
-
 /// One buried (hidden, not closed) window: see `AppState::buried_windows`.
 #[derive(Debug, Clone)]
 pub struct BuriedWindow {
-    /// Tauri window label (`workspace-<16hex>-<seq>` / `terminal-win-<seq>` /
-    /// outbound). Also the Window-menu item id suffix.
+    /// Tauri window label. Also the Window-menu item id suffix.
     pub label: String,
     /// OS display title at bury time ("🏠 /path Window 2",
     /// "Terminal Window 1") -- shown verbatim in the Window menu.
@@ -401,27 +353,11 @@ pub struct BuriedWindow {
     pub buried_at: u64,
 }
 
-/// One window the desktop opened for a devserver: see
-/// `AppState::devserver_windows`.
-#[derive(Debug, Clone)]
-pub struct DevserverWindow {
-    /// Outbound spawn id (the workspace tenant prefix, or the standalone
-    /// terminal id). Teardown closes the window by this.
-    pub window_id: String,
-    /// The actual Tauri window label. Reconnect re-opens the window under the
-    /// SAME label so the remote hydrates its `?w=<label>` session.
-    pub label: String,
-    /// Workspace tenant prefix for a workspace window (`None` for the
-    /// standalone terminal). Reconnect re-assembles a fresh tenant URL from
-    /// this and the rotated token.
-    pub prefix: Option<String>,
-}
-
 /// Family prefix for unbury matching: the label with its trailing
 /// `-<seq>` segment removed (everything through the LAST dash).
 /// `terminal-win-3` -> `terminal-win-` (all standalone terminals are
 /// one family); `workspace-<16hex>-2` -> `workspace-<16hex>-` (one
-/// family per workspace; same shape for outbound labels).
+/// family per workspace).
 fn window_family_prefix(label: &str) -> &str {
     match label.rfind('-') {
         Some(idx) => &label[..=idx],
@@ -562,7 +498,7 @@ impl AppState {
     /// Upsert a window's freshly-captured OS geometry into the desktop-local
     /// geometry LRU (see `config::push_window_geometry`). Keyed by the stable
     /// native window label; covers every window class (the geometry store is
-    /// separate from the outbound-only `window_configs`). Best-effort: any I/O
+    /// separate from `window_configs`). Best-effort: any I/O
     /// error is logged and dropped, like `push_window_config`.
     pub fn push_window_geometry(&self, label: &str, geom: WindowGeometry) {
         let mut store = self.store.lock().unwrap();
@@ -1333,48 +1269,6 @@ fn record_menu_title(record: &chan_server::WindowRecord) -> String {
     }
 }
 
-/// Display name for a devserver in the Window menu: its user label, or its
-/// host when unlabelled.
-fn devserver_display(d: &Devserver) -> String {
-    let label = d.label.trim();
-    if !label.is_empty() {
-        return label.to_string();
-    }
-    // No label: fall back to the URL host (the `[DEVSERVER {host}]` identity),
-    // or the raw URL if it somehow doesn't parse.
-    devserver::parse_devserver_url(&d.url)
-        .map(|(host, _)| host)
-        .unwrap_or_else(|_| d.url.clone())
-}
-
-/// Record a window the desktop opened for a devserver, so a later disconnect
-/// can tear it down and a reconnect can re-open it.
-fn track_devserver_window(state: &AppState, id: &str, window: DevserverWindow) {
-    state
-        .devserver_windows
-        .lock()
-        .unwrap()
-        .entry(id.to_string())
-        .or_default()
-        .push(window);
-}
-
-/// Close the imperative windows the desktop opened for a devserver -- its
-/// workspace tenants and standalone terminals -- and forget their tracking.
-/// Leaves the control terminal alone (only the full forget teardown reaps that).
-/// Best-effort: a window the user already closed is a no-op.
-fn remove_devserver_workspace_windows(app: &tauri::AppHandle, state: &AppState, id: &str) {
-    let windows = state
-        .devserver_windows
-        .lock()
-        .unwrap()
-        .remove(id)
-        .unwrap_or_default();
-    for window in windows {
-        serve::close_remote_workspace_windows(app, &window.window_id);
-    }
-}
-
 /// Reap a devserver's control terminal: close its window AND its chan-library
 /// registry row + tenant, then drop the prefix tracking so the exit watcher
 /// (keyed on it) stops. Closing the control-terminal WINDOW alone doesn't stop
@@ -1407,7 +1301,6 @@ fn remove_devserver_windows(app: &tauri::AppHandle, state: &AppState, id: &str) 
         let _ = cancel.send(DevserverWatcherStop::CloseWindows);
     }
     state.devserver_watcher_views.lock().unwrap().remove(id);
-    remove_devserver_workspace_windows(app, state, id);
     // Drop it from the launcher feed and re-push so its windows + workspaces
     // leave the launcher (the watcher/poll already stopped on cancel).
     state.devserver_feed.forget(id);
@@ -2689,8 +2582,7 @@ async fn connect_devserver_impl_inner(
 /// (`POST /api/library/windows {Workspace, path}`). The window watcher then
 /// reconciles the new record open, so the window is feed-driven: it persists
 /// server-side and reopens on reconnect, and disconnect closes it via the
-/// watcher's reconcile-to-empty -- unlike the old imperative `outbound-` spawn,
-/// which lived outside the feed and vanished on reconnect. The SPA Open button
+/// watcher's reconcile-to-empty. The SPA Open button
 /// turns the workspace ON first, so the minted record resolves a live token (an
 /// off workspace mints an empty token the watcher skips). Reached over the
 /// desktop bridge from the launcher's `workspaces/open` route.
@@ -4264,7 +4156,7 @@ fn open_devtools(window: tauri::WebviewWindow) {
 /// and live on the connecting screen, where the SPA command bus is dead.
 /// The routing mirrors the launcher menu's New Window item but keyed on
 /// the INVOKING window's label instead of focus: a workspace-class
-/// window (workspace / outbound / standalone terminal / watcher-opened)
+/// window (workspace / standalone terminal / watcher-opened)
 /// opens another window of its OWN connection; anything else (a control
 /// terminal) spawns a standalone terminal.
 #[tauri::command]
@@ -4463,7 +4355,7 @@ async fn reconnect_devserver_for_window(
 /// window's label is `{library_id}::{window_id}`, and a locally-supervised
 /// workspace window belongs to the local library by construction (its
 /// `WindowSpec` carries `library_id: "local"`). Every other label -- the
-/// launcher, About, an outbound URL attachment, a terminal-only window -- names
+/// launcher, About, or a terminal-only window -- names
 /// no library, so the commands below refuse instead of guessing one.
 ///
 /// Deriving this from the caller's own label rather than an argument is what
@@ -5793,8 +5685,7 @@ fn main() {
             // ACL-scoped to locally-served windows (capabilities/
             // local-drop.json) -- the drag pasteboard is system-wide.
             dropped_paths::read_dropped_paths,
-            // Native upload picker + HTTP stream. Paths and bytes stay in Rust;
-            // the capability excludes outbound-* remote URL attachments.
+            // Native upload picker + HTTP stream. Paths and bytes stay in Rust.
             upload::upload_files_native,
             // `cs tunnel` trigger: the SPA forwards the tunnel_open
             // window_command here; the devserver to dial is resolved from the
@@ -5897,7 +5788,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
         // New Window opens another window of the FOCUSED window's
         // connection (open_new_window_for_focused_workspace): local
-        // workspace or outbound remote, or another standalone
+        // workspace or another standalone
         // terminal window; with the launcher (or nothing) focused it opens
         // a standalone terminal window -- the launcher itself is a
         // singleton and is never multiplied. Convention for future
@@ -5920,7 +5811,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // so a launcher-focused chord would dead-end). The single handler
         // routes by the FOCUSED window's kind: a launcher (main / main-*)
         // opens a new standalone terminal window; any embedded SPA window
-        // (workspace-* / outbound-* / terminal-*) gets `app.terminal.toggle`
+        // (workspace-* / terminal-*) gets `app.terminal.toggle`
         // dispatched, which the SPA interprets per its mode (workspace:
         // toggle a pane terminal; terminal: add a tab).
         let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Terminal")
@@ -6042,8 +5933,8 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 /// Route every menubar item click / accelerator. Menu events carry only
 /// the item id -- never the source window -- so the dynamic Window-menu
-/// rows encode their window's label in the id (the `buried:` / `open:` /
-/// `remote:` namespaces); routing by `is_focused` is reserved for items
+/// rows encode their window's label in the id (the `buried:` / `open:`
+/// namespaces); routing by `is_focused` is reserved for items
 /// that genuinely mean "the focused window" (and for macOS, whose single
 /// global menubar has no owning window). Off macOS only the launcher has
 /// a menubar, so the static items below fire from it alone.
@@ -6063,10 +5954,6 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         if let Err(e) = show_window(app, label) {
             tracing::warn!(label, error = %e, "raising open window from menu failed");
         }
-        return;
-    }
-    if let Some(label) = id.strip_prefix(REMOTE_MENU_ID_PREFIX) {
-        open_remote_window_from_menu(app, label);
         return;
     }
     match id {
@@ -6124,11 +6011,6 @@ const OPEN_MENU_ID_PREFIX: &str = "open:";
 /// Disabled section header above the open-window entries (a `-{ds_id}` suffix
 /// per devserver group, so the cleanup matches it by prefix).
 const OPEN_MENU_HEADER_ID: &str = "open-header";
-/// Window-menu id namespace for reopenable remote windows (same
-/// prefix+label scheme as `buried:`).
-const REMOTE_MENU_ID_PREFIX: &str = "remote:";
-/// Disabled section header above the remote entries.
-const REMOTE_MENU_HEADER_ID: &str = "remote-header";
 /// Linux/Windows Window-submenu id (macOS uses the system
 /// `WINDOW_SUBMENU_ID` from `Menu::default`). The launcher's menubar --
 /// the only off-mac bar -- uses this id for its Window submenu, so the
@@ -6253,9 +6135,8 @@ fn window_submenus(app: &tauri::AppHandle) -> Vec<Submenu<tauri::Wry>> {
 }
 
 /// Re-sync the Window submenu's dynamic tail: remove every
-/// previously-appended `buried:*` / `remote:*` entry (and the section
-/// headers), then append the current snapshots -- buried windows most
-/// recent first, then reopenable remote windows sorted by title. Off-mac
+/// previously-appended `buried:*` / `open:*` entry (and the section
+/// headers), then append the current snapshots. Off-mac
 /// the tail lands on the launcher's bar alone (the only menubar). Runs
 /// on the main thread -- muda requires menu mutation there on macOS --
 /// and is best-effort throughout: a menu glitch must never take down a
@@ -6275,10 +6156,8 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                     // devserver), so match those header ids by prefix.
                     if id.starts_with(BURIED_MENU_HEADER_ID)
                         || id.starts_with(OPEN_MENU_HEADER_ID)
-                        || id == REMOTE_MENU_HEADER_ID
                         || id.starts_with(BURIED_MENU_ID_PREFIX)
                         || id.starts_with(OPEN_MENU_ID_PREFIX)
-                        || id.starts_with(REMOTE_MENU_ID_PREFIX)
                     {
                         let _ = submenu.remove(&item);
                     }
@@ -6287,15 +6166,6 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
         }
         let state = app.state::<Arc<AppState>>();
         let buried = state.buried_snapshot();
-        let mut remote: Vec<(String, String)> = state
-            .remote_reopen
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(label, entry)| (label.clone(), entry.menu_title.clone()))
-            .collect();
-        remote.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
         // Sections are assembled as data first, then applied to every
         // submenu at the end -- MenuItems can't be shared across menus, so
         // each menubar gets freshly built ones.
@@ -6319,45 +6189,18 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                     id_prefix,
                 });
             };
-        // Group the hidden windows by the devserver that opened them, so a
-        // user with several devservers can tell their windows apart; a window
-        // tracked under no devserver is local. The devserver's tracked window
-        // labels (plus its control terminal) are the membership test.
-        let cfg = state.store.lock().unwrap().get().ok();
-        let mut devservers: Vec<(String, String, std::collections::HashSet<String>)> = {
-            let tracked = state.devserver_windows.lock().unwrap();
-            tracked
-                .iter()
-                .map(|(ds_id, windows)| {
-                    let display = cfg
-                        .as_ref()
-                        .and_then(|c| c.devservers.iter().find(|d| &d.id == ds_id))
-                        .map(devserver_display)
-                        .unwrap_or_else(|| ds_id.clone());
-                    let mut labels: std::collections::HashSet<String> =
-                        windows.iter().map(|w| w.label.clone()).collect();
-                    labels.insert(serve::control_terminal_label(ds_id));
-                    (ds_id.clone(), display, labels)
-                })
-                .collect()
-        };
-        devservers.sort_by(|a, b| a.1.cmp(&b.1));
-
         // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
         // window -- not just reopen a hidden or remote one. The library's own
         // window set is the source of truth (local rows now; each connected
         // devserver's rows once its feed merges in via `DevserverFeedSource`). A
         // row counts as open when its native webview is alive AND visible: a
         // buried window's webview is alive but hidden, so it shows under Hidden,
-        // not here. Grouped by the same devserver membership as the Hidden
-        // section so the two line up. Appended first → the open windows head the
-        // dynamic tail, above Hidden and Remote.
+        // not here. Appended first, the open windows head the dynamic tail.
         let open_records = state
             .embedded()
             .map(|e| e.assemble_window_records())
             .unwrap_or_default();
         let mut open_local: Vec<(String, String)> = Vec::new();
-        let mut open_grouped: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for record in &open_records {
             // A server-hidden window belongs under Hidden, never Open:
             // group strictly by the persisted `hidden`, not just native visibility.
@@ -6372,12 +6215,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 continue;
             }
             let title = window.title().unwrap_or_else(|_| record_menu_title(record));
-            match devservers.iter().find(|(_, _, labels)| labels.contains(&label)) {
-                Some((ds_id, _, _)) => {
-                    open_grouped.entry(ds_id.clone()).or_default().push((label, title))
-                }
-                None => open_local.push((label, title)),
-            }
+            open_local.push((label, title));
         }
         if !open_local.is_empty() {
             push_section(
@@ -6387,19 +6225,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 OPEN_MENU_ID_PREFIX,
             );
         }
-        for (ds_id, display, _) in &devservers {
-            if let Some(rows) = open_grouped.get(ds_id) {
-                push_section(
-                    &format!("{OPEN_MENU_HEADER_ID}-{ds_id}"),
-                    &format!("{display} windows ({})", rows.len()),
-                    rows.clone(),
-                    OPEN_MENU_ID_PREFIX,
-                );
-            }
-        }
-
         let mut local: Vec<(String, String)> = Vec::new();
-        let mut grouped: HashMap<String, Vec<(String, String)>> = HashMap::new();
         // Hidden = the in-session buried set UNION the server-persisted hidden
         // records: a window hidden in a PRIOR session (record.hidden)
         // isn't opened on connect (should_show false) and isn't in the local
@@ -6441,15 +6267,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
             let title = hidden_title(&label, None);
             hidden_rows.push((label, title));
         }
-        for (label, title) in hidden_rows {
-            match devservers.iter().find(|(_, _, labels)| labels.contains(&label)) {
-                Some((ds_id, _, _)) => grouped
-                    .entry(ds_id.clone())
-                    .or_default()
-                    .push((label, title)),
-                None => local.push((label, title)),
-            }
-        }
+        local.extend(hidden_rows);
 
         // Count + cost hint in the header: buried webviews stay live (warm
         // layout, running terminals), which is memory the user can't see.
@@ -6461,23 +6279,6 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 BURIED_MENU_ID_PREFIX,
             );
         }
-        for (ds_id, display, _) in &devservers {
-            if let Some(rows) = grouped.get(ds_id) {
-                push_section(
-                    &format!("{BURIED_MENU_HEADER_ID}-{ds_id}"),
-                    &format!("{display} hidden windows ({})", rows.len()),
-                    rows.clone(),
-                    BURIED_MENU_ID_PREFIX,
-                );
-            }
-        }
-        push_section(
-            REMOTE_MENU_HEADER_ID,
-            "Remote Windows",
-            remote,
-            REMOTE_MENU_ID_PREFIX,
-        );
-
         for submenu in &submenus {
             for section in &sections {
                 if let Ok(item) =
@@ -6505,239 +6306,6 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
     });
 }
 
-fn devserver_window_is_reopenable(row: &chan_server::WindowRecord) -> bool {
-    row.persisted && !row.connected && !row.control && !row.token.is_empty()
-}
-
-/// Re-poll every remote connection's window feed and replace the
-/// reopenable-remote-windows snapshot (then rebuild the menu). Spawned async:
-/// each remote gets a short timeout and a failed poll just leaves that
-/// connection out this round. Triggers: an outbound window opening or being
-/// destroyed, and a `remote:` menu click. Tauri 2 exposes no menu-will-open
-/// hook, so event-driven refresh with tolerable staleness is the design.
-pub fn refresh_remote_windows_menu(app: &tauri::AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<Arc<AppState>>();
-
-        /// One remote connection to poll.
-        struct Conn {
-            family: String,
-            url: String,
-            base_title: String,
-            config_key: String,
-            connecting: bool,
-        }
-        let mut conns: Vec<Conn> = Vec::new();
-        // (id, display name, live conn) for each CONNECTED devserver, so its
-        // persisted-but-closed windows become reopen entries below (L10).
-        let mut devserver_targets: Vec<(String, String, devserver::DevserverConn)> = Vec::new();
-        let cfg = {
-            let store = state.store.lock().unwrap();
-            store.get().ok()
-        };
-        if let Some(cfg) = cfg {
-            for o in &cfg.outbound {
-                conns.push(Conn {
-                    family: format!("{}-", serve::outbound_window_prefix(&o.id)),
-                    url: o.url.clone(),
-                    base_title: serve::remote_window_title(&o.url),
-                    config_key: config::remote_window_key(&o.id),
-                    connecting: true,
-                });
-            }
-            for d in &cfg.devservers {
-                // `devservers.get` returns Some only for a CONNECTED devserver.
-                if let Some(conn) = state.devservers.get(&d.id) {
-                    devserver_targets.push((d.id.clone(), devserver_display(d), conn));
-                }
-            }
-        }
-
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
-        {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::warn!(error = %e, "remote windows poll: building http client failed");
-                return;
-            }
-        };
-        let mut map: HashMap<String, RemoteReopen> = HashMap::new();
-        for conn in conns {
-            let rows = match fetch_remote_windows(&client, &conn.url).await {
-                Some(rows) => rows,
-                None => continue, // remote down / unparsable; skip this round
-            };
-            for row in rows {
-                // Reopenable = the remote has restore state for the label
-                // and no live socket holds it anywhere, and the label
-                // belongs to THIS connection (filters out browser-session
-                // ids and other desktops' families).
-                if !(row.saved && !row.connected && row.id.starts_with(&conn.family)) {
-                    continue;
-                }
-                map.insert(
-                    row.id.clone(),
-                    RemoteReopen {
-                        url: conn.url.clone(),
-                        base_title: conn.base_title.clone(),
-                        menu_title: format!(
-                            "{} - {}",
-                            conn.base_title,
-                            remote_window_tail(&row.id)
-                        ),
-                        config_key: conn.config_key.clone(),
-                        connecting: conn.connecting,
-                        devserver: None,
-                    },
-                );
-            }
-        }
-        // A connected devserver's persisted, disconnected, non-control windows
-        // are reopenable from the Window menu. The URL uses the live feed's
-        // current per-mount token; an off tenant (empty token) is not
-        // menu-reopenable here because its launcher row turns it back on. The
-        // reopen re-creates and re-tracks the window so a later disconnect tears
-        // it down.
-        for (id, display, conn) in devserver_targets {
-            let rows = match devserver::fetch_library_windows(&conn).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!(devserver = %id, error = %e, "remote windows poll: listing library windows failed");
-                    continue;
-                }
-            };
-            for row in rows {
-                if !devserver_window_is_reopenable(&row) {
-                    continue;
-                }
-                let url = match devserver::assemble_tenant_url(
-                    &conn.host,
-                    conn.port,
-                    &row.prefix,
-                    &row.token,
-                ) {
-                    Ok(url) => url,
-                    Err(e) => {
-                        tracing::warn!(devserver = %id, label = %row.window_id, error = %e, "assembling a devserver reopen url failed");
-                        continue;
-                    }
-                };
-                let title = if row.title.is_empty() {
-                    None
-                } else {
-                    Some(row.title.clone())
-                };
-                let tail = title
-                    .clone()
-                    .unwrap_or_else(|| remote_window_tail(&row.window_id));
-                map.insert(
-                    row.window_id.clone(),
-                    RemoteReopen {
-                        url,
-                        base_title: title.unwrap_or_else(|| display.clone()),
-                        menu_title: format!("{display} - {tail}"),
-                        config_key: config::remote_window_key(&row.prefix),
-                        // Workspace reopen routes through the connecting screen,
-                        // like the reconnect path.
-                        connecting: true,
-                        devserver: Some(DevserverReopen {
-                            id: id.clone(),
-                            prefix: row.prefix,
-                        }),
-                    },
-                );
-            }
-        }
-        *state.remote_reopen.lock().unwrap() = map;
-        rebuild_window_menu(&app);
-    });
-}
-
-/// Row shape of the remote `GET /api/windows` response. Field names are
-/// the wire contract pinned server-side
-/// (`routes::windows::WindowInfo`).
-#[derive(serde::Deserialize)]
-struct RemoteWindowRow {
-    id: String,
-    connected: bool,
-    saved: bool,
-}
-
-/// GET `<base>/api/windows` preserving the base URL's query (`?t=`
-/// token rides there for outbound attachments). `None` on any failure
-/// -- the caller skips that connection for this refresh round.
-async fn fetch_remote_windows(
-    client: &reqwest::Client,
-    base: &str,
-) -> Option<Vec<RemoteWindowRow>> {
-    let base = tauri::Url::parse(base).ok()?;
-    let mut api = base.clone();
-    let mut path = base.path().to_string();
-    if !path.ends_with('/') {
-        path.push('/');
-    }
-    api.set_path(&format!("{path}api/windows"));
-    api.set_fragment(None);
-    let resp = client.get(api.as_str()).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    resp.json::<Vec<RemoteWindowRow>>().await.ok()
-}
-
-/// Human tail for a remote window label in the menu:
-/// `outbound-<16hex>-7` -> "window 7". Falls back to the raw label for
-/// anything unexpected.
-fn remote_window_tail(label: &str) -> String {
-    match label.rsplit('-').next().and_then(|n| n.parse::<u64>().ok()) {
-        Some(seq) => format!("window {seq}"),
-        None => label.to_string(),
-    }
-}
-
-/// `remote:` menu click: open a webview for the remote-known label.
-/// On success the label becomes `connected` remote-side, so a refresh
-/// drops it from the menu.
-fn open_remote_window_from_menu(app: &tauri::AppHandle, label: &str) {
-    let entry = {
-        let state = app.state::<Arc<AppState>>();
-        let map = state.remote_reopen.lock().unwrap();
-        map.get(label).cloned()
-    };
-    let Some(entry) = entry else {
-        tracing::warn!(label, "remote window menu entry has no stored connection");
-        return;
-    };
-    // A CLOSED devserver WORKSPACE window (L10): re-create it at its label AND
-    // re-track it under the devserver so a later disconnect tears it down. It
-    // reuses the outbound reopen (connecting screen, like reconnect).
-    if let Some(ds) = entry.devserver.clone() {
-        let tracked = serve::reopen_remote_window(app, label, &entry).map(|()| DevserverWindow {
-            window_id: ds.prefix.clone(),
-            label: label.to_string(),
-            prefix: Some(ds.prefix.clone()),
-        });
-        match tracked {
-            Ok(window) => {
-                let state = app.state::<Arc<AppState>>();
-                track_devserver_window(&state, &ds.id, window);
-            }
-            Err(e) => tracing::warn!(label, error = %e, "reopening devserver window failed"),
-        }
-        return;
-    }
-    if let Err(e) = serve::reopen_remote_window(app, label, &entry) {
-        tracing::warn!(label, error = %e, "reopening remote window failed");
-    }
-}
-
-/// Re-show a buried window and drop it from the registry + menu.
-/// Returns `false` when the label no longer names a live window (it
-/// was destroyed underneath; the registry entry is cleaned up either
-/// way).
 pub fn unbury_window(app: &tauri::AppHandle, label: &str) -> bool {
     let state = app.state::<Arc<AppState>>();
     let removed = state.remove_buried(label);
@@ -6882,15 +6450,11 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
 /// label across the running `serves` map, then mint another window for
 /// it (the watcher opens it).
 ///
-/// A focused `outbound-*` window opens a new window on the
-/// SAME remote (the connection is recovered from the label's hash
-/// prefix against the outbound attachments). With the
-/// launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
+/// With the launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
 /// terminal window instead -- the launcher is a singleton, never
 /// multiplied. The "Computers" picker stays reachable via the
 /// `win-main` menu item, which is also the fallback surface when a
-/// focused window's backing connection can't be resolved (stale
-/// window for a forgotten attachment).
+/// focused window's backing connection can't be resolved.
 /// Open the FOCUSED workspace window's contents in the system browser. Mints a
 /// browser-affinity record for the same workspace (chan-desktop's watcher skips
 /// non-native records, so no native twin opens), composes its loopback URL with
@@ -6912,7 +6476,7 @@ fn open_focused_window_in_browser(app: &tauri::AppHandle) -> Result<(), String> 
 /// mints a browser-affinity record for the same workspace (chan-desktop
 /// skips it, D4) so the browser tab holds its own window_id, then opens
 /// the composed URL. No-op for a window without a workspace record
-/// (standalone terminals, outbound webviews).
+/// (standalone terminals).
 fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     let embedded = state
@@ -6941,7 +6505,7 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
 }
 
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
-    // Buried workspace-/outbound- windows take precedence in their family:
+    // Buried workspace windows take precedence in their family:
     // Cmd+Shift+N on a window whose family has a hidden sibling REOPENS that
     // sibling (most recent first) instead of spawning a fresh window. Local
     // `local::` windows are independent registry records -- no family unbury;
@@ -7011,26 +6575,12 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
         });
         return Ok(());
     }
-    // Family unbury first: workspace- and outbound- windows all
-    // group by their `<kind>-<16hex>-` label prefix.
+    // Family unbury first: legacy workspace windows group by their
+    // `workspace-<16hex>-` label prefix.
     if let Some(buried) = state.most_recent_buried(window_family_prefix(focused_label)) {
         if unbury_window(app, &buried) {
             return Ok(());
         }
-    }
-    if focused_label.starts_with("outbound-") {
-        let cfg = state.store.lock().unwrap().get().map_err(err)?;
-        // New window on the SAME outbound remote: recover the attachment
-        // by matching the focused label's hash prefix (labels are
-        // `outbound-<hash(id)>-<seq>`; the hash is one-way).
-        for o in &cfg.outbound {
-            let prefix = serve::outbound_window_prefix(&o.id);
-            if focused_label.starts_with(&format!("{prefix}-")) {
-                return serve::spawn_remote_workspace_window(app, &o.id, &o.url).map(|_| ());
-            }
-        }
-        // Stale window for a forgotten attachment: surface the picker.
-        return show_window(app, "main");
     }
     let resolved = {
         let serves = state.serves.lock().unwrap();
@@ -7349,8 +6899,8 @@ fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
 /// macOS-only, where the single global menubar serves every window (the
 /// off-mac shapes carry per-window items that need no focus routing).
 ///
-/// - An embedded SPA window (workspace-* / outbound-* /
-///   terminal-*) gets `app.terminal.toggle` dispatched. The SPA decides
+/// - An embedded SPA window (workspace-* / terminal-*) gets
+///   `app.terminal.toggle` dispatched. The SPA decides
 ///   what that means: a workspace window toggles a pane terminal (its
 ///   existing behaviour); a terminal window adds a terminal tab.
 /// - Anything else (a focused launcher `main` / `main-*`, or no focused
@@ -7378,7 +6928,7 @@ fn handle_new_terminal(app: &tauri::AppHandle) {
 /// (plain Ctrl+W stays a terminal readline chord there, and Ctrl+Shift+W
 /// is tab close).
 ///
-/// - A focused workspace webview (workspace-* / outbound-* / terminal-*):
+/// - A focused workspace webview (workspace-* / terminal-*):
 ///   on macOS the menu shares Cmd+W with tab-close, so it dispatches
 ///   `app.tab.close` (the active tab, not the window). Off-mac the menu
 ///   chord is the registry's window-close (Ctrl+Alt+W; tab-close is
@@ -8151,43 +7701,6 @@ mod tests {
     }
 
     #[test]
-    fn devserver_reopen_filter_requires_a_live_reopen_target() {
-        let mut row = chan_server::WindowRecord {
-            window_id: "w-test".into(),
-            library_id: "lib-test".into(),
-            kind: chan_server::WindowKind::Terminal,
-            title: "Terminal Window 1".into(),
-            ordinal: 1,
-            label: String::new(),
-            workspace_path: None,
-            prefix: "/api/terminal".into(),
-            token: "tok-test".into(),
-            persisted: true,
-            connected: false,
-            active_transfer: false,
-            control: false,
-            hidden: true,
-            origin: chan_server::WindowOrigin::Native,
-        };
-        assert!(
-            devserver_window_is_reopenable(&row),
-            "hidden rows remain menu-reopenable"
-        );
-
-        row.persisted = false;
-        assert!(!devserver_window_is_reopenable(&row));
-        row.persisted = true;
-        row.connected = true;
-        assert!(!devserver_window_is_reopenable(&row));
-        row.connected = false;
-        row.control = true;
-        assert!(!devserver_window_is_reopenable(&row));
-        row.control = false;
-        row.token.clear();
-        assert!(!devserver_window_is_reopenable(&row));
-    }
-
-    #[test]
     fn devserver_disconnect_closes_its_windows() {
         // A disconnect stops the watcher AND closes the devserver's native
         // windows; only the control-exit path retires the watcher and keeps
@@ -8324,7 +7837,7 @@ mod tests {
         for label in [
             "main",
             "about",
-            "outbound-1a2b",
+            "unmanaged-1a2b",
             "terminal-1a2b",
             "control-terminal-1a2b",
             "lib-0a1b",
@@ -8737,14 +8250,10 @@ mod tests {
         // All standalone terminals are one family.
         assert_eq!(window_family_prefix("terminal-win-0"), "terminal-win-");
         assert_eq!(window_family_prefix("terminal-win-12"), "terminal-win-");
-        // Workspace / outbound group per hash segment.
+        // Workspace labels group per hash segment.
         assert_eq!(
             window_family_prefix("workspace-00deadbeef00aa11-3"),
             "workspace-00deadbeef00aa11-",
-        );
-        assert_eq!(
-            window_family_prefix("outbound-00deadbeef00aa11-0"),
-            "outbound-00deadbeef00aa11-",
         );
         // Degenerate label without a dash stays itself (never matches a
         // family-prefixed lookup, which always ends in '-').

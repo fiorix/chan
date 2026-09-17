@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "local-upload",
-  "description": "Native streaming transfers for locally-served SPA windows and loopback devserver windows. Authenticated exact gateway origins receive the same commands through a runtime capability. Excludes outbound-* remote URL attachments because transfers access the user's local filesystem.",
+  "description": "Native streaming transfers for locally served SPA windows and loopback devserver windows. Authenticated exact gateway origins receive the same commands through a runtime capability.",
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
