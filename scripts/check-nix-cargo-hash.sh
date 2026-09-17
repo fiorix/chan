@@ -77,7 +77,7 @@ PIN_TARGET='^("[^"]*"|lib\.[A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*$'
 # closed on a layout no file here uses.
 SECOND_ATTR='(^|;)[[:space:]]*cargoHash[[:space:]]*='
 # An npmDeps.hash line: `hash = "..."` as an attribute name of its own, not
-# the tail of cargoHash.
+# the tail of a longer lowercase name such as outputhash.
 NPM_HASH_LINE='(^|[^A-Za-z0-9_])hash[[:space:]]*=[[:space:]]*"([^"]*)"'
 HARVEST="harvest the value with 'make nix-sdme-check NIX_PACKAGE=chan' on Linux, or 'make nix-check' on a Linux host with Nix installed, with the Cargo.lock you will pin in the working tree (a macOS or Windows host harvests in a Linux VM or container that has Nix, over this working tree, or asks a maintainer to); copy the got: line of the mismatch whose derivation name ends in -vendor-staging (a -npm-deps mismatch is npmDeps.hash, re-pinned by hand in both .nix files before a build reaches the cargo one), then pin it with 'make nix-hash-pin CARGO_HASH=sha256-...'"
 
@@ -211,7 +211,7 @@ check() {
     if [ ! -f "$LOCK" ]; then
         problem "$LOCK is absent"
     elif [ ! -f "$DIGEST_FILE" ]; then
-        problem "$DIGEST_FILE is absent: it records the digest of the $LOCK the cargoHash pins were harvested for; $HARVEST"
+        problem "$DIGEST_FILE is absent: it records the digest of the $LOCK the cargoHash pins were harvested for; restore it from the commit whose cargoHash pins you kept and run the check again, or $HARVEST"
     else
         recorded="$(cat "$DIGEST_FILE")"
         if [[ $recorded =~ $DIGEST_LINE ]]; then
@@ -302,7 +302,7 @@ pin_hash() {
                 die "'$value' is the value both $CHAN_NIX and $DESKTOP_NIX pin, and $DIGEST_FILE is malformed (expected the one line '<64 hex>  $LOCK'), so the pins cannot be matched to the live $LOCK: restore the digest file from the commit whose pins you kept (for example 'git checkout <rev> -- $DIGEST_FILE') and run the check, or $HARVEST; nothing was written"
                 ;;
             absent)
-                echo "$TAG: note: $DIGEST_FILE is absent, so '$value', which both files already pin, is recorded as harvested for the live $LOCK without a stale-pin check" >&2
+                echo "$TAG: note: $DIGEST_FILE is absent, so '$value', which both files already pin, is recorded as harvested for the live $LOCK without a stale-pin check. If $LOCK changed since those pins were harvested, the value is stale: restore the digest file with 'git checkout <rev> -- $DIGEST_FILE' instead" >&2
                 ;;
         esac
     fi

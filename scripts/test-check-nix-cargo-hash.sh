@@ -223,6 +223,7 @@ rm -f "$TREE/$DIGEST_FILE"
 run_check
 assert_status 1 "an absent digest file fails"
 assert_out "^nix cargo hash: FAIL: $DIGEST_FILE is absent: it records the digest of the $LOCK the cargoHash pins were harvested for" "the absent digest file is named with its purpose"
+assert_out "restore it from the commit whose cargoHash pins you kept and run the check again, or harvest the value" "the absent digest file names the restore and the harvest"
 assert_out "make nix-hash-pin CARGO_HASH=sha256-" "the absent digest file names the pin command"
 reset_fixture
 
@@ -434,7 +435,7 @@ write_lock root-crate-bumped
 rm -f "$TREE/$DIGEST_FILE"
 run_check pin "$HASH_A"
 assert_status 0 "an absent digest file is the bootstrap case: the value both files carry pins"
-assert_out "^nix cargo hash: note: $DIGEST_FILE is absent, so '$HASH_A', which both files already pin, is recorded as harvested for the live $LOCK without a stale-pin check\$" "the bootstrap pin says the stale-pin check did not run"
+assert_out "^nix cargo hash: note: $DIGEST_FILE is absent, so '$HASH_A', which both files already pin, is recorded as harvested for the live $LOCK without a stale-pin check\. If $LOCK changed since those pins were harvested, the value is stale: restore the digest file with 'git checkout <rev> -- $DIGEST_FILE' instead\$" "the bootstrap pin says the stale-pin check did not run and how to restore its evidence"
 [ "$(cat "$TREE/$DIGEST_FILE")" = "$(lock_digest)  $LOCK" ] || fail "the bootstrap pin recorded the live digest: $(cat "$TREE/$DIGEST_FILE")"
 assert_mode "$DIGEST_FILE" "$(created_mode)" "the created digest file has the mode a fresh file gets under this umask, not mktemp's private one"
 run_check
@@ -470,6 +471,18 @@ done
 
 # A second attribute on the cargoHash line: the value ends at the first `;`,
 # and the pin replaces that value alone.
+write_nix "$CHAN_NIX" "\"$HASH_A\"; # cargoHash = lib.fakeHash; to re-harvest"
+run_check
+assert_status 0 "a trailing comment that mentions cargoHash is not a second attribute"
+write_lock root-crate-bumped
+snapshot_tree
+run_check pin "$HASH_B"
+assert_status 0 "the pin accepts a trailing comment that mentions cargoHash"
+assert_pinned "$CHAN_NIX" "$HASH_B" "the pin kept the trailing cargoHash comment in $CHAN_NIX"
+run_check
+assert_status 0 "the tree with the trailing cargoHash comment passes after the pin"
+reset_fixture
+
 write_nix "$CHAN_NIX" "\"$HASH_A\"; doCheck = false"
 run_check
 assert_status 0 "a second attribute after the cargoHash value is not a malformed pin"
@@ -487,25 +500,44 @@ run_check
 assert_status 0 "the tree with second attributes passes after the pin"
 reset_fixture
 
+# A third-position cargoHash attribute is a duplicate even when another
+# attribute follows the value first.
+for file in "$CHAN_NIX" "$DESKTOP_NIX"; do
+    write_nix "$file" "\"$HASH_A\"; doCheck = false; cargoHash = \"$HASH_B\""
+    run_check
+    assert_status 1 "$file with a third-position cargoHash attribute fails"
+    assert_fail_lines 1 "the third-position cargoHash attribute in $file is the only problem reported"
+    assert_out "^nix cargo hash: FAIL: more than one cargoHash attribute on the cargoHash line of $file\$" "the third-position cargoHash attribute in $file is named"
+    snapshot_tree
+    run_check pin "$HASH_B"
+    assert_status 1 "the pin refuses a third-position cargoHash attribute in $file"
+    assert_out "^nix cargo hash: FAIL: more than one cargoHash attribute on the cargoHash line of $file; nothing was written\$" "the pin refusal names the third-position cargoHash attribute in $file"
+    assert_untouched "the refused pin over a third-position cargoHash attribute in $file left every file as it was"
+    reset_fixture
+done
+
 # A cargoHash value that is neither a quoted string nor a lib.* placeholder:
 # the check reports it as malformed, and the pin refuses to replace it,
 # because replacing everything before the `;` would leave Nix that does not
 # parse. Two attributes on the one line are refused as a duplicate.
-for layout in \
-    "/* harvested; see README */ \"$HASH_A\"" \
-    "if true then \"$HASH_A\" else \"a;b\"" \
-    "\"$HASH_A\" /* got: */"; do
-    write_lock root-crate-bumped
-    write_nix "$DESKTOP_NIX" "$layout"
-    run_check
-    assert_status 1 "fixture: cargoHash = $layout; fails the check"
-    assert_out "^nix cargo hash: FAIL: cargoHash in $DESKTOP_NIX is .*, a placeholder or malformed value" "cargoHash = $layout; is reported as malformed"
-    snapshot_tree
-    run_check pin "$HASH_B"
-    assert_status 1 "the pin refuses to replace cargoHash = $layout;"
-    assert_out "^nix cargo hash: FAIL: cargoHash in $DESKTOP_NIX is .*, neither a quoted value nor a lib\\.\\* placeholder, so the pin cannot replace it: set the line to 'cargoHash = lib\\.fakeHash;' and pin again; nothing was written\$" "the refusal of cargoHash = $layout; names the repair"
-    assert_untouched "the refused pin over cargoHash = $layout; left every file as it was, chan.nix included"
-    reset_fixture
+for file in "$CHAN_NIX" "$DESKTOP_NIX"; do
+    for layout in \
+        "/* harvested; see README */ \"$HASH_A\"" \
+        "if true then \"$HASH_A\" else \"a;b\"" \
+        "\"$HASH_A\" /* got: */" \
+        "/* \"x\" ; */ \"$HASH_A\""; do
+        write_lock root-crate-bumped
+        write_nix "$file" "$layout"
+        run_check
+        assert_status 1 "fixture: cargoHash = $layout; in $file fails the check"
+        assert_out "^nix cargo hash: FAIL: cargoHash in $file is .*, a placeholder or malformed value" "cargoHash = $layout; in $file is reported as malformed"
+        snapshot_tree
+        run_check pin "$HASH_B"
+        assert_status 1 "the pin refuses to replace cargoHash = $layout; in $file"
+        assert_out "^nix cargo hash: FAIL: cargoHash in $file is .*, neither a quoted value nor a lib\\.\\* placeholder, so the pin cannot replace it: set the line to 'cargoHash = lib\\.fakeHash;' and pin again; nothing was written\$" "the refusal of cargoHash = $layout; in $file names the repair"
+        assert_untouched "the refused pin over cargoHash = $layout; in $file left every file as it was"
+        reset_fixture
+    done
 done
 write_lock root-crate-bumped
 write_nix "$CHAN_NIX" "\"$HASH_A\"; cargoHash = \"$HASH_A\""

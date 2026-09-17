@@ -64,8 +64,8 @@ def require_unconditional_step(makefile: str, name: str, step: str) -> None:
     ... `endif` span of the target, and not continued from the line above
     it. make honours a directive behind leading spaces, but reads a tab-led
     `ifeq` or `endif` as a recipe line, so a directive is one whose first
-    character is not a tab. A line ending in a backslash, a comment
-    included, swallows the line after it.
+    character is not a tab. A make-level comment or recipe line ending in a
+    backslash swallows the line after it.
     """
     where = f"Makefile target {name}"
     depth = 0
