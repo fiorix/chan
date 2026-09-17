@@ -1365,9 +1365,8 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_error_message_does_not_leak_host_paths() {
-        // Trigger a path refusal that, prior to the scrub, would
-        // echo "img.png" and any chan-workspace Display detail. After
-        // the scrub the message is category-only.
+        // Trigger a path refusal whose raw chan-workspace Display detail
+        // includes "img.png". The MCP message must stay category-only.
         let (_cfg, _root, server) = fixture();
         let err = server
             .write_file(

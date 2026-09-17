@@ -460,9 +460,8 @@ fn exec_write_file(args: &Json, ctx: &ToolContext) -> Result<Json> {
         ctx.workspace
             .write_text_if_unchanged(path, Some(expected), None, content)?;
     } else {
-        // No expected mtime supplied: fall back to a plain write.
-        // This is the "the model didn't read first" path and
-        // matches the legacy behavior; new flows should always
+        // A caller without an expected mtime gets a plain write, which cannot
+        // detect an intervening edit. Flows that read first should always
         // round-trip mtime_ns.
         ctx.workspace.write_text(path, content)?;
     }
