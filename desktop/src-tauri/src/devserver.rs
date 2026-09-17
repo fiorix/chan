@@ -3351,11 +3351,26 @@ mod tests {
         assert_eq!(request.method, method);
         assert_eq!(request.path, path);
         match body {
-            Some(body) => assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
-                body
-            ),
-            None => assert!(request.body.is_empty(), "body: {:?}", request.body),
+            Some(body) => {
+                assert_eq!(
+                    request
+                        .headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .unwrap(),
+                    "application/json"
+                );
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+                    body
+                );
+            }
+            None => {
+                assert!(request
+                    .headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .is_none());
+                assert!(request.body.is_empty(), "body: {:?}", request.body);
+            }
         }
     }
 
@@ -3410,36 +3425,140 @@ mod tests {
         (status, body.into())
     }
 
+    fn other_message(error: SetWorkspaceOnError) -> String {
+        match error {
+            SetWorkspaceOnError::Other { message } => message,
+            other => panic!("expected a plain request error, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
-    async fn fetch_local_color_raw_request_contract() {
+    async fn fetch_workspaces_request_contract_per_arm() {
         use axum::http::{Method, StatusCode};
 
-        let server = MockManagementServer::start(vec![
-            mock_response(StatusCode::OK, r##"{"color":"#224466"}"##),
-            mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
-        ])
-        .await;
-        let conn = server.raw_conn();
-        let (color, error) = tokio::time::timeout(Duration::from_secs(10), async {
-            (
-                fetch_local_color(&conn).await,
-                fetch_local_color(&conn).await.unwrap_err(),
-            )
-        })
-        .await
-        .expect("colour requests must finish");
+        for gateway in [false, true] {
+            let success_body = if gateway {
+                serde_json::json!([{
+                    "workspace_id": "notes",
+                    "path": "/repo/notes",
+                    "label": "Notes",
+                    "on": true,
+                    "library_id": "lib-1",
+                    "devserver_id": null,
+                    "prefix": "notes",
+                }])
+            } else {
+                serde_json::json!([{
+                    "prefix": "/api/notes",
+                    "path": "/repo/notes",
+                    "label": "Notes",
+                    "on": true,
+                    "token": "tenant-token",
+                }])
+            };
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::OK, success_body.to_string()),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (rows, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    fetch_workspaces(&conn).await,
+                    fetch_workspaces(&conn).await.unwrap_err(),
+                )
+            })
+            .await
+            .expect("workspace-list requests must finish");
 
-        assert_eq!(color.unwrap().as_deref(), Some("#224466"));
-        assert_eq!(
-            error,
-            "devserver colour returned HTTP 500 Internal Server Error"
-        );
-        let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        for request in requests.iter() {
-            assert_raw_request(request, Method::GET, "/api/library/local-color", None);
+            let rows = rows.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].path, "/repo/notes");
+            assert_eq!(rows[0].label, "Notes");
+            assert!(rows[0].on);
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway workspaces returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver workspaces returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::GET,
+                        "/api/library/workspaces",
+                        None,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        None,
+                    );
+                } else {
+                    assert_raw_request(request, Method::GET, "/api/devserver/workspaces", None);
+                }
+            }
+            server.assert_responses_drained();
         }
-        server.assert_responses_drained();
+    }
+
+    #[tokio::test]
+    async fn fetch_local_color_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::OK, r##"{"color":"#224466"}"##),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let (color, error) = tokio::time::timeout(Duration::from_secs(10), async {
+                (
+                    fetch_local_color(&conn).await,
+                    fetch_local_color(&conn).await.unwrap_err(),
+                )
+            })
+            .await
+            .expect("colour requests must finish");
+
+            assert_eq!(color.unwrap().as_deref(), Some("#224466"));
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway colour returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver colour returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in requests.iter() {
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::GET,
+                        "/api/library/local-color",
+                        None,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        None,
+                    );
+                } else {
+                    assert_raw_request(request, Method::GET, "/api/library/local-color", None);
+                }
+            }
+            server.assert_responses_drained();
+        }
     }
 
     #[tokio::test]
@@ -3767,6 +3886,269 @@ mod tests {
             }
             server.assert_responses_drained();
         }
+    }
+
+    #[tokio::test]
+    async fn forget_workspace_status_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![mock_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failure",
+            )])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                forget_workspace(&conn, "/notes", false),
+            )
+            .await
+            .expect("workspace-forget request must finish")
+            .unwrap_err();
+
+            assert_eq!(
+                other_message(error),
+                if gateway {
+                    "gateway workspace delete returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver workspace delete returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            if gateway {
+                assert_gateway_request(
+                    &requests[0],
+                    Method::DELETE,
+                    "/api/library/workspaces/notes",
+                    None,
+                    "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                    Some("csrf-1"),
+                );
+            } else {
+                assert_raw_request(
+                    &requests[0],
+                    Method::DELETE,
+                    "/api/devserver/workspaces/notes",
+                    None,
+                );
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn add_workspace_status_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![mock_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failure",
+            )])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let error =
+                tokio::time::timeout(Duration::from_secs(10), add_workspace(&conn, "/repo/notes"))
+                    .await
+                    .expect("workspace-add request must finish")
+                    .unwrap_err();
+
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway workspace add returned HTTP 500 Internal Server Error: failure"
+                } else {
+                    "devserver workspace mount returned HTTP 500 Internal Server Error: failure"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let body = Some(serde_json::json!({ "path": "/repo/notes" }));
+            if gateway {
+                assert_gateway_request(
+                    &requests[0],
+                    Method::POST,
+                    "/api/library/workspaces",
+                    body,
+                    "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                    Some("csrf-1"),
+                );
+            } else {
+                assert_raw_request(
+                    &requests[0],
+                    Method::POST,
+                    "/api/devserver/workspaces",
+                    body,
+                );
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_workspace_on_status_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+
+        for gateway in [false, true] {
+            for on in [true, false] {
+                let server = MockManagementServer::start(vec![mock_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failure",
+                )])
+                .await;
+                let conn = if gateway {
+                    server.gateway_conn()
+                } else {
+                    server.raw_conn()
+                };
+                let error = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    set_workspace_on(&conn, "/notes", on, false),
+                )
+                .await
+                .expect("workspace-toggle request must finish")
+                .unwrap_err();
+
+                assert_eq!(
+                    other_message(error),
+                    if gateway {
+                        "gateway workspace on/off returned HTTP 500 Internal Server Error"
+                    } else {
+                        "devserver workspace on/off returned HTTP 500 Internal Server Error"
+                    }
+                );
+                let requests = server.requests.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                if gateway {
+                    assert_gateway_request(
+                        &requests[0],
+                        Method::POST,
+                        if on {
+                            "/api/library/workspaces/notes/on"
+                        } else {
+                            "/api/library/workspaces/notes/off"
+                        },
+                        (!on).then(|| serde_json::json!({ "force": false })),
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        Some("csrf-1"),
+                    );
+                } else {
+                    assert_raw_request(
+                        &requests[0],
+                        Method::POST,
+                        "/api/devserver/workspaces/notes/on",
+                        Some(serde_json::json!({ "on": on, "force": false })),
+                    );
+                }
+                server.assert_responses_drained();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_management_transport_labels() {
+        fn assert_prefix(error: &str, prefix: &str) {
+            assert!(error.starts_with(prefix), "error: {error:?}");
+            assert!(error.len() > prefix.len(), "transport detail is missing");
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let conn = DevserverConn {
+            host: "127.0.0.1".into(),
+            port,
+            token: "raw-token".into(),
+            name: "raw".into(),
+            gateway: None,
+        };
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert_prefix(
+                &fetch_workspaces(&conn).await.unwrap_err(),
+                "listing devserver workspaces: ",
+            );
+            assert_prefix(
+                &fetch_local_color(&conn).await.unwrap_err(),
+                "fetching devserver colour: ",
+            );
+            assert_prefix(
+                &fetch_library_windows(&conn).await.unwrap_err(),
+                "listing library windows: ",
+            );
+            assert_prefix(
+                &mint_library_window(&conn, chan_server::WindowKind::Terminal, None)
+                    .await
+                    .unwrap_err(),
+                "minting library window: ",
+            );
+            assert_prefix(
+                &discard_library_window(&conn, "window-1").await.unwrap_err(),
+                "discarding library window: ",
+            );
+            assert_prefix(
+                &other_message(forget_workspace(&conn, "/notes", false).await.unwrap_err()),
+                "forgetting devserver workspace: ",
+            );
+            assert_prefix(
+                &set_window_visibility(&conn, "window-1", true)
+                    .await
+                    .unwrap_err(),
+                "setting devserver window visibility: ",
+            );
+            assert_prefix(
+                &set_window_label(&conn, "window-1", "Focus")
+                    .await
+                    .unwrap_err(),
+                "setting devserver window label: ",
+            );
+            assert_prefix(
+                &add_workspace(&conn, "/repo/notes").await.unwrap_err(),
+                "mounting devserver workspace: ",
+            );
+            assert_prefix(
+                &other_message(
+                    set_workspace_on(&conn, "/notes", false, false)
+                        .await
+                        .unwrap_err(),
+                ),
+                "setting devserver workspace on/off: ",
+            );
+        })
+        .await
+        .expect("transport failures must finish");
+    }
+
+    #[tokio::test]
+    async fn fetch_local_color_decode_error_contract() {
+        use axum::http::{Method, StatusCode};
+
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::OK, "not json")]).await;
+        let conn = server.raw_conn();
+        let error = tokio::time::timeout(Duration::from_secs(10), fetch_local_color(&conn))
+            .await
+            .expect("colour request must finish")
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("decoding devserver colour: "),
+            "error: {error:?}"
+        );
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_raw_request(&requests[0], Method::GET, "/api/library/local-color", None);
+        server.assert_responses_drained();
     }
 
     #[tokio::test]
