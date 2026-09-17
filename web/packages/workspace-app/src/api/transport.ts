@@ -1,26 +1,20 @@
 // API transport: HTTP+WebSocket against the local chan-server.
 //
-// `chan serve` runs a real loopback server. The Tauri desktop and
-// (eventual) iOS shells spawn the same server in-process and point
-// their WebView at it via the same loopback URL. One transport
-// implementation, one wire format, one auth model - there is no
-// platform-specific path.
+// `chan serve` runs a real loopback server. The Tauri desktop spawns the
+// same server in-process and points its WebView at it via the same loopback
+// URL. One transport implementation, one wire format, one auth model - there
+// is no platform-specific path.
 //
 // This transport lives in a single module so client.ts can stay focused
 // on the typed API surface (file ops, search, graph, ...) and leave
 // wire mechanics (token plumbing, fetch shape, WebSocket reconnect)
 // here.
 //
-// We considered routing native shells through Tauri's custom URI
-// scheme + event bus to avoid binding a port. That doesn't work as
-// cleanly as it sounds: HTTP request/response would map fine, but
-// WebSocket can't go through a custom scheme (the browser spec
-// requires `ws:` / `wss:` URLs) and Tauri events are pub/sub with
-// none of WebSocket's ordering or connection-state semantics.
-// Splitting just HTTP over a custom scheme while leaving WS on
-// loopback was also evaluated: since we'd still bind a port for
-// /ws, the partial scheme switch added complexity without removing
-// the open port. We stay on plain loopback everywhere.
+// Loopback is required for the shared HTTP and WebSocket transport: browser
+// WebSockets require `ws:` / `wss:` URLs, while Tauri's custom URI scheme
+// cannot carry them and its event bus lacks WebSocket ordering and connection
+// state. Sending only HTTP through the custom scheme would still require the
+// loopback port for `/ws`, so both protocols use loopback.
 
 import { ApiError } from "./errors";
 import type { WsClientFrame, WsPingFrame } from "./types";
