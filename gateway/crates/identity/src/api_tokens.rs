@@ -140,7 +140,7 @@ pub struct ValidatedToken {
 }
 
 /// Default scope set for a freshly-issued token. It grants only `tunnel`,
-/// which chan-tunnel-server requires for tunnel admission.
+/// the scope chan-tunnel-server requires for any dial.
 pub const DEFAULT_TOKEN_SCOPES: &[&str] = &["tunnel"];
 
 /// Request-scoped audit context recorded alongside token mutations.
