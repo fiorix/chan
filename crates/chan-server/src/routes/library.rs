@@ -149,6 +149,10 @@ pub fn launcher_router(
             post(handle_hide_library_window),
         )
         .route(
+            "/api/library/windows/{window_id}/live-terminals",
+            get(handle_library_window_live_terminals),
+        )
+        .route(
             "/api/library/windows/{window_id}/close",
             post(handle_close_library_window),
         )
@@ -1255,10 +1259,46 @@ async fn handle_hide_library_window(
     .await
 }
 
+#[derive(Serialize)]
+struct LibraryWindowLiveTerminals {
+    /// `None` means the row came from a connected devserver whose feed does not
+    /// carry a terminal count.
+    count: Option<usize>,
+}
+
+/// `GET /api/library/windows/{window_id}/live-terminals`: return the number of
+/// live terminal sessions the local host associates with this launcher-visible
+/// window. This is the same host-wide count as the `cs window rm` guard. A row
+/// supplied by the connected-devserver feed returns `count: null` rather than
+/// guessing zero; an id absent from the launcher feed returns 404.
+async fn handle_library_window_live_terminals(
+    State(host): State<Arc<WorkspaceHost>>,
+    AxumPath(window_id): AxumPath<String>,
+) -> Response {
+    if !host
+        .assemble_window_records()
+        .iter()
+        .any(|record| record.window_id == window_id)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let local = host.window_registry().is_some_and(|registry| {
+        registry
+            .snapshot()
+            .iter()
+            .any(|row| row.window_id == window_id)
+    });
+    Json(LibraryWindowLiveTerminals {
+        count: local.then(|| host.live_terminal_count(&window_id)),
+    })
+    .into_response()
+}
+
 /// `POST /api/library/windows/{window_id}/close`: close a native window through
 /// the desktop manager, then discard any local durable row. Remote close is
-/// routed by the desktop op to the owning devserver. A live-terminal native
-/// window keeps the desktop's existing confirmation dialog.
+/// routed by the desktop op to the owning devserver. The launcher has already
+/// shown the informed live-terminal confirmation, so the bridge close is forced
+/// and cannot raise a second native prompt.
 async fn handle_close_library_window(
     State(host): State<Arc<WorkspaceHost>>,
     AxumPath(window_id): AxumPath<String>,
@@ -1267,7 +1307,7 @@ async fn handle_close_library_window(
         .desktop_bridge()
         .dispatch(|reply| DesktopWindowOp::Close {
             id: window_id.clone(),
-            force: false,
+            force: true,
             reply,
         })
         .await
@@ -3815,7 +3855,8 @@ mod window_op_route_tests {
             .window_id;
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
-                if let DesktopWindowOp::Close { reply, .. } = op {
+                if let DesktopWindowOp::Close { force, reply, .. } = op {
+                    assert!(force, "the launcher already obtained informed consent");
                     // Hidden/offline row: no native webview was destroyed. The
                     // route must still discard the durable library record.
                     let _ = reply.send(Ok(false));
@@ -3831,6 +3872,82 @@ mod window_op_route_tests {
             .all(|record| record.window_id != id));
 
         let (status, _) = post(&router, "/api/library/windows/nope/close").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn live_terminal_count_route_reports_known_zero_unknown_remote_and_missing() {
+        let store = tempfile::tempdir().unwrap();
+        let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(store.path().join("windows.json"))),
+            "local".into(),
+        );
+        let mut config = super::tenant_config("127.0.0.1:0".parse().unwrap(), "/terminal");
+        config.no_token = true;
+        host.open_terminal_session(config, None, None)
+            .await
+            .expect("mount terminal tenant");
+        let live = host
+            .mint_window(WindowKind::Terminal, None)
+            .expect("mint live window");
+        let idle = host
+            .mint_window(WindowKind::Terminal, None)
+            .expect("mint idle window");
+
+        let terminal = host.clone().router();
+        let create = serde_json::json!({
+            "name": "counted",
+            "command": "sh",
+            "window_id": live.window_id,
+        })
+        .to_string();
+        let (status, _) = send(&terminal, "POST", "/terminal/api/terminals", Some(&create)).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        host.install_devserver_feed(Arc::new(RemoteWindowFeed(WindowRecord {
+            window_id: "w-remote".into(),
+            library_id: "lib-remote".into(),
+            kind: WindowKind::Terminal,
+            title: "Terminal Window 1".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "remote-token".into(),
+            persisted: true,
+            connected: true,
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: WindowOrigin::Native,
+        })));
+        let router = launcher_router(host, None, None);
+
+        for (window_id, expected) in [
+            (live.window_id.as_str(), serde_json::json!(1)),
+            (idle.window_id.as_str(), serde_json::json!(0)),
+            ("w-remote", serde_json::Value::Null),
+        ] {
+            let (status, body) = send(
+                &router,
+                "GET",
+                &format!("/api/library/windows/{window_id}/live-terminals"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "window {window_id}");
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["count"], expected, "window {window_id}");
+        }
+
+        let (status, _) = send(
+            &router,
+            "GET",
+            "/api/library/windows/missing/live-terminals",
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

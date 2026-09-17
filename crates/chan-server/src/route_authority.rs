@@ -295,6 +295,11 @@ pub(crate) static LAUNCHER: RouteTable = &[
     (Delete, "/api/library/windows/{window_id}", NonOwner),
     (Post, "/api/library/windows/{window_id}/open", NonOwner),
     (Post, "/api/library/windows/{window_id}/hide", NonOwner),
+    (
+        Get,
+        "/api/library/windows/{window_id}/live-terminals",
+        NonOwner,
+    ),
     (Post, "/api/library/windows/{window_id}/close", NonOwner),
     (Put, "/api/library/windows/{window_id}/label", NonOwner),
     (
