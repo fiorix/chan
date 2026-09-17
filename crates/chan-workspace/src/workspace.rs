@@ -354,6 +354,13 @@ pub enum RecoveryOutcome {
     Retry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistedReportRefresh {
+    Settled,
+    Owed,
+    Refreshing,
+}
+
 /// Executes the recovery passes a workspace parks.
 ///
 /// A parked pass carries no worker of its own. The startup worker drains the
@@ -479,7 +486,6 @@ pub(crate) struct RecoveryPlan {
     generation: WorkspaceGeneration,
     replay_pending_writes: bool,
     action: Option<RecoveryAction>,
-    refresh_report: bool,
 }
 
 impl RecoveryPlan {
@@ -507,13 +513,12 @@ impl RecoveryPlan {
                 generation: recovery.generation,
                 replay_pending_writes,
                 action,
-                refresh_report,
             },
         )
     }
 
     fn has_work(self) -> bool {
-        self.replay_pending_writes || self.action.is_some() || self.refresh_report
+        self.replay_pending_writes || self.action.is_some()
     }
 }
 
@@ -576,6 +581,67 @@ impl RecoveryWorker {
 impl Drop for RecoveryWorker {
     fn drop(&mut self) {
         self.stop_and_join();
+    }
+}
+
+struct OpenRecoveryPause {
+    root: std::path::PathBuf,
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+static OPEN_RECOVERY_PAUSE: std::sync::OnceLock<std::sync::Mutex<Option<OpenRecoveryPause>>> =
+    std::sync::OnceLock::new();
+
+/// Arm a one-shot barrier before the startup worker claims recovery.
+///
+/// This supports cross-crate recovery ownership tests. The worker also leaves
+/// the barrier when stopped, so teardown does not depend on releasing it.
+#[doc(hidden)]
+pub fn arm_open_recovery_pause_for_test(
+    root: std::path::PathBuf,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let slot = OPEN_RECOVERY_PAUSE.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap() = Some(OpenRecoveryPause {
+        root,
+        reached: reached_tx,
+        release: release_rx,
+    });
+    (reached_rx, release_tx)
+}
+
+fn open_recovery_pause_for_test(workspace: &Workspace, stop: &AtomicBool) {
+    let Some(slot) = OPEN_RECOVERY_PAUSE.get() else {
+        return;
+    };
+    let pause = {
+        let mut pause = slot.lock().unwrap();
+        if pause
+            .as_ref()
+            .is_some_and(|pause| pause.root == workspace.root())
+        {
+            pause.take()
+        } else {
+            None
+        }
+    };
+    let Some(pause) = pause else {
+        return;
+    };
+    let _ = pause.reached.send(());
+    while !stop.load(Ordering::Acquire) {
+        match pause
+            .release
+            .recv_timeout(std::time::Duration::from_millis(2))
+        {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
 }
 
@@ -672,6 +738,9 @@ pub struct Workspace {
     /// across replay, reconcile, or rebuild work; the derived-state
     /// mutation boundary remains a separate lock.
     recovery: std::sync::Mutex<RecoveryStatus>,
+    /// Open-time persisted-report refresh obligation. Claimants inspect and
+    /// update it outside the recovery-coordinator critical section.
+    persisted_report_refresh: std::sync::Mutex<PersistedReportRefresh>,
     /// One owned startup worker. It executes the metadata-derived recovery
     /// plan off the open caller and joins on ordinary workspace teardown.
     recovery_worker: RecoveryWorker,
@@ -704,11 +773,12 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
+    open_recovery_pause_for_test(&workspace, stop);
     tracing::debug!(
         generation = plan.generation.get(),
         action = ?plan.action,
         replay_pending_writes = plan.replay_pending_writes,
-        refresh_report = plan.refresh_report,
+        refresh_report = workspace.persisted_report_refresh_is_owed(),
         "workspace startup recovery worker started",
     );
 
@@ -735,8 +805,8 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
             RecoveryAction::Reconcile => workspace.reconcile().map(|_| ()),
             RecoveryAction::FullRebuild => workspace.reindex(Some(stop)).map(|_| ()),
         };
-        if result.is_ok() && plan.refresh_report && !stop.load(Ordering::Acquire) {
-            result = workspace.rescan_persisted_report();
+        if result.is_ok() && !stop.load(Ordering::Acquire) {
+            result = workspace.refresh_persisted_report_if_owed();
         }
         let outcome = if result.is_ok() {
             RecoveryOutcome::Complete
@@ -982,6 +1052,11 @@ impl Workspace {
             write_serial: Arc::new(std::sync::Mutex::new(())),
             dashboard_serial: std::sync::Mutex::new(()),
             recovery: std::sync::Mutex::new(recovery),
+            persisted_report_refresh: std::sync::Mutex::new(if refresh_report {
+                PersistedReportRefresh::Owed
+            } else {
+                PersistedReportRefresh::Settled
+            }),
             recovery_worker: RecoveryWorker::new(),
             recovery_driver: std::sync::RwLock::new(None),
             report: Arc::new(std::sync::OnceLock::new()),
@@ -1003,6 +1078,41 @@ impl Workspace {
     /// close and block an immediate reopen.
     pub fn stop_open_recovery(&self) {
         self.recovery_worker.stop_and_join();
+    }
+
+    /// Refresh a persisted report when the open-time recovery plan requires it.
+    ///
+    /// Recovery claimants call this after their pass action succeeds and before
+    /// they finish the pass. A settled obligation is a no-op, and a failed
+    /// refresh remains owed for the retried pass.
+    pub fn refresh_persisted_report_if_owed(&self) -> Result<()> {
+        {
+            let mut refresh = self.persisted_report_refresh.lock().unwrap();
+            match *refresh {
+                PersistedReportRefresh::Settled => return Ok(()),
+                PersistedReportRefresh::Owed => *refresh = PersistedReportRefresh::Refreshing,
+                PersistedReportRefresh::Refreshing => {
+                    return Err(ChanError::Io(
+                        "persisted report refresh is already running".to_string(),
+                    ));
+                }
+            }
+        }
+
+        #[cfg(test)]
+        let result = report_refresh_probe(self).and_then(|()| self.rescan_persisted_report());
+        #[cfg(not(test))]
+        let result = self.rescan_persisted_report();
+        *self.persisted_report_refresh.lock().unwrap() = if result.is_ok() {
+            PersistedReportRefresh::Settled
+        } else {
+            PersistedReportRefresh::Owed
+        };
+        result
+    }
+
+    fn persisted_report_refresh_is_owed(&self) -> bool {
+        *self.persisted_report_refresh.lock().unwrap() != PersistedReportRefresh::Settled
     }
 
     #[cfg(test)]
@@ -1123,6 +1233,12 @@ impl Workspace {
         pass: RecoveryPass,
         outcome: RecoveryOutcome,
     ) -> Result<RecoveryStatus> {
+        let outcome =
+            if outcome == RecoveryOutcome::Complete && self.persisted_report_refresh_is_owed() {
+                RecoveryOutcome::Retry
+            } else {
+                outcome
+            };
         let status = {
             let mut status = self.recovery.lock().unwrap();
             if status.active != Some(pass) {
@@ -3989,6 +4105,60 @@ fn size_to_i64(size: u64) -> i64 {
 }
 
 #[cfg(test)]
+#[derive(Default)]
+struct ReportRefreshProbe {
+    attempts: usize,
+    fail_next: bool,
+}
+
+#[cfg(test)]
+static REPORT_REFRESH_PROBES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, ReportRefreshProbe>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn arm_report_refresh_probe(root: std::path::PathBuf, fail_next: bool) {
+    REPORT_REFRESH_PROBES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            root,
+            ReportRefreshProbe {
+                attempts: 0,
+                fail_next,
+            },
+        );
+}
+
+#[cfg(test)]
+fn report_refresh_probe(workspace: &Workspace) -> Result<()> {
+    let probes = REPORT_REFRESH_PROBES.get_or_init(Default::default);
+    let mut probes = probes.lock().unwrap();
+    let Some(probe) = probes.get_mut(workspace.root()) else {
+        return Ok(());
+    };
+    probe.attempts += 1;
+    if std::mem::take(&mut probe.fail_next) {
+        return Err(ChanError::Io(
+            "injected persisted report refresh failure".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn take_report_refresh_attempts(root: &Path) -> usize {
+    REPORT_REFRESH_PROBES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(root)
+        .map(|probe| probe.attempts)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 struct OpenRecoveryProbe {
     root: std::path::PathBuf,
     tx: std::sync::mpsc::Sender<std::thread::ThreadId>,
@@ -4766,6 +4936,130 @@ mod tests {
             "background startup recovery did not converge: {:?}",
             workspace.recovery_status()
         );
+    }
+
+    fn persisted_report_fixture() -> (TempDir, TempDir, Library, KnownWorkspace) {
+        let cfg = TempDir::new().unwrap();
+        let workspace_dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let entry = lib.register_workspace(workspace_dir.path()).unwrap();
+        std::fs::write(workspace_dir.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
+        workspace.report().unwrap();
+        let report_path = workspace.paths().report.clone();
+        drop(workspace);
+        assert!(report_path.is_file(), "baseline report was not persisted");
+        (cfg, workspace_dir, lib, entry)
+    }
+
+    fn open_without_starting_recovery(
+        lib: &Library,
+        entry: KnownWorkspace,
+    ) -> (Arc<Workspace>, RecoveryPlan) {
+        let chan_home = lib.config_path().parent().unwrap().to_path_buf();
+        Workspace::open(
+            entry,
+            lib.walk_filter(),
+            lib.drafts_dir(),
+            lib.transfer_max_bytes(),
+            &chan_home,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn persisted_report_recovery_survives_a_stopped_open_worker() {
+        let (_cfg, root, lib, _entry) = persisted_report_fixture();
+        std::fs::write(root.path().join("offline.md"), "# Offline\n").unwrap();
+        let (worker_reached, worker_release) =
+            arm_open_recovery_pause_for_test(root.path().canonicalize().unwrap());
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        worker_reached
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("startup worker did not reach the pre-claim barrier");
+        assert!(workspace.persisted_report_refresh_is_owed());
+
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+        let workspace_for_stop = workspace.clone();
+        let stopper = std::thread::spawn(move || {
+            workspace_for_stop.stop_open_recovery();
+            let _ = stopped_tx.send(());
+        });
+        if stopped_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .is_err()
+        {
+            let _ = worker_release.send(());
+            stopper.join().unwrap();
+            panic!("startup worker did not stop at the pre-claim barrier");
+        }
+        stopper.join().unwrap();
+        assert!(workspace.persisted_report_refresh_is_owed());
+
+        let pass = workspace.begin_recovery().expect("open pass is pending");
+        assert_eq!(pass.action, RecoveryAction::Reconcile);
+        workspace.reconcile().unwrap();
+        workspace.refresh_persisted_report_if_owed().unwrap();
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Complete)
+            .unwrap();
+
+        assert!(!workspace.persisted_report_refresh_is_owed());
+        assert!(workspace
+            .report()
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.path == "offline.md"));
+    }
+
+    #[test]
+    fn persisted_report_recovery_failure_stays_owed_and_requeues() {
+        let (_cfg, root, lib, entry) = persisted_report_fixture();
+        let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
+        let pass = workspace.begin_recovery().expect("open pass is pending");
+        workspace.reconcile().unwrap();
+        arm_report_refresh_probe(workspace.root().to_path_buf(), true);
+
+        let error = workspace
+            .refresh_persisted_report_if_owed()
+            .expect_err("injected refresh must fail");
+        assert!(error
+            .to_string()
+            .contains("injected persisted report refresh failure"));
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+
+        assert!(workspace.persisted_report_refresh_is_owed());
+        assert_eq!(workspace.recovery_status().pending, Some(pass));
+        assert_eq!(take_report_refresh_attempts(root.path()), 1);
+    }
+
+    #[test]
+    fn persisted_report_recovery_refreshes_only_once() {
+        let (_cfg, root, lib, entry) = persisted_report_fixture();
+        let (workspace, _plan) = open_without_starting_recovery(&lib, entry);
+        let pass = workspace.begin_recovery().expect("open pass is pending");
+        workspace.reconcile().unwrap();
+        arm_report_refresh_probe(workspace.root().to_path_buf(), false);
+
+        workspace.refresh_persisted_report_if_owed().unwrap();
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Complete)
+            .unwrap();
+
+        let later_generation = workspace.request_recovery(RecoveryAction::Reconcile);
+        let later = workspace.begin_recovery().expect("later pass is pending");
+        assert_eq!(later.generation, later_generation);
+        workspace.reconcile().unwrap();
+        workspace.refresh_persisted_report_if_owed().unwrap();
+        workspace
+            .finish_recovery(later, RecoveryOutcome::Complete)
+            .unwrap();
+
+        assert!(!workspace.persisted_report_refresh_is_owed());
+        assert_eq!(take_report_refresh_attempts(root.path()), 1);
     }
 
     #[test]
