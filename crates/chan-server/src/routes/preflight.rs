@@ -149,9 +149,9 @@ struct PreflightError {
 ///
 /// Precedence, highest first. A genuine index error maps to `Failed` so the
 /// shell can surface it. A recovery pass with no claimant (`unowned`) maps to
-/// `NeedsDecision`: it converges nowhere, so reporting it as recovery in
-/// progress spins the overlay forever, and the decision it carries is the only
-/// escape the product surface offers. Ordinary pending or active recovery maps
+/// `NeedsDecision`: it converges nowhere, so reporting it as `Pending` would
+/// unlock the boot with the recovery stalled, and the decision it carries is the
+/// only escape the product surface offers. Ordinary pending or active recovery maps
 /// to `Pending`, while a ready generation keeps build/reindex progress
 /// non-blocking.
 ///
@@ -726,10 +726,11 @@ mod tests {
     #[test]
     fn a_stalled_recovery_is_reported_and_offers_a_way_out() {
         // A pass parked with no claimant is `!is_ready()` exactly like a
-        // running one, so checking readiness first would report it as recovery
-        // in progress and spin the overlay forever. It must be distinguishable
-        // from the running case above -- same readiness, same index status,
-        // different step -- and carry the rebuild that clears it.
+        // running one. Checking readiness first would report the stalled pass as
+        // `Pending`, which does not hold the lock, so the boot would unlock with
+        // the recovery stalled and never offer the rebuild that clears it. It
+        // must be distinguishable from the running case above -- same readiness,
+        // same index status, different step -- and carry the rebuild that clears it.
         let (_c, _r, ws) = workspace();
         ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
         assert!(

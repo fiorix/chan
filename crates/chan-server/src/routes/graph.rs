@@ -1606,10 +1606,8 @@ fn build_graph_view(
     let disk_files = workspace_disk_files(&workspace);
     let image_files = image_subset(&disk_files);
     // Directory entries from the same walk. Markdown links whose
-    // target is a directory (e.g. `[notes](../notes/)`) would otherwise
-    // fall through to ghost emission as `kind: file` missing nodes;
-    // we filter them out of the ghost path and drop the corresponding
-    // edges below.
+    // target is a directory (e.g. `[notes](../notes/)`) stay out of
+    // `ghost_set`, and the edge filter below drops their edges.
     let disk_dirs = workspace_disk_dirs(&workspace);
     let present_files: std::collections::BTreeSet<&str> = files
         .iter()
@@ -1707,6 +1705,7 @@ fn build_graph_view(
     // referenced by any `@@mention` resolution are skipped. The
     // graph view's job is "who-mentions-whom"; an imported contact
     // never mentioned anywhere contributes nothing to that picture.
+    //
     // The first node batch intentionally skips chan-report buckets
     // so streaming callers can draw the semantic graph before the
     // report layer finishes. A later node batch re-sends final node
@@ -1839,7 +1838,7 @@ fn build_graph_view(
         // empty node ids.
         //
         // Also drop link edges whose dst is a directory on disk:
-        // the ghost-set loop above skips ghost emission for those,
+        // the ghost-set loop above keeps those out of `ghost_set`,
         // so the edge would otherwise dangle against a non-existent
         // node. Non-link edges (mention, tag) can't have a directory
         // dst (mention dsts are `@@name`, tag dsts are `#name`),
@@ -2357,7 +2356,7 @@ mod tests {
         // Pin the helper contract: every regular directory
         // the user might link to has to show up here so api_graph can
         // recognise `[label](some/dir/)` targets and keep them out of
-        // ghost emission. The companion `workspace_disk_files` set is
+        // `ghost_set`. The companion `workspace_disk_files` set is
         // unaffected (it filters `is_dir` out the other way).
         let (_cfg, root, workspace) = open_workspace();
         put(root.path(), "docs/intro.md", b"# Intro\n");
