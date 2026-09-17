@@ -1034,7 +1034,8 @@ async fn devserver_discovery_routes_multiple_local_instances() {
 /// A VALUED `--devserver=<port>` under `CHAN_NO_DEVSERVER_HANDOFF` names a
 /// specific instance the environment forbids reaching: that contradiction
 /// must refuse loudly, naming both sides, and must never fall through to a
-/// silent standalone bind. (The bare flag and the env var alone request
+/// silent standalone bind. (The bare flag still requests a devserver; under
+/// the opt-out, selection is skipped and this test's sandbox falls through to
 /// standalone serving.)
 #[tokio::test]
 async fn valued_devserver_selector_refuses_under_handoff_opt_out() {
@@ -1558,14 +1559,14 @@ async fn devserver_sigkill_releases_flock_and_survives_config() {
     );
 }
 
-/// The rotation contract end to end (devserver-token-rotation item): an
-/// operator rotate through the live management API retires the old bearer
-/// IMMEDIATELY, a SIGKILL + restart on the same HOME comes back with the
-/// ROTATED token (the stability window restarts at the rotation's mint), the
-/// pre-rotation token stays dead across the restart, and the persisted
-/// workspace set still re-mounts. Red mutation: leave `require_bearer` (or
-/// the launcher gates) reading a copy of the pre-rotation token, or rotate
-/// without persisting -- either fails an assert below.
+/// The rotation contract end to end: an operator rotation through the live
+/// management API retires the old bearer IMMEDIATELY, a SIGKILL + restart on
+/// the same HOME comes back with the ROTATED token (the stability window
+/// restarts at the rotation's mint), the pre-rotation token stays dead across
+/// the restart, and the persisted workspace set still re-mounts. Red mutation:
+/// leave `require_bearer` (or the launcher gates) reading a copy of the
+/// pre-rotation token, or rotate without persisting -- either fails an assert
+/// below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devserver_rotate_token_retires_the_old_bearer_and_survives_restart() {
     let sandbox = Sandbox::new();

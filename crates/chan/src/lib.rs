@@ -3093,9 +3093,9 @@ struct LiveInstances {
 /// kind wins; with both kinds live, the desktop personality chooses desktop and
 /// the standalone personality chooses a devserver. With neither live, the
 /// desktop personality chooses desktop and the standalone personality chooses
-/// standalone. A present but
-/// unidentified control socket preserves the conservative standalone fallback
-/// only when no live instance supplies a stronger signal.
+/// standalone. A present but unidentified control socket preserves the
+/// conservative standalone fallback only when no live instance supplies a
+/// stronger signal.
 fn decide_open_route(
     flags: OpenFlags,
     parentage: Parentage,
@@ -3120,8 +3120,8 @@ fn decide_open_route(
 
     Ok(match parentage {
         // In a devserver shell: register with the current devserver. This
-        // beats a forced-desktop env var that leaked into the session, avoiding
-        // routing a devserver shell to chan-desktop.
+        // beats a forced-desktop env var that leaked into the session, so the
+        // leaked variable cannot route a devserver shell to chan-desktop.
         Parentage::Devserver { .. } => OpenTarget::Devserver,
         Parentage::Desktop => OpenTarget::Desktop,
         // No identified parent. A sole live instance wins regardless of binary

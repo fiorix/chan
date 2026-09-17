@@ -1640,9 +1640,9 @@ mod tests {
 
     #[test]
     fn test_post_upgrade_state_suppresses_banner() {
-        // Regression: chan upgrade on the running (old) binary must
-        // leave the cached state in a shape where maybe_print_banner
-        // takes the early-exit (latest_version == None) path.
+        // `chan upgrade` on the running (old) binary must leave the cached
+        // state in a shape where `maybe_print_banner` takes the early-exit
+        // (`latest_version == None`) path.
         let state = post_upgrade_state("0.7.3");
         assert_eq!(state.checked_version, "0.7.3");
         assert!(state.latest_version.is_none());
