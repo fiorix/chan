@@ -974,7 +974,15 @@ where
 /// back. Platform-neutral -- it works over whatever read/write halves the
 /// active `transport::Conn` yields (a unix stream or a windows named pipe).
 async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
-    let (read, mut write) = conn.into_split();
+    let (read, write) = conn.into_split();
+    serve_connection_parts(read, write, ctx).await;
+}
+
+async fn serve_connection_parts<R, W>(read: R, mut write: W, ctx: ControlSocketCtx)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     // Bound the request read: a control request is one JSON line, and the
     // largest legitimate one is a `cs copy` clipboard payload (base64 of up to
     // MAX_CLIPBOARD_BYTES). Cap it so a hostile client cannot grow the request
@@ -1045,7 +1053,29 @@ async fn serve_connection(conn: transport::Conn, ctx: ControlSocketCtx) {
             .await;
             return;
         }
-        Ok(req) => handle_request(req, &ctx).await,
+        Ok(req) => {
+            let cancel_on_eof = matches!(
+                &req,
+                ControlRequest::TermSurvey {
+                    cancel_on_eof: true,
+                    ..
+                } | ControlRequest::SessionHandover {
+                    accept: false,
+                    reject: false,
+                    cancel_on_eof: true,
+                    ..
+                }
+            );
+            if cancel_on_eof {
+                // Pin one connection-scoped EOF future because a survey borrows
+                // the same future in its queued and open selects; the first
+                // select may already have polled it.
+                let mut client_eof = Box::pin(wait_for_client_eof(&mut reader));
+                handle_request_until_client_eof(req, &ctx, &mut client_eof).await
+            } else {
+                handle_request(req, &ctx).await
+            }
+        }
     };
     write_response(&mut write, &response).await;
 }
@@ -1188,6 +1218,28 @@ pub(crate) mod transport {
 
 // Long-running requests await their reply or offload filesystem work.
 async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlResponse {
+    let mut client_eof = std::future::pending();
+    handle_request_until_client_eof(req, ctx, &mut client_eof).await
+}
+
+/// The client-lifetime future and deadline passed to a blocked handler. The
+/// ordinary dispatcher supplies a future that never resolves; an opted-in
+/// connection supplies its EOF future.
+struct ClientWait<'a, F> {
+    client_eof: &'a mut F,
+    timeout_secs: u64,
+}
+
+/// Dispatch a request with a caller-supplied client-lifetime future. Survey and
+/// requester-side handover handlers poll it; other request handlers do not.
+async fn handle_request_until_client_eof<F>(
+    req: ControlRequest,
+    ctx: &ControlSocketCtx,
+    client_eof: &mut F,
+) -> ControlResponse
+where
+    F: std::future::Future<Output = ()> + Unpin,
+{
     let ControlSocketCtx {
         workspace_cell,
         events_tx,
@@ -1570,14 +1622,17 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             } else {
                 None
             };
-            handle_session_handover(
+            handle_session_handover_until_client_eof(
+                ClientWait {
+                    client_eof,
+                    timeout_secs,
+                },
                 session_registry,
                 handover_bus,
                 events_tx,
                 window_id,
                 to,
                 answer,
-                timeout_secs,
             )
             .await
         }
@@ -1640,11 +1695,14 @@ async fn handle_request(req: ControlRequest, ctx: &ControlSocketCtx) -> ControlR
             timeout_secs,
             cancel_on_eof: _,
         } => {
-            handle_survey(
+            handle_survey_until_client_eof(
+                ClientWait {
+                    client_eof,
+                    timeout_secs,
+                },
                 spec,
                 tab_name.as_deref(),
                 tab_group.as_deref(),
-                timeout_secs,
                 events_tx,
                 survey_bus,
                 terminal_registry,
@@ -2448,6 +2506,33 @@ fn fmt_spawn_failures(failed: &[(String, String)]) -> String {
         .join(", ")
 }
 
+/// Test-only entry point whose client-EOF future never resolves.
+#[cfg(all(test, unix))]
+async fn handle_survey(
+    spec: SurveySpec,
+    tab_name: Option<&str>,
+    tab_group: Option<&str>,
+    timeout_secs: u64,
+    events_tx: &broadcast::Sender<String>,
+    survey_bus: &Arc<crate::survey::SurveyBus>,
+    terminal_registry: Option<&Arc<TerminalRegistry>>,
+) -> ControlResponse {
+    let mut client_eof = std::future::pending();
+    handle_survey_until_client_eof(
+        ClientWait {
+            client_eof: &mut client_eof,
+            timeout_secs,
+        },
+        spec,
+        tab_name,
+        tab_group,
+        events_tx,
+        survey_bus,
+        terminal_registry,
+    )
+    .await
+}
+
 /// The blocking `cs terminal survey` path: resolve the tab selector to the
 /// owning SPA window(s), take a turn in the target's survey FIFO, mint a
 /// survey id, push the `open_survey` overlay to each window, park a oneshot,
@@ -2459,20 +2544,33 @@ fn fmt_spawn_failures(failed: &[(String, String)]) -> String {
 /// single overlay slot per tab (and one window-wide slot), so a concurrent
 /// second `open_survey` would replace the first and strand its caller. A
 /// later survey waits in a bounded per-target queue and only opens once every
-/// earlier one resolves (reply, dismiss, or timeout). The caller's
-/// `--timeout` bounds the TOTAL wait (queue time plus reply time), so a
-/// survey can time out while still queued; it then leaves the queue without
-/// ever opening an overlay. A target already at capacity is refused with an
-/// explicit queue-full response.
-async fn handle_survey(
+/// earlier handler releases its turn. The caller's `--timeout` bounds the
+/// TOTAL wait (queue time plus reply time), so a survey can time out while
+/// still queued; it then leaves the queue without ever opening an overlay. A
+/// target already at capacity is refused with an explicit queue-full response.
+///
+/// An opted-in request also waits for client EOF while queued and once open.
+/// Queued EOF only releases its turn; open EOF also cancels its bus entry and
+/// closes its overlays. The open select polls the reply first, but that poll
+/// is not atomic with `SurveyBus::complete_survey`: a completion accepted
+/// after the reply arm returns pending can race a ready EOF or deadline, whose
+/// branch then owns cleanup and the response.
+async fn handle_survey_until_client_eof<F>(
+    wait: ClientWait<'_, F>,
     mut spec: SurveySpec,
     tab_name: Option<&str>,
     tab_group: Option<&str>,
-    timeout_secs: u64,
     events_tx: &broadcast::Sender<String>,
     survey_bus: &Arc<crate::survey::SurveyBus>,
     terminal_registry: Option<&Arc<TerminalRegistry>>,
-) -> ControlResponse {
+) -> ControlResponse
+where
+    F: std::future::Future<Output = ()> + Unpin,
+{
+    let ClientWait {
+        client_eof,
+        timeout_secs,
+    } = wait;
     if tab_name.is_none() && tab_group.is_none() {
         return ControlResponse::Error {
             message: "survey needs a tab name and/or group selector".into(),
@@ -2510,24 +2608,34 @@ async fn handle_survey(
         match survey_bus.enqueue_turn(crate::survey::survey_queue_key(&windows, tab_name)) {
             crate::survey::SurveyTurn::Ready(guard) => guard,
             crate::survey::SurveyTurn::Wait(guard, turn_rx) => {
-                match tokio::time::timeout_at(deadline, turn_rx).await {
-                    Ok(Ok(())) => guard,
+                let turn = tokio::select! {
+                    biased;
+                    result = turn_rx => Some(result),
+                    _ = &mut *client_eof => None,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        return ControlResponse::Timeout {
+                            message: format!(
+                                "no reply within {timeout_secs}s (timed out while queued behind an \
+                                 earlier survey for this target)"
+                            ),
+                        };
+                    }
+                };
+                match turn {
+                    Some(Ok(())) => guard,
                     // The sender dropped without firing: the bus vanished
                     // mid-wait (server teardown). Nothing was pushed, so there
                     // is no overlay to close.
-                    Ok(Err(_)) => {
+                    Some(Err(_)) => {
                         return ControlResponse::Error {
                             message: "survey cancelled while queued".into(),
                         };
                     }
-                    // The caller's window elapsed while still queued: leave the
-                    // queue (guard drop) having never opened an overlay.
-                    Err(_elapsed) => {
-                        return ControlResponse::Timeout {
-                            message: format!(
-                            "no reply within {timeout_secs}s (timed out while queued behind an \
-                             earlier survey for this target)"
-                        ),
+                    // A flagged client ended while queued. Returning drops the
+                    // turn guard without opening an overlay or parking a reply.
+                    None => {
+                        return ControlResponse::Error {
+                            message: "survey client disconnected while queued".into(),
                         };
                     }
                 }
@@ -2563,32 +2671,52 @@ async fn handle_survey(
             return ControlResponse::Error { message };
         }
     }
-    // Block until C's reply route fires the oneshot, the deadline passes, or
-    // the sender is dropped. Mirrors the `cs pane` round-trip
-    // (PANE_REPLY_TIMEOUT), but the window is the caller's `--timeout` (the
-    // host needs real time to read and answer, unlike pane's instant reply).
-    match tokio::time::timeout_at(deadline, rx).await {
-        Ok(Ok((reply, answered_by))) => {
-            // Close the STALE overlay in the other target windows, but NOT the
-            // one that answered: it already dismissed its overlay via the
-            // reply, so an `answered_elsewhere` close there only races that
-            // local clear (a spurious saved-draft dialog + composer hide).
-            send_survey_close_commands(
-                &windows,
-                answered_by.as_deref(),
-                &survey_id,
-                tab_name,
-                SurveyCloseReason::AnsweredElsewhere,
-                events_tx,
-            );
-            ControlResponse::Ok {
-                message: format_survey_reply(&reply),
+    // Block until C's reply route fires the oneshot, a flagged client exits,
+    // the deadline passes, or the sender is dropped. Mirrors the `cs pane`
+    // round-trip (PANE_REPLY_TIMEOUT), but the window is the caller's
+    // `--timeout` (the host needs real time to read and answer, unlike pane's
+    // instant reply).
+    tokio::select! {
+        biased;
+        result = rx => {
+            match result {
+                Ok((reply, answered_by)) => {
+                    // Close the STALE overlay in the other target windows, but NOT the
+                    // one that answered: it already dismissed its overlay via the
+                    // reply, so an `answered_elsewhere` close there only races that
+                    // local clear (a spurious saved-draft dialog + composer hide).
+                    send_survey_close_commands(
+                        &windows,
+                        answered_by.as_deref(),
+                        &survey_id,
+                        tab_name,
+                        SurveyCloseReason::AnsweredElsewhere,
+                        events_tx,
+                    );
+                    ControlResponse::Ok {
+                        message: format_survey_reply(&reply),
+                    }
+                }
+                // A receive error means the sender was dropped without a reply (server
+                // shutdown); the entry is gone, but cancel defensively in case
+                // register/await ever diverge.
+                Err(_) => {
+                    survey_bus.cancel(&survey_id);
+                    send_survey_close_commands(
+                        &windows,
+                        None,
+                        &survey_id,
+                        tab_name,
+                        SurveyCloseReason::Cancelled,
+                        events_tx,
+                    );
+                    ControlResponse::Error {
+                        message: "survey cancelled before a reply".into(),
+                    }
+                }
             }
-        }
-        // A receive error means the sender was dropped without a reply (server
-        // shutdown); the entry is gone, but cancel defensively in case
-        // register/await ever diverge.
-        Ok(Err(_)) => {
+        },
+        _ = &mut *client_eof => {
             survey_bus.cancel(&survey_id);
             send_survey_close_commands(
                 &windows,
@@ -2599,13 +2727,13 @@ async fn handle_survey(
                 events_tx,
             );
             ControlResponse::Error {
-                message: "survey cancelled before a reply".into(),
+                message: "survey client disconnected before a reply".into(),
             }
-        }
+        },
         // No reply within the window: drop the parked oneshot so it does not
         // leak and answer with a distinct Timeout (the CLI maps it to exit
         // 124). A late host answer then finds the id gone and no-ops.
-        Err(_elapsed) => {
+        _ = tokio::time::sleep_until(deadline) => {
             survey_bus.cancel(&survey_id);
             send_survey_close_commands(
                 &windows,
@@ -2618,7 +2746,7 @@ async fn handle_survey(
             ControlResponse::Timeout {
                 message: format!("no reply within {timeout_secs}s"),
             }
-        }
+        },
     }
 }
 
@@ -3263,9 +3391,17 @@ fn handle_session_self(
 /// `cs session handover`: either a follower REQUESTS leadership (blocks for the
 /// leader's accept/reject), or the leader ANSWERS a pending request from its own
 /// terminal (`--accept` / `--reject`, the CLI path for a non-visible leader).
-/// The request path mirrors `handle_survey`: park the oneshot, push the prompt
-/// to the leader, then block on the caller's `--timeout`.
-async fn handle_session_handover(
+/// The request path mirrors `handle_survey_until_client_eof`: park the oneshot,
+/// push the prompt to the leader, then block on the reply, opted-in client EOF,
+/// or the caller's `--timeout`.
+///
+/// The biased select polls the reply first, but that poll is not atomic with
+/// `HandoverBus::complete`: a completion accepted after the reply arm returns
+/// pending can race a ready EOF or deadline. The winning EOF or deadline branch
+/// clears the bus and pending slot, and leadership moves only when the reply
+/// branch wins.
+async fn handle_session_handover_until_client_eof<F>(
+    wait: ClientWait<'_, F>,
     session_registry: &SessionRegistry,
     handover_bus: &HandoverBus,
     events_tx: &broadcast::Sender<String>,
@@ -3274,8 +3410,14 @@ async fn handle_session_handover(
     // `None` requests a handover; `Some(true)`/`Some(false)` is the leader
     // answering a pending request with accept / reject.
     answer: Option<bool>,
-    timeout_secs: u64,
-) -> ControlResponse {
+) -> ControlResponse
+where
+    F: std::future::Future<Output = ()> + Unpin,
+{
+    let ClientWait {
+        client_eof,
+        timeout_secs,
+    } = wait;
     // The leader answering a pending request from its own terminal.
     if let Some(accept) = answer {
         let Some(pending) = session_registry.pending_for_leader(&window_id) else {
@@ -3329,49 +3471,61 @@ async fn handle_session_handover(
         return ControlResponse::Error { message };
     }
     let timeout_secs = if timeout_secs == 0 { 30 } else { timeout_secs };
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
-        Ok(Ok(reply)) => {
-            let accepted = matches!(reply, HandoverReply::Accept);
-            // The answer path only fired the oneshot; apply the leadership move
-            // here, in the requester's handler, so it happens exactly once.
-            let resolved = session_registry.resolve_handover(&request_id, accepted);
-            if accepted {
-                crate::session_roster::broadcast_session_roster(events_tx, session_registry);
-            }
-            match reply {
-                HandoverReply::Accept => {
-                    let leader = resolved
-                        .and_then(|r| r.new_leader)
-                        .unwrap_or_else(|| window_id.clone());
-                    ControlResponse::Ok {
-                        message: format!("handover accepted; {leader} now leads"),
+    tokio::select! {
+        biased;
+        result = rx => {
+            match result {
+                Ok(reply) => {
+                    let accepted = matches!(reply, HandoverReply::Accept);
+                    // The answer path only fired the oneshot; apply the leadership move
+                    // here, in the requester's handler, so it happens exactly once.
+                    let resolved = session_registry.resolve_handover(&request_id, accepted);
+                    if accepted {
+                        crate::session_roster::broadcast_session_roster(events_tx, session_registry);
+                    }
+                    match reply {
+                        HandoverReply::Accept => {
+                            let leader = resolved
+                                .and_then(|r| r.new_leader)
+                                .unwrap_or_else(|| window_id.clone());
+                            ControlResponse::Ok {
+                                message: format!("handover accepted; {leader} now leads"),
+                            }
+                        }
+                        HandoverReply::Reject { reason } => ControlResponse::Ok {
+                            message: reason
+                                .map(|r| format!("handover rejected: {r}"))
+                                .unwrap_or_else(|| "handover rejected".into()),
+                        },
                     }
                 }
-                HandoverReply::Reject { reason } => ControlResponse::Ok {
-                    message: reason
-                        .map(|r| format!("handover rejected: {r}"))
-                        .unwrap_or_else(|| "handover rejected".into()),
-                },
+                // The sender was dropped without a reply during server shutdown:
+                // clear both sides and report it.
+                Err(_) => {
+                    handover_bus.cancel(&request_id);
+                    session_registry.cancel_handover(&request_id);
+                    ControlResponse::Error {
+                        message: "handover cancelled before a reply".into(),
+                    }
+                }
             }
-        }
-        // The sender was dropped without a reply (server shutdown, or the
-        // requester gone): clear both sides and report it.
-        Ok(Err(_)) => {
+        },
+        _ = &mut *client_eof => {
             handover_bus.cancel(&request_id);
             session_registry.cancel_handover(&request_id);
             ControlResponse::Error {
-                message: "handover cancelled before a reply".into(),
+                message: "handover client disconnected before a reply".into(),
             }
-        }
+        },
         // No answer within the window: drop the parked request and clear the
         // pending slot; a late answer then finds nothing.
-        Err(_elapsed) => {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
             handover_bus.cancel(&request_id);
             session_registry.cancel_handover(&request_id);
             ControlResponse::Timeout {
                 message: format!("no answer within {timeout_secs}s"),
             }
-        }
+        },
     }
 }
 
@@ -5246,6 +5400,12 @@ mod tests {
             // No filesystem surface: the tests that need one build it.
             standalone_files: None,
         }
+    }
+
+    /// Drive the generic one-request connection path over an in-memory stream.
+    async fn serve_test_connection(stream: tokio::io::DuplexStream, ctx: ControlSocketCtx) {
+        let (read, write) = tokio::io::split(stream);
+        serve_connection_parts(read, write, ctx).await;
     }
 
     #[test]
@@ -8304,6 +8464,192 @@ is_lead = false
             body_markdown: body.into(),
             options: vec!["ok".into()],
         }
+    }
+
+    async fn recv_command(
+        rx: &mut broadcast::Receiver<String>,
+        command: &str,
+    ) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let raw = rx.recv().await.expect("window command");
+                let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if frame["command"] == command {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {command}"))
+    }
+
+    #[tokio::test]
+    async fn cancel_on_eof_releases_an_open_survey_and_its_turn() {
+        let (_root, registry) = single_tab_registry();
+        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        Arc::get_mut(&mut ctx.terminal_registry)
+            .expect("unshared registry cell")
+            .set(registry)
+            .expect("set terminal registry");
+        let mut events = ctx.events_tx.subscribe();
+        let survey_bus = ctx.survey_bus.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let mut task = tokio::spawn(serve_test_connection(server, ctx));
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "type": "term_survey",
+            "tab_name": "@@T",
+            "spec": {
+                "surveyId": "",
+                "title": null,
+                "bodyMarkdown": "client exits",
+                "options": ["ok"]
+            },
+            "timeout_secs": 600,
+            "cancel_on_eof": true
+        }))
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"]
+            .as_str()
+            .expect("survey id")
+            .to_string();
+        let key = crate::survey::survey_queue_key(&["win-a".into()], Some("@@T"));
+        let queued_probe = match survey_bus.enqueue_turn(key.clone()) {
+            crate::survey::SurveyTurn::Wait(guard, _) => guard,
+            crate::survey::SurveyTurn::Ready(_) => {
+                panic!("handler did not hold the expected survey turn")
+            }
+            crate::survey::SurveyTurn::Full => panic!("expected one held survey turn"),
+        };
+        drop(queued_probe);
+        drop(client);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await {
+            Ok(result) => result.expect("survey handler task"),
+            Err(_) => {
+                task.abort();
+                panic!("flagged survey stayed parked after its client exited");
+            }
+        }
+
+        let close = recv_command(&mut events, "close_survey").await;
+        assert_eq!(close["surveyId"], survey_id);
+        assert_eq!(close["reason"], "cancelled");
+        assert!(!survey_bus.complete_survey(
+            &survey_id,
+            SurveyReply::Dismissed {
+                survey_id: survey_id.clone(),
+            },
+            Some("win-a".into()),
+        ));
+        assert!(matches!(
+            survey_bus.enqueue_turn(key),
+            crate::survey::SurveyTurn::Ready(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_on_eof_clears_a_pending_handover() {
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        let _leader = ctx.session_registry.join("leader", true, None).guard;
+        let _follower = ctx.session_registry.join("follower", false, None).guard;
+        let mut events = ctx.events_tx.subscribe();
+        let session_registry = ctx.session_registry.clone();
+        let handover_bus = ctx.handover_bus.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let mut task = tokio::spawn(serve_test_connection(server, ctx));
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "type": "session_handover",
+            "window_id": "follower",
+            "timeout_secs": 600,
+            "cancel_on_eof": true
+        }))
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+
+        let prompt = recv_command(&mut events, "handover_prompt").await;
+        assert!(session_registry.pending_for_leader("leader").is_some());
+        drop(client);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await {
+            Ok(result) => result.expect("handover handler task"),
+            Err(_) => {
+                task.abort();
+                panic!("flagged handover stayed parked after its client exited");
+            }
+        }
+        assert!(session_registry.pending_for_leader("leader").is_none());
+
+        let request_id = prompt["request_id"].as_str().expect("request id");
+        assert!(!handover_bus.complete(request_id, HandoverReply::Accept));
+        let (fresh_id, _fresh_rx) = handover_bus.register();
+        assert!(session_registry
+            .request_handover(&fresh_id, "follower", None)
+            .is_ok());
+        handover_bus.cancel(&fresh_id);
+        session_registry.cancel_handover(&fresh_id);
+    }
+
+    #[tokio::test]
+    async fn missing_cancel_on_eof_keeps_a_half_closed_survey_alive() {
+        let (_root, registry) = single_tab_registry();
+        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        Arc::get_mut(&mut ctx.terminal_registry)
+            .expect("unshared registry cell")
+            .set(registry)
+            .expect("set terminal registry");
+        let mut events = ctx.events_tx.subscribe();
+        let survey_bus = ctx.survey_bus.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_test_connection(server, ctx));
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "type": "term_survey",
+            "tab_name": "@@T",
+            "spec": {
+                "surveyId": "",
+                "title": null,
+                "bodyMarkdown": "old client",
+                "options": ["ok"]
+            },
+            "timeout_secs": 600
+        }))
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let open = recv_command(&mut events, "open_survey").await;
+        let survey_id = open["survey"]["surveyId"]
+            .as_str()
+            .expect("survey id")
+            .to_string();
+        assert!(survey_bus.complete_survey(
+            &survey_id,
+            SurveyReply::Option {
+                survey_id: survey_id.clone(),
+                option_index: 0,
+                option_label: "ok".into(),
+            },
+            Some("win-a".into()),
+        ));
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            BufReader::new(&mut client).read_line(&mut line),
+        )
+        .await
+        .expect("response wait")
+        .expect("response read");
+        assert!(matches!(
+            serde_json::from_str::<ControlResponse>(&line).unwrap(),
+            ControlResponse::Ok { message } if message == "ok"
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .expect("handler join")
+            .expect("handler task");
     }
 
     /// Await the next `open_survey` frame on the `/ws` fan-out.

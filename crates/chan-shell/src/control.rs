@@ -206,21 +206,19 @@ pub async fn send_control_request_held(socket: &Path, request: ControlRequest) -
     Ok(send_control_request_streaming(socket, request).await?.ack)
 }
 
-/// The still-open control connection behind a long-lived request
-/// (`cs tunnel`). The server's ack line has already been read; the
-/// connection stays up until [`TunnelSession::wait`] returns or the
-/// session is dropped, and that lifetime IS the request's lifetime on the
-/// server side.
+/// The still-open control connection after its first response line. `cs
+/// tunnel` keeps it until [`TunnelSession::wait`] returns or the session is
+/// dropped; [`send_control_request_held`] drops it as soon as that first
+/// response arrives.
 #[derive(Debug)]
 pub struct TunnelSession {
     /// The server's acknowledgement, already unwrapped from its
     /// [`ControlResponse`] envelope.
     pub ack: String,
     reader: tokio::io::BufReader<transport::ReadEnd>,
-    // Held open, never written again: the server reads this half's EOF as
-    // "the foreground command ended" and tears the tunnel down, so it must
-    // live exactly as long as the session. Dropping the session (Ctrl-C
-    // kills the process, or `wait` returns) is the teardown signal.
+    // Held open, never written again. For a tunnel the server reads this
+    // half's EOF as "the foreground command ended", so dropping the session
+    // (Ctrl-C kills the process, or `wait` returns) is the teardown signal.
     _write: transport::WriteEnd,
 }
 

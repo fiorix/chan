@@ -13,8 +13,8 @@
 //! may be OPEN per target at a time. [`SurveyBus::enqueue_turn`] admits the
 //! first survey for a target immediately and parks later ones in a bounded
 //! [`VecDeque`]; each caller's [`SurveyTurnGuard`] releases its slot on drop
-//! (reply, timeout, cancel, or a dropped connection), promoting the next
-//! survey in arrival order.
+//! (reply, timeout, cancellation, or EOF from an opted-in client), promoting
+//! the next survey in arrival order.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,7 +71,8 @@ pub(crate) enum SurveyTurn<'a> {
 /// RAII slot in a target's survey FIFO. Dropping it removes the entry and,
 /// when the entry was the head, promotes the next survey in line, so every
 /// exit path of the blocked handler (reply, timeout while open, timeout
-/// while queued, push failure, a dropped connection) releases the target.
+/// while queued, push failure, or EOF from an opted-in client) releases the
+/// target.
 pub(crate) struct SurveyTurnGuard<'a> {
     bus: &'a SurveyBus,
     key: SurveyQueueKey,
