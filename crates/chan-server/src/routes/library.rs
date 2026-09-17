@@ -388,7 +388,7 @@ pub fn launcher_router(
 /// requests already passed the gateway's `__Host-devserver_gate` check and arrive with
 /// client credentials stripped, so they bypass this local bearer; the
 /// reverse-tunnel legs, the only launcher routes that tell the owner from a
-/// grantee, are guarded separately by [`require_tunnel_owner`].
+/// grantee, are guarded separately by [`require_owner_desktop`].
 /// Other requests accept the token in the `Authorization: Bearer` header on
 /// every route, and additionally as the `?t=` query param on watch WebSockets
 /// (a browser WS can't header). The comparison is constant-time so a wrong token
@@ -920,21 +920,19 @@ fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
 /// Restrict the tunnel legs to the devserver owner's desktop app.
 ///
 /// A grant is all-or-nothing over the devserver, and these are the only
-/// launcher routes a grantee does not share with the owner: a reverse tunnel
-/// dials out through an addressed app window, whose host can be the owner's
-/// own machine, outside the devserver a grant covers. A tunnel-origin request
-/// bypasses the launcher bearer, which would leave the unguessable tunnel id
-/// as the only thing standing between a session holder and a listener on the
-/// owner's machine.
+/// launcher routes a grantee does not share with the owner. This gate
+/// classifies each tunnel leg; it does not govern the window-addressed trigger.
+/// A grantee's shell can address that trigger to the owner's desktop, which
+/// then dials with its owner session.
 ///
-/// Only the desktop app serves a reverse tunnel, dialing both legs natively
-/// on the session the gateway's desktop entry route minted, so the gateway
-/// assertion must name the owner on a desktop session. The owner's browser
-/// session is refused, which keeps a browser tab, or anyone holding its
-/// cookie, from opening a listener; so is a session whose client the gateway
-/// did not state, which is what a gateway too old to state one sends. Local
-/// (non-tunnel) requests are unaffected: the launcher bearer already gates
-/// those.
+/// The gateway assertion must name the owner on a desktop session. A grantee's
+/// desktop session, the owner's browser session, and an unknown client are
+/// refused from attaching legs. The native client and a main-frame script at
+/// the tenant origin present the same admitted session because the desktop
+/// installs its session cookies in the webview store; this gate does not
+/// distinguish them. An extension frame's opaque Origin fails the gateway's
+/// exact-Origin check first. Local (non-tunnel) requests are unaffected: the
+/// launcher bearer already gates those.
 async fn require_owner_desktop(req: Request<Body>, next: Next) -> Response {
     if let Some(origin) = req.extensions().get::<crate::TunnelOrigin>() {
         if !origin.owner_desktop() {
@@ -4242,9 +4240,9 @@ mod window_op_route_tests {
     #[tokio::test]
     async fn tunnel_legs_are_refused_for_a_non_owner_gateway_role() {
         // Both legs are GET, so the mutation gate does not cover them and a
-        // tunnel-origin request bypasses the launcher bearer. Without the owner
-        // gate a grantee who learned a tunnel id could open a listener on the
-        // owner's desktop.
+        // tunnel-origin request bypasses the launcher bearer. The owner-desktop
+        // gate refuses a grantee from attaching either leg; it does not stop a
+        // grantee's shell from sending the window-addressed trigger.
         let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));
         let router = launcher_router(host, None, None);
 
@@ -4378,12 +4376,11 @@ mod window_op_route_tests {
         }
     }
 
-    /// The reverse-tunnel legs are the owner's desktop app's: a tunnel dials out
-    /// through an addressed app window whose host can be the owner's own
-    /// machine, outside the devserver a grant covers, and only the desktop app
-    /// dials the legs. The owner on a browser session and a grantee are refused
-    /// before the upgrade; the owner's desktop and a local caller reach the
-    /// `WebSocketUpgrade` extractor, which rejects a plain GET.
+    /// The reverse-tunnel leg gate admits only the owner's desktop session.
+    /// The owner on a browser session and a grantee are refused before the
+    /// upgrade; the owner's desktop and a local caller reach the
+    /// `WebSocketUpgrade` extractor, which rejects a plain GET. This test does
+    /// not exercise the separate window-addressed trigger.
     #[tokio::test]
     async fn only_the_owners_desktop_and_a_local_caller_reach_the_reverse_tunnel_legs() {
         let host = Arc::new(WorkspaceHost::new(library(), crate::route_builder()));

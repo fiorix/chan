@@ -2157,9 +2157,11 @@ fn build_devserver_app(
     // surface: the gateway admits only the owner and a grantee to a devserver
     // session, and a grant carries the owner's authority over the devserver.
     // The one launcher route a grantee does not share is the reverse-tunnel
-    // pair, which `require_tunnel_owner` keeps the owner's. The cell is filled
-    // with the bound address after the listener binds (unfilled on a
-    // tunnel-only devserver, where `require_mutable` answers 503).
+    // pair, whose legs `require_owner_desktop` admits only on the owner's
+    // desktop session. That gate does not govern the window-addressed trigger.
+    // The cell is filled with the bound address after the listener binds
+    // (unfilled on a tunnel-only devserver, where `require_mutable` answers
+    // 503).
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
     crate::install_launcher_root_fallback(
         &host,

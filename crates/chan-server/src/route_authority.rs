@@ -52,8 +52,8 @@ pub(crate) enum Verb {
 ///   authority over the devserver
 ///   (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). A grantee
 ///   meets what the owner meets everywhere except the reverse-tunnel legs,
-///   which dial out through an addressed app window whose host can be the
-///   owner's own machine, outside the devserver a grant covers.
+///   where `require_owner_desktop` refuses the grantee's session. That leg
+///   gate does not govern who can send the window-addressed trigger.
 ///
 /// There is no anonymous tunnel caller. The gateway forwards nothing without a
 /// signed-in principal, extension frames included (it binds their links to the
@@ -74,10 +74,9 @@ pub(crate) enum Authority {
     NonOwner,
     /// The owner calling from the desktop app and a local caller reach the
     /// handler; the owner from a browser or an unknown client, and a grantee on
-    /// any client, are refused with 403. Only the desktop app serves a reverse
-    /// tunnel, so no other session needs these routes, and a session minted
-    /// for a browser (a browser tab, or its stolen cookie) cannot open a
-    /// listener on the owner's machine.
+    /// any client, are refused with 403. On reverse-tunnel routes this keeps
+    /// those sessions from attaching a leg; it does not govern the
+    /// window-addressed trigger that asks the owner's desktop to dial.
     DesktopOwner,
     /// Only a local caller holding the devserver's bearer reaches the
     /// handler. The gateway strips client credentials, so no tunnel caller
@@ -286,8 +285,9 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
 ];
 
 /// The launcher root: `routes::library::launcher_router`. No gate on it
-/// consults the caller except `require_tunnel_owner` on the reverse-tunnel
-/// legs, so a grantee reaches every other route the owner does.
+/// consults the caller except `require_owner_desktop` on the reverse-tunnel
+/// legs. That gate classifies the leg caller, not who sent the window-addressed
+/// trigger; a grantee reaches every other route the owner does.
 pub(crate) static LAUNCHER: RouteTable = &[
     (Get, "/api/library/windows", NonOwner),
     (Post, "/api/library/windows", NonOwner),
@@ -335,9 +335,8 @@ pub(crate) static LAUNCHER: RouteTable = &[
     (Post, "/api/library/gateways/{id}/connect", NonOwner),
     (Post, "/api/library/gateways/{id}/disconnect", NonOwner),
     (Post, "/api/library/fs/pick-folder", NonOwner),
-    // The reverse-tunnel legs dial out through an addressed app window whose
-    // host can be the owner's own machine, outside the devserver a grant
-    // covers, and only the owner's desktop app dials them.
+    // A leg is admitted only for the owner's desktop session. This classifies
+    // the leg caller, not who sent the window-addressed trigger.
     (Get, "/api/library/tunnel/control", DesktopOwner),
     (Get, "/api/library/tunnel/conn", DesktopOwner),
     (Get, "/api/library/workspaces", NonOwner),
