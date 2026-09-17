@@ -2769,6 +2769,10 @@ mod tests {
         include_str!("../../../web/packages/workspace-app/src/api/desktop.ts");
     const WORKSPACE_APP_EXTERNAL_LINKS_TS: &str =
         include_str!("../../../web/packages/workspace-app/src/editor/external_links.ts");
+    /// The launcher SPA's own IPC dispatch site, included the same way and for
+    /// the same reason: its invoke vocabulary must be the shipped source.
+    const LAUNCHER_DESKTOP_TS: &str =
+        include_str!("../../../web/packages/launcher/src/api/desktop.ts");
 
     fn capability_permissions(raw: &str) -> Vec<String> {
         let v: serde_json::Value = serde_json::from_str(raw).expect("capability JSON parses");
@@ -3894,6 +3898,63 @@ mod tests {
             violations.is_empty(),
             "origin-aware ACL parity violations:\n{}",
             violations.join("\n"),
+        );
+    }
+
+    /// The launcher is a remotely-served window like every other: it runs under
+    /// the `main` / `main-*` labels and loads from the embedded loopback server
+    /// (`WebviewUrl::External(http://{addr}/?t=...)` in main.rs), so a
+    /// capability reaches it only by naming that label AND matching that origin
+    /// in `remote.urls`. Grant parity alone does not cover this. A command added
+    /// to the `main-window` permission set passes
+    /// `app_acl_grants_every_registered_command` and
+    /// `app_acl_has_no_stale_grants` while default.json, which is where
+    /// `main-window` is bound, carries no `remote` key at all and therefore
+    /// hands the launcher nothing. This test walks the launcher's own invokes
+    /// against the grant recomputed for its label and origin, so a command that
+    /// is grantable in name only fails here instead of at runtime.
+    #[test]
+    fn origin_aware_acl_grants_the_launcher_invoke_vocabulary() {
+        const LAUNCHER_ORIGIN: &str = "http://127.0.0.1:4090";
+        let vocabulary = tauri_invoke_commands(LAUNCHER_DESKTOP_TS);
+        // Parser honesty: both of the launcher's own invokes must have parsed,
+        // or the walk below is hollow.
+        for expected in ["restart_desktop_after_update", "request_app_quit"] {
+            assert!(
+                vocabulary.iter().any(|command| command == expected),
+                "launcher invoke-vocabulary parser lost `{expected}`; fix the parser before \
+                 trusting this test",
+            );
+        }
+        const MAIN_RS: &str = include_str!("main.rs");
+        let registered: std::collections::HashSet<String> =
+            invoke_handler_commands(MAIN_RS).into_iter().collect();
+        // Both launcher-class labels: the `main-*` glob exists so a second
+        // launcher window runs on the same permission set as the singleton.
+        for label in ["main", "main-2"] {
+            let (app_commands, _) = effective_grants(label, LAUNCHER_ORIGIN);
+            for command in &vocabulary {
+                assert!(
+                    registered.contains(command),
+                    "the launcher invokes `{command}` but generate_handler! does not register it",
+                );
+                assert!(
+                    app_commands.contains(command),
+                    "the launcher invokes `{command}` but no capability grants it to `{label}` \
+                     served from {LAUNCHER_ORIGIN}; a permission set bound by a capability with \
+                     no `remote` key never reaches the loopback-served launcher",
+                );
+            }
+        }
+        // Why the walk above can fail at all: default.json binds the broad
+        // main-window set to the launcher labels with no remote scope, which is
+        // what keeps the updater, dialog and process grants off remote content.
+        // Widening it would hand the launcher all of them at once.
+        assert!(
+            capability_remote_urls(DEFAULT_CAPABILITY_JSON).is_empty(),
+            "default.json must stay local-only: its main-window set carries the updater, dialog \
+             and process grants, and a remote scope would hand every one of them to remotely \
+             served launcher content",
         );
     }
 }
