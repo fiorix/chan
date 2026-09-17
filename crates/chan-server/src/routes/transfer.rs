@@ -107,11 +107,15 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// sparse-aware tar stream, but preserves the conservative preflight bound.
 pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
     let archive_name = download_filename(&abs.to_string_lossy());
-    verify_readable_fs_entry(abs, Path::new(&archive_name))
+    verify_readable_fs_entry(abs, Path::new(&archive_name), true)
         .map(|size| size.saturating_add(TAR_END_OF_ARCHIVE_BYTES))
 }
 
-fn verify_readable_fs_entry(abs: &Path, archive_path: &Path) -> Result<u64, String> {
+fn verify_readable_fs_entry(
+    abs: &Path,
+    archive_path: &Path,
+    is_archive_root: bool,
+) -> Result<u64, String> {
     let meta = std::fs::symlink_metadata(abs)
         .map_err(|e| format!("cannot access {}: {e}", abs.display()))?;
     if meta.file_type().is_symlink() {
@@ -124,13 +128,19 @@ fn verify_readable_fs_entry(abs: &Path, archive_path: &Path) -> Result<u64, Stri
     if meta.is_dir() {
         let entries = std::fs::read_dir(abs)
             .map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
-        let mut encoded_bytes = tar_entry_encoded_size(archive_path, None, 0);
+        let header_path = if is_archive_root {
+            archive_path.join("")
+        } else {
+            archive_path.to_path_buf()
+        };
+        let mut encoded_bytes = tar_entry_encoded_size(&header_path, None, 0);
         for entry in entries {
             let entry =
                 entry.map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
             encoded_bytes = encoded_bytes.saturating_add(verify_readable_fs_entry(
                 &entry.path(),
                 &archive_path.join(entry.file_name()),
+                false,
             )?);
         }
         Ok(encoded_bytes)
@@ -1398,6 +1408,40 @@ mod tests {
         assert_eq!(planned, bytes.len() as u64);
     }
 
+    fn assert_terminal_directory_root_size_matches_builder(root_name_len: usize) {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("d".repeat(root_name_len));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("f"), b"").unwrap();
+
+        let archive_name = download_filename(&root.to_string_lossy());
+        let planned = verify_readable_fs(&root).unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            builder.follow_symlinks(false);
+            builder.append_dir_all(&archive_name, &root).unwrap();
+            builder.finish().unwrap();
+        }
+
+        assert_eq!(
+            planned,
+            bytes.len() as u64,
+            "{root_name_len}-byte directory root: planned={planned}, real={}",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn terminal_archive_preflight_matches_a_99_byte_directory_root() {
+        assert_terminal_directory_root_size_matches_builder(99);
+    }
+
+    #[test]
+    fn terminal_archive_preflight_matches_a_100_byte_directory_root() {
+        assert_terminal_directory_root_size_matches_builder(100);
+    }
+
     #[tokio::test]
     async fn archive_writer_stops_after_exactly_the_encoded_byte_ceiling() {
         const CAP: u64 = 1300;
@@ -1938,6 +1982,21 @@ mod tests {
             message.contains("4096") && message.contains("2048"),
             "the refusal must name the encoded archive size and its ceiling: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_archive_with_a_100_byte_root_is_refused_at_the_planned_ceiling() {
+        const OLD_UNDERCOUNT: u64 = 3072;
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("d".repeat(100));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("f"), b"").unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        let response =
+            stream_planned_download_tracked(&bulk, None, None, root, OLD_UNDERCOUNT).await;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// The bound has to survive a file that grows after the plan measured it,
