@@ -1507,6 +1507,7 @@ async fn resolve_entry_target(
     Ok(EntryTarget::Denied)
 }
 
+/// Handle `GET /s/{owner}/{workspace}`.
 async fn share_landing(
     State(state): State<AppState>,
     session: Session,
@@ -1516,6 +1517,7 @@ async fn share_landing(
     landing(state, session, owner, Some(workspace), query).await
 }
 
+/// Handle `GET /s/{owner}`.
 async fn share_landing_root(
     State(state): State<AppState>,
     session: Session,
@@ -1525,7 +1527,7 @@ async fn share_landing_root(
     landing(state, session, owner, None, query).await
 }
 
-/// Public entry point for copied share links, optionally `?d=`-qualified to pick one of the owner's devservers. Both forms validate the path, sanitize the selector, and stash a login redirect before authenticated work. With a session, they resolve the owner first, apply the owner-only rule for the whole-devserver root, then resolve and refuse a missing or blocked caller. The per-workspace route admits an owner or grantee and signs `/{workspace}/`; the owner-only root signs `/`. Both mint against the controller row's tenant origin and return a no-store POST handoff.
+/// Shared body of `share_landing` and `share_landing_root`, optionally `?d=`-qualified to pick one of the owner's devservers. Both forms validate the path and sanitize the selector. Without a session, they stash the share URL and 303 to sign-in. With a session, they resolve the owner first, apply the owner-only rule for the whole-devserver root, then resolve and refuse a missing or blocked caller. The per-workspace route admits an owner or grantee and signs `/{workspace}/`; the owner-only root signs `/`. Both mint against the controller row's tenant origin and return a no-store POST handoff.
 async fn landing(
     state: AppState,
     session: Session,

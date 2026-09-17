@@ -157,6 +157,12 @@ sequenceDiagram
     else signed-in caller
         ID->>Profile: find_user_by_username owner
         Profile-->>ID: owner user record or 404
+        Note over ID: /s/{owner} requires caller == owner first
+        ID->>Profile: get_user caller
+        Profile-->>ID: caller user or missing
+        alt caller missing or blocked
+            ID-->>Browser: 404
+        end
         ID->>Control: admin list_owner_tunnels immutable owner id
         Control-->>ID: live devserver_id + proxy_base_url or empty
         ID->>Profile: devserver_access owner devserver caller
@@ -191,7 +197,7 @@ devserver-proxy verifies and consumes the Ed25519 entry credential, creates a bo
 
 1. Validate `owner` (username shape) and `workspace` (1-64 lowercase alnum + `[._-]`); malformed values 404. An optional `?d=<disc-or-full-id>` (lowercase hex) picks one of the owner's devservers; malformed selectors 404.
 2. No session: stash `/s/{owner}/{workspace}` (with the sanitized `?d=` when present) under `post_login_redirect` and 303 to `/`. The SPA renders the OAuth picker; on callback, the stash is consumed and the user lands back here with a fresh session.
-3. With a session: resolve owner -> pick the target devserver (`?d=` match, single live, or the first live one the caller can access) -> profile access check -> mint entry JWT -> return the auto-submitting no-store POST handoff aimed at the owning node's tenant origin (`{owner}--{disc}.{proxy}.<proxy-apex>`). This is the devserver-gate mint above; the `{workspace}` is only the redirect path, not part of the access check.
+3. With a session: resolve owner -> refuse a missing or blocked caller -> pick the target devserver (`?d=` match, single live, or the first live one the caller can access) -> profile access check -> mint entry JWT -> return the auto-submitting no-store POST handoff aimed at the owning node's tenant origin (`{owner}--{disc}.{proxy}.<proxy-apex>`). This is the devserver-gate mint above; the `{workspace}` is only the redirect path, not part of the access check.
 
 The post-login redirect is validated to start with a single `/` and to contain no `:` or `//` prefix, so a hostile stash cannot point the callback at another origin.
 
