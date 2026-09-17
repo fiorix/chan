@@ -473,7 +473,7 @@ fn spawn_coordinator(
                     // Refusing one strands it: the coordinator is the only
                     // claimant a served workspace has, so a refusal is
                     // terminal for that pass rather than a deferral.
-                    match pass.action {
+                    let result = match pass.action {
                         RecoveryAction::FullRebuild => workspace_for_pass
                             .run_full_rebuild_pass(pass, Some(&cancel_w), &progress, aggression)
                             .map(|_| ()),
@@ -481,6 +481,11 @@ fn spawn_coordinator(
                         RecoveryAction::Replay => {
                             workspace_for_pass.replay_pending_writes().map(|_| ())
                         }
+                    };
+                    if result.is_ok() {
+                        workspace_for_pass.refresh_persisted_report_if_owed()
+                    } else {
+                        result
                     }
                 })
                 .await;
@@ -1383,6 +1388,67 @@ mod tests {
 
         drop(tx);
         coordinator.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persisted_report_recovery_runs_when_coordinator_claims_open_pass() {
+        let cfg = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(dir.path()).unwrap();
+        fs::write(dir.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        workspace.report().unwrap();
+        let report_path = workspace.paths().report.clone();
+        drop(workspace);
+        assert!(report_path.is_file(), "baseline report was not persisted");
+
+        fs::write(dir.path().join("offline.md"), "# Offline\n").unwrap();
+        let (worker_reached, worker_release) =
+            chan_workspace::workspace::arm_open_recovery_pause_for_test(
+                dir.path().canonicalize().unwrap(),
+            );
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        worker_reached
+            .recv_timeout(CONVERGENCE_BUDGET)
+            .expect("startup worker did not reach the pre-claim barrier");
+
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+        let workspace_for_stop = workspace.clone();
+        let stopper = std::thread::spawn(move || {
+            workspace_for_stop.stop_open_recovery();
+            let _ = stopped_tx.send(());
+        });
+        if stopped_rx.recv_timeout(CONVERGENCE_BUDGET).is_err() {
+            let _ = worker_release.send(());
+            stopper.join().unwrap();
+            panic!("startup worker did not stop at the pre-claim barrier");
+        }
+        stopper.join().unwrap();
+        let required = workspace.recovery_status().generation;
+        assert!(workspace.recovery_status().pending.is_some());
+
+        let (_events_tx, events_rx) = broadcast::channel(64);
+        let indexer = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        assert!(
+            await_ready(&workspace, required).await,
+            "the coordinator did not finish the open pass: {:?}",
+            workspace.recovery_status()
+        );
+
+        assert!(workspace
+            .report()
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.path == "offline.md"));
+        drop(indexer);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
