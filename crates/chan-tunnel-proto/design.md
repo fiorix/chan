@@ -87,7 +87,7 @@ The handshake fields could in theory ride on the request line or custom headers 
 
 ### Why JSON
 
-The control frames are exchanged once per tunnel lifetime; encode cost is irrelevant. JSON is debuggable on the wire, additive-friendly via serde, and avoids a transitive dep on a binary codec the rest of the workspace doesn't already use. A frame costs on the order of 200 B.
+The control frames use the same length-prefixed codec for the life of the tunnel, including periodic lease refreshes; encode cost is irrelevant. JSON is debuggable on the wire, additive-friendly via serde, and avoids a transitive dep on a binary codec the rest of the workspace doesn't already use. A frame costs on the order of 200 B.
 
 ### Length prefix
 
