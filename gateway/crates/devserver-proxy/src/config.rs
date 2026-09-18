@@ -45,7 +45,9 @@ pub struct Config {
     /// every Host that ends with this suffix.
     pub wildcard_suffix: String,
     /// Base URL of identity-service. devserver-proxy sends PAT validation and
-    /// Hello-name requests to `{identity_url}/internal/v1/tokens/validate`.
+    /// Hello-name requests to `/internal/v1/tokens/validate` at this URL's
+    /// scheme, host and port: `IdentityValidator::new` joins that absolute
+    /// path, which replaces any path this URL carries.
     /// See `gateway/design.md`, "Devserver publication", for the contact inventory.
     pub identity_url: Url,
     /// Bearer devserver-proxy presents on identity-service's
