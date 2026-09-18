@@ -1597,11 +1597,57 @@ fn safe_upstream_set_cookie(value: &HeaderValue) -> bool {
 /// outlasts the window, or meets revocation or expiry, ends the client
 /// socket with a Close: 1011 "upstream timed out", or the same 1008 the
 /// pump sends.
+///
+/// Each direction owns its source stream and destination sink. The policy
+/// monitor resets the shared idle deadline from either source and requests a
+/// cooperative stop on idle, revocation, or expiry. A direction that ends
+/// normally does not cancel its peer, so a frame the peer already read is not
+/// discarded. Final Close sends are bounded because a peer that stopped
+/// reading must not retain the bridge task forever.
 struct BridgePolicy {
     assertion: HeaderValue,
     idle_timeout: std::time::Duration,
     cancellation: tokio_util::sync::CancellationToken,
     expires_at: tokio::time::Instant,
+}
+
+const WS_BRIDGE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+struct BridgeStop {
+    client_code: u16,
+    upstream_code: TgCloseCode,
+    reason: &'static str,
+}
+
+async fn bridge_stop(stop: &mut tokio::sync::watch::Receiver<Option<BridgeStop>>) -> BridgeStop {
+    *stop
+        .wait_for(Option::is_some)
+        .await
+        .expect("bridge policy monitor owns the stop sender")
+        .as_ref()
+        .expect("wait_for accepted only a stop value")
+}
+
+async fn send_bridge_close<S, M>(sink: &mut S, message: M)
+where
+    S: futures_util::Sink<M> + Unpin,
+{
+    let _ = tokio::time::timeout(WS_BRIDGE_CLOSE_TIMEOUT, sink.send(message)).await;
+}
+
+fn client_bridge_close(stop: BridgeStop) -> Message {
+    Message::Close(Some(CloseFrame {
+        code: stop.client_code,
+        reason: stop.reason.into(),
+    }))
+}
+
+fn upstream_bridge_close(stop: BridgeStop) -> TgMessage {
+    TgMessage::Close(Some(TgCloseFrame {
+        code: stop.upstream_code,
+        reason: TgUtf8Bytes::from_static(stop.reason),
+    }))
 }
 
 async fn bridge_ws(
@@ -1651,123 +1697,191 @@ async fn bridge_ws(
     let (mut up_tx, mut up_rx) = upstream.split();
     let (mut cl_tx, mut cl_rx) = client.split();
 
-    let mut idle_deadline = tokio::time::Instant::now() + policy.idle_timeout;
-    loop {
-        tokio::select! {
-            msg = cl_rx.next() => match msg {
+    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(tokio::time::Instant::now());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(None);
+    let mut directions = tokio::task::JoinSet::new();
+
+    let mut client_stop = stop_rx.clone();
+    let client_activity = activity_tx.clone();
+    directions.spawn(async move {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                stop = bridge_stop(&mut client_stop) => {
+                    send_bridge_close(&mut up_tx, upstream_bridge_close(stop)).await;
+                    return Ok(());
+                }
+                msg = cl_rx.next() => msg,
+            };
+            match msg {
                 Some(Ok(msg)) => {
-                    idle_deadline = tokio::time::Instant::now() + policy.idle_timeout;
-                    let stop = matches!(msg, Message::Close(_));
-                    up_tx.send(client_to_upstream(msg)).await?;
-                    if stop {
-                        break;
+                    client_activity.send_replace(tokio::time::Instant::now());
+                    let closes = matches!(msg, Message::Close(_));
+                    let translated = client_to_upstream(msg);
+                    let sent = tokio::select! {
+                        biased;
+                        stop = bridge_stop(&mut client_stop) => {
+                            send_bridge_close(&mut up_tx, upstream_bridge_close(stop)).await;
+                            return Ok(());
+                        }
+                        result = up_tx.send(translated) => result,
+                    };
+                    sent?;
+                    if closes {
+                        return Ok(());
                     }
                 }
-                Some(Err(e)) => {
-                    // Client transport died mid-frame; the upstream
-                    // half is still healthy, so close it properly.
-                    let _ = up_tx.send(TgMessage::Close(None)).await;
-                    return Err(e.into());
+                Some(Err(error)) => {
+                    send_bridge_close(&mut up_tx, TgMessage::Close(None)).await;
+                    return Err(anyhow::Error::from(error));
                 }
                 None => {
-                    // Client vanished without a Close handshake.
-                    let _ = up_tx.send(TgMessage::Close(None)).await;
-                    break;
+                    send_bridge_close(&mut up_tx, TgMessage::Close(None)).await;
+                    return Ok(());
                 }
-            },
-            msg = up_rx.next() => match msg {
-                Some(Ok(msg)) => {
-                    idle_deadline = tokio::time::Instant::now() + policy.idle_timeout;
-                    let stop = matches!(msg, TgMessage::Close(_));
-                    if let Some(translated) = upstream_to_client(msg) {
-                        cl_tx.send(translated).await?;
-                    }
-                    if stop {
-                        break;
-                    }
-                }
-                Some(Err(e)) => {
-                    let _ = cl_tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1011, // internal error
-                            reason: "upstream error".into(),
-                        })))
-                        .await;
-                    return Err(e.into());
-                }
-                None => {
-                    // The substream ended without a Close handshake
-                    // (tunnel redial, yamux teardown): tell the
-                    // browser so `onclose` fires promptly instead of
-                    // leaving a half-open zombie socket.
-                    let _ = cl_tx
-                        .send(Message::Close(Some(CloseFrame {
-                            code: 1001, // going away
-                            reason: "upstream closed".into(),
-                        })))
-                        .await;
-                    break;
-                }
-            },
-            _ = tokio::time::sleep_until(idle_deadline) => {
-                tracing::info!("ws bridge idle timeout (both directions quiet)");
-                let _ = cl_tx
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1001, // going away
-                        reason: "idle timeout".into(),
-                    })))
-                    .await;
-                let _ = up_tx
-                    .send(TgMessage::Close(Some(TgCloseFrame {
-                        code: TgCloseCode::Away,
-                        reason: TgUtf8Bytes::from_static("idle timeout"),
-                    })))
-                    .await;
-                break;
-            }
-            _ = policy.cancellation.cancelled() => {
-                let _ = cl_tx
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1008,
-                        reason: "session revoked".into(),
-                    })))
-                    .await;
-                let _ = up_tx
-                    .send(TgMessage::Close(Some(TgCloseFrame {
-                        code: TgCloseCode::Policy,
-                        reason: TgUtf8Bytes::from_static("session revoked"),
-                    })))
-                    .await;
-                break;
-            }
-            _ = tokio::time::sleep_until(policy.expires_at) => {
-                let _ = cl_tx
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1008,
-                        reason: "session expired".into(),
-                    })))
-                    .await;
-                let _ = up_tx
-                    .send(TgMessage::Close(Some(TgCloseFrame {
-                        code: TgCloseCode::Policy,
-                        reason: TgUtf8Bytes::from_static("session expired"),
-                    })))
-                    .await;
-                break;
             }
         }
+    });
+
+    let mut upstream_stop = stop_rx;
+    directions.spawn(async move {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                stop = bridge_stop(&mut upstream_stop) => {
+                    send_bridge_close(&mut cl_tx, client_bridge_close(stop)).await;
+                    return Ok(());
+                }
+                msg = up_rx.next() => msg,
+            };
+            match msg {
+                Some(Ok(msg)) => {
+                    activity_tx.send_replace(tokio::time::Instant::now());
+                    let closes = matches!(msg, TgMessage::Close(_));
+                    let Some(translated) = upstream_to_client(msg) else {
+                        continue;
+                    };
+                    let sent = tokio::select! {
+                        biased;
+                        stop = bridge_stop(&mut upstream_stop) => {
+                            send_bridge_close(&mut cl_tx, client_bridge_close(stop)).await;
+                            return Ok(());
+                        }
+                        result = cl_tx.send(translated) => result,
+                    };
+                    sent?;
+                    if closes {
+                        return Ok(());
+                    }
+                }
+                Some(Err(error)) => {
+                    send_bridge_close(
+                        &mut cl_tx,
+                        Message::Close(Some(CloseFrame {
+                            code: 1011,
+                            reason: "upstream error".into(),
+                        })),
+                    )
+                    .await;
+                    return Err(anyhow::Error::from(error));
+                }
+                None => {
+                    send_bridge_close(
+                        &mut cl_tx,
+                        Message::Close(Some(CloseFrame {
+                            code: 1001,
+                            reason: "upstream closed".into(),
+                        })),
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        }
+    });
+
+    let idle = tokio::time::sleep_until(tokio::time::Instant::now() + policy.idle_timeout);
+    tokio::pin!(idle);
+    let mut first_error = None;
+    let requested_stop = loop {
+        if directions.is_empty() {
+            break None;
+        }
+        tokio::select! {
+            result = directions.join_next() => match result {
+                Some(Ok(Ok(()))) => {}
+                Some(Ok(Err(error))) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Some(Err(error)) => {
+                    first_error = Some(anyhow::Error::from(error));
+                    break Some(BridgeStop {
+                        client_code: 1011,
+                        upstream_code: TgCloseCode::Error,
+                        reason: "bridge task failed",
+                    });
+                }
+                None => break None,
+            },
+            changed = activity_rx.changed() => {
+                if changed.is_ok() {
+                    let at = *activity_rx.borrow_and_update();
+                    idle.as_mut().reset(at + policy.idle_timeout);
+                }
+            }
+            _ = &mut idle => {
+                tracing::info!("ws bridge idle timeout (both directions quiet)");
+                break Some(BridgeStop {
+                    client_code: 1001,
+                    upstream_code: TgCloseCode::Away,
+                    reason: "idle timeout",
+                });
+            }
+            _ = policy.cancellation.cancelled() => {
+                break Some(BridgeStop {
+                    client_code: 1008,
+                    upstream_code: TgCloseCode::Policy,
+                    reason: "session revoked",
+                });
+            }
+            _ = tokio::time::sleep_until(policy.expires_at) => {
+                break Some(BridgeStop {
+                    client_code: 1008,
+                    upstream_code: TgCloseCode::Policy,
+                    reason: "session expired",
+                });
+            }
+        }
+    };
+    if let Some(stop) = requested_stop {
+        stop_tx.send_replace(Some(stop));
     }
-    Ok(())
+    while let Some(result) = directions.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
+            Err(error) if first_error.is_none() => first_error = Some(error.into()),
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Close a client socket the bridge never connected upstream.
 async fn close_unbridged(mut client: WebSocket, code: u16, reason: &'static str) {
-    let _ = client
-        .send(Message::Close(Some(CloseFrame {
+    send_bridge_close(
+        &mut client,
+        Message::Close(Some(CloseFrame {
             code,
             reason: reason.into(),
-        })))
-        .await;
+        })),
+    )
+    .await;
 }
 
 // axum and tungstenite each wrap ws text payloads in their own Utf8Bytes
@@ -2001,6 +2115,230 @@ mod tests {
     use super::*;
 
     const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+
+    const BRIDGE_TEST_TOKEN: &str = "bridge-test-token";
+    const BRIDGE_TEST_USER: &str = "bridge-user";
+    const BRIDGE_TEST_DEVSERVER: &str = "bridge";
+
+    struct BridgeTestValidator;
+
+    #[async_trait::async_trait]
+    impl chan_tunnel_server::Validator for BridgeTestValidator {
+        async fn validate(
+            &self,
+            token: &str,
+        ) -> std::result::Result<chan_tunnel_server::Validated, chan_tunnel_server::ServerError>
+        {
+            if token != BRIDGE_TEST_TOKEN {
+                return Err(chan_tunnel_server::ServerError::InvalidToken);
+            }
+            Ok(chan_tunnel_server::Validated {
+                user_id: Uuid::new_v4(),
+                username: BRIDGE_TEST_USER.to_string(),
+                devserver_id: BRIDGE_TEST_DEVSERVER.to_string(),
+                scopes: vec![chan_tunnel_server::TUNNEL_SCOPE.to_string()],
+                gateway_assertion_key: Some(
+                    chan_tunnel_proto::gateway_assertion::derive_assertion_key(token),
+                ),
+                admission_lease: None,
+                admission_lease_expires_at: None,
+            })
+        }
+    }
+
+    async fn bridge_test_tunnel(upstream: axum::Router) -> TunnelHandle {
+        use chan_tunnel_proto::{H2Duplex, TUNNEL_PATH};
+        use chan_tunnel_server::{Registry, RegistryEvent, Validator};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let registry = Registry::new();
+        let (_, _, mut events) = registry.snapshot_and_subscribe();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test tunnel listener");
+        let address = listener.local_addr().expect("test tunnel address");
+        let server_registry = registry.clone();
+        let validator: std::sync::Arc<dyn Validator> = std::sync::Arc::new(BridgeTestValidator);
+        tokio::spawn(async move {
+            let _ =
+                chan_tunnel_server::serve_tunnel_listener(listener, validator, server_registry, 0)
+                    .await;
+        });
+        tokio::spawn(async move {
+            let tcp = TcpStream::connect(address)
+                .await
+                .expect("connect test tunnel");
+            tcp.set_nodelay(true).expect("set test tunnel nodelay");
+            let (mut h2, connection) = h2::client::handshake(tcp).await.expect("test h2 handshake");
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let request = http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("https://chan-tunnel{TUNNEL_PATH}"))
+                .header(header::AUTHORIZATION, format!("Bearer {BRIDGE_TEST_TOKEN}"))
+                .body(())
+                .expect("test tunnel request");
+            let (response, send) = h2
+                .send_request(request, false)
+                .expect("send test tunnel request");
+            let response = response.await.expect("test tunnel response");
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let duplex = H2Duplex::new(send, response.into_body());
+            let config = chan_tunnel_client::ClientConfig {
+                tunnel_url: "https://chan-tunnel/v1/tunnel".parse().unwrap(),
+                token: BRIDGE_TEST_TOKEN.to_string(),
+                workspace: BRIDGE_TEST_DEVSERVER.to_string(),
+                ..Default::default()
+            };
+            let (_, connection) = chan_tunnel_client::handshake(&config, duplex)
+                .await
+                .expect("test tunnel protocol handshake");
+            chan_tunnel_client::serve_substreams(connection, upstream)
+                .await
+                .expect("serve test tunnel substreams");
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let RegistryEvent::TunnelUp { row, .. } =
+                    events.recv().await.expect("test tunnel registry event")
+                {
+                    if row.user.as_ref() == BRIDGE_TEST_USER
+                        && row.workspace.as_ref() == BRIDGE_TEST_DEVSERVER
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("test tunnel registers");
+        registry
+            .get(BRIDGE_TEST_USER, BRIDGE_TEST_DEVSERVER)
+            .expect("registered test tunnel")
+    }
+
+    async fn serve_bridge_test_socket(
+        handle: TunnelHandle,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let handle = handle.clone();
+                async move {
+                    ws.on_upgrade(move |client| async move {
+                        bridge_ws(
+                            client,
+                            handle,
+                            "/ws",
+                            &ForwardedHeaders::default(),
+                            BridgePolicy {
+                                assertion: HeaderValue::from_static("test-assertion"),
+                                idle_timeout: std::time::Duration::from_secs(2),
+                                cancellation: tokio_util::sync::CancellationToken::new(),
+                                expires_at: tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(30),
+                            },
+                        )
+                        .await
+                        .expect("bridge test socket");
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bridge test listener");
+        let address = listener.local_addr().expect("bridge test address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn gateway_bridge_moves_large_full_duplex_streams_independently() {
+        use axum::extract::ws::{Message as AxMessage, WebSocketUpgrade as AxUpgrade};
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TgMessage;
+
+        const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
+        const CHUNK_BYTES: usize = 64 * 1024;
+
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(1);
+        let upstream = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: AxUpgrade| {
+                let request_tx = request_tx.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        for chunk in vec![0xc1; TRANSFER_BYTES].chunks(CHUNK_BYTES) {
+                            socket
+                                .send(AxMessage::Binary(chunk.to_vec().into()))
+                                .await
+                                .expect("send upstream response");
+                        }
+                        let mut request = Vec::with_capacity(TRANSFER_BYTES);
+                        while request.len() < TRANSFER_BYTES {
+                            match socket.recv().await.expect("client request frame") {
+                                Ok(AxMessage::Binary(bytes)) => request.extend_from_slice(&bytes),
+                                other => panic!("unexpected upstream frame: {other:?}"),
+                            }
+                        }
+                        request_tx
+                            .send(request)
+                            .await
+                            .expect("report upstream request");
+                    })
+                }
+            }),
+        );
+        let handle = bridge_test_tunnel(upstream).await;
+        let (address, server) = serve_bridge_test_socket(handle).await;
+        let (client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/"))
+            .await
+            .expect("connect bridge test client");
+        let (mut client_tx, mut client_rx) = client.split();
+        let request = vec![0x35; TRANSFER_BYTES];
+        let expected_request = request.clone();
+
+        let (received_response, received_request) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+                let send = async move {
+                    for chunk in request.chunks(CHUNK_BYTES) {
+                        client_tx
+                            .send(TgMessage::Binary(chunk.to_vec().into()))
+                            .await
+                            .expect("send client request");
+                    }
+                };
+                let receive = async move {
+                    let mut response = Vec::with_capacity(TRANSFER_BYTES);
+                    while response.len() < TRANSFER_BYTES {
+                        match client_rx.next().await.expect("upstream response frame") {
+                            Ok(TgMessage::Binary(bytes)) => response.extend_from_slice(&bytes),
+                            other => panic!("unexpected client frame: {other:?}"),
+                        }
+                    }
+                    response
+                };
+                let client = async move {
+                    let ((), response) = tokio::join!(send, receive);
+                    response
+                };
+                tokio::join!(client, request_rx.recv())
+            })
+            .await
+            .expect("full-duplex transfer must not wedge");
+        assert_eq!(received_response, vec![0xc1; TRANSFER_BYTES]);
+        assert_eq!(
+            received_request.expect("upstream receives request"),
+            expected_request
+        );
+        server.abort();
+    }
 
     #[test]
     fn entry_content_type_requires_one_exact_raw_value() {
