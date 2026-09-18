@@ -36,8 +36,8 @@ use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
 use crate::error::{err, err_from};
 use crate::routes::files::{
     consume_transfer_body, content_disposition_archive, content_disposition_attachment,
-    download_filename, query_flag, stream_upload_tracked, upload_leaf_filename,
-    with_upload_destination, RequestBodyMessage, UploadDestinationParts,
+    download_filename, is_active_content_path, query_flag, stream_upload_tracked,
+    upload_leaf_filename, with_upload_destination, RequestBodyMessage, UploadDestinationParts,
 };
 use crate::static_assets::content_type_for;
 
@@ -436,14 +436,31 @@ async fn stream_planned_download_tracked(
         ),
     };
     let body = download_body(rx, job, alive_tx);
-    (
+    let mut response = (
         [
             (header::CONTENT_TYPE, content_type),
             (header::CONTENT_DISPOSITION, disposition),
         ],
         body,
     )
-        .into_response()
+        .into_response();
+    // The file arm takes the pair on the same condition as the workspace
+    // download, for a client that renders the attachment instead of saving
+    // it. The archive arm always declares a tar, whatever its root is named,
+    // so it is left out.
+    if let PlannedDownload::File { name } = &planned {
+        if is_active_content_path(name) {
+            response.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox".parse().expect("static header value"),
+            );
+            response.headers_mut().insert(
+                "x-content-type-options",
+                "nosniff".parse().expect("static header value"),
+            );
+        }
+    }
+    response
 }
 
 /// Stream one uid-filesystem download using the shared preflight and ceiling.
@@ -1974,6 +1991,75 @@ mod tests {
             message.contains("4097") && message.contains("4096"),
             "the refusal must name the size and the ceiling it exceeded: {message}"
         );
+    }
+
+    /// The file arm sets the sandbox pair on the condition the workspace
+    /// download uses. HTML and SVG, the two document types `content_type_for`
+    /// declares that can run script, are sandboxed and never sniffed; a raster
+    /// image and an ordinary binary carry neither header.
+    #[tokio::test]
+    async fn a_terminal_file_download_sandboxes_only_active_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+
+        for (name, content_type, content, sandboxed) in [
+            (
+                "page.html",
+                "text/html; charset=utf-8",
+                &b"<script>top.chan = 1</script>"[..],
+                true,
+            ),
+            (
+                "figure.svg",
+                "image/svg+xml",
+                &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>"[..],
+                true,
+            ),
+            ("photo.png", "image/png", &b"\x89PNG\r\n\x1a\n"[..], false),
+            (
+                "bundle.zip",
+                "application/octet-stream",
+                &b"PK\x03\x04"[..],
+                false,
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+
+            let response = stream_planned_download_tracked(&bulk, None, None, path, u64::MAX).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let headers = response.headers().clone();
+            let value = |header_name: &str| {
+                headers
+                    .get(header_name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                value("content-type").as_deref(),
+                Some(content_type),
+                "{name}"
+            );
+            assert_eq!(
+                value("content-disposition"),
+                Some(format!("attachment; filename=\"{name}\"")),
+                "{name}"
+            );
+            assert_eq!(
+                value("content-security-policy").as_deref(),
+                sandboxed.then_some("sandbox"),
+                "{name}: {headers:?}"
+            );
+            assert_eq!(
+                value("x-content-type-options").as_deref(),
+                sandboxed.then_some("nosniff"),
+                "{name}: {headers:?}"
+            );
+            let streamed = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(streamed.as_ref(), content, "{name}");
+        }
     }
 
     #[tokio::test]

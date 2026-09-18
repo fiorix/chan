@@ -1536,7 +1536,7 @@ async fn read_via_session(
     let mtime = token.map(|ns| ns / 1_000_000_000);
     let mtime_ns = token.map(|ns| ns.to_string());
     if query_flag(&query.download) {
-        return (
+        let mut response = (
             [
                 (header::CONTENT_TYPE, content_type_for(path).to_string()),
                 (
@@ -1547,6 +1547,20 @@ async fn read_via_session(
             content,
         )
             .into_response();
+        // A session can hold any text the editable-text gate admits, HTML
+        // included, so this takes the pair on the same condition as the disk
+        // download of the same path.
+        if is_active_content_path(path) {
+            response.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox".parse().expect("static header value"),
+            );
+            response.headers_mut().insert(
+                "x-content-type-options",
+                "nosniff".parse().expect("static header value"),
+            );
+        }
+        return response;
     }
     // Classification and the write-bit probe touch the filesystem;
     // keep them off the async worker like every other read path.
@@ -6247,6 +6261,87 @@ mod doc_divert_tests {
             std::fs::read_to_string(root.path().join("n.md")).unwrap(),
             "disk v1\n"
         );
+    }
+
+    /// A session download sets the sandbox pair on the condition the disk
+    /// download of the same path uses. The disk download of the HTML file
+    /// already carries the pair, so each body is asserted to be the session's
+    /// unflushed text: that is what shows the session served the response.
+    #[tokio::test]
+    async fn session_download_sandboxes_only_active_content() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let disk = "<p>disk</p>\n";
+        let live = "<script>top.chan = 1</script>\n";
+
+        for (path, content_type, sandboxed) in [
+            ("page.html", "text/html; charset=utf-8", true),
+            ("n.md", "text/plain; charset=utf-8", false),
+        ] {
+            workspace.write_text(path, disk).unwrap();
+            let mut handle = state
+                .doc_sessions
+                .attach(&workspace, path, "win-1", None)
+                .await
+                .unwrap();
+            let _frames = handle.take_frames();
+            handle
+                .push(
+                    0,
+                    vec![UpdateJson {
+                        client_id: "c-1".into(),
+                        changes: replace_diff(disk, live),
+                    }],
+                )
+                .unwrap();
+
+            let resp = api_read_file(
+                State(state.clone()),
+                AxumPath(path.to_string()),
+                Query(ReadFileQuery {
+                    download: Some("1".into()),
+                    stream: None,
+                    root: None,
+                }),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let headers = resp.headers().clone();
+            let value = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                value("content-type").as_deref(),
+                Some(content_type),
+                "{path}"
+            );
+            assert_eq!(
+                value("content-disposition"),
+                Some(format!("attachment; filename=\"{path}\"")),
+                "{path}"
+            );
+            assert_eq!(
+                value("content-security-policy").as_deref(),
+                sandboxed.then_some("sandbox"),
+                "{path}: {headers:?}"
+            );
+            assert_eq!(
+                value("x-content-type-options").as_deref(),
+                sandboxed.then_some("nosniff"),
+                "{path}: {headers:?}"
+            );
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(std::str::from_utf8(&bytes).unwrap(), live, "{path}");
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(path)).unwrap(),
+                disk,
+                "{path}: the edit must still be unflushed"
+            );
+        }
     }
 
     #[tokio::test]
