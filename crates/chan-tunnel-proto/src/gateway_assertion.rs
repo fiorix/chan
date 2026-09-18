@@ -182,8 +182,21 @@ pub fn derive_assertion_key(token: &str) -> AssertionKey {
     h.finalize().into()
 }
 
-/// Token-resolved devserver identity used by identity-service and the
-/// gateway proxy as the `drv` claim.
+/// Token-resolved devserver identity: the lowercase hex SHA-256 of the
+/// raw PAT, 64 characters. identity-service returns it when it
+/// validates a PAT, the tunnel registry keys each registration on
+/// `(username, devserver_id)`, and it is the `drv` claim of both the
+/// devserver-gate entry credential and every gateway assertion. The
+/// proxy checks an entry credential's `drv` against the live
+/// registration, and the devserver checks each assertion's `drv`
+/// against its own call to this function. Each check compares the
+/// exact string, so this encoding is a cross-service contract.
+///
+/// The PAT is the secret; this digest is a public handle. The digest
+/// does not reveal the PAT, so the id travels openly: its first 12
+/// characters name the devserver in the tenant host, and the desktop
+/// roster returns the full id to every caller with access, grantees
+/// included.
 pub fn devserver_id_from_token(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()
