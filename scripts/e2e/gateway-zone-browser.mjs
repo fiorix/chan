@@ -1,43 +1,92 @@
 // Headless-Chrome half of the gateway-zone e2e: sign in through the
 // stubbed OAuth, walk the account-mode desktop-authorize consent, and
-// hand the chan:// callback URL back to the harness.
+// hand the loopback callback URL back to the harness.
 //
 // Env: CHROME_BIN, ID_ORIGIN (https://id.localtest.me:PORT), and either
-// AUTH_PATH (the /desktop/authorize?... query) or LOGIN_ONLY=1. Prints one JSON
-// object on stdout:
-//   { radios: [values...], consent_text: "...", handoff_url: "chan://..." }
+//   - AUTH_PATH (/desktop/authorize?...), LOOPBACK_PORT, and REDIRECT_URI
+//     for the full consent + PKCE flow, or
+//   - LOGIN_ONLY=1 to just sign in via /auth/github and print the URL.
+//
+// In consent mode the script binds a tiny loopback listener on
+// LOOPBACK_PORT so the consent handoff page's meta refresh has somewhere
+// to land; it returns the captured callback URL for the harness to redeem
+// with its PKCE verifier.
+//
+// Prints one JSON object on stdout:
+//   consent mode: { radios: [...], consent_text: "...", callback_url: "..." }
+//   login mode:   { login_url: "..." }
 // radios reports any input[name="devserver"] on the consent page so
 // the harness can assert the consent renders no picker. Exits nonzero on
-// navigation/shape failures; content assertions stay in the harness
-// so the log reads as one assert list.
+// navigation/shape failures; content assertions stay in the harness.
+import http from "http";
 import puppeteer from "puppeteer-core";
 
-const { CHROME_BIN, ID_ORIGIN, AUTH_PATH, LOGIN_ONLY } = process.env;
-if (!CHROME_BIN || !ID_ORIGIN || (!LOGIN_ONLY && !AUTH_PATH)) {
-    console.error("missing CHROME_BIN / ID_ORIGIN / AUTH_PATH");
+const {
+    CHROME_BIN,
+    ID_ORIGIN,
+    AUTH_PATH,
+    LOOPBACK_PORT,
+    REDIRECT_URI,
+    LOGIN_ONLY,
+} = process.env;
+if (!CHROME_BIN || !ID_ORIGIN) {
+    console.error("missing CHROME_BIN / ID_ORIGIN");
+    process.exit(2);
+}
+const loginOnly = LOGIN_ONLY === "1" || LOGIN_ONLY === "true";
+if (!loginOnly && (!AUTH_PATH || !LOOPBACK_PORT || !REDIRECT_URI)) {
+    console.error(
+        "missing AUTH_PATH / LOOPBACK_PORT / REDIRECT_URI (or set LOGIN_ONLY=1)",
+    );
     process.exit(2);
 }
 
-const browser = await puppeteer.launch({
-    executablePath: CHROME_BIN,
-    headless: "new",
-    args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        // The local full-stack harness uses a fresh per-run CA. Chromium is
-        // isolated from the host trust store, so permit only this test launch
-        // to navigate the loopback TLS edge.
-        "--ignore-certificate-errors",
-        // The wildcard + id hosts must hit the loopback listeners even
-        // if the sandbox resolver prefers AAAA records.
-        "--host-resolver-rules=MAP *.localtest.me 127.0.0.1",
-    ],
-});
+const CALLBACK_TIMEOUT_MS = 30000;
+
+function startLoopbackListener(port) {
+    return new Promise((resolve, reject) => {
+        let captured = null;
+        let timeout = null;
+        const server = http.createServer((req, res) => {
+            if (!captured) {
+                captured = `http://127.0.0.1:${port}${req.url}`;
+            }
+            res.writeHead(200, { "content-type": "text/html" });
+            res.end("<!doctype html><html><body>You can close this tab.</body></html>");
+            if (timeout) {
+                clearTimeout(timeout);
+            }
+            server.closeAllConnections?.();
+            server.close(() => resolve(captured));
+        });
+        server.on("error", reject);
+        server.listen(port, "127.0.0.1", () => {
+            timeout = setTimeout(() => {
+                server.closeAllConnections?.();
+                server.close(() => reject(new Error("loopback callback timeout")));
+            }, CALLBACK_TIMEOUT_MS);
+        });
+    });
+}
+
+const capturedPromise = loginOnly ? null : startLoopbackListener(Number(LOOPBACK_PORT));
+let browser = null;
 
 try {
+    browser = await puppeteer.launch({
+        executablePath: CHROME_BIN,
+        headless: "new",
+        args: [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--ignore-certificate-errors",
+            "--host-resolver-rules=MAP *.localtest.me 127.0.0.1",
+        ],
+    });
+
     const page = await browser.newPage();
 
-    if (LOGIN_ONLY) {
+    if (loginOnly) {
         await page.goto(`${ID_ORIGIN}/auth/github`, { waitUntil: "networkidle2" });
         if (new URL(page.url()).origin !== ID_ORIGIN) {
             console.error(`expected the identity origin after login, got ${page.url()}`);
@@ -62,16 +111,21 @@ try {
         );
         const consentText = await page.$eval("body", (el) => el.innerText);
 
-        // Authorize. The handoff answers the form POST as a 200 page
-        // whose primary button carries the chan:// URL (the meta refresh
-        // to a custom scheme is a no-op in headless Chrome).
+        // Authorize. The consent POST answers a 200 handoff page that
+        // meta-refreshes to the loopback callback; the loopback listener
+        // captures the URL the browser actually navigates to.
         await Promise.all([
             page.waitForNavigation({ waitUntil: "networkidle2" }),
             page.click('button[name="action"][value="allow"]'),
         ]);
-        const handoff = await page.$eval("a.btn.primary", (a) => a.getAttribute("href"));
-        if (!handoff || !handoff.startsWith("chan://auth/callback#")) {
-            console.error(`expected a chan:// handoff link, got ${handoff}`);
+
+        const callbackUrl = await capturedPromise;
+        if (!callbackUrl) {
+            console.error("loopback callback was not captured");
+            process.exit(3);
+        }
+        if (!callbackUrl.startsWith(REDIRECT_URI)) {
+            console.error(`expected callback at ${REDIRECT_URI}, got ${callbackUrl}`);
             process.exit(3);
         }
 
@@ -79,10 +133,12 @@ try {
             JSON.stringify({
                 radios,
                 consent_text: consentText,
-                handoff_url: handoff,
+                callback_url: callbackUrl,
             }),
         );
     }
 } finally {
-    await browser.close();
+    if (browser) {
+        await browser.close();
+    }
 }
