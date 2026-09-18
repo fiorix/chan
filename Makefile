@@ -437,7 +437,16 @@ check-chan-server-windows-tests:
 			echo "error: no chan-server Windows tests were selected" >&2; \
 			exit 1; \
 		fi; \
-		listed="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --list --exact "$$@")"; \
+		selected=' '; \
+		for test_name in "$$@"; do \
+			case "$$selected" in \
+				*" $$test_name "*) \
+					printf 'error: duplicate chan-server Windows test: %s\n' "$$test_name" >&2; \
+					exit 1 ;; \
+			esac; \
+			selected="$$selected$$test_name "; \
+		done; \
+		listed="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --color never --list --exact "$$@")"; \
 		missing=0; \
 		for test_name in "$$@"; do \
 			if ! printf '%s\n' "$$listed" | grep -Fqx "$$test_name: test"; then \
@@ -446,19 +455,16 @@ check-chan-server-windows-tests:
 			fi; \
 		done; \
 		[ "$$missing" -eq 0 ]; \
-		run_output="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --color never --exact "$$@" 2>&1)" || { \
-			printf '%s\n' "$$run_output"; \
-			exit 1; \
-		}; \
-		printf '%s\n' "$$run_output"; \
-		expected="$$#"; \
-		summary="test result: ok. $$expected passed; 0 failed; 0 ignored;"; \
-		case "$$run_output" in \
-			*"$$summary"*) ;; \
-			*) \
-				printf 'error: chan-server Windows tests did not all execute: expected %s passed and 0 ignored\n' "$$expected" >&2; \
-				exit 1 ;; \
-		esac
+		ignored="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --color never --list --ignored --exact "$$@")"; \
+		ignored_selected=0; \
+		for test_name in "$$@"; do \
+			if printf '%s\n' "$$ignored" | grep -Fqx "$$test_name: test"; then \
+				printf 'error: chan-server Windows test is ignored: %s\n' "$$test_name" >&2; \
+				ignored_selected=1; \
+			fi; \
+		done; \
+		[ "$$ignored_selected" -eq 0 ]; \
+		RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --color never --exact "$$@"
 
 .PHONY: ci-linux-packages
 ci-linux-packages: ## Build the direct-download Linux deb and rpm packages.
