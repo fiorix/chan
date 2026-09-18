@@ -720,14 +720,18 @@ mod tests {
     /// `IndexStatus::Idle { embedding: Some(..) }` (BM25 committed and
     /// searchable, vectors still flushing). This pins the fallback for a
     /// chip with no per-file label, which the indexer does not publish,
-    /// so `current_file` is `None`. The embed phase runs AFTER BM25, so
-    /// by then every indexable file already shows up in
-    /// `workspace.indexed_paths()` (the BM25 index) - counting
-    /// `indexable_files > indexed_files` would read everywhere as "BM25
-    /// done" -> no orange. The `embedding_sweep` flag is then the only
-    /// signal (mapped from `Idle.embedding` by `is_embedding_sweep`); it
-    /// marks every dir with indexable content because embeddings are
-    /// still pending across the whole sweep.
+    /// so `current_file` is `None`. BM25 commits before each embed flush and
+    /// a build does not clear it first, so while the chip shows,
+    /// `workspace.indexed_paths()` (the BM25 index) holds what the build has
+    /// committed so far and any path an earlier index still holds; on a
+    /// first build it can lack files the drain has not reached. The fixture
+    /// lists every indexable file, as over an earlier index that holds them
+    /// all or from the tail flush on, so comparing `indexed_files` with
+    /// `indexable_files` alone would read every dir with indexable text as
+    /// Indexed, with nothing in progress. The `embedding_sweep` flag is then
+    /// the only in-progress signal (mapped from `Idle.embedding` by
+    /// `is_embedding_sweep`); it marks every dir with indexable content
+    /// because embeddings are still pending across the whole sweep.
     #[test]
     fn indexing_state_marks_every_dir_with_indexable_files_during_embedding_sweep() {
         let entries = vec![
@@ -739,8 +743,8 @@ mod tests {
             tree_entry("assets", true),
             tree_entry("assets/logo.png", false),
         ];
-        // BM25 has already indexed every text file (embedding phase
-        // runs AFTER BM25). `indexed_paths` reflects that completion.
+        // Every text file is in the BM25 index, as over an earlier index
+        // that holds them all or from the tail flush on.
         let indexed_paths = BTreeSet::from([
             "notes/finished.md".to_string(),
             "docs/done.md".to_string(),
@@ -810,7 +814,8 @@ mod tests {
             tree_entry("docs", true),
             tree_entry("docs/done.md", false),
         ];
-        // BM25 finished the whole tree before the embed phase started.
+        // Both files are listed, as they are at an embed flush that follows
+        // their drain: BM25 commits before each flush.
         let indexed_paths =
             BTreeSet::from(["notes/embedding.md".to_string(), "docs/done.md".to_string()]);
 

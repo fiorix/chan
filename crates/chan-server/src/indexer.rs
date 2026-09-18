@@ -1277,15 +1277,17 @@ impl ProgressCallback for StatusUpdater {
                     }
                 }
             }
-            // Option A: the embed phase runs AFTER BM25 indexing. The first
-            // EmbedBatch means BM25 has been committed and is searchable
-            // (facade.rs commits before each embed flush), so flip the
-            // status to Idle now. preflight maps Idle -> ready, so the
-            // overlay unlocks and the slow embed forward-pass finishes in
-            // the background instead of pinning Building for minutes (the
-            // original heavy-drive wedge). `embedding: Some` carries
-            // file-based progress for a passive status chip; reconcile_idle
-            // clears it to None when the pass returns.
+            // Each EmbedBatch follows a BM25 commit of what the build has
+            // indexed so far (build_all commits before every embed flush).
+            // The first one comes from the drain loop once the queued chunks
+            // fill a batch, which can be long before the drain reaches the
+            // last file; otherwise it is the tail flush after the drain.
+            // Flip the status to Idle with `embedding: Some` carrying
+            // file-based progress and the last tick's file for the status
+            // chip, and latch `started` so later IndexFile ticks update the
+            // chip instead of reverting the status to Building. The
+            // coordinator clears the shared signal when the pass returns, so
+            // the Idle reconcile_idle stamps then carries `embedding: None`.
             ProgressStage::EmbedBatch => {
                 let (done, total, file) = {
                     let mut p = self.embed.lock().unwrap();
