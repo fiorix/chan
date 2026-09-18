@@ -5042,7 +5042,8 @@ mod tests {
 
     #[test]
     fn open_recovery_pause_rejects_a_duplicate_root_without_poisoning() {
-        let root = TempDir::new().unwrap().path().canonicalize().unwrap();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let (_reached, _release) = arm_open_recovery_pause_for_test(root.clone());
 
         let duplicate = std::panic::catch_unwind(|| {

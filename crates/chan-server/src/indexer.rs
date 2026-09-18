@@ -399,6 +399,8 @@ fn take_coordinator_retry_failure(root: &std::path::Path) -> bool {
 struct CoordinatorRefreshFailure {
     passes: usize,
     refreshes: usize,
+    /// Passes, counted from 1, whose action fails instead of running.
+    failed_actions: Vec<usize>,
     pass_tx: tokio::sync::mpsc::UnboundedSender<usize>,
 }
 
@@ -421,6 +423,7 @@ fn arm_coordinator_refresh_failure(
             CoordinatorRefreshFailure {
                 passes: 0,
                 refreshes: 0,
+                failed_actions: Vec::new(),
                 pass_tx,
             },
         );
@@ -431,15 +434,31 @@ fn arm_coordinator_refresh_failure(
 }
 
 #[cfg(test)]
-fn record_coordinator_refresh_failure_pass(root: &std::path::Path) {
+fn fail_coordinator_action_on_pass(root: &std::path::Path, pass: usize) {
+    COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get_mut(root)
+        .expect("coordinator refresh probe is not armed")
+        .failed_actions
+        .push(pass);
+}
+
+/// Count a coordinator pass for an armed probe, and report whether the probe
+/// scripted that pass's action to fail.
+#[cfg(test)]
+fn record_coordinator_refresh_failure_pass(root: &std::path::Path) -> bool {
     let mut probes = COORDINATOR_REFRESH_FAILURES
         .get_or_init(Default::default)
         .lock()
         .unwrap();
-    if let Some(probe) = probes.get_mut(root) {
-        probe.passes += 1;
-        let _ = probe.pass_tx.send(probe.passes);
-    }
+    let Some(probe) = probes.get_mut(root) else {
+        return false;
+    };
+    probe.passes += 1;
+    let _ = probe.pass_tx.send(probe.passes);
+    probe.failed_actions.contains(&probe.passes)
 }
 
 #[cfg(test)]
@@ -553,7 +572,11 @@ fn spawn_coordinator(
                         bg_embed: bg_embed_w,
                     };
                     #[cfg(test)]
-                    record_coordinator_refresh_failure_pass(workspace_for_pass.root());
+                    if record_coordinator_refresh_failure_pass(workspace_for_pass.root()) {
+                        return RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Io(
+                            "injected coordinator action failure".to_string(),
+                        ));
+                    }
                     #[cfg(test)]
                     if take_coordinator_retry_failure(workspace_for_pass.root()) {
                         return RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Io(
@@ -1657,6 +1680,167 @@ mod tests {
 
         drop(tx);
         coordinator.await.unwrap();
+    }
+
+    /// A workspace whose open-time pass is pending with the persisted-report
+    /// refresh owed and no startup worker left to claim it: the report is
+    /// persisted, and the reopened workspace's worker is stopped at its
+    /// pre-claim barrier.
+    fn workspace_with_an_owed_open_pass() -> (TempDir, TempDir, Library, Arc<Workspace>) {
+        let cfg = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(dir.path()).unwrap();
+        fs::write(dir.path().join("baseline.md"), "# Baseline\n").unwrap();
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        workspace.report().unwrap();
+        let root = workspace.root().to_path_buf();
+        drop(workspace);
+
+        let (worker_reached, worker_release) =
+            chan_workspace::workspace::arm_open_recovery_pause_for_test(root);
+        let workspace = lib.open_workspace(dir.path()).unwrap();
+        worker_reached
+            .recv_timeout(CONVERGENCE_BUDGET)
+            .expect("startup worker did not reach the pre-claim barrier");
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::sync_channel(1);
+        let workspace_for_stop = workspace.clone();
+        let stopper = std::thread::spawn(move || {
+            workspace_for_stop.stop_open_recovery();
+            let _ = stopped_tx.send(());
+        });
+        if stopped_rx.recv_timeout(CONVERGENCE_BUDGET).is_err() {
+            let _ = worker_release.send(());
+            stopper.join().unwrap();
+            panic!("startup worker did not stop at the pre-claim barrier");
+        }
+        stopper.join().unwrap();
+        assert!(
+            workspace.recovery_status().pending.is_some(),
+            "the open pass must still be pending: {:?}",
+            workspace.recovery_status()
+        );
+        (cfg, dir, lib, workspace)
+    }
+
+    /// Wait until the coordinator settles, or return the first pass number
+    /// above `max_pass` it starts. Settled means the workspace is ready and the
+    /// status is `Idle` again: the coordinator publishes `Idle` for a ready
+    /// workspace only as the last step of an activation, after its final drain
+    /// of the wake channel, so a request made once this returns `None` starts a
+    /// new activation.
+    async fn settle_or_exceed(
+        workspace: &Arc<Workspace>,
+        status: &Arc<Mutex<IndexStatus>>,
+        pass_rx: &mut tokio::sync::mpsc::UnboundedReceiver<usize>,
+        max_pass: usize,
+    ) -> Option<usize> {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                if workspace.recovery_status().is_ready()
+                    && matches!(*status.lock().unwrap(), IndexStatus::Idle { .. })
+                {
+                    break None;
+                }
+                tokio::select! {
+                    pass = pass_rx.recv() => {
+                        if pass.is_some_and(|pass| pass > max_pass) {
+                            break pass;
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("coordinator neither settled nor exceeded the pass bound")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_action_failure_between_refresh_failures_does_not_buy_another_retry() {
+        // One activation: the first pass's refresh fails and requeues it, the
+        // retry's action fails, and the pass after that refreshes and fails
+        // again. That second refresh failure completes the generation.
+        // Restarting the count on the action failure would buy a third
+        // refresh and a fourth pass.
+        let (_cfg, _dir, _lib, workspace) = workspace_with_an_owed_open_pass();
+        let root = workspace.root().to_path_buf();
+        let required = workspace.recovery_status().generation;
+        let status = idle_status();
+        let shared = test_shared(status.clone());
+        let cancel = shared.cancel.clone();
+        let (pass_tx, mut pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        fail_coordinator_action_on_pass(&root, 2);
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(10),
+        );
+        tx.send(required).unwrap();
+
+        let exceeded = settle_or_exceed(&workspace, &status, &mut pass_rx, 3).await;
+        if exceeded.is_some() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let counts = take_coordinator_refresh_failure(&root);
+        assert!(
+            exceeded.is_none(),
+            "the action failure bought another refresh retry: (passes, refreshes) = {counts:?}"
+        );
+        assert_eq!(counts, (3, 2), "(passes, refreshes)");
+
+        drop(tx);
+        coordinator.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_driven_coordinator_bounds_refresh_retries_per_wake() {
+        // Through `Indexer::spawn`, so the coordinator's driver is installed
+        // and every `Retry` it finishes wakes it again on its own channel. The
+        // running activation must absorb that wake: restarting the refresh
+        // count on it would requeue the pass for as long as the refresh keeps
+        // failing. A later request shows the bound is per wake rather than per
+        // process: the obligation is still owed, so it spends two passes again.
+        let (_cfg, _dir, _lib, workspace) = workspace_with_an_owed_open_pass();
+        let root = workspace.root().to_path_buf();
+        let (pass_tx, mut pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        let (_events_tx, events_rx) = broadcast::channel(64);
+        // Installing the driver announces the pending open pass.
+        let indexer = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+
+        let exceeded = settle_or_exceed(&workspace, &indexer.status, &mut pass_rx, 2).await;
+        if exceeded.is_some() {
+            indexer.cancel();
+        }
+        assert!(
+            exceeded.is_none(),
+            "the coordinator's own retry wake restarted the refresh count: pass {exceeded:?}"
+        );
+
+        let later = workspace.request_recovery(RecoveryAction::Reconcile);
+        let exceeded = settle_or_exceed(&workspace, &indexer.status, &mut pass_rx, 4).await;
+        if exceeded.is_some() {
+            indexer.cancel();
+        }
+        let counts = take_coordinator_refresh_failure(&root);
+        assert!(
+            exceeded.is_none(),
+            "the later wake spent more than two passes: (passes, refreshes) = {counts:?}"
+        );
+        assert!(workspace.recovery_status().completed_generation >= later);
+        assert_eq!(counts, (4, 4), "(passes, refreshes) across two wakes");
+        drop(indexer);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
