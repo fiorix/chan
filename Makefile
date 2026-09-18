@@ -421,7 +421,6 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# a few seconds and is not the deferred full-suite Windows port.
 	scripts/smoke-windows-cli.sh target/release/chan.exe
 	$(MAKE) check-chan-server-windows-tests
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact $(CHAN_SERVER_WINDOWS_TESTS)
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
@@ -446,7 +445,20 @@ check-chan-server-windows-tests:
 				missing=1; \
 			fi; \
 		done; \
-		[ "$$missing" -eq 0 ]
+		[ "$$missing" -eq 0 ]; \
+		run_output="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --color never --exact "$$@" 2>&1)" || { \
+			printf '%s\n' "$$run_output"; \
+			exit 1; \
+		}; \
+		printf '%s\n' "$$run_output"; \
+		expected="$$#"; \
+		summary="test result: ok. $$expected passed; 0 failed; 0 ignored;"; \
+		case "$$run_output" in \
+			*"$$summary"*) ;; \
+			*) \
+				printf 'error: chan-server Windows tests did not all execute: expected %s passed and 0 ignored\n' "$$expected" >&2; \
+				exit 1 ;; \
+		esac
 
 .PHONY: ci-linux-packages
 ci-linux-packages: ## Build the direct-download Linux deb and rpm packages.
