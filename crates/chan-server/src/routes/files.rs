@@ -6264,6 +6264,82 @@ mod doc_divert_tests {
         );
     }
 
+    /// The workspace download sets the sandbox pair on `is_active_content_path`,
+    /// the condition the session download and the terminal file download
+    /// share. HTML and SVG are sandboxed and never sniffed; a raster image and
+    /// an ordinary binary carry neither header. No session is attached, so
+    /// each body is the bytes on disk.
+    #[tokio::test]
+    async fn a_workspace_download_sandboxes_only_active_content() {
+        let (_cfg, root, state) = divert_app();
+
+        for (path, content_type, content, sandboxed) in [
+            (
+                "page.html",
+                "text/html; charset=utf-8",
+                &b"<script>top.chan = 1</script>"[..],
+                true,
+            ),
+            (
+                "figure.svg",
+                "image/svg+xml",
+                &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>"[..],
+                true,
+            ),
+            ("photo.png", "image/png", &b"\x89PNG\r\n\x1a\n"[..], false),
+            (
+                "bundle.zip",
+                "application/octet-stream",
+                &b"PK\x03\x04"[..],
+                false,
+            ),
+        ] {
+            std::fs::write(root.path().join(path), content).unwrap();
+
+            let resp = api_read_file(
+                State(state.clone()),
+                AxumPath(path.to_string()),
+                Query(ReadFileQuery {
+                    download: Some("1".into()),
+                    stream: None,
+                    root: None,
+                }),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let headers = resp.headers().clone();
+            let value = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                value("content-type").as_deref(),
+                Some(content_type),
+                "{path}"
+            );
+            assert_eq!(
+                value("content-disposition"),
+                Some(format!("attachment; filename=\"{path}\"")),
+                "{path}"
+            );
+            assert_eq!(
+                value("content-security-policy").as_deref(),
+                sandboxed.then_some("sandbox"),
+                "{path}: {headers:?}"
+            );
+            assert_eq!(
+                value("x-content-type-options").as_deref(),
+                sandboxed.then_some("nosniff"),
+                "{path}: {headers:?}"
+            );
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(bytes.as_ref(), content, "{path}");
+        }
+    }
+
     /// A session download sets the sandbox pair on the condition the disk
     /// download of the same path uses. The disk download of the HTML file
     /// already carries the pair, so each body is asserted to be the session's
