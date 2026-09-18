@@ -8343,9 +8343,10 @@ mod tests {
         let one = Registry::new(test_config(64, 16, 600));
         let two = Registry::new(test_config(64, 16, 600));
         insert_session(&one, named_session("a", "Terminal-1"));
-        // A second tenant has its own numbering (the bug a process-global
-        // static caused: a second workspace window restarting past 1). It is
-        // unaffected by `one`'s live terminals.
+        // A second tenant has its own numbering: `next_terminal_name`
+        // reads only its own registry's sessions and reservations, so a
+        // second workspace window starts at 1, unaffected by `one`'s live
+        // terminals.
         assert_eq!(two.next_terminal_name(), "Terminal-1");
         // `one` already has Terminal-1 live -> next is 2.
         assert_eq!(one.next_terminal_name(), "Terminal-2");
