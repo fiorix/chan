@@ -36,6 +36,13 @@ DEB_TARGET ?= $(LINUX_TARGET)
 RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
 CHAN_TARGET ?=
+CHAN_SERVER_WINDOWS_TESTS := \
+	tenant_builder_tests::tenant_builders_preserve_routes_and_state \
+	handoff::tests::well_known_path_is_named_pipe_on_windows \
+	handoff::tests::listener_round_trip_upgrade_checked_pipe \
+	handoff::tests::unserved_pipe_is_no_desktop \
+	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
+	devserver_handoff::tests::listener_round_trip_registered_pipe
 
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a
 # macOS workstation can produce Linux bundles. DISTRO selects the rootfs +
@@ -378,12 +385,13 @@ ci-macos: ## Run the focused macOS CI validation target.
 ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
 	# The Rust test run covers chan-library and chan-desktop, plus the named
-	# chan-server tests whose harnesses use Windows transports. The chan-library
+	# chan-server tests that exercise Windows named-pipe paths. The chan-library
 	# tests include the Windows ConPTY child-reaping paths, chan-desktop includes
-	# the registry-backed user-PATH assertion, and chan-server covers the tenant
-	# builder's named-pipe control socket, the handoff named-pipe path and
-	# upgrade cases, and the devserver named-pipe path and registration round
-	# trip. The remaining chan-server, chan-workspace, and tunnel harnesses stay
+	# the registry-backed user-PATH assertion when CHAN_TEST_REAL_USER_PATH arms
+	# it, and chan-server covers the tenant builder's named-pipe control socket,
+	# the handoff named-pipe path and upgrade cases, and the devserver named-pipe
+	# path and registration round trip. The remaining chan-server, chan-workspace,
+	# and tunnel harnesses stay
 	# outside this Windows-specific subset: they are Unix-only, exercise Unix
 	# facilities such as POSIX shells, Unix-domain sockets, `/tmp` path semantics,
 	# or real PTYs, or have no Windows transport arm to exercise.
@@ -412,12 +420,8 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# connect -- plus the plain fact that chan.exe reaches `main` at all. It is
 	# a few seconds and is not the deferred full-suite Windows port.
 	scripts/smoke-windows-cli.sh target/release/chan.exe
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact tenant_builder_tests::tenant_builders_preserve_routes_and_state
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::well_known_path_is_named_pipe_on_windows
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::listener_round_trip_upgrade_checked_pipe
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact handoff::tests::unserved_pipe_is_no_desktop
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped
-	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact devserver_handoff::tests::listener_round_trip_registered_pipe
+	$(MAKE) check-chan-server-windows-tests
+	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --exact $(CHAN_SERVER_WINDOWS_TESTS)
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
@@ -425,6 +429,24 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# production/package build is complete, then prove install.ps1 and Windows
 	# self-replacement end to end on the stock Windows Server runner.
 	CARGO="$(CARGO)" scripts/smoke-windows-installer.sh target/release/chan.exe
+
+.PHONY: check-chan-server-windows-tests
+check-chan-server-windows-tests:
+	@set -eu; \
+		set -- $(CHAN_SERVER_WINDOWS_TESTS); \
+		if [ "$$#" -eq 0 ]; then \
+			echo "error: no chan-server Windows tests were selected" >&2; \
+			exit 1; \
+		fi; \
+		listed="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-server --lib -- --list --exact "$$@")"; \
+		missing=0; \
+		for test_name in "$$@"; do \
+			if ! printf '%s\n' "$$listed" | grep -Fqx "$$test_name: test"; then \
+				printf 'error: chan-server Windows test did not resolve: %s\n' "$$test_name" >&2; \
+				missing=1; \
+			fi; \
+		done; \
+		[ "$$missing" -eq 0 ]
 
 .PHONY: ci-linux-packages
 ci-linux-packages: ## Build the direct-download Linux deb and rpm packages.
