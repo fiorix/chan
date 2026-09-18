@@ -2636,10 +2636,10 @@ mod tests {
 
     #[test]
     fn key_bridge_invokes_tauri_ipc_via_core_invoke() {
-        // The `invokeIpc` helper calls `window.__TAURI__.core.invoke`, Tauri 2's
-        // invoke surface, for the native `reload_window` and `open_devtools`
-        // commands. When that surface is missing, the helper returns before
-        // swallowing the Cmd+R / Cmd+Opt+I event.
+        // The `invokeIpc` helper calls `window.__TAURI__.core.invoke`,
+        // Tauri 2's invoke surface, for the native `reload_window` and
+        // `open_devtools` commands. When that surface is missing, the helper
+        // returns before swallowing the Cmd+R / Cmd+Opt+I event.
         assert!(KEY_BRIDGE_JS.contains("window.__TAURI__"));
         assert!(KEY_BRIDGE_JS.contains("tauri.core.invoke"));
     }

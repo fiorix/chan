@@ -7858,10 +7858,10 @@ mod tests {
         feed.set_color("ds-1".to_string(), Some("#ff8800".to_string()));
         assert_eq!(feed.pane_color(lib), Some("#ff8800".to_string()));
         // A genuine clear (the devserver dropped its colour) still
-        // propagates -- a null push removes the cache so new windows fall back to the
-        // accent. The web live-apply side ignores every null and keeps its
-        // current colour, but the desktop cache must reflect a real clear, so
-        // the eager seed must not blanket-ignore nulls.
+        // propagates -- a null push removes the cache so new windows fall
+        // back to the accent. The web live-apply side ignores every null and
+        // keeps its current colour, but the desktop cache must reflect a real
+        // clear, so the eager seed must not blanket-ignore nulls.
         feed.set_color("ds-1".to_string(), None);
         assert_eq!(feed.pane_color(lib), None);
     }

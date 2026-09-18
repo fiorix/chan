@@ -2251,10 +2251,11 @@ mod tests {
         server.abort();
     }
 
-    /// The sign-in resume end to end: park -> callback -> roster fetched -> poll
-    /// running. The resume must make the parked runtime resumable before
-    /// re-entering connect_gateway, or the coalesce guard reads the park
-    /// as an attempt in flight and the gateway sticks Connecting forever.
+    /// The sign-in resume end to end: park -> callback -> roster
+    /// fetched -> poll running. The resume must make the parked runtime
+    /// resumable before re-entering connect_gateway, or the coalesce
+    /// guard reads the park as an attempt in flight and the gateway
+    /// sticks Connecting forever.
     #[tokio::test]
     async fn resume_after_signin_fetches_roster_and_starts_poll() {
         let (origin, server) = spawn_gateway_stub(false).await;

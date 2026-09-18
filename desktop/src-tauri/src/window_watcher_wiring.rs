@@ -939,11 +939,11 @@ async fn stream_window_feed(
 
 /// Subscribe to a connected devserver's pane-highlight COLOUR feed
 /// (`GET /api/library/local-color/watch`): on each `{ color }` push,
-/// refresh the launcher's per-devserver colour cache and -- only on a real change
-/// -- re-push the library feed, so a NEW window of this devserver reads the fresh
-/// `?pane=` colour at build. The workspace list is polled because there is no
-/// `workspaces/watch`. Reconnects on a dropped socket until `cancel` flips
-/// true (disconnect), like the window feed.
+/// refresh the launcher's per-devserver colour cache and -- only on a real
+/// change -- re-push the library feed, so a NEW window of this devserver
+/// reads the fresh `?pane=` colour at build. The workspace list is polled
+/// because there is no `workspaces/watch`. Reconnects on a dropped socket
+/// until `cancel` leaves `Running` or its sender drops, like the window feed.
 pub(crate) fn spawn_devserver_color_watch(
     state: Arc<AppState>,
     id: String,
@@ -1058,7 +1058,8 @@ pub(crate) async fn spawn_devserver_window_watcher(
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
     let pending_deletes = Arc::clone(&state.pending_window_deletes);
     // The WS feed task owns a `conn` clone, pushes changes into `snapshot` +
-    // wakes `change`, and stops when `cancel` flips true.
+    // wakes `change`, and stops when `cancel` leaves `Running` or its sender
+    // drops.
     tauri::async_runtime::spawn(run_devserver_window_feed(
         id,
         app.clone(),
