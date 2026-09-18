@@ -70,9 +70,10 @@ pub fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>, Strin
 /// ACL parity tests in serve.rs assert this list equals the grant recomputed
 /// from the capability sources. It is what a gateway-served `lib-*` window on
 /// a minted exact origin may invoke; a loopback window's effective grant
-/// differs at the edges (no `gateway_csrf_token`, and `read_dropped_paths`
-/// only where local-drop applies), which cannot mislead because a locally
-/// served page never skews from its host.
+/// differs at the edges (no `gateway_csrf_token`, no `probe_url` because the
+/// connecting screen is a local app page, and `read_dropped_paths` only where
+/// local-drop applies), which cannot mislead because a locally served page
+/// never skews from its host.
 ///
 /// `native_vocabulary` is itself a member: an app old enough to lack an
 /// advertised command is also old enough to lack this query, so a page that
@@ -96,7 +97,6 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "open_new_window",
     "open_reverse_tunnel",
     "platform_os",
-    "probe_url",
     "read_clipboard_html",
     "read_clipboard_image",
     "read_clipboard_text",
@@ -113,9 +113,12 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "zoom_reset",
 ];
 
-/// The capability JSON minted for one authenticated exact origin: the existing
-/// devserver native vocabulary, `lib-*` windows only, and one `remote.urls`
-/// entry.
+/// The capability JSON minted for one authenticated exact origin: the
+/// gateway-window permission set, native transfer permissions, fullscreen,
+/// webview zoom, and opener, `lib-*` windows only, and one `remote.urls`
+/// entry. The gateway-window set is workspace-window without `allow-probe-url`,
+/// because the connecting screen is a local app page and a remote gateway
+/// origin must not receive the reachability oracle.
 /// No scoped permissions, no deny entries (see the module doc for why
 /// both rules are absolute).
 pub fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String> {
@@ -126,7 +129,7 @@ pub fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String
         "remote": { "urls": remote_urls },
         "windows": ["lib-*"],
         "permissions": [
-            "workspace-window",
+            "gateway-window",
             "allow-gateway-csrf-token",
             "allow-download-file-native",
             "allow-upload-files-native",
@@ -218,7 +221,7 @@ mod tests {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     /// Stub for the `platform_os` app command (granted to `lib-*` windows
-    /// via the `workspace-window` permission set), so an allowed invoke
+    /// via the `gateway-window` permission set), so an allowed invoke
     /// has a handler to reach and returns a recognizable body.
     #[tauri::command]
     fn platform_os() -> &'static str {
@@ -226,7 +229,7 @@ mod tests {
     }
 
     /// Stub for the `open_reverse_tunnel` app command (also granted through
-    /// the `workspace-window` set): the `cs tunnel` trigger must reach
+    /// the `gateway-window` set): the `cs tunnel` trigger must reach
     /// devserver-served `lib-*` windows, so the scope test pins the minted
     /// grant carrying it.
     #[tauri::command]
@@ -235,7 +238,7 @@ mod tests {
     }
 
     /// Stub for the gateway-only CSRF mirror command. Unlike the broader
-    /// workspace-window set, its permission is carried directly by the minted
+    /// gateway-window set, its permission is carried directly by the minted
     /// exact-origin capability.
     #[tauri::command]
     fn gateway_csrf_token() -> &'static str {
@@ -243,7 +246,7 @@ mod tests {
     }
 
     /// Stubs for the command deck's library-window commands. Their permissions
-    /// sit in the `workspace-window` SET rather than in this capability's own
+    /// sit in the `gateway-window` SET rather than in this capability's own
     /// permission list, so these pins are what prove a gateway-served `lib-*`
     /// window really reaches them through the set the minted capability carries.
     #[tauri::command]
@@ -582,6 +585,30 @@ mod tests {
         let app = mock_desktop_app();
         app.add_capability(json)
             .expect("add_capability returned Ok");
+    }
+
+    /// The minted exact-origin grant must not carry the reachability oracle.
+    /// probe_url is reserved for the bundled local connecting screen; a
+    /// gateway-served page must receive the gateway-window set, which
+    /// excludes it.
+    #[test]
+    fn minted_capability_does_not_grant_probe_url() {
+        let json = production_json();
+        let cap: serde_json::Value = serde_json::from_str(&json).expect("minted JSON parses");
+        let perms: Vec<String> = cap["permissions"]
+            .as_array()
+            .expect("permissions is an array")
+            .iter()
+            .map(|p| p.as_str().expect("permission is a string").to_string())
+            .collect();
+        assert!(
+            perms.iter().all(|p| p != "workspace-window" && p != "allow-probe-url"),
+            "minted gateway capability must not carry workspace-window or allow-probe-url: {perms:?}",
+        );
+        assert!(
+            perms.iter().any(|p| p == "gateway-window"),
+            "minted gateway capability must carry the gateway-window set: {perms:?}",
+        );
     }
 
     /// Re-adding the same capability accumulates duplicate grants rather

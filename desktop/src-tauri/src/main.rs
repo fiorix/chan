@@ -3565,12 +3565,14 @@ fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::Sta
 }
 
 /// Reachability probe for the chan-desktop connecting screen. Devserver
-/// windows load `connecting.html` instead of pointing the webview
-/// straight at the remote (a down remote paints a blank white webview);
-/// that page calls this command on a retry loop until the remote answers,
-/// then navigates. Runs from Rust because the page's CSP
+/// windows load the bundled local `connecting.html` instead of pointing the
+/// webview straight at the remote (a down remote paints a blank white webview);
+/// that trusted local page calls this command on a retry loop until the remote
+/// answers, then navigates. Runs from Rust because the page's CSP
 /// (`default-src 'self'`) blocks a cross-origin `fetch`. Authentication cookies
-/// for the target origin are copied from the calling webview when available.
+/// for the target origin are copied from the calling webview when available so
+/// the probe can distinguish a registered-but-not-answering gateway devserver
+/// from a live one.
 #[tauri::command]
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let target = probe_target_kind(&url);

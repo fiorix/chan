@@ -39,6 +39,38 @@ permissions = [
   "allow-native-vocabulary",
 ]
 
+# The gateway-window set is workspace-window without allow-probe-url. The
+# bundled connecting screen is a local app page, so it reaches probe_url through
+# the workspace capability's workspace-window grant; a remotely served gateway
+# lib-* window must not receive probe_url.
+[[set]]
+identifier = "gateway-window"
+description = "Allows authenticated gateway-served lib-* windows to call their app commands."
+permissions = [
+  "allow-reload-window",
+  "allow-open-devtools",
+  "allow-open-new-window",
+  "allow-request-app-quit",
+  "allow-request-close-window",
+  "allow-hide-window-from-close-confirm",
+  "allow-abandon-devserver-for-window",
+  "allow-reconnect-devserver-for-window",
+  "allow-zoom-in",
+  "allow-zoom-out",
+  "allow-zoom-reset",
+  "allow-platform-os",
+  "allow-read-clipboard-text",
+  "allow-write-clipboard-text",
+  "allow-read-clipboard-image",
+  "allow-write-clipboard-image",
+  "allow-read-clipboard-html",
+  "allow-write-clipboard-html",
+  "allow-open-reverse-tunnel",
+  "allow-create-library-window",
+  "allow-focus-library-window",
+  "allow-native-vocabulary",
+]
+
 [[permission]]
 identifier = "allow-reload-window"
 description = "Enables the reload_window command."
@@ -139,12 +171,13 @@ identifier = "allow-open-reverse-tunnel"
 description = "Enables the open_reverse_tunnel command (the cs tunnel trigger; the devserver to dial resolves from the invoking window's own connection)."
 commands.allow = ["open_reverse_tunnel"]
 
-# IN the workspace-window set on purpose, unlike allow-gateway-csrf-token below.
-# Both commands resolve their target library from the INVOKING window's own
-# label, so a window can only ever reach its own library, and every window class
-# that runs the command deck needs them: a loopback window gets them through
-# capabilities/workspace.json, and an authenticated exact-origin gateway lib-*
-# window gets them because the runtime-minted capability carries this same set.
+# IN the workspace-window and gateway-window sets on purpose, unlike
+# allow-gateway-csrf-token below. Both commands resolve their target library
+# from the INVOKING window's own label, so a window can only ever reach its own
+# library, and every window class that runs the command deck needs them: a
+# loopback window gets them through capabilities/workspace.json, and an
+# authenticated exact-origin gateway lib-* window gets them through the
+# runtime-minted gateway-window set.
 [[permission]]
 identifier = "allow-create-library-window"
 description = "Enables the create_library_window command (the command deck's native library-window mint)."

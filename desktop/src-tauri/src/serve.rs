@@ -3138,9 +3138,9 @@ mod tests {
             "allow-zoom-in",
             "allow-zoom-out",
             "allow-zoom-reset",
-            // The connecting screen for remote devserver windows probes the remote
-            // through this command; without the ACL grant the IPC denies and
-            // the screen never detects a reachable remote.
+            // The bundled local connecting screen for remote devserver windows
+            // probes the remote through this command; without the ACL grant the
+            // IPC denies and the screen never detects a reachable remote.
             "allow-probe-url",
             // `cs tunnel` reaches the desktop through the SPA of a
             // devserver-served window; the grant rides this shared set so
@@ -3152,6 +3152,18 @@ mod tests {
                 "workspace-window app permission set must include {expected}: {workspace_set:?}",
             );
         }
+    }
+
+    #[test]
+    fn app_acl_gateway_window_set_excludes_probe_url() {
+        // The gateway-window set is what the runtime-minted exact-origin
+        // capability carries. It must not grant probe_url because the connecting
+        // screen is a bundled local page, not a gateway-served page.
+        let gateway_set = app_permission_set("gateway-window");
+        assert!(
+            gateway_set.iter().all(|p| p != "allow-probe-url"),
+            "gateway-window app permission set must not include allow-probe-url: {gateway_set:?}",
+        );
     }
 
     // Tauri's ACL denies any `generate_handler!` command that no granted

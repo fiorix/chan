@@ -2,7 +2,7 @@
 //
 // The problem this solves: a devserver window ultimately points at a remote
 // tenant URL. When that remote is down the WKWebView shows a blank white page with
-// no feedback. Instead the Rust side opens this local page first;
+// no feedback. Instead the Rust side opens this local bundled page first;
 // it shows a spinner + a live elapsed timer + one timestamped row per
 // connection attempt, retries until it succeeds (or the user closes the
 // window), and on success navigates the same window to the live
@@ -21,10 +21,12 @@
 //                library-owned per-window state survives the navigation.
 //   * Reachability is probed through a single Tauri command:
 //         invoke('probe_url', { url }) -> { reachable, status, detail }
-//     For a gateway target, reachable is false on 502/503/504 and on a
-//     transport failure; 401/403/404 prove the gate answered and are reachable.
-//     Loopback targets keep the any-response behavior. The Rust request carries
-//     the target origin's webview cookies when available.
+//     Only this bundled local page may call it. For a gateway target,
+//     reachable is false on 502/503/504 and on a transport failure;
+//     401/403/404 prove the gate answered and are reachable. Loopback
+//     targets keep the any-response behavior. The Rust request carries
+//     the target origin's webview cookies when available so the probe can
+//     tell a registered-but-not-answering gateway devserver from a live one.
 //     The page cannot fetch the remote itself: the strict CSP
 //     (default-src 'self') blocks cross-origin connect-src, so detection
 //     must run in Rust, which has no CORS restriction and owns the
