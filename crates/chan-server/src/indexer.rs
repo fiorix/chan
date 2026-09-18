@@ -1759,10 +1759,11 @@ mod tests {
 
     /// Wait until the coordinator settles, or return the first pass number
     /// above `max_pass` it starts. Settled means the workspace is ready and the
-    /// status is `Idle` again: the coordinator publishes `Idle` for a ready
-    /// workspace only as the last step of an activation, after its final drain
-    /// of the wake channel, so a request made once this returns `None` starts a
-    /// new activation.
+    /// status is `Idle`, and both halves are read live on every poll. Reading
+    /// both is what makes this sound: a pass that leaves a ready workspace
+    /// publishes `Idle` even when its activation goes on to claim a generation
+    /// requested while it was completing, so `Idle` alone does not mean the
+    /// coordinator has stopped.
     async fn settle_or_exceed(
         workspace: &Arc<Workspace>,
         status: &Arc<Mutex<IndexStatus>>,
