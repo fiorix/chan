@@ -2473,16 +2473,22 @@ mod tests {
         // bundled connecting page instead, which probes via `probe_url` and
         // navigates on success. Needles are built at runtime so this test's
         // own source text doesn't satisfy the `contains` checks (the
-        // bin_status test uses the same trick).
+        // bin_status test uses the same trick). The handoff needle is the
+        // injecting assignment, searched in the production half: the global's
+        // bare name also appears in a production doc comment and in this
+        // test's message.
         let serve_rs = include_str!("serve.rs");
         let app_load = format!("WebviewUrl::App({q}connecting.html", q = '"');
-        let handoff = format!("__CHAN{u}CONNECTING__", u = '_');
+        let handoff = format!("window.__CHAN{u}CONNECTING__ = ", u = '_');
         assert!(
             serve_rs.contains(&app_load),
             "remote devserver windows must load connecting.html, not the remote directly",
         );
+        let (production, _) = serve_rs
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
         assert!(
-            serve_rs.contains(&handoff),
+            production.contains(&handoff),
             "the connecting page must receive its inputs via window.__CHAN_CONNECTING__",
         );
     }
@@ -2610,9 +2616,13 @@ mod tests {
         assert!(KEY_BRIDGE_JS.contains("window.__CHAN_WINDOW_KIND__ === 'control'"));
         // The kind global is stamped per window at build time, ahead of
         // the bridge in both init-script shapes (direct load and the
-        // connecting screen).
+        // connecting screen). Searched in the production half, since this
+        // test spells the stamp it looks for.
         const SERVE_RS: &str = include_str!("serve.rs");
-        assert!(SERVE_RS.contains("window.__CHAN_WINDOW_KIND__ = "));
+        let (production, _) = SERVE_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        assert!(production.contains("window.__CHAN_WINDOW_KIND__ = "));
     }
 
     #[test]
@@ -2939,9 +2949,14 @@ mod tests {
             compose_window_title("Control Terminal - box", "control", 3, "ignored"),
             "Control Terminal - box",
         );
+        // Searched in the production half, since this test's own titles carry
+        // the prefix.
         const SERVE_RS: &str = include_str!("serve.rs");
+        let (production, _) = SERVE_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
         assert!(
-            SERVE_RS.contains("Control Terminal -"),
+            production.contains("Control Terminal -"),
             "control window titles should include the devserver label/address"
         );
     }
@@ -2950,14 +2965,19 @@ mod tests {
     fn close_requested_arm_prompts_a_buryable_window_and_real_closes_the_rest() {
         const SERVE_RS: &str = include_str!("serve.rs");
         // bury_window_now is the one bury body the two callers (the silent-hide
-        // gesture, the SPA Hide callback) share.
+        // gesture, the SPA Hide callback) share. Its definition is searched in
+        // the production half, since this test spells it.
+        let (production, _) = SERVE_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
         assert!(
-            SERVE_RS.contains("pub(crate) fn bury_window_now("),
+            production.contains("pub(crate) fn bury_window_now("),
             "bury_window_now must exist for the silent-hide + Hide-callback paths",
         );
-        // The host-to-webview confirm dispatch rides the chan:command bridge.
+        // The host-to-webview confirm dispatch rides the chan:command bridge:
+        // the script the arm evaluates names the confirm command.
         assert!(
-            SERVE_RS.contains("name: 'app.window.confirmClose'"),
+            CONFIRM_CLOSE_DISPATCH_JS.contains("name: 'app.window.confirmClose'"),
             "the close-confirm eval must dispatch app.window.confirmClose",
         );
         // Isolate on_close_requested, the body of the CloseRequested arm. The
@@ -3266,7 +3286,7 @@ mod tests {
         // Linux/Windows Ctrl+Alt+W window close (alt branch).
         let close_invoke = concat!("invokeIpc(e, 'request_close", "_window')");
         assert_eq!(SERVE_RS.matches(close_invoke).count(), 3);
-        assert!(SERVE_RS.contains("location.pathname.endsWith('/connecting.html')"));
+        assert!(KEY_BRIDGE_JS.contains("location.pathname.endsWith('/connecting.html')"));
         const CONNECTING_JS: &str = include_str!("../../src/connecting.js");
         assert!(CONNECTING_JS.contains("request_close_window"));
         assert!(CONNECTING_JS.contains("key === 'd'"));

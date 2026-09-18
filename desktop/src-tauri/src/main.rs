@@ -7237,9 +7237,29 @@ mod tests {
     fn desktop_binary_accepts_hidden_mcp_proxy_command() {
         const MAIN_RS: &str = include_str!("main.rs");
         assert!(MAIN_RS.contains("\"__mcp-proxy\""));
-        assert!(MAIN_RS.contains("run_hidden_mcp_proxy_if_requested"));
-        assert!(MAIN_RS.contains("run_mcp_proxy(socket)"));
-        assert!(MAIN_RS.contains("chan_server::run_mcp_stdio_proxy"));
+        // The remaining needles appear verbatim in this test's own text, so
+        // each is searched in the production region that must hold it rather
+        // than in the whole file.
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let main_body = source_region(
+            production,
+            "\nfn main() {",
+            "linux_gui_stack::prefer_system_gui_stack();",
+        );
+        assert!(main_body.contains("run_hidden_mcp_proxy_if_requested()"));
+        let dispatch = source_region(
+            production,
+            "\nfn run_hidden_mcp_proxy_if_requested(",
+            "\nfn run_as_cs_if_requested(",
+        );
+        assert!(dispatch.contains("run_mcp_proxy(socket)"));
+        let proxy = source_region(
+            production,
+            "\nasync fn run_mcp_proxy(",
+            "\n/// Windows console attach",
+        );
+        assert!(proxy.contains("chan_server::run_mcp_stdio_proxy"));
     }
 
     /// The `--version` probe is what makes this binary's build id readable
@@ -7812,9 +7832,14 @@ mod tests {
         assert!(
             MAIN_RS.contains("const DESKTOP_UPDATE_READY_EVENT: &str = \"desktop-update-ready\"")
         );
-        assert!(MAIN_RS.contains("fn notify_desktop_update_ready"));
-        assert!(MAIN_RS.contains("fn restart_desktop_after_update"));
-        assert!(MAIN_RS.contains("restart_desktop_after_update,"));
+        // These needles are searched in the production half: each appears
+        // verbatim in this test's own text, which the whole file includes.
+        let (production, _) = MAIN_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        assert!(production.contains("fn notify_desktop_update_ready"));
+        assert!(production.contains("fn restart_desktop_after_update"));
+        assert!(production.contains("restart_desktop_after_update,"));
         assert!(
             !MAIN_RS.contains(concat!("prompt_restart", "_for_update")),
             "update-ready prompt must not use the native restart alert path",
@@ -8118,7 +8143,7 @@ mod tests {
         // The custom item exists with the Cmd+Q accelerator and routes
         // to request_quit; the predefined one is stripped by text.
         assert!(MAIN_RS.contains(concat!("fn request", "_quit(app: &tauri::AppHandle)")));
-        assert!(MAIN_RS.contains(r#"accelerator("CmdOrCtrl+Q")"#));
+        assert!(MAIN_RS.contains(concat!("accelerator(\"CmdOrCtrl", "+Q\")")));
         assert!(MAIN_RS.contains(concat!("text.contains(", "\"quit\")")));
         // The ExitRequested backstop still guards non-menu exit paths.
         assert!(MAIN_RS.contains(concat!("RunEvent::Exit", "Requested { api, .. }")));
