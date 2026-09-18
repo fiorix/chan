@@ -2808,8 +2808,10 @@ async fn validate_token(
         tracing::warn!("internal validate_token throttled");
         return Err(Error::Unauthorized);
     }
-    // chan-tunnel forwards the originating client IP via
-    // X-Forwarded-For; we record that as the validate-IP for audit.
+    // Audit context for the `used` row: `request_meta` takes the first
+    // X-Forwarded-For address and the User-Agent. devserver-proxy's
+    // validator sends neither header, so both stay NULL on its calls
+    // unless a hop in between adds them.
     let meta = request_meta(&headers);
     let v = match (body.proxy_id, body.registration_id) {
         (Some(proxy_id), Some(registration_id)) if !registration_id.is_nil() => {
