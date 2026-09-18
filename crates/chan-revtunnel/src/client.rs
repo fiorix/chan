@@ -34,8 +34,10 @@ const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 /// queued connection is served the moment the pressure clears.
 const ACCEPT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// A close flushes an in-flight frame first, so a peer that stopped reading
-/// must not retain the adapter forever.
+/// Called only after the leg has decided to end, this one-second grace gives
+/// the send slot and Close frame a final flush without tying teardown to a
+/// transport idle deadline. Expiry loses the Close frame and, after an
+/// abnormal exit, may also lose the worker's one in-flight data frame.
 const HALF_CLOSE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The accept errors that mean one PEER vanished between SYN and accept
@@ -292,8 +294,13 @@ fn data_url(cfg: &ClientConfig, conn_id: &str) -> String {
 
 /// Move bytes between the splice channels and the WebSocket.
 ///
-/// The directions remain independently polled, but either one ending still
-/// closes the WebSocket and cancels the other as the legacy contract requires.
+/// The directions are independently polled, but either one ending closes the
+/// whole WebSocket as the legacy contract requires. A downlink end signals the
+/// outbound direction and waits for its unbounded close attempt. If that stop
+/// wins after the outbound direction has received a chunk but before its send
+/// begins, the chunk is discarded as both-direction teardown starts. No close
+/// timeout is imposed because expiry can replace the legacy peer's Close with
+/// a transport reset.
 async fn shuttle(ws: WsStream, mut out_rx: mpsc::Receiver<Vec<u8>>, in_tx: mpsc::Sender<Vec<u8>>) {
     let (mut sink, mut stream) = ws.split();
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
@@ -818,7 +825,9 @@ mod tests {
             let receive = async move {
                 let mut received = Vec::with_capacity(TRANSFER_BYTES);
                 while received.len() < TRANSFER_BYTES {
-                    let chunk = in_rx.recv().await.expect("adapter keeps inbound open");
+                    let Some(chunk) = in_rx.recv().await else {
+                        break;
+                    };
                     received.extend_from_slice(&chunk);
                 }
                 received
