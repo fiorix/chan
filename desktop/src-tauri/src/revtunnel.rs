@@ -2,10 +2,11 @@
 //!
 //! A devserver terminal's `cs tunnel` pushes a `tunnel_open` window_command to
 //! the terminal's OWN window over the tenant `/ws`; the SPA forwards the
-//! payload here. The payload names only the tunnel and its ports. The
-//! devserver to answer is resolved from the invoking window's own connection
-//! record (its `lib-*` label), never from the payload: a page can only ask its
-//! own devserver for what that devserver could already ask itself.
+//! payload here. The payload describes the tunnel's protocol, bind address,
+//! ports, and half-close support but carries no capability. The devserver to
+//! answer is resolved from the invoking window's own connection record (its
+//! `lib-*` label), never from the payload: a page can only ask its own
+//! devserver for what that devserver could already ask itself.
 //!
 //! The listener, the control WebSocket back to the devserver, and the
 //! per-connection bridges all live in `chan_revtunnel::client`; this module
