@@ -4936,7 +4936,20 @@ mod tests {
         // match, failing on the deadline with the marker already delivered.
         // Short reads are exactly what a loaded full-suite run produces, which
         // is why this only ever failed under the whole gate and never alone.
+        //
+        // Start from `replay`, the other half of the attach contract that
+        // `collect_until` also reads. `Session::attach` subscribes `rx` and
+        // then, unless the session is on the alternate screen, snapshots the
+        // ring into `replay`, so output broadcast before that subscribe can
+        // reach this handle only through `replay`. A one-shot command can print
+        // its marker while `Registry::create` is still between spawning the
+        // child and attaching; if the reader broadcasts it in that gap, reading
+        // `rx` alone would wait out the deadline for a marker already in
+        // `replay`.
         let mut seen: Vec<u8> = Vec::new();
+        for chunk in handle.replay.drain(..) {
+            seen.extend_from_slice(&chunk);
+        }
         loop {
             while let Ok(event) = handle.rx.try_recv() {
                 if let SessionEvent::Output(data) = event {
