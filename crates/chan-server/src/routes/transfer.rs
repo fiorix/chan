@@ -18,8 +18,10 @@
 //! The configured transfer ceiling governs both directions on this tenant.
 //! Single-file reads and writes are bounded by it. Archive plans refuse when
 //! the encoded archive bound already exceeds it. That bound assumes each
-//! regular file's metadata length matches its content. The tar writer keeps a
-//! source that changes after preflight from passing the ceiling mid-flight.
+//! regular file's metadata length matches its content, and that every hole the
+//! filesystem reports in a sparse file spans at least one 512-byte tar block.
+//! The tar writer keeps a source that changes after preflight from passing the
+//! ceiling mid-flight.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -105,8 +107,11 @@ fn abs_from_terminal_path(path: &str) -> PathBuf {
 /// including entry headers, long-name and long-link extensions, content padding,
 /// and termination blocks.
 ///
-/// Regular files count their logical metadata length. This can overstate a
-/// sparse-aware tar stream, but preserves the conservative preflight bound.
+/// Regular files count their logical metadata length. A sparse file's tar entry
+/// stays within that count when every hole the filesystem reports spans at
+/// least one 512-byte tar block. Smaller holes can cost more in sparse
+/// extension headers than they remove from the content, so on a filesystem
+/// that reports them the returned size can fall short of the archive.
 pub(crate) fn verify_readable_fs(abs: &Path) -> Result<u64, String> {
     let archive_name = download_filename(&abs.to_string_lossy());
     verify_readable_fs_entry(abs, Path::new(&archive_name), ArchiveEntryPosition::Root)
