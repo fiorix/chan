@@ -915,7 +915,10 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
 
     // Extract the chan binary into a sibling temp file. We never
     // unpack the rest of the archive (LICENSE, README) because the
-    // upgrade only swaps the executable.
+    // upgrade only swaps the executable. Keep it a sibling:
+    // `install_replacement` moves it over the executable with a
+    // same-directory rename, and on Windows that rename runs while the
+    // executable path has no file.
     let bin_temp = binary_dir.join(format!(".chan.upgrade-bin.{}", std::process::id()));
     let mut bin_guard = TempGuard::new(bin_temp.clone());
     extract_binary(&archive_path, &bin_temp, bin_name, ext, opts.verbose)?;
@@ -1193,6 +1196,14 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
     // self-replace crate is used only for its delayed, post-exit deletion of
     // that known backup; its one-shot replacement helper cannot roll back a
     // failure after it has moved the running executable.
+    //
+    // `exe_path` has no file from the first rename until the second one
+    // succeeds or, when the second one fails, until the rollback succeeds.
+    // Only those renames and their sharing-violation retries run inside that
+    // gap: `run_upgrade` writes and closes `new_bin` in `exe_path`'s own
+    // directory before this call, so filling the path again is one
+    // same-directory rename. A process exit inside the gap skips the rollback
+    // and leaves the previous executable at `backup`.
     let file_name = exe_path
         .file_name()
         .and_then(|name| name.to_str())
