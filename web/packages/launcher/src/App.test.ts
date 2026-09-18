@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import App from "./App.svelte";
 import appSource from "./App.svelte?raw";
-import { library, reportError } from "./state/library.svelte";
+import { library, reportError, stopWatching } from "./state/library.svelte";
 import { clearNotices } from "./state/notices.svelte";
 import { screen } from "./state/screen.svelte";
 import { controlAttention, clearAllControlAttention } from "./state/controlAttention.svelte";
@@ -38,8 +38,13 @@ describe("launcher root", () => {
   let target: HTMLElement | null = null;
   let app: Record<string, unknown> | null = null;
 
-  afterEach(() => {
+  // Mounting the root runs loadLibrary, which starts the library's window feed
+  // and workspace poll, and unmounting the root leaves both running, so the
+  // teardown stops them. A poll that outlives this file fires after Vitest
+  // deletes the jsdom globals and fails the run with `document is not defined`.
+  function tearDown(): void {
     if (app) unmount(app);
+    stopWatching();
     target?.remove();
     target = null;
     app = null;
@@ -53,6 +58,38 @@ describe("launcher root", () => {
     clearCommandLauncherDraft("computers");
     themeState.theme = "dark";
     applyTheme();
+  }
+
+  afterEach(tearDown);
+
+  it("teardown stops the workspace poll the mount starts", async () => {
+    // Start without a feed so this mount's poll runs on the fake clock.
+    stopWatching();
+    vi.useFakeTimers();
+    try {
+      target = document.createElement("div");
+      document.body.appendChild(target);
+      app = mount(App, { target });
+      flushSync();
+      const { backend } = await import("./api/backend");
+      const polled = vi.spyOn(backend, "listWorkspaces");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(polled, "the mount starts the workspace poll").toHaveBeenCalled();
+      polled.mockRestore();
+
+      tearDown();
+      // Model the end of this file: Vitest deletes the jsdom globals.
+      const doc = Object.getOwnPropertyDescriptor(globalThis, "document");
+      expect(doc, "document is an own global to delete").toBeDefined();
+      delete (globalThis as { document?: Document }).document;
+      try {
+        expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+      } finally {
+        Object.defineProperty(globalThis, "document", doc!);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders the top bar: title, subtitle, matching command icon, and no theme or [+]", () => {
@@ -233,6 +270,8 @@ describe("launcher update dialog", () => {
 
   afterEach(() => {
     if (app) unmount(app);
+    // The mount starts the library feed and poll; see the root suite's tearDown.
+    stopWatching();
     target?.remove();
     target = null;
     app = null;
