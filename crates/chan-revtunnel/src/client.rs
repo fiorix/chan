@@ -291,31 +291,54 @@ fn data_url(cfg: &ClientConfig, conn_id: &str) -> String {
 }
 
 /// Move bytes between the splice channels and the WebSocket.
+///
+/// The directions remain independently polled, but either one ending still
+/// closes the WebSocket and cancels the other as the legacy contract requires.
 async fn shuttle(ws: WsStream, mut out_rx: mpsc::Receiver<Vec<u8>>, in_tx: mpsc::Sender<Vec<u8>>) {
     let (mut sink, mut stream) = ws.split();
-    loop {
-        tokio::select! {
-            outbound = out_rx.recv() => match outbound {
-                Some(chunk) => {
-                    if sink.send(Message::binary(chunk)).await.is_err() {
-                        break;
-                    }
-                }
-                None => break,
-            },
-            inbound = stream.next() => match inbound {
-                Some(Ok(Message::Binary(bytes))) => {
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+    let outbound = async move {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = &mut stop_rx => break,
+                chunk = out_rx.recv() => chunk,
+            };
+            let Some(chunk) = chunk else { break };
+            let sent = tokio::select! {
+                biased;
+                _ = &mut stop_rx => false,
+                result = sink.send(Message::binary(chunk)) => result.is_ok(),
+            };
+            if !sent {
+                break;
+            }
+        }
+        let _ = sink.close().await;
+    };
+    let downlink = async move {
+        while let Some(inbound) = stream.next().await {
+            match inbound {
+                Ok(Message::Binary(bytes)) => {
                     if in_tx.send(bytes.to_vec()).await.is_err() {
                         break;
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {}
-                Some(Err(_)) => break,
-            },
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    };
+    tokio::pin!(outbound);
+    tokio::pin!(downlink);
+    tokio::select! {
+        _ = &mut outbound => {}
+        _ = &mut downlink => {
+            let _ = stop_tx.send(());
+            outbound.await;
         }
     }
-    let _ = sink.close().await;
 }
 
 fn half_close_outbound_message(chunk: Vec<u8>) -> Message {
@@ -764,5 +787,76 @@ mod tests {
             .await
             .expect("an unreadable peer cannot retain the adapter")
             .expect("adapter task");
+    }
+
+    #[tokio::test]
+    async fn legacy_adapter_moves_large_full_duplex_streams_independently() {
+        const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
+        const CHUNK_BYTES: usize = 64 * 1024;
+
+        let (base, server) = mock_control().await;
+        let (ws, _) = tokio_tungstenite::connect_async(base)
+            .await
+            .expect("connect adapter socket");
+        let mut peer = server.await.expect("accept adapter socket");
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let (in_tx, mut in_rx) = mpsc::channel(16);
+        let adapter = tokio::spawn(shuttle(ws, out_rx, in_tx));
+        let request = vec![0x35; TRANSFER_BYTES];
+        let response = vec![0xc1; TRANSFER_BYTES];
+
+        let local_response = response.clone();
+        let local = async move {
+            let send = async move {
+                for chunk in local_response.chunks(CHUNK_BYTES) {
+                    out_tx
+                        .send(chunk.to_vec())
+                        .await
+                        .expect("queue local response");
+                }
+            };
+            let receive = async move {
+                let mut received = Vec::with_capacity(TRANSFER_BYTES);
+                while received.len() < TRANSFER_BYTES {
+                    let chunk = in_rx.recv().await.expect("adapter keeps inbound open");
+                    received.extend_from_slice(&chunk);
+                }
+                received
+            };
+            let ((), received) = tokio::join!(send, receive);
+            received
+        };
+        let peer_request = request.clone();
+        let remote = async move {
+            for chunk in peer_request.chunks(CHUNK_BYTES) {
+                peer.send(Message::binary(chunk.to_vec()))
+                    .await
+                    .expect("send peer request");
+            }
+            let mut received = Vec::with_capacity(TRANSFER_BYTES);
+            while let Some(frame) = peer.next().await {
+                match frame.expect("receive local response") {
+                    Message::Binary(bytes) => received.extend_from_slice(&bytes),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            received
+        };
+
+        let (received_request, received_response, ()) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (received_request, received_response, adapter) =
+                    tokio::join!(local, remote, adapter);
+                (
+                    received_request,
+                    received_response,
+                    adapter.expect("adapter task"),
+                )
+            })
+            .await
+            .expect("legacy full-duplex transfer must not wedge");
+        assert_eq!(received_request, request);
+        assert_eq!(received_response, response);
     }
 }
