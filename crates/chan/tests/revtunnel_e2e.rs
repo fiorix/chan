@@ -1324,6 +1324,43 @@ async fn devserver_data_leg_closes_after_local_tcp_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devserver_data_leg_enforces_frame_cap_before_peer_marker() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind frame-cap origin");
+    let origin_port = origin.local_addr().expect("origin address").port();
+    let mut cs = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, origin_port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let (_control, mut data) = rig
+        .open_raw_desktop(&trigger, &mut cs, "pre-marker-frame-cap")
+        .await;
+    let (origin_socket, _) = within("origin accepts data-leg dial", origin.accept())
+        .await
+        .expect("accept data-leg dial");
+
+    within(
+        "oversized pre-marker frame",
+        data.send(Message::binary(vec![0; MAX_DATA_FRAME_BYTES + 1])),
+    )
+    .await
+    .expect("send oversized frame");
+    let frame = within("devserver Close after oversized frame", data.next())
+        .await
+        .expect("data socket stays open through the Close frame")
+        .expect("valid data-leg frame");
+    assert!(
+        matches!(frame, Message::Close(_)),
+        "unexpected frame: {frame:?}"
+    );
+    drop(origin_socket);
+    drop(cs);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devserver_data_leg_enforces_frame_cap_after_peer_marker() {
     let rig = TunnelRig::new().await;
     let mut spa = rig.connect_window_ws().await;
