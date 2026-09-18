@@ -58,7 +58,7 @@ afterEach(() => {
   app = null;
 });
 
-describe("Library read-only parity", () => {
+describe("Library on the read-only surface", () => {
   it("hides every mutation control including edit-config, keeps the static on-state", () => {
     mountList();
     const l = labels();
@@ -89,7 +89,7 @@ describe("Library read-only parity", () => {
     expect(target!.querySelector('[aria-label="Hide window"]')).toBeNull();
   });
 
-  it("shows the red lost icon for an unreachable devserver on the gateway surface", () => {
+  it("shows the red lost icon for an unreachable devserver on the read-only surface", () => {
     // A post-sleep unreachable devserver on the read-only surface still gets
     // the honest red icon from the status field, no mutation controls
     // involved.
@@ -107,8 +107,8 @@ describe("Library read-only parity", () => {
   });
 
   it("keeps the machine-collapse toggle: it is not a mutation control", () => {
-    // The collapse toggle renders OUTSIDE the readOnly mutation guard, so a
-    // gateway viewer can still fold a machine's windows. Its prefix-safe
+    // The collapse toggle renders OUTSIDE the readOnly mutation guard, so the
+    // read-only surface can still fold a machine's windows. Its prefix-safe
     // aria-label must not read as a mutation control.
     collapsedState.keys = [];
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
