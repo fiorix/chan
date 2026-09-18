@@ -123,9 +123,14 @@ pub struct ValidatedToken {
     pub scopes: Vec<String>,
     /// Devserver identity: lowercase hex SHA-256 of the PAT. The gateway
     /// keys the tunnel registry and the devserver-gate `drv` claim on
-    /// this (1 token : 1 devserver). Computed identity-side; the raw PAT
-    /// never leaves this service. Distinct encoding from the stored
-    /// `token_hash` (base64url) but the same underlying digest.
+    /// this (1 token : 1 devserver). Identity computes it after
+    /// devserver-proxy forwards the raw PAT from the tunnel Authorization
+    /// header in its internal validation body. The devserver-to-proxy leg uses
+    /// TLS except on verified loopback; the proxy-to-identity leg uses HTTPS,
+    /// loopback, or an authenticated encrypted overlay, and
+    /// `IDENTITY_INTERNAL_TOKEN` authenticates that internal request. Identity
+    /// persists only the base64url `token_hash`, the same digest in a different
+    /// encoding.
     pub devserver_id: String,
     /// Authorization state retained only long enough to sign the admission
     /// lease. The proxy learns it from the verified lease, not this response.
