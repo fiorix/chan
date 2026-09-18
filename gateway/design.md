@@ -165,7 +165,7 @@ devserver-control owns everything about the fleet that must be coherent: the pro
 
 identity, profile, and the admin CLI read the aggregate `/admin/v1/*` view from the controller under per-caller scoped credentials, never a query-time fan-out to proxy-local state. Revocation rides the same authority:
 
-- **PAT revocation** durably revokes the token in profile, then identity best-effort cuts the owner's live tunnels and browser sessions through the controller. Because registrations do not retain a token id (only the digest-derived devserver id), one revocation pulls down all of the caller's tunnels; other PATs simply redial.
+- **PAT revocation** durably revokes the token in profile, then identity best-effort cuts the owner's live tunnels and browser sessions through the controller. Identity cuts all of the owner's tunnels rather than only the revoked PAT's, because the revoke path does not map the token to its devserver id. Registrations retain only the digest-derived devserver id, which is enough to target one PAT's tunnel, but identity does not use that route today; other PATs simply redial.
 - **Blocking a user** is one profile transaction (block marker, every PAT revoked, audit row, durable outbox job); a background worker retries the fleet cut to a deadline and settles before reporting completion. Unblocking restores none of it: tokens stay revoked.
 - **Operator session and tunnel commands** are acknowledged distributed operations: the controller answers only when every addressed proxy has confirmed the kill or the session drain, and reports a partial failure explicitly instead of pretending coherence.
 
