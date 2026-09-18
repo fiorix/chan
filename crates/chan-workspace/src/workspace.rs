@@ -348,10 +348,27 @@ pub struct RecoveryPass {
     pub action: RecoveryAction,
 }
 
+/// How [`Workspace::finish_recovery`] ends the active pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryOutcome {
+    /// The pass action succeeded. While a persisted-report refresh is owed,
+    /// `finish_recovery` treats this as [`RecoveryOutcome::Retry`], so it
+    /// completes a generation only once no refresh is owed.
     Complete,
+    /// Complete the pass's generation although the persisted-report refresh
+    /// is still owed.
+    ///
+    /// This is the only outcome that completes a generation past an owed
+    /// refresh. It is for a claimant whose pass action succeeded, whose own
+    /// [`Workspace::refresh_persisted_report_if_owed`] calls failed, and which
+    /// bounds how often it retries them. Once nothing else is pending the
+    /// workspace reports ready over a stale persisted report. The obligation
+    /// is not cleared: the sender still owes the refresh and must call it again
+    /// on the passes it claims later, and until one succeeds every
+    /// `Complete`, from any claimant, keeps being requeued.
     CompleteWithReportRefreshOwed,
+    /// Requeue the pass, merged into any pass requested meanwhile, and wake the
+    /// installed recovery driver.
     Retry,
 }
 
@@ -1107,6 +1124,11 @@ impl Workspace {
     /// Recovery claimants call this after their pass action succeeds and before
     /// they finish the pass. A settled obligation is a no-op, a failed or
     /// unwound refresh remains owed, and a concurrent caller receives an error.
+    /// That error is the same `ChanError::Io` a failed rescan returns, so a
+    /// caller cannot tell the two apart. Callers that refresh only between
+    /// claiming a pass through [`Workspace::begin_recovery`] and finishing it
+    /// never meet that error from one another, because `begin_recovery` hands
+    /// out one active pass at a time.
     pub fn refresh_persisted_report_if_owed(&self) -> Result<()> {
         {
             let mut refresh = self.persisted_report_refresh.lock().unwrap();

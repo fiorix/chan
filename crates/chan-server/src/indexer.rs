@@ -352,8 +352,15 @@ impl chan_workspace::RecoveryDriver for CoordinatorDriver {
 /// path is unaffected.
 const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// One initial refresh and one immediate retry. Persistent report-write
-/// failures must not keep the single recovery coordinator busy forever.
+/// Refresh failures per coordinator activation: the first requeues the pass for
+/// one retry, and the second, or any later one, completes the generation with
+/// the refresh still owed. The count starts at zero each time the idle
+/// coordinator takes a wake and again after a pass completes with nothing
+/// owed. A failed pass action neither adds to it nor resets it, so an action
+/// failure between two refresh failures does not buy another retry. Persistent
+/// report-write failures must not keep the single recovery coordinator busy
+/// forever; the obligation outlives the activation, and the next claimed pass
+/// whose action succeeds tries the refresh again.
 const MAX_REPORT_REFRESH_ATTEMPTS: usize = 2;
 
 enum RecoveryPassResult {
