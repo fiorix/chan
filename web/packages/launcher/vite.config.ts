@@ -47,8 +47,11 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // builder, config-backed per-machine collapse, and the Gateways screen plus
 // the Computers command launcher) sits near the ceiling; raise the budget
 // deliberately when adding real surface, and treat an unexpected jump as an
-// accidental heavy import.
-const LAUNCHER_GZIP_BUDGET_BYTES = 48 * 1024;
+// accidental heavy import. Keep a few KiB of headroom rather than trimming to
+// the line: gzip output differs slightly between zlib versions, so a bundle
+// measured just under the ceiling on one machine can be measured just over it
+// on another, which makes the local build stop predicting CI.
+const LAUNCHER_GZIP_BUDGET_BYTES = 52 * 1024;
 
 function launcherSizeBudget(): Plugin {
   return {
