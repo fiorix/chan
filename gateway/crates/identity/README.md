@@ -195,7 +195,7 @@ Internal (internal listener, route-scoped Bearer authentication):
 | POST   | `/internal/v1/tokens/validate`         | validate a PAT using `IDENTITY_INTERNAL_TOKEN` |
 | POST   | `/internal/v1/sessions/whoami`         | resolve an indexed OAuth cookie using `IDENTITY_SESSION_INTERNAL_TOKEN` |
 
-The token route is called by devserver-proxy during tunnel handshake and lease refresh; with `proxy_id` and `registration_id` present the response additionally carries the 120-second Ed25519 admission lease. `whoami` accepts a raw `__Host-id_session` value from the separately authenticated account caller and returns only the indexed user plus authentication time; an empty `IDENTITY_SESSION_INTERNAL_TOKEN` disables the route outright (404). Malformed, unknown, expired, pre-index, deleted-user, and blocked-user cookies share one 401 response.
+The token route accepts PAT validation and Hello-name requests from devserver-proxy; with `proxy_id` and `registration_id` present the response additionally carries the 120-second Ed25519 admission lease. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory. `whoami` accepts a raw `__Host-id_session` value from the separately authenticated account caller and returns only the indexed user plus authentication time; an empty `IDENTITY_SESSION_INTERNAL_TOKEN` disables the route outright (404). Malformed, unknown, expired, pre-index, deleted-user, and blocked-user cookies share one 401 response.
 
 Admin (internal listener):
 

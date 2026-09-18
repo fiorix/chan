@@ -44,9 +44,9 @@ pub struct Config {
     /// `.p1.proxy.chan.app`). The proxy router parses `{user}` out of
     /// every Host that ends with this suffix.
     pub wildcard_suffix: String,
-    /// Base URL of identity-service. devserver-proxy POSTs to
-    /// `{identity_url}/internal/v1/tokens/validate` to validate the
-    /// PAT every `chan devserver` presents in its tunnel handshake.
+    /// Base URL of identity-service. devserver-proxy sends PAT validation and
+    /// Hello-name requests to `{identity_url}/internal/v1/tokens/validate`.
+    /// See `gateway/design.md`, "Devserver publication", for the contact inventory.
     pub identity_url: Url,
     /// Bearer devserver-proxy presents on identity-service's
     /// `/internal/v1/tokens/validate`. Sourced from

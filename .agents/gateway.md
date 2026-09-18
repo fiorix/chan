@@ -126,7 +126,7 @@ Request bodies are bounded by `MAX_REQUEST_BYTES` (default 100 MiB). Response bo
 
 ### Database pools
 
-`profile` and `identity` each open a Postgres pool capped at 4 connections, both against the same gateway database. Postgres non-superuser slots are a shared resource; running both services on a single dev Postgres alongside running tests can otherwise run the slot count out. The cap is documented at each pool-build site. `devserver-proxy`, `admin`, and `gateway-common` hold no DB connection: devserver-proxy resolves identity over HTTP for tunnel admission, Hello-name announcement, and lease refresh, keeps its live-tunnel state in an in-process registry.
+`profile` and `identity` each open a Postgres pool capped at 4 connections, both against the same gateway database. Postgres non-superuser slots are a shared resource; running both services on a single dev Postgres alongside running tests can otherwise run the slot count out. The cap is documented at each pool-build site. `devserver-proxy`, `admin`, and `gateway-common` hold no DB connection: devserver-proxy resolves identity over HTTP for tunnel admission, Hello-name announcement, and lease refresh, and keeps its live-tunnel state in an in-process registry.
 
 ### Atomic upserts in profile-service
 
