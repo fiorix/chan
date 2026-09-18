@@ -1214,13 +1214,17 @@ impl DevserverState {
                 // window. Otherwise a mount may publish between the two reads
                 // and be mistaken for an out-of-band close.
                 let mounted = mounted_snapshot();
-                // Reflect removes and closes made over the control socket,
-                // which act on the host and bypass this map. A workspace
-                // absent from the library drops its row (a Starting row and
-                // a Forgotten tombstone stay); a Mounted row whose prefix
-                // the host does not serve was closed out of band and turns
-                // off at a newer generation. A Starting row is deliberately
-                // not mistaken for an out-of-band close.
+                // Reflect removes and closes made without this map, by
+                // anything that changes the host or its registry directly:
+                // for example the control socket, the launcher's off and
+                // DELETE routes, and `chan workspace forget` in another
+                // process, whose registry edit reaches the host library
+                // through the registry reload watcher. A workspace absent
+                // from the library drops its row (a Starting row and a
+                // Forgotten tombstone stay); a Mounted row whose prefix the
+                // host does not serve was closed out of band and turns off
+                // at a newer generation. A Starting row is deliberately not
+                // mistaken for an out-of-band close.
                 map.retain(|_, record| {
                     registered.contains(&canonical_root(&record.root))
                         || record.phase == MountPhase::Starting
