@@ -379,8 +379,10 @@ pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response 
     };
     let status = indexer.snapshot();
     // The embed sweep reaches Idle{embedding:Some} (BM25 committed, vectors
-    // still flushing) with no per-file label, so it has to be signalled
-    // separately from `current_file`.
+    // still flushing) with the chip's per-file label, which names a file
+    // for the whole sweep, as `current_file`. The sweep flag, read
+    // separately, decides the spine only for a chip with no label (see
+    // is_embedding_sweep).
     let embed_sweep = is_embedding_sweep(&status);
     let current_file = current_index_file(status);
     let readiness = workspace.readiness();
@@ -414,8 +416,9 @@ fn current_index_file(status: IndexStatus) -> Option<String> {
         // During the background embed sweep the search index is Idle, but the
         // embed pass still drains file by file and stamps the live label onto
         // the chip. Surface it so the indexing spine pulses one directory at a
-        // time instead of the whole tree (see build_indexing_state). `None`
-        // between batch flushes falls back to the broad sweep below.
+        // time instead of the whole tree (see build_indexing_state). A batch
+        // flush keeps the last file's label, so the chip names a file for the
+        // whole sweep.
         IndexStatus::Idle {
             embedding: Some(p), ..
         } => p.file,
@@ -426,9 +429,11 @@ fn current_index_file(status: IndexStatus) -> Option<String> {
 /// True while the background embedding pass is running: the search index
 /// flips to `Idle { embedding: Some(..) }` once BM25 is committed and
 /// searchable, then keeps re-embedding in the background for the rest of
-/// the (minutes-long, on a big workspace) sweep. `current_index_file` is
-/// `None` across that whole window, so this is the only signal the spine
-/// has to pulse the dirs that still have vectors pending.
+/// the (minutes-long, on a big workspace) sweep. `current_index_file`
+/// returns the chip's file across that whole window, and that label
+/// decides the spine. This flag decides it only for a chip with no file,
+/// which the indexer does not publish: `build_indexing_state` then
+/// pulses every dir with indexable files.
 fn is_embedding_sweep(status: &IndexStatus) -> bool {
     matches!(
         status,
@@ -475,16 +480,18 @@ fn build_indexing_state(
     }
 
     // Broaden "one dir is indexing" into "the whole sweep is indexing" ONLY
-    // when there's active indexing but no per-file label to pin it to, so a
-    // long pass pulses the spine instead of looking idle - without painting
-    // every dir orange when we DO know which file is in flight:
+    // when there's active indexing but no matching per-file label to pin it
+    // to, so a long pass pulses the spine instead of looking idle - without
+    // painting every dir orange when we DO know which file is in flight:
     //
     // - `embedding_sweep`: the background embed phase. The indexer commits
     //   BM25 then flips to `Idle { embedding: Some(..) }` and re-embeds for
     //   the rest of the (minutes-long) pass. It stamps the draining file
-    //   onto the chip, so `current_file` is usually a real path (matched
-    //   per-entry above -> one dir pulses). The broad sweep is the
-    //   fallback when the chip carries no file or one no entry matches.
+    //   onto the chip and keeps it across batch flushes, so `current_file`
+    //   names a file for the whole sweep (matched per-entry above -> one dir
+    //   pulses). The broad sweep is the fallback when no entry matches that
+    //   path, or when the chip carries no file, which the indexer does not
+    //   publish.
     //
     // - `current_file.is_some()`: the foreground build emits `Building.file`
     //   as a real workspace-relative path during `GraphRebuild` / `IndexFile`
@@ -711,15 +718,16 @@ mod tests {
 
     /// During the background embedding phase the indexer reports
     /// `IndexStatus::Idle { embedding: Some(..) }` (BM25 committed and
-    /// searchable, vectors still flushing) with NO per-file label, so
-    /// `current_file` is `None`. The embed phase runs AFTER BM25, so by
-    /// then every indexable file already shows up in
+    /// searchable, vectors still flushing). This pins the fallback for a
+    /// chip with no per-file label, which the indexer does not publish,
+    /// so `current_file` is `None`. The embed phase runs AFTER BM25, so
+    /// by then every indexable file already shows up in
     /// `workspace.indexed_paths()` (the BM25 index) - counting
     /// `indexable_files > indexed_files` would read everywhere as "BM25
-    /// done" -> no orange. The `embedding_sweep` flag is the real signal
-    /// (mapped from `Idle.embedding` by `is_embedding_sweep`); it marks
-    /// every dir with indexable content because embeddings are still
-    /// pending across the whole sweep.
+    /// done" -> no orange. The `embedding_sweep` flag is then the only
+    /// signal (mapped from `Idle.embedding` by `is_embedding_sweep`); it
+    /// marks every dir with indexable content because embeddings are
+    /// still pending across the whole sweep.
     #[test]
     fn indexing_state_marks_every_dir_with_indexable_files_during_embedding_sweep() {
         let entries = vec![
@@ -739,8 +747,8 @@ mod tests {
             "docs/another.md".to_string(),
         ]);
 
-        // No per-file label during the embed sweep; the embedding flag
-        // carries the signal instead.
+        // A chip with no per-file label, which the indexer does not
+        // publish; the embedding flag carries the signal instead.
         let response = build_indexing_state(
             &entries,
             &indexed_paths,
@@ -924,11 +932,12 @@ mod tests {
         );
     }
 
-    /// `is_embedding_sweep` is the signal that makes the spine pulse for
-    /// the whole background embed pass. Only `Idle { embedding: Some(..) }`
-    /// (BM25 committed, vectors still flushing) counts; a settled idle, a
-    /// foreground Building/Reindexing pass (those carry a per-file label
-    /// instead), and Error do not.
+    /// `is_embedding_sweep` marks the background embed pass, the flag that
+    /// makes the spine pulse every dir with indexable files when the chip
+    /// carries no file. Only `Idle { embedding: Some(..) }` (BM25
+    /// committed, vectors still flushing) counts; a settled idle, a
+    /// foreground Building/Reindexing pass (`current_index_file` returns
+    /// their `file`), and Error do not.
     #[test]
     fn is_embedding_sweep_only_true_for_idle_with_embedding() {
         use crate::indexer::EmbedProgress;

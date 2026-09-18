@@ -37,10 +37,12 @@ const VCS_BURST_REBUILD_THRESHOLD: usize = 64;
 /// producer's per-batch chunk counters overshoot, so we report file
 /// progress instead). Serialized camelCase to match the SPA.
 ///
-/// `file` is the workspace-relative path the embed pass is currently
-/// draining. It carries the same live label the foreground build stamps on
+/// `file` is the workspace-relative path of the last file the build reported
+/// progress on. It carries the same live label the foreground build stamps on
 /// `Building.file`, so the indexing-state endpoint can pulse the one directory
-/// being embedded instead of the whole spine. `None` between batch flushes.
+/// being embedded instead of the whole spine. The indexer publishes it as
+/// `Some` for the whole sweep: a batch flush keeps the path of the file
+/// reported before it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbedProgress {
