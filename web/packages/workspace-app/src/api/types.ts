@@ -1042,8 +1042,12 @@ export type IndexerStatus =
       /// (the backend emits an explicit null) or absent once settled. The
       /// status bar renders it as a passive "embedding done/total" chip,
       /// never the active reindexing pill. `file` is the workspace-relative
-      /// path currently being drained (absent between batch flushes); the
-      /// indexing spine uses it to pulse one directory at a time.
+      /// path of the last file the build reported progress on; the server
+      /// sends it for the whole sweep, since a batch flush keeps the path of
+      /// the file reported before it. The status bar reads only `done` and
+      /// `total`; the indexing spine gets its per-directory states from
+      /// GET /api/indexing/state, which the server derives from the same
+      /// path.
       embedding?: { done: number; total: number; file?: string | null } | null;
     }
   | { state: "building"; current: number; total: number; file: string }
