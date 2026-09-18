@@ -65,11 +65,14 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub api_tokens: ApiTokenService,
     /// Per-token-fingerprint rate limiter applied to
-    /// /internal/v1/tokens/validate. Defense in depth: devserver-proxy
-    /// throttles by the same fingerprint one hop earlier, so this
-    /// kicks in only if the internal bearer leaks and someone calls
-    /// identity directly. Throttled requests come back as 401 so
-    /// they are indistinguishable from "unknown token" on the wire.
+    /// /internal/v1/tokens/validate: a defense-in-depth twin of
+    /// devserver-proxy's throttle. That throttle meters dial and
+    /// lease-refresh validation but not the Hello-name announcement.
+    /// This bucket meters announcements too, so a fresh fingerprint's
+    /// immediate announcement can be refused here
+    /// (`IdentityValidator::announce_devserver_name` spaces its retries
+    /// for that). Throttled requests come back as 401 so they are
+    /// indistinguishable from "unknown token" on the wire.
     pub token_throttle: TokenThrottle,
     /// One-time desktop-authorize redemption codes; written by the
     /// confirm handler, consumed by `/desktop/authorize/redeem`.
@@ -1259,8 +1262,9 @@ async fn tokens_revoke(
         .await?;
     // Drop every live tunnel and browser session the user has. We can't
     // selectively kill the tunnel(s) backed by this specific PAT
-    // (chan-tunnel-server doesn't track which token registered which
-    // substream), so a revoke pulls down everything the user has
+    // (registrations retain the digest-derived devserver id, not the
+    // token id, and the current revocation path does not target by
+    // devserver id), so a revoke pulls down everything the user has
     // open. chan-serve instances using a non-revoked token will
     // reconnect on the next handshake; instances using the revoked
     // token fail the next validate and stay disconnected.
