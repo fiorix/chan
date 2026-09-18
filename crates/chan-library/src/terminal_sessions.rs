@@ -7292,13 +7292,16 @@ mod tests {
     fn close_forces_and_reaps_hup_immune_child() {
         let registry = Registry::new(test_config(4096, 8, 60));
         let mut opts = opts_with_window("win-hup-immune");
+        // `%s` keeps the readiness marker out of the command text, so only the
+        // shell can print it, after it has run the `trap`.
         opts.command = Some(
-            "trap '' HUP TERM; printf CHAN_HUP_IMMUNE_READY; while :; do sleep 1; done".into(),
+            "trap '' HUP TERM; printf 'CHAN_HUP_IMMUNE_<%s>' READY; while :; do sleep 1; done"
+                .into(),
         );
         let mut handle = registry.create(opts).unwrap();
         let id = handle.id().to_string();
         let pid = registry.live_child_pids()[0];
-        wait_for_output(&mut handle, b"CHAN_HUP_IMMUNE_READY");
+        wait_for_output(&mut handle, b"CHAN_HUP_IMMUNE_<READY>");
 
         assert!(registry.close(&id, CloseReason::Explicit));
         wait_for_process_to_disappear(pid);
@@ -7964,9 +7967,11 @@ mod tests {
         registry.close(handle.id(), CloseReason::Explicit);
     }
 
-    // POSIX printf command, and its needle appears inside the command banner
-    // echo, so on Windows this passes without the command ever running; run
-    // it where a pass proves execution.
+    // POSIX printf command; not valid under the Windows default shell
+    // (PowerShell). A session that inherits the tenant default records its
+    // command text into the ring as a banner, and `collect_until` reads that
+    // replay first, so the needle is assembled through `%s`: the banner never
+    // holds it, and only the command's output can.
     #[cfg(unix)]
     #[tokio::test]
     async fn tenant_default_command_runs_when_session_omits_one() {
@@ -7974,7 +7979,7 @@ mod tests {
         // that brings none of its own, so a single-purpose terminal window's
         // PTY runs the given command instead of an interactive shell.
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
-        registry.set_default_command(Some("printf 'DEFAULT=<ran>\\n'".into()));
+        registry.set_default_command(Some("printf 'DEFAULT=<%s>\\n' ran".into()));
         let mut handle = registry
             .create(CreateOptions {
                 size: test_size(),
@@ -7997,7 +8002,10 @@ mod tests {
     }
 
     // POSIX printf commands; not valid under the Windows default shell
-    // (PowerShell).
+    // (PowerShell). The explicit command's needle is assembled through `%s`
+    // so only its output, never a banner carrying its text, satisfies the
+    // wait. The default's is spelled out, so the absence check also rejects a
+    // banner of the default command.
     #[cfg(unix)]
     #[tokio::test]
     async fn explicit_command_overrides_tenant_default() {
@@ -8012,7 +8020,7 @@ mod tests {
                 window_id: None,
                 mcp_env: false,
                 cwd: None,
-                command: Some("printf 'PICK=<explicit>\\n'".into()),
+                command: Some("printf 'PICK=<%s>\\n' explicit".into()),
                 env: Default::default(),
                 profile: None,
             })
@@ -8108,7 +8116,8 @@ mod tests {
     }
 
     // POSIX printf command; not valid under the Windows default shell
-    // (PowerShell).
+    // (PowerShell). The `%s` keeps the needle out of the command text, so a
+    // banner carrying that text cannot put it in the scrollback.
     #[cfg(unix)]
     #[tokio::test]
     async fn all_scrollback_returns_session_output() {
@@ -8121,7 +8130,7 @@ mod tests {
                 window_id: None,
                 mcp_env: false,
                 cwd: None,
-                command: Some("printf 'SCRAPE=<tok123>\\n'".into()),
+                command: Some("printf 'SCRAPE=<%s>\\n' tok123".into()),
                 env: Default::default(),
                 profile: None,
             })
