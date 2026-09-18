@@ -335,8 +335,9 @@ pub(crate) static LAUNCHER: RouteTable = &[
     (Post, "/api/library/gateways/{id}/connect", NonOwner),
     (Post, "/api/library/gateways/{id}/disconnect", NonOwner),
     (Post, "/api/library/fs/pick-folder", NonOwner),
-    // A leg is admitted only for the owner's desktop session. This classifies
-    // the leg caller, not who sent the window-addressed trigger.
+    // A gateway leg is admitted only for the owner's desktop session; a local
+    // caller holding the launcher bearer is admitted too. This classifies the
+    // leg caller, not who sent the window-addressed trigger.
     (Get, "/api/library/tunnel/control", DesktopOwner),
     (Get, "/api/library/tunnel/conn", DesktopOwner),
     (Get, "/api/library/workspaces", NonOwner),
