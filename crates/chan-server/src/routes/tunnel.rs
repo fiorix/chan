@@ -34,8 +34,10 @@ use tokio::sync::mpsc;
 
 use crate::WorkspaceHost;
 
-/// A close flushes an in-flight frame first, so a peer that stopped reading
-/// must not retain the adapter forever.
+/// Called only after the leg has decided to end, this one-second grace gives
+/// the send slot and Close frame a final flush without tying teardown to a
+/// transport idle deadline. Expiry loses the Close frame and, after an
+/// abnormal exit, may also lose the worker's one in-flight data frame.
 const HALF_CLOSE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Deserialize)]
@@ -159,10 +161,25 @@ async fn serve_tunnel_conn(socket: WebSocket, port: u16, conn_id: String, half_c
     let (downlink_tx, from_peer) = mpsc::channel::<Vec<u8>>(8);
     if half_close {
         let adapter = shuttle_half_close(socket, uplink_rx, downlink_tx);
-        tokio::join!(
-            chan_revtunnel::bridge::splice_half_close(tcp, to_peer, from_peer),
-            adapter,
-        );
+        let splice = chan_revtunnel::bridge::splice_half_close(tcp, to_peer, from_peer);
+        tokio::pin!(adapter);
+        tokio::pin!(splice);
+        tokio::select! {
+            peer_half_close = &mut adapter => {
+                // Once the peer's marker was accepted and the TCP downlink
+                // ended, dropping the splice can close the remaining read
+                // half. Without a marker, let the byte pump drain its channel
+                // and propagate cancellation itself.
+                if peer_half_close == PeerHalfClose::Open {
+                    splice.await;
+                }
+            }
+            // A completed splice drops both channels, which ends the adapter
+            // through its bounded close path.
+            _ = &mut splice => {
+                let _ = adapter.await;
+            }
+        }
         return;
     }
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -226,6 +243,12 @@ async fn close_half_close<T>(close: impl std::future::Future<Output = T>) {
     let _ = tokio::time::timeout(HALF_CLOSE_CLOSE_TIMEOUT, close).await;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerHalfClose {
+    Open,
+    DownlinkEnded,
+}
+
 /// Move negotiated data and directional end markers over the WebSocket.
 ///
 /// The adapter owns an outbound task that stays independent of a blocked
@@ -234,12 +257,13 @@ async fn close_half_close<T>(close: impl std::future::Future<Output = T>) {
 /// outbound direction ends. Before that marker, inbound channel backpressure
 /// can pause stream polling. Oversized Binary frames end the leg in either
 /// state. Every completed exit that recovers the sink makes exactly one
-/// bounded close attempt.
+/// bounded close attempt. A `DownlinkEnded` result means the adapter enqueued
+/// the peer marker and the TCP byte pump dropped its inbound receiver.
 async fn shuttle_half_close(
     socket: WebSocket,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     in_tx: mpsc::Sender<Vec<u8>>,
-) {
+) -> PeerHalfClose {
     let (mut sink, mut stream) = socket.split();
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
     let mut outbound = tokio::task::JoinSet::new();
@@ -269,6 +293,7 @@ async fn shuttle_half_close(
     let mut outbound_finished = false;
     let mut finished_sink = None;
     let mut in_tx = Some(in_tx);
+    let mut peer_half_close = PeerHalfClose::Open;
     loop {
         if finished_sink.is_some() && in_tx.is_none() {
             break;
@@ -282,7 +307,7 @@ async fn shuttle_half_close(
                         finished_sink = Some(sink);
                         break;
                     }
-                    Some(Err(_)) | None => return,
+                    Some(Err(_)) | None => return peer_half_close,
                 }
             }
             inbound = stream.next() => match inbound {
@@ -300,7 +325,9 @@ async fn shuttle_half_close(
                         break;
                     }
                     if ended {
+                        tx.closed().await;
                         in_tx.take();
+                        peer_half_close = PeerHalfClose::DownlinkEnded;
                     }
                 }
             },
@@ -312,11 +339,12 @@ async fn shuttle_half_close(
             let _ = stop_tx.send(());
             match outbound.join_next().await {
                 Some(Ok((sink, _))) => sink,
-                Some(Err(_)) | None => return,
+                Some(Err(_)) | None => return peer_half_close,
             }
         }
     };
     close_half_close(sink.close()).await;
+    peer_half_close
 }
 
 #[cfg(test)]
@@ -326,7 +354,50 @@ mod tests {
     use axum::body::Body;
     use axum::http::{header, Request};
     use chan_revtunnel::wire::{CONN_PATH, CONTROL_PATH};
+    use tokio::io::AsyncReadExt;
     use tower::ServiceExt;
+
+    type ClientWebSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Build a real upgraded Axum socket and its tungstenite peer.
+    async fn websocket_pair() -> (WebSocket, ClientWebSocket, tokio::task::JoinHandle<()>) {
+        let (socket_tx, socket_rx) = tokio::sync::oneshot::channel::<WebSocket>();
+        let socket_tx = Arc::new(std::sync::Mutex::new(Some(socket_tx)));
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let socket_tx = Arc::clone(&socket_tx);
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let sender = {
+                            let mut slot = socket_tx.lock().expect("socket sender lock");
+                            slot.take().expect("single test WebSocket")
+                        };
+                        let _ = sender.send(socket);
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket server");
+        let address = listener.local_addr().expect("test WebSocket address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test WebSocket")
+        });
+        let (peer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/"))
+            .await
+            .expect("connect test WebSocket");
+        let socket = tokio::time::timeout(std::time::Duration::from_secs(2), socket_rx)
+            .await
+            .expect("Axum upgrades the test WebSocket")
+            .expect("upgrade hands out its socket");
+        (socket, peer, server)
+    }
 
     /// A well-formed WebSocket handshake request. Served through `oneshot`
     /// there is no connection to upgrade, so a request that passes the gate
@@ -434,5 +505,75 @@ mod tests {
         )
         .await
         .expect("bounded close returns before its caller's deadline");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_peer_cannot_hold_a_half_close_adapter_forever() {
+        let (socket, mut peer, server) = websocket_pair().await;
+        let (out_tx, out_rx) = mpsc::channel(1);
+        let (in_tx, in_rx) = mpsc::channel(1);
+        drop(in_rx);
+        let adapter = tokio::spawn(shuttle_half_close(socket, out_rx, in_tx));
+
+        // Once the second chunk enters the one-slot channel, the outbound
+        // worker owns the large first frame. Leaving the peer unread makes
+        // that send, and therefore SplitSink::close's flush, stay pending.
+        out_tx
+            .send(vec![0; 16 * 1024 * 1024])
+            .await
+            .expect("queue large outbound frame");
+        out_tx
+            .send(vec![1])
+            .await
+            .expect("outbound worker takes large frame");
+        peer.send(tokio_tungstenite::tungstenite::Message::binary(
+            b"stop".to_vec(),
+        ))
+        .await
+        .expect("trigger inbound channel failure");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), adapter)
+            .await
+            .expect("an unreadable peer cannot retain the adapter")
+            .expect("adapter task");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_closed_half_close_socket_ends_its_connection_task_after_a_peer_marker() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quiet origin");
+        let origin_port = origin.local_addr().expect("quiet origin address").port();
+        let (socket, mut peer, server) = websocket_pair().await;
+        let connection = tokio::spawn(serve_tunnel_conn(
+            socket,
+            origin_port,
+            "test-connection".to_string(),
+            true,
+        ));
+        let (mut origin_socket, _) = origin.accept().await.expect("accept origin connection");
+
+        peer.send(tokio_tungstenite::tungstenite::Message::text(
+            HALF_CLOSE_MARKER,
+        ))
+        .await
+        .expect("send peer marker");
+        let mut request = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            origin_socket.read_to_end(&mut request),
+        )
+        .await
+        .expect("peer marker shuts down the origin write half")
+        .expect("read request through peer marker");
+        assert!(request.is_empty());
+
+        peer.close(None).await.expect("close peer socket");
+        tokio::time::timeout(std::time::Duration::from_secs(3), connection)
+            .await
+            .expect("closed socket ends the whole connection task")
+            .expect("connection task");
+        server.abort();
     }
 }
