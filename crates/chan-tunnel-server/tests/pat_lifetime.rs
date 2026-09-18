@@ -8,7 +8,8 @@
 //! live allocation for the raw token bytes after registration and
 //! allows exactly the h2 decoder's scratch buffer, so a later
 //! `tokio::spawn` inside `register_tunnel` that keeps a clone would turn
-//! red.
+//! red. The scan dials with a Hello name so it exercises the production
+//! name branch.
 //!
 //! The watch is this binary's global allocator, which is why these tests
 //! live in their own file. Tests in one binary run on parallel threads,
@@ -46,13 +47,19 @@ struct WatchingAllocator;
 #[global_allocator]
 static ALLOCATOR: WatchingAllocator = WatchingAllocator;
 
-// SAFETY: every method forwards its arguments to `System` unchanged. The
-// bookkeeping only loads and stores atomics, which never allocates.
+// SAFETY: `alloc` and `alloc_zeroed` call `System` first and only then
+// take `LIVE_LOCK` while they insert the new block. `dealloc` takes
+// `LIVE_LOCK` before removing the block and before calling `System`, so
+// `live_scan` cannot read a block that is being freed. `realloc` holds
+// the lock across remove, system realloc and insert. The lock is never
+// held while the system allocator runs, so there is no deadlock.
 unsafe impl GlobalAlloc for WatchingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc(layout);
         if !p.is_null() {
+            live_lock();
             live_insert(p as usize, layout.size());
+            live_unlock();
         }
         p
     }
@@ -60,15 +67,19 @@ unsafe impl GlobalAlloc for WatchingAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc_zeroed(layout);
         if !p.is_null() {
+            live_lock();
             live_insert(p as usize, layout.size());
+            live_unlock();
         }
         p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        live_lock();
         live_remove(ptr as usize);
         note_release(ptr as usize, layout.size(), None);
-        System.dealloc(ptr, layout)
+        System.dealloc(ptr, layout);
+        live_unlock();
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -118,7 +129,8 @@ struct LiveTable {
     size: UnsafeCell<[usize; LIVE_CAP]>,
 }
 
-// SAFETY: all accesses are protected by LIVE_LOCK.
+// SAFETY: `LIVE_TABLE` is mutated only while `LIVE_LOCK` is held, by
+// `live_insert`, `live_remove`, and the read in `live_scan`.
 unsafe impl Sync for LiveTable {}
 
 static LIVE_TABLE: LiveTable = LiveTable {
@@ -157,7 +169,9 @@ unsafe fn live_insert(addr: usize, size: usize) {
         }
         i = (i + 1) % LIVE_CAP;
         if i == start {
-            panic!("live allocation table full");
+            // Aborting avoids unwinding inside the allocator, which would
+            // re-enter the global allocator and spin on the lock.
+            std::process::abort();
         }
     }
 }
@@ -431,6 +445,7 @@ async fn scan_based_pin_allows_only_the_h2_decoder_scratch_block() {
     let cfg = ClientConfig {
         token: "unused".into(),
         workspace: "devsrv".into(),
+        name: Some("office box".into()),
         ..ClientConfig::default()
     };
     let (_registration, _tunnel) = chan_tunnel_client::handshake(&cfg, duplex)
