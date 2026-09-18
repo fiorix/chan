@@ -748,14 +748,14 @@ fn planned_workspace_download_response(
             .parse()
             .expect("download filename is header-safe"),
     );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        "nosniff".parse().expect("static header value"),
+    );
     if is_active_content_path(name) {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             "sandbox".parse().expect("static header value"),
-        );
-        response.headers_mut().insert(
-            "x-content-type-options",
-            "nosniff".parse().expect("static header value"),
         );
     }
     response
@@ -863,6 +863,8 @@ pub(crate) fn stream_binary_plan(
             header::CONTENT_SECURITY_POLICY,
             "sandbox".parse().expect("static header value"),
         );
+    }
+    if attachment || is_active_content_path(path) {
         response.headers_mut().insert(
             "x-content-type-options",
             "nosniff".parse().expect("static header value"),
@@ -1551,16 +1553,17 @@ async fn read_via_session(
         )
             .into_response();
         // A session can hold any text the editable-text gate admits, HTML
-        // included, so this takes the pair on the same condition as the disk
-        // download of the same path.
+        // included. Sniffing is never wanted on a download, so the nosniff
+        // header is unconditional; the sandbox CSP is kept conditional on the
+        // active-content predicate, matching the disk download of the same path.
+        response.headers_mut().insert(
+            "x-content-type-options",
+            "nosniff".parse().expect("static header value"),
+        );
         if is_active_content_path(path) {
             response.headers_mut().insert(
                 header::CONTENT_SECURITY_POLICY,
                 "sandbox".parse().expect("static header value"),
-            );
-            response.headers_mut().insert(
-                "x-content-type-options",
-                "nosniff".parse().expect("static header value"),
             );
         }
         return response;
@@ -5864,8 +5867,8 @@ mod doc_divert_tests {
     use tower::ServiceExt;
 
     use super::{
-        api_read_file, api_write_file as api_write_file_raw, ReadFileQuery, WriteBody,
-        WriteFileQuery,
+        api_read_file, api_write_file as api_write_file_raw, download_path_sync,
+        stream_binary_download, DownloadPayload, ReadFileQuery, WriteBody, WriteFileQuery,
     };
     use crate::doc_sessions::changes::{replace_diff, UpdateJson};
     use crate::state::test_support::workspace_app_state;
@@ -6433,11 +6436,13 @@ mod doc_divert_tests {
         );
     }
 
-    /// The workspace download sets the sandbox pair on `is_active_content_path`,
-    /// the condition the session download and the terminal file download
-    /// share. HTML and SVG are sandboxed and never sniffed; a raster image and
-    /// an ordinary binary carry neither header. No session is attached, so
-    /// each body is the bytes on disk.
+    /// The workspace download keeps the sandbox CSP conditional on
+    /// `is_active_content_path` and sets `x-content-type-options: nosniff`
+    /// unconditionally on every attachment. HTML and SVG are sandboxed and
+    /// never sniffed; a raster image and an ordinary binary carry nosniff but
+    /// no CSP; HTML bytes under a non-active extension are not sandboxed but
+    /// are still never sniffed. No session is attached, so each body is the
+    /// bytes on disk.
     #[tokio::test]
     async fn a_workspace_download_sandboxes_only_active_content() {
         let (_cfg, root, state) = divert_app();
@@ -6454,6 +6459,12 @@ mod doc_divert_tests {
                 "image/svg+xml",
                 &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>"[..],
                 true,
+            ),
+            (
+                "page.txt",
+                "text/plain; charset=utf-8",
+                &b"<script>top.chan = 1</script>"[..],
+                false,
             ),
             ("photo.png", "image/png", &b"\x89PNG\r\n\x1a\n"[..], false),
             (
@@ -6501,7 +6512,7 @@ mod doc_divert_tests {
             );
             assert_eq!(
                 value("x-content-type-options").as_deref(),
-                sandboxed.then_some("nosniff"),
+                Some("nosniff"),
                 "{path}: {headers:?}"
             );
             let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
@@ -6509,10 +6520,12 @@ mod doc_divert_tests {
         }
     }
 
-    /// A session download sets the sandbox pair on the condition the disk
-    /// download of the same path uses. The disk download of the HTML file
-    /// already carries the pair, so each body is asserted to be the session's
-    /// unflushed text: that is what shows the session served the response.
+    /// A session download keeps the sandbox CSP conditional on
+    /// `is_active_content_path` and sets `x-content-type-options: nosniff`
+    /// unconditionally on every attachment. The disk download of the HTML file
+    /// already carries the headers, so each body is asserted to be the
+    /// session's unflushed text: that is what shows the session served the
+    /// response.
     #[tokio::test]
     async fn session_download_sandboxes_only_active_content() {
         let (_cfg, root, state) = divert_app();
@@ -6523,6 +6536,7 @@ mod doc_divert_tests {
         for (path, content_type, sandboxed) in [
             ("page.html", "text/html; charset=utf-8", true),
             ("n.md", "text/plain; charset=utf-8", false),
+            ("n.txt", "text/plain; charset=utf-8", false),
         ] {
             workspace.write_text(path, disk).unwrap();
             let mut handle = state
@@ -6577,7 +6591,7 @@ mod doc_divert_tests {
             );
             assert_eq!(
                 value("x-content-type-options").as_deref(),
-                sandboxed.then_some("nosniff"),
+                Some("nosniff"),
                 "{path}: {headers:?}"
             );
             let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
@@ -6588,6 +6602,51 @@ mod doc_divert_tests {
                 "{path}: the edit must still be unflushed"
             );
         }
+    }
+
+    /// The shared binary plan helper sets `x-content-type-options: nosniff`
+    /// unconditionally when the caller asks for an attachment, and keeps the
+    /// sandbox CSP conditional on `is_active_content_path`. HTML bytes under a
+    /// non-active extension are not sandboxed but are still never sniffed.
+    #[tokio::test]
+    async fn binary_attachment_plan_sends_nosniff_unconditionally() {
+        use axum::body::to_bytes;
+
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let content = b"<script>top.chan = 1</script>";
+        workspace.write_bytes("page.txt", content).unwrap();
+
+        let plan = match download_path_sync(&workspace, "page.txt", None).unwrap() {
+            DownloadPayload::File(plan) => plan,
+            DownloadPayload::Archive => panic!("expected file download"),
+        };
+        let response = stream_binary_download("page.txt", plan);
+
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"page.txt\""
+        );
+        assert!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .is_none(),
+            "non-active extension must not get sandbox CSP"
+        );
+        assert_eq!(
+            response.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        let actual = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(actual.as_ref(), content.as_slice());
     }
 
     #[tokio::test]

@@ -449,19 +449,19 @@ async fn stream_planned_download_tracked(
         body,
     )
         .into_response();
-    // The file arm takes the pair on the same condition as the workspace
-    // download, for a client that renders the attachment instead of saving
-    // it. The archive arm always declares a tar, whatever its root is named,
-    // so it is left out.
+    // The file arm mirrors the workspace download: nosniff is unconditional
+    // on an attachment, and the sandbox CSP is kept conditional on the
+    // active-content predicate. The archive arm always declares a tar, whatever
+    // its root is named, so it is left out.
     if let PlannedDownload::File { name } = &planned {
+        response.headers_mut().insert(
+            "x-content-type-options",
+            "nosniff".parse().expect("static header value"),
+        );
         if is_active_content_path(name) {
             response.headers_mut().insert(
                 header::CONTENT_SECURITY_POLICY,
                 "sandbox".parse().expect("static header value"),
-            );
-            response.headers_mut().insert(
-                "x-content-type-options",
-                "nosniff".parse().expect("static header value"),
             );
         }
     }
@@ -1998,10 +1998,11 @@ mod tests {
         );
     }
 
-    /// The file arm sets the sandbox pair on the condition the workspace
-    /// download uses. HTML and SVG, the two document types `content_type_for`
-    /// declares that can run script, are sandboxed and never sniffed; a raster
-    /// image and an ordinary binary carry neither header.
+    /// The file arm keeps the sandbox CSP conditional on `is_active_content_path`
+    /// and sets `x-content-type-options: nosniff` unconditionally on every
+    /// attachment. HTML and SVG are sandboxed and never sniffed; a raster image
+    /// and an ordinary binary carry nosniff but no CSP; HTML bytes under a
+    /// non-active extension are not sandboxed but are still never sniffed.
     #[tokio::test]
     async fn a_terminal_file_download_sandboxes_only_active_content() {
         let dir = tempfile::tempdir().unwrap();
@@ -2019,6 +2020,12 @@ mod tests {
                 "image/svg+xml",
                 &b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>"[..],
                 true,
+            ),
+            (
+                "page.txt",
+                "text/plain; charset=utf-8",
+                &b"<script>top.chan = 1</script>"[..],
+                false,
             ),
             ("photo.png", "image/png", &b"\x89PNG\r\n\x1a\n"[..], false),
             (
@@ -2057,7 +2064,7 @@ mod tests {
             );
             assert_eq!(
                 value("x-content-type-options").as_deref(),
-                sandboxed.then_some("nosniff"),
+                Some("nosniff"),
                 "{name}: {headers:?}"
             );
             let streamed = axum::body::to_bytes(response.into_body(), usize::MAX)
