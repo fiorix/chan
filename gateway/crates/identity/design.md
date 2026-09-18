@@ -96,7 +96,7 @@ sequenceDiagram
 PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
 
 - Random bytes from `rand::rngs::OsRng`.
-- Hash: `SHA-256(token)` stored in `api_tokens.token_hash`. Plaintext leaves on the create response and is never persisted.
+- Hash: `SHA-256(token)` stored in `api_tokens.token_hash`. Plaintext leaves identity only through the one-time SPA/admin creation response or desktop redemption response and is never persisted there.
 - Scopes: each token carries a scope list (`api_tokens.scopes`), defaulting to `["tunnel"]` (dial chan-tunnel). `tunnel` is the only live tunnel scope. `POST /api/tokens` refuses every `desktop.*` scope; the desktop-authorize flow and the operator mint (`POST /admin/v1/tokens`) mint `desktop.connect` / `desktop.account`. Validate returns the list and chan-tunnel-server enforces it.
 - Origin: mints record `created` (SPA), `created_via_desktop` (desktop-authorize flow), or `created_via_admin` (operator) in `api_token_audit`, so operators can tell them apart.
 - Validate (`/internal/v1/tokens/validate`):

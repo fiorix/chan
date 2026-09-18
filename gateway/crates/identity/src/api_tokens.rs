@@ -1,10 +1,11 @@
 //! Personal access tokens.
 //!
-//! Issued from the identity service for the chan CLI / chan-tunnel.
+//! Issued by identity for tunnel and desktop clients.
 //! Token shape: `chan_pat_<32 random b64url bytes>`. Database stores
 //! only `SHA-256(token)`, so a leak of the table doesn't hand out
-//! live secrets; the plaintext leaves on the create response and is
-//! never persisted.
+//! live secrets. The plaintext leaves identity only through the one-time
+//! SPA/admin creation response or desktop redemption response and is never
+//! persisted there.
 //!
 //! Scope is intentionally flat: a token authenticates a user. Workspace
 //! ownership is enforced at the tenant host
@@ -81,7 +82,9 @@ pub struct ApiToken {
     pub scopes: Vec<String>,
 }
 
-/// One-shot response: the only time the plaintext token is exposed.
+/// One-shot mint result. The plaintext is serialized only by the SPA/admin
+/// creation response or the desktop redemption response; identity never
+/// persists it.
 #[derive(Serialize)]
 pub struct CreatedToken {
     #[serde(flatten)]
@@ -108,9 +111,8 @@ pub struct AuditEntry {
     pub user_agent: Option<String>,
 }
 
-/// Successful validate result handed to chan-tunnel. `username` is
-/// what chan.app/{username} resolves to; tunneld uses it to build
-/// the public URL.
+/// Successful PAT validation result used by the tunnel and desktop routes.
+/// `username` is the canonical gateway handle for the token's owner.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidatedToken {
     pub user_id: Uuid,
@@ -123,14 +125,18 @@ pub struct ValidatedToken {
     pub scopes: Vec<String>,
     /// Devserver identity: lowercase hex SHA-256 of the PAT. The gateway
     /// keys the tunnel registry and the devserver-gate `drv` claim on
-    /// this (1 token : 1 devserver). Identity computes it after
-    /// devserver-proxy forwards the raw PAT from the tunnel Authorization
-    /// header in its internal validation body. The devserver-to-proxy leg uses
-    /// TLS except on verified loopback; the proxy-to-identity leg uses HTTPS,
-    /// loopback, or an authenticated encrypted overlay, and
-    /// `IDENTITY_INTERNAL_TOKEN` authenticates that internal request. Identity
-    /// persists only the base64url `token_hash`, the same digest in a different
-    /// encoding.
+    /// this (1 token : 1 devserver). Identity derives it from the plaintext on
+    /// every validation. A tunnel client presents that plaintext once per dial
+    /// in the Authorization header and periodically in lease-refresh frames;
+    /// devserver-proxy sends it to identity for dial and refresh validation and
+    /// for up to three Hello-name announcement attempts. The client requires
+    /// HTTPS except to a verified loopback peer. The proxy's identity URL must
+    /// use HTTPS or literal loopback HTTP unless the deployment declares an
+    /// authenticated encrypted overlay; `IDENTITY_INTERNAL_TOKEN` authenticates
+    /// but does not encrypt those internal requests. Desktop roster reads and
+    /// entry mints instead present the stored desktop PAT directly to identity
+    /// in their Authorization headers. Identity persists only the base64url
+    /// `token_hash`, the same digest in a different encoding.
     pub devserver_id: String,
     /// Authorization state retained only long enough to sign the admission
     /// lease. The proxy learns it from the verified lease, not this response.
