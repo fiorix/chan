@@ -401,6 +401,10 @@ struct CoordinatorRefreshFailure {
     refreshes: usize,
     /// Passes, counted from 1, whose action fails instead of running.
     failed_actions: Vec<usize>,
+    /// Request a reconcile once, from the coordinator, after `finish_recovery`
+    /// completes a pass with the refresh still owed and before the coordinator
+    /// drains its wake channel.
+    reconcile_after_owed_completion: bool,
     pass_tx: tokio::sync::mpsc::UnboundedSender<usize>,
 }
 
@@ -424,6 +428,7 @@ fn arm_coordinator_refresh_failure(
                 passes: 0,
                 refreshes: 0,
                 failed_actions: Vec::new(),
+                reconcile_after_owed_completion: false,
                 pass_tx,
             },
         );
@@ -443,6 +448,29 @@ fn fail_coordinator_action_on_pass(root: &std::path::Path, pass: usize) {
         .expect("coordinator refresh probe is not armed")
         .failed_actions
         .push(pass);
+}
+
+#[cfg(test)]
+fn request_reconcile_after_owed_completion(root: &std::path::Path) {
+    COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get_mut(root)
+        .expect("coordinator refresh probe is not armed")
+        .reconcile_after_owed_completion = true;
+}
+
+/// Report whether an armed probe scripted a reconcile request after this owed
+/// completion, clearing the script so the request is made once.
+#[cfg(test)]
+fn take_reconcile_after_owed_completion(root: &std::path::Path) -> bool {
+    COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get_mut(root)
+        .is_some_and(|probe| std::mem::take(&mut probe.reconcile_after_owed_completion))
 }
 
 /// Count a coordinator pass for an armed probe, and report whether the probe
@@ -645,6 +673,12 @@ fn spawn_coordinator(
                 if full_rebuild {
                     next_start_at = Instant::now() + cooldown;
                 }
+                #[cfg(test)]
+                if outcome == RecoveryOutcome::CompleteWithReportRefreshOwed
+                    && take_reconcile_after_owed_completion(workspace_w.root())
+                {
+                    workspace_w.request_recovery(RecoveryAction::Reconcile);
+                }
                 required_generation = drain_required_generation(&mut rx, required_generation);
 
                 match &result {
@@ -703,12 +737,12 @@ fn spawn_coordinator(
                 {
                     break;
                 }
-                if !matches!(&result, Ok(RecoveryPassResult::Complete)) {
-                    if recovery.pending.is_some() {
-                        continue;
-                    }
-                    break;
-                }
+                // `recovery` is the status `finish_recovery` read, and the drain
+                // above ran after that read. A generation requested in between
+                // shows only in `required_generation`, and the drain consumed
+                // its wake, so this activation must claim it. Any result that
+                // gets here ends the activation only once that generation is
+                // complete and nothing is pending.
                 if recovery.completed_generation >= required_generation
                     && recovery.pending.is_none()
                 {
@@ -1840,6 +1874,57 @@ mod tests {
         );
         assert!(workspace.recovery_status().completed_generation >= later);
         assert_eq!(counts, (4, 4), "(passes, refreshes) across two wakes");
+        drop(indexer);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_coordinator_claims_a_generation_requested_as_a_pass_completes() {
+        // The coordinator drains its wake channel after `finish_recovery`
+        // reads the status, so a request made in between has its wake consumed
+        // by the running activation: until another wake arrives, only that
+        // activation can claim it. The probe makes the request there, after
+        // the second pass completes the open generation with the refresh still
+        // owed, when the status that `finish_recovery` read has nothing
+        // pending.
+        let (_cfg, _dir, _lib, workspace) = workspace_with_an_owed_open_pass();
+        let root = workspace.root().to_path_buf();
+        let open_generation = workspace.recovery_status().generation;
+        let (pass_tx, _pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        request_reconcile_after_owed_completion(&root);
+        let (_events_tx, events_rx) = broadcast::channel(64);
+        // Installing the driver announces the pending open pass and routes the
+        // probe's request to the coordinator's channel.
+        let indexer = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+
+        let claimed = tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.is_ready() && recovery.completed_generation > open_generation {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let recovery = workspace.recovery_status();
+        let unowned = workspace.recovery_is_unowned();
+        let counts = take_coordinator_refresh_failure(&root);
+        assert!(
+            claimed,
+            "the generation requested as the pass completed was never claimed: \
+             recovery={recovery:?} unowned={unowned} (passes, refreshes)={counts:?}"
+        );
+        // The activation spent its refresh retry on the open generation, so the
+        // claimed generation completes after one pass.
+        assert_eq!(counts, (3, 3), "(passes, refreshes)");
         drop(indexer);
     }
 
