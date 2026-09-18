@@ -15,8 +15,10 @@
 //!     reports `pending` without locking; build or reindex work on a ready
 //!     generation reports `done`. A genuine index error reports `failed`.
 //!     Recovery that has no worker assigned to it never converges, so it
-//!     reports as a decision carrying the rebuild that clears it -- that DOES
-//!     lock, because a decision is the only thing that clears it.
+//!     reports as a decision offering a rebuild, and that DOES lock. The
+//!     route never reports it for a served workspace, whose indexer
+//!     installs a recovery driver when it spawns; `index_decision` says
+//!     what the rebuild does.
 //!   - `model` step (embeddings builds only): when the workspace has
 //!     semantic search enabled but the embedding model is not on disk,
 //!     the user must choose -- download it or fall back to keyword
@@ -149,11 +151,10 @@ struct PreflightError {
 ///
 /// Precedence, highest first. A genuine index error maps to `Failed` so the
 /// shell can surface it. A recovery pass with no claimant (`unowned`) maps to
-/// `NeedsDecision`: it converges nowhere, so reporting it as `Pending` would
-/// unlock the boot with the recovery stalled, and the decision it carries is the
-/// only escape the product surface offers. Ordinary pending or active recovery maps
-/// to `Pending`, while a ready generation keeps build/reindex progress
-/// non-blocking.
+/// `NeedsDecision`: it converges nowhere, and reporting it as `Pending` would
+/// unlock the boot with the recovery still stalled. Ordinary pending or active
+/// recovery maps to `Pending`, while a ready generation keeps build/reindex
+/// progress non-blocking.
 ///
 /// The unowned arm sits ahead of the readiness arm deliberately: a stalled
 /// recovery and a running one are both `!is_ready()`, and testing readiness
@@ -394,10 +395,13 @@ pub async fn api_preflight_decision(
 /// re-renders without a second poll.
 ///
 /// The step offers this only when a recovery pass is parked with no claimant.
-/// `rebuild` is the one choice: it raises the parked pass to a full rebuild and
-/// hands it to the indexer, which is the request that always finds a claimant.
-/// The onboarding decision uses the same full-rebuild recovery action as
-/// `POST /api/index/rebuild`.
+/// `rebuild` is the one choice. It makes the same `Indexer::request_rebuild`
+/// call as `POST /api/index/rebuild`, which raises the parked pass to a full
+/// rebuild and wakes the workspace's recovery driver. It does not claim the
+/// pass, so a workspace with no driver keeps the pass parked and still asks
+/// for this decision. The route never serves such a workspace: the indexer
+/// this handler reads from the workspace cell installed the driver when it
+/// spawned, before the cell was stored.
 async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
     if choice != "rebuild" {
         return err(
@@ -726,11 +730,11 @@ mod tests {
     #[test]
     fn a_stalled_recovery_is_reported_and_offers_a_way_out() {
         // A pass parked with no claimant is `!is_ready()` exactly like a
-        // running one. Checking readiness first would report the stalled pass as
-        // `Pending`, which does not hold the lock, so the boot would unlock with
-        // the recovery stalled and never offer the rebuild that clears it. It
-        // must be distinguishable from the running case above -- same readiness,
-        // same index status, different step -- and carry the rebuild that clears it.
+        // running one. Checking readiness first would report the stalled pass
+        // as `Pending`, which does not hold the lock, so the boot would unlock
+        // with the recovery still stalled and no decision offered. It must be
+        // distinguishable from the running case above -- same readiness, same
+        // index status, different step -- and carry the rebuild choice.
         let (_c, _r, ws) = workspace();
         ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
         assert!(
