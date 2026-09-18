@@ -4871,7 +4871,10 @@ mod tests {
 
     #[tokio::test]
     async fn already_open_mount_waits_for_an_in_process_release() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: the workspace opens and the close are
+        // real I/O that a loaded runner can stretch to several seconds, and the
+        // ordering this pins is asserted below rather than timed.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -4912,7 +4915,10 @@ mod tests {
 
     #[tokio::test]
     async fn already_open_mount_reports_releasing_after_the_budget() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: the workspace opens and the close are
+        // real I/O that a loaded runner can stretch to several seconds, and the
+        // budget is asserted below as a lower bound on the wait.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
