@@ -2,6 +2,8 @@
 
 Status: Accepted (amended)
 
+Later note: the devserver grant model (`gateway/migrations/0014_drop_devserver_grant_roles.sql`) replaced the viewer and editor devserver grant roles with one binary, shell-equivalent grant. The verified tunnel role that the Decision says the capability inherits, and the readonly tunnel viewers under Consequences, therefore do not exist: every tunnel caller is the owner or a grantee, and a grantee mints the same command capability the owner does.
+
 ## Context
 
 Chan needs one command launcher from workspace windows, standalone terminals, the launcher window, and remote devserver content. The visual and keyboard UX is identical, but those webviews do not have equal authority. In particular, a remote devserver page must not receive Chan Desktop's root launcher bearer, tenant tokens, or any transport that would let it query or mutate the aggregate Computers inventory on its own.
