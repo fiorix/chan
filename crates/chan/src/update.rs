@@ -748,6 +748,13 @@ fn post_upgrade_state(installed_version: &str) -> State {
     }
 }
 
+/// Path where the downloaded binary is staged before replacing the
+/// running executable. Keeping it in `binary_dir` makes every
+/// replacement rename a same-directory move.
+pub(crate) fn staged_binary_path(binary_dir: &Path, pid: u32) -> PathBuf {
+    binary_dir.join(format!(".chan.upgrade-bin.{pid}"))
+}
+
 pub struct UpgradeOptions {
     pub assume_yes: bool,
     pub check_only: bool,
@@ -917,9 +924,10 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
     // unpack the rest of the archive (LICENSE, README) because the
     // upgrade only swaps the executable. Keep it a sibling:
     // `install_replacement` moves it over the executable with a
-    // same-directory rename, and on Windows that rename runs while the
-    // executable path has no file.
-    let bin_temp = binary_dir.join(format!(".chan.upgrade-bin.{}", std::process::id()));
+    // same-directory rename, and on Windows it first probes the rename
+    // of the staged binary so a sharing violation is absorbed while the
+    // executable path still holds the old image.
+    let bin_temp = staged_binary_path(&binary_dir, std::process::id());
     let mut bin_guard = TempGuard::new(bin_temp.clone());
     extract_binary(&archive_path, &bin_temp, bin_name, ext, opts.verbose)?;
 
@@ -1182,54 +1190,97 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
     let running =
         env::current_exe().context("resolving current executable for Windows replacement")?;
     let running = running.canonicalize().unwrap_or(running);
-    if running != exe_path {
+    let backup = install_replacement_with(
+        new_bin,
+        exe_path,
+        &running,
+        |src, dst| retry_windows_sharing_violation(|| fs::rename(src, dst), std::thread::sleep),
+        std::process::id,
+    )?;
+    if let Err(error) = self_replace::self_delete_at(&backup) {
+        eprintln!(
+            "chan: warning: upgraded successfully but could not schedule removal of {}: {error}",
+            backup.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn install_replacement_with<R, P>(
+    new_bin: &Path,
+    exe_path: &Path,
+    running_exe: &Path,
+    mut rename: R,
+    pid: P,
+) -> Result<PathBuf>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+    P: FnOnce() -> u32,
+{
+    if running_exe != exe_path {
         bail!(
             "refusing to replace {} because the running executable is {}",
             exe_path.display(),
-            running.display()
+            running_exe.display()
         );
     }
 
     // Windows permits renaming the mapped executable but not deleting or
-    // overwriting it. Keep the old image at a path we control until the new
-    // image is in place, so a failed second rename can restore it. The
-    // self-replace crate is used only for its delayed, post-exit deletion of
-    // that known backup; its one-shot replacement helper cannot roll back a
-    // failure after it has moved the running executable.
+    // overwriting it. The sequence is:
     //
-    // `exe_path` has no file from the first rename until the second one
-    // succeeds or, when the second one fails, until the rollback succeeds.
-    // Only those renames and their sharing-violation retries run inside that
-    // gap: `run_upgrade` writes and closes `new_bin` in `exe_path`'s own
-    // directory before this call, so filling the path again is one
-    // same-directory rename. A process exit inside the gap skips the rollback
-    // and leaves the previous executable at `backup`.
+    //   1. Rename the staged new binary to a probe name in the same
+    //      directory, retrying on sharing violations. If this fails,
+    //      `exe_path` still holds the old image and the caller cleans up.
+    //   2. Rename the running image to a known backup, retrying on sharing
+    //      violations. `exe_path` is now empty.
+    //   3. Rename the probe to `exe_path`, retrying on sharing violations.
+    //   4. If step 3 fails, rename the backup back to `exe_path`.
+    //
+    // `run_upgrade` writes and closes the staged binary in `exe_path`'s own
+    // directory before this call, so every rename is a same-directory move.
+    // The self-replace crate is used only for its delayed, post-exit deletion
+    // of the backup; its one-shot replacement helper cannot roll back a
+    // failure after it has moved the running executable.
+    let binary_dir = exe_path
+        .parent()
+        .context("current Windows executable has no parent directory")?;
     let file_name = exe_path
         .file_name()
         .and_then(|name| name.to_str())
         .context("current Windows executable has no UTF-8 filename")?;
-    let backup =
-        exe_path.with_file_name(format!(".{file_name}.upgrade-old.{}", std::process::id()));
+    let pid = pid();
+    let backup = exe_path.with_file_name(format!(".{file_name}.upgrade-old.{pid}"));
     if backup.exists() {
         bail!(
             "refusing Windows replacement because {} already exists",
             backup.display()
         );
     }
-    retry_windows_sharing_violation(|| fs::rename(exe_path, &backup), std::thread::sleep)
-        .with_context(|| {
-            format!(
-                "moving running executable {} to {}",
-                exe_path.display(),
-                backup.display()
-            )
-        })?;
-    if let Err(replace_error) =
-        retry_windows_sharing_violation(|| fs::rename(new_bin, exe_path), std::thread::sleep)
-    {
-        if let Err(rollback_error) =
-            retry_windows_sharing_violation(|| fs::rename(&backup, exe_path), std::thread::sleep)
-        {
+    let probe = binary_dir.join(format!(".chan.upgrade-probe-bin.{pid}"));
+    if probe.exists() {
+        bail!(
+            "refusing Windows replacement because {} already exists",
+            probe.display()
+        );
+    }
+    let mut probe_guard = TempGuard::new(probe.clone());
+    rename(new_bin, &probe).with_context(|| {
+        format!(
+            "moving staged binary {} to probe {}",
+            new_bin.display(),
+            probe.display()
+        )
+    })?;
+    rename(exe_path, &backup).with_context(|| {
+        format!(
+            "moving running executable {} to {}",
+            exe_path.display(),
+            backup.display()
+        )
+    })?;
+    if let Err(replace_error) = rename(&probe, exe_path) {
+        if let Err(rollback_error) = rename(&backup, exe_path) {
             bail!(
                 "replacing {} failed ({replace_error}); restoring the previous executable also \
                  failed ({rollback_error}). The previous executable remains at {}",
@@ -1245,13 +1296,8 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
             )
         });
     }
-    if let Err(error) = self_replace::self_delete_at(&backup) {
-        eprintln!(
-            "chan: warning: upgraded successfully but could not schedule removal of {}: {error}",
-            backup.display()
-        );
-    }
-    Ok(())
+    probe_guard.disarm();
+    Ok(backup)
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -1711,6 +1757,98 @@ mod tests {
         assert_eq!(not_found.kind(), io::ErrorKind::NotFound);
         assert_eq!(not_found_calls, 1);
         assert!(not_found_sleeps.is_empty());
+    }
+
+    #[test]
+    fn test_windows_install_replacement_probe_rename_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("chan.exe");
+        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(&new_bin, b"new").unwrap();
+
+        let mut calls: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let backup = install_replacement_with(
+            &new_bin,
+            &exe,
+            &exe,
+            |src, dst| {
+                calls.push((src.to_path_buf(), dst.to_path_buf()));
+                fs::rename(src, dst)
+            },
+            || 123,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&exe).unwrap(), b"new");
+        assert!(!new_bin.exists());
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0, new_bin);
+        assert!(calls[0]
+            .1
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".chan.upgrade-probe-bin."));
+        assert_eq!(calls[1].0, exe);
+        assert_eq!(calls[1].1, backup);
+        assert_eq!(calls[2].0, calls[0].1);
+        assert_eq!(calls[2].1, exe);
+    }
+
+    #[test]
+    fn test_windows_install_replacement_leaves_exe_untouched_when_probe_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("chan.exe");
+        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(&new_bin, b"new").unwrap();
+
+        let mut calls = 0;
+        let error = install_replacement_with(
+            &new_bin,
+            &exe,
+            &exe,
+            |_src, _dst| {
+                calls += 1;
+                Err(io::Error::from_raw_os_error(32))
+            },
+            || 123,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("moving staged binary"));
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn test_windows_install_replacement_rolls_back_on_final_rename_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("chan.exe");
+        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(&new_bin, b"new").unwrap();
+
+        let mut calls = 0;
+        let error = install_replacement_with(
+            &new_bin,
+            &exe,
+            &exe,
+            |src, dst| {
+                calls += 1;
+                if calls == 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    fs::rename(src, dst)
+                }
+            },
+            || 123,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("replacing"));
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
     }
 
     #[test]
