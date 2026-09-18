@@ -33,6 +33,10 @@ use std::env;
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(any(test, target_os = "windows"))]
@@ -933,8 +937,29 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
 
     set_executable_mode(&bin_temp)?;
 
+    // On Windows the replacement is not atomic: from the probe rename
+    // until any rollback completes, `exe_path` can be empty. Catch a
+    // Ctrl-C during that window so the process does not exit before the
+    // sequence finishes. On Unix the replacement is one atomic rename,
+    // so no interrupt handling is needed there.
+    #[cfg(target_os = "windows")]
+    let interrupted = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "windows")]
+    let _interrupt_guard = {
+        let interrupted = Arc::clone(&interrupted);
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            interrupted.store(true, Ordering::SeqCst);
+        })
+    };
+
     install_replacement(&bin_temp, &exe_path)?;
     bin_guard.disarm();
+
+    #[cfg(target_os = "windows")]
+    if interrupted.load(Ordering::SeqCst) {
+        eprintln!("chan: interrupted during replacement; the executable path was not left empty");
+    }
     drop(archive_guard);
 
     let _ = write_state(&state_path(), &post_upgrade_state(&target_version));
@@ -1242,6 +1267,10 @@ where
     // The self-replace crate is used only for its delayed, post-exit deletion
     // of the backup; its one-shot replacement helper cannot roll back a
     // failure after it has moved the running executable.
+    //
+    // `run_upgrade` catches Ctrl-C around this sequence on Windows, so an
+    // interrupt cannot terminate the process while `exe_path` is empty and
+    // skip the rollback.
     let binary_dir = exe_path
         .parent()
         .context("current Windows executable has no parent directory")?;
