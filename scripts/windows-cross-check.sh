@@ -64,6 +64,9 @@ SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
 # rust-embed requires both gitignored directories to exist. Create them in the
 # isolated tree the compiler reads, not in the caller's live worktree.
 mkdir -p "$SOURCE_SNAPSHOT/web/dist" "$SOURCE_SNAPSHOT/web-launcher/dist"
+# Tauri emits target-specific ACL schemas under gen/schemas during test builds.
+# Keep tracked source read-only while allowing that isolated generated directory.
+mkdir -p "$SOURCE_SNAPSHOT/desktop/src-tauri/gen"
 # The Windows Tauri config embeds the release CLI as a resource. The
 # cross-check compiles desktop tests without building a package, so it needs a
 # placeholder at the configured source path for the build script to copy.
@@ -71,10 +74,10 @@ mkdir -p "$SOURCE_SNAPSHOT/target/release"
 install -m 755 /dev/null "$SOURCE_SNAPSHOT/target/release/chan.exe"
 
 GUEST_RUN='set -euo pipefail
-hand_back_target() {
-    chown -R "$HOST_UID:$HOST_GID" "$CARGO_TARGET_DIR" || true
+hand_back_writable_dirs() {
+    chown -R "$HOST_UID:$HOST_GID" "$CARGO_TARGET_DIR" /src/desktop/src-tauri/gen || true
 }
-trap hand_back_target EXIT
+trap hand_back_writable_dirs EXIT
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -103,7 +106,9 @@ echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree sna
 sdme_status=0
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$WINDOWS_CROSS_ROOTFS" -t 180 \
     --storage btrfs --disk "$SDME_BUILD_DISK" \
-    -b "$SOURCE_SNAPSHOT:/src:ro" -b "$CARGO_TARGET_DIR:/cargo-target" \
+    -b "$SOURCE_SNAPSHOT:/src:ro" \
+    -b "$SOURCE_SNAPSHOT/desktop/src-tauri/gen:/src/desktop/src-tauri/gen" \
+    -b "$CARGO_TARGET_DIR:/cargo-target" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
     CARGO_TARGET_DIR=/cargo-target STATUS_FILE="/cargo-target/$STATUS_NAME" \
     /bin/bash -c "$GUEST_RUN" || sdme_status=$?
