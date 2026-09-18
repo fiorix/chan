@@ -64,6 +64,11 @@ SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
 # rust-embed requires both gitignored directories to exist. Create them in the
 # isolated tree the compiler reads, not in the caller's live worktree.
 mkdir -p "$SOURCE_SNAPSHOT/web/dist" "$SOURCE_SNAPSHOT/web-launcher/dist"
+# The Windows Tauri config embeds the release CLI as a resource. The
+# cross-check compiles desktop tests without building a package, so it needs a
+# placeholder at the configured source path for the build script to copy.
+mkdir -p "$SOURCE_SNAPSHOT/target/release"
+install -m 755 /dev/null "$SOURCE_SNAPSHOT/target/release/chan.exe"
 
 GUEST_RUN='set -euo pipefail
 hand_back_target() {
@@ -85,6 +90,10 @@ RUSTFLAGS="-D warnings" cargo check --release -p chan --target x86_64-pc-windows
 if [ "$status" -eq 0 ]; then
     RUSTFLAGS="-D warnings" cargo test --release -p chan-library -p chan-server \
         --lib --no-run --target x86_64-pc-windows-gnu || status=$?
+fi
+if [ "$status" -eq 0 ]; then
+    RUSTFLAGS="-D warnings" cargo test --release -p chan-desktop --all-targets \
+        --no-run --target x86_64-pc-windows-gnu || status=$?
 fi
 printf "%s\n" "$status" >"$STATUS_FILE"
 exit 0'

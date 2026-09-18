@@ -1215,7 +1215,9 @@ mod windows_shim {
         impl Drop for UserPathRestore {
             fn drop(&mut self) {
                 if self.active {
-                    let _ = self.restore();
+                    if let Err(error) = self.restore() {
+                        eprintln!("ERROR: restoring HKCU\\Environment Path failed: {error}");
+                    }
                 }
             }
         }
@@ -1226,6 +1228,10 @@ mod windows_shim {
             if std::env::var_os(RUN_REAL_REGISTRY_TEST).as_deref()
                 != Some(std::ffi::OsStr::new("1"))
             {
+                assert!(
+                    std::env::var_os("GITHUB_ACTIONS").is_none(),
+                    "{RUN_REAL_REGISTRY_TEST}=1 is required on GitHub Actions"
+                );
                 eprintln!("SKIP {RUN_REAL_REGISTRY_TEST} is not enabled");
                 return;
             }
