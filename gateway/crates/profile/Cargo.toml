@@ -48,9 +48,10 @@ copyright = "2026, fiorix <fiorix@gmail.com>"
 license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Internal HTTP API in front of Postgres for the chan-gateway suite.
-Holds users, linked OAuth identities and per-user workspace URLs. Called
-only by sibling gateway services (identity, devserver-proxy); not exposed
-publicly. Ships as a single static binary."""
+Holds users, linked OAuth identities, devservers and their sharing grants,
+feature flags and the auth audit log. Called only by identity-service and
+the chan-gateway-admin CLI; not exposed publicly. Ships as a single static
+binary."""
 section = "net"
 priority = "optional"
 # profile's systemd unit Requires the migration unit and binary shipped by the

@@ -1,13 +1,13 @@
 //! Devserver registry sweeper.
 //!
-//! Identity mints one `devservers` row per PAT (the devserver id is
-//! the SHA-256 of the raw token) and nothing deletes them: PAT
-//! rotation strands the old row forever, so the dashboard lists every
-//! devserver ever registered. The sweeper keeps the registry honest:
-//! each tick stamps `last_seen_at` on the rows that are live right now
-//! (devserver-control's aggregate tunnel snapshot) and deletes rows
-//! offline longer than the configured retention, where offline age is
-//! `now() - COALESCE(last_seen_at, created_at)`.
+//! Identity registers one `devservers` row per tunnel-scope PAT (the
+//! devserver id is the SHA-256 of the raw token), and revoking or
+//! rotating a PAT deletes nothing, so without a sweep the dashboard
+//! would list every devserver ever registered. The sweeper keeps the
+//! registry honest: each tick stamps `last_seen_at` on the rows that
+//! are live right now (devserver-control's aggregate tunnel snapshot)
+//! and deletes rows offline longer than the configured retention,
+//! where offline age is `now() - COALESCE(last_seen_at, created_at)`.
 //!
 //! Fail-safe rule (load-bearing, test-pinned): a tick that cannot
 //! fetch the live-tunnel snapshot marks and deletes NOTHING. Marking
