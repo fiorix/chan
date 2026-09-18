@@ -1693,6 +1693,16 @@ mod tests {
     }
 
     #[test]
+    fn test_staged_binary_path_is_in_binary_dir() {
+        let dir = PathBuf::from("/some/binary/dir");
+        let path = staged_binary_path(&dir, 12345);
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".chan.upgrade-bin."));
+        assert!(name.ends_with("12345"));
+    }
+
+    #[test]
     fn test_windows_sharing_violation_retry_succeeds_when_violation_clears() {
         let mut calls = 0;
         let mut sleeps = Vec::new();
