@@ -19,12 +19,7 @@
 //! must be removed through the exact session-revocation settlement path before
 //! its parent becomes eligible. A swept devserver that redials announces its display name in the
 //! tunnel `Hello`, and identity's validate exchange recreates the row
-//! with that label on the spot. A client that announces no name shows
-//! up live-unlabeled on the owner's dashboard (the live list comes
-//! from devserver-control's aggregate) until the next grant create
-//! recreates its row. The owner's own entry and open flow never break:
-//! owner-side access checks never read the
-//! `devservers` table.
+//! with that label on the spot. A client that announces no name shows up live-unlabeled on the owner's dashboard (the live list comes from devserver-control's aggregate); a grant create recreates its row but leaves it unlabeled, and only a later dial that announces a name labels it. The owner's own entry and open flow never break: owner-side access checks never read the `devservers` table.
 //!
 //! Fleet coverage: the snapshot is devserver-control's cluster-wide
 //! aggregate, so registrations on every connected proxy count as live.

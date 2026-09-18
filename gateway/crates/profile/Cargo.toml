@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Internal HTTP API for the chan-gateway user/identity/workspace store, devserver admission policy, sharing grants, feature flags, and auth audit."
+description = "Internal HTTP API for the chan-gateway user, identity, devserver and sharing-grant store, devserver admission policy, feature flags, and auth audit."
 
 [[bin]]
 name = "profile-service"
@@ -49,7 +49,7 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Internal HTTP API in front of Postgres for the chan-gateway suite.
 Holds users, linked OAuth identities, devservers and their sharing grants,
-feature flags and the auth audit log. Called only by identity-service and
+devserver admission policy, feature flags and the auth audit log. Called only by identity-service and
 the chan-gateway-admin CLI; not exposed publicly. Ships as a single static
 binary."""
 section = "net"
