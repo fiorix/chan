@@ -1272,14 +1272,15 @@ impl GraphView {
     /// single transaction. If any insert fails, the transaction
     /// rolls back and the graph stays in its previous state.
     ///
-    /// This replaces the prior `clear()` + per-file `replace_file()`
-    /// loop in `Workspace::reindex`, which left the graph half-populated
-    /// when a per-file write errored mid-rebuild. Callers that want
-    /// progress reporting per-file should still use that loop for
-    /// non-transactional incremental updates; reindex specifically
-    /// trades streaming for atomicity because the next caller (the
-    /// server's auto-rebuild trigger) keys off "is the graph empty?"
-    /// and a half-populated rebuild lies about its state.
+    /// One transaction matters because `clear()` followed by per-file
+    /// `replace_file()` calls (one transaction each, the path for
+    /// incremental updates) leaves the graph half-populated when a
+    /// write errors partway. The server's boot-time check requests a
+    /// full rebuild when the graph is empty, and a half-populated
+    /// graph is not empty. `Workspace::reindex` does not call this: it
+    /// stages each Markdown file (`stage_file`, one commit per file,
+    /// so a crashed rebuild resumes) and swaps the staged tables in
+    /// with one transaction (`swap_staging_with_text_files`).
     pub fn replace_all(&self, entries: &[FileGraph<'_>]) -> Result<()> {
         tracing::debug!(files = entries.len(), "graph::replace_all");
         let conn = self.writer.lock().unwrap();

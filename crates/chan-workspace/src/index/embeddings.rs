@@ -1,8 +1,7 @@
-// candle-backed embedder. Replaces the previous fastembed + ort
-// stack with a pure-Rust transformer runtime so release builds are
-// a single static binary on every platform: no prebuilt
-// onnxruntime download at build time, no `libwebgpu_dawn.dylib`
-// next to the binary at runtime, and no rpath / install_name_tool
+// candle-backed embedder. candle is a pure-Rust transformer
+// runtime, so the embedder ships no native runtime of its own: no
+// prebuilt download at build time, no shared library next to the
+// binary at runtime, and no rpath / install_name_tool
 // post-processing.
 //
 // Backends (CPU is the default; GPU is opt-in via CHAN_ENABLE_GPU=1):

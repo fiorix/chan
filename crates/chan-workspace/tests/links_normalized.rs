@@ -1,7 +1,9 @@
 // End-to-end: workspace-rooted (`/images/x`) and parent-relative
 // (`../images/x`) markdown links resolve to the same backlink target
-// as bare workspace-relative paths after `reindex`. Regresses the
-// "0 backlinks on an embedded image" symptom.
+// as bare workspace-relative paths after `reindex`. Backlinks are
+// looked up by the stored target, so a link stored in its raw href
+// form would leave an embedded image with no backlink from that
+// page.
 
 use chan_workspace::Library;
 use tempfile::TempDir;
