@@ -177,7 +177,16 @@ pub use ws::ws_upgrade;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::extract::{Query, State};
     use axum::http::header;
+    use axum::Json;
+    use tempfile::TempDir;
+
+    use crate::state::AppState;
 
     #[tokio::test]
     async fn blocking_response_maps_a_panicked_task_to_a_labelled_500() {
@@ -201,5 +210,151 @@ mod tests {
             body.starts_with("probe task panicked: "),
             "unexpected body: {body:?}"
         );
+    }
+
+    /// Poll `future` with every blocking task it spawns cancelled before it
+    /// runs.
+    ///
+    /// The runtime entered around each poll has shut its blocking pool down,
+    /// and tokio shuts a task spawned into such a pool down instead of queueing
+    /// it, so the route's `spawn_blocking` resolves to a cancelled `JoinError`.
+    /// `run_blocking` answers a cancelled task and a panicked one the same way,
+    /// so this reaches the route's join-error arm with no seam in the route.
+    /// Only the route's own polls see the shut-down runtime; the test's runtime
+    /// keeps driving every other task.
+    async fn with_blocking_tasks_cancelled<F: Future>(future: F) -> F::Output {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let shut_down = runtime.handle().clone();
+        runtime.shutdown_background();
+        let mut future = std::pin::pin!(future);
+        let route = std::future::poll_fn(move |cx| {
+            let _entered = shut_down.enter();
+            future.as_mut().poll(cx)
+        });
+        tokio::time::timeout(Duration::from_secs(5), route)
+            .await
+            .expect("the route did not answer with its blocking task cancelled")
+    }
+
+    /// The status, content type and body text of `response`.
+    async fn response_parts(response: Response) -> (StatusCode, String, String) {
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            content_type,
+            String::from_utf8(body.to_vec()).unwrap(),
+        )
+    }
+
+    /// True when `text` is how a cancelled task's `JoinError` displays.
+    fn is_cancelled_task(text: &str) -> bool {
+        text.strip_prefix("task ")
+            .and_then(|rest| rest.strip_suffix(" was cancelled"))
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// Assert `response` is the text/plain 500 a failed blocking task gets,
+    /// naming `label` and the cancelled task.
+    async fn assert_blocking_task_failed(response: Response, label: &str) {
+        let (status, content_type, body) = response_parts(response).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(content_type, "text/plain; charset=utf-8", "{body}");
+        assert!(
+            body.strip_prefix(&format!("{label} task panicked: "))
+                .is_some_and(is_cancelled_task),
+            "{body}"
+        );
+    }
+
+    /// State for a served workspace: a workspace cell with its indexer.
+    fn served_state() -> (TempDir, TempDir, Arc<AppState>) {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let state = crate::state::test_support::workspace_app_state(
+            lib,
+            root.path().to_path_buf(),
+            workspace,
+        );
+        (cfg, root, Arc::new(state))
+    }
+
+    // Each pin drives one route to its join-error arm and checks the whole
+    // answer: a 500, text/plain, the route's label, then the task's
+    // `JoinError`. The routes include `run_blocking` arms, one whose label is
+    // a parameter, and a `blocking_response` caller.
+
+    #[tokio::test]
+    async fn preflight_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_preflight(State(state))).await;
+        assert_blocking_task_failed(response, "preflight").await;
+    }
+
+    #[tokio::test]
+    async fn list_files_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_list_files(
+            State(state),
+            Query(files::ListFilesQuery { dir: None }),
+        ))
+        .await;
+        assert_blocking_task_failed(response, "list files").await;
+    }
+
+    #[tokio::test]
+    async fn reports_state_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_reports_state(State(state))).await;
+        assert_blocking_task_failed(response, "reports state").await;
+    }
+
+    #[tokio::test]
+    async fn excluded_dirs_put_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_excluded_dirs_put(
+            State(state),
+            Json(serde_json::from_value(serde_json::json!({ "workspace": ["vendor"] })).unwrap()),
+        ))
+        .await;
+        assert_blocking_task_failed(response, "excluded directories").await;
+    }
+
+    #[tokio::test]
+    async fn storage_reset_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_storage_reset(
+            State(state),
+            Json(serde_json::from_value(serde_json::json!({ "mode": "workspace" })).unwrap()),
+        ))
+        .await;
+        assert_blocking_task_failed(response, "reset").await;
+    }
+
+    #[tokio::test]
+    async fn workspace_info_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_get_workspace(State(state))).await;
+        assert_blocking_task_failed(response, "workspace info").await;
+    }
+
+    #[tokio::test]
+    async fn list_windows_join_error_body() {
+        let (_cfg, _root, state) = served_state();
+        let response = with_blocking_tasks_cancelled(api_list_windows(State(state))).await;
+        assert_blocking_task_failed(response, "list windows").await;
     }
 }
