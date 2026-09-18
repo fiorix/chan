@@ -777,10 +777,15 @@ DS_DISPLAY_NAME="e2e-box"
 spawn_devserver() { # spawn_devserver <name> <port> <pat> <tunnel-url>
     local name="$1" port="$2" pat="$3" turl="$4"
     mkdir -p "$WORK/home-$name"
+    # Tunnel-mode devservers now default to not binding the loopback
+    # listener (17f8b83f7), but the upload/extension scenarios need the
+    # mutable launcher surface. CHAN_DEVSERVER_LISTEN=1 restores the
+    # bind without affecting tunnel routing.
     spawn "ds-$name" env \
         CHAN_HOME="$WORK/home-$name" \
         CHAN_TUNNEL_TOKEN="$pat" \
         SSL_CERT_FILE="$TLS_DIR/ca.crt" \
+        CHAN_DEVSERVER_LISTEN=1 \
         "$CHAN_BIN" devserver run --service=none \
         --bind 127.0.0.1 --port "$port" \
         --tunnel-url="$turl" \
@@ -1192,6 +1197,12 @@ frag_get() { # frag_get <url> <key> -> percent-decoded value
         "$1" "$2"
 }
 
+query_get() { # query_get <url> <key> -> percent-decoded value
+    node -e 'const [u,k]=process.argv.slice(1);const q=new URL(u).searchParams;
+        const v=q.get(k);console.log(v===null?"":decodeURIComponent(v.replace(/\+/g," ")))' \
+        "$1" "$2"
+}
+
 roster_row() { # roster_row <roster-json> <dsid> -> "owner online"
     printf %s "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
         const id=process.argv[1];
@@ -1200,13 +1211,23 @@ roster_row() { # roster_row <roster-json> <dsid> -> "owner online"
         "$2"
 }
 
-AUTH_PATH="/desktop/authorize?redirect_uri=chan%3A%2F%2Fauth%2Fcallback&state=e2e-nonce&label=chan-desktop+%40+e2e&scopes=desktop.account&expires_in=2592000"
+# PKCE for the loopback desktop-authorize flow. The verifier stays in
+# the harness; the challenge rides the authorize query; the browser
+# script captures the loopback callback so the harness can redeem.
+pkce_pair="$(node -e 'const c=require("crypto");const v=c.randomBytes(32).toString("base64url").replace(/=/g,"");const h=c.createHash("sha256").update(v).digest("base64url").replace(/=/g,"");console.log(v+" "+h)')"
+PKCE_VERIFIER="${pkce_pair% *}"
+PKCE_CHALLENGE="${pkce_pair#* }"
+LOOPBACK_PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+REDIRECT_URI="http://127.0.0.1:$LOOPBACK_PORT/auth/callback"
+REDIRECT_URI_ENC="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$REDIRECT_URI")"
+AUTH_PATH="/desktop/authorize?redirect_uri=$REDIRECT_URI_ENC&state=e2e-nonce&label=chan-desktop+%40+e2e&scopes=desktop.account&expires_in=2592000&code_challenge=$PKCE_CHALLENGE&code_challenge_method=S256"
 if [ -x "$CHROME_BIN" ]; then
     # Run from a copy inside the work dir: ESM resolves node_modules
     # (puppeteer-core) relative to the script's own location.
     cp "$REPO/scripts/e2e/gateway-zone-browser.mjs" "$WORK/"
     browser_json="$(CHROME_BIN="$CHROME_BIN" ID_ORIGIN="https://$ID_HOST" \
-        AUTH_PATH="$AUTH_PATH" \
+        AUTH_PATH="$AUTH_PATH" REDIRECT_URI="$REDIRECT_URI" \
+        LOOPBACK_PORT="$LOOPBACK_PORT" \
         node "$WORK/gateway-zone-browser.mjs" 2> "$LOGS/browser.log")" || browser_json=""
     if [ -z "$browser_json" ]; then
         assert_fail "consent: browser run produced no output (see logs/browser.log)"
@@ -1215,35 +1236,42 @@ if [ -x "$CHROME_BIN" ]; then
     # node's inspect form for non-strings).
     radios_n="$(printf %s "$browser_json" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(String(JSON.parse(d).radios.length))}catch{console.log("-1")}})')"
     consent_text="$(printf %s "$browser_json" | json_get consent_text)"
-    handoff="$(printf %s "$browser_json" | json_get handoff_url)"
+    callback_url="$(printf %s "$browser_json" | json_get callback_url)"
     if [ "$radios_n" = "0" ]; then
         assert_pass "consent: account consent renders no devserver picker"
     else
         assert_fail "consent: expected 0 devserver radios, found $radios_n"
     fi
     case "$consent_text" in
-    *"access to your account on this gateway"*)
+    *"account-level access to this gateway"*)
         assert_pass "consent: the account copy renders"
         ;;
     *)
-        assert_fail "consent: account copy missing (see logs/browser.log)"
+        assert_fail "consent: account copy missing (got: ${consent_text:-<empty>}; see logs/browser.log)"
         ;;
     esac
-    if [ -z "$(frag_get "$handoff" devserver_owner)" ] &&
-        [ -z "$(frag_get "$handoff" devserver_id)" ]; then
-        assert_pass "consent: fragment carries no devserver_* keys"
+    if [ -z "$(query_get "$callback_url" devserver_owner)" ] &&
+        [ -z "$(query_get "$callback_url" devserver_id)" ]; then
+        assert_pass "consent: loopback callback carries no devserver_* query keys"
     else
-        assert_fail "consent: unexpected devserver_* keys: $handoff"
+        assert_fail "consent: unexpected devserver_* query keys: $callback_url"
+    fi
+    if [ "$(query_get "$callback_url" state)" = "e2e-nonce" ]; then
+        assert_pass "consent: loopback callback echoes the state nonce"
+    else
+        assert_fail "consent: loopback callback state mismatch: $callback_url"
     fi
 
     # Redeem the one-time code: 200 exactly once, 410 on replay.
-    code="$(frag_get "$handoff" code)"
+    code="$(query_get "$callback_url" code)"
     redeem1="$(curl -sS -o "$WORK/redeem.json" -w '%{http_code}' \
         -X POST "http://127.0.0.1:$ID_INNER_PORT/desktop/authorize/redeem" \
-        -H "content-type: application/json" -d "{\"code\":\"$code\"}")"
+        -H "content-type: application/json" \
+        -d "{\"code\":\"$code\",\"code_verifier\":\"$PKCE_VERIFIER\"}")"
     redeem2="$(curl -sS -o /dev/null -w '%{http_code}' \
         -X POST "http://127.0.0.1:$ID_INNER_PORT/desktop/authorize/redeem" \
-        -H "content-type: application/json" -d "{\"code\":\"$code\"}")"
+        -H "content-type: application/json" \
+        -d "{\"code\":\"$code\",\"code_verifier\":\"$PKCE_VERIFIER\"}")"
     if [ "$redeem1" = "200" ] && [ "$redeem2" = "410" ]; then
         assert_pass "redeem: one-time code answers 200 once, 410 on replay"
     else
@@ -1906,7 +1934,11 @@ scenario_upload() {
     # the tunnel. Registration is idempotent, so an aborted earlier run
     # cannot strand this step.
     local ws_dir add_body prefix ws_id
-    ws_dir="$WORK/upload-ws"
+    # Use a fresh directory per run so a persisted workspace from an
+    # aborted earlier run does not carry a stale root inode: since
+    # 0043b22b6 the workspace fails closed when the directory it opened
+    # is replaced by an rm -rf + mkdir.
+    ws_dir="$WORK/upload-ws-$$"
     rm -rf "$ws_dir"
     mkdir -p "$ws_dir"
     add_body="$(curl_node "$node" "$host" -X POST \
@@ -1931,7 +1963,7 @@ scenario_upload() {
     code="$(curl_node "$node" "$host" -o "$WORK/upload-noheader.txt" -w '%{http_code}' \
         -X POST "https://$host:$PROXY_PORT/$prefix/api/fs/upload" \
         -H "Cookie: $cookies" \
-        -F "file=@$payload" -F "dir=")"
+        -F "dir=" -F "file=@$payload")"
     if [ "$code" = "403" ] && grep -q '^forbidden$' "$WORK/upload-noheader.txt"; then
         assert_pass "upload: POST without the csrf mirror is the proxy's 403 forbidden"
     else
@@ -1944,7 +1976,7 @@ scenario_upload() {
     code="$(curl_node "$node" "$host" -o "$WORK/upload-ok.json" -w '%{http_code}' \
         -X POST "https://$host:$PROXY_PORT/$prefix/api/fs/upload" \
         -H "Cookie: $cookies" -H "x-chan-csrf: $csrf" \
-        -F "file=@$payload" -F "dir=")"
+        -F "dir=" -F "file=@$payload")"
     uploaded_path="$(json_get path < "$WORK/upload-ok.json")"
     if [ "$code" = "200" ] && [ -n "$uploaded_path" ]; then
         assert_pass "upload: csrf-mirrored multipart POST answers 200 ($uploaded_path)"
