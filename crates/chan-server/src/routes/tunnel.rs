@@ -34,6 +34,10 @@ use tokio::sync::mpsc;
 
 use crate::WorkspaceHost;
 
+/// A close flushes an in-flight frame first, so a peer that stopped reading
+/// must not retain the adapter forever.
+const HALF_CLOSE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Deserialize)]
 pub(super) struct TunnelControlQuery {
     tunnel: String,
@@ -210,13 +214,16 @@ fn half_close_outbound_message(chunk: Vec<u8>) -> Message {
     }
 }
 
-fn half_close_inbound_chunk(message: Message) -> Result<Option<Vec<u8>>, ()> {
+fn half_close_inbound_chunk(message: Message) -> Option<Vec<u8>> {
     match message {
-        Message::Binary(bytes) if bytes.len() > MAX_DATA_FRAME_BYTES => Err(()),
-        Message::Binary(bytes) if !bytes.is_empty() => Ok(Some(bytes.to_vec())),
-        Message::Text(text) if text == HALF_CLOSE_MARKER => Ok(Some(Vec::new())),
-        _ => Ok(None),
+        Message::Binary(bytes) if !bytes.is_empty() => Some(bytes.to_vec()),
+        Message::Text(text) if text == HALF_CLOSE_MARKER => Some(Vec::new()),
+        _ => None,
     }
+}
+
+async fn close_half_close<T>(close: impl std::future::Future<Output = T>) {
+    let _ = tokio::time::timeout(HALF_CLOSE_CLOSE_TIMEOUT, close).await;
 }
 
 /// Move negotiated data and directional end markers over the WebSocket.
@@ -226,7 +233,8 @@ fn half_close_inbound_chunk(message: Message) -> Result<Option<Vec<u8>>, ()> {
 /// discarded while the stream remains polled for transport closure until the
 /// outbound direction ends. Before that marker, inbound channel backpressure
 /// can pause stream polling. Oversized Binary frames end the leg in either
-/// state.
+/// state. Every completed exit that recovers the sink makes exactly one
+/// bounded close attempt.
 async fn shuttle_half_close(
     socket: WebSocket,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
@@ -279,13 +287,12 @@ async fn shuttle_half_close(
             }
             inbound = stream.next() => match inbound {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Binary(bytes))) if bytes.len() > MAX_DATA_FRAME_BYTES => break,
                 Some(Ok(message)) => {
-                    let chunk = match half_close_inbound_chunk(message) {
-                        Ok(Some(chunk)) => chunk,
-                        Ok(None) => continue,
-                        Err(()) => break,
-                    };
                     let Some(tx) = in_tx.as_ref() else {
+                        continue;
+                    };
+                    let Some(chunk) = half_close_inbound_chunk(message) else {
                         continue;
                     };
                     let ended = chunk.is_empty();
@@ -309,7 +316,7 @@ async fn shuttle_half_close(
             }
         }
     };
-    let _ = sink.close().await;
+    close_half_close(sink.close()).await;
 }
 
 #[cfg(test)]
@@ -407,15 +414,25 @@ mod tests {
         );
         assert_eq!(
             half_close_inbound_chunk(Message::text(HALF_CLOSE_MARKER)),
-            Ok(Some(Vec::new()))
+            Some(Vec::new())
         );
         assert_eq!(
             half_close_inbound_chunk(Message::text("future-control")),
-            Ok(None)
+            None
         );
         assert_eq!(
             half_close_inbound_chunk(Message::Binary(b"bytes".to_vec().into())),
-            Ok(Some(b"bytes".to_vec()))
+            Some(b"bytes".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_peer_cannot_hold_a_half_close_close_forever() {
+        tokio::time::timeout(
+            HALF_CLOSE_CLOSE_TIMEOUT + std::time::Duration::from_secs(1),
+            close_half_close(std::future::pending::<()>()),
+        )
+        .await
+        .expect("bounded close returns before its caller's deadline");
     }
 }
