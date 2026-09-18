@@ -207,10 +207,14 @@ where
 /// Drive a single client's h2 connection through accept,
 /// validate, handshake, register, and tunnel-driver lifecycle.
 ///
-/// The bearer and the request head that carried it are locals of
-/// `register_tunnel`, so they are dropped when it returns, before the
-/// tunnel driver starts; the driver runs for the tunnel's whole life
-/// without them.
+/// The request head is dropped as soon as the bearer is read from it
+/// (`request.into_body()` inside `register_tunnel`). The bearer is a
+/// local of `register_tunnel` and is dropped when that function
+/// returns, unless the Hello carries a name. Then the detached
+/// announcement task owns it until `announce_devserver_name` returns,
+/// which can be after the tunnel driver starts. `RegisteredTunnel`
+/// carries no bearer and `run_tunnel` takes no bearer argument, so the
+/// driver never holds either.
 async fn handle_tunnel_conn(
     tcp: TcpStream,
     peer: SocketAddr,
