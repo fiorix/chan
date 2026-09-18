@@ -2513,6 +2513,9 @@ mod tests {
             } => {
                 assert_eq!(p.done, 120, "file-based embed progress, not chunk count");
                 assert_eq!(p.total, 512);
+                // The flush keeps the file the preceding tick reported, not
+                // its own summary label.
+                assert_eq!(p.file.as_deref(), Some("notes/note-120.md"));
             }
             other => panic!("expected Idle+embedding after EmbedBatch, got {other:?}"),
         }
