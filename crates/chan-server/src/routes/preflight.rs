@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(stalled_snap.phase, Phase::NeedsDecision);
         assert!(
             stalled_snap.locked,
-            "a pass that converges nowhere still holds the boot: the decision is the only escape"
+            "a pass that converges nowhere must hold the boot, not unlock as recovery in progress"
         );
     }
 
@@ -754,10 +754,10 @@ mod tests {
         let decision = index
             .decision
             .as_ref()
-            .expect("a stalled recovery must offer the escape");
+            .expect("a stalled recovery must carry a decision");
         assert!(
             decision.choices.iter().any(|choice| choice.id == "rebuild"),
-            "the escape is a rebuild: {:?}",
+            "the decision offers a rebuild: {:?}",
             decision.choices
         );
     }
@@ -785,7 +785,46 @@ mod tests {
         );
         let index = snap.steps.iter().find(|step| step.id == "index").unwrap();
         assert_eq!(index.state, StepState::Pending);
-        assert!(index.decision.is_none(), "the stall's escape hatch is gone");
+        assert!(
+            index.decision.is_none(),
+            "the stall's decision is gone once a driver is installed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_served_workspace_is_never_reported_as_stalled() {
+        // The route reads its workspace from the cell, and the cell's indexer
+        // installed the workspace's recovery driver when it spawned. The same
+        // pass that `a_stalled_recovery_is_reported_and_offers_a_way_out`
+        // parks on a bare workspace has a claimant here, so the route never
+        // offers the stall decision.
+        let (cfg, root, ws) = workspace();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            lib,
+            root.path().to_path_buf(),
+            ws.clone(),
+        ));
+        ws.request_recovery(chan_workspace::RecoveryAction::Reconcile);
+        assert!(
+            !ws.recovery_is_unowned(),
+            "a served workspace's pass must have a claimant: {:?}",
+            ws.recovery_status()
+        );
+
+        let response = api_preflight(State(state)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let index = snapshot["steps"]
+            .as_array()
+            .and_then(|steps| steps.iter().find(|step| step["id"] == "index"))
+            .expect("the snapshot carries an index step");
+        assert_ne!(index["state"], "needs_decision", "{snapshot}");
+        assert!(index.get("decision").is_none(), "{snapshot}");
     }
 
     #[test]
