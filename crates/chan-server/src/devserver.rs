@@ -1214,9 +1214,12 @@ impl DevserverState {
                 // window. Otherwise a mount may publish between the two reads
                 // and be mistaken for an out-of-band close.
                 let mounted = mounted_snapshot();
-                // Preserve the prior out-of-band control-socket semantics:
-                // remove means absence; close advances a settled mounted row
-                // to a newer desired-off intent. A Starting row is deliberately
+                // Reflect removes and closes made over the control socket,
+                // which act on the host and bypass this map. A workspace
+                // absent from the library drops its row (a Starting row and
+                // a Forgotten tombstone stay); a Mounted row whose prefix
+                // the host does not serve was closed out of band and turns
+                // off at a newer generation. A Starting row is deliberately
                 // not mistaken for an out-of-band close.
                 map.retain(|_, record| {
                     registered.contains(&canonical_root(&record.root))
@@ -3916,7 +3919,8 @@ mod tests {
         assert_eq!(resolve_boot_token(&mut old, now), BootToken::RotatedByAge);
         assert_ne!(old.devserver_token, "stale");
         assert_eq!(old.token_minted_at, now);
-        // Unknown mint time (every pre-rotation config): rotated once.
+        // Unknown mint time (`0`, which a config without the field also
+        // loads as): rotated once.
         let mut unknown = PersistedConfig {
             devserver_token: "pre-fix".into(),
             token_minted_at: 0,

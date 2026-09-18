@@ -565,9 +565,9 @@ fn is_image_path(rel: &str) -> bool {
 /// pointing at any on-disk file (LICENSE, .rs source, .sh, ...)
 /// resolves to that real file instead of synthesizing a ghost.
 ///
-/// Returns an empty set on `list_tree` failure so callers degrade to
-/// the previous graph-files-only behaviour instead of failing the
-/// request.
+/// Returns an empty set when the walk fails, so callers still answer
+/// the request with the indexed graph files alone as the resolver's
+/// universe instead of failing it.
 fn workspace_disk_files(
     workspace: &chan_workspace::Workspace,
 ) -> std::collections::BTreeSet<String> {
@@ -1295,20 +1295,18 @@ fn merge_language_layer(
 ) -> chan_workspace::Result<()> {
     // The workspace-graph language layer emits Language -> File
     // edges directly so the language lens (1-hop BFS in GraphPanel)
-    // splays out to EVERY file of that language. The prior shape
-    // went through `build_language_graph`, which aggregates files
-    // into per-directory edges with a depth-bounded top-N rank --
-    // fine for the /api/graph/languages overview surface but it had
-    // the workspace lens showing only the top dir per language
-    // (clicking a language surfaced a single directory out of
-    // many). The Workspace
-    // filesystem layer already emits each file as a node + the
-    // contains-edges that anchor it to the spine, so per-file
+    // splays out to EVERY file of that language. It does not go
+    // through `build_language_graph`, which aggregates files into
+    // per-directory edges with a depth-bounded top-N rank: the
+    // lens's 1-hop neighbours would then be directories (only the
+    // top-ranked ones under a depth) rather than files. The
+    // Workspace filesystem layer already emits each file as a node
+    // + the contains-edges that anchor it to the spine, so per-file
     // language edges plug straight into the rendered graph.
     //
-    // /api/graph/languages keeps using `build_language_graph`
-    // for the overview's directory rollup (with `?depth=N`
-    // ranking); only the workspace lens path moves.
+    // /api/graph/languages uses `build_language_graph` for the
+    // overview's directory rollup (with `?depth=N` ranking); only
+    // the workspace lens takes this per-file path.
     //
     // The file-NODE set comes from the unified tree
     // layer (the full File Browser namespace), and the language
@@ -2345,7 +2343,8 @@ mod tests {
 
         // referenced_disk_files trigger: disk_files contains LICENSE,
         // graph_file_set does not, and it is not an image. api_graph emits a
-        // File { missing: false } node for it instead of the previous ghost.
+        // File { missing: false } node for it rather than dropping the link
+        // as unresolved.
         assert!(disk.contains("LICENSE"));
         assert!(!graph_file_set.contains("LICENSE"));
         assert!(!is_image_path("LICENSE"));
@@ -3034,10 +3033,10 @@ mod tests {
         // The workspace-graph language layer must emit one
         // Language -> File edge per file of the language so the
         // GraphPanel lens (1-hop BFS seeded on `language:<lang>`)
-        // renders the bubble plus every file. The prior shape went
-        // via `build_language_graph` which collapsed files into
-        // top-N per-directory edges, which left the language lens
-        // showing a single directory instead of every file.
+        // renders the bubble plus every file. Edges from
+        // `build_language_graph` collapse files into top-N
+        // per-directory edges, which would leave the language lens
+        // showing directories instead of every file.
         let (_cfg, root, workspace) = open_workspace();
         put(root.path(), "notes/intro.md", b"# Intro\n");
         put(root.path(), "notes/deep/sub.md", b"# Sub\n");
@@ -3066,9 +3065,9 @@ mod tests {
 
         // Every markdown file appears as a 1-hop neighbour of the
         // Markdown language bubble, regardless of which directory
-        // it lives in. The prior implementation kept only the
-        // top-N directory edges per the `depth` parameter; the
-        // workspace lens is now decoupled from that ranking.
+        // it lives in: the workspace lens does not apply the
+        // top-N directory ranking that `build_language_graph`
+        // takes from the `depth` parameter.
         assert!(markdown_targets.contains("notes/intro.md"));
         assert!(markdown_targets.contains("notes/deep/sub.md"));
         assert!(markdown_targets.contains("docs/readme.md"));

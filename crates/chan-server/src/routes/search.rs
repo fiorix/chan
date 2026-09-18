@@ -490,10 +490,10 @@ fn build_indexing_state(
     //
     // - `embedding_sweep`: the background embed phase. The indexer commits
     //   BM25 then flips to `Idle { embedding: Some(..) }` and re-embeds for
-    //   the rest of the (minutes-long) pass. It now stamps the draining file
+    //   the rest of the (minutes-long) pass. It stamps the draining file
     //   onto the chip, so `current_file` is usually a real path (matched
-    //   per-entry above -> one dir pulses) and only `None` between batch
-    //   flushes. The broad sweep is the fallback for those gaps.
+    //   per-entry above -> one dir pulses). The broad sweep is the
+    //   fallback when the chip carries no file or one no entry matches.
     //
     // - `current_file.is_some()`: the foreground build emits `Building.file`
     //   as a real workspace-relative path during `GraphRebuild` / `IndexFile`
