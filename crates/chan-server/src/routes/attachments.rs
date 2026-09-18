@@ -21,6 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::util::{slugify_for_filename, split_filename};
@@ -121,7 +122,7 @@ pub async fn api_post_attachment(
     // Reserve suppression before publication so the watcher cannot race
     // the write's attribution. Failed attempts cancel their reservation.
     let self_writes = Arc::clone(&state.self_writes);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("attachment write", move || {
         let join_filename = |name: &str| -> String {
             if dir.is_empty() {
                 name.to_owned()
@@ -172,13 +173,7 @@ pub async fn api_post_attachment(
     let rel = match result {
         Ok(Ok(rel)) => rel,
         Ok(Err(e)) => return err_from(&e),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("attachment write task panicked: {e}"),
-            )
-                .into_response();
-        }
+        Err(failed) => return failed.into_response(),
     };
     Json(serde_json::json!({ "path": rel })).into_response()
 }

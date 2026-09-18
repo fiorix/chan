@@ -53,6 +53,7 @@ use chan_workspace::contacts::{
 };
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +82,7 @@ pub async fn api_get_contacts(
         Err(error) => return err_state(&error),
     };
     let needle = q.q;
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("contacts list", move || {
         let needle = needle.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let rows = match workspace.contacts_filtered(needle, q.limit) {
             Ok(v) => v,
@@ -110,14 +111,6 @@ pub async fn api_get_contacts(
         Json(out).into_response()
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("contacts list task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 pub async fn api_post_contacts_import(
@@ -239,8 +232,9 @@ pub async fn api_post_contacts_import(
     };
     let import_workspace = workspace.clone();
     let self_writes = Arc::clone(&state.self_writes);
-    let summary =
-        match tokio::task::spawn_blocking(move || -> Result<ImportSummary, Box<Response>> {
+    let summary = match run_blocking(
+        "contacts import",
+        move || -> Result<ImportSummary, Box<Response>> {
             let contacts = match parse_google_csv(bytes.as_slice()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -262,19 +256,14 @@ pub async fn api_post_contacts_import(
                 }
             }
             Ok(summary)
-        })
-        .await
-        {
-            Ok(Ok(summary)) => summary,
-            Ok(Err(response)) => return *response,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("contacts import task panicked: {e}"),
-                )
-                    .into_response()
-            }
-        };
+        },
+    )
+    .await
+    {
+        Ok(Ok(summary)) => summary,
+        Ok(Err(response)) => return *response,
+        Err(failed) => return failed.into_response(),
+    };
 
     // Collect imported paths for an immediate index pass; without the
     // inline index call the watcher's 1 s debounce leaves a visible lag

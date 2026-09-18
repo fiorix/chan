@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{FileClass, PathClass, ReportFileStats, ReportLanguageStats, ReportTotals};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -76,16 +76,14 @@ pub async fn api_inspector(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || build_inspector_payload(&workspace, &params.path))
-        .await
+    match run_blocking("inspector", move || {
+        build_inspector_payload(&workspace, &params.path)
+    })
+    .await
     {
         Ok(Ok(payload)) => Json(payload).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("inspector task panicked: {e}"),
-        )
-            .into_response(),
+        Err(failed) => failed.into_response(),
     }
 }
 

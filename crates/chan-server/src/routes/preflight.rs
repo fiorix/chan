@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_state};
 use crate::indexer::IndexStatus;
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -359,14 +360,13 @@ pub async fn api_preflight(State(state): State<Arc<AppState>>) -> Response {
     };
     // Semantic reads hit sqlite + the model resolver touches the filesystem,
     // so do the whole derivation on the blocking pool.
-    match tokio::task::spawn_blocking(move || settled_snapshot(&workspace, &indexer.snapshot()))
-        .await
+    match run_blocking("preflight", move || {
+        settled_snapshot(&workspace, &indexer.snapshot())
+    })
+    .await
     {
         Ok(snapshot) => Json(snapshot).into_response(),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("preflight task panicked: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -414,14 +414,13 @@ async fn index_decision(state: &Arc<AppState>, choice: &str) -> Response {
         Err(response) => return *response,
     };
     indexer.request_rebuild();
-    match tokio::task::spawn_blocking(move || settled_snapshot(&workspace, &indexer.snapshot()))
-        .await
+    match run_blocking("preflight decision", move || {
+        settled_snapshot(&workspace, &indexer.snapshot())
+    })
+    .await
     {
         Ok(snapshot) => Json(snapshot).into_response(),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("preflight decision task panicked: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -440,48 +439,48 @@ async fn model_decision(state: &Arc<AppState>, choice: &str) -> Response {
     // The blocking closure carries its error as `Box<Response>` so the
     // `Result` Err variant stays pointer-sized (an axum `Response` is
     // large; clippy::result_large_err otherwise fires under -D warnings).
-    match tokio::task::spawn_blocking(move || -> Result<PreflightSnapshot, Box<Response>> {
-        use chan_workspace::index::embeddings::{global_models_dir, Embedder};
-        match choice.as_str() {
-            "download" => {
-                let model = workspace
-                    .semantic_model()
-                    .map_err(|e| Box::new(crate::error::err_from(&e)))?;
-                let cache_dir = global_models_dir();
-                if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+    match run_blocking(
+        "preflight decision",
+        move || -> Result<PreflightSnapshot, Box<Response>> {
+            use chan_workspace::index::embeddings::{global_models_dir, Embedder};
+            match choice.as_str() {
+                "download" => {
+                    let model = workspace
+                        .semantic_model()
+                        .map_err(|e| Box::new(crate::error::err_from(&e)))?;
+                    let cache_dir = global_models_dir();
+                    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+                        return Err(Box::new(err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("creating model cache {}: {e}", cache_dir.display()),
+                        )));
+                    }
+                    if let Err(e) = Embedder::open(&model, &cache_dir).map(|_| ()) {
+                        let chan_err: chan_workspace::ChanError =
+                            chan_workspace::index::IndexError::Embed(e).into();
+                        return Err(Box::new(crate::error::err_from(&chan_err)));
+                    }
+                }
+                "skip" => {
+                    workspace
+                        .set_semantic_enabled(false)
+                        .map_err(|e| Box::new(crate::error::err_from(&e)))?;
+                }
+                other => {
                     return Err(Box::new(err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("creating model cache {}: {e}", cache_dir.display()),
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown choice {other:?} for pre-flight step \"model\""),
                     )));
                 }
-                if let Err(e) = Embedder::open(&model, &cache_dir).map(|_| ()) {
-                    let chan_err: chan_workspace::ChanError =
-                        chan_workspace::index::IndexError::Embed(e).into();
-                    return Err(Box::new(crate::error::err_from(&chan_err)));
-                }
             }
-            "skip" => {
-                workspace
-                    .set_semantic_enabled(false)
-                    .map_err(|e| Box::new(crate::error::err_from(&e)))?;
-            }
-            other => {
-                return Err(Box::new(err(
-                    StatusCode::BAD_REQUEST,
-                    format!("unknown choice {other:?} for pre-flight step \"model\""),
-                )));
-            }
-        }
-        Ok(settled_snapshot(&workspace, &indexer.snapshot()))
-    })
+            Ok(settled_snapshot(&workspace, &indexer.snapshot()))
+        },
+    )
     .await
     {
         Ok(Ok(snapshot)) => Json(snapshot).into_response(),
         Ok(Err(response)) => *response,
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("preflight decision task panicked: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 

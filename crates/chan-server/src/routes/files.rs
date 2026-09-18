@@ -17,6 +17,7 @@ use chan_workspace::{AtomicWriteKind, BoundedFileReader, FileStat};
 use crate::collab_sessions::{HttpReplaceOutcome, HttpWriteView};
 use crate::doc_sessions::{flush_session, DocSession};
 use crate::error::{err, err_from, err_state};
+use crate::routes::run_blocking;
 use crate::scene_sessions::scene::SceneError;
 use crate::scene_sessions::{flush_session as flush_scene_session, SceneSession};
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
@@ -123,12 +124,12 @@ pub async fn api_list_files(
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
     };
-    let result = tokio::task::spawn_blocking(move || list_files_sync(&workspace, query)).await;
+    let result = run_blocking("list files", move || list_files_sync(&workspace, query)).await;
 
     match result {
         Ok(Ok(out)) => Json(out).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -1251,14 +1252,14 @@ async fn binary_stream_response(
     attachment: bool,
 ) -> Response {
     let plan_path = path.clone();
-    let plan = tokio::task::spawn_blocking(move || {
+    let plan = run_blocking("binary read", move || {
         binary_plan_sync(&workspace, &plan_path, range_header.as_deref())
     })
     .await;
     let plan = match plan {
         Ok(Ok(plan)) => plan,
         Ok(Err(e)) => return err_from(&e),
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
     stream_binary_plan(&path, plan, attachment, None)
 }
@@ -1375,8 +1376,10 @@ pub async fn api_read_file(
 
     let read_workspace = workspace.clone();
     let path_for_read = path.clone();
-    let result =
-        tokio::task::spawn_blocking(move || read_file_sync(&read_workspace, &path_for_read)).await;
+    let result = run_blocking("read file", move || {
+        read_file_sync(&read_workspace, &path_for_read)
+    })
+    .await;
 
     match result {
         Ok(Ok(ReadFileResult::Text {
@@ -1407,7 +1410,7 @@ pub async fn api_read_file(
             ),
         ),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -1566,7 +1569,7 @@ async fn read_via_session(
     // keep them off the async worker like every other read path.
     let ws = workspace.clone();
     let rel = path.to_string();
-    let meta = tokio::task::spawn_blocking(move || {
+    let meta = run_blocking("read file metadata", move || {
         (
             path_class_for_wire(&ws, &rel),
             workspace_path_writable(&ws, &rel),
@@ -1575,7 +1578,7 @@ async fn read_via_session(
     .await;
     let (path_class, writable) = match meta {
         Ok(meta) => meta,
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
     if query_flag(&query.stream) {
         // Meta + ONE chunk + Done: the authority text is already in
@@ -2253,11 +2256,11 @@ pub async fn api_create_file(
     // watcher's echo is suppressed without racing the await; see
     // api_write_file for the full rationale.
     state.self_writes.note(&path);
-    let result = tokio::task::spawn_blocking(move || create_file_sync(&workspace, body)).await;
+    let result = run_blocking("create file", move || create_file_sync(&workspace, body)).await;
     match result {
         Ok(Ok(())) => StatusCode::CREATED.into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -5289,10 +5292,10 @@ pub async fn api_delete_file(
     // external-edit/removal event).
     state.self_writes.note(&path);
     let path_for_remove = path.clone();
-    match tokio::task::spawn_blocking(move || workspace.remove(&path_for_remove)).await {
+    match run_blocking("delete file", move || workspace.remove(&path_for_remove)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -5324,7 +5327,7 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     state.self_writes.note(&body.from);
     state.self_writes.note(&body.to);
     let self_writes = Arc::clone(&state.self_writes);
-    let outcome = match tokio::task::spawn_blocking(move || {
+    let outcome = match run_blocking("move", move || {
         let outcome = workspace.rename_with_link_rewrite(&from, &to)?;
         for path in &outcome.rewritten {
             self_writes.note(path);
@@ -5335,7 +5338,7 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return err_from(&e),
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
     Json(MoveResponse {
         renamed: outcome.renamed,
@@ -5457,15 +5460,13 @@ pub async fn api_fs_transfer(
             }
         }
         TransferOp::Move => {
-            match tokio::task::spawn_blocking(move || {
+            match run_blocking("transfer", move || {
                 fs_transfer_batch_sync(&workspace, &self_writes, op, &dest_dir, &sources, None)
             })
             .await
             {
                 Ok(result) => result,
-                Err(join) => {
-                    return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string());
-                }
+                Err(failed) => return failed.into_response(),
             }
         }
     };

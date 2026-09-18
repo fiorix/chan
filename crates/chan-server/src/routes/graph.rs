@@ -120,7 +120,7 @@ pub async fn api_link_targets(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(move || api_link_targets_sync(workspace, p), "link targets").await
+    blocking_response("link targets", move || api_link_targets_sync(workspace, p)).await
 }
 
 fn api_link_targets_sync(
@@ -153,13 +153,12 @@ pub async fn api_resolve_link(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || match workspace.resolve_link(&p.target) {
+    blocking_response("resolve link", move || {
+        match workspace.resolve_link(&p.target) {
             Some(resolved) => Json(resolved).into_response(),
             None => StatusCode::NOT_FOUND.into_response(),
-        },
-        "resolve link",
-    )
+        }
+    })
     .await
 }
 
@@ -171,19 +170,16 @@ pub async fn api_headings(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || {
-            let graph = match workspace.graph() {
-                Ok(g) => g,
-                Err(e) => return err_from(&e),
-            };
-            match graph.headings_of(&path) {
-                Ok(headings) => Json(headings).into_response(),
-                Err(e) => err_from(&e),
-            }
-        },
-        "headings",
-    )
+    blocking_response("headings", move || {
+        let graph = match workspace.graph() {
+            Ok(g) => g,
+            Err(e) => return err_from(&e),
+        };
+        match graph.headings_of(&path) {
+            Ok(headings) => Json(headings).into_response(),
+            Err(e) => err_from(&e),
+        }
+    })
     .await
 }
 
@@ -208,29 +204,24 @@ pub async fn api_links(State(state): State<Arc<AppState>>) -> Response {
     if workspace.is_reindexing() {
         return Json(Vec::<chan_workspace::Edge>::new()).into_response();
     }
-    blocking_response(
-        move || {
-            let graph = match workspace.graph() {
-                Ok(g) => g,
+    blocking_response("links", move || {
+        let graph = match workspace.graph() {
+            Ok(g) => g,
+            Err(e) => return err_from(&e),
+        };
+        let files = match graph.files() {
+            Ok(f) => f,
+            Err(e) => return err_from(&e),
+        };
+        let mut edges = Vec::new();
+        for f in &files {
+            match graph.neighbors(f) {
+                Ok(es) => edges.extend(es.into_iter().filter(|e| matches!(e.kind, EdgeKind::Link))),
                 Err(e) => return err_from(&e),
-            };
-            let files = match graph.files() {
-                Ok(f) => f,
-                Err(e) => return err_from(&e),
-            };
-            let mut edges = Vec::new();
-            for f in &files {
-                match graph.neighbors(f) {
-                    Ok(es) => {
-                        edges.extend(es.into_iter().filter(|e| matches!(e.kind, EdgeKind::Link)))
-                    }
-                    Err(e) => return err_from(&e),
-                }
             }
-            Json(edges).into_response()
-        },
-        "links",
-    )
+        }
+        Json(edges).into_response()
+    })
     .await
 }
 
@@ -1400,23 +1391,20 @@ pub async fn api_language_graph(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || {
-            let report = match workspace.report() {
-                Ok(r) => r,
+    blocking_response("language graph", move || {
+        let report = match workspace.report() {
+            Ok(r) => r,
+            Err(e) => return err_from(&e),
+        };
+        let mut graph = build_language_graph(&report.files, p.depth, p.language.as_deref());
+        if let Some(language) = p.language.as_deref() {
+            match language_detail_scoped(&workspace, &report.files, language) {
+                Ok(detail) => graph.detail = Some(detail),
                 Err(e) => return err_from(&e),
-            };
-            let mut graph = build_language_graph(&report.files, p.depth, p.language.as_deref());
-            if let Some(language) = p.language.as_deref() {
-                match language_detail_scoped(&workspace, &report.files, language) {
-                    Ok(detail) => graph.detail = Some(detail),
-                    Err(e) => return err_from(&e),
-                }
             }
-            Json(graph).into_response()
-        },
-        "language graph",
-    )
+        }
+        Json(graph).into_response()
+    })
     .await
 }
 
@@ -1450,7 +1438,7 @@ pub async fn api_graph(
     if stream {
         return stream_graph_response(workspace, params).await;
     }
-    blocking_response(move || api_graph_sync(workspace, params), "graph").await
+    blocking_response("graph", move || api_graph_sync(workspace, params)).await
 }
 
 /// Empty NDJSON graph stream (`meta` + `done`, no nodes/edges) returned
@@ -1962,7 +1950,7 @@ pub async fn api_backlinks(
     if stream {
         return stream_backlinks_response(workspace, path).await;
     }
-    blocking_response(move || api_backlinks_sync(workspace, path), "backlinks").await
+    blocking_response("backlinks", move || api_backlinks_sync(workspace, path)).await
 }
 
 /// Empty NDJSON backlinks stream (`meta` + `done`) returned while the

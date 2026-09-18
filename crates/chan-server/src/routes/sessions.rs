@@ -105,12 +105,12 @@ pub async fn api_get_session(
         // store (control / desktop-local terminals). `app` picks the namespace.
         if let Some(dir) = standalone_blob_dir(&state, q.app) {
             return blocking_response(
+                "get terminal session",
                 move || match crate::terminal_blob::get(&dir, &key) {
                     Ok(Some(bytes)) => raw_json_response(bytes),
                     Ok(None) => StatusCode::NO_CONTENT.into_response(),
                     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
                 },
-                "get terminal session",
             )
             .await;
         }
@@ -119,17 +119,14 @@ pub async fn api_get_session(
             None => StatusCode::NO_CONTENT.into_response(),
         };
     };
-    blocking_response(
-        move || match workspace.get_session(&key) {
-            Ok(Some(bytes)) => raw_json_response(bytes),
-            // 204 NO_CONTENT, not 404: "no session yet" is the normal
-            // first-launch state. transport.ts treats an empty 2xx body
-            // as `undefined`; the api wrapper coerces that to `null`.
-            Ok(None) => StatusCode::NO_CONTENT.into_response(),
-            Err(e) => err_from(&e),
-        },
-        "get session",
-    )
+    blocking_response("get session", move || match workspace.get_session(&key) {
+        Ok(Some(bytes)) => raw_json_response(bytes),
+        // 204 NO_CONTENT, not 404: "no session yet" is the normal
+        // first-launch state. transport.ts treats an empty 2xx body
+        // as `undefined`; the api wrapper coerces that to `null`.
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_from(&e),
+    })
     .await
 }
 
@@ -159,24 +156,23 @@ async fn put_session_response(
     let Ok(workspace) = state.try_workspace() else {
         if let Some(dir) = standalone_blob_dir(state, app) {
             return blocking_response(
+                "put terminal session",
                 move || match crate::terminal_blob::put(&dir, &key, &body) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
                     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
                 },
-                "put terminal session",
             )
             .await;
         }
         ephemeral_map_lock(state, app).insert(key, body.to_vec());
         return StatusCode::NO_CONTENT.into_response();
     };
-    blocking_response(
-        move || match workspace.put_session(&key, &body) {
+    blocking_response("put session", move || {
+        match workspace.put_session(&key, &body) {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => err_from(&e),
-        },
-        "put session",
-    )
+        }
+    })
     .await
 }
 
@@ -218,25 +214,23 @@ async fn delete_session_response(
     }
     let Ok(workspace) = state.try_workspace() else {
         if let Some(dir) = standalone_blob_dir(state, app) {
-            return blocking_response(
-                move || match crate::terminal_blob::delete(&dir, &key) {
+            return blocking_response("delete terminal session", move || {
+                match crate::terminal_blob::delete(&dir, &key) {
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
                     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-                },
-                "delete terminal session",
-            )
+                }
+            })
             .await;
         }
         ephemeral_map_lock(state, app).remove(&key);
         return StatusCode::NO_CONTENT.into_response();
     };
-    blocking_response(
-        move || match workspace.delete_session(&key) {
+    blocking_response("delete session", move || {
+        match workspace.delete_session(&key) {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => err_from(&e),
-        },
-        "delete session",
-    )
+        }
+    })
     .await
 }
 
@@ -246,25 +240,21 @@ pub async fn api_list_sessions(
 ) -> Response {
     let Ok(workspace) = state.try_workspace() else {
         if let Some(dir) = standalone_blob_dir(&state, q.app) {
-            return blocking_response(
-                move || match crate::terminal_blob::list(&dir) {
+            return blocking_response("list terminal sessions", move || {
+                match crate::terminal_blob::list(&dir) {
                     Ok(keys) => Json(keys).into_response(),
                     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-                },
-                "list terminal sessions",
-            )
+                }
+            })
             .await;
         }
         let keys: Vec<String> = ephemeral_map_lock(&state, q.app).keys().cloned().collect();
         return Json(keys).into_response();
     };
-    blocking_response(
-        move || match workspace.list_sessions() {
-            Ok(keys) => Json(keys).into_response(),
-            Err(e) => err_from(&e),
-        },
-        "list sessions",
-    )
+    blocking_response("list sessions", move || match workspace.list_sessions() {
+        Ok(keys) => Json(keys).into_response(),
+        Err(e) => err_from(&e),
+    })
     .await
 }
 

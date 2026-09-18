@@ -22,6 +22,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 pub(crate) const NEW_DRAFT_CONTENT: &str = "# Draft\n";
@@ -174,7 +175,7 @@ pub async fn api_create_draft(
     // the await, so the watcher's Created event for our own draft is
     // suppressed without the post-await race (see files.rs::api_write_file).
     let self_writes = Arc::clone(&state.self_writes);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("create draft", move || {
         let name = create_draft_sync(&workspace, seed)?;
         self_writes.note(&format!("{}/{name}/draft.md", workspace.drafts_dir_name()));
         Ok::<_, chan_workspace::ChanError>((name, workspace.drafts_dir_name().to_string()))
@@ -184,7 +185,7 @@ pub async fn api_create_draft(
     let (name, dir) = match result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return err_from(&e),
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
 
     let path = format!("{dir}/{name}/draft.md");
@@ -204,7 +205,7 @@ pub async fn api_create_diagram(State(state): State<Arc<AppState>>) -> Response 
     // to the await, so the watcher's Created event for our own write is
     // suppressed without the post-await race (see files.rs::api_write_file).
     let self_writes = Arc::clone(&state.self_writes);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("create diagram", move || {
         let (name, path) = create_diagram_sync(&workspace)?;
         self_writes.note(&path);
         Ok::<_, chan_workspace::ChanError>((name, path))
@@ -214,7 +215,7 @@ pub async fn api_create_diagram(State(state): State<Arc<AppState>>) -> Response 
     let (name, path) = match result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return err_from(&e),
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
 
     Json(DraftCreateResponse { path, name }).into_response()
@@ -277,13 +278,15 @@ pub async fn api_inspect_draft(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result =
-        tokio::task::spawn_blocking(move || inspect_draft_sync(&workspace, &payload.path)).await;
+    let result = run_blocking("inspect draft", move || {
+        inspect_draft_sync(&workspace, &payload.path)
+    })
+    .await;
 
     match result {
         Ok(Ok(out)) => Json(out).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -299,13 +302,15 @@ pub async fn api_discard_draft(
     // Suppress the watcher's Removed event before the blocking discard
     // (see files.rs::api_write_file).
     state.self_writes.note(&path);
-    let result =
-        tokio::task::spawn_blocking(move || discard_draft_sync(&workspace, &payload.path)).await;
+    let result = run_blocking("discard draft", move || {
+        discard_draft_sync(&workspace, &payload.path)
+    })
+    .await;
 
     match result {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -323,7 +328,7 @@ pub async fn api_promote_draft(
     // the blocking promote (see files.rs::api_write_file).
     state.self_writes.note(&source_path);
     state.self_writes.note(&target_path);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("promote draft", move || {
         promote_draft_sync(&workspace, &payload.path, &payload.target)
     })
     .await;
@@ -331,7 +336,7 @@ pub async fn api_promote_draft(
     match result {
         Ok(Ok(out)) => Json(out).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 

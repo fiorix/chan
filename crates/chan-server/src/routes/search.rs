@@ -98,13 +98,12 @@ pub async fn api_search_files(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || match filename_recovery(&workspace, &p.q, p.limit) {
+    blocking_response("file search", move || {
+        match filename_recovery(&workspace, &p.q, p.limit) {
             Ok(hits) => Json(hits).into_response(),
             Err(error) => err_from(&error),
-        },
-        "file search",
-    )
+        }
+    })
     .await
 }
 
@@ -186,56 +185,53 @@ async fn search_content_with_mode_resolver(
         + 'static,
 ) -> Response {
     let response_limit = normalized_content_limit(p.limit);
-    blocking_response(
-        move || {
-            // Effective mode reads disk-backed configuration. Resolve it with
-            // readiness and search in this one blocking operation.
-            let (mode, readiness) = match resolve_mode(&workspace) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return err_from(&error),
-            };
-            if !readiness.is_ready() || p.q.trim().is_empty() {
-                return Json(ContentSearchResponse {
-                    ready: readiness.is_ready(),
-                    readiness,
-                    mode: mode.label(),
-                    hits: Vec::new(),
-                })
-                .into_response();
-            }
-            let opts = SearchOpts {
-                mode,
-                limit: expanded_content_candidate_limit(response_limit),
-                scope: p.scope,
-            };
-            let results = match workspace.search(&p.q, &opts) {
-                Ok(r) => r,
-                Err(e) => return err_from(&e),
-            };
-            let hits = collapse_hits_by_file(
-                results.hits.into_iter().map(ContentHit::from),
-                response_limit,
-            );
-            let readiness = workspace.readiness();
-            if !readiness.is_ready() {
-                return Json(ContentSearchResponse {
-                    ready: false,
-                    readiness,
-                    mode: results.mode,
-                    hits: Vec::new(),
-                })
-                .into_response();
-            }
-            Json(ContentSearchResponse {
-                ready: results.ready,
+    blocking_response("content search", move || {
+        // Effective mode reads disk-backed configuration. Resolve it with
+        // readiness and search in this one blocking operation.
+        let (mode, readiness) = match resolve_mode(&workspace) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return err_from(&error),
+        };
+        if !readiness.is_ready() || p.q.trim().is_empty() {
+            return Json(ContentSearchResponse {
+                ready: readiness.is_ready(),
+                readiness,
+                mode: mode.label(),
+                hits: Vec::new(),
+            })
+            .into_response();
+        }
+        let opts = SearchOpts {
+            mode,
+            limit: expanded_content_candidate_limit(response_limit),
+            scope: p.scope,
+        };
+        let results = match workspace.search(&p.q, &opts) {
+            Ok(r) => r,
+            Err(e) => return err_from(&e),
+        };
+        let hits = collapse_hits_by_file(
+            results.hits.into_iter().map(ContentHit::from),
+            response_limit,
+        );
+        let readiness = workspace.readiness();
+        if !readiness.is_ready() {
+            return Json(ContentSearchResponse {
+                ready: false,
                 readiness,
                 mode: results.mode,
-                hits,
+                hits: Vec::new(),
             })
-            .into_response()
-        },
-        "content search",
-    )
+            .into_response();
+        }
+        Json(ContentSearchResponse {
+            ready: results.ready,
+            readiness,
+            mode: results.mode,
+            hits,
+        })
+        .into_response()
+    })
     .await
 }
 
@@ -256,13 +252,12 @@ pub async fn api_search_workspace(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || match workspace.workspace_search(&request) {
+    blocking_response("workspace search", move || {
+        match workspace.workspace_search(&request) {
             Ok(result) => Json(result).into_response(),
             Err(error) => err_from(&error),
-        },
-        "workspace search",
-    )
+        }
+    })
     .await
 }
 
@@ -389,31 +384,27 @@ pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response 
     let embed_sweep = is_embedding_sweep(&status);
     let current_file = current_index_file(status);
     let readiness = workspace.readiness();
-    blocking_response(
-        move || {
-            let entries =
-                match fs_ops::list_tree_filtered(workspace.root(), workspace.walk_filter()) {
-                    Ok(entries) => entries,
-                    Err(e) => return err_from(&e),
-                };
-            let indexed_paths = match workspace.indexed_paths() {
-                Ok(paths) => paths.into_iter().collect::<BTreeSet<_>>(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "indexing-state: failed to snapshot indexed paths");
-                    BTreeSet::new()
-                }
-            };
-            Json(build_indexing_state(
-                &entries,
-                &indexed_paths,
-                current_file.as_deref(),
-                embed_sweep,
-                readiness,
-            ))
-            .into_response()
-        },
-        "indexing state",
-    )
+    blocking_response("indexing state", move || {
+        let entries = match fs_ops::list_tree_filtered(workspace.root(), workspace.walk_filter()) {
+            Ok(entries) => entries,
+            Err(e) => return err_from(&e),
+        };
+        let indexed_paths = match workspace.indexed_paths() {
+            Ok(paths) => paths.into_iter().collect::<BTreeSet<_>>(),
+            Err(e) => {
+                tracing::warn!(error = %e, "indexing-state: failed to snapshot indexed paths");
+                BTreeSet::new()
+            }
+        };
+        Json(build_indexing_state(
+            &entries,
+            &indexed_paths,
+            current_file.as_deref(),
+            embed_sweep,
+            readiness,
+        ))
+        .into_response()
+    })
     .await
 }
 

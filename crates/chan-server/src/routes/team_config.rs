@@ -31,6 +31,7 @@ use chan_workspace::{Member, TeamConfig};
 use serde::Deserialize;
 
 use crate::error::{err, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 /// `POST /api/team-config/read` body. `dir` is workspace-relative.
@@ -185,11 +186,14 @@ pub async fn api_team_config_read(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || read_team_config(&workspace, &dir)).await;
+    let result = run_blocking("read team config", move || {
+        read_team_config(&workspace, &dir)
+    })
+    .await;
     match result {
         Ok(Ok(config)) => Json(config).into_response(),
         Ok(Err(msg)) => err(StatusCode::BAD_REQUEST, msg),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -211,14 +215,14 @@ pub async fn api_team_config_write(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("write team config", move || {
         write_team_config(&workspace, &dir, &config, brief.as_deref())
     })
     .await;
     match result {
         Ok(Ok(())) => Json(serde_json::json!({})).into_response(),
         Ok(Err(msg)) => err(StatusCode::BAD_REQUEST, msg),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 

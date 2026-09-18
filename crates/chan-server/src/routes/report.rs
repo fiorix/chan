@@ -167,19 +167,16 @@ pub async fn api_report_file(
     if query_flag(&p.stream) {
         return stream_report_file_response(workspace, p.path).await;
     }
-    blocking_response(
-        move || {
-            let report = match workspace.report_for_files(std::slice::from_ref(&p.path)) {
-                Ok(r) => r,
-                Err(e) => return err_from(&e),
-            };
-            match report.files.into_iter().find(|f| f.path == p.path) {
-                Some(stats) => Json(stats).into_response(),
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
-        },
-        "report file",
-    )
+    blocking_response("report file", move || {
+        let report = match workspace.report_for_files(std::slice::from_ref(&p.path)) {
+            Ok(r) => r,
+            Err(e) => return err_from(&e),
+        };
+        match report.files.into_iter().find(|f| f.path == p.path) {
+            Some(stats) => Json(stats).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    })
     .await
 }
 
@@ -235,25 +232,22 @@ pub async fn api_report_prefix(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || {
-            let report = match if p.path.is_empty() {
-                workspace.report()
-            } else {
-                workspace.report_for_prefix(&p.path)
-            } {
-                Ok(r) => r,
-                Err(e) => return err_from(&e),
-            };
-            Json(PrefixReport {
-                totals: report.totals,
-                by_language: report.by_language,
-                cocomo: report.cocomo,
-            })
-            .into_response()
-        },
-        "report prefix",
-    )
+    blocking_response("report prefix", move || {
+        let report = match if p.path.is_empty() {
+            workspace.report()
+        } else {
+            workspace.report_for_prefix(&p.path)
+        } {
+            Ok(r) => r,
+            Err(e) => return err_from(&e),
+        };
+        Json(PrefixReport {
+            totals: report.totals,
+            by_language: report.by_language,
+            cocomo: report.cocomo,
+        })
+        .into_response()
+    })
     .await
 }
 
@@ -269,22 +263,19 @@ pub async fn api_report_dir(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    blocking_response(
-        move || {
-            let report = match workspace.report_for_dir(&p.path) {
-                Ok(Some(r)) => r,
-                Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-                Err(e) => return err_from(&e),
-            };
-            Json(PrefixReport {
-                totals: report.totals,
-                by_language: report.by_language,
-                cocomo: report.cocomo,
-            })
-            .into_response()
-        },
-        "report dir",
-    )
+    blocking_response("report dir", move || {
+        let report = match workspace.report_for_dir(&p.path) {
+            Ok(Some(r)) => r,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => return err_from(&e),
+        };
+        Json(PrefixReport {
+            totals: report.totals,
+            by_language: report.by_language,
+            cocomo: report.cocomo,
+        })
+        .into_response()
+    })
     .await
 }
 

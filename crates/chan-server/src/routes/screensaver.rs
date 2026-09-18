@@ -27,6 +27,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 const MIN_TIMEOUT_SECS: u32 = 10;
@@ -72,11 +73,14 @@ pub async fn api_screensaver_state(State(state): State<Arc<AppState>>) -> Respon
 }
 
 async fn screensaver_state_response(workspace: Arc<chan_workspace::Workspace>) -> Response {
-    let result = tokio::task::spawn_blocking(move || screensaver_state_sync(&workspace)).await;
+    let result = run_blocking("screensaver state", move || {
+        screensaver_state_sync(&workspace)
+    })
+    .await;
     match result {
         Ok(Ok(state)) => Json(state).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -117,7 +121,8 @@ pub async fn api_screensaver_patch(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(
+    let result = run_blocking(
+        "patch screensaver",
         move || -> Result<ScreensaverState, chan_workspace::ChanError> {
             let config = workspace.update_screensaver(
                 payload.enabled,
@@ -131,7 +136,7 @@ pub async fn api_screensaver_patch(
     match result {
         Ok(Ok(state)) => Json(state).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -152,7 +157,7 @@ pub async fn api_screensaver_set_pin(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("set screensaver pin", move || {
         workspace.set_screensaver_pin_hash(Some(bytes))?;
         screensaver_state_sync(&workspace)
     })
@@ -160,7 +165,7 @@ pub async fn api_screensaver_set_pin(
     match result {
         Ok(Ok(state)) => Json(state).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -170,7 +175,7 @@ pub async fn api_screensaver_clear_pin(State(state): State<Arc<AppState>>) -> Re
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("clear screensaver pin", move || {
         workspace.set_screensaver_pin_hash(None)?;
         screensaver_state_sync(&workspace)
     })
@@ -178,7 +183,7 @@ pub async fn api_screensaver_clear_pin(State(state): State<Arc<AppState>>) -> Re
     match result {
         Ok(Ok(state)) => Json(state).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -199,7 +204,7 @@ pub async fn api_screensaver_verify(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("verify screensaver pin", move || {
         let stored = workspace.screensaver_pin_hash()?;
         let verified = match stored {
             // Constant-time compare to avoid leaking PIN length /
@@ -218,7 +223,7 @@ pub async fn api_screensaver_verify(
     match result {
         Ok(Ok(verified)) => Json(VerifyResult { verified }).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 

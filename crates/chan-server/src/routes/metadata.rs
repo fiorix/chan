@@ -20,6 +20,7 @@ use chan_workspace::{
 use crate::bus::{make_progress_broadcast, make_watch_bridge};
 use crate::error::{err, err_from};
 use crate::indexer::Indexer;
+use crate::routes::run_blocking;
 use crate::state::{AppState, WorkspaceCell};
 use crate::terminal_sessions::CloseReason;
 
@@ -33,14 +34,15 @@ struct MetadataExportDownload {
 pub async fn api_metadata_export(State(state): State<Arc<AppState>>) -> Response {
     let library = state.library.clone();
     let workspace_root = state.workspace_root.clone();
-    let result =
-        tokio::task::spawn_blocking(move || export_metadata_download(&library, &workspace_root))
-            .await;
+    let result = run_blocking("export metadata", move || {
+        export_metadata_download(&library, &workspace_root)
+    })
+    .await;
 
     match result {
         Ok(Ok(download)) => metadata_download_response(download),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -96,14 +98,14 @@ pub async fn api_metadata_import(
     }
 
     let state_clone = state.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("import metadata", move || {
         perform_metadata_import(&state_clone, bytes, rescan, force_scm)
     })
     .await;
     match result {
         Ok(Ok(report)) => Json(report).into_response(),
         Ok(Err(e)) => err_from_metadata_import(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 

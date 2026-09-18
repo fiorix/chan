@@ -37,6 +37,7 @@ use chan_workspace::index::embeddings::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 
 /// Snapshot of the per-workspace semantic-search state. Settings UI +
@@ -174,14 +175,10 @@ pub async fn api_semantic_state(State(state): State<Arc<AppState>>) -> Response 
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || build_state(&workspace)).await {
+    match run_blocking("semantic state", move || build_state(&workspace)).await {
         Ok(Ok(s)) => Json(s).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("semantic state task panicked: {e}"),
-        )
-            .into_response(),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -191,7 +188,7 @@ pub async fn api_semantic_models(State(state): State<Arc<AppState>>) -> Response
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("semantic models", move || {
         let current_model = match workspace.semantic_model() {
             Ok(model) => model,
             Err(e) => return err_from(&e),
@@ -207,14 +204,6 @@ pub async fn api_semantic_models(State(state): State<Arc<AppState>>) -> Response
         .into_response()
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("semantic models task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// `PATCH /api/index/semantic/model`. Persist the per-workspace model.
@@ -233,7 +222,7 @@ pub async fn api_semantic_model_patch(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("semantic model patch", move || {
         if let Err(e) = workspace.set_semantic_model(&model) {
             return err_from(&e);
         }
@@ -243,14 +232,6 @@ pub async fn api_semantic_model_patch(
         }
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("semantic model patch task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// Structured error payload for the 409 returned by `enable` when
@@ -280,7 +261,7 @@ pub async fn api_semantic_enable(State(state): State<Arc<AppState>>) -> Response
     // explicit rebuild or as files are saved. The cold-boot trigger keys on an
     // empty index, not on this flag.
     let indexer = state.try_indexer().ok();
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("semantic enable", move || {
         let model_name = match workspace.semantic_model() {
             Ok(m) => m,
             Err(e) => return err_from(&e),
@@ -319,14 +300,6 @@ pub async fn api_semantic_enable(State(state): State<Arc<AppState>>) -> Response
         }
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("semantic enable task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// `POST /api/index/semantic/disable`. Flips the workspace to BM25 and bins the
@@ -338,7 +311,7 @@ pub async fn api_semantic_disable(State(state): State<Arc<AppState>>) -> Respons
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("semantic disable", move || {
         if let Err(e) = workspace.set_semantic_enabled(false) {
             return err_from(&e);
         }
@@ -348,14 +321,6 @@ pub async fn api_semantic_disable(State(state): State<Arc<AppState>>) -> Respons
         }
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("semantic disable task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// `POST /api/index/semantic/download`. Synchronously fetches the
@@ -373,7 +338,7 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || {
+    blocking_response("download", move || {
         let model_name = match workspace.semantic_model() {
             Ok(m) => m,
             Err(e) => return err_from(&e),
@@ -401,15 +366,7 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
             Err(e) => err_from(&e),
         }
     })
-    .await;
-    match result {
-        Ok(response) => response,
-        Err(join_err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("download task panicked: {join_err}"),
-        )
-            .into_response(),
-    }
+    .await
 }
 
 #[cfg(test)]

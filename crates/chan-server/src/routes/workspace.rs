@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use super::preferences::{preferences_view, PreferencesView};
 use crate::error::{err, err_state};
+use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -52,14 +53,11 @@ async fn workspace_info_response(state: Arc<AppState>, label: &'static str) -> R
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || workspace_info(&state, &workspace)).await;
+    let result = run_blocking(label, move || workspace_info(&state, &workspace)).await;
     match result {
         Ok(Ok(info)) => Json(info).into_response(),
         Ok(Err(message)) => err(StatusCode::INTERNAL_SERVER_ERROR, message),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -78,13 +76,10 @@ pub async fn api_workspace_bootstrap(State(state): State<Arc<AppState>>) -> Resp
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    match tokio::task::spawn_blocking(move || workspace.bootstrap()).await {
+    match run_blocking("bootstrap", move || workspace.bootstrap()).await {
         Ok(Ok(tree)) => Json(tree).into_response(),
         Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("bootstrap task panicked: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -103,7 +98,7 @@ pub async fn api_cloud_workspaces() -> Response {
     // (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). This tenant
     // serves a grantee terminals too, so the paths show a grantee nothing a
     // shell here could not list.
-    match tokio::task::spawn_blocking(move || {
+    blocking_response("cloud workspaces", move || {
         let out: Vec<CloudDriveJson> = chan_workspace::paths::detected_cloud_drives()
             .into_iter()
             .map(|c| CloudDriveJson {
@@ -115,14 +110,6 @@ pub async fn api_cloud_workspaces() -> Response {
         Json(out).into_response()
     })
     .await
-    {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cloud workspaces task panicked: {e}"),
-        )
-            .into_response(),
-    }
 }
 
 /// Build a `WorkspaceInfo` from current registry state.

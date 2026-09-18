@@ -22,6 +22,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::blocking_response;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -101,7 +102,7 @@ pub async fn api_excluded_dirs_put(
         Ok(w) => w,
         Err(e) => return err_state(&e),
     };
-    blocking_response(move || {
+    blocking_response("excluded directories", move || {
         if let Err(e) = workspace.set_excluded_dirs(dirs) {
             return err_from(&e);
         }
@@ -116,16 +117,6 @@ pub async fn api_excluded_dirs_put(
         }
     })
     .await
-}
-
-async fn blocking_response(f: impl FnOnce() -> Response + Send + 'static) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("excluded directories task failed: {error}"),
-        ),
-    }
 }
 
 #[cfg(test)]

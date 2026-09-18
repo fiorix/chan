@@ -66,21 +66,46 @@ mod ws;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use tokio::task::JoinError;
+
+/// A blocking task that did not return: its closure panicked, or the runtime
+/// cancelled it before it ran. It answers as a text/plain 500 carrying the
+/// route's label.
+pub(crate) struct BlockingTaskFailed {
+    label: &'static str,
+    error: JoinError,
+}
+
+impl IntoResponse for BlockingTaskFailed {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{} task panicked: {}", self.label, self.error),
+        )
+            .into_response()
+    }
+}
+
+/// Runs a closure on the blocking pool and returns its value, or the
+/// [`BlockingTaskFailed`] carrying `label` when the task did not return.
+pub(crate) async fn run_blocking<T: Send + 'static>(
+    label: &'static str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, BlockingTaskFailed> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| BlockingTaskFailed { label, error })
+}
 
 /// Runs a response-producing closure on the blocking pool and maps a panicked
 /// task to a text/plain 500 carrying `label`.
 pub(crate) async fn blocking_response(
-    f: impl FnOnce() -> Response + Send + 'static,
     label: &'static str,
+    f: impl FnOnce() -> Response + Send + 'static,
 ) -> Response {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(response) => response,
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{label} task panicked: {e}"),
-        )
-            .into_response(),
-    }
+    run_blocking(label, f)
+        .await
+        .unwrap_or_else(IntoResponse::into_response)
 }
 
 pub use attachments::api_post_attachment;
@@ -156,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocking_response_maps_a_panicked_task_to_a_labelled_500() {
-        let response = blocking_response(|| panic!("boom"), "probe").await;
+        let response = blocking_response("probe", || panic!("boom")).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let content_type = response
             .headers()

@@ -34,6 +34,7 @@ use serde::Deserialize;
 use chan_shell::GRAPH_LINK_PREFIX;
 
 use crate::error::err;
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 /// Body of `POST /api/open` (Contract C). `window_id` is the submitting
@@ -96,7 +97,7 @@ pub async fn api_open(
     let self_writes = Arc::clone(&state.self_writes);
     let session_registry = Arc::clone(&state.session_registry);
     let events_tx = state.events_tx.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("open", move || {
         crate::control_socket::open_path(
             &workspace,
             &self_writes,
@@ -111,7 +112,7 @@ pub async fn api_open(
     match result {
         Ok(Ok(message)) => ok_message(message),
         Ok(Err(error)) => err(StatusCode::BAD_REQUEST, error),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 

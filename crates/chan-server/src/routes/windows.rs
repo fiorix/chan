@@ -25,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -143,13 +144,9 @@ pub(crate) fn enumerate_windows(state: &AppState) -> Vec<WindowInfo> {
 
 pub async fn api_list_windows(State(state): State<Arc<AppState>>) -> Response {
     // spawn_blocking: `enumerate_windows` does sync disk I/O (`list_sessions`).
-    match tokio::task::spawn_blocking(move || enumerate_windows(&state)).await {
+    match run_blocking("list windows", move || enumerate_windows(&state)).await {
         Ok(rows) => Json(rows).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list windows task panicked: {e}"),
-        )
-            .into_response(),
+        Err(failed) => failed.into_response(),
     }
 }
 

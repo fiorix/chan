@@ -25,6 +25,7 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::error::{err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,11 +40,11 @@ pub async fn api_reports_state(State(state): State<Arc<AppState>>) -> Response {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let result = tokio::task::spawn_blocking(move || workspace.reports_enabled()).await;
+    let result = run_blocking("reports state", move || workspace.reports_enabled()).await;
     match result {
         Ok(Ok(enabled)) => Json(ReportsState { enabled }).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -51,7 +52,7 @@ async fn reports_state_after_set(
     workspace: Arc<chan_workspace::Workspace>,
     enabled: bool,
 ) -> Response {
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("set reports", move || {
         workspace.set_reports_enabled(enabled)?;
         workspace.reports_enabled()
     })
@@ -59,7 +60,7 @@ async fn reports_state_after_set(
     match result {
         Ok(Ok(enabled)) => Json(ReportsState { enabled }).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 

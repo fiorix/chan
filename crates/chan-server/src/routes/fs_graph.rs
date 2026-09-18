@@ -36,6 +36,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 /// Hard cap on `depth` for scope=directory. Ten matches the frontend's
@@ -307,7 +308,7 @@ pub async fn api_fs_graph(
     // batch at a time with a continuation token. Otherwise it uses the
     // whole-scope walk because the depth-cap probe needs that completeness.
     let paged = p.limit.is_some() || p.cursor.is_some();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("filesystem graph", move || {
         if paged {
             build_fs_graph_paged(&workspace, &p)
         } else {
@@ -318,11 +319,7 @@ pub async fn api_fs_graph(
     match result {
         Ok(Ok(response)) => Json(response).into_response(),
         Ok(Err(e)) => err(e.status, e.message),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("filesystem graph task panicked: {e}"),
-        )
-            .into_response(),
+        Err(failed) => failed.into_response(),
     }
 }
 

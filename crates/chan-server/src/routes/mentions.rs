@@ -19,6 +19,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -54,7 +55,8 @@ pub async fn api_get_mentions(
     };
     let q = params.q.clone();
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
-    let result = tokio::task::spawn_blocking(
+    let result = run_blocking(
+        "mentions",
         move || -> Result<Vec<MentionItem>, chan_workspace::ChanError> {
             let graph = workspace.graph()?;
             let mentions = graph.mentions()?;
@@ -80,7 +82,7 @@ pub async fn api_get_mentions(
     match result {
         Ok(Ok(items)) => Json(items).into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err_from(&chan_workspace::ChanError::Io(join.to_string())),
+        Err(failed) => failed.into_response(),
     }
 }
 

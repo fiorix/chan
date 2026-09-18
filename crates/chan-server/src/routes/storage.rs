@@ -19,6 +19,7 @@ use chan_workspace::{ResetMode, ResetReport, Workspace};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
+use crate::routes::run_blocking;
 use crate::state::AppState;
 
 use super::metadata::{
@@ -81,17 +82,14 @@ pub async fn api_storage_reset(
     // and the chan-workspace wipe walks the filesystem; neither belongs
     // on the async runtime's worker thread.
     let state_clone = state.clone();
-    let result = tokio::task::spawn_blocking(move || perform_reset(&state_clone, mode)).await;
+    let result = run_blocking("reset", move || perform_reset(&state_clone, mode)).await;
     match result {
         Ok(Ok(report)) => Json(ResetResponse {
             removed_entries: report.removed_entries,
         })
         .into_response(),
         Ok(Err(e)) => err_from_reset(&e),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("reset task: {e}"),
-        ),
+        Err(failed) => failed.into_response(),
     }
 }
 

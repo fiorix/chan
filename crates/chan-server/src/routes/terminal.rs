@@ -14,6 +14,7 @@ use chan_shell::{PaneSide, ResolvedSubmit, SubmitAgent};
 use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
 
+use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
@@ -389,19 +390,14 @@ pub async fn api_terminal_ws(
         None
     } else if let Ok(workspace) = state.try_workspace() {
         let cwd = query.cwd.clone();
-        let result =
-            tokio::task::spawn_blocking(move || resolve_terminal_cwd(&workspace, cwd.as_deref()))
-                .await;
+        let result = run_blocking("terminal cwd", move || {
+            resolve_terminal_cwd(&workspace, cwd.as_deref())
+        })
+        .await;
         match result {
             Ok(Ok(cwd)) => cwd,
             Ok(Err(message)) => return (StatusCode::BAD_REQUEST, message).into_response(),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("terminal cwd task panicked: {e}"),
-                )
-                    .into_response()
-            }
+            Err(failed) => return failed.into_response(),
         }
     } else if matches!(query.app, Some(crate::app_query::AppQuery::Files)) {
         match state.standalone_files.clone() {
@@ -412,19 +408,13 @@ pub async fn api_terminal_ws(
                 // invalid cwd falls back to the canonical home because the
                 // spawn gesture must always land somewhere sensible.
                 let cwd = query.cwd.clone();
-                let result = tokio::task::spawn_blocking(move || {
+                let result = run_blocking("terminal cwd", move || {
                     resolve_standalone_files_cwd(&files.fs, cwd.as_deref())
                 })
                 .await;
                 match result {
                     Ok(cwd) => Some(cwd),
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("terminal cwd task panicked: {e}"),
-                        )
-                            .into_response()
-                    }
+                    Err(failed) => return failed.into_response(),
                 }
             }
             // No Files state on this tenant: keep the plain drop-cwd

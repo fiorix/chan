@@ -41,6 +41,7 @@ use chan_workspace::{
 
 use crate::bulk_transfer::{BulkCancel, BulkOutcome};
 use crate::error::{err, err_from};
+use crate::routes::run_blocking;
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
 use crate::signal::now_unix_secs;
 use crate::standalone_mutations::MutationTicket;
@@ -193,11 +194,11 @@ pub async fn api_standalone_list_files(
         );
     };
     let fs = files.fs.clone();
-    let result = tokio::task::spawn_blocking(move || standalone_list_sync(&fs, &dir)).await;
+    let result = run_blocking("list files", move || standalone_list_sync(&fs, &dir)).await;
     match result {
         Ok(Ok(out)) => Json(out).into_response(),
         Ok(Err(e)) => standalone_err(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -255,7 +256,7 @@ pub async fn api_standalone_create_file(
     let path = body.path.clone();
     let is_dir = body.is_dir;
     let content = body.content.unwrap_or_default();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("create file", move || {
         if is_dir {
             fs.create_dir(&path)
         } else {
@@ -280,9 +281,9 @@ pub async fn api_standalone_create_file(
             cancel_mutation(&files, ticket);
             standalone_err(&e)
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string())
+            failed.into_response()
         }
     }
 }
@@ -301,7 +302,7 @@ pub async fn api_standalone_delete_file(
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&path));
     let fs = files.fs.clone();
     let remove_path = path.clone();
-    let result = tokio::task::spawn_blocking(move || fs.remove_safe(&remove_path)).await;
+    let result = run_blocking("delete file", move || fs.remove_safe(&remove_path)).await;
     match result {
         Ok(Ok(())) => {
             commit_mutation(
@@ -315,9 +316,9 @@ pub async fn api_standalone_delete_file(
             cancel_mutation(&files, ticket);
             standalone_err(&e)
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string())
+            failed.into_response()
         }
     }
 }
@@ -429,7 +430,7 @@ pub(crate) async fn standalone_read_file(
     }
     let fs = files.fs.clone();
     let read_path = path.clone();
-    let result = tokio::task::spawn_blocking(move || standalone_read_sync(&fs, &read_path)).await;
+    let result = run_blocking("read file", move || standalone_read_sync(&fs, &read_path)).await;
     match result {
         Ok(Ok(StandaloneReadResult::Text {
             content,
@@ -452,14 +453,14 @@ pub(crate) async fn standalone_read_file(
         Ok(Ok(StandaloneReadResult::Binary)) => {
             let fs = files.fs.clone();
             let plan_path = path.clone();
-            let plan = tokio::task::spawn_blocking(move || {
+            let plan = run_blocking("binary read", move || {
                 standalone_binary_plan_sync(&fs, &plan_path, range_header.as_deref())
             })
             .await;
             match plan {
                 Ok(Ok(plan)) => stream_binary_plan(&path, plan, false, None),
                 Ok(Err(e)) => standalone_err(&e),
-                Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+                Err(failed) => failed.into_response(),
             }
         }
         Ok(Ok(StandaloneReadResult::TooLarge { size, limit })) => err(
@@ -469,7 +470,7 @@ pub(crate) async fn standalone_read_file(
             ),
         ),
         Ok(Err(e)) => standalone_err(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -597,7 +598,7 @@ pub async fn api_standalone_write_file(
     // an existing file larger than the editor limit stays shrinkable.
     let budget_fs = files.fs.clone();
     let budget_path = path.clone();
-    let existing_size = match tokio::task::spawn_blocking(move || {
+    let existing_size = match run_blocking("stat file", move || {
         budget_fs
             .stat(&budget_path)
             .ok()
@@ -607,7 +608,7 @@ pub async fn api_standalone_write_file(
     .await
     {
         Ok(size) => size,
-        Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => return failed.into_response(),
     };
     let content = match accumulate_text_body(
         body,
@@ -621,7 +622,7 @@ pub async fn api_standalone_write_file(
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&path));
     let fs = files.fs.clone();
     let write_path = path.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("write file", move || {
         standalone_write_sync(&fs, &write_path, preconditions, &content)
     })
     .await;
@@ -640,9 +641,9 @@ pub async fn api_standalone_write_file(
             cancel_mutation(&files, ticket);
             return standalone_err(&error);
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string());
+            return failed.into_response();
         }
     };
     commit_mutation(
@@ -913,7 +914,7 @@ pub async fn api_standalone_post_attachment(
 
     let w = query.w;
     let task_files = files.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("attachment write", move || {
         let fs = &task_files.fs;
         let build_name = |suffix: Option<u32>| -> String {
             let base = match suffix {
@@ -972,11 +973,7 @@ pub async fn api_standalone_post_attachment(
     match result {
         Ok(Ok(rel)) => Json(serde_json::json!({ "path": rel })).into_response(),
         Ok(Err(e)) => standalone_err(&e),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("attachment write task panicked: {e}"),
-        )
-            .into_response(),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -999,7 +996,7 @@ pub async fn api_standalone_move(
     let fs = files.fs.clone();
     let from = body.from.clone();
     let to = body.to.clone();
-    let result = tokio::task::spawn_blocking(move || fs.move_plain(&from, &to)).await;
+    let result = run_blocking("move", move || fs.move_plain(&from, &to)).await;
     match result {
         Ok(Ok(())) => {
             commit_mutation(
@@ -1024,9 +1021,9 @@ pub async fn api_standalone_move(
             cancel_mutation(&files, ticket);
             standalone_err(&e)
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string())
+            failed.into_response()
         }
     }
 }
@@ -1086,7 +1083,7 @@ pub async fn api_standalone_fs_transfer(
             }
         }
         TransferOp::Move => {
-            match tokio::task::spawn_blocking(move || {
+            match run_blocking("transfer", move || {
                 standalone_transfer_batch_sync(
                     &batch_files,
                     w.as_deref(),
@@ -1099,7 +1096,7 @@ pub async fn api_standalone_fs_transfer(
             .await
             {
                 Ok(result) => result,
-                Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+                Err(failed) => return failed.into_response(),
             }
         }
     };

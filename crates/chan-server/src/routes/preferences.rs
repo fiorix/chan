@@ -24,6 +24,7 @@ use crate::preferences::{
     BubbleOverlayMode, GraphColorPrefs, TerminalColorMode, TerminalColorPrefs,
     EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN,
 };
+use crate::routes::run_blocking;
 use crate::state::AppState;
 use crate::{
     BrowserSidePanes, EditorPrefs, EditorTheme, HybridSurfaceThemes, LineSpacing, PaneWidths,
@@ -353,10 +354,10 @@ pub async fn api_patch_config(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PatchConfigBody>,
 ) -> Response {
-    let result = tokio::task::spawn_blocking(move || patch_config(&state, body)).await;
+    let result = run_blocking("patch config", move || patch_config(&state, body)).await;
     match result {
         Ok(result) => patch_config_response(result),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 

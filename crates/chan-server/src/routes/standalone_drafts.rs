@@ -25,6 +25,7 @@ use axum::Json;
 use chan_workspace::{ChanError, WatchEvent, WatchKind};
 
 use crate::error::{err, err_from};
+use crate::routes::run_blocking;
 use crate::state::{AppState, StandaloneDrafts, StandaloneFilesState};
 
 use super::drafts::{
@@ -88,11 +89,11 @@ async fn create_with_retry(
 ) -> Response {
     for _ in 0..2 {
         let store = drafts.clone();
-        let name = match tokio::task::spawn_blocking(move || store.store.next_untitled_name()).await
+        let name = match run_blocking("draft name", move || store.store.next_untitled_name()).await
         {
             Ok(Ok(name)) => name,
             Ok(Err(e)) => return err_from(&e),
-            Err(join) => return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+            Err(failed) => return failed.into_response(),
         };
         let leaf = primary_leaf(&name);
         let dir_wire = format!("{}/{name}", drafts.wire_root);
@@ -106,7 +107,7 @@ async fn create_with_retry(
         let store = drafts.clone();
         let task_name = name.clone();
         let task_leaf = leaf.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = run_blocking("create draft", move || {
             #[cfg(test)]
             tests::collide_next_name(&store.store, &task_name);
             store.store.create_draft_dir(&task_name)?;
@@ -137,9 +138,9 @@ async fn create_with_retry(
                 cancel_mutation(files, ticket);
                 return err_from(&e);
             }
-            Err(join) => {
+            Err(failed) => {
                 cancel_mutation(files, ticket);
-                return err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string());
+                return failed.into_response();
             }
         }
     }
@@ -210,7 +211,7 @@ pub async fn api_standalone_inspect_draft(
     };
     let store = drafts.clone();
     let task_name = name.clone();
-    let result = tokio::task::spawn_blocking(move || store.store.inspect(&task_name)).await;
+    let result = run_blocking("inspect draft", move || store.store.inspect(&task_name)).await;
     match result {
         Ok(Ok(info)) => Json(DraftInspectResponse {
             path: format!("{}/{name}/draft.md", drafts.wire_root),
@@ -222,7 +223,7 @@ pub async fn api_standalone_inspect_draft(
         })
         .into_response(),
         Ok(Err(e)) => err_from(&e),
-        Err(join) => err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -244,7 +245,7 @@ pub async fn api_standalone_discard_draft(
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&dir_wire));
     let store = drafts.clone();
     let task_name = name.clone();
-    let result = tokio::task::spawn_blocking(move || store.store.discard(&task_name)).await;
+    let result = run_blocking("discard draft", move || store.store.discard(&task_name)).await;
     match result {
         Ok(Ok(())) => {
             commit_mutation(
@@ -262,9 +263,9 @@ pub async fn api_standalone_discard_draft(
             cancel_mutation(&files, ticket);
             err_from(&e)
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string())
+            failed.into_response()
         }
     }
 }
@@ -299,7 +300,7 @@ pub async fn api_standalone_promote_draft(
     let store = drafts.clone();
     let task_name = name.clone();
     let task_rel = target_rel.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = run_blocking("promote draft", move || {
         store.store.promote_to(&task_name, &target_abs, &task_rel)
     })
     .await;
@@ -324,9 +325,9 @@ pub async fn api_standalone_promote_draft(
             cancel_mutation(&files, ticket);
             err_from(&e)
         }
-        Err(join) => {
+        Err(failed) => {
             cancel_mutation(&files, ticket);
-            err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string())
+            failed.into_response()
         }
     }
 }
