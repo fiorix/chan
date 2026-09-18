@@ -48,7 +48,10 @@ async fn run() -> anyhow::Result<()> {
 
     // Validator chain (outermost first):
     //   ThrottlingValidator  per-token-fingerprint rate limit before
-    //                        any round trip to identity-service.
+    //                        each validation round trip to
+    //                        identity-service (tunnel dial and lease
+    //                        refresh); the Hello-name announcement is
+    //                        not throttled here.
     //   IdentityValidator    upstream PAT lookup.
     let identity = IdentityValidator::new(
         cfg.identity_url.clone(),

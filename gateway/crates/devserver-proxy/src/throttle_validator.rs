@@ -1,11 +1,16 @@
-//! Per-token-fingerprint rate limiter for the tunnel handshake.
+//! Per-token-fingerprint rate limiter for the tunnel's PAT
+//! validations, at dial and on lease refresh.
 //!
 //! Why not a per-IP gate: every internal hop behind nginx sees one
 //! peer IP, so a "per-IP" bucket degenerates into a single global
 //! one -- a noisy attacker can lock out legitimate handshakes while
 //! real source-IP diversity stays invisible.
 //!
-//! The brute-force surface is the tunnel handshake. We can't easily
+//! The brute-force surface is the tunnel handshake, but the bucket
+//! meters every validation this wrapper forwards: the dial's, and each
+//! lease refresh's, because the tunnel driver revalidates a refresh
+//! through the same validator. The Hello-name announcement is not
+//! metered (`announce_devserver_name` below). We can't easily
 //! key on the original client IP here (the listener is raw h2, not
 //! axum, and the gateway terminator wraps `chan-tunnel-server` from
 //! chan-core; plumbing X-Forwarded-For into the validator means a
@@ -17,8 +22,9 @@
 //! odds per fresh prefix, so the cap on map size is fine.
 //!
 //! Throttled validates surface as `ServerError::InvalidToken`.
-//! On the wire this is the same 401 an unknown token returns, so
-//! an attacker can't oracle "this fingerprint is rate-limited"
+//! At dial this is the same 401 an unknown token returns, and on a
+//! lease refresh it is the same `Refused` frame an unknown token
+//! gets, so an attacker can't oracle "this fingerprint is rate-limited"
 //! vs "this token is unknown" by response shape. chan-tunnel-client
 //! retries 401 with exponential backoff, so a legit client that
 //! somehow burned its burst recovers on the next attempt once the
