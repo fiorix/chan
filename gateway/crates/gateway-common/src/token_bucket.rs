@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Default refill rate (tokens per second) per fingerprint, shared by
-/// the two validate throttles (devserver-proxy's tunnel handshake and
-/// identity's `/internal/v1/tokens/validate`). The two are documented
+/// the two validate throttles (devserver-proxy's, which meters tunnel
+/// dial validation and lease refresh, and identity's
+/// `/internal/v1/tokens/validate`). The two are documented
 /// defense-in-depth twins; sourcing the limits here keeps them from
 /// drifting apart.
 pub const DEFAULT_REFILL_PER_SEC: f32 = 4.0;
