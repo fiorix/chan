@@ -126,10 +126,15 @@ pub async fn dial_with_tls(
         s
     };
 
+    let mut authorization = http::HeaderValue::try_from(format!("Bearer {}", cfg.token))
+        .map_err(|e| ClientError::Handshake(format!("build request: {e}")))?;
+    // Sensitive: h2 sends it as an HPACK literal never indexed, and its
+    // `Debug` prints `Sensitive` instead of the PAT.
+    authorization.set_sensitive(true);
     let req = http::Request::builder()
         .method(Method::POST)
         .uri(tunnel_url.as_str())
-        .header(http::header::AUTHORIZATION, format!("Bearer {}", cfg.token))
+        .header(http::header::AUTHORIZATION, authorization)
         .body(())
         .map_err(|e| ClientError::Handshake(format!("build request: {e}")))?;
     let (resp_fut, send) = send_req
@@ -441,6 +446,119 @@ mod tests {
         );
         drop(server);
         let _ = dialing.await;
+    }
+
+    /// Read one HPACK integer with a `prefix`-bit prefix (RFC 7541
+    /// section 5.1) off the front of `block`.
+    fn hpack_int(block: &mut &[u8], prefix: u32) -> usize {
+        let mask = (1usize << prefix) - 1;
+        let mut value = usize::from(block[0]) & mask;
+        *block = &block[1..];
+        if value == mask {
+            let mut shift = 0;
+            loop {
+                let byte = block[0];
+                *block = &block[1..];
+                value += usize::from(byte & 0x7f) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+        value
+    }
+
+    /// Skip one HPACK string literal (RFC 7541 section 5.2).
+    fn hpack_skip_string(block: &mut &[u8]) {
+        let len = hpack_int(block, 7);
+        *block = &block[len..];
+    }
+
+    /// Each field of an HPACK header block as its representation (RFC
+    /// 7541 section 6) and the index of its name, 0 for a literal name.
+    /// Strings are skipped, never decoded, so Huffman coding does not
+    /// matter.
+    fn hpack_representations(mut block: &[u8]) -> Vec<(&'static str, usize)> {
+        let mut fields = Vec::new();
+        while let Some(&first) = block.first() {
+            if first & 0x80 != 0 {
+                fields.push(("indexed", hpack_int(&mut block, 7)));
+                continue;
+            }
+            if first & 0xe0 == 0x20 {
+                // A dynamic table size update carries no field.
+                hpack_int(&mut block, 5);
+                continue;
+            }
+            let (representation, prefix) = match first & 0xf0 {
+                0x00 => ("without indexing", 4),
+                0x10 => ("never indexed", 4),
+                _ => ("incremental indexing", 6),
+            };
+            let name = hpack_int(&mut block, prefix);
+            if name == 0 {
+                hpack_skip_string(&mut block);
+            }
+            hpack_skip_string(&mut block);
+            fields.push((representation, name));
+        }
+        fields
+    }
+
+    /// The dial sends its PAT as an HPACK literal never indexed (RFC 7541
+    /// section 6.2.3): no decoder that reads it may add it to a
+    /// compression table, and an intermediary that re-encodes the
+    /// request must keep that representation.
+    #[tokio::test]
+    async fn dial_sends_the_pat_as_a_never_indexed_literal() {
+        // `authorization` in the HPACK static table (RFC 7541 appendix A).
+        const AUTHORIZATION_NAME: usize = 23;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = ClientConfig {
+            tunnel_url: Url::parse(&format!("http://{addr}/v1/tunnel")).unwrap(),
+            token: "chan_pat_on-the-wire".into(),
+            ..ClientConfig::default()
+        };
+        let dialing = tokio::spawn(async move { dial_with_tls(&cfg, None).await.map(|_| ()) });
+        let (mut server, _) = listener.accept().await.unwrap();
+        let mut preface = [0u8; 24];
+        server.read_exact(&mut preface).await.unwrap();
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+
+        let mut header_block = None;
+        let mut answered_settings = false;
+        for _ in 0..8 {
+            let (frame_type, _, payload) =
+                tokio::time::timeout(Duration::from_secs(5), read_h2_frame(&mut server))
+                    .await
+                    .expect("client frames must arrive promptly");
+            if frame_type == 0x4 && !answered_settings {
+                server
+                    .write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0])
+                    .await
+                    .unwrap();
+                answered_settings = true;
+            }
+            if frame_type == 0x1 {
+                header_block = Some(payload);
+                break;
+            }
+        }
+        let header_block = header_block.expect("the dial never sent its HEADERS frame");
+        let fields = hpack_representations(&header_block);
+        let authorization: Vec<_> = fields
+            .iter()
+            .filter(|(_, name)| *name == AUTHORIZATION_NAME)
+            .collect();
+        assert_eq!(
+            authorization,
+            [&("never indexed", AUTHORIZATION_NAME)],
+            "every field of the dial's header block: {fields:?}",
+        );
+        drop(server);
+        let _ = tokio::time::timeout(Duration::from_secs(5), dialing).await;
     }
 
     #[test]
