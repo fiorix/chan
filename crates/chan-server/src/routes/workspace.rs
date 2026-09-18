@@ -96,11 +96,13 @@ struct CloudDriveJson {
 }
 
 pub async fn api_cloud_workspaces() -> Response {
-    // The detection walks the owner's home dir for Dropbox / iCloud
-    // / Google Drive / OneDrive locations, surfaced in the SPA's
-    // "register a workspace" picker. The tunnel is always authenticated
-    // (the gateway proves the viewer is the owner), so there is no
-    // anonymous viewer to withhold it from.
+    // `detected_cloud_drives` reports the Dropbox, iCloud Drive and Google
+    // Drive folders it finds on this machine. Over the tunnel the gateway
+    // admits only this devserver's owner and its grantees, and a grant is
+    // one shell-equivalent authority over the whole devserver
+    // (`gateway/migrations/0014_drop_devserver_grant_roles.sql`). This tenant
+    // serves a grantee terminals too, so the paths show a grantee nothing a
+    // shell here could not list.
     match tokio::task::spawn_blocking(move || {
         let out: Vec<CloudDriveJson> = chan_workspace::paths::detected_cloud_drives()
             .into_iter()
