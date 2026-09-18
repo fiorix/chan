@@ -7,8 +7,8 @@
 //! real source-IP diversity stays invisible.
 //!
 //! The brute-force surface is the tunnel handshake, but the bucket
-//! meters every validation this wrapper forwards: the dial's, and each
-//! lease refresh's, because the tunnel driver revalidates a refresh
+//! meters every validation call: the dial's, and each lease refresh's,
+//! because the tunnel driver revalidates a refresh
 //! through the same validator. The Hello-name announcement is not
 //! metered (`announce_devserver_name` below). We can't easily
 //! key on the original client IP here (the listener is raw h2, not

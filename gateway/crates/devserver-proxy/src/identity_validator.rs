@@ -1,14 +1,20 @@
 //! Token validator backed by identity-service's
 //! `/internal/v1/tokens/validate`.
 //!
-//! The endpoint shape:
+//! The endpoint shapes:
 //!
 //!   POST /internal/v1/tokens/validate
 //!   Authorization: Bearer `<shared internal bearer>`
 //!   Content-Type: application/json
-//!   { "token": "<chan_pat_*>" }
+//!
+//!   Dial / lease refresh (auth-stage validate):
+//!     { "token": "<chan_pat_*>", "proxy_id": "...", "registration_id": "..." }
+//!
+//!   Hello-name announcement:
+//!     { "token": "<chan_pat_*>", "name": "..." }
 //!
 //!   200 { "user_id": "...", "username": "...", "token_id": "...",
+//!         "devserver_id": "...",
 //!         "expires_at": "<iso8601|null>",
 //!         "scopes": ["tunnel", ...] }
 //!   401 if the token is unknown / revoked / expired
