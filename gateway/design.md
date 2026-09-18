@@ -64,7 +64,7 @@ flowchart TB
 
 ## Devserver publication
 
-A devserver publishes itself with nothing but an outbound connection and a PAT; no inbound port, DNS, or TURN/STUN stack is involved. The PAT is the only credential the devserver holds: the devserver id is the lowercase hex SHA-256 of the raw PAT, so one token identifies one devserver and the raw token never leaves the owner's side of identity.
+A devserver publishes itself with nothing but an outbound connection and a PAT; no inbound port, DNS, or TURN/STUN stack is involved. The PAT is the only credential the devserver holds: the devserver id is the lowercase hex SHA-256 of the raw PAT, so one token identifies one devserver. Identity returns the plaintext only on creation and persists only its digest; the configured devserver later sends the plaintext to devserver-proxy in the tunnel Authorization header over TLS except on verified loopback, and devserver-proxy forwards it to identity over HTTPS, loopback, or an authenticated encrypted overlay in an internal validation request authenticated with `IDENTITY_INTERNAL_TOKEN`.
 
 ```mermaid
 sequenceDiagram
