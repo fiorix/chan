@@ -5140,30 +5140,199 @@ mod write_tests {
         );
     }
 
-    #[test]
-    fn api_read_file_wraps_sync_workspace_reads_in_spawn_blocking() {
-        let source = include_str!("files.rs");
-
-        assert!(source.contains("read_file_sync(&read_workspace, &path_for_read)"));
-        assert!(source.contains("download_path_sync(&plan_ws, &plan_path, plan_range.as_deref())"));
+    /// The runtime `assert_uses_blocking_pool` needs: one blocking thread,
+    /// which the helper holds while it polls the handler once.
+    fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn api_list_files_wraps_sync_workspace_walk_in_spawn_blocking() {
-        let source = include_str!("files.rs");
+    fn api_read_file_text_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+            std::fs::write(root.path().join("note.md"), "hello").unwrap();
+            let response = crate::state::test_support::assert_uses_blocking_pool(api_read_file(
+                State(state),
+                AxumPath("note.md".to_string()),
+                Query(ReadFileQuery::default()),
+                HeaderMap::new(),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let file: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(file["content"], "hello");
+        });
+    }
 
-        assert!(source
-            .contains("tokio::task::spawn_blocking(move || list_files_sync(&workspace, query))"));
+    /// Park every worker of `tenant`'s lane and return once each is running,
+    /// so the next admitted job waits in the queue. Dropping the senders
+    /// releases the workers.
+    fn hold_lane_workers(
+        tenant: &crate::bulk_transfer::BulkTransferTenant,
+    ) -> (
+        Vec<std::sync::mpsc::Sender<()>>,
+        Vec<crate::bulk_transfer::BulkJob<()>>,
+    ) {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut releases = Vec::new();
+        let mut held = Vec::new();
+        for _ in 0..crate::bulk_transfer::ACTIVE_CAPACITY {
+            let (release, park) = std::sync::mpsc::channel::<()>();
+            let started = started_tx.clone();
+            releases.push(release);
+            held.push(
+                tenant
+                    .submit(move |_| {
+                        let _ = started.send(());
+                        let _ = park.recv();
+                    })
+                    .expect("within the lane's capacity"),
+            );
+        }
+        for _ in 0..crate::bulk_transfer::ACTIVE_CAPACITY {
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("every lane worker picks up a held job");
+        }
+        (releases, held)
+    }
+
+    /// The download branch plans on the transfer lane, which keeps the plan
+    /// off both the runtime thread and the blocking pool that editor saves
+    /// and terminal spawns queue on.
+    /// Both lane workers and the pool's only thread are held before the
+    /// first poll, and the file is created after it. A plan run on the
+    /// runtime thread during that poll finds no file, and a plan on the pool
+    /// cannot finish while the pool stays held, so either fails the pin. A
+    /// plan run on the runtime thread in a later poll, such as after waiting
+    /// for a lane admission, sees the file, and the pin passes.
+    #[test]
+    fn api_read_file_download_plans_on_the_transfer_lane() {
+        one_blocking_thread_runtime().block_on(async {
+            use futures::FutureExt;
+            use std::time::Duration;
+
+            let (lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app_with_tenant(bulk, None);
+            let holder = lane.tenant();
+            let (lane_releases, _held) = hold_lane_workers(&holder);
+            let (pool_started_tx, pool_started_rx) = std::sync::mpsc::channel();
+            let (pool_release_tx, pool_release_rx) = std::sync::mpsc::channel::<()>();
+            let pool_blocker = tokio::task::spawn_blocking(move || {
+                pool_started_tx.send(()).unwrap();
+                pool_release_rx
+                    .recv()
+                    .expect("the test releases the pool itself");
+            });
+            pool_started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+
+            let download = api_read_file(
+                State(state),
+                AxumPath("late.bin".to_string()),
+                Query(ReadFileQuery {
+                    download: Some("1".to_string()),
+                    ..ReadFileQuery::default()
+                }),
+                HeaderMap::new(),
+            );
+            tokio::pin!(download);
+            assert!(
+                download.as_mut().now_or_never().is_none(),
+                "the download answered before the transfer lane ran its plan"
+            );
+            std::fs::write(root.path().join("late.bin"), b"planned late").unwrap();
+            drop(lane_releases);
+            let response = tokio::time::timeout(Duration::from_secs(5), download)
+                .await
+                .expect("the download plan waited on the blocking pool, not the transfer lane");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "the plan ran before the lane admitted it and saw no file"
+            );
+            let body = tokio::time::timeout(
+                Duration::from_secs(5),
+                axum::body::to_bytes(response.into_body(), usize::MAX),
+            )
+            .await
+            .expect("the download body completed")
+            .unwrap();
+            assert_eq!(&body[..], b"planned late");
+
+            pool_release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), pool_blocker)
+                .await
+                .unwrap()
+                .unwrap();
+        });
     }
 
     #[test]
-    fn api_create_and_delete_wrap_sync_workspace_io_in_spawn_blocking() {
-        let source = include_str!("files.rs");
+    fn api_list_files_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+            std::fs::write(root.path().join("listed.md"), "x").unwrap();
+            let response = crate::state::test_support::assert_uses_blocking_pool(api_list_files(
+                State(state),
+                Query(ListFilesQuery { dir: None }),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == "listed.md"));
+        });
+    }
 
-        assert!(source
-            .contains("tokio::task::spawn_blocking(move || create_file_sync(&workspace, body))"));
-        assert!(source
-            .contains("tokio::task::spawn_blocking(move || workspace.remove(&path_for_remove))"));
+    #[test]
+    fn api_create_file_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+            let response = crate::state::test_support::assert_uses_blocking_pool(api_create_file(
+                State(state),
+                Json(CreateBody {
+                    path: "created.md".to_string(),
+                    is_dir: false,
+                    content: Some("made".to_string()),
+                }),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("created.md")).unwrap(),
+                "made"
+            );
+        });
+    }
+
+    #[test]
+    fn api_delete_file_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+            std::fs::write(root.path().join("doomed.md"), "x").unwrap();
+            let response = crate::state::test_support::assert_uses_blocking_pool(api_delete_file(
+                State(state),
+                AxumPath("doomed.md".to_string()),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(!root.path().join("doomed.md").exists());
+        });
     }
 
     #[test]

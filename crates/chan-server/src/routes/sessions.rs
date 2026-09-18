@@ -262,12 +262,19 @@ pub async fn api_list_sessions(
 mod tests {
     use std::sync::Arc;
 
-    use axum::body::Bytes;
+    use axum::body::{to_bytes, Bytes};
     use axum::extract::{Query, State};
     use axum::http::StatusCode;
+    use tempfile::TempDir;
 
-    use super::{api_delete_session, api_put_session, SessionQuery};
-    use crate::state::test_support::make_test_state;
+    use super::{
+        api_delete_session, api_get_session, api_list_sessions, api_put_session, SessionListQuery,
+        SessionQuery,
+    };
+    use crate::state::test_support::{
+        assert_uses_blocking_pool, make_test_state, workspace_app_state,
+    };
+    use crate::state::AppState;
 
     fn query(w: &str, client: Option<&str>) -> Query<SessionQuery> {
         Query(SessionQuery {
@@ -457,14 +464,98 @@ mod tests {
         assert!(rx.try_recv().is_err(), "failed write must not notify");
     }
 
-    #[test]
-    fn session_routes_wrap_sync_workspace_io_in_spawn_blocking() {
-        let source = include_str!("sessions.rs");
+    /// The runtime `assert_uses_blocking_pool` needs: one blocking thread,
+    /// which the helper holds while it polls the handler once.
+    fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+    }
 
-        assert!(source.contains("tokio::task::spawn_blocking(f)"));
-        assert!(source.contains("move || match workspace.get_session(&key)"));
-        assert!(source.contains("move || match workspace.put_session(&key, &body)"));
-        assert!(source.contains("move || match workspace.delete_session(&key)"));
-        assert!(source.contains("move || match workspace.list_sessions()"));
+    /// A state with a registered workspace, so the session routes take their
+    /// workspace arm rather than the workspace-less terminal stores.
+    fn workspace_state() -> (TempDir, TempDir, Arc<AppState>) {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let state = Arc::new(workspace_app_state(
+            lib,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        (cfg, root, state)
+    }
+
+    #[test]
+    fn api_get_session_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, _root, state) = workspace_state();
+            let workspace = state.try_workspace().unwrap();
+            workspace.put_session("win-1", b"{\"saved\":true}").unwrap();
+            let resp =
+                assert_uses_blocking_pool(api_get_session(State(state), query("win-1", None)))
+                    .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], b"{\"saved\":true}");
+        });
+    }
+
+    #[test]
+    fn api_put_session_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, _root, state) = workspace_state();
+            let workspace = state.try_workspace().unwrap();
+            let resp = assert_uses_blocking_pool(api_put_session(
+                State(state),
+                query("win-1", None),
+                Bytes::from_static(b"{\"saved\":true}"),
+            ))
+            .await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                workspace.get_session("win-1").unwrap().as_deref(),
+                Some(&b"{\"saved\":true}"[..])
+            );
+        });
+    }
+
+    #[test]
+    fn api_delete_session_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, _root, state) = workspace_state();
+            let workspace = state.try_workspace().unwrap();
+            workspace.put_session("win-1", b"{}").unwrap();
+            let resp =
+                assert_uses_blocking_pool(api_delete_session(State(state), query("win-1", None)))
+                    .await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert_eq!(workspace.get_session("win-1").unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn api_list_sessions_runs_off_runtime_thread() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, _root, state) = workspace_state();
+            state
+                .try_workspace()
+                .unwrap()
+                .put_session("win-1", b"{}")
+                .unwrap();
+            let resp = assert_uses_blocking_pool(api_list_sessions(
+                State(state),
+                Query(SessionListQuery { app: None }),
+            ))
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let keys: Vec<String> = serde_json::from_slice(&body).unwrap();
+            assert_eq!(keys, vec!["win-1".to_string()]);
+        });
     }
 }
