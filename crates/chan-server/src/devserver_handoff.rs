@@ -1462,28 +1462,74 @@ mod tests {
             r"\\.\pipe\chan-test-devserver-{}",
             std::process::id()
         ));
-        let _handle = start_listener(pipe.clone(), |request| async move {
-            match request {
-                Request::RegisterWorkspace { workspace_path, .. } => {
-                    assert_eq!(workspace_path, "notes");
-                    Response::Registered {
+        let (handled_tx, mut handled_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _handle = start_listener(pipe.clone(), move |request| {
+            let handled_tx = handled_tx.clone();
+            async move {
+                let response = match &request {
+                    Request::RegisterWorkspace { .. } => Response::Registered {
                         devserver_version: CHAN_VERSION.into(),
                         prefix: "/api/notes-1a2b3c".into(),
-                    }
-                }
-                Request::Identify { .. } => Response::Error {
-                    message: "unexpected identify".into(),
-                },
+                    },
+                    Request::Identify { .. } => Response::Identified {
+                        pid: 123,
+                        library_root: PathBuf::from(r"C:\chan-library"),
+                        port: 8787,
+                        version: CHAN_VERSION.into(),
+                    },
+                };
+                let _ = handled_tx.send(request);
+                response
             }
         })
         .expect("bind named-pipe listener");
 
-        match request_endpoint(&pipe, &registration_request()).await {
+        let registration = registration_request();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            request_endpoint(&pipe, &registration),
+        )
+        .await
+        .expect("registration round trip is bounded");
+        match reply {
             EndpointReply::Response(Response::Registered { prefix, .. }) => {
                 assert_eq!(prefix, "/api/notes-1a2b3c")
             }
             other => panic!("expected Registered, got {other:?}"),
         }
+        let handled = tokio::time::timeout(Duration::from_secs(1), handled_rx.recv())
+            .await
+            .expect("registration handler reports its request")
+            .expect("registration listener keeps its request channel open");
+        assert_eq!(handled, registration);
+
+        let identify = Request::Identify {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+        };
+        let reply =
+            tokio::time::timeout(Duration::from_secs(5), request_endpoint(&pipe, &identify))
+                .await
+                .expect("identity round trip is bounded");
+        match reply {
+            EndpointReply::Response(Response::Identified {
+                pid,
+                library_root,
+                port,
+                version,
+            }) => {
+                assert_eq!(pid, 123);
+                assert_eq!(library_root, PathBuf::from(r"C:\chan-library"));
+                assert_eq!(port, 8787);
+                assert_eq!(version, CHAN_VERSION);
+            }
+            other => panic!("expected Identified, got {other:?}"),
+        }
+        let handled = tokio::time::timeout(Duration::from_secs(1), handled_rx.recv())
+            .await
+            .expect("identity handler reports its request")
+            .expect("registration listener keeps its request channel open");
+        assert_eq!(handled, identify);
     }
 
     #[cfg(unix)]
