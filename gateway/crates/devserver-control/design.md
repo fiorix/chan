@@ -102,7 +102,7 @@ A `BrowserSessionUp` that exceeds a proxy or fleet row/byte cap advances the gen
 
 `SessionRevocation` supports exact subject/owner/devserver, subject user, admin session id, owner user, and all sessions. The controller fans each request to every connected or warming authority. Success requires every command acknowledgement, no retained unreachable authority, and a ready fleet. A 502 reports confirmed counts without claiming an authoritative zero.
 
-This limits honest retention and controller authority; it does not make an assigned proxy a trusted execution environment. A fully compromised proxy can capture the transient PAT during validation; see 'Devserver publication' in `gateway/design.md` for the full inventory. Node isolation and PAT rotation/revocation remain the incident boundary.
+This limits honest retention and controller authority; it does not make an assigned proxy a trusted execution environment. A fully compromised assigned proxy can capture and reuse the PAT of every tunnel currently connected to it until identity revokes it or it expires, including at dial or refresh, because the proxy process holds those PATs; see 'Devserver publication' in `gateway/design.md` and `crates/chan-tunnel-server/design.md` for when and how long the proxy holds a PAT. Node isolation and PAT rotation/revocation remain the incident boundary.
 
 ## Reconciliation
 
