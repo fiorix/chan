@@ -3837,8 +3837,11 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
     let devserver_opt_out = chan_server::devserver_handoff::devserver_handoff_opt_out();
     // A VALUED selector names a specific devserver; silently serving
     // standalone instead would be the wrong-instance outcome this flag exists
-    // to prevent. Under the opt-out, the bare `--devserver` and the env var
-    // alone skip the handoff and serve standalone.
+    // to prevent. Under the opt-out, a route that resolves to a devserver
+    // skips selection and serves standalone: a bare `--devserver` outside a
+    // devserver shell, or no target flag inside one. Parentage is detected
+    // under the opt-out too, so a bare `--devserver` inside a devserver shell
+    // is refused as nested (`RouteError::NestedDevserver`).
     if devserver_opt_out {
         if let Some(DevserverSelector::Port(port)) = flags.devserver {
             anyhow::bail!(
