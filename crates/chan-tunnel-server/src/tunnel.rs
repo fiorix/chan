@@ -26,10 +26,11 @@ use chan_tunnel_proto::{accept_next, H2Duplex, TUNNEL_PATH};
 use h2::Reason;
 use http::{header, Method, Response, StatusCode};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio_util::compat::Compat;
 
 use crate::driver::run_tunnel;
-use crate::registry::Registry;
+use crate::registry::{OpenRequest, Registry, TunnelHandle};
 use crate::{
     handshake_validated_with_admission, RegistrationAdmission, RegistrationPermit, ServerError,
     Validated, Validator, FIRST_STREAM_TIMEOUT, H2_HANDSHAKE_TIMEOUT, MAX_INFLIGHT_HANDSHAKES,
@@ -205,6 +206,11 @@ where
 
 /// Drive a single client's h2 connection through accept,
 /// validate, handshake, register, and tunnel-driver lifecycle.
+///
+/// The bearer and the request head that carried it are locals of
+/// `register_tunnel`, so they are dropped when it returns, before the
+/// tunnel driver starts; the driver runs for the tunnel's whole life
+/// without them.
 async fn handle_tunnel_conn(
     tcp: TcpStream,
     peer: SocketAddr,
@@ -214,6 +220,66 @@ async fn handle_tunnel_conn(
     max_registrations_per_user: usize,
     inflight_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(), ServerError> {
+    let Some(tunnel) = register_tunnel(
+        tcp,
+        peer,
+        &validator,
+        admission,
+        &registry,
+        max_registrations_per_user,
+        inflight_permit,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let RegisteredTunnel {
+        yconn,
+        open_rx,
+        shutdown_rx,
+        handle,
+        validated,
+        user,
+        devserver,
+    } = tunnel;
+    run_tunnel(
+        yconn,
+        open_rx,
+        shutdown_rx,
+        registry,
+        handle,
+        validator,
+        validated,
+    )
+    .await;
+    tracing::info!(%user, %devserver, "tunnel driver exited");
+    Ok(())
+}
+
+/// A registered tunnel, as `register_tunnel` hands it to the tunnel
+/// driver. Nothing here holds the bearer.
+struct RegisteredTunnel {
+    yconn: yamux::Connection<Compat<H2Duplex>>,
+    open_rx: mpsc::Receiver<OpenRequest>,
+    shutdown_rx: oneshot::Receiver<()>,
+    handle: TunnelHandle,
+    validated: Validated,
+    user: Arc<str>,
+    devserver: Arc<str>,
+}
+
+/// Accept, validate, handshake and register one dial. `Ok(None)` is a
+/// connection that closed before its first stream, or a dial refused
+/// before validation that has already been answered and drained.
+async fn register_tunnel(
+    tcp: TcpStream,
+    peer: SocketAddr,
+    validator: &Arc<dyn Validator>,
+    admission: Arc<dyn RegistrationAdmission>,
+    registry: &Arc<Registry>,
+    max_registrations_per_user: usize,
+    inflight_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Option<RegisteredTunnel>, ServerError> {
     let _ = tcp.set_nodelay(true);
     // Per-stage timeouts: a peer that finishes one stage but stalls
     // on the next is bounded by the next stage's timer rather than
@@ -245,7 +311,7 @@ async fn handle_tunnel_conn(
     let (request, mut respond) = match accepted {
         Some(Ok(rs)) => rs,
         Some(Err(e)) => return Err(ServerError::Handshake(format!("h2 accept: {e}"))),
-        None => return Ok(()),
+        None => return Ok(None),
     };
 
     if request.method() != Method::POST || request.uri().path() != TUNNEL_PATH {
@@ -260,7 +326,7 @@ async fn handle_tunnel_conn(
         // connection cannot hold a slot with it.
         drop(inflight_permit);
         drain_refused_conn(conn).await;
-        return Ok(());
+        return Ok(None);
     }
 
     let token = match extract_bearer(&request) {
@@ -273,11 +339,13 @@ async fn handle_tunnel_conn(
             let _ = respond.send_response(resp, true);
             drop(inflight_permit);
             drain_refused_conn(conn).await;
-            return Ok(());
+            return Ok(None);
         }
     };
 
-    let (_parts, recv_body) = request.into_parts();
+    // Only the body stream goes on to the tunnel; the head, with the
+    // Authorization header `token` was read from, is dropped here.
+    let recv_body = request.into_body();
 
     // Spawn the h2 frame driver BEFORE we await on the validator.
     // The h2 connection only makes progress while somebody is
@@ -410,7 +478,8 @@ async fn handle_tunnel_conn(
     // The Hello may carry a display name for the roster. Hand it to
     // the validator on a detached task: it is best-effort metadata,
     // so a slow identity hop must not delay the tunnel driver, and a
-    // failure never unwinds the registration.
+    // failure never unwinds the registration. The task takes the
+    // bearer and drops it when the announcement returns.
     if let Some(name) = hello
         .name
         .as_deref()
@@ -418,8 +487,7 @@ async fn handle_tunnel_conn(
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
     {
-        let validator = validator.clone();
-        let token = token.clone();
+        let validator = Arc::clone(validator);
         tokio::spawn(async move {
             validator.announce_devserver_name(&token, &name).await;
         });
@@ -430,18 +498,15 @@ async fn handle_tunnel_conn(
     drop(inflight_permit);
     let _ = admitted.send(());
 
-    run_tunnel(
+    Ok(Some(RegisteredTunnel {
         yconn,
         open_rx,
         shutdown_rx,
-        registry.clone(),
         handle,
-        validator,
         validated,
-    )
-    .await;
-    tracing::info!(%user, %devserver, "tunnel driver exited");
-    Ok(())
+        user,
+        devserver,
+    }))
 }
 
 /// The h2 frame driver of a dial that got past the pre-auth checks.
