@@ -28,6 +28,7 @@ A singleton, database-free controller (`devserver-control`) owns the dynamic pro
 - Cleartext control HTTP/h2c is permitted only on loopback or when deployment explicitly asserts the exact protected-overlay mode. Bearers authenticate authority but do not provide transport confidentiality.
 - Memory and work are finite: 128 live sessions, 256 live-plus-disconnected authorities, 2,048 rows/2 MiB per session snapshot, 16,384 rows/64 MiB fleet state, bounded pending claims/commands/watches, a 64-frame inbound queue, and a 32-frame-per-second sliding limit per established session. The offending session is retired on overflow or flood.
 - These controls do not turn an assigned proxy node into a trusted execution environment. A fully compromised node can capture the raw PAT while it transiently passes through initial validation or lease refresh, then exercise stolen-PAT transfer/impersonation until that PAT is revoked or expires. Leases and scoped service credentials constrain fleet authority and honest retention; deployment node isolation, incident eviction, and PAT rotation/revocation remain the response to node compromise.
+- **2026-09-18:** The proxy also handles the PAT during the Hello-name announcement and while a tunnel's h2 connection lasts; see 'Devserver publication' in `gateway/design.md` for the inventory, and `crates/chan-tunnel-server/design.md` for residual trust details.
 
 ## Consequences
 

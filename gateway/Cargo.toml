@@ -4,8 +4,9 @@
 # Crates:
 #
 #   - profile      internal HTTP API in front of Postgres. Users,
-#                  linked OAuth identities, workspaces + sharing
-#                  grants, feature flags, auth audit. Called only by
+#                  linked OAuth identities, devservers + sharing
+#                  grants, feature flags, durable per-user and fleet
+#                  devserver policy, auth audit. Called only by
 #                  identity-service and the operator CLI; not exposed
 #                  publicly.
 #
