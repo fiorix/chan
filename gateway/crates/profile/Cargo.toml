@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Internal HTTP API for the chan-gateway user/identity/workspace store."
+description = "Internal HTTP API for the chan-gateway user/identity/workspace store, devserver admission policy, sharing grants, feature flags, and auth audit."
 
 [[bin]]
 name = "profile-service"

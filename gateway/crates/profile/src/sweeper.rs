@@ -2,7 +2,7 @@
 //!
 //! Identity registers one `devservers` row per tunnel-scope PAT (the
 //! devserver id is the SHA-256 of the raw token), and revoking or
-//! rotating a PAT deletes nothing, so without a sweep the dashboard
+//! rotating a PAT deletes no `devservers` row, so without a sweep the dashboard
 //! would list every devserver ever registered. The sweeper keeps the
 //! registry honest: each tick stamps `last_seen_at` on the rows that
 //! are live right now (devserver-control's aggregate tunnel snapshot)
@@ -21,9 +21,9 @@
 //! tunnel `Hello`, and identity's validate exchange recreates the row
 //! with that label on the spot. A client that announces no name shows
 //! up live-unlabeled on the owner's dashboard (the live list comes
-//! from devserver-control's aggregate) until the next grant create or
-//! identity mint recreates its row. The owner's own entry and open
-//! flow never break: owner-side access checks never read the
+//! from devserver-control's aggregate) until the next grant create
+//! recreates its row. The owner's own entry and open flow never break:
+//! owner-side access checks never read the
 //! `devservers` table.
 //!
 //! Fleet coverage: the snapshot is devserver-control's cluster-wide
