@@ -11,6 +11,7 @@ mod identity_config;
 mod test_db;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Default scope set for tests that don't care about scope content.
 /// Matches the production default in
@@ -37,8 +38,9 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use tokio::sync::mpsc;
 use wiremock::matchers::{method as mock_method, path as mock_path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 use identity::api_tokens::{NewToken, RequestMeta, TokenOrigin};
 use identity::config::Config;
@@ -125,17 +127,17 @@ impl TestEnv {
         self.profile.as_ref().expect("built with a profile mock")
     }
 
-    /// JSON bodies of the POSTs identity sent to `path`, in arrival
-    /// order.
-    async fn profile_posts(&self, path: &str) -> Vec<Value> {
-        self.profile()
-            .received_requests()
-            .await
-            .expect("profile request recording enabled")
-            .iter()
-            .filter(|request| request.method.as_str() == "POST" && request.url.path() == path)
-            .map(|request| serde_json::from_slice(&request.body).expect("json request body"))
-            .collect()
+    /// Mount profile's devserver-row route for `uid`, answering every
+    /// ensure with `template`, and hand back the stream of ensures
+    /// identity posts to it.
+    async fn row_ensures(&self, uid: Uuid, template: ResponseTemplate) -> RowEnsures {
+        let (posts, received) = mpsc::unbounded_channel();
+        Mock::given(mock_method("POST"))
+            .and(mock_path(format!("/v1/users/{uid}/devservers")))
+            .respond_with(RowEnsureResponder { posts, template })
+            .mount(self.profile())
+            .await;
+        RowEnsures { received }
     }
 
     async fn cleanup(self) {
@@ -159,6 +161,53 @@ impl TestEnv {
         .await
         .expect("insert user");
         id
+    }
+}
+
+/// Bound on every wait for a row ensure. The ensure runs on a task the
+/// validate response does not wait for, so a test waits for the POST
+/// instead of reading a count the moment the response lands, and the
+/// bound turns a hop that never happens into a failure rather than a
+/// hang.
+const ROW_ENSURE_BOUND: Duration = Duration::from_secs(30);
+
+/// Answers profile's devserver-row route and hands each ensure's JSON
+/// body to the test as it arrives, which is before any response delay
+/// the template carries.
+struct RowEnsureResponder {
+    posts: mpsc::UnboundedSender<Value>,
+    template: ResponseTemplate,
+}
+
+impl Respond for RowEnsureResponder {
+    fn respond(&self, request: &MockRequest) -> ResponseTemplate {
+        let body = serde_json::from_slice(&request.body).expect("json request body");
+        let _ = self.posts.send(body);
+        self.template.clone()
+    }
+}
+
+/// The devserver-row ensures profile received, in arrival order.
+struct RowEnsures {
+    received: mpsc::UnboundedReceiver<Value>,
+}
+
+impl RowEnsures {
+    /// The next ensure, or a failure once [`ROW_ENSURE_BOUND`] passes.
+    async fn next(&mut self) -> Value {
+        tokio::time::timeout(ROW_ENSURE_BOUND, self.received.recv())
+            .await
+            .expect("profile received no devserver row ensure within the bound")
+            .expect("row ensure channel stays open")
+    }
+
+    /// Every ensure that has already arrived beyond the ones read.
+    fn drain(&mut self) -> Vec<Value> {
+        let mut rest = Vec::new();
+        while let Ok(post) = self.received.try_recv() {
+            rest.push(post);
+        }
+        rest
     }
 }
 
@@ -678,11 +727,11 @@ async fn admission_validate_registers_the_devserver_row() {
     let env = TestEnv::with_profile_mock().await;
     let uid = env.insert_user().await;
     let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;
-    let route = format!("/v1/users/{uid}/devservers");
-    Mock::given(mock_method("POST"))
-        .and(mock_path(route.clone()))
-        .respond_with(ResponseTemplate::new(201).set_body_json(devserver_row(uid, "", "")))
-        .mount(env.profile())
+    let mut ensures = env
+        .row_ensures(
+            uid,
+            ResponseTemplate::new(201).set_body_json(devserver_row(uid, "", "")),
+        )
         .await;
 
     let (s, v) = json_post_with_auth(
@@ -698,12 +747,13 @@ async fn admission_validate_registers_the_devserver_row() {
         .expect("devserver_id")
         .to_string();
 
-    let posts = env.profile_posts(&route).await;
-    assert_eq!(posts.len(), 1, "one row ensure per admission validate");
-    assert_eq!(posts[0]["devserver_id"], devserver_id);
-    assert_eq!(
-        posts[0]["label"], "",
-        "a nameless dial gets a label-less row"
+    let post = ensures.next().await;
+    assert_eq!(post["devserver_id"], devserver_id);
+    assert_eq!(post["label"], "", "a nameless dial gets a label-less row");
+    let extra = ensures.drain();
+    assert!(
+        extra.is_empty(),
+        "one row ensure per admission validate, got {extra:?}"
     );
 
     env.cleanup().await;
@@ -718,15 +768,11 @@ async fn name_announce_validate_labels_the_devserver_row() {
     let env = TestEnv::with_profile_mock().await;
     let uid = env.insert_user().await;
     let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;
-    let route = format!("/v1/users/{uid}/devservers");
-    Mock::given(mock_method("POST"))
-        .and(mock_path(route.clone()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(devserver_row(
+    let mut ensures = env
+        .row_ensures(
             uid,
-            "",
-            "office box",
-        )))
-        .mount(env.profile())
+            ResponseTemplate::new(200).set_body_json(devserver_row(uid, "", "office box")),
+        )
         .await;
 
     let (s, v) = json_post_with_auth(
@@ -742,10 +788,14 @@ async fn name_announce_validate_labels_the_devserver_row() {
         .expect("devserver_id")
         .to_string();
 
-    let posts = env.profile_posts(&route).await;
-    assert_eq!(posts.len(), 1);
-    assert_eq!(posts[0]["devserver_id"], devserver_id);
-    assert_eq!(posts[0]["label"], "office box");
+    let post = ensures.next().await;
+    assert_eq!(post["devserver_id"], devserver_id);
+    assert_eq!(post["label"], "office box");
+    let extra = ensures.drain();
+    assert!(
+        extra.is_empty(),
+        "one row ensure per validate, got {extra:?}"
+    );
 
     env.cleanup().await;
 }
@@ -755,24 +805,121 @@ async fn admission_validate_without_the_tunnel_scope_registers_nothing() {
     // A PAT that cannot dial can never appear in the tunnel registry,
     // so a row for its id would be a phantom on the dashboard and in
     // the desktop roster. The validate itself still succeeds: the
-    // tunnel-server, not this route, refuses the dial.
+    // tunnel-server, not this route, refuses the dial. A dialling PAT
+    // of the same owner validates second and gives the assertion an
+    // ensure to wait for on the same route: the scopeless validate's
+    // ensure, had the scope gate let it through, was spawned first and
+    // would be the POST waiting here.
     let env = TestEnv::with_profile_mock().await;
     let uid = env.insert_user().await;
-    let secret = pat_with_scopes(&env, uid, &["desktop.account"]).await;
+    let scopeless = pat_with_scopes(&env, uid, &["desktop.account"]).await;
+    let dialling = pat_with_scopes(&env, uid, &["tunnel"]).await;
+    let mut ensures = env
+        .row_ensures(
+            uid,
+            ResponseTemplate::new(201).set_body_json(devserver_row(uid, "", "")),
+        )
+        .await;
 
     let (s, _) = json_post_with_auth(
+        &env.router,
+        "/internal/v1/tokens/validate",
+        "test-internal",
+        json!({"token": scopeless, "registration_id": Uuid::new_v4(), "proxy_id": "p1"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (s, v) = json_post_with_auth(
+        &env.router,
+        "/internal/v1/tokens/validate",
+        "test-internal",
+        json!({"token": dialling, "registration_id": Uuid::new_v4(), "proxy_id": "p1"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let dialling_id = v["devserver_id"]
+        .as_str()
+        .expect("devserver_id")
+        .to_string();
+
+    let post = ensures.next().await;
+    assert_eq!(
+        post["devserver_id"], dialling_id,
+        "the first ensure is the dialling PAT's"
+    );
+    let extra = ensures.drain();
+    assert!(
+        extra.is_empty(),
+        "a PAT without the tunnel scope registers no row, got {extra:?}"
+    );
+
+    env.cleanup().await;
+}
+
+/// Longer than the profile client's own total timeout (10 s, set in
+/// `gateway_common::profile_client`), so the stalled ensure cannot
+/// answer at all while the test runs.
+const PROFILE_STALL: Duration = Duration::from_secs(20);
+
+/// What devserver-proxy's `IdentityValidator` gives the whole validate
+/// exchange. A validate slower than this is a 502 on the dial and a
+/// refused lease refresh on a live tunnel.
+const PROXY_VALIDATE_BUDGET: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+async fn a_stalled_profile_does_not_hold_the_admission_validate() {
+    // Every dial and every 60 s lease refresh of a live tunnel comes
+    // through this route on devserver-proxy's budget, and a lease that
+    // lapses closes the tunnel. The row ensure is a profile hop on a
+    // longer bound than that budget, so it runs detached: profile
+    // accepting the POST and answering far too late leaves the validate
+    // answering at once with the lease its caller needs.
+    let env = TestEnv::with_profile_mock().await;
+    let uid = env.insert_user().await;
+    let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;
+    let mut ensures = env
+        .row_ensures(
+            uid,
+            ResponseTemplate::new(201)
+                .set_body_json(devserver_row(uid, "", ""))
+                .set_delay(PROFILE_STALL),
+        )
+        .await;
+
+    let started = Instant::now();
+    let (s, v) = json_post_with_auth(
         &env.router,
         "/internal/v1/tokens/validate",
         "test-internal",
         json!({"token": secret, "registration_id": Uuid::new_v4(), "proxy_id": "p1"}),
     )
     .await;
+    let elapsed = started.elapsed();
     assert_eq!(s, StatusCode::OK);
+    assert!(
+        elapsed < PROXY_VALIDATE_BUDGET,
+        "validate answered in {elapsed:?}, past devserver-proxy's {PROXY_VALIDATE_BUDGET:?}"
+    );
 
-    let posts = env
-        .profile_posts(&format!("/v1/users/{uid}/devservers"))
-        .await;
-    assert!(posts.is_empty(), "got {posts:?}");
+    // The normal admission body, not a degraded one.
+    assert_eq!(v["user_id"], uid.to_string());
+    assert_eq!(v["scopes"], json!(["tunnel"]));
+    let devserver_id = v["devserver_id"]
+        .as_str()
+        .expect("devserver_id")
+        .to_string();
+    assert!(!v["admission_lease"]
+        .as_str()
+        .expect("admission_lease")
+        .is_empty());
+    assert!(v["admission_lease_expires_at"].is_string());
+
+    // The row is still ensured: profile holds the POST, it just has not
+    // answered it.
+    let post = ensures.next().await;
+    assert_eq!(post["devserver_id"], devserver_id);
+    assert_eq!(post["label"], "");
 
     env.cleanup().await;
 }

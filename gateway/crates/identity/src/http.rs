@@ -2853,9 +2853,23 @@ async fn validate_token(
         }
     };
     // Through the same gated upsert every mint site uses: tunnel scope
-    // only, best-effort.
+    // only, best-effort. Detached, the way chan-tunnel-server detaches
+    // the name announcement, because the caller of this route holds a
+    // shorter budget for the whole exchange (5 s in devserver-proxy's
+    // `IdentityValidator`) than the profile client's own bound (10 s):
+    // waiting on profile here would turn a slow profile into a failed
+    // dial and a refused lease refresh, and a lapsed lease closes a
+    // live tunnel. The lease in this response, not the row, is what
+    // keeps that tunnel up; an ensure that is lost with the task is
+    // repeated by the next lease refresh a minute later.
     if let Some(label) = row_label {
-        register_devserver_row(&state, v.user_id, &body.token, label, &v.scopes).await;
+        let label = label.to_owned();
+        let user_id = v.user_id;
+        let scopes = v.scopes.clone();
+        let token = body.token;
+        tokio::spawn(async move {
+            register_devserver_row(&state, user_id, &token, &label, &scopes).await;
+        });
     }
     Ok(Json(v))
 }
