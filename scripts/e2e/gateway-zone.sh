@@ -1208,17 +1208,10 @@ fi
 # ---------------------------------------------------------------
 # I: account-mode consent flow in headless Chrome: sign in via the
 # stub OAuth, assert the picker-less account consent, read the
-# chan:// handoff fragment, redeem the one-time code, then drive the
-# roster and a roster-targeted desktop entry with the redeemed
-# account PAT.
+# loopback callback URL the browser script captures, redeem the
+# one-time code, then drive the roster and a roster-targeted desktop
+# entry with the redeemed account PAT.
 # ---------------------------------------------------------------
-
-frag_get() { # frag_get <url> <key> -> percent-decoded value
-    node -e 'const [u,k]=process.argv.slice(1);const h=u.split("#")[1]||"";
-        for(const p of h.split("&")){const [a,...r]=p.split("=");
-        if(a===k){console.log(decodeURIComponent(r.join("=").replace(/\+/g," ")));break}}' \
-        "$1" "$2"
-}
 
 query_get() { # query_get <url> <key> -> percent-decoded value
     node -e 'const [u,k]=process.argv.slice(1);const q=new URL(u).searchParams;
@@ -1990,8 +1983,12 @@ scenario_upload() {
     # Both POSTs below send `dir` before `file`, which is what the SPA and
     # the desktop send: the route reads destination parts until the `file`
     # part arrives and refuses a body that leads with it
-    # (`with_upload_destination`, crates/chan-server/src/routes/files.rs),
-    # so a file-first body would 400 before either guard is exercised.
+    # (`with_upload_destination`, crates/chan-server/src/routes/files.rs).
+    # The proxy's guard reads headers only and answers before the forward,
+    # so part order cannot change that 403: the unmirrored POST never
+    # reaches the route. The mirrored POST does, so a file-first body there
+    # takes the route's 400 and leaves the 200 and the on-disk check below
+    # unreachable.
     local payload code
     payload="$WORK/upload-payload.txt"
     printf 'tunneled upload payload\n' > "$payload"
