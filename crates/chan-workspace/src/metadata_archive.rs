@@ -468,9 +468,9 @@ struct CapturedRecord {
 }
 
 /// What the archive walk must not take from the live metadata directory: the
-/// two stores it replaces with staged snapshots, the recovery records it
-/// replaces with the bytes captured between those snapshots, and the graph
-/// WAL, which no archive carries.
+/// two stores it replaces with staged snapshots, the recovery records the
+/// export appends from the bytes captured between those snapshots, and the
+/// graph WAL, which no archive carries.
 struct ArchiveSubstitutions {
     snapshots: BTreeMap<PathBuf, PathBuf>,
     captured: Vec<CapturedRecord>,
@@ -487,8 +487,12 @@ impl ArchiveSubstitutions {
 /// directory, refusing a non-regular file at either path the way the store
 /// snapshots do. A record that is not there is captured as absent: a write
 /// that records its journal entry after this point commits its graph rows
-/// after it too, so the graph snapshot does not describe that write and the
-/// archive has nothing to say about it.
+/// after it too, so the graph snapshot does not describe that write and no
+/// captured record names it. The archive can still hold that write's chunks,
+/// because its index commit can precede the index snapshot taken below; the
+/// archived graph then carries the file's earlier stamp, or no row for it,
+/// which `reconcile` repairs except where that earlier stamp matches the
+/// tree.
 fn capture_graph_records(
     workspace_paths: &WorkspacePaths,
     staging: &Path,
@@ -547,8 +551,9 @@ fn write_archive(
     // already carries either still holds its journal entry at this point or
     // committed its chunks before it, which puts them in the index snapshot
     // below; the rebuild marker brackets a full rebuild the same way. The walk
-    // runs after both snapshots, by which time a write straddling them has
-    // cleared its entry, so the walk cannot be what reads them.
+    // runs after both snapshots, and a write straddling them can clear its
+    // entry before the walk lists `graph/`, so the walk cannot be what reads
+    // them.
     let captured = capture_graph_records(workspace_paths, staging.path())?;
     let bm25 = workspace_paths.index.join("bm25");
     let index = staging.path().join("bm25");
@@ -905,7 +910,7 @@ const EXPORT_CAPTURE_PAUSE_BUDGET: std::time::Duration = std::time::Duration::fr
 /// root panics instead of silently replacing the first. The caller reads the
 /// returned receiver to learn that the graph snapshot is taken, and makes a
 /// journal entry or a rebuild marker appear before releasing the barrier, so
-/// only a capture that reads inside that window sees it. The barrier waits at
+/// the record is on disk when the capture below reads it. The barrier waits at
 /// most `EXPORT_CAPTURE_PAUSE_BUDGET` for its release and then proceeds, so a
 /// caller that never releases it fails on its own assertions rather than
 /// hanging.
@@ -1443,9 +1448,9 @@ mod tests {
         }
     }
 
-    /// Bounded wait for every rendezvous in this module's tests: long enough
-    /// that a loaded machine does not trip it, short enough that a barrier
-    /// nobody releases fails the test instead of hanging the suite.
+    /// Bounded wait for every channel rendezvous in this module's tests: long
+    /// enough that a loaded machine does not trip it, short enough that a
+    /// barrier nobody releases fails the test instead of hanging the suite.
     const TEST_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn bm25_hits(ws: &crate::workspace::Workspace, token: &str) -> Vec<String> {
@@ -1686,7 +1691,8 @@ mod tests {
         .unwrap();
         // Startup recovery holds an `Arc<Workspace>` of its own for the whole
         // pass, and what this test reads is whether the handles it drops leave
-        // one live, so every open waits that pass out first.
+        // one live, so the three opens that another open or an import follows
+        // wait that pass out first.
         let ws = lib.open_workspace(root.path()).unwrap();
         ws.join_open_recovery();
         ws.write_text("beta.md", "# beta\nbody\n").unwrap();
@@ -2054,10 +2060,10 @@ mod tests {
     /// The write that leaves no trace. Its graph commit lands before the
     /// export's graph snapshot and its index commit after the export's index
     /// snapshot, so the archive pairs a graph that matches the tree on disk
-    /// with search chunks that do not. `reconcile` compares stamps and skips
-    /// a file whose stamp matches, so the write's own journal entry is the
-    /// only record that the index is behind, and the write clears that entry
-    /// before the archive walk lists `graph/`.
+    /// with search chunks that do not. `reconcile` compares stamps and skips a
+    /// Markdown file whose stamp matches, so the write's own journal entry is
+    /// the only record that the index is behind, and the write clears that
+    /// entry before the archive walk lists `graph/`.
     #[test]
     fn metadata_archive_captures_the_journal_of_a_write_across_both_snapshots() {
         let (lib, _cfg, root) = archive_fixture();
@@ -2154,10 +2160,12 @@ mod tests {
     /// A rebuild interrupted between its graph swap and its index commit
     /// leaves `rebuild.inprogress` beside a graph that already describes the
     /// tree and an index that does not. `reconcile` cannot repair that on its
-    /// own, because a file rewritten to the same length and mtime still
-    /// matches its graph stamp, so the marker is the archive's only record of
-    /// it, and a rebuild that finishes during the export clears the marker
-    /// before the archive walk lists `graph/`.
+    /// own, because the rebuilt graph carries the stamps it read off the tree
+    /// and `reconcile` skips a Markdown file whose stamp matches, so the
+    /// marker is the archive's only record of it, and a rebuild that finishes
+    /// during the export clears the marker before the archive walk lists
+    /// `graph/`. This test stages that state by rewriting the note to the same
+    /// length and mtime, which leaves its stamp matching.
     #[test]
     fn metadata_archive_captures_a_rebuild_marker_cleared_before_the_walk() {
         let (lib, _cfg, root) = archive_fixture();

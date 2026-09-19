@@ -705,7 +705,7 @@ static INDEX_COMMIT_PAUSES: std::sync::OnceLock<
 #[cfg(any(test, feature = "test-hooks"))]
 const INDEX_COMMIT_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Arm a one-shot barrier inside a per-file mutation, between its graph
+/// Arm a one-shot barrier inside `index_file_inner`, between its graph
 /// commit and its search-index commit.
 ///
 /// Compiled for this crate's own tests and for downstream test builds that
