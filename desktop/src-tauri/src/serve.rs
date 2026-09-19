@@ -3143,8 +3143,12 @@ mod tests {
             // IPC denies and the screen never detects a reachable remote.
             "allow-probe-url",
             // `cs tunnel` reaches the desktop through the SPA of a
-            // devserver-served window; the grant rides this shared set so
-            // loopback and gateway lib windows both carry it.
+            // devserver-served window. This set carries the grant to the
+            // `control-terminal-*`, `local::*` and `lib-*` windows
+            // capabilities/workspace.json covers, on a local app page or on a
+            // page served from one of the two origins that file lists; a
+            // gateway-served `lib-*` window carries it through the
+            // `gateway-window` set its runtime-minted capability names.
             "allow-open-reverse-tunnel",
         ] {
             assert!(
@@ -3373,9 +3377,11 @@ mod tests {
             perms.iter().any(|p| p == "core:event:default"),
             "launcher-events must grant the core event listen/unlisten ACL: {perms:?}",
         );
-        // Least privilege: it carries ONLY the event grant. The launcher is pure
-        // HTTP otherwise, so the powerful local-only default.json grants (updater,
-        // process restart, dialog) must NOT leak onto remote content through here.
+        // Least privilege: it carries ONLY the event grant. The two app
+        // commands the launcher SPA invokes ride their own narrow remote-scoped
+        // capabilities (launcher-update.json, launcher-control.json), so the
+        // process, updater and dialog plugin permissions the list below names
+        // must NOT leak onto remote content through here.
         assert_eq!(
             perms.len(),
             1,
@@ -3437,13 +3443,15 @@ mod tests {
     // Tauri resolves a window's effective grants from BOTH its label
     // (capability `windows` globs) and the origin its content loaded from
     // (`remote.urls`): a capability with no matching remote pattern never
-    // reaches remotely-served content, and every chan window is remotely
-    // served (the loopback embedded server included). The ACL itself only
-    // exists in the shipped app -- unit tests call the Rust fns directly
-    // and a mocked webview has no ACL -- so vocabulary/grant drift shows
-    // up as runtime denials unless these tests recompute the per-class
-    // grants from the capability files and pin the SPA's invoke
-    // vocabulary as a subset.
+    // reaches remotely-served content, and every window that loads the SPA
+    // is remotely served, from the embedded loopback server or from a
+    // devserver. The bundled connecting and About pages are local app pages
+    // instead, which a capability reaches through the `local` grant Tauri
+    // defaults on. The ACL itself only exists in the shipped app -- unit
+    // tests call the Rust fns directly and a mocked webview has no ACL -- so
+    // vocabulary/grant drift shows up as runtime denials unless these tests
+    // recompute the per-class grants from the capability files and pin the
+    // SPA's invoke vocabulary as a subset.
 
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability

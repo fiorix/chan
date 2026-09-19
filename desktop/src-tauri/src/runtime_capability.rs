@@ -71,11 +71,12 @@ pub fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>, Strin
 /// from the capability sources. It is what a gateway-served `lib-*` window on
 /// a minted exact origin may invoke; a loopback window's effective grant
 /// differs at the edges (it lacks `gateway_csrf_token`; it holds `probe_url`,
-/// which `capabilities/workspace.json` grants to local app pages and to
-/// loopback origins in `control-terminal-*`, `local::*` and `lib-*` windows
-/// while this set withholds it; and it holds `read_dropped_paths` only where
-/// local-drop applies), which cannot mislead because a locally served page
-/// never skews from its host.
+/// which `capabilities/workspace.json` grants to local app pages and to the
+/// `http://127.0.0.1:*` and `http://localhost:*` origins it lists, in
+/// `control-terminal-*`, `local::*` and `lib-*` windows, while this set
+/// withholds it; and it holds `read_dropped_paths` only where local-drop
+/// applies), which cannot mislead because a locally served page never skews
+/// from its host.
 ///
 /// `native_vocabulary` is itself a member: an app old enough to lack an
 /// advertised command is also old enough to lack this query, so a page that
@@ -590,9 +591,12 @@ mod tests {
     }
 
     /// The minted exact-origin grant must not carry the reachability oracle.
-    /// probe_url is reserved for the bundled local connecting screen; a
-    /// gateway-served page must receive the gateway-window set, which
-    /// excludes it.
+    /// probe_url exists for the bundled local connecting screen, its only
+    /// caller; `capabilities/workspace.json` hands it to
+    /// `control-terminal-*`, `local::*` and `lib-*` windows on a local app
+    /// page or on one of the two origins that file lists, and a
+    /// gateway-served page receives the gateway-window set, which excludes
+    /// it.
     #[test]
     fn minted_capability_does_not_grant_probe_url() {
         let json = production_json();

@@ -24,9 +24,9 @@
 //     This page is the command's only caller. capabilities/workspace.json
 //     hands the `workspace-window` set to local app pages and to the
 //     `http://127.0.0.1:*` and `http://localhost:*` origins it lists in
-//     `control-terminal-*`, `local::*` and `lib-*` windows, so any
-//     loopback-served page in those windows holds the probe too; the
-//     runtime capability minted for a gateway origin omits it.
+//     `control-terminal-*`, `local::*` and `lib-*` windows, so any page
+//     served from those two origins into those windows holds the probe
+//     too; the runtime capability minted for a gateway origin omits it.
 //     For a gateway target, reachable is false on 502/503/504 and on a
 //     transport failure; 401/403/404 prove the gate answered and are
 //     reachable. Loopback targets keep the any-response behavior. The
