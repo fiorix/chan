@@ -5659,7 +5659,7 @@ mod tests {
         assert_eq!(off.status(), StatusCode::NO_CONTENT);
         assert_eq!(launcher_workspace_on(&app, &id).await, Some(false));
 
-        // on: remount at the same stable id.
+        // on: remount at the same stable id, answered with the workspace's row.
         let on = app
             .clone()
             .oneshot(
@@ -5671,7 +5671,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(on.status(), StatusCode::NO_CONTENT);
+        assert_eq!(on.status(), StatusCode::OK);
+        let on_row: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(on.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .expect("on answers a row");
+        assert_eq!(on_row["workspace_id"], id.as_str());
+        assert_eq!(on_row["status"], "running");
+        assert_eq!(on_row["on"], true);
         assert_eq!(launcher_workspace_on(&app, &id).await, Some(true));
 
         // rm: unregister; the workspace disappears from the list.
@@ -5953,13 +5962,30 @@ mod tests {
                 Some(true),
                 "{caller}"
             );
-            for (step, method, uri) in [
-                ("off", "POST", format!("/api/library/workspaces/{id}/off")),
-                ("on", "POST", format!("/api/library/workspaces/{id}/on")),
-                ("remove", "DELETE", format!("/api/library/workspaces/{id}")),
+            // `on` answers 200 with the workspace's row; the other two verbs
+            // have no row to answer with and stay 204.
+            for (step, method, uri, expected) in [
+                (
+                    "off",
+                    "POST",
+                    format!("/api/library/workspaces/{id}/off"),
+                    StatusCode::NO_CONTENT,
+                ),
+                (
+                    "on",
+                    "POST",
+                    format!("/api/library/workspaces/{id}/on"),
+                    StatusCode::OK,
+                ),
+                (
+                    "remove",
+                    "DELETE",
+                    format!("/api/library/workspaces/{id}"),
+                    StatusCode::NO_CONTENT,
+                ),
             ] {
                 let (status, body) = send(caller, method, &uri, None).await;
-                assert_eq!(status, StatusCode::NO_CONTENT, "{caller} {step}: {body}");
+                assert_eq!(status, expected, "{caller} {step}: {body}");
             }
             assert_eq!(launcher_workspace_on(&app, &id).await, None, "{caller}");
 

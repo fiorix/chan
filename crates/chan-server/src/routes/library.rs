@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chan_library::{allocate_workspace_prefix, ServeConfig};
+use chan_workspace::KnownWorkspace;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
@@ -669,33 +670,53 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
-            // Live lifecycle state the launcher drives spinners off. `on` is
-            // the live mounted bool; `status` carries the richer
-            // `starting`/`error`/`unavailable` the bool cannot express.
-            let (status, error) = host.workspace_status(&workspace.root_path);
-            Some(LauncherWorkspace {
-                path: workspace.root_path.to_string_lossy().into_owned(),
-                label: workspace
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| workspace_label(&workspace.root_path)),
-                on: launcher_row_on(status),
-                status,
-                error,
-                // Local rows: no devserver, prefix == workspace_id (the
-                // slash-free slug); on/off/remove route by workspace_id. Carry
-                // this host's library id so the launcher groups a headless
-                // devserver's own windows (`lib-<hex>`) under Local machine, not
-                // the orphan bucket.
-                library_id: Some(library_id.clone()),
-                devserver_id: None,
-                prefix: workspace_id.clone(),
+            Some(local_launcher_row(
+                host,
+                &library_id,
                 workspace_id,
-            })
+                &workspace.root_path,
+                workspace.display_name.as_deref(),
+            ))
         })
         .collect();
     rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
     rows
+}
+
+/// One local workspace's launcher row, as every local surface answers it.
+///
+/// The list route, `add` and `on` all build their row here, so the three cannot
+/// disagree about the same workspace: `status` and `error` come from
+/// [`WorkspaceHost::workspace_status`] rather than from what the caller just
+/// did, so a mounted tenant whose root is unreachable, gone or replaced reads
+/// `unavailable` with its reason instead of `running`. `on` is the live mounted
+/// bool; `status` carries the richer `starting`/`error`/`unavailable` the bool
+/// cannot express.
+fn local_launcher_row(
+    host: &WorkspaceHost,
+    library_id: &str,
+    workspace_id: String,
+    root: &Path,
+    display_name: Option<&str>,
+) -> LauncherWorkspace {
+    let (status, error) = host.workspace_status(root);
+    LauncherWorkspace {
+        path: root.to_string_lossy().into_owned(),
+        label: display_name
+            .map(str::to_string)
+            .unwrap_or_else(|| workspace_label(root)),
+        on: launcher_row_on(status),
+        status,
+        error,
+        // Local rows: no devserver, prefix == workspace_id (the slash-free
+        // slug); on/off/remove route by workspace_id. Carry this host's library
+        // id so the launcher groups a headless devserver's own windows
+        // (`lib-<hex>`) under Local machine, not the orphan bucket.
+        library_id: Some(library_id.to_string()),
+        devserver_id: None,
+        prefix: workspace_id.clone(),
+        workspace_id,
+    }
 }
 
 async fn handle_mint_library_command_capability(
@@ -1681,17 +1702,27 @@ fn require_mutable(state: &LauncherState) -> Result<SocketAddr, Box<Response>> {
 }
 
 /// Resolve a launcher `workspace_id` (the route prefix without its leading slash)
-/// to `(prefix, root)` against the live host library, or `None` when no
+/// to `(prefix, registration)` against the live host library, or `None` when no
 /// registered workspace maps to it. Mirrors the devserver's stable
-/// `allocate_workspace_prefix` mapping.
-fn resolve_workspace(host: &WorkspaceHost, id: &str) -> Option<(String, PathBuf)> {
+/// `allocate_workspace_prefix` mapping. Handlers that answer with a row take the
+/// registration, which carries the label, rather than scanning the library again.
+fn resolve_registered_workspace(
+    host: &WorkspaceHost,
+    id: &str,
+) -> Option<(String, KnownWorkspace)> {
     let prefix = format!("/{id}");
     host.library()
         .list_workspaces()
         .into_iter()
-        .map(|ws| ws.root_path)
-        .find(|root| allocate_workspace_prefix(root).ok().as_deref() == Some(prefix.as_str()))
-        .map(|root| (prefix, root))
+        .find(|ws| {
+            allocate_workspace_prefix(&ws.root_path).ok().as_deref() == Some(prefix.as_str())
+        })
+        .map(|ws| (prefix, ws))
+}
+
+/// [`resolve_registered_workspace`] for the handlers that need only the root.
+fn resolve_workspace(host: &WorkspaceHost, id: &str) -> Option<(String, PathBuf)> {
+    resolve_registered_workspace(host, id).map(|(prefix, ws)| (prefix, ws.root_path))
 }
 
 /// A launcher row's `on`: a tenant is mounted at this root and is not being
@@ -1713,21 +1744,6 @@ fn launcher_row_on(status: WorkspaceStatus) -> bool {
     matches!(
         status,
         WorkspaceStatus::Running | WorkspaceStatus::Unavailable
-    )
-}
-
-/// The refusal `POST .../on` answers over a mount whose root is not usable.
-///
-/// The route has no row to carry the condition and cannot repair it: the
-/// tenant is already mounted, and reopening it would mean tearing down live
-/// terminals and dirty buffers, which this verb never does. So it answers the
-/// conflict with the reason the launcher row shows, and `off` / `chan close`
-/// stay the way to clear the state. 409 rather than 404: the workspace is
-/// registered and its id resolved, only its filesystem is not usable.
-fn degraded_root_response(reason: Option<String>) -> Response {
-    crate::error::err(
-        StatusCode::CONFLICT,
-        reason.unwrap_or_else(|| "workspace root is not usable".to_string()),
     )
 }
 
@@ -1796,27 +1812,15 @@ async fn handle_add_workspace(
     {
         Ok(hosted) => {
             set_overlay(&state.host, &hosted.root, true);
-            let workspace_id = hosted.prefix.trim_start_matches('/').to_string();
-            // The row the list route would build for this root, not an
-            // assumption that a mount just succeeded: re-adding an already
-            // mounted workspace whose directory has gone away or been replaced
-            // must answer with that state, not a green row.
-            let (status, error) = state.host.workspace_status(&hosted.root);
-            Json(LauncherWorkspace {
-                path: hosted.root.to_string_lossy().into_owned(),
-                label: registered
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| workspace_label(&hosted.root)),
-                on: launcher_row_on(status),
-                status,
-                error,
-                // A freshly added workspace is always local (no devserver).
-                library_id: Some(state.host.library_id().to_string()),
-                devserver_id: None,
-                prefix: workspace_id.clone(),
-                workspace_id,
-            })
+            // A freshly added workspace is always local (no devserver), so the
+            // shared builder's row is the whole answer.
+            Json(local_launcher_row(
+                &state.host,
+                state.host.library_id(),
+                hosted.prefix.trim_start_matches('/').to_string(),
+                &hosted.root,
+                registered.display_name.as_deref(),
+            ))
             .into_response()
         }
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
@@ -1827,9 +1831,11 @@ async fn handle_add_workspace(
 }
 
 /// `POST /api/library/workspaces/{id}/on`: mount the registered workspace at its
-/// SAME stable prefix (minting a fresh tenant token), persisting on. 204 once it
-/// is mounted; 409 with the reason when the mount is up but its root is not
-/// usable, because reopening it is not something this verb may do.
+/// SAME stable prefix (minting a fresh tenant token), persisting on. 200 with
+/// the workspace's row on every success, the same shape `add` answers with, so
+/// one idempotent verb has one answer: a mount whose root is unreachable, gone
+/// or replaced comes back `on: true` with `status: "unavailable"` and the reason
+/// in `error`, which the caller acts on instead of reading a bare 204 as health.
 /// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,
@@ -1839,9 +1845,10 @@ async fn handle_workspace_on(
         Ok(addr) => addr,
         Err(resp) => return *resp,
     };
-    let Some((prefix, root)) = resolve_workspace(&state.host, &id) else {
+    let Some((prefix, registered)) = resolve_registered_workspace(&state.host, &id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let root = registered.root_path.clone();
     match state
         .host
         .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix))
@@ -1849,10 +1856,14 @@ async fn handle_workspace_on(
     {
         Ok(_) => {
             set_overlay(&state.host, &root, true);
-            match state.host.workspace_status(&root) {
-                (WorkspaceStatus::Unavailable, reason) => degraded_root_response(reason),
-                _ => StatusCode::NO_CONTENT.into_response(),
-            }
+            Json(local_launcher_row(
+                &state.host,
+                state.host.library_id(),
+                id,
+                &root,
+                registered.display_name.as_deref(),
+            ))
+            .into_response()
         }
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
@@ -2528,6 +2539,24 @@ mod devserver_route_tests {
         (status, json)
     }
 
+    /// [`request`] keeping the body as text, for the routes that answer a plain
+    /// string rather than JSON. Unix-only with its one caller, so the
+    /// windows-gnu arm does not carry an unused helper.
+    #[cfg(unix)]
+    async fn request_text(router: &axum::Router, method: &str, uri: &str) -> (StatusCode, String) {
+        let req = Caller::Local.stamp(Request::builder().method(method).uri(uri), None);
+        let response = router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     #[cfg(unix)]
     fn hold_foreign_lock(
         lib: &Library,
@@ -2695,7 +2724,7 @@ mod devserver_route_tests {
     // `add_answers_a_replaced_root_with_the_row_the_list_reports`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn on_over_a_replaced_root_refuses_instead_of_answering_no_content() {
+    async fn on_answers_the_row_the_list_reports_healthy_and_replaced_alike() {
         let cfg = tempfile::tempdir().unwrap();
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("workspace");
@@ -2707,41 +2736,95 @@ mod devserver_route_tests {
         let (status, added) =
             request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
         assert_eq!(status, StatusCode::OK);
-        let on_uri = format!(
-            "/api/library/workspaces/{}/on",
-            added["workspace_id"].as_str().expect("workspace id")
-        );
+        let workspace_id = added["workspace_id"]
+            .as_str()
+            .expect("workspace id")
+            .to_string();
+        let on_uri = format!("/api/library/workspaces/{workspace_id}/on");
 
-        // A healthy mount keeps answering the idempotent 204.
-        let (status, _) = request(&router, "POST", &on_uri, None).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        // A healthy mount: the row, not a bare 204 a caller has to interpret.
+        let (status, healthy) = request(&router, "POST", &on_uri, None).await;
+        assert_eq!(status, StatusCode::OK, "on answered {status}: {healthy}");
+        assert_eq!(healthy["status"], "running");
+        assert_eq!(healthy["on"], true);
+        assert_eq!(healthy["workspace_id"], workspace_id.as_str());
+        assert!(
+            healthy["error"].is_null(),
+            "a healthy row carries no reason: {healthy}"
+        );
 
         // The root is replaced under the live tenant: same path, new inode.
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::create_dir(&root).unwrap();
 
-        let (status, refusal) = request(&router, "POST", &on_uri, None).await;
+        let (status, degraded) = request(&router, "POST", &on_uri, None).await;
         assert_eq!(
             status,
-            StatusCode::CONFLICT,
-            "reopening a dead tenant answered {status} with no way to say why"
+            StatusCode::OK,
+            "on over a degraded mount answered {status}: {degraded}"
         );
-        let reason = refusal["error"]
+        let (status, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = rows
+            .as_array()
+            .expect("array of rows")
+            .iter()
+            .find(|row| row["workspace_id"] == workspace_id.as_str())
+            .expect("the workspace is listed");
+        assert_eq!(
+            &degraded, listed,
+            "on and the list route disagree about the same workspace"
+        );
+
+        assert_eq!(degraded["status"], "unavailable");
+        assert_eq!(
+            degraded["on"], true,
+            "a mounted-but-degraded row keeps the toggle on the action that helps"
+        );
+        let reason = degraded["error"]
             .as_str()
-            .expect("a refusal carries a reason");
+            .expect("a degraded row carries a reason");
         assert!(
             reason.contains(&root.display().to_string()),
-            "the refusal must name the root: {reason}"
+            "the reason must name the root: {reason}"
         );
         assert!(
             reason.contains("chan close"),
-            "the refusal must name a verb that clears the state: {reason}"
+            "the reason must name a verb that clears the state: {reason}"
         );
-        // The refusal is not a teardown: `off` and `chan close` stay the way
-        // to clear the state, with the tenant's live sessions intact.
+        // Answering is not a teardown: the tenant and its live state stay up
+        // for `off` or `chan close` to clear.
+        assert!(host.is_root_mounted(&root), "on tore the tenant down");
+    }
+
+    /// A writer flock held elsewhere is not the degraded-root condition and does
+    /// not become a row: `on` cannot mount at all, so it keeps its plain-text
+    /// conflict.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_over_a_foreign_locked_workspace_answers_a_plain_text_conflict() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).expect("register");
+        let (host, router) = mutable_router(lib);
+        let _foreign = hold_foreign_lock(host.library(), root.path());
+
+        let workspace_id = allocate_workspace_prefix(root.path())
+            .expect("prefix")
+            .trim_start_matches('/')
+            .to_string();
+        let (status, body) = request_text(
+            &router,
+            "POST",
+            &format!("/api/library/workspaces/{workspace_id}/on"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "locked on answered {status}");
+        assert_eq!(body, "workspace is open in another Chan process");
         assert!(
-            host.is_root_mounted(&root),
-            "the refusal tore the tenant down"
+            !host.is_root_mounted(root.path()),
+            "a refused on mounted the workspace anyway"
         );
     }
 
