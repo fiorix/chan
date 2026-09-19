@@ -1704,9 +1704,11 @@ fn resolve_workspace(host: &WorkspaceHost, id: &str) -> Option<(String, PathBuf)
 /// reports for the same condition (`DevserverState::entry_from_record` keys
 /// `on` off the mount, not the status), so local and remote rows read alike.
 ///
-/// Only the health checks write `unavailable`, and only for a mounted root
-/// (`WorkspaceHost::reconcile_root_health`); a close clears the overlay
-/// (`close_workspace_for_root`), so a stopped row never reaches this arm.
+/// Only the health checks write `unavailable`, and only for a root they find
+/// mounted (`WorkspaceHost::reconcile_root_health`), and a close clears the
+/// overlay. So a stopped row reaches this arm only when a close lands between
+/// that mounted check and its insert, and the next `off` or mount attempt for
+/// that root clears it.
 fn launcher_row_on(status: WorkspaceStatus) -> bool {
     matches!(
         status,
