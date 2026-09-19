@@ -17,8 +17,7 @@
   --brand: #e58c4d;
   --danger: #f85149;
   /* Attention without failure: a foreign lock pulsing, a mount whose root is
-     not usable. Deliberately outside the light-theme block, because both
-     surfaces draw this state in the same amber. */
+     not usable. Each theme carries its own amber; the light one is below. */
   --warn: #e3b341;
 }
 
@@ -35,6 +34,10 @@
   --accent: #2da44e;
   --brand: #c25e16;
   --danger: #d1242f;
+  /* The light-surface partner of the dark theme's amber: the shared theme
+     pairs the same two values (web-shared/src/styles/theme.css, warn-text).
+     The dark value reads at 1.95:1 against this card. */
+  --warn: #9a6700;
 }
 
 * {
