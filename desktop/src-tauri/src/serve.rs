@@ -3100,10 +3100,15 @@ mod tests {
 
     #[test]
     fn workspace_capability_covers_loopback_server_urls() {
-        // Workspace windows load chan-server through loopback HTTP
-        // origins. Without a remote URL match, Tauri omits the IPC
-        // bridge and workspace-window app commands such as reload_window
-        // or the zoom chords never reach Rust.
+        // This capability's two remote URL patterns are the loopback HTTP
+        // origins a chan-server serves the SPA on: `control-terminal-*` and
+        // `local::*` windows on the embedded server, and a `lib-*` window on a
+        // loopback devserver. A remotely served page on any other origin falls
+        // outside the capability's remote scope, so Tauri resolves no
+        // `workspace-window` command for it and rejects the invoke:
+        // `reload_window` and the zoom chords never reach Rust. A gateway-served
+        // `lib-*` window carries them through the `gateway-window` set its
+        // runtime-minted capability names.
         let remote_urls = capability_remote_urls(WORKSPACE_CAPABILITY_JSON);
         assert!(
             remote_urls.iter().any(|u| u == "http://127.0.0.1:*"),
@@ -3991,15 +3996,16 @@ mod tests {
                 );
             }
         }
-        // Why the walk above can fail at all: default.json binds the broad
-        // main-window set to the launcher labels with no remote scope, which is
-        // what keeps the updater, dialog and process grants off remote content.
-        // Widening it would hand the launcher all of them at once.
+        // Why the walk above can fail at all: default.json binds the
+        // main-window app-command set plus the core, dialog, opener and updater
+        // permissions to the launcher labels with no remote scope, so none of
+        // them reaches remotely served content. Widening it would hand the
+        // launcher all of them at once.
         assert!(
             capability_remote_urls(DEFAULT_CAPABILITY_JSON).is_empty(),
-            "default.json must stay local-only: its main-window set carries the updater, dialog \
-             and process grants, and a remote scope would hand every one of them to remotely \
-             served launcher content",
+            "default.json must stay local-only: it carries the main-window app-command set plus \
+             the core, dialog, opener and updater permissions, and a remote scope would hand \
+             every one of them to remotely served launcher content",
         );
     }
 }
