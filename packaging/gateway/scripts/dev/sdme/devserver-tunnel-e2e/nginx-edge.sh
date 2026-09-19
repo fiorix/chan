@@ -57,6 +57,10 @@ DS_PORT="${DS_PORT:-8787}"
 # defaults to 60s, which closes an idle tunnel on its own; the edge sets both
 # grpc timeouts long so the measurement is about the terminator and nothing else.
 EDGE_GRPC_TIMEOUT="${EDGE_GRPC_TIMEOUT:-1h}"
+# nginx arms client_body_timeout, 60s by default, whenever it is waiting for
+# more of a request body (`ngx_http_v2_read_request_body`), and a tunnel's
+# request body is idle for long stretches, so the edge sets it long too.
+EDGE_BODY_TIMEOUT="${EDGE_BODY_TIMEOUT:-1h}"
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -220,9 +224,13 @@ http {
         ssl_certificate_key /root/proxy.key;
 
         # A tunnel is one request that lives as long as the devserver and
-        # carries nothing between uses, so the edge must not put an idle read
-        # or send deadline on it, and must not cap a body that never ends.
+        # carries nothing between uses, so the edge must not put an idle
+        # deadline on either direction, and must not cap a body that never
+        # ends. Both directions need one: the grpc timeouts below bound the
+        # upstream leg, and client_body_timeout bounds how long nginx waits
+        # for more request body from the devserver.
         client_max_body_size 0;
+        client_body_timeout $EDGE_BODY_TIMEOUT;
 
         location /v1/tunnel {
             grpc_pass grpc://127.0.0.1:$PROXY_TUN_PORT;

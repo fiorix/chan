@@ -82,7 +82,7 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sh clean
 
 The edge runs inside `gw-e2e-proxy`, beside the terminator, because that is where production runs it and because nothing else can reach the listener: devserver-proxy puts `TUNNEL_BIND_ADDR` through `require_protected_listener`, which refuses a non-loopback cleartext listener unless the operator declares `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`. `scenario` stops and restarts the terminator behind the edge and times what the devserver, the terminator and nginx each report. `clean` restores the devserver's tunnel url and removes the edge; the rootfs stays for the next run.
 
-One thing the edge configures that a default nginx does not: `grpc_read_timeout` and `grpc_send_timeout`. Both default to 60s, and a registered tunnel carries nothing between requests, so an edge on the defaults closes every idle tunnel a minute after it registers.
+One thing the edge configures that a default nginx does not: the idle timeouts. A registered tunnel is one request that carries nothing between uses, and nginx's `client_body_timeout` bounds how long it waits for more of a request body. At its 60s default that closes an idle tunnel and the devserver redials, over and over. `EDGE_BODY_TIMEOUT` sets it, and the effect tracks the setting exactly: at `20s` an idle tunnel lasts 19.93 to 20.00 s, at `1h` it survives a 150 s idle window untouched. `EDGE_GRPC_TIMEOUT` sets `grpc_read_timeout` and `grpc_send_timeout`, which bound the upstream leg the same way; the edge sets both long. Anything running nginx in front of a real tunnel needs the same three.
 
 ## Files
 
