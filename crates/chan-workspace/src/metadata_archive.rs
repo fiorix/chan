@@ -544,7 +544,7 @@ fn write_archive(
     // Retain substitutions for absent stores too: a store appearing during
     // the walk must fail the export rather than fall back to a live copy.
     snapshots.insert(workspace_paths.graph_db.clone(), graph);
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(test)]
     export_capture_pause_for_test(&workspace_paths.root);
     // Read the records that relate the two stores here, after the graph
     // snapshot and before the index snapshot. A write the graph snapshot
@@ -885,38 +885,36 @@ fn append_file(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 struct ExportCapturePause {
     reached: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 static EXPORT_CAPTURE_PAUSES: std::sync::OnceLock<
     std::sync::Mutex<BTreeMap<PathBuf, ExportCapturePause>>,
 > = std::sync::OnceLock::new();
 
 /// How long a barrier waits for its release before giving up on it.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 const EXPORT_CAPTURE_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Arm a one-shot barrier inside `write_archive`, between the graph snapshot
 /// and the capture of the graph directory's recovery records.
 ///
-/// Compiled for this crate's own tests and for downstream test builds that
-/// enable `test-hooks`, which link this crate as a normal dependency and so
-/// cannot reach a `cfg(test)` hook. Pauses are keyed by the workspace metadata
-/// root (`WorkspacePaths::root`), and a second outstanding armer for the same
-/// root panics instead of silently replacing the first. The caller reads the
-/// returned receiver to learn that the graph snapshot is taken, and makes a
-/// journal entry or a rebuild marker appear before releasing the barrier, so
-/// the record is on disk when the capture below reads it. The barrier waits at
-/// most `EXPORT_CAPTURE_PAUSE_BUDGET` for its release and then proceeds, so a
-/// caller that never releases it fails on its own assertions rather than
-/// hanging.
-#[cfg(any(test, feature = "test-hooks"))]
-#[doc(hidden)]
-pub fn arm_export_capture_pause_for_test(
+/// Every caller is one of this module's own unit tests, so `cfg(test)` is the
+/// whole gate and the armer stays private to this module. Pauses are keyed by
+/// the workspace metadata root (`WorkspacePaths::root`), and a second
+/// outstanding armer for the same root panics instead of silently replacing
+/// the first. The caller reads the returned receiver to learn that the graph
+/// snapshot is taken, and makes a journal entry or a rebuild marker appear
+/// before releasing the barrier, so the record is on disk when the capture
+/// below reads it. The barrier waits at most `EXPORT_CAPTURE_PAUSE_BUDGET`
+/// for its release and then proceeds, so a caller that never releases it
+/// fails on its own assertions rather than hanging.
+#[cfg(test)]
+fn arm_export_capture_pause_for_test(
     metadata_root: PathBuf,
 ) -> (
     std::sync::mpsc::Receiver<()>,
@@ -942,7 +940,7 @@ pub fn arm_export_capture_pause_for_test(
     (reached_rx, release_tx)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 fn export_capture_pause_for_test(metadata_root: &Path) {
     let Some(pauses) = EXPORT_CAPTURE_PAUSES.get() else {
         return;

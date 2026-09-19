@@ -690,37 +690,35 @@ fn open_recovery_pause_for_test(workspace: &Workspace, stop: &AtomicBool) {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 struct IndexCommitPause {
     reached: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 static INDEX_COMMIT_PAUSES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, IndexCommitPause>>,
 > = std::sync::OnceLock::new();
 
 /// How long a barrier waits for its release before giving up on it.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 const INDEX_COMMIT_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Arm a one-shot barrier inside `index_file_inner`, between its graph
 /// commit and its search-index commit.
 ///
-/// Compiled for this crate's own tests and for downstream test builds that
-/// enable `test-hooks`: chan-server's unit tests link chan-workspace as a
-/// normal dependency, so `cfg(test)` alone would not reach them. Pauses are
-/// keyed by canonical workspace root, and a second outstanding armer for the
-/// same root panics instead of silently replacing the first. The caller reads
-/// the returned receiver to learn that the mutation has reached the barrier,
-/// at which point its journal entry is on disk and the graph carries the new
+/// Every caller is one of this crate's own unit tests, so `cfg(test)` is the
+/// whole gate and the armer needs no wider visibility. Pauses are keyed by
+/// canonical workspace root, and a second outstanding armer for the same root
+/// panics instead of silently replacing the first. The caller reads the
+/// returned receiver to learn that the mutation has reached the barrier, at
+/// which point its journal entry is on disk and the graph carries the new
 /// row while the index still carries the old chunks. The barrier waits at most
 /// `INDEX_COMMIT_PAUSE_BUDGET` for its release and then proceeds, so a caller
 /// that never releases it fails on its own assertions rather than hanging.
-#[cfg(any(test, feature = "test-hooks"))]
-#[doc(hidden)]
-pub fn arm_index_commit_pause_for_test(
+#[cfg(test)]
+pub(crate) fn arm_index_commit_pause_for_test(
     root: std::path::PathBuf,
 ) -> (
     std::sync::mpsc::Receiver<()>,
@@ -746,7 +744,7 @@ pub fn arm_index_commit_pause_for_test(
     (reached_rx, release_tx)
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 fn index_commit_pause_for_test(workspace: &Workspace) {
     let Some(pauses) = INDEX_COMMIT_PAUSES.get() else {
         return;
@@ -3497,7 +3495,7 @@ impl Workspace {
         } else {
             self.graph()?.stamp_text_file(rel, mtime, size)?;
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(test)]
         index_commit_pause_for_test(self);
         // Hand the already-read content to the index so the read goes through
         // the Workspace sandbox exactly once. Snapshot the vector epoch BEFORE
