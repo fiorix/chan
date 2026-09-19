@@ -15,17 +15,17 @@
 #     -> h2c 127.0.0.1:7100   devserver-proxy's tunnel listener
 #
 # The edge has to be co-located. devserver-proxy puts TUNNEL_BIND_ADDR through
-# `require_protected_listener` (`gateway/crates/devserver-proxy/src/config.rs`
-# line 126), which refuses a non-loopback cleartext listener unless the
-# operator declares CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay, so an
-# edge in another container cannot reach that listener at all. Nothing of the
-# rig's own path changes:
-# `tls-forward.py` keeps serving :7444, the proxy keeps its loopback bind, and
-# only the devserver's `--tunnel-url` moves. Before `up` stops or replaces
-# anything of the rig's it saves what putting it back needs under STATE_DIR:
-# the terminator's environment, and the devserver's environment, argv and
-# tunnel url. `scenario` and `clean` read the same files, so a half-finished
-# `up` is still reversible.
+# `require_protected_listener` (the TUNNEL_BIND_ADDR call in
+# `gateway/crates/devserver-proxy/src/config.rs`), which refuses a non-loopback
+# cleartext listener unless the operator declares
+# CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay, so an edge in another
+# container cannot reach that listener at all. Nothing of the rig's own path
+# changes: `tls-forward.py` keeps serving :7444, the proxy keeps its loopback
+# bind, and only the devserver's `--tunnel-url` moves. Before `up` stops or
+# replaces anything of the rig's it saves what putting it back needs under
+# STATE_DIR: the terminator's environment, and the devserver's environment,
+# argv and tunnel url. `scenario` and `clean` read the same files, so a
+# half-finished `up` is still reversible.
 #
 #   nginx-edge.sh up         stand the edge up and route the devserver through it
 #   nginx-edge.sh scenario   stop/start the terminator, timing both sides
@@ -58,9 +58,14 @@ PROXY_TLS_PORT="${PROXY_TLS_PORT:-7443}"
 # dials when the nginx edge is not in the way.
 TUNNEL_TLS_PORT="${TUNNEL_TLS_PORT:-7444}"
 DS_PORT="${DS_PORT:-8787}"
-# A registered tunnel carries nothing between requests. nginx's grpc_read_timeout
-# defaults to 60s, which closes an idle tunnel on its own; the edge sets both
-# grpc timeouts long so the measurement is about the terminator and nothing else.
+# A registered tunnel carries nothing between requests. nginx arms
+# grpc_read_timeout, 60s by default, whenever the upstream read is not ready
+# (`ngx_http_upstream_process_non_buffered_request`), so it bounds how long the
+# terminator may stay silent; grpc_send_timeout is armed only while a write to
+# the upstream is pending (`ngx_http_upstream_send_request`), so it is not an
+# idle deadline. The edge sets both long, the read timeout because an idle
+# tunnel would otherwise reach it and the send timeout defensively, so the
+# measurement is about the terminator and nothing else.
 EDGE_GRPC_TIMEOUT="${EDGE_GRPC_TIMEOUT:-1h}"
 # nginx arms client_body_timeout, 60s by default, whenever it is waiting for
 # more of a request body (`ngx_http_v2_read_request_body`), and a tunnel's

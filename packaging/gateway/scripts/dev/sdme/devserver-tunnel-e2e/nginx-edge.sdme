@@ -1,10 +1,13 @@
 # chan-e2e-nginx: the devserver-tunnel e2e's nginx TLS edge.
 #
-# Adds nginx to the runtime rootfs so one more container in the same zone can
-# wear the production shape of the tunnel ingress: TLS + h2 on
-# `proxy.{domain}`, `grpc_pass` of `/v1/tunnel` as h2c into devserver-proxy's
-# tunnel listener (gateway/docs/dev-setup.md, "The TLS edges"). The base
-# already carries curl, openssl, python3 and iproute2, and the edge needs no
+# Adds nginx to the runtime rootfs so `nginx-edge.sh` can copy the
+# distribution's nginx binary into the proxy container, where it wears the
+# production shape of the tunnel ingress: TLS + h2 on `proxy.{domain}`,
+# `grpc_pass` of `/v1/tunnel` as h2c into devserver-proxy's tunnel listener
+# (gateway/docs/dev-setup.md, "The TLS edges"). Nothing runs from this rootfs;
+# the edge has to sit beside the terminator, for the reason nginx-edge.sh's
+# header gives. It is built from the rig's own runtime rootfs so the binary it
+# carries finds the libraries the proxy container has, and the edge needs no
 # binary of ours, so nginx is the only addition.
 #
 # Build: sudo sdme fs build -f chan-e2e-nginx nginx-edge.sdme
