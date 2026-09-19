@@ -26,6 +26,9 @@ def forward(client: socket.socket, target_host: str, target_port: int) -> None:
     except OSError:
         client.close()
         return
+    # create_connection leaves its connect deadline on the socket. A forwarded
+    # connection carries nothing between uses, so the established socket gets none.
+    upstream.settimeout(None)
     threading.Thread(target=copy, args=(client, upstream), daemon=True).start()
     threading.Thread(target=copy, args=(upstream, client), daemon=True).start()
 
