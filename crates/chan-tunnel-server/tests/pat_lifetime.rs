@@ -59,9 +59,11 @@ static ALLOCATOR: WatchingAllocator = WatchingAllocator;
 // Holding the lock across `System` cannot deadlock, because nothing
 // that runs under the lock allocates through this `GlobalAlloc`:
 // `System` is the platform allocator and does not route back through
-// the registered one, `live_insert`, `live_remove`, `live_scan` and
-// `note_release` touch only statics, atomics and locals, and a full
-// table aborts instead of unwinding.
+// the registered one, `live_insert`, `live_remove` and `note_release`
+// touch only statics, atomics and locals, `live_scan` reads the table,
+// the blocks it lists and the caller's needle and records its hits in
+// a local `LiveScan`, a fixed-size array and a count, so it allocates
+// nothing, and a full table aborts instead of unwinding.
 unsafe impl GlobalAlloc for WatchingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc(layout);
