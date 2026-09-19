@@ -1260,14 +1260,15 @@ async fn tokens_revoke(
         .profile_client
         .revoke_user_api_token(uid, id, meta.ip.as_deref(), meta.user_agent.as_deref())
         .await?;
-    // Drop every live tunnel and browser session the user has. We can't
-    // selectively kill the tunnel(s) backed by this specific PAT
-    // (registrations retain the digest-derived devserver id, not the
-    // token id, and the current revocation path does not target by
-    // devserver id), so a revoke pulls down everything the user has
-    // open. chan-serve instances using a non-revoked token will
-    // reconnect on the next handshake; instances using the revoked
-    // token fail the next validate and stay disconnected.
+    // Best-effort cut of the owner's whole live surface: every tunnel
+    // they own and every proxy session they are the subject of. The
+    // scope is the owner and not the one PAT because this handler has
+    // the token id and profile's revoke returns nothing that maps it
+    // to the token's devserver id; devserver-control's exact
+    // per-tunnel kill is open to identity, and identity does not call
+    // it. A devserver on another PAT is cut here too and comes back
+    // on its next dial; one on the revoked PAT redials and fails
+    // validation every time.
     let (kill, revoke) = tokio::join!(
         state.cfg.workspace_admin.kill_owner_tunnels(uid),
         state.cfg.workspace_admin.revoke_subject_sessions(uid),
