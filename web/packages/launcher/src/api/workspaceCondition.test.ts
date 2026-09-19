@@ -36,9 +36,9 @@ describe("workspaceCondition", () => {
   });
 
   it("keeps the busy set to the three transitional statuses", () => {
-    const busy = Object.entries(EXPECTED)
-      .filter(([, condition]) => condition === "busy")
-      .map(([status]) => status);
+    const busy = (Object.keys(EXPECTED) as WorkspaceStatus[]).filter(
+      (status) => workspaceCondition(status) === "busy",
+    );
     expect(busy.sort()).toEqual(["closing", "removing", "starting"]);
   });
 });
