@@ -33,10 +33,6 @@ use std::env;
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "windows")]
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(any(test, target_os = "windows"))]
@@ -937,29 +933,21 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
 
     set_executable_mode(&bin_temp)?;
 
-    // On Windows the replacement is not atomic: from the probe rename
-    // until any rollback completes, `exe_path` can be empty. Catch a
-    // Ctrl-C during that window so the process does not exit before the
-    // sequence finishes. On Unix the replacement is one atomic rename,
-    // so no interrupt handling is needed there.
+    // On Windows the replacement is not atomic: from the rename of the
+    // running image until the final rename or the rollback completes,
+    // `exe_path` holds no file, and a console Ctrl-C in that window would
+    // otherwise reach the default handler, which ends the process and skips
+    // the rollback. Holding a Ctrl-C listener across the whole call keeps
+    // every press in the window away from that handler. On Unix the
+    // replacement is one atomic rename, so there is no window to guard.
     #[cfg(target_os = "windows")]
-    let interrupted = Arc::new(AtomicBool::new(false));
-    #[cfg(target_os = "windows")]
-    let _interrupt_guard = {
-        let interrupted = Arc::clone(&interrupted);
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            interrupted.store(true, Ordering::SeqCst);
-        })
-    };
-
+    install_under_interrupt_guard(tokio::signal::windows::ctrl_c, || {
+        install_replacement(&bin_temp, &exe_path)
+    })?;
+    #[cfg(not(target_os = "windows"))]
     install_replacement(&bin_temp, &exe_path)?;
     bin_guard.disarm();
 
-    #[cfg(target_os = "windows")]
-    if interrupted.load(Ordering::SeqCst) {
-        eprintln!("chan: interrupted during replacement; the executable path was not left empty");
-    }
     drop(archive_guard);
 
     let _ = write_state(&state_path(), &post_upgrade_state(&target_version));
@@ -1199,6 +1187,40 @@ fn retry_windows_sharing_violation<T>(
     operation()
 }
 
+/// Runs `install` while a console interrupt listener built by `listen` is held.
+///
+/// `listen` runs before `install`, and on Windows building the listener is what
+/// registers the process-wide console handler and subscribes a receiver for
+/// `CTRL_C_EVENT`, so the handler is in place before the first rename. It is a
+/// plain call for that reason: `tokio::signal::ctrl_c` registers nothing until
+/// the future it returns is first polled. The listener is dropped only
+/// after `install` returns, including when it returns an error after rolling
+/// back. While a receiver lives, tokio's handler answers TRUE to every
+/// `CTRL_C_EVENT`, so repeated presses inside the window all stop there instead
+/// of reaching the default handler that ends the process; after the drop the
+/// handler answers FALSE and the default behaviour applies again. The listener
+/// is never polled, because suppression depends on the receiver existing and
+/// not on anything reading from it.
+///
+/// A listener that cannot be built is reported and the replacement runs
+/// unguarded, which is the behaviour of a process with no console.
+#[cfg(any(test, target_os = "windows"))]
+fn install_under_interrupt_guard<G>(
+    listen: impl FnOnce() -> io::Result<G>,
+    install: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let guard = match listen() {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            eprintln!("chan: warning: interrupts are not held during the replacement: {error}");
+            None
+        }
+    };
+    let installed = install();
+    drop(guard);
+    installed
+}
+
 #[cfg(not(target_os = "windows"))]
 fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
     fs::rename(new_bin, exe_path).with_context(|| {
@@ -1268,9 +1290,12 @@ where
     // of the backup; its one-shot replacement helper cannot roll back a
     // failure after it has moved the running executable.
     //
-    // `run_upgrade` catches Ctrl-C around this sequence on Windows, so an
-    // interrupt cannot terminate the process while `exe_path` is empty and
-    // skip the rollback.
+    // `run_upgrade` holds a Ctrl-C listener across this whole call, so a
+    // console Ctrl-C arriving while `exe_path` is empty is answered by tokio's
+    // console handler and the sequence runs on. Nothing else is held off:
+    // Ctrl-Break, closing the console, a logoff or shutdown, and any external
+    // kill still end the process, and one inside the gap skips the rollback
+    // and leaves the previous executable at `backup`.
     let binary_dir = exe_path
         .parent()
         .context("current Windows executable has no parent directory")?;
@@ -1888,6 +1913,107 @@ mod tests {
 
         assert!(error.to_string().contains("replacing"));
         assert_eq!(fs::read(&exe).unwrap(), b"old");
+    }
+
+    /// Records its own drop, so a test can place it in the order of the
+    /// renames the guarded closure reports.
+    struct InterruptListenerSpy {
+        events: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+
+    impl Drop for InterruptListenerSpy {
+        fn drop(&mut self) {
+            self.events.borrow_mut().push("listener dropped");
+        }
+    }
+
+    #[test]
+    fn test_install_under_interrupt_guard_brackets_every_rename() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let listen_events = std::rc::Rc::clone(&events);
+        let install_events = std::rc::Rc::clone(&events);
+
+        install_under_interrupt_guard(
+            move || {
+                listen_events.borrow_mut().push("listener created");
+                Ok(InterruptListenerSpy {
+                    events: listen_events,
+                })
+            },
+            move || {
+                let mut events = install_events.borrow_mut();
+                events.push("staged binary to probe");
+                events.push("running image to backup");
+                events.push("probe to executable");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            [
+                "listener created",
+                "staged binary to probe",
+                "running image to backup",
+                "probe to executable",
+                "listener dropped",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_install_under_interrupt_guard_holds_the_listener_through_the_rollback() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let listen_events = std::rc::Rc::clone(&events);
+        let install_events = std::rc::Rc::clone(&events);
+
+        let error = install_under_interrupt_guard(
+            move || {
+                listen_events.borrow_mut().push("listener created");
+                Ok(InterruptListenerSpy {
+                    events: listen_events,
+                })
+            },
+            move || {
+                let mut events = install_events.borrow_mut();
+                events.push("staged binary to probe");
+                events.push("running image to backup");
+                events.push("probe to executable failed");
+                events.push("backup rolled back to executable");
+                Err(anyhow::anyhow!("replacing chan.exe failed"))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "replacing chan.exe failed");
+        assert_eq!(
+            *events.borrow(),
+            [
+                "listener created",
+                "staged binary to probe",
+                "running image to backup",
+                "probe to executable failed",
+                "backup rolled back to executable",
+                "listener dropped",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_install_under_interrupt_guard_replaces_without_a_listener() {
+        let mut installed = false;
+
+        install_under_interrupt_guard(
+            || Err::<InterruptListenerSpy, _>(io::Error::from_raw_os_error(5)),
+            || {
+                installed = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(installed);
     }
 
     #[test]
