@@ -774,18 +774,23 @@ host_for() { # host_for <user> <dsid> -> "<user>--<disc>.<node>.$APEX" (empty if
 # re-announce it, which must be label-stable (no suffix creep).
 DS_DISPLAY_NAME="e2e-box"
 
-spawn_devserver() { # spawn_devserver <name> <port> <pat> <tunnel-url>
-    local name="$1" port="$2" pat="$3" turl="$4"
+# A tunnel devserver binds no local listener, which is what the documented
+# foreground tunnel invocation gives (`resolve_devserver_listen`,
+# crates/chan/src/lib.rs), so that is the boot every devserver here gets: an
+# empty CHAN_DEVSERVER_LISTEN reads as unset and leaves the default in place.
+# The one exception is the devserver `scenario_upload` registers a scratch
+# workspace on, because library mutation is gated on the loopback serve
+# address (`require_mutable`, crates/chan-server/src/routes/library.rs); that
+# spawn passes listen=1. The bind changes no routing: the tunnel router is
+# built from the same app either way.
+spawn_devserver() { # spawn_devserver <name> <port> <pat> <tunnel-url> [listen]
+    local name="$1" port="$2" pat="$3" turl="$4" listen="${5:-}"
     mkdir -p "$WORK/home-$name"
-    # Tunnel-mode devservers now default to not binding the loopback
-    # listener (17f8b83f7), but the upload/extension scenarios need the
-    # mutable launcher surface. CHAN_DEVSERVER_LISTEN=1 restores the
-    # bind without affecting tunnel routing.
     spawn "ds-$name" env \
         CHAN_HOME="$WORK/home-$name" \
         CHAN_TUNNEL_TOKEN="$pat" \
         SSL_CERT_FILE="$TLS_DIR/ca.crt" \
-        CHAN_DEVSERVER_LISTEN=1 \
+        CHAN_DEVSERVER_LISTEN="$listen" \
         "$CHAN_BIN" devserver run --service=none \
         --bind 127.0.0.1 --port "$port" \
         --tunnel-url="$turl" \
@@ -814,7 +819,7 @@ else
 $fleet_shape"
 fi
 
-spawn_devserver a "${DS_PORTS[0]}" "$PAT_A" "$(node_tunnel_url p1)"
+spawn_devserver a "${DS_PORTS[0]}" "$PAT_A" "$(node_tunnel_url p1)" 1
 spawn_devserver b "${DS_PORTS[1]}" "$PAT_B" "$(node_tunnel_url p2)"
 spawn_devserver d "${DS_PORTS[3]}" "$PAT_D" "$(node_tunnel_url p3)"
 
@@ -1841,7 +1846,7 @@ scenario_roster() {
 
     # Redial devserver A and wait for the flip back so the stack is
     # left as found.
-    spawn_devserver a "${DS_PORTS[0]}" "$PAT_A" "$(node_tunnel_url p1)"
+    spawn_devserver a "${DS_PORTS[0]}" "$PAT_A" "$(node_tunnel_url p1)" 1
     local back=0
     for _ in $(seq 150); do
         code="$(roster_get "$WORK/roster3.json")"
@@ -1905,9 +1910,9 @@ scenario_roster() {
 # into `x-chan-csrf` (what the SPA's XHR helpers send) must cross
 # host -> proxy -> tunnel -> devserver and land the bytes in the
 # workspace on disk. Registers a scratch workspace on devserver A
-# through the tunnel (owner assertions may mutate; the harness
-# devservers bind loopback, so the mutable launcher surface is up)
-# and removes it afterwards so the stack is left as found.
+# through the tunnel (devserver A is the one spawned with a loopback
+# listener, so its launcher surface is mutable) and removes it
+# afterwards so the stack is left as found.
 scenario_upload() {
     local host node body entry_url hdrs gate csrf cookies
     node="$(tunnel_field "$DS_A" proxy_id)"
