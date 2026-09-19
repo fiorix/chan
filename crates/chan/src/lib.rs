@@ -2048,7 +2048,7 @@ struct PsActivity {
     /// The holder's own live mount state for this root, straight off its
     /// workspace listing. `unavailable` is the one that changes what an
     /// operator does: the tenant is mounted over a directory it cannot use,
-    /// and no amount of waiting fixes it.
+    /// and `mount_error` says why.
     mount: WorkspaceStatus,
     /// The reason behind `mount`, when the holder reports one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2110,10 +2110,11 @@ struct PsOutput {
 ///
 /// `free` when no live writer holds it. `degraded` when the holder reports a
 /// root it cannot use ([`WorkspaceStatus::Unavailable`]): the flock is held,
-/// so the workspace is served, and every file request through that tenant
-/// still fails. `served` otherwise, including for a holder that reports no
-/// mount state at all (a standalone or desktop serve, or a devserver this
-/// credential cannot reach): unreported is not unusable.
+/// so the workspace is served, but the holder's own health check could not
+/// validate the directory under it, and the reason says what it found.
+/// `served` otherwise, including for a holder that reports no mount state at
+/// all (a standalone or desktop serve, or a devserver this credential cannot
+/// reach): unreported is not unusable.
 fn ps_state_column(served: bool, mount: Option<WorkspaceStatus>) -> &'static str {
     if !served {
         return "free";
