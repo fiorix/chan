@@ -52,6 +52,9 @@ APEX="${APEX:-proxy.localtest.me}"
 PROXY_PUB_PORT="${PROXY_PUB_PORT:-7002}"
 PROXY_TUN_PORT="${PROXY_TUN_PORT:-7100}"
 PROXY_TLS_PORT="${PROXY_TLS_PORT:-7443}"
+# The rig's own tunnel edge (run.sh's TUNNEL_TLS_PORT), which the devserver
+# dials when the nginx edge is not in the way.
+TUNNEL_TLS_PORT="${TUNNEL_TLS_PORT:-7444}"
 DS_PORT="${DS_PORT:-8787}"
 # A registered tunnel carries nothing between requests. nginx's grpc_read_timeout
 # defaults to 60s, which closes an idle tunnel on its own; the edge sets both
@@ -256,7 +259,7 @@ save_dsp_env() {
 
 restart_dsp() {  # bring the terminator back exactly as the rig ran it
     local saved="$STATE_DIR/dsp-setenv" args
-    [ -s "$saved" ] || { printf 'no saved environment for dsp\n' >&2; return 1; }
+    [ -s "$saved" ] || { printf 'no saved environment for dsp in %s; run run.sh to rebuild the rig\n' "$saved" >&2; return 1; }
     mapfile -t args < "$saved"
     in_proxy /usr/bin/systemctl stop dsp >/dev/null 2>&1
     in_proxy /usr/bin/systemd-run --unit=dsp --collect \
@@ -379,6 +382,12 @@ cmd_scenario() {
     [ "$(ds_tunnel_url)" = "https://$(cip "$C_PROXY"):$EDGE_PORT/v1/tunnel" ] \
       || die "the devserver is not dialling the edge; run '$0 up' first"
     mkdir -p "$STATE_DIR"
+    # dsp is a transient --collect unit, so the stop below destroys it and its
+    # environment survives only in $STATE_DIR/dsp-setenv. STATE_DIR is derived
+    # from the checkout and sits under target/, so it can be absent even though
+    # an earlier `up` wrote it. Save it while dsp is still up, or stop nothing.
+    save_dsp_env \
+      || die "cannot save the terminator's environment to $STATE_DIR/dsp-setenv, so it could not be restarted; nothing was stopped. Run '$0 up' first, or run.sh to rebuild the rig"
     local t_since p_since
     t_since="$(ds_epoch)"; p_since="$(in_proxy /bin/date -u +%s)"
 
@@ -425,9 +434,18 @@ cmd_scenario() {
 # ---------------------------------------------------------------------- clean
 
 cmd_clean() {
-    local url
-    if [ -f "$STATE_DIR/ds-url-original" ] && running "$C_DS"; then
-        url="$(cat "$STATE_DIR/ds-url-original")"
+    local url proxy_ip edge_url
+    proxy_ip="$(cip "$C_PROXY")"
+    edge_url="https://$proxy_ip:$EDGE_PORT/v1/tunnel"
+    if running "$C_DS"; then
+        url="$(cat "$STATE_DIR/ds-url-original" 2>/dev/null)"
+        # Removing the edge below strands a devserver that still dials it, and
+        # the url the rig gave the devserver is known only from the saved file,
+        # so with that file gone there is nothing to put back. Refuse while the
+        # edge is still serving.
+        if [ -z "$url" ] && [ "$(ds_tunnel_url)" = "$edge_url" ]; then
+            die "the devserver dials the edge and $STATE_DIR/ds-url-original is gone, so clean cannot put it back and nothing was stopped; write the url the rig gave the devserver, normally https://$proxy_ip:$TUNNEL_TLS_PORT/v1/tunnel, into that file and run '$0 clean' again, or run run.sh to rebuild the rig"
+        fi
         if [ -n "$url" ] && [ "$(ds_tunnel_url)" != "$url" ]; then
             restart_chands "$url" && rm -f "$STATE_DIR/ds-url-original" \
               || info "could not restore the devserver tunnel url $url"
