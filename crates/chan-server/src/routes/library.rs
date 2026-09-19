@@ -2642,8 +2642,8 @@ mod devserver_route_tests {
 
     /// A mutable (loopback) launcher router over a real host, plus the host
     /// itself: `add` and `on` both require a bound serve address. Unix-only
-    /// with the two tests that build on it, so the windows-gnu arm does not
-    /// carry an unused fixture.
+    /// with the tests that build on it, so the windows-gnu arm does not carry
+    /// an unused fixture.
     #[cfg(unix)]
     fn mutable_router(lib: Library) -> (Arc<WorkspaceHost>, axum::Router) {
         let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
