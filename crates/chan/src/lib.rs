@@ -61,7 +61,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chan_server::{EditorPrefs, EditorTheme, LineSpacing, ServeConfig, ServerConfig, ThemeChoice};
+use chan_server::{
+    EditorPrefs, EditorTheme, LineSpacing, ServeConfig, ServerConfig, ThemeChoice, WorkspaceStatus,
+};
 use chan_shell::ShellAction;
 use chan_workspace::{
     KnownWorkspace, Library, MetadataExportOptions, MetadataImportOptions, RecoveryAction,
@@ -2043,6 +2045,14 @@ struct PsRow {
 /// here rather than silently rendering something stale.
 #[derive(Serialize)]
 struct PsActivity {
+    /// The holder's own live mount state for this root, straight off its
+    /// workspace listing. `unavailable` is the one that changes what an
+    /// operator does: the tenant is mounted over a directory it cannot use,
+    /// and no amount of waiting fixes it.
+    mount: WorkspaceStatus,
+    /// The reason behind `mount`, when the holder reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_error: Option<String>,
     /// `None` when the status call did not answer.
     readiness: Option<WorkspaceReadiness>,
     /// `None` when the tenant carries no indexer AT ALL -- `/api/health`
@@ -2093,6 +2103,25 @@ struct PsHealth {
 #[derive(Serialize)]
 struct PsOutput {
     workspaces: Vec<PsRow>,
+}
+
+/// The `chan ps` / `chan workspace status` STATE column: what this
+/// workspace's serving is worth right now.
+///
+/// `free` when no live writer holds it. `degraded` when the holder reports a
+/// root it cannot use ([`WorkspaceStatus::Unavailable`]): the flock is held,
+/// so the workspace is served, and every file request through that tenant
+/// still fails. `served` otherwise, including for a holder that reports no
+/// mount state at all (a standalone or desktop serve, or a devserver this
+/// credential cannot reach): unreported is not unusable.
+fn ps_state_column(served: bool, mount: Option<WorkspaceStatus>) -> &'static str {
+    if !served {
+        return "free";
+    }
+    match mount {
+        Some(WorkspaceStatus::Unavailable) => "degraded",
+        _ => "served",
+    }
 }
 
 /// The `chan ps` BY column: the resolved serving kind, or `-` when the
@@ -2244,7 +2273,15 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
         let indexer = ps_get::<PsHealth>(&client, &base, "/api/health", &entry.token)
             .await
             .and_then(|health| health.indexer);
-        out.insert(entry.path, PsActivity { readiness, indexer });
+        out.insert(
+            entry.path,
+            PsActivity {
+                mount: entry.status,
+                mount_error: entry.error,
+                readiness,
+                indexer,
+            },
+        );
     }
     out
 }
@@ -2343,7 +2380,7 @@ async fn cmd_ps(json: bool) -> Result<()> {
         "STATE", "BY", "PID", "READY", "GEN", "PASS", "ACTION", "INDEXER", "QUEUE"
     );
     for r in &rows {
-        let state = if r.served { "served" } else { "free" };
+        let state = ps_state_column(r.served, r.activity.as_ref().map(|a| a.mount));
         let by = ps_by_column(r.served, r.served_by);
         let pid = r
             .pid
@@ -7718,6 +7755,13 @@ struct StatusOutput {
     served: bool,
     served_by: Option<ServedBy>,
     pid: Option<u32>,
+    /// The holder's live mount state, when it reports one. `unavailable`
+    /// means the tenant is mounted over a directory it cannot use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount: Option<WorkspaceStatus>,
+    /// The reason behind `mount`, when the holder reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     readiness: Option<WorkspaceReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8100,9 +8144,14 @@ async fn served_workspace_status(known: &KnownWorkspace, lock_dir: &Path) -> Sta
     } else {
         None
     };
-    let (readiness, indexer) = match activity {
-        Some(activity) => (activity.readiness, activity.indexer),
-        None => (None, None),
+    let (mount, mount_error, readiness, indexer) = match activity {
+        Some(activity) => (
+            Some(activity.mount),
+            activity.mount_error,
+            activity.readiness,
+            activity.indexer,
+        ),
+        None => (None, None, None, None),
     };
     StatusOutput {
         root,
@@ -8110,6 +8159,8 @@ async fn served_workspace_status(known: &KnownWorkspace, lock_dir: &Path) -> Sta
         served: true,
         served_by,
         pid,
+        mount,
+        mount_error,
         readiness,
         indexer,
         index: None,
@@ -8131,7 +8182,12 @@ async fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
         println!("metadata: {metadata_key}");
     }
     if out.served {
-        println!("state: served");
+        // `served` is the flock; the holder's mount state is what says whether
+        // serving it is worth anything, so the same word `chan ps` prints.
+        println!("state: {}", ps_state_column(true, out.mount));
+        if let Some(reason) = &out.mount_error {
+            println!("reason: {reason}");
+        }
         println!("by: {}", ps_by_column(true, out.served_by));
         println!(
             "pid: {}",
@@ -8206,6 +8262,8 @@ fn workspace_status_output(
             served: false,
             served_by: None,
             pid: None,
+            mount: None,
+            mount_error: None,
             readiness: Some(readiness),
             indexer: None,
             index: None,
@@ -8242,6 +8300,8 @@ fn workspace_status_output(
         served: false,
         served_by: None,
         pid: None,
+        mount: None,
+        mount_error: None,
         readiness: Some(readiness),
         indexer: None,
         index: Some(StatusIndex {
@@ -10618,6 +10678,32 @@ mod tests {
         assert_eq!(ps_by_column(true, Some(ServedBy::Devserver)), "devserver");
         assert_eq!(ps_by_column(true, Some(ServedBy::Standalone)), "standalone");
         assert_eq!(ps_by_column(true, Some(ServedBy::Desktop)), "desktop");
+    }
+
+    #[test]
+    fn ps_state_column_separates_a_degraded_mount_from_a_healthy_one() {
+        // The flock decides served vs free; a mount state never revives a
+        // workspace nobody holds.
+        assert_eq!(ps_state_column(false, None), "free");
+        assert_eq!(
+            ps_state_column(false, Some(WorkspaceStatus::Unavailable)),
+            "free"
+        );
+        // A holder that reports no mount state (a standalone or desktop serve,
+        // or a devserver this credential cannot reach) is not called degraded:
+        // unreported is not unusable.
+        assert_eq!(ps_state_column(true, None), "served");
+        assert_eq!(
+            ps_state_column(true, Some(WorkspaceStatus::Running)),
+            "served"
+        );
+        // The one case an operator has to act on: mounted over a directory the
+        // tenant cannot use, which the flock alone cannot tell from a healthy
+        // serve.
+        assert_eq!(
+            ps_state_column(true, Some(WorkspaceStatus::Unavailable)),
+            "degraded"
+        );
     }
 
     /// The payload is the one recorded from the owner's live devserver in
