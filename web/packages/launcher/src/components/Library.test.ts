@@ -608,12 +608,11 @@ describe("Library: workspace OFF confirm-and-retry", () => {
   });
 });
 
-describe("Library: a refused turn-on", () => {
-  // `POST .../on` over a tenant whose root is not usable answers 409 with the
-  // reason the row should be showing. The per-row handler has no special case
-  // for it: the rejection reaches the error bubble, and the re-list behind it
-  // replaces the stale row with the degraded one.
-  it("shows the server's reason and re-lists the row as degraded", async () => {
+describe("Library: turning on a workspace whose root is not usable", () => {
+  // `POST .../on` answers 200 with the row over such a mount: the verb
+  // succeeded, so nothing here is an error. The re-list behind it replaces the
+  // stale off row with the degraded one, and the banner stays closed.
+  it("lists the row as degraded and opens no error bubble", async () => {
     const { backend } = await import("../api/backend");
     // The mutable-surface suites share one mock registry, so which local row is
     // off depends on what ran before: name the row from the one found here.
@@ -622,9 +621,7 @@ describe("Library: a refused turn-on", () => {
     const reason =
       `workspace root does not exist: ${off.path}; turn this workspace off and on, ` +
       "or run chan close, to mount that path again";
-    const onSpy = vi
-      .spyOn(backend, "setWorkspaceOn")
-      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: reason })));
+    const onSpy = vi.spyOn(backend, "setWorkspaceOn").mockResolvedValueOnce(undefined);
     const listSpy = vi.spyOn(backend, "listWorkspaces").mockImplementation(async () =>
       library.workspaces.map((w) =>
         w.workspace_id === off.workspace_id
@@ -640,21 +637,44 @@ describe("Library: a refused turn-on", () => {
       await settle();
       flushSync();
 
-      // The bubble carries the reason alone, not the JSON the server wrapped
-      // it in.
-      expect(library.error).toBe(reason);
+      expect(library.error).toBeNull();
       expect(listSpy.mock.calls.length).toBeGreaterThan(calls);
       const row = library.workspaces.find((w) => w.workspace_id === off.workspace_id)!;
       expect(row.status).toBe("unavailable");
       expect(row.error).toBe(reason);
-      // And the row now draws the degraded state instead of the stale off one.
+      // The row draws the degraded state instead of the stale off one, offers
+      // the one action that helps it, and still cannot mint a window.
       expect(target!.querySelector(`.row-error.degraded[title="${reason}"]`)).toBeTruthy();
       expect(byAria(`Turn off ${name}`)).toBeTruthy();
+      expect(byAria(`New window of ${name}`)!.disabled).toBe(true);
     } finally {
       // The list stub answers for the whole registry, so a failure here would
       // follow the shared mock state into the next case.
       onSpy.mockRestore();
       listSpy.mockRestore();
+    }
+  });
+
+  // A refusal is still a refusal. The plain-text 409 for a mount another Chan
+  // process holds is its own sentence, and it reaches the banner unchanged.
+  it("shows a plain-text refusal in the banner", async () => {
+    const { backend } = await import("../api/backend");
+    const off = library.workspaces.find((w) => w.devserver_id === null && !w.on)!;
+    const name = off.label || off.path.split("/").filter(Boolean).at(-1)!;
+    const locked = "workspace is open in another Chan process";
+    const onSpy = vi
+      .spyOn(backend, "setWorkspaceOn")
+      .mockRejectedValueOnce(new ApiError(409, locked));
+    try {
+      mountList();
+
+      byAria(`Turn on ${name}`)!.click();
+      await settle();
+      flushSync();
+
+      expect(library.error).toBe(locked);
+    } finally {
+      onSpy.mockRestore();
     }
   });
 });

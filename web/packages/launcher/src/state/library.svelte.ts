@@ -294,11 +294,11 @@ export async function toggleWorkspace(id: string, on: boolean, force?: boolean):
     await backend.setWorkspaceOn(id, on, force);
   } catch (e) {
     clearPending(key); // stop the spinner; the error surfaces / the confirm opens
-    // A refusal can be the first thing that reveals the row was stale: an `on`
-    // over a tenant whose root stopped being usable is refused with the reason
-    // that row should be showing. Re-list before the error surfaces so the row
-    // behind the bubble is the live one. Best-effort, so a failed re-list
-    // cannot replace the error the caller is about to see.
+    // A refusal can be the first thing that reveals the row was stale: the
+    // mount may have been taken by another Chan process, or the workspace
+    // unregistered, since the list was fetched. Re-list before the error
+    // surfaces so the row behind the bubble is the live one. Best-effort, so a
+    // failed re-list cannot replace the error the caller is about to see.
     try {
       await refreshWorkspaces();
     } catch {

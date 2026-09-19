@@ -357,9 +357,13 @@ export interface CreateWindowOptions {
 export interface LibraryApi {
   listWorkspaces(): Promise<WorkspaceEntry[]>;
   addLocalWorkspace(path: string, label?: string): Promise<WorkspaceEntry>;
-  /** Turn a local workspace on/off. An unforced off of a workspace with live
-   * terminal sessions answers 409 `live_terminals` (parse with
-   * `liveTerminalsCount`); retry with `force: true` to off it anyway. */
+  /** Turn a local workspace on/off. `on` answers with the workspace's row, in
+   * the same shape a list row carries, so a mount whose root is not usable
+   * comes back on and `unavailable` rather than as a refusal; the launcher
+   * re-lists instead of reading that body, the way it does after an add. An
+   * unforced off of a workspace with live terminal sessions answers 409
+   * `live_terminals` (parse with `liveTerminalsCount`); retry with
+   * `force: true` to off it anyway. */
   setWorkspaceOn(id: string, on: boolean, force?: boolean): Promise<void>;
   removeWorkspace(id: string): Promise<void>;
   listDevservers(): Promise<DevserverEntry[]>;
@@ -450,10 +454,11 @@ export interface LibraryApi {
 /**
  * A non-2xx response, carrying the status and the server's text body.
  *
- * `body` is what the server sent; `message` is what a person reads. The library
- * answers a refusal with `{"error": "<reason>"}`, so the message is that reason
- * alone and the JSON envelope never reaches an error bubble. Callers that match
- * on a refusal's SHAPE read `body`, not the message.
+ * `body` is what the server sent; `message` is what a person reads. Some
+ * refusals are plain text and some arrive in a `{"error": "<reason>"}`
+ * envelope, so the message is the reason either way and the envelope never
+ * reaches an error bubble. Callers that match on a refusal's SHAPE read `body`,
+ * not the message.
  */
 export class ApiError extends Error {
   constructor(
@@ -466,9 +471,9 @@ export class ApiError extends Error {
 }
 
 /** The reason inside a `{"error": "<reason>"}` body, or the body unchanged when
- * it is not one. The server's own text, never rewritten: the reasons differ
- * between a stalled mount and a replaced root and between platforms, so the
- * launcher displays whatever arrives. */
+ * it is not one. The server's own text, never rewritten: a reason differs
+ * between the conditions behind it and between platforms, so the launcher
+ * displays whatever arrives. */
 function refusalReason(body: string): string {
   try {
     const parsed: unknown = JSON.parse(body);
@@ -487,9 +492,10 @@ function refusalReason(body: string): string {
  * was refused because the workspace still has live terminal sessions. Returns
  * `active_terminals` when `e` is an `ApiError` whose 409 body parses to
  * `{error:"live_terminals", active_terminals:N}`, else null, so the launcher
- * can confirm-and-retry only that case and let every other 409 (a plain
- * `NO_DESKTOP` string, or a reason the row shows) fall through to the generic
- * error banner. Reads the raw `body`: the message is the unwrapped reason.
+ * can confirm-and-retry only that case and let every other 409 (the plain-text
+ * refusals: `NO_DESKTOP`, a workspace another Chan process holds) fall through
+ * to the generic error banner. Reads the raw `body`: the message is the
+ * unwrapped reason.
  */
 export function liveTerminalsCount(e: unknown): number | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null;

@@ -39,14 +39,60 @@ describe("liveApi.liveTerminalCount", () => {
   });
 });
 
+describe("liveApi.setWorkspaceOn", () => {
+  it("accepts the row the on route answers with", async () => {
+    // `on` answers 200 carrying the workspace's row. The launcher re-lists
+    // rather than reading it, so all this call owes the caller is to resolve.
+    const row = {
+      workspace_id: "ws-1",
+      path: "/home/me/proj",
+      label: "",
+      on: true,
+      status: "unavailable",
+      error: "workspace root does not exist: /home/me/proj",
+      library_id: "local",
+      devserver_id: null,
+      prefix: "ws-1",
+    };
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => row });
+    vi.stubGlobal("fetch", fetch);
+
+    // Resolving IS the assertion: a body the caller does not read must not
+    // become a parse failure on the way back.
+    await liveApi.setWorkspaceOn("ws-1", true);
+    expect(fetch).toHaveBeenCalledWith("/api/library/workspaces/ws-1/on", {
+      method: "POST",
+      headers: {},
+      body: undefined,
+    });
+  });
+
+  it("carries a plain-text refusal through as the error a person reads", async () => {
+    // The workspace another Chan process holds: a plain-text 409, so the body
+    // is already the sentence the banner shows.
+    const locked = "workspace is open in another Chan process";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        statusText: "Conflict",
+        text: async () => locked,
+      }),
+    );
+
+    await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toEqual(new ApiError(409, locked));
+    await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toThrow(locked);
+  });
+});
+
 describe("ApiError", () => {
-  it("reads a refusal envelope as its message and keeps the raw body", () => {
-    // The library answers a refused on with `{"error": "<reason>"}`; the reason
+  it("reads an enveloped refusal as its message and keeps the raw body", () => {
+    // Refusals mapped from a chan-workspace error arrive as
+    // `{"error": "<reason>"}` (fd pressure on the on route is one); the reason
     // is what a person reads in the error bubble, the envelope is not.
-    const reason =
-      "workspace root does not exist: /home/me/proj; turn this workspace off and on, " +
-      "or run chan close, to mount that path again";
-    const e = new ApiError(409, JSON.stringify({ error: reason }));
+    const reason = "workspace is under file-descriptor pressure";
+    const e = new ApiError(503, JSON.stringify({ error: reason }));
 
     expect(e.message).toBe(reason);
     expect(e.body).toBe(JSON.stringify({ error: reason }));
@@ -65,7 +111,9 @@ describe("ApiError", () => {
       JSON.stringify({ error: "live_terminals", active_terminals: 3 }),
     );
     expect(liveTerminalsCount(live)).toBe(3);
-    expect(liveTerminalsCount(new ApiError(409, JSON.stringify({ error: "root gone" })))).toBeNull();
+    expect(
+      liveTerminalsCount(new ApiError(409, JSON.stringify({ error: "some other reason" }))),
+    ).toBeNull();
     expect(liveTerminalsCount(new ApiError(409, "NO_DESKTOP"))).toBeNull();
   });
 });
