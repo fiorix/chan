@@ -47,6 +47,7 @@
 #   scripts/e2e/gateway-zone.sh core       # the core suite only
 #   scripts/e2e/gateway-zone.sh <scenario> # stack bring-up + that scenario only
 #   E2E_KEEP=1 scripts/e2e/gateway-zone.sh # leave the stack running
+#   E2E_LAUNCHER_BUNDLE=1|0                # pin the launcher-bundle expectation
 #
 # Scenarios: self-contained assert groups that run against the
 # brought-up stack after the core region. Register one by defining
@@ -156,6 +157,7 @@ log() { printf '%s\n' "$*"; }
 assert_pass() { printf 'PASS %s\n' "$*" | tee -a "$ASSERT_LOG"; }
 assert_fail() {
     printf 'FAIL %s\n' "$*" | tee -a "$ASSERT_LOG"
+    launcher_bundle_verdict
     log "RESULT: aborting on the first failed assertion (see $ASSERT_LOG)"
     exit 1
 }
@@ -351,12 +353,31 @@ done
 # chan binary built somewhere other than this checkout.
 if [ -n "${E2E_LAUNCHER_BUNDLE:-}" ]; then
     LAUNCHER_BUNDLE="$E2E_LAUNCHER_BUNDLE"
+    LAUNCHER_BUNDLE_WHY="pinned by E2E_LAUNCHER_BUNDLE=$E2E_LAUNCHER_BUNDLE"
 elif [ -f "$REPO/web-launcher/dist/index.html" ]; then
     LAUNCHER_BUNDLE=1
+    LAUNCHER_BUNDLE_WHY="web-launcher/dist/index.html is present in $REPO"
 else
     LAUNCHER_BUNDLE=0
+    LAUNCHER_BUNDLE_WHY="no web-launcher/dist/index.html in $REPO and no E2E_LAUNCHER_BUNDLE"
 fi
-log "launcher bundle expected at the devserver root: $LAUNCHER_BUNDLE"
+log "launcher bundle expected at the devserver root: $LAUNCHER_BUNDLE ($LAUNCHER_BUNDLE_WHY)"
+
+# Four checks take the devserver root: the entry routes, the redeem hop, the
+# watchdog's fresh dial and the roster's own-devserver hop. On the `0` branch
+# all four also accept the devserver's "launcher bundle not built" banner, and
+# a run on that branch is otherwise indistinguishable: same assertion count,
+# same exit code, same RESULT line. So every RESULT block names the branch the
+# run took, and the branch that never reaches the launcher SPA root says so
+# where no reader of the tail can miss it.
+launcher_bundle_verdict() {
+    if [ "$LAUNCHER_BUNDLE" = 0 ]; then
+        log "!!!! NO LAUNCHER BUNDLE EXPECTED: $LAUNCHER_BUNDLE_WHY"
+        log "!!!! the four root checks accepted the devserver's no-bundle banner, so this run did NOT exercise the launcher SPA root"
+    else
+        log "launcher bundle expected ($LAUNCHER_BUNDLE_WHY): every root check demanded the launcher SPA's 200"
+    fi
+}
 
 # ---------------------------------------------------------------
 # Database: fresh schema inside the existing database
@@ -3629,4 +3650,5 @@ run_scenarios() { # run_scenarios <all|name>
 log ""
 log "==== assertion summary ($ASSERT_LOG) ===="
 cat "$ASSERT_LOG"
+launcher_bundle_verdict
 log "RESULT: all assertions passed"
