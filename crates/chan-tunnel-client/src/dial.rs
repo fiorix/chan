@@ -18,8 +18,14 @@
 //! idle timeouts on the tunnel location: for nginx that is
 //! `client_body_timeout`, whose 60s default ends an idle tunnel
 //! about once a minute with a clean `200` and no error on either
-//! side, plus `grpc_read_timeout` and `grpc_send_timeout` on the
-//! upstream leg.
+//! side. `grpc_read_timeout` is an idle deadline on the same
+//! request's upstream leg and is worth raising alongside;
+//! `grpc_send_timeout` is armed only while a write to the upstream
+//! is pending, so it is not an idle deadline here.
+//!
+//! An edge that terminates TLS sees this dial's bearer in the clear;
+//! section 6 of `crates/chan-tunnel-server/design.md` says what a
+//! captured tunnel PAT reaches.
 
 use std::sync::Arc;
 
