@@ -341,6 +341,23 @@ done
 # build checks).
 [ -x "$CHAN_BIN" ] || (cd "$REPO" && cargo build -p chan --no-default-features >/dev/null) || exit 2
 
+# Whether the devserver root is expected to serve the launcher SPA. The SPA
+# comes from web-launcher/dist (`make web-launcher`); a chan binary built
+# with it answers 200 at the root, one built without answers a 404 "bundle
+# not built" banner. Both prove a request crossed
+# host -> proxy -> tunnel -> devserver, but only the 200 exercises the SPA
+# root, so the entry checks demand it whenever the bundle is there rather
+# than accept either answer. E2E_LAUNCHER_BUNDLE pins the expectation for a
+# chan binary built somewhere other than this checkout.
+if [ -n "${E2E_LAUNCHER_BUNDLE:-}" ]; then
+    LAUNCHER_BUNDLE="$E2E_LAUNCHER_BUNDLE"
+elif [ -f "$REPO/web-launcher/dist/index.html" ]; then
+    LAUNCHER_BUNDLE=1
+else
+    LAUNCHER_BUNDLE=0
+fi
+log "launcher bundle expected at the devserver root: $LAUNCHER_BUNDLE"
+
 # ---------------------------------------------------------------
 # Database: fresh schema inside the existing database
 # ---------------------------------------------------------------
@@ -954,15 +971,16 @@ check_entry_routes() { # check_entry_routes <name> <pat> <user> <owner-id> <dsid
     fi
     code="$(curl_node "$node" "$host" -o "$WORK/root-$name.html" -w '%{http_code}' \
         -H "Cookie: $cookie" "https://$host:$PROXY_PORT/")"
-    # 200 = launcher SPA served through the tunnel. A chan binary
-    # built without the web bundles answers with its own "bundle not
-    # built" banner instead; both are devserver-generated responses,
-    # so either proves the request crossed
-    # host -> proxy -> tunnel -> devserver (the proxy's own 404 is
-    # a bare {"error":"not found"}).
+    # 200 = launcher SPA served through the tunnel. A chan binary built
+    # without the web bundles answers with its own "bundle not built"
+    # banner instead; both are devserver-generated responses, so either
+    # proves the request crossed host -> proxy -> tunnel -> devserver (the
+    # proxy's own 404 is a bare {"error":"not found"}). The banner is
+    # accepted only when no launcher bundle is expected; with one built,
+    # the SPA root must answer 200.
     if [ "$code" = "200" ]; then
         assert_pass "entry($name): cookie admits; devserver root serves 200"
-    elif grep -qi "bundle not built" "$WORK/root-$name.html"; then
+    elif [ "$LAUNCHER_BUNDLE" = 0 ] && grep -qi "bundle not built" "$WORK/root-$name.html"; then
         assert_pass "entry($name): cookie admits; devserver answered ($code no-bundle banner: chan built without web bundles)"
     else
         assert_fail "entry($name): expected the devserver root, got $code: $(head -c 120 "$WORK/root-$name.html")"
@@ -1327,7 +1345,8 @@ if [ -x "$CHROME_BIN" ]; then
             -H "Cookie: $bcookie" "https://$HOST_A:$PROXY_PORT/")"
     fi
     if [ "$hop2" = "200" ] ||
-        { [ -n "$hop2" ] && grep -qi "bundle not built" "$WORK/root-browser.html"; }; then
+        { [ "$LAUNCHER_BUNDLE" = 0 ] && [ -n "$hop2" ] &&
+            grep -qi "bundle not built" "$WORK/root-browser.html"; }; then
         assert_pass "redeem: account PAT opens the roster-picked devserver ($hop2)"
     else
         assert_fail "redeem: entry hops expected 303 then devserver answer, got $hop1/$hop2"
@@ -1565,9 +1584,9 @@ scenario_sweeper() {
 # while a fresh dial still routes (the dishonest-green asymmetry), and SIGCONT
 # heals the socket. The SPA DisconnectOverlay and the desktop Unreachable
 # rendering are unit-covered (workspace-app transportHeartbeat/disconnectOverlay,
-# chan-desktop entry_from_devserver); this scenario cannot drive a browser
-# because the rig's chan is built --no-default-features and serves no SPA bundle,
-# so it asserts the server+proxy behaviour those clients sit on.
+# chan-desktop entry_from_devserver); this scenario drives no browser, because
+# the harness does not require a chan binary carrying the SPA bundles, so it
+# asserts the server+proxy behaviour those clients sit on.
 scenario_watchdog() {
     # A lone-scenario run skips the core suite, so mint devserver A's entry +
     # gate cookie here (the same two-hop check_entry_routes does).
@@ -1591,15 +1610,17 @@ scenario_watchdog() {
     fi
 
     # A fresh dial through the proxy still routes to the devserver (200, or the
-    # no-bundle banner from a chan built without web assets) -- the poll-heals
-    # path the launcher green dot rides even while a held socket is dead.
+    # 404 of the no-bundle banner when no launcher bundle is expected) -- the
+    # poll-heals path the launcher green dot rides even while a held socket is
+    # dead.
     local fresh
     fresh="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -H "Cookie: $cookie" \
         "https://$host:$PROXY_PORT/")"
-    case "$fresh" in
-    200 | 404) assert_pass "watchdog: a fresh dial routes to the devserver ($fresh)" ;;
-    *) assert_fail "watchdog: fresh dial did not reach the devserver (got $fresh)" ;;
-    esac
+    if [ "$fresh" = 200 ] || { [ "$LAUNCHER_BUNDLE" = 0 ] && [ "$fresh" = 404 ]; }; then
+        assert_pass "watchdog: a fresh dial routes to the devserver ($fresh)"
+    else
+        assert_fail "watchdog: fresh dial did not reach the devserver (got $fresh)"
+    fi
 
     # The probe holds the feed WS and drives three phases (alive / proxy SIGSTOP
     # / SIGCONT), reporting per-phase whether a WS Ping is answered and whether
@@ -1883,7 +1904,8 @@ scenario_roster() {
                 -H "Cookie: $cookie" "https://$host:$PROXY_PORT/")"
         fi
         if [ "$hop2" = "200" ] ||
-            { [ -n "$hop2" ] && grep -qi "bundle not built" "$WORK/root-roster.html"; }; then
+            { [ "$LAUNCHER_BUNDLE" = 0 ] && [ -n "$hop2" ] &&
+                grep -qi "bundle not built" "$WORK/root-roster.html"; }; then
             assert_pass "roster: account PAT entry routes to the own devserver ($hop2)"
         else
             assert_fail "roster: entry hops expected 303 then devserver answer, got $hop1/$hop2"
