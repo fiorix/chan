@@ -93,10 +93,12 @@ pub enum WorkspaceStatus {
     /// Distinct from both `Running` (which claims the workspace works) and
     /// `Error` (which calls for retrying a lifecycle operation). The
     /// tenant stays up and keeps its live state; the health probe clears this
-    /// back to `Running` on its own once the root answers again, which a
-    /// remount does and a different directory at the same path does not. The
-    /// launcher shows the row as degraded and keeps the toggle enabled,
-    /// because turning it off is still a valid thing to do.
+    /// back to `Running` on its own once the root answers again. On unix that
+    /// means the directory the tenant opened, because `RootedFs::revalidate`
+    /// compares inodes: a remount clears the state and a different directory
+    /// at the same path does not. The launcher shows the row as degraded and
+    /// keeps the toggle enabled, because turning it off is still a valid thing
+    /// to do.
     Unavailable,
 }
 
@@ -500,16 +502,18 @@ enum MountState {
 
 /// The reason a degraded launcher row carries for `error`.
 ///
-/// An unreachable mount carries the transport error alone: it can come back on
-/// its own, and the health check clears the row when it does. Every other
-/// condition means the directory the tenant opened is not at that path any
-/// more, which no amount of waiting repairs, so the reason names the verbs
-/// that do clear it: the launcher's power toggle and `chan close`.
+/// An unreachable mount carries the transport error alone: the errno says the
+/// root can come back on its own, and the health check clears the row when it
+/// does. Every other condition lacks that promise, so its reason adds the
+/// verbs that pick up whatever is at the path now: the launcher's power toggle
+/// and `chan close`. `WorkspaceRootMissing` needs them, because the directory
+/// the tenant opened is not at that path any more; a plain `Io` error shares
+/// the arm and can still clear by itself once the root answers.
 fn degraded_root_reason(error: &ChanError) -> String {
     match error {
         ChanError::RootUnavailable { reason, .. } => reason.clone(),
-        terminal => format!(
-            "{terminal}; turn this workspace off and on, or run chan close, \
+        other => format!(
+            "{other}; turn this workspace off and on, or run chan close, \
              to mount that path again"
         ),
     }
@@ -1168,8 +1172,8 @@ impl WorkspaceHost {
     /// registrations of a mount that is already up: turning an unusable root
     /// into a mount FAILURE would let a caller record the tenant as gone
     /// (`DevserverState::finish_failed_attempt`) while it is still serving
-    /// routes and holding live terminals. Clearing the state stays the job of
-    /// `off` and `close_workspace_for_root`.
+    /// routes and holding live terminals. Tearing the tenant down is a close's
+    /// job, not this check's.
     ///
     /// Blocking: `Workspace::revalidate_root` stats the real root, which is
     /// where a stalled network mount hangs, so it runs on the blocking pool
@@ -1196,7 +1200,7 @@ impl WorkspaceHost {
             }
             // A join failure (a panicked blocking task, or a runtime shutting
             // down) says nothing about the root, so the overlay keeps whatever
-            // the last probe published.
+            // the last health check published.
             Err(error) => tracing::warn!(
                 root = %root.display(),
                 %error,
@@ -3345,17 +3349,20 @@ impl WorkspaceHost {
     ///
     /// Shared by the health probe and by the mount path's pre-check so both
     /// publish the same `mount_state` for the same condition. A reachable root
-    /// clears the overlay; every failure records
-    /// [`MountState::Unavailable`] with the reason the launcher row shows, so
-    /// a tenant whose root is unreachable, gone or replaced stops reporting
-    /// `running` everywhere at once. Nothing here tears a tenant down:
-    /// `close_workspace_for_root` stays the only way a mount goes away.
+    /// clears the overlay; every failure over a root that is still mounted
+    /// records [`MountState::Unavailable`] with the reason the launcher row
+    /// shows, so a tenant whose root is unreachable, gone or replaced stops
+    /// reporting `running` everywhere at once. Nothing here tears a tenant
+    /// down: a mount goes away only through the host's close paths.
     ///
     /// The terminal conditions share the recoverable one's state because the
-    /// same evidence clears both: `RootedFs::revalidate` keeps a root only
-    /// when its inode matches the one the capability handle was opened
-    /// against, so the overlay clears when that very directory is back at the
-    /// path and never for a newly created one.
+    /// same evidence clears both. On unix that evidence is identity:
+    /// `RootedFs::revalidate` keeps a root only when its inode matches the one
+    /// the capability handle was opened against, so the overlay clears when
+    /// that very directory is back at the path and never for a newly created
+    /// one. The non-unix arm asks only whether the retained handle still
+    /// answers, so a directory swapped in at the same path is not a condition
+    /// it can report.
     fn reconcile_root_health(
         &self,
         root: &Path,
@@ -3386,9 +3393,9 @@ impl WorkspaceHost {
                     self.notify_window_change();
                 }
             }
-            // A close that landed while this root was being stat-ed already
-            // cleared the overlay and dropped the tenant, so do not republish
-            // a degraded row for a workspace that is no longer mounted.
+            // A close that landed while this root was being stat-ed has
+            // already dropped the tenant and clears the overlay itself, so do
+            // not republish a degraded row for an unmounted workspace.
             Err(_) if !self.is_root_mounted(root) => {}
             Err(error) => {
                 let reason = degraded_root_reason(error);
