@@ -669,9 +669,9 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                 .ok()?
                 .trim_start_matches('/')
                 .to_string();
-            // Live lifecycle state the launcher drives spinners off. `on` stays
-            // the live mounted bool (== status `running`); `status` carries the
-            // richer `starting`/`error` the bool can't express.
+            // Live lifecycle state the launcher drives spinners off. `on` is
+            // the live mounted bool; `status` carries the richer
+            // `starting`/`error`/`unavailable` the bool cannot express.
             let (status, error) = host.workspace_status(&workspace.root_path);
             Some(LauncherWorkspace {
                 path: workspace.root_path.to_string_lossy().into_owned(),
@@ -679,7 +679,7 @@ fn scoped_local_workspaces(host: &WorkspaceHost) -> Vec<LauncherWorkspace> {
                     .display_name
                     .clone()
                     .unwrap_or_else(|| workspace_label(&workspace.root_path)),
-                on: status == WorkspaceStatus::Running,
+                on: launcher_row_on(status),
                 status,
                 error,
                 // Local rows: no devserver, prefix == workspace_id (the
@@ -1694,6 +1694,41 @@ fn resolve_workspace(host: &WorkspaceHost, id: &str) -> Option<(String, PathBuf)
         .map(|root| (prefix, root))
 }
 
+/// A launcher row's `on`: a tenant is mounted at this root and is not being
+/// torn down.
+///
+/// `unavailable` counts, because the mount IS up: the tenant keeps its live
+/// terminals and buffers, the only action that helps is still turning it off,
+/// and the toggle must offer that rather than a "Turn on" that re-enters the
+/// same mount and changes nothing. This is what a connected devserver already
+/// reports for the same condition (`DevserverState::entry_from_record` keys
+/// `on` off the mount, not the status), so local and remote rows read alike.
+///
+/// Only the health checks write `unavailable`, and only for a mounted root
+/// (`WorkspaceHost::reconcile_root_health`); a close clears the overlay
+/// (`close_workspace_for_root`), so a stopped row never reaches this arm.
+fn launcher_row_on(status: WorkspaceStatus) -> bool {
+    matches!(
+        status,
+        WorkspaceStatus::Running | WorkspaceStatus::Unavailable
+    )
+}
+
+/// The refusal `POST .../on` answers over a mount whose root is not usable.
+///
+/// The route has no row to carry the condition and cannot repair it: the
+/// tenant is already mounted, and reopening it would mean tearing down live
+/// terminals and dirty buffers, which this verb never does. So it answers the
+/// conflict with the reason the launcher row shows, and `off` / `chan close`
+/// stay the way to clear the state. 409 rather than 404: the workspace is
+/// registered and its id resolved, only its filesystem is not usable.
+fn degraded_root_response(reason: Option<String>) -> Response {
+    crate::error::err(
+        StatusCode::CONFLICT,
+        reason.unwrap_or_else(|| "workspace root is not usable".to_string()),
+    )
+}
+
 /// The per-tenant serve config the launcher mounts a workspace with. Mirrors the
 /// devserver's `tenant_config`: a tokened tenant (`no_token:false`) at its stable
 /// public slug, served in-process under the host's listener.
@@ -1760,16 +1795,20 @@ async fn handle_add_workspace(
         Ok(hosted) => {
             set_overlay(&state.host, &hosted.root, true);
             let workspace_id = hosted.prefix.trim_start_matches('/').to_string();
+            // The row the list route would build for this root, not an
+            // assumption that a mount just succeeded: re-adding an already
+            // mounted workspace whose directory has gone away or been replaced
+            // must answer with that state, not a green row.
+            let (status, error) = state.host.workspace_status(&hosted.root);
             Json(LauncherWorkspace {
                 path: hosted.root.to_string_lossy().into_owned(),
                 label: registered
                     .display_name
                     .clone()
                     .unwrap_or_else(|| workspace_label(&hosted.root)),
-                on: true,
-                // Just mounted: live state is running, no error.
-                status: WorkspaceStatus::Running,
-                error: None,
+                on: launcher_row_on(status),
+                status,
+                error,
                 // A freshly added workspace is always local (no devserver).
                 library_id: Some(state.host.library_id().to_string()),
                 devserver_id: None,
@@ -1786,7 +1825,10 @@ async fn handle_add_workspace(
 }
 
 /// `POST /api/library/workspaces/{id}/on`: mount the registered workspace at its
-/// SAME stable prefix (minting a fresh tenant token), persisting on. Loopback-only.
+/// SAME stable prefix (minting a fresh tenant token), persisting on. 204 once it
+/// is mounted; 409 with the reason when the mount is up but its root is not
+/// usable, because reopening it is not something this verb may do.
+/// Loopback-only.
 async fn handle_workspace_on(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -1805,7 +1847,10 @@ async fn handle_workspace_on(
     {
         Ok(_) => {
             set_overlay(&state.host, &root, true);
-            StatusCode::NO_CONTENT.into_response()
+            match state.host.workspace_status(&root) {
+                (WorkspaceStatus::Unavailable, reason) => degraded_root_response(reason),
+                _ => StatusCode::NO_CONTENT.into_response(),
+            }
         }
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
@@ -2561,6 +2606,140 @@ mod devserver_route_tests {
             statuses.contains(&"stopped"),
             "one row must be stopped: {:?}",
             statuses
+        );
+    }
+
+    /// A mutable (loopback) launcher router over a real host, plus the host
+    /// itself: `add` and `on` both require a bound serve address. Unix-only
+    /// with the two tests that build on it, so the windows-gnu arm does not
+    /// carry an unused fixture.
+    #[cfg(unix)]
+    fn mutable_router(lib: Library) -> (Arc<WorkspaceHost>, axum::Router) {
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let cell = OnceLock::new();
+        let _ = cell.set("127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+        let router = launcher_router(host.clone(), None, Some(Arc::new(cell)));
+        (host, router)
+    }
+
+    // Unix-only: Windows refuses to delete a tree while the tenant holds
+    // handles inside it, so the replacement cannot be staged there, and
+    // `RootedFs::revalidate`'s non-unix arm has no inode check to observe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_answers_a_replaced_root_with_the_row_the_list_reports() {
+        let cfg = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (host, router) = mutable_router(lib);
+
+        let body = serde_json::json!({ "path": root.to_string_lossy() }).to_string();
+        let (status, mounted) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mounted["status"], "running");
+        assert_eq!(mounted["on"], true);
+
+        // The root is replaced under the live tenant: same path, new inode.
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+
+        let (status, added) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "re-adding a registered root stays an idempotent registration"
+        );
+        let (status, rows) = request(&router, "GET", "/api/library/workspaces", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = rows
+            .as_array()
+            .expect("array of rows")
+            .iter()
+            .find(|row| row["workspace_id"] == added["workspace_id"])
+            .expect("the added workspace is listed");
+
+        assert_eq!(
+            added["status"], listed["status"],
+            "add and list disagree on status"
+        );
+        assert_eq!(added["on"], listed["on"], "add and list disagree on on");
+        assert_eq!(
+            added["error"], listed["error"],
+            "add and list disagree on error"
+        );
+        assert_eq!(added["status"], "unavailable");
+        assert_eq!(
+            added["on"], true,
+            "a mounted-but-degraded row keeps the toggle on the action that helps"
+        );
+        let reason = added["error"]
+            .as_str()
+            .expect("a degraded row carries a reason");
+        assert!(
+            reason.contains(&root.display().to_string()),
+            "the reason must name the root: {reason}"
+        );
+
+        // Nothing was torn down: the tenant and its live state are still
+        // mounted for `off` to clear.
+        assert!(host.is_root_mounted(&root), "add tore the tenant down");
+    }
+
+    // Unix-only for the same two reasons as
+    // `add_answers_a_replaced_root_with_the_row_the_list_reports`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_over_a_replaced_root_refuses_instead_of_answering_no_content() {
+        let cfg = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (host, router) = mutable_router(lib);
+
+        let body = serde_json::json!({ "path": root.to_string_lossy() }).to_string();
+        let (status, added) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK);
+        let on_uri = format!(
+            "/api/library/workspaces/{}/on",
+            added["workspace_id"].as_str().expect("workspace id")
+        );
+
+        // A healthy mount keeps answering the idempotent 204.
+        let (status, _) = request(&router, "POST", &on_uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The root is replaced under the live tenant: same path, new inode.
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir(&root).unwrap();
+
+        let (status, refusal) = request(&router, "POST", &on_uri, None).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "reopening a dead tenant answered {status} with no way to say why"
+        );
+        let reason = refusal["error"]
+            .as_str()
+            .expect("a refusal carries a reason");
+        assert!(
+            reason.contains(&root.display().to_string()),
+            "the refusal must name the root: {reason}"
+        );
+        assert!(
+            reason.contains("chan close"),
+            "the refusal must name a verb that clears the state: {reason}"
+        );
+        // The refusal is not a teardown: `off` and `chan close` stay the way
+        // to clear the state, with the tenant's live sessions intact.
+        assert!(
+            host.is_root_mounted(&root),
+            "the refusal tore the tenant down"
         );
     }
 

@@ -82,7 +82,8 @@ pub struct WorkspaceEntry {
     /// while `closing`, or `on:false` while `starting`.
     #[serde(default)]
     pub status: WorkspaceStatus,
-    /// Human reason when `status == "error"`.
+    /// Human reason behind `status`: the mount failure for `"error"`, or what
+    /// is wrong with the root for `"unavailable"`. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Per-workspace bearer token, minted devserver-side.
