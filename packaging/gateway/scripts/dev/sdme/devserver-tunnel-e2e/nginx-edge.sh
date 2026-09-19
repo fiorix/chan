@@ -69,7 +69,10 @@ EDGE_BODY_TIMEOUT="${EDGE_BODY_TIMEOUT:-1h}"
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
-ts()   { date -u +%FT%T.%3NZ; }
+# %N, not %3N: uutils' `date` prints %3N as the whole nanosecond field with
+# its leading zeros removed, so a stamp at .070 reads .701 and the log sorts
+# wrong. %N is the zero-padded nine-digit field on uutils and on GNU coreutils.
+ts()   { date -u +%FT%T.%NZ; }
 stamp(){ printf '   [%s] %s\n' "$(ts)" "$*"; }
 die()  { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
