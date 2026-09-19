@@ -748,39 +748,52 @@ fn post_upgrade_state(installed_version: &str) -> State {
     }
 }
 
-/// Path where the downloaded binary is staged before it replaces the running
-/// executable.
-///
-/// The path is a type rather than a bare [`PathBuf`] because
-/// [`install_replacement`] takes nothing else, and the only function that
-/// builds one derives the directory from the running executable's own path.
-/// Every replacement rename is then a move within one directory. A staging
-/// directory chosen independently, such as [`std::env::temp_dir`], can sit on
-/// another volume, where the rename fails with `EXDEV` on Unix and is not the
-/// same-directory move the Windows sequence recovers from.
-#[derive(Debug)]
-struct StagedBinary {
-    path: PathBuf,
-}
+/// Home of [`StagedBinary`], and of nothing else, so that its `path` field is
+/// out of reach of `run_upgrade` and of [`install_replacement`]. A private
+/// field is visible everywhere in the module that defines it, so only a module
+/// of its own leaves [`StagedBinary::beside`] as the way to build one.
+mod staging {
+    use std::path::{Path, PathBuf};
 
-impl StagedBinary {
-    /// Builds the staging path in `exe_path`'s own directory.
-    fn beside(exe_path: &Path, pid: u32) -> Result<Self> {
-        let directory = exe_path.parent().with_context(|| {
-            format!(
-                "{} has no parent directory to stage the download in",
-                exe_path.display()
-            )
-        })?;
-        Ok(Self {
-            path: directory.join(format!(".chan.upgrade-bin.{pid}")),
-        })
+    use anyhow::{Context, Result};
+
+    /// Path where the downloaded binary is staged before it replaces the
+    /// running executable.
+    ///
+    /// The path is a type rather than a bare [`PathBuf`] because
+    /// [`super::install_replacement`] takes nothing else, and the only
+    /// function that builds one derives the directory from the running
+    /// executable's own path. Every replacement rename is then a move within
+    /// one directory. A staging directory chosen independently, such as
+    /// [`std::env::temp_dir`], can sit on another volume, where the rename
+    /// fails with `EXDEV` on Unix and is not the same-directory move the
+    /// Windows sequence recovers from.
+    #[derive(Debug)]
+    pub(super) struct StagedBinary {
+        path: PathBuf,
     }
 
-    fn path(&self) -> &Path {
-        &self.path
+    impl StagedBinary {
+        /// Builds the staging path in `exe_path`'s own directory.
+        pub(super) fn beside(exe_path: &Path, pid: u32) -> Result<Self> {
+            let directory = exe_path.parent().with_context(|| {
+                format!(
+                    "{} has no parent directory to stage the download in",
+                    exe_path.display()
+                )
+            })?;
+            Ok(Self {
+                path: directory.join(format!(".chan.upgrade-bin.{pid}")),
+            })
+        }
+
+        pub(super) fn path(&self) -> &Path {
+            &self.path
+        }
     }
 }
+
+use staging::StagedBinary;
 
 pub struct UpgradeOptions {
     pub assume_yes: bool,
@@ -1250,8 +1263,28 @@ fn install_under_interrupt_guard<G>(
     installed
 }
 
+/// Refuses a staged binary that is not in `exe_path`'s own directory.
+///
+/// [`StagedBinary::beside`] derives the staging directory from the path it is
+/// given, so only its caller makes that directory the running executable's.
+/// Both platforms reach this before their first rename, while `exe_path` still
+/// holds the old image: the non-Windows [`install_replacement`] calls it
+/// directly, the Windows one through [`install_replacement_with`].
+fn ensure_staged_beside_executable(new_bin: &StagedBinary, exe_path: &Path) -> Result<()> {
+    if new_bin.path().parent() != exe_path.parent() {
+        bail!(
+            "refusing to replace {} with {} because the staged binary is not in the \
+             executable's own directory",
+            exe_path.display(),
+            new_bin.path().display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 fn install_replacement(new_bin: &StagedBinary, exe_path: &Path) -> Result<()> {
+    ensure_staged_beside_executable(new_bin, exe_path)?;
     fs::rename(new_bin.path(), exe_path).with_context(|| {
         format!(
             "replacing {} with {}",
@@ -1302,18 +1335,8 @@ where
         );
     }
     // Every rename below moves a file within `exe_path`'s directory, which
-    // needs no assumption about which volume the staged binary sits on. The
-    // staged binary is built beside the running executable, so this refusal
-    // fires only for a staged path assembled some other way, and it fires
-    // before the first rename, while `exe_path` still holds the old image.
-    if new_bin.path().parent() != exe_path.parent() {
-        bail!(
-            "refusing to replace {} with {} because the staged binary is not in the \
-             executable's own directory",
-            exe_path.display(),
-            new_bin.path().display()
-        );
-    }
+    // needs no assumption about which volume the staged binary sits on.
+    ensure_staged_beside_executable(new_bin, exe_path)?;
 
     // Windows permits renaming the mapped executable but not deleting or
     // overwriting it. The sequence is:
@@ -1757,6 +1780,27 @@ mod tests {
 
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert!(!staged.path().exists());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_install_replacement_refuses_a_staged_binary_from_another_directory() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let exe = install_dir.path().join("chan");
+        // Staged beside an executable in another directory, the shape a move
+        // of the staging directory to `std::env::temp_dir` would produce.
+        let staged = StagedBinary::beside(&elsewhere.path().join("chan"), 123).unwrap();
+        fs::write(&exe, b"old").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
+
+        let error = install_replacement(&staged, &exe).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not in the executable's own directory"));
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+        assert_eq!(fs::read(staged.path()).unwrap(), b"new");
     }
 
     #[test]
