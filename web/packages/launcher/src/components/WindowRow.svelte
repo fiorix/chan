@@ -319,9 +319,9 @@
       background: var(--btn-bg);
     }
     50% {
-      border-color: #e3b341;
-      color: #e3b341;
-      background: color-mix(in srgb, #e3b341 18%, transparent);
+      border-color: var(--warn);
+      color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 18%, transparent);
     }
   }
 
@@ -329,9 +329,9 @@
   @media (prefers-reduced-motion: reduce) {
     .icon-btn.attention {
       animation: none;
-      border-color: #e3b341;
-      color: #e3b341;
-      background: color-mix(in srgb, #e3b341 18%, transparent);
+      border-color: var(--warn);
+      color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 18%, transparent);
     }
   }
 </style>
