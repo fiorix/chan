@@ -67,6 +67,23 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 
 `run.sh` leaves the containers up on PASS for inspection (`sudo sdme join gw-e2e-proxy`, `sudo sdme logs gw-e2e-ds`).
 
+## The nginx edge
+
+`tls-forward.py` is what the rig puts in front of the tunnel listener, so a plain run exercises no nginx. `nginx-edge.sh` adds the ingress production actually runs: nginx terminating TLS + h2 on the apex and `grpc_pass`ing `/v1/tunnel` as h2c into devserver-proxy's tunnel listener. It runs against a rig that is already up, and moves only the devserver's `--tunnel-url`.
+
+```sh
+# build the rootfs the nginx binary comes from (one-time)
+sudo sdme fs build -f chan-e2e-nginx packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sdme
+
+packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sh up
+packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sh scenario
+packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sh clean
+```
+
+The edge runs inside `gw-e2e-proxy`, beside the terminator, because that is where production runs it and because nothing else can reach the listener: devserver-proxy puts `TUNNEL_BIND_ADDR` through `require_protected_listener`, which refuses a non-loopback cleartext listener unless the operator declares `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`. `scenario` stops and restarts the terminator behind the edge and times what the devserver, the terminator and nginx each report. `clean` restores the devserver's tunnel url and removes the edge; the rootfs stays for the next run.
+
+One thing the edge configures that a default nginx does not: `grpc_read_timeout` and `grpc_send_timeout`. Both default to 60s, and a registered tunnel carries nothing between requests, so an edge on the defaults closes every idle tunnel a minute after it registers.
+
 ## Files
 
 | file                      | role                                             |
@@ -79,6 +96,8 @@ packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh
 | `tls-forward.py`            | exact-ALPN TLS edges for public HTTP and h2     |
 | `e2e-extension.py`          | declared local extension: entry doc, echo, log  |
 | `zone-isolation-probe.sh` | demonstrate same-zone OK / cross-zone BLOCKED    |
+| `nginx-edge.sdme`         | rootfs carrying the distribution nginx binary    |
+| `nginx-edge.sh`           | the production nginx `grpc_pass` ingress, in front of the terminator |
 
 ## Config the harness sets
 
