@@ -5,6 +5,7 @@
 // its own rows so it is robust to the shared module-level mock state.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { WorkspaceStatus } from "../api/library";
 import {
   selection,
   isSelected,
@@ -91,6 +92,45 @@ describe("workspace multi-select", () => {
     expect(row.status).toBe("locked");
     expect(row.on).toBe(false);
     expect(selection.note).toBe("1 locked workspace skipped");
+  });
+
+  // Total over the wire union: which status a bulk run refuses to act on is the
+  // classifier's `foreign` answer, so a status added to the wire needs an entry
+  // here. A degraded mount is not one of them -- it is up, and turning it off is
+  // the one action that helps it.
+  const SKIPPED_BY_BULK: Record<WorkspaceStatus, boolean> = {
+    stopped: false,
+    starting: false,
+    running: false,
+    locked: true,
+    closing: false,
+    removing: false,
+    error: false,
+    unavailable: false,
+  };
+
+  it("skips a bulk run over the foreign lock alone", async () => {
+    for (const status of Object.keys(SKIPPED_BY_BULK) as WorkspaceStatus[]) {
+      const skipped = SKIPPED_BY_BULK[status];
+      const path = `/tmp/sel-bulk-${status}`;
+      clearSelection();
+      await addLocalWorkspace(path);
+      const id = library.workspaces.find((w) => w.path === path)!.workspace_id;
+      library.workspaces = library.workspaces.map((w) =>
+        w.workspace_id === id ? { ...w, on: true, status } : w,
+      );
+      toggleSelected("workspace", id);
+
+      await bulkSetOnAll(false);
+
+      // A skipped row is untouched (still on); an included one was turned off.
+      const row = library.workspaces.find((w) => w.workspace_id === id)!;
+      expect({ status, note: selection.note, on: row.on }).toEqual({
+        status,
+        note: skipped ? "1 locked workspace skipped" : null,
+        on: skipped,
+      });
+    }
   });
 
   it("remove is gated behind a confirm; cancel leaves the row", async () => {

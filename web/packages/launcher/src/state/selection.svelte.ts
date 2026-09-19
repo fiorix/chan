@@ -12,6 +12,7 @@
 // surfaced; the per-row quick actions stay the single-item path; remove is
 // bulk-only (behind selection + a confirm).
 
+import { workspaceCondition, type WorkspaceEntry } from "../api/library";
 import {
   connectDevserver,
   connectGateway,
@@ -144,18 +145,23 @@ async function runBulk(
   return failures;
 }
 
+/** A row another Chan process holds the mount for. The classifier owns which
+ * status that is, so this answer moves with it instead of carrying its own copy
+ * of the wire string; a row the live re-fetch has already dropped is not held
+ * by anyone here. */
+function foreignMount(row: WorkspaceEntry | undefined): boolean {
+  return row !== undefined && workspaceCondition(row.status) === "foreign";
+}
+
 function lockedWorkspace(item: SelItem): boolean {
   if (item.kind === "workspace") {
-    return (
-      library.workspaces.find((w) => w.devserver_id === null && w.workspace_id === item.id)
-        ?.status === "locked"
+    return foreignMount(
+      library.workspaces.find((w) => w.devserver_id === null && w.workspace_id === item.id),
     );
   }
   if (item.kind === "served") {
-    return (
-      library.workspaces.find(
-        (w) => w.devserver_id === item.devserverId && w.prefix === item.id,
-      )?.status === "locked"
+    return foreignMount(
+      library.workspaces.find((w) => w.devserver_id === item.devserverId && w.prefix === item.id),
     );
   }
   return false;

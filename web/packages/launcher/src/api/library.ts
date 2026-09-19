@@ -111,10 +111,10 @@ export type WorkspaceStatus =
   | "unavailable";
 
 /**
- * How a lifecycle status reads on a control surface. The workspace rows and the
- * command deck ask this instead of comparing wire strings, so a status added to
- * the wire is one decision here rather than a scattered set of comparisons that
- * each quietly leave it looking healthy:
+ * How a lifecycle status reads on a control surface. The workspace rows, the
+ * command deck and the bulk selection ask this instead of comparing wire
+ * strings, so how a status reads on those three is one decision here rather
+ * than a set of comparisons that each quietly leave it looking healthy:
  * - `idle`     nothing is mounted; the surface offers turning it on
  * - `busy`     a lifecycle operation is in flight; controls spin and lock
  * - `ready`    mounted and serving; the row offers its whole action set
