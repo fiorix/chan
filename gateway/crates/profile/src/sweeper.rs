@@ -17,17 +17,20 @@
 //!
 //! Authorization invariant: rows carrying grants are never swept. Each grant
 //! must be removed through the exact session-revocation settlement path before
-//! its parent becomes eligible. A swept devserver that redials announces its display name in the
-//! tunnel `Hello`, and identity's validate exchange recreates the row
-//! with that label on the spot. A client that announces no name shows
-//! up live-unlabeled on the owner's dashboard (the live list comes from
-//! devserver-control's aggregate); a grant create recreates its row but
-//! leaves it unlabeled, and only a later dial that announces a name
-//! labels it. The owner's own entry needs the row too: profile's
-//! `devserver_access` selects from `devservers` for the owner as well
-//! as for grantees, so identity denies the owner entry to a live
-//! devserver whose row is missing until a grant create or a
-//! name-announcing dial recreates it.
+//! its parent becomes eligible. A swept row comes back on the next
+//! validate: identity ensures it for every tunnel admission, which is
+//! every dial and every lease refresh, so a row lost while the tunnel
+//! stays up returns within a refresh interval instead of waiting for a
+//! reconnect. devserver-proxy sends the display name a client
+//! announces in its tunnel `Hello` on a separate validate, so the
+//! admission ensure carries no label and the announce labels the row a
+//! moment later; a client that announces no name keeps the label-less
+//! row, which the dashboard renders by id prefix. A grant create also
+//! recreates the row, label-less. The owner's own entry needs the row
+//! too: profile's `devserver_access` selects from `devservers` for the
+//! owner as well as for grantees, so identity denies the owner entry
+//! to a live devserver whose row is missing until one of those
+//! recreates it.
 //!
 //! Fleet coverage: the snapshot is devserver-control's cluster-wide
 //! aggregate, so registrations on every connected proxy count as live.

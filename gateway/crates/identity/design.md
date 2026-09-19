@@ -103,6 +103,7 @@ PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
   - Per-token-fingerprint throttle (4 rps refill, 16 burst, 4096-entry LRU map). Throttled requests return 401, identical on the wire to an unknown token.
   - One statement joins the user, seeded fleet singleton, and optional user policy while bumping `last_used_at`. Blocked, paused, disabled, required-but-missing, unreadable, and invalid-limit states all preserve the uniform 401.
   - A successful admission validation signs the positive finite user limit into the 120-second admission lease. No-policy compatibility mode signs the protocol maximum, leaving `MAX_DEVSERVERS_PER_USER` as the effective controller ceiling.
+  - A successful admission validation of a `tunnel`-scope PAT also ensures the owner's `devservers` row in profile, so a validated dial always has the row profile's `devserver_access` requires. devserver-proxy omits the display name from the admission call and forwards it on the follow-up validate, which labels the same row, so the admission ensure is label-less. Both are best-effort and never fail the validate.
   - Append `used` to `api_token_audit`.
 - Revoke (`DELETE /api/tokens/{id}`):
   - Profile atomically verifies ownership, marks the row revoked, writes its audit row, and reserves a durable subject-revocation generation.
