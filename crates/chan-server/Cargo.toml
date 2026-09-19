@@ -83,6 +83,12 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+# This crate's tests (indexer.rs) arm chan-workspace's startup-recovery pause
+# barrier, one of the test-only seams behind the `test-hooks` feature; enable it
+# for the test build. default-features stays off, spelled out as in the
+# [dependencies] entry above, so this line adds a feature without changing which
+# ones default.
+chan-workspace = { workspace = true, default-features = false, features = ["test-hooks"] }
 # This crate's tests (host.rs, routes/terminal.rs) drive chan-library's
 # terminal-session registry directly, including its test-only `attach`/`len`/
 # `is_empty` helpers behind the `test-util` feature; enable it for the test build.

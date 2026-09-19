@@ -621,22 +621,27 @@ impl Drop for RecoveryWorker {
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 struct OpenRecoveryPause {
     reached: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 static OPEN_RECOVERY_PAUSES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, OpenRecoveryPause>>,
 > = std::sync::OnceLock::new();
 
 /// Arm a one-shot barrier before the startup worker claims recovery.
 ///
-/// This remains available outside `cfg(test)` because chan-server's unit tests
-/// link chan-workspace as a normal dependency. Pauses are keyed by canonical
-/// workspace root, and a second outstanding armer for the same root panics
-/// instead of silently replacing the first. The worker also leaves the barrier
-/// when stopped, so teardown does not depend on releasing it.
+/// Compiled for this crate's own tests and for downstream test builds that
+/// enable `test-hooks`: chan-server's unit tests link chan-workspace as a
+/// normal dependency, so `cfg(test)` alone would not reach them. Pauses are
+/// keyed by canonical workspace root, and a second outstanding armer for the
+/// same root panics instead of silently replacing the first. The worker also
+/// leaves the barrier when stopped, so teardown does not depend on releasing
+/// it.
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub fn arm_open_recovery_pause_for_test(
     root: std::path::PathBuf,
@@ -664,6 +669,7 @@ pub fn arm_open_recovery_pause_for_test(
     (reached_rx, release_tx)
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 fn open_recovery_pause_for_test(workspace: &Workspace, stop: &AtomicBool) {
     let Some(pauses) = OPEN_RECOVERY_PAUSES.get() else {
         return;
@@ -812,6 +818,7 @@ fn run_open_recovery(workspace: std::sync::Weak<Workspace>, plan: RecoveryPlan, 
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
+    #[cfg(any(test, feature = "test-hooks"))]
     open_recovery_pause_for_test(&workspace, stop);
     tracing::debug!(
         generation = plan.generation.get(),
