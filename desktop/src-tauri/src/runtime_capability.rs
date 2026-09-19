@@ -70,8 +70,10 @@ pub fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>, Strin
 /// ACL parity tests in serve.rs assert this list equals the grant recomputed
 /// from the capability sources. It is what a gateway-served `lib-*` window on
 /// a minted exact origin may invoke; a loopback window's effective grant
-/// differs at the edges (no `gateway_csrf_token`, no `probe_url` because the
-/// connecting screen is a local app page, and `read_dropped_paths` only where
+/// differs at the edges (it lacks `gateway_csrf_token`; it holds `probe_url`,
+/// which `capabilities/workspace.json` grants to local app pages and to
+/// loopback origins in `control-terminal-*`, `local::*` and `lib-*` windows
+/// while this set withholds it; and it holds `read_dropped_paths` only where
 /// local-drop applies), which cannot mislead because a locally served page
 /// never skews from its host.
 ///

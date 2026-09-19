@@ -21,12 +21,18 @@
 //                library-owned per-window state survives the navigation.
 //   * Reachability is probed through a single Tauri command:
 //         invoke('probe_url', { url }) -> { reachable, status, detail }
-//     Only this bundled local page may call it. For a gateway target,
-//     reachable is false on 502/503/504 and on a transport failure;
-//     401/403/404 prove the gate answered and are reachable. Loopback
-//     targets keep the any-response behavior. The Rust request carries
-//     the target origin's webview cookies when available so the probe can
-//     tell a registered-but-not-answering gateway devserver from a live one.
+//     This page is the command's only caller. capabilities/workspace.json
+//     hands the `workspace-window` set to local app pages and to the
+//     `http://127.0.0.1:*` and `http://localhost:*` origins it lists in
+//     `control-terminal-*`, `local::*` and `lib-*` windows, so any
+//     loopback-served page in those windows holds the probe too; the
+//     runtime capability minted for a gateway origin omits it.
+//     For a gateway target, reachable is false on 502/503/504 and on a
+//     transport failure; 401/403/404 prove the gate answered and are
+//     reachable. Loopback targets keep the any-response behavior. The
+//     Rust request carries the target origin's webview cookies when
+//     available so the probe can tell a registered-but-not-answering
+//     gateway devserver from a live one.
 //     The page cannot fetch the remote itself: the strict CSP
 //     (default-src 'self') blocks cross-origin connect-src, so detection
 //     must run in Rust, which has no CORS restriction and owns the

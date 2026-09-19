@@ -3243,8 +3243,13 @@ mod tests {
             perms.iter().any(|p| p == "allow-read-dropped-paths"),
             "local-drop capability must grant allow-read-dropped-paths: {perms:?}",
         );
-        // ...and must not leak in through the workspace command set that
-        // gateway-served windows receive through their runtime capability.
+        // ...and must not leak in through capabilities/workspace.json or its
+        // `workspace-window` set, which a loopback-served `lib-*` window
+        // receives. A gateway-served one receives the `gateway-window` set
+        // through its runtime capability instead, and DELIBERATE_EXCLUSIONS
+        // pairs both exact-origin classes with `read_dropped_paths`, so
+        // `origin_aware_acl_grants_spa_invoke_vocabulary_per_window_class`
+        // covers that route.
         let workspace_perms = capability_permissions(WORKSPACE_CAPABILITY_JSON);
         assert!(
             workspace_perms
