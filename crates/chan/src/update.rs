@@ -1227,10 +1227,12 @@ fn retry_windows_sharing_violation<T>(
 /// of reaching the default handler that ends the process; after the drop the
 /// handler answers FALSE and the default behaviour applies again. The listener
 /// is never polled, because suppression depends on the receiver existing and
-/// not on anything reading from it.
+/// not on anything reading from it. Registering at creation and answering TRUE
+/// while a receiver lives are tokio implementation details rather than
+/// documented promises, read at tokio 1.52.2.
 ///
 /// A listener that cannot be built is reported and the replacement runs
-/// unguarded, which is the behaviour of a process with no console.
+/// unguarded.
 #[cfg(any(test, target_os = "windows"))]
 fn install_under_interrupt_guard<G>(
     listen: impl FnOnce() -> io::Result<G>,
@@ -1299,8 +1301,8 @@ where
             running_exe.display()
         );
     }
-    // Every rename below moves a file within `exe_path`'s directory, which is
-    // the only shape that is atomic on one volume and recoverable here. The
+    // Every rename below moves a file within `exe_path`'s directory, which
+    // needs no assumption about which volume the staged binary sits on. The
     // staged binary is built beside the running executable, so this refusal
     // fires only for a staged path assembled some other way, and it fires
     // before the first rename, while `exe_path` still holds the old image.
