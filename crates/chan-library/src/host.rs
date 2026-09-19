@@ -86,15 +86,17 @@ pub enum WorkspaceStatus {
     /// interrupted operation. [`LauncherWorkspace::error`] carries the reason.
     /// The launcher clears the spinner and surfaces the reason.
     Error,
-    /// Mounted, but the filesystem under the root is currently unreachable --
-    /// a network mount whose client stalled, died, or is being remounted.
+    /// Mounted, but the directory under the root is not usable: a network
+    /// mount whose client stalled, died, or is being remounted, or a root
+    /// removed or replaced while the tenant held it open.
     ///
     /// Distinct from both `Running` (which claims the workspace works) and
     /// `Error` (which calls for retrying a lifecycle operation). The
     /// tenant stays up and keeps its live state; the health probe clears this
-    /// back to `Running` on its own once the mount answers again, including
-    /// across a remount. The launcher shows the row as degraded and keeps the
-    /// toggle enabled, because turning it off is still a valid thing to do.
+    /// back to `Running` on its own once the root answers again, which a
+    /// remount does and a different directory at the same path does not. The
+    /// launcher shows the row as degraded and keeps the toggle enabled,
+    /// because turning it off is still a valid thing to do.
     Unavailable,
 }
 
@@ -208,8 +210,8 @@ pub struct LauncherWorkspace {
     /// a row without the field reads `stopped`.
     #[serde(default)]
     pub status: WorkspaceStatus,
-    /// Short human reason, present only when `status == error` (an open
-    /// failure). Omitted otherwise.
+    /// Short human reason behind `status`: the open failure for `error`, or
+    /// what is wrong with the root for `unavailable`. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -310,6 +312,9 @@ pub struct WorkspaceHost {
     library: Library,
     #[cfg(test)]
     open_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+    #[cfg(test)]
+    revalidate_thread_probe:
+        std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
     open_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -486,10 +491,28 @@ enum MountState {
     /// A mount or removal failed, or the root is still releasing after an
     /// interrupted operation. The string is the short human reason.
     Error(String),
-    /// Mounted but the filesystem under the root is unreachable; the string is
-    /// the transport reason. Set and cleared by the health probe, never by a
-    /// mount attempt.
+    /// Mounted but the directory under the root is not usable; the string is
+    /// the reason a row displays. Set and cleared by the root health checks
+    /// (the periodic probe and the mount path's pre-check), never by the
+    /// outcome of a mount attempt.
     Unavailable(String),
+}
+
+/// The reason a degraded launcher row carries for `error`.
+///
+/// An unreachable mount carries the transport error alone: it can come back on
+/// its own, and the health check clears the row when it does. Every other
+/// condition means the directory the tenant opened is not at that path any
+/// more, which no amount of waiting repairs, so the reason names the verbs
+/// that do clear it: the launcher's power toggle and `chan close`.
+fn degraded_root_reason(error: &ChanError) -> String {
+    match error {
+        ChanError::RootUnavailable { reason, .. } => reason.clone(),
+        terminal => format!(
+            "{terminal}; turn this workspace off and on, or run chan close, \
+             to mount that path again"
+        ),
+    }
 }
 
 struct HostedWorkspaceRuntime {
@@ -656,6 +679,8 @@ impl WorkspaceHost {
             register_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            revalidate_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_release_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1116,6 +1141,11 @@ impl WorkspaceHost {
     /// in the pre-check and return it. A distinct root that collides on
     /// `config.prefix` falls through to `open_registered_workspace` and its
     /// duplicate-prefix error.
+    ///
+    /// An existing mount is revalidated before it is handed back, so a caller
+    /// that re-registers a root whose directory has gone away or been replaced
+    /// sees that through [`workspace_status`](Self::workspace_status) at once
+    /// instead of after the next health probe tick.
     pub async fn open_or_get_registered_workspace(
         &self,
         root: impl AsRef<Path>,
@@ -1124,9 +1154,55 @@ impl WorkspaceHost {
         let root = root.as_ref();
         let _registering = self.register_lock.lock().await;
         if let Some(existing) = self.hosted_for_root(root)? {
+            self.revalidate_mounted_root(root).await;
             return Ok(existing);
         }
         self.open_registered_workspace(root, config).await
+    }
+
+    /// Re-check one mounted root's filesystem and publish the result through
+    /// the degraded overlay.
+    ///
+    /// Reports through [`workspace_status`](Self::workspace_status) rather
+    /// than through a return value, because the callers are idempotent
+    /// registrations of a mount that is already up: turning an unusable root
+    /// into a mount FAILURE would let a caller record the tenant as gone
+    /// (`DevserverState::finish_failed_attempt`) while it is still serving
+    /// routes and holding live terminals. Clearing the state stays the job of
+    /// `off` and `close_workspace_for_root`.
+    ///
+    /// Blocking: `Workspace::revalidate_root` stats the real root, which is
+    /// where a stalled network mount hangs, so it runs on the blocking pool
+    /// and can never pin a runtime worker. Nothing here bounds that stat; the
+    /// caller's own budget does, and the launcher's `add` / `on` routes have
+    /// none beyond their client.
+    async fn revalidate_mounted_root(&self, root: &Path) {
+        let Some(workspace) = self.live_workspace(root) else {
+            return;
+        };
+        #[cfg(test)]
+        let probe = self.revalidate_thread_probe.lock().unwrap().take();
+        let joined = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                let _ = probe.send(std::thread::current().id());
+            }
+            workspace.revalidate_root()
+        })
+        .await;
+        match joined {
+            Ok(outcome) => {
+                let _ = self.reconcile_root_health(root, outcome);
+            }
+            // A join failure (a panicked blocking task, or a runtime shutting
+            // down) says nothing about the root, so the overlay keeps whatever
+            // the last probe published.
+            Err(error) => tracing::warn!(
+                root = %root.display(),
+                %error,
+                "workspace root revalidation task did not finish",
+            ),
+        }
     }
 
     /// The existing mount for `root`, matched by canonical form, or `None`
@@ -3254,61 +3330,83 @@ impl WorkspaceHost {
         };
         let mut refreshed = 0;
         for (root, workspace) in mounted {
-            let key = canonical_key(&root);
-            let was_degraded = matches!(
-                self.mount_state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&key),
-                Some(MountState::Unavailable(_))
-            );
-            match workspace.revalidate_root() {
-                Ok(remounted) => {
-                    if remounted {
-                        refreshed += 1;
-                    }
-                    if was_degraded {
-                        self.mount_state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&key);
-                        tracing::info!(
-                            root = %root.display(),
-                            remounted,
-                            "workspace root is reachable again",
-                        );
-                        self.notify_window_change();
-                    }
-                }
-                Err(chan_workspace::ChanError::RootUnavailable { reason, .. }) => {
-                    if !was_degraded {
-                        tracing::warn!(
-                            root = %root.display(),
-                            %reason,
-                            "workspace root is unreachable; marking the row degraded",
-                        );
-                        self.mount_state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(key, MountState::Unavailable(reason));
-                        self.notify_window_change();
-                    }
-                }
-                // A genuinely missing or replaced root is the terminal
-                // condition WL-13/WL-14 already own; the probe does not tear
-                // tenants down, it only reports.
-                Err(error) => {
-                    if !was_degraded {
-                        tracing::warn!(
-                            root = %root.display(),
-                            %error,
-                            "workspace root probe failed",
-                        );
-                    }
-                }
+            if self
+                .reconcile_root_health(&root, workspace.revalidate_root())
+                .is_ok_and(|remounted| remounted)
+            {
+                refreshed += 1;
             }
         }
         refreshed
+    }
+
+    /// Fold one root's [`Workspace::revalidate_root`] outcome into the degraded
+    /// overlay and hand the outcome back unchanged.
+    ///
+    /// Shared by the health probe and by the mount path's pre-check so both
+    /// publish the same `mount_state` for the same condition. A reachable root
+    /// clears the overlay; every failure records
+    /// [`MountState::Unavailable`] with the reason the launcher row shows, so
+    /// a tenant whose root is unreachable, gone or replaced stops reporting
+    /// `running` everywhere at once. Nothing here tears a tenant down:
+    /// `close_workspace_for_root` stays the only way a mount goes away.
+    ///
+    /// The terminal conditions share the recoverable one's state because the
+    /// same evidence clears both: `RootedFs::revalidate` keeps a root only
+    /// when its inode matches the one the capability handle was opened
+    /// against, so the overlay clears when that very directory is back at the
+    /// path and never for a newly created one.
+    fn reconcile_root_health(
+        &self,
+        root: &Path,
+        outcome: Result<bool, ChanError>,
+    ) -> Result<bool, ChanError> {
+        let key = canonical_key(root);
+        let published = match self
+            .mount_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            Some(MountState::Unavailable(reason)) => Some(reason.clone()),
+            _ => None,
+        };
+        match &outcome {
+            Ok(remounted) => {
+                if published.is_some() {
+                    self.mount_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&key);
+                    tracing::info!(
+                        root = %root.display(),
+                        remounted,
+                        "workspace root is reachable again",
+                    );
+                    self.notify_window_change();
+                }
+            }
+            // A close that landed while this root was being stat-ed already
+            // cleared the overlay and dropped the tenant, so do not republish
+            // a degraded row for a workspace that is no longer mounted.
+            Err(_) if !self.is_root_mounted(root) => {}
+            Err(error) => {
+                let reason = degraded_root_reason(error);
+                if published.as_deref() != Some(reason.as_str()) {
+                    tracing::warn!(
+                        root = %root.display(),
+                        %error,
+                        "workspace root is not usable; marking the row degraded",
+                    );
+                    self.mount_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(key, MountState::Unavailable(reason));
+                    self.notify_window_change();
+                }
+            }
+        }
+        outcome
     }
 
     /// Drop a workspace root's transient lifecycle state (it settled to running,
@@ -5791,6 +5889,193 @@ mod tests {
             "deleted root was published as a tenant"
         );
         assert!(!root.exists(), "failed mount recreated the workspace root");
+    }
+
+    /// Mount a registered workspace at `root` and return the host, with the
+    /// tenant published and reporting `running`. The shared fixture for the
+    /// replaced-root tests below.
+    #[cfg(unix)]
+    async fn mounted_host(cfg: &Path, root: &Path, prefix: &str) -> Arc<WorkspaceHost> {
+        let lib = Library::open_at(cfg.join("config.toml")).expect("library");
+        lib.register_workspace(root).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        host.open_or_get_registered_workspace(root, serve_config(prefix))
+            .await
+            .expect("mount");
+        assert_eq!(
+            host.workspace_status(root).0,
+            WorkspaceStatus::Running,
+            "fixture did not publish a running tenant"
+        );
+        host
+    }
+
+    /// Replace the directory at `root` with a fresh one: same path, new inode,
+    /// which is the `rm -rf root && mkdir root` shape `RootedFs::revalidate`
+    /// treats as terminal.
+    #[cfg(unix)]
+    fn replace_root(root: &Path) {
+        use std::os::unix::fs::MetadataExt as _;
+        let before = std::fs::symlink_metadata(root).expect("root before").ino();
+        std::fs::remove_dir_all(root).expect("remove harness-owned workspace");
+        std::fs::create_dir(root).expect("recreate the path");
+        let after = std::fs::symlink_metadata(root).expect("root after").ino();
+        assert_ne!(before, after, "the recreated root reused the same inode");
+    }
+
+    // Unix-only for two reasons: Windows refuses to delete a tree while the
+    // tenant holds handles inside it, so the harness cannot build the
+    // scenario; and `RootedFs::revalidate`'s non-unix arm has no inode check,
+    // so there is no replaced-root condition to observe there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_reports_a_replaced_root_as_unavailable() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).expect("workspace");
+        let host = mounted_host(cfg.path(), &root, "/replaced").await;
+
+        replace_root(&root);
+
+        assert_eq!(
+            host.probe_mounted_roots(),
+            0,
+            "a replaced root is not a remount and must not refresh the handle"
+        );
+        let (status, reason) = host.workspace_status(&root);
+        assert_eq!(
+            status,
+            WorkspaceStatus::Unavailable,
+            "a tenant over a replaced root still reports {status:?}"
+        );
+        let reason = reason.expect("a degraded row carries a reason");
+        assert!(
+            reason.contains(&root.display().to_string()),
+            "the reason must name the root: {reason}"
+        );
+        assert!(
+            reason.contains("chan close"),
+            "the reason must name a verb that clears the state: {reason}"
+        );
+        // The probe reports; it never tears a tenant down.
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/replaced".to_string()],
+            "the probe unmounted the tenant"
+        );
+    }
+
+    /// A replaced root stays degraded across probe ticks, because `revalidate`
+    /// adopts a root only when its inode matches the one the handle was opened
+    /// against, and it clears when the ORIGINAL directory is back at the path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_replaced_root_clears_only_when_the_original_directory_returns() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).expect("workspace");
+        let host = mounted_host(cfg.path(), &root, "/moved").await;
+
+        // Move the original directory aside rather than deleting it, so the
+        // inode it was opened against can come back.
+        let aside = parent.path().join("workspace-aside");
+        std::fs::rename(&root, &aside).expect("move the original root aside");
+        std::fs::create_dir(&root).expect("a different directory takes the path");
+
+        host.probe_mounted_roots();
+        assert_eq!(host.workspace_status(&root).0, WorkspaceStatus::Unavailable);
+        host.probe_mounted_roots();
+        assert_eq!(
+            host.workspace_status(&root).0,
+            WorkspaceStatus::Unavailable,
+            "a later probe cleared a replaced root"
+        );
+
+        std::fs::remove_dir(&root).expect("remove the impostor");
+        std::fs::rename(&aside, &root).expect("put the original root back");
+        host.probe_mounted_roots();
+        assert_eq!(
+            host.workspace_status(&root).0,
+            WorkspaceStatus::Running,
+            "the original directory is back and the row is still degraded"
+        );
+    }
+
+    /// The mount path's pre-check stats a real root, and a stalled network
+    /// mount is exactly where that call hangs, so it must never run on a
+    /// runtime worker. Platform-independent: every arm of
+    /// `RootedFs::revalidate` touches the filesystem.
+    #[tokio::test(flavor = "current_thread")]
+    async fn revalidating_a_mounted_root_runs_off_the_runtime_thread() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = WorkspaceHost::new(lib, fake_builder());
+        host.open_or_get_registered_workspace(root.path(), serve_config("/probe"))
+            .await
+            .expect("mount");
+
+        let (probe, observed) = std::sync::mpsc::channel();
+        *host.revalidate_thread_probe.lock().unwrap() = Some(probe);
+        let runtime_thread = std::thread::current().id();
+        // The second registration takes the already-mounted early return, the
+        // only path that revalidates.
+        host.open_or_get_registered_workspace(root.path(), serve_config("/probe"))
+            .await
+            .expect("idempotent re-registration");
+
+        let revalidate_thread = observed
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the early return did not revalidate the root");
+        assert_ne!(
+            revalidate_thread, runtime_thread,
+            "the blocking root revalidation ran on the runtime thread"
+        );
+    }
+
+    // Unix-only for the same two reasons as
+    // `probe_reports_a_replaced_root_as_unavailable`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mounting_a_replaced_root_reports_it_without_waiting_for_the_probe() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).expect("workspace");
+        let host = mounted_host(cfg.path(), &root, "/stale").await;
+
+        replace_root(&root);
+
+        // No probe tick in between: the mount path itself must observe the
+        // replacement.
+        let hosted = host
+            .open_or_get_registered_workspace(&root, serve_config("/stale"))
+            .await
+            .expect("an idempotent re-registration stays a success");
+        assert_eq!(
+            hosted.prefix, "/stale",
+            "re-registration moved the tenant's prefix"
+        );
+        let (status, reason) = host.workspace_status(&root);
+        assert_eq!(
+            status,
+            WorkspaceStatus::Unavailable,
+            "the mount path handed back the stale tenant as {status:?}"
+        );
+        assert!(
+            reason.is_some_and(|reason| reason.contains(&root.display().to_string())),
+            "the degraded row carries no reason naming the root"
+        );
+        // Idempotent, never an implicit teardown: the tenant and its live
+        // state are still there for `off` / `chan close` to clear.
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/stale".to_string()],
+            "re-registration tore the tenant down"
+        );
     }
 
     #[tokio::test]

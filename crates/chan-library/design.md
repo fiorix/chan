@@ -37,6 +37,8 @@ The window registry, workspace overlay, and local color store stamp save snapsho
 
 Each hosted runtime stores its normalized canonical root before publication. By-root lookups canonicalize only the caller's target, outside the workspace-map lock, and compare it with those stored keys so a mounted root's filesystem cannot block lookup while the shared routing map is locked. After tenant construction, root validation runs on the blocking pool without the map lock. Publication then checks both prefix and canonical root under the write lock; a losing runtime shuts down after releasing that guard. The asynchronous registration mutex still serializes idempotent registrations across the open and mount.
 
+An idempotent registration that finds the root already mounted revalidates it on the blocking pool before handing that tenant back, so a caller learns from the workspace's status that the root has gone away or been replaced without waiting for the next health probe tick. Both the probe and this pre-check fold their result into the same degraded state: a reachable root clears it, and every failure records `Unavailable` with the reason a row displays. Neither tears a tenant down, and neither turns an unusable root into a mount failure, which would record a tenant as gone while it is still serving routes and holding live terminals. Closing the workspace clears the state.
+
 Cancelling a mount does not stop an already-running blocking root check: its workspace handle retains the writer lock until `ensure_root_available` returns, indefinitely if the root hangs. The host settles the cancelled registered mount into `Error` with `workspace is still releasing; retry`.
 
 ## Boundaries
