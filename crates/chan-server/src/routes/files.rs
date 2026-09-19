@@ -6694,11 +6694,13 @@ mod doc_divert_tests {
     ///
     /// `attachment = true` reaches `stream_binary_plan` only from the
     /// `#[cfg(test)]` helpers `stream_binary_download` and
-    /// `stream_binary_download_with_completion`; `binary_stream_response` and
-    /// `standalone_read_file` both pass `false`. This therefore covers a path
-    /// production does not take. The half of the condition production does
-    /// take, an inline read of active content, is pinned by
-    /// `svg_read_is_an_attached_sandboxed_resource`.
+    /// `stream_binary_download_with_completion`; `standalone_read_file` passes
+    /// `false`, and `binary_stream_response` forwards its own `attachment`
+    /// parameter, which its two callers, `api_read_file` and the
+    /// `#[cfg(test)]` `media_stream_response`, both set to `false`. This
+    /// therefore covers a path production does not take. The half of the
+    /// condition production does take, an inline read of active content, is
+    /// pinned by `svg_read_is_an_attached_sandboxed_resource`.
     #[tokio::test]
     async fn binary_attachment_plan_sends_nosniff_unconditionally() {
         use axum::body::to_bytes;
