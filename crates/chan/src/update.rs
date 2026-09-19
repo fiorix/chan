@@ -748,11 +748,38 @@ fn post_upgrade_state(installed_version: &str) -> State {
     }
 }
 
-/// Path where the downloaded binary is staged before replacing the
-/// running executable. Keeping it in `binary_dir` makes every
-/// replacement rename a same-directory move.
-pub(crate) fn staged_binary_path(binary_dir: &Path, pid: u32) -> PathBuf {
-    binary_dir.join(format!(".chan.upgrade-bin.{pid}"))
+/// Path where the downloaded binary is staged before it replaces the running
+/// executable.
+///
+/// The path is a type rather than a bare [`PathBuf`] because
+/// [`install_replacement`] takes nothing else, and the only function that
+/// builds one derives the directory from the running executable's own path.
+/// Every replacement rename is then a move within one directory. A staging
+/// directory chosen independently, such as [`std::env::temp_dir`], can sit on
+/// another volume, where the rename fails with `EXDEV` on Unix and is not the
+/// same-directory move the Windows sequence recovers from.
+#[derive(Debug)]
+struct StagedBinary {
+    path: PathBuf,
+}
+
+impl StagedBinary {
+    /// Builds the staging path in `exe_path`'s own directory.
+    fn beside(exe_path: &Path, pid: u32) -> Result<Self> {
+        let directory = exe_path.parent().with_context(|| {
+            format!(
+                "{} has no parent directory to stage the download in",
+                exe_path.display()
+            )
+        })?;
+        Ok(Self {
+            path: directory.join(format!(".chan.upgrade-bin.{pid}")),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 pub struct UpgradeOptions {
@@ -922,16 +949,16 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
 
     // Extract the chan binary into a sibling temp file. We never
     // unpack the rest of the archive (LICENSE, README) because the
-    // upgrade only swaps the executable. Keep it a sibling:
-    // `install_replacement` moves it over the executable with a
+    // upgrade only swaps the executable. [`StagedBinary`] keeps it a
+    // sibling: `install_replacement` moves it over the executable with a
     // same-directory rename, and on Windows it first probes the rename
     // of the staged binary so a sharing violation is absorbed while the
     // executable path still holds the old image.
-    let bin_temp = staged_binary_path(&binary_dir, std::process::id());
-    let mut bin_guard = TempGuard::new(bin_temp.clone());
-    extract_binary(&archive_path, &bin_temp, bin_name, ext, opts.verbose)?;
+    let staged = StagedBinary::beside(&exe_path, std::process::id())?;
+    let mut bin_guard = TempGuard::new(staged.path().to_path_buf());
+    extract_binary(&archive_path, staged.path(), bin_name, ext, opts.verbose)?;
 
-    set_executable_mode(&bin_temp)?;
+    set_executable_mode(staged.path())?;
 
     // On Windows the replacement is not atomic: from the rename of the
     // running image until the final rename or the rollback completes,
@@ -942,10 +969,10 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
     // replacement is one atomic rename, so there is no window to guard.
     #[cfg(target_os = "windows")]
     install_under_interrupt_guard(tokio::signal::windows::ctrl_c, || {
-        install_replacement(&bin_temp, &exe_path)
+        install_replacement(&staged, &exe_path)
     })?;
     #[cfg(not(target_os = "windows"))]
-    install_replacement(&bin_temp, &exe_path)?;
+    install_replacement(&staged, &exe_path)?;
     bin_guard.disarm();
 
     drop(archive_guard);
@@ -1222,18 +1249,18 @@ fn install_under_interrupt_guard<G>(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
-    fs::rename(new_bin, exe_path).with_context(|| {
+fn install_replacement(new_bin: &StagedBinary, exe_path: &Path) -> Result<()> {
+    fs::rename(new_bin.path(), exe_path).with_context(|| {
         format!(
             "replacing {} with {}",
             exe_path.display(),
-            new_bin.display()
+            new_bin.path().display()
         )
     })
 }
 
 #[cfg(target_os = "windows")]
-fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
+fn install_replacement(new_bin: &StagedBinary, exe_path: &Path) -> Result<()> {
     let running =
         env::current_exe().context("resolving current executable for Windows replacement")?;
     let running = running.canonicalize().unwrap_or(running);
@@ -1255,7 +1282,7 @@ fn install_replacement(new_bin: &Path, exe_path: &Path) -> Result<()> {
 
 #[cfg(any(test, target_os = "windows"))]
 fn install_replacement_with<R, P>(
-    new_bin: &Path,
+    new_bin: &StagedBinary,
     exe_path: &Path,
     running_exe: &Path,
     mut rename: R,
@@ -1270,6 +1297,19 @@ where
             "refusing to replace {} because the running executable is {}",
             exe_path.display(),
             running_exe.display()
+        );
+    }
+    // Every rename below moves a file within `exe_path`'s directory, which is
+    // the only shape that is atomic on one volume and recoverable here. The
+    // staged binary is built beside the running executable, so this refusal
+    // fires only for a staged path assembled some other way, and it fires
+    // before the first rename, while `exe_path` still holds the old image.
+    if new_bin.path().parent() != exe_path.parent() {
+        bail!(
+            "refusing to replace {} with {} because the staged binary is not in the \
+             executable's own directory",
+            exe_path.display(),
+            new_bin.path().display()
         );
     }
 
@@ -1319,10 +1359,10 @@ where
         );
     }
     let mut probe_guard = TempGuard::new(probe.clone());
-    rename(new_bin, &probe).with_context(|| {
+    rename(new_bin.path(), &probe).with_context(|| {
         format!(
             "moving staged binary {} to probe {}",
-            new_bin.display(),
+            new_bin.path().display(),
             probe.display()
         )
     })?;
@@ -1346,7 +1386,7 @@ where
             format!(
                 "replacing {} with {}; the previous executable was restored",
                 exe_path.display(),
-                new_bin.display()
+                new_bin.path().display()
             )
         });
     }
@@ -1707,24 +1747,27 @@ mod tests {
     fn test_install_replacement_renames() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("chan");
-        let new_bin = dir.path().join(".chan.upgrade-bin.test");
+        let staged = StagedBinary::beside(&exe, 123).unwrap();
         fs::write(&exe, b"old").unwrap();
-        fs::write(&new_bin, b"new").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
 
-        install_replacement(&new_bin, &exe).unwrap();
+        install_replacement(&staged, &exe).unwrap();
 
         assert_eq!(fs::read(&exe).unwrap(), b"new");
-        assert!(!new_bin.exists());
+        assert!(!staged.path().exists());
     }
 
     #[test]
-    fn test_staged_binary_path_is_in_binary_dir() {
-        let dir = PathBuf::from("/some/binary/dir");
-        let path = staged_binary_path(&dir, 12345);
-        assert_eq!(path.parent(), Some(dir.as_path()));
-        let name = path.file_name().unwrap().to_string_lossy();
+    fn test_staged_binary_is_beside_the_running_executable() {
+        let exe = PathBuf::from("/some/binary/dir/chan");
+        let staged = StagedBinary::beside(&exe, 12345).unwrap();
+        assert_eq!(staged.path().parent(), exe.parent());
+        let name = staged.path().file_name().unwrap().to_string_lossy();
         assert!(name.starts_with(".chan.upgrade-bin."));
         assert!(name.ends_with("12345"));
+
+        let error = StagedBinary::beside(Path::new("/"), 12345).unwrap_err();
+        assert!(error.to_string().contains("no parent directory"));
     }
 
     #[test]
@@ -1827,13 +1870,13 @@ mod tests {
     fn test_windows_install_replacement_probe_rename_sequence() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("chan.exe");
-        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        let staged = StagedBinary::beside(&exe, 123).unwrap();
         fs::write(&exe, b"old").unwrap();
-        fs::write(&new_bin, b"new").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
 
         let mut calls: Vec<(PathBuf, PathBuf)> = Vec::new();
         let backup = install_replacement_with(
-            &new_bin,
+            &staged,
             &exe,
             &exe,
             |src, dst| {
@@ -1845,9 +1888,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read(&exe).unwrap(), b"new");
-        assert!(!new_bin.exists());
+        assert!(!staged.path().exists());
         assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0, new_bin);
+        assert_eq!(calls[0].0, staged.path());
         assert!(calls[0]
             .1
             .file_name()
@@ -1864,13 +1907,13 @@ mod tests {
     fn test_windows_install_replacement_leaves_exe_untouched_when_probe_fails() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("chan.exe");
-        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        let staged = StagedBinary::beside(&exe, 123).unwrap();
         fs::write(&exe, b"old").unwrap();
-        fs::write(&new_bin, b"new").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
 
         let mut calls = 0;
         let error = install_replacement_with(
-            &new_bin,
+            &staged,
             &exe,
             &exe,
             |_src, _dst| {
@@ -1890,13 +1933,13 @@ mod tests {
     fn test_windows_install_replacement_rolls_back_on_final_rename_failure() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("chan.exe");
-        let new_bin = dir.path().join(".chan.upgrade-bin.123");
+        let staged = StagedBinary::beside(&exe, 123).unwrap();
         fs::write(&exe, b"old").unwrap();
-        fs::write(&new_bin, b"new").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
 
         let mut calls = 0;
         let error = install_replacement_with(
-            &new_bin,
+            &staged,
             &exe,
             &exe,
             |src, dst| {
@@ -1913,6 +1956,38 @@ mod tests {
 
         assert!(error.to_string().contains("replacing"));
         assert_eq!(fs::read(&exe).unwrap(), b"old");
+    }
+
+    #[test]
+    fn test_windows_install_replacement_refuses_a_staged_binary_from_another_directory() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let exe = install_dir.path().join("chan.exe");
+        // Staged beside an executable in another directory, the shape a move
+        // of the staging directory to `std::env::temp_dir` would produce.
+        let staged = StagedBinary::beside(&elsewhere.path().join("chan.exe"), 123).unwrap();
+        fs::write(&exe, b"old").unwrap();
+        fs::write(staged.path(), b"new").unwrap();
+
+        let mut calls = 0;
+        let error = install_replacement_with(
+            &staged,
+            &exe,
+            &exe,
+            |_src, _dst| {
+                calls += 1;
+                Ok(())
+            },
+            || 123,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("not in the executable's own directory"));
+        assert_eq!(calls, 0);
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+        assert_eq!(fs::read(staged.path()).unwrap(), b"new");
     }
 
     /// Records its own drop, so a test can place it in the order of the
