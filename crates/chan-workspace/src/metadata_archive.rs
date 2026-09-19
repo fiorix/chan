@@ -1,6 +1,6 @@
 //! Import and export of registered workspace metadata as zstd-compressed tar archives.
 //!
-//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content and sibling locks, tokens, and trash are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; other included metadata is read live during archiving.
+//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content and sibling locks, tokens, and trash are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; `graph/pending_writes.json` and `graph/rebuild.inprogress` are captured between those two snapshots and archived from those copies; other included metadata is read live during archiving.
 //!
 //! Import replaces the four metadata subtrees after refusing a live in-process workspace and acquiring its writer lock. Unless `MetadataImportOptions::force_scm` is set, an archive with a Git identity requires a target identity: normalized remote lists must match when either is nonempty; otherwise differing known HEADs are refused. An archive without a Git identity imposes no SCM check.
 
@@ -26,7 +26,16 @@ const MANIFEST_PATH: &str = "chan-metadata-v1/manifest.json";
 const PAYLOAD_ROOT: &str = "chan-metadata-v1/payload";
 const ARCHIVE_FORMAT_VERSION: u32 = 1;
 const PATH_KEY_SCHEME: &str = "canonical-absolute-path-slug-sha256-8hex";
-const INCLUDED_SUBTREES: &[&str] = &["index", "graph", "report", "sessions"];
+const GRAPH_SUBTREE: &str = "graph";
+const INCLUDED_SUBTREES: &[&str] = &["index", GRAPH_SUBTREE, "report", "sessions"];
+/// Records under the workspace's `graph` directory that relate the graph's
+/// state to the search index's. A per-file mutation records its entry in the
+/// pending-write journal before its graph commit and clears it after its index
+/// commit; the rebuild marker brackets a full rebuild's graph swap and index
+/// commit the same way. Both are archived as the export read them between its
+/// two store snapshots, so an imported workspace whose index is behind its
+/// graph replays or rebuilds on its next open.
+const CAPTURED_GRAPH_RECORDS: &[&str] = &["pending_writes.json", "rebuild.inprogress"];
 const EXCLUDED_SUBTREES: &[&str] = &[
     "locks",
     "tokens",
@@ -446,6 +455,73 @@ fn graph_user_version(graph_db: &Path) -> Result<Option<u32>> {
         .ok())
 }
 
+/// One of the graph directory's recovery records, as the export read it
+/// between the two store snapshots.
+struct CapturedRecord {
+    /// Live path, which the archive walk leaves alone so that a record written
+    /// or cleared after the capture cannot reach the archive.
+    live: PathBuf,
+    /// Staged copy of the bytes read, absent when the record was not there.
+    staged: Option<PathBuf>,
+    /// Entry name under the archived `graph` subtree.
+    name: &'static str,
+}
+
+/// What the archive walk must not take from the live metadata directory: the
+/// two stores it replaces with staged snapshots, the recovery records it
+/// replaces with the bytes captured between those snapshots, and the graph
+/// WAL, which no archive carries.
+struct ArchiveSubstitutions {
+    snapshots: BTreeMap<PathBuf, PathBuf>,
+    captured: Vec<CapturedRecord>,
+    graph_wal: PathBuf,
+}
+
+impl ArchiveSubstitutions {
+    fn is_captured(&self, path: &Path) -> bool {
+        self.captured.iter().any(|record| record.live == path)
+    }
+}
+
+/// Copy the graph directory's recovery records into the export's staging
+/// directory, refusing a non-regular file at either path the way the store
+/// snapshots do. A record that is not there is captured as absent: a write
+/// that records its journal entry after this point commits its graph rows
+/// after it too, so the graph snapshot does not describe that write and the
+/// archive has nothing to say about it.
+fn capture_graph_records(
+    workspace_paths: &WorkspacePaths,
+    staging: &Path,
+) -> Result<Vec<CapturedRecord>> {
+    let mut captured = Vec::with_capacity(CAPTURED_GRAPH_RECORDS.len());
+    for &name in CAPTURED_GRAPH_RECORDS {
+        let live = workspace_paths.graph_dir.join(name);
+        let staged = if snapshot_source_exists(&live, false)? {
+            match std::fs::read(&live) {
+                Ok(bytes) => {
+                    let staged = staging.join(name);
+                    std::fs::write(&staged, bytes)?;
+                    Some(staged)
+                }
+                // Cleared between the two calls: the mutation that owned the
+                // record ran to the end, so its index commit precedes the
+                // index snapshot taken below.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(ChanError::io_with_context(
+                        error,
+                        format!("capture recovery record {}", live.display()),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        captured.push(CapturedRecord { live, staged, name });
+    }
+    Ok(captured)
+}
+
 fn write_archive(
     workspace_paths: &WorkspacePaths,
     manifest: &MetadataManifest,
@@ -464,13 +540,27 @@ fn write_archive(
     // Retain substitutions for absent stores too: a store appearing during
     // the walk must fail the export rather than fall back to a live copy.
     snapshots.insert(workspace_paths.graph_db.clone(), graph);
+    #[cfg(any(test, feature = "test-hooks"))]
+    export_capture_pause_for_test(&workspace_paths.root);
+    // Read the records that relate the two stores here, after the graph
+    // snapshot and before the index snapshot. A write the graph snapshot
+    // already carries either still holds its journal entry at this point or
+    // committed its chunks before it, which puts them in the index snapshot
+    // below; the rebuild marker brackets a full rebuild the same way. The walk
+    // runs after both snapshots, by which time a write straddling them has
+    // cleared its entry, so the walk cannot be what reads them.
+    let captured = capture_graph_records(workspace_paths, staging.path())?;
     let bm25 = workspace_paths.index.join("bm25");
     let index = staging.path().join("bm25");
     if snapshot_source_exists(&bm25, true)? {
         snapshot_bm25(&bm25, &index)?;
     }
     snapshots.insert(bm25, index);
-    let graph_wal = workspace_paths.graph_dir.join("graph.sqlite-wal");
+    let substitutions = ArchiveSubstitutions {
+        snapshots,
+        captured,
+        graph_wal: workspace_paths.graph_dir.join("graph.sqlite-wal"),
+    };
     let file = File::create(tmp)?;
     let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), 0)
         .map_err(|e| ChanError::io_with_context(e, "create zstd encoder"))?;
@@ -498,9 +588,11 @@ fn write_archive(
                 &source,
                 &archive_dir,
                 &mut stats,
-                &snapshots,
-                &graph_wal,
+                &substitutions,
             )?;
+        }
+        if *subtree == GRAPH_SUBTREE {
+            append_captured_records(&mut builder, &substitutions, &archive_dir, &mut stats)?;
         }
     }
 
@@ -686,13 +778,31 @@ fn extract_payload(archive: &Path, payload: &Path) -> Result<(usize, u64)> {
     Ok((stats.files, stats.bytes))
 }
 
+/// Archive the records the export captured, from the staged copies rather
+/// than from the walk, so the archive carries the state the capture read even
+/// when the record was written or cleared afterwards.
+fn append_captured_records(
+    builder: &mut Builder<zstd::stream::write::Encoder<'_, BufWriter<File>>>,
+    substitutions: &ArchiveSubstitutions,
+    archive_dir: &Path,
+    stats: &mut ArchiveStats,
+) -> Result<()> {
+    for record in &substitutions.captured {
+        let Some(staged) = record.staged.as_deref() else {
+            continue;
+        };
+        let len = std::fs::symlink_metadata(staged)?.len();
+        append_file(builder, staged, &archive_dir.join(record.name), len, stats)?;
+    }
+    Ok(())
+}
+
 fn append_tree(
     builder: &mut Builder<zstd::stream::write::Encoder<'_, BufWriter<File>>>,
     source: &Path,
     archive_dir: &Path,
     stats: &mut ArchiveStats,
-    snapshots: &BTreeMap<PathBuf, PathBuf>,
-    graph_wal: &Path,
+    substitutions: &ArchiveSubstitutions,
 ) -> Result<()> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(source)? {
@@ -703,16 +813,19 @@ fn append_tree(
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name();
-        if path == graph_wal || should_skip_entry_name(&name, &path) {
+        if path == substitutions.graph_wal
+            || substitutions.is_captured(&path)
+            || should_skip_entry_name(&name, &path)
+        {
             continue;
         }
-        let path = snapshots.get(&path).unwrap_or(&path);
+        let path = substitutions.snapshots.get(&path).unwrap_or(&path);
         let meta = std::fs::symlink_metadata(path)?;
         let dest = archive_dir.join(&name);
         let file_type = meta.file_type();
         if file_type.is_dir() {
             append_dir(builder, &dest, stats)?;
-            append_tree(builder, path, &dest, stats, snapshots, graph_wal)?;
+            append_tree(builder, path, &dest, stats, substitutions)?;
         } else if file_type.is_file() {
             append_file(builder, path, &dest, meta.len(), stats)?;
         } else {
@@ -765,6 +878,76 @@ fn append_file(
     stats.files += 1;
     stats.bytes += len;
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+struct ExportCapturePause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+static EXPORT_CAPTURE_PAUSES: std::sync::OnceLock<
+    std::sync::Mutex<BTreeMap<PathBuf, ExportCapturePause>>,
+> = std::sync::OnceLock::new();
+
+/// How long a barrier waits for its release before giving up on it.
+#[cfg(any(test, feature = "test-hooks"))]
+const EXPORT_CAPTURE_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Arm a one-shot barrier inside `write_archive`, between the graph snapshot
+/// and the capture of the graph directory's recovery records.
+///
+/// Compiled for this crate's own tests and for downstream test builds that
+/// enable `test-hooks`, which link this crate as a normal dependency and so
+/// cannot reach a `cfg(test)` hook. Pauses are keyed by the workspace metadata
+/// root (`WorkspacePaths::root`), and a second outstanding armer for the same
+/// root panics instead of silently replacing the first. The caller reads the
+/// returned receiver to learn that the graph snapshot is taken, and makes a
+/// journal entry or a rebuild marker appear before releasing the barrier, so
+/// only a capture that reads inside that window sees it. The barrier waits at
+/// most `EXPORT_CAPTURE_PAUSE_BUDGET` for its release and then proceeds, so a
+/// caller that never releases it fails on its own assertions rather than
+/// hanging.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn arm_export_capture_pause_for_test(
+    metadata_root: PathBuf,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let pauses = EXPORT_CAPTURE_PAUSES.get_or_init(Default::default);
+    let mut pauses = pauses.lock().unwrap();
+    match pauses.entry(metadata_root) {
+        std::collections::btree_map::Entry::Occupied(entry) => {
+            let root = entry.key().display().to_string();
+            drop(pauses);
+            panic!("export capture pause already armed for {root}");
+        }
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(ExportCapturePause {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        }
+    }
+    (reached_rx, release_tx)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn export_capture_pause_for_test(metadata_root: &Path) {
+    let Some(pauses) = EXPORT_CAPTURE_PAUSES.get() else {
+        return;
+    };
+    let pause = pauses.lock().unwrap().remove(metadata_root);
+    let Some(pause) = pause else {
+        return;
+    };
+    let _ = pause.reached.send(());
+    let _ = pause.release.recv_timeout(EXPORT_CAPTURE_PAUSE_BUDGET);
 }
 
 #[cfg(test)]
@@ -1258,6 +1441,25 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// Bounded wait for every rendezvous in this module's tests: long enough
+    /// that a loaded machine does not trip it, short enough that a barrier
+    /// nobody releases fails the test instead of hanging the suite.
+    const TEST_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn bm25_hits(ws: &crate::workspace::Workspace, token: &str) -> Vec<String> {
+        let opts = crate::workspace::SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        ws.search(token, &opts)
+            .unwrap()
+            .hits
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect()
     }
 
     fn archive_fixture() -> (Library, TempDir, TempDir) {
@@ -1841,5 +2043,212 @@ mod tests {
         assert_eq!(reads, vec!["added.md".to_string()]);
         assert_eq!(shards(&paths.index), imported_shards);
         assert!(ws.semantic_enabled().unwrap());
+    }
+
+    /// The write that leaves no trace. Its graph commit lands before the
+    /// export's graph snapshot and its index commit after the export's index
+    /// snapshot, so the archive pairs a graph that matches the tree on disk
+    /// with search chunks that do not. `reconcile` compares stamps and skips
+    /// a file whose stamp matches, so the write's own journal entry is the
+    /// only record that the index is behind, and the write clears that entry
+    /// before the archive walk lists `graph/`.
+    #[test]
+    fn metadata_archive_captures_the_journal_of_a_write_across_both_snapshots() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
+        ws.write_text("note.md", "# note\n\nbodyone\n").unwrap();
+        ws.reindex(None).unwrap();
+        assert_eq!(bm25_hits(&ws, "bodyone"), vec!["note.md".to_string()]);
+        assert!(
+            paths.index.join("config.toml").is_file(),
+            "the walk needs a file under index/ to release the parked save",
+        );
+
+        // Park a real save between its graph commit and its index commit. From
+        // here until the barrier is released the graph carries the new row, the
+        // index carries the old chunks, and the journal entry says so.
+        ws.write_text("note.md", "# note\n\nbodytwo\n").unwrap();
+        let (reached, release) =
+            crate::workspace::arm_index_commit_pause_for_test(ws.root().to_path_buf());
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let saver = {
+            let ws = std::sync::Arc::clone(&ws);
+            std::thread::spawn(move || {
+                let result = ws.index_file("note.md");
+                let _ = done_tx.send(());
+                result.unwrap();
+            })
+        };
+        reached
+            .recv_timeout(TEST_WAIT_BUDGET)
+            .expect("the save reaches the barrier between its graph and index commits");
+        let journal = paths.graph_dir.join("pending_writes.json");
+        assert!(journal.exists(), "the parked save journalled its file");
+
+        // Release it during the walk of `index/`, so the walk lists `graph/`
+        // only after the entry is gone.
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = released.clone();
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path.file_name() == Some(OsStr::new("config.toml")) && !observed.replace(true) {
+                    release.send(()).expect("the parked save still waits");
+                    done_rx
+                        .recv_timeout(TEST_WAIT_BUDGET)
+                        .expect("the released save finishes before the walk lists graph/");
+                }
+            }))
+        });
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "straddle-test".into(),
+            },
+        )
+        .unwrap();
+        assert!(released.get(), "the walk reached index/config.toml");
+        saver.join().unwrap();
+        assert!(!journal.exists(), "the save cleared its journal entry");
+        assert_eq!(bm25_hits(&ws, "bodytwo"), vec!["note.md".to_string()]);
+        drop(ws);
+
+        let report = lib
+            .import_metadata_archive(
+                root.path(),
+                &archive,
+                MetadataImportOptions {
+                    rescan: false,
+                    force_scm: false,
+                },
+            )
+            .unwrap();
+        assert!(!report.rescanned);
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
+        let stale = bm25_hits(&ws, "bodyone");
+        assert_eq!(
+            bm25_hits(&ws, "bodytwo"),
+            vec!["note.md".to_string()],
+            "the imported index is behind its graph: the old body answers with {stale:?}",
+        );
+        assert!(stale.is_empty(), "the old chunks outlived the replay");
+
+        let payload = out_dir.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        let archived = std::fs::read_to_string(payload.join("graph/pending_writes.json")).unwrap();
+        assert!(archived.contains("note.md"), "archived journal: {archived}");
+    }
+
+    /// A rebuild interrupted between its graph swap and its index commit
+    /// leaves `rebuild.inprogress` beside a graph that already describes the
+    /// tree and an index that does not. `reconcile` cannot repair that on its
+    /// own, because a file rewritten to the same length and mtime still
+    /// matches its graph stamp, so the marker is the archive's only record of
+    /// it, and a rebuild that finishes during the export clears the marker
+    /// before the archive walk lists `graph/`.
+    #[test]
+    fn metadata_archive_captures_a_rebuild_marker_cleared_before_the_walk() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        let note = root.path().join("note.md");
+        {
+            let ws = lib.open_workspace(root.path()).unwrap();
+            ws.join_open_recovery();
+            ws.write_text("note.md", "# note\n\nbodyone\n").unwrap();
+            ws.reindex(None).unwrap();
+            assert_eq!(bm25_hits(&ws, "bodyone"), vec!["note.md".to_string()]);
+            assert!(
+                paths.index.join("config.toml").is_file(),
+                "the walk needs a file under index/ to clear the marker",
+            );
+        }
+
+        // The tree an interrupted rebuild leaves behind: a body the index has
+        // never chunked under the stamp the graph already carries.
+        let before = std::fs::metadata(&note).unwrap();
+        std::fs::write(&note, "# note\n\nbodytwo\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&note)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = std::fs::metadata(&note).unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the rewrite kept the file's size"
+        );
+        assert_eq!(
+            after.modified().unwrap(),
+            before.modified().unwrap(),
+            "the rewrite kept the file's mtime",
+        );
+
+        // The marker appears after the graph snapshot, inside the window the
+        // capture reads, and is gone before the walk lists `graph/`.
+        let marker = paths.graph_dir.join("rebuild.inprogress");
+        let (reached, release) = arm_export_capture_pause_for_test(paths.root.clone());
+        let stamped = marker.clone();
+        let rebuilder = std::thread::spawn(move || {
+            reached
+                .recv_timeout(TEST_WAIT_BUDGET)
+                .expect("the export reaches the barrier after its graph snapshot");
+            std::fs::write(&stamped, "started_at = 0\n").unwrap();
+            release.send(()).expect("the export still waits");
+        });
+        let cleared = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = cleared.clone();
+        let removed = marker.clone();
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path.file_name() == Some(OsStr::new("config.toml")) && !observed.replace(true) {
+                    std::fs::remove_file(&removed).expect("the marker is still on disk");
+                }
+            }))
+        });
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "rebuild-marker-test".into(),
+            },
+        )
+        .unwrap();
+        rebuilder.join().unwrap();
+        assert!(cleared.get(), "the walk reached index/config.toml");
+        assert!(!marker.exists(), "the rebuild cleared its marker");
+
+        lib.import_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataImportOptions {
+                rescan: false,
+                force_scm: false,
+            },
+        )
+        .unwrap();
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
+        let stale = bm25_hits(&ws, "bodyone");
+        assert_eq!(
+            bm25_hits(&ws, "bodytwo"),
+            vec!["note.md".to_string()],
+            "the imported workspace did not rebuild: the old body answers with {stale:?}",
+        );
+        assert!(stale.is_empty(), "the old chunks outlived the rebuild");
+
+        let payload = out_dir.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        assert!(payload.join("graph/rebuild.inprogress").is_file());
     }
 }

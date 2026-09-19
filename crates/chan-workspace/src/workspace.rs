@@ -690,6 +690,75 @@ fn open_recovery_pause_for_test(workspace: &Workspace, stop: &AtomicBool) {
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
+struct IndexCommitPause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+static INDEX_COMMIT_PAUSES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, IndexCommitPause>>,
+> = std::sync::OnceLock::new();
+
+/// How long a barrier waits for its release before giving up on it.
+#[cfg(any(test, feature = "test-hooks"))]
+const INDEX_COMMIT_PAUSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Arm a one-shot barrier inside a per-file mutation, between its graph
+/// commit and its search-index commit.
+///
+/// Compiled for this crate's own tests and for downstream test builds that
+/// enable `test-hooks`: chan-server's unit tests link chan-workspace as a
+/// normal dependency, so `cfg(test)` alone would not reach them. Pauses are
+/// keyed by canonical workspace root, and a second outstanding armer for the
+/// same root panics instead of silently replacing the first. The caller reads
+/// the returned receiver to learn that the mutation has reached the barrier,
+/// at which point its journal entry is on disk and the graph carries the new
+/// row while the index still carries the old chunks. The barrier waits at most
+/// `INDEX_COMMIT_PAUSE_BUDGET` for its release and then proceeds, so a caller
+/// that never releases it fails on its own assertions rather than hanging.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn arm_index_commit_pause_for_test(
+    root: std::path::PathBuf,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let pauses = INDEX_COMMIT_PAUSES.get_or_init(Default::default);
+    let mut pauses = pauses.lock().unwrap();
+    match pauses.entry(root) {
+        std::collections::hash_map::Entry::Occupied(entry) => {
+            let root = entry.key().display().to_string();
+            drop(pauses);
+            panic!("index commit pause already armed for {root}");
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(IndexCommitPause {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        }
+    }
+    (reached_rx, release_tx)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn index_commit_pause_for_test(workspace: &Workspace) {
+    let Some(pauses) = INDEX_COMMIT_PAUSES.get() else {
+        return;
+    };
+    let pause = pauses.lock().unwrap().remove(workspace.root());
+    let Some(pause) = pause else {
+        return;
+    };
+    let _ = pause.reached.send(());
+    let _ = pause.release.recv_timeout(INDEX_COMMIT_PAUSE_BUDGET);
+}
+
 struct RecoveryExecutionGuard<'a> {
     workspace: &'a Workspace,
     pass: Option<RecoveryPass>,
@@ -3428,6 +3497,8 @@ impl Workspace {
         } else {
             self.graph()?.stamp_text_file(rel, mtime, size)?;
         }
+        #[cfg(any(test, feature = "test-hooks"))]
+        index_commit_pause_for_test(self);
         // Hand the already-read content to the index so the read goes through
         // the Workspace sandbox exactly once. Snapshot the vector epoch BEFORE
         // reading the opt-in so a disable that races this save is reconciled by
