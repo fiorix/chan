@@ -36,7 +36,7 @@ cargo run -p devserver-proxy
 The recorded public origins use `https` because the config refuses a cleartext public origin whose host is not a loopback literal; the listeners themselves stay loopback cleartext in dev. For the full local stack (with identity + profile + Postgres), prefer `packaging/gateway/scripts/dev/setup.sh` + `packaging/gateway/scripts/dev/run.sh`. Two listeners come up:
 
 - `BIND_ADDR` (7002): public HTTP. `proxy.{domain}` sits behind nginx + TLS in production; loopback in dev.
-- `TUNNEL_BIND_ADDR` (7100): h2c. nginx `grpc_pass`es the `proxy.{domain}/v1/tunnel` ingress here; `chan devserver` instances dial it for the handshake. That location must raise `client_body_timeout`, `grpc_read_timeout` and `grpc_send_timeout`: a tunnel is one `POST` whose request body stays open for the life of the registration, so at nginx's 60s `client_body_timeout` default an idle tunnel is ended about once a minute, cleanly and with a `200`.
+- `TUNNEL_BIND_ADDR` (7100): h2c. nginx `grpc_pass`es the `proxy.{domain}/v1/tunnel` ingress here; `chan devserver` instances dial it for the handshake. That location must raise `client_body_timeout`: a tunnel is one `POST` whose request body stays open for the life of the registration, so at nginx's 60s default an idle tunnel is ended about once a minute, cleanly and with a `200`. `grpc_read_timeout` is an idle deadline on the same request's upstream leg and is worth raising alongside; `grpc_send_timeout` is armed only while a write to the upstream is pending, so it is not an idle deadline here. The edge also decodes the dial's bearer: `gateway/docs/dev-setup.md` says what an operator does about that.
 
 ## Env vars
 
