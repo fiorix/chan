@@ -1936,13 +1936,16 @@ scenario_upload() {
 
     # A workspace to upload into: a real folder on the devserver's host
     # (the whole harness shares loopback), registered + mounted through
-    # the tunnel. Registration is idempotent, so an aborted earlier run
-    # cannot strand this step.
+    # the tunnel.
     local ws_dir add_body prefix ws_id
-    # Use a fresh directory per run so a persisted workspace from an
-    # aborted earlier run does not carry a stale root inode: since
-    # 0043b22b6 the workspace fails closed when the directory it opened
-    # is replaced by an rm -rf + mkdir.
+    # A fresh directory per run. $WORK survives a run, so a workspace an
+    # aborted earlier run registered is still in the devserver's library,
+    # and re-registering that path hands back the existing tenant
+    # (`open_or_get_registered_workspace` matches by canonical path). That
+    # tenant's root handle is pinned to the directory's device and inode
+    # (`rooted_fs.rs`), so a root replaced by rm -rf + mkdir leaves it dead
+    # and the upload lands on a 404. A per-run directory has no earlier
+    # tenant to inherit.
     ws_dir="$WORK/upload-ws-$$"
     rm -rf "$ws_dir"
     mkdir -p "$ws_dir"
@@ -1962,6 +1965,11 @@ scenario_upload() {
     # The guard half: no `x-chan-csrf` mirror -> the proxy's own 403
     # `forbidden` (the devserver never sees the request; its errors are
     # JSON-shaped, so the bare body pins the refusal to the proxy).
+    # Both POSTs below send `dir` before `file`, which is what the SPA and
+    # the desktop send: the route reads destination parts until the `file`
+    # part arrives and refuses a body that leads with it
+    # (`with_upload_destination`, crates/chan-server/src/routes/files.rs),
+    # so a file-first body would 400 before either guard is exercised.
     local payload code
     payload="$WORK/upload-payload.txt"
     printf 'tunneled upload payload\n' > "$payload"
