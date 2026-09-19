@@ -1923,6 +1923,133 @@ async fn devserver_create_idempotent() {
     app.cleanup().await;
 }
 
+/// The row's transaction-id stamp. Postgres writes a fresh tuple
+/// version on every UPDATE, even one that assigns a column to itself,
+/// so an unchanged `xmin` is proof that a request performed no row
+/// write.
+async fn row_version(app: &TestApp, owner: &str, devserver_id: &str) -> String {
+    sqlx::query_scalar::<_, String>(
+        "SELECT xmin::text FROM devservers WHERE owner_user_id = $1 AND devserver_id = $2",
+    )
+    .bind(Uuid::parse_str(owner).unwrap())
+    .bind(devserver_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("devserver row")
+}
+
+#[tokio::test]
+async fn devserver_create_with_a_blank_label_performs_no_row_write() {
+    // A live tunnel revalidates on every lease refresh, about once a
+    // minute, and each validate ensures this row with no label. The
+    // conflict path must therefore cost nothing: assigning the label
+    // to itself would churn a dead tuple per minute per devserver.
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let dsid = ds("a");
+
+    let (s, _) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers"),
+            Some(json!({"devserver_id": dsid, "label": "laptop"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let before = row_version(&app, &owner, &dsid).await;
+
+    let (s, v) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers"),
+            Some(json!({"devserver_id": dsid, "label": ""})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["label"], "laptop", "a blank label never blanks a name");
+    assert_eq!(
+        row_version(&app, &owner, &dsid).await,
+        before,
+        "the blank-label conflict path rewrote the row"
+    );
+
+    // A named create still writes: the pin above measures a skipped
+    // write, not a blind spot in `xmin`.
+    let (s, v) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers"),
+            Some(json!({"devserver_id": dsid, "label": "desk"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["label"], "desk");
+    assert_ne!(row_version(&app, &owner, &dsid).await, before);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn devserver_create_with_a_blank_label_inserts_a_label_less_row() {
+    // The row a nameless dial gets must be the one the grant-create
+    // bootstrap already inserts: present, and labelled with the empty
+    // string rather than a deduped placeholder.
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let dsid = ds("a");
+
+    let (s, v) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers"),
+            Some(json!({"devserver_id": dsid, "label": ""})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(v["devserver_id"], dsid);
+    assert_eq!(v["label"], "");
+
+    let (s, v) = app
+        .req(Method::GET, &format!("/v1/users/{owner}/devservers"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let rows = v.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["label"], "");
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn devserver_access_for_the_owner_follows_the_row() {
+    // The owner arm of `devserver_access` selects from `devservers`,
+    // so an owner is refused entry to their own live devserver while
+    // its row is missing. A label-less create is all it takes to let
+    // them back in.
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let dsid = ds("a");
+    let access = format!("/v1/users/{owner}/devservers/{dsid}/access?as={owner}");
+
+    let (s, _) = app.req(Method::GET, &access, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "no row, no entry, owner included");
+
+    let (s, _) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers"),
+            Some(json!({"devserver_id": dsid, "label": ""})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (s, v) = app.req(Method::GET, &access, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["access"], true);
+
+    app.cleanup().await;
+}
+
 #[tokio::test]
 async fn devserver_create_validates_id() {
     let app = TestApp::new().await;

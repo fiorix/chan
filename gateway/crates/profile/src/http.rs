@@ -1232,13 +1232,15 @@ async fn admin_revoke_token(
 
 /// Idempotent devserver create. Re-issuing for the same
 /// (owner, devserver_id) returns the existing row at 200 OK instead of
-/// 409. identity-service calls this at PAT-create time (it holds the raw
-/// token to compute `devserver_id`) and again when a tunnel announces a
-/// display name; the `(owner, devserver_id)` pair is the canonical key,
-/// the surrogate uuid is for FK joins only. A blank / absent label on a
-/// re-issue leaves the stored label untouched. A non-blank label dedups
-/// within the owner's rows (`-2`, `-3`, ... suffixes) so the roster
-/// never shows two identical names for one owner.
+/// 409. identity-service calls this at PAT-create time (it holds the
+/// raw token to compute `devserver_id`), on every validate a tunnel's
+/// dial and lease refresh drive, and again when that tunnel announces
+/// a display name; the `(owner, devserver_id)` pair is the canonical
+/// key, the surrogate uuid is for FK joins only. A blank / absent
+/// label on a re-issue leaves the stored label untouched and writes no
+/// row. A non-blank label dedups within the owner's rows (`-2`, `-3`,
+/// ... suffixes) so the roster never shows two identical names for one
+/// owner.
 async fn create_devserver(
     State(state): State<AppState>,
     Path(owner_id): Path<Uuid>,
@@ -1308,19 +1310,35 @@ async fn create_devserver(
         tx.commit().await?;
         return Ok((StatusCode::CREATED, Json(d)));
     }
-    // Existing row: refresh the label only when a non-empty one is
-    // supplied so the grant-create auto-bootstrap (label-less) never
-    // blanks a real name.
-    let existing = sqlx::query_as::<_, Devserver>(
-        "UPDATE devservers SET label = CASE WHEN $3 = '' THEN label ELSE $3 END \
-         WHERE owner_user_id = $1 AND devserver_id = $2 \
-         RETURNING id, owner_user_id, devserver_id, label, created_at",
-    )
-    .bind(owner_id)
-    .bind(&devserver_id)
-    .bind(&label)
-    .fetch_one(&mut *tx)
-    .await?;
+    // Existing row. A blank label carries nothing to write, and the
+    // label-less callers are the frequent ones: a live tunnel
+    // revalidates on every lease refresh, about once a minute, and
+    // each validate ensures this row. Reading it back instead of
+    // assigning the label to itself keeps that steady state free of a
+    // dead tuple per minute per devserver, and is what leaves a real
+    // name untouched when the grant-create auto-bootstrap or a
+    // nameless dial ensures the row.
+    let existing = if label.is_empty() {
+        sqlx::query_as::<_, Devserver>(
+            "SELECT id, owner_user_id, devserver_id, label, created_at FROM devservers \
+             WHERE owner_user_id = $1 AND devserver_id = $2",
+        )
+        .bind(owner_id)
+        .bind(&devserver_id)
+        .fetch_one(&mut *tx)
+        .await?
+    } else {
+        sqlx::query_as::<_, Devserver>(
+            "UPDATE devservers SET label = $3 \
+             WHERE owner_user_id = $1 AND devserver_id = $2 \
+             RETURNING id, owner_user_id, devserver_id, label, created_at",
+        )
+        .bind(owner_id)
+        .bind(&devserver_id)
+        .bind(&label)
+        .fetch_one(&mut *tx)
+        .await?
+    };
     tx.commit().await?;
     Ok((StatusCode::OK, Json(existing)))
 }
