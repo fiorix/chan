@@ -17,15 +17,18 @@
  * connected/disconnected. */
 export type PendingTarget = "on" | "off" | "connected" | "disconnected";
 
-// The settled status a row sits at BEFORE each target's transition. The bridge
-// is held only while the row is still at this status; once `status` moves off it
-// (to the transitional `starting`/`connecting`, the target, or `error`), the
-// backend `status` drives the spinner and the bridge is dropped.
-const FROM_OF: Record<PendingTarget, string> = {
-  on: "stopped",
-  off: "running",
-  connected: "disconnected",
-  disconnected: "connected",
+// The settled statuses a row can sit at BEFORE each target's transition. The
+// bridge is held only while the row is still at one of them; once `status`
+// moves off them (to the transitional `starting`/`connecting`, the target, or
+// `error`), the backend `status` drives the spinner and the bridge is dropped.
+// An off starts from either mounted status: a workspace whose root stopped
+// being usable is still mounted, and its Turn off must bridge the click the
+// same way a healthy row's does.
+const FROM_OF: Record<PendingTarget, readonly string[]> = {
+  on: ["stopped"],
+  off: ["running", "unavailable"],
+  connected: ["disconnected"],
+  disconnected: ["connected"],
 };
 
 interface PendingEntry {
@@ -91,7 +94,8 @@ export function reconcile(current: Record<string, string>): void {
   for (const key of Object.keys(pending.markers)) {
     const entry = pending.markers[key]!;
     const cur = current[key];
-    if (cur !== FROM_OF[entry.target] || now - entry.ts > BRIDGE_TIMEOUT_MS) {
+    const held = cur !== undefined && FROM_OF[entry.target].includes(cur);
+    if (!held || now - entry.ts > BRIDGE_TIMEOUT_MS) {
       delete pending.markers[key];
     }
   }

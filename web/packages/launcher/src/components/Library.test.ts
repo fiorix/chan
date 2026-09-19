@@ -121,7 +121,15 @@ describe("Library: Local group", () => {
     mountList();
     const id = library.workspaces.find((w) => w.devserver_id === null)!.workspace_id;
     expect(byAria("New window of notes")!.disabled).toBe(false);
-    for (const status of ["stopped", "starting", "locked", "closing", "removing", "error"] as const) {
+    for (const status of [
+      "stopped",
+      "starting",
+      "locked",
+      "closing",
+      "removing",
+      "error",
+      "unavailable",
+    ] as const) {
       library.workspaces = library.workspaces.map(
         (w): WorkspaceEntry => (w.workspace_id === id ? { ...w, on: true, status } : w),
       );
@@ -161,6 +169,64 @@ describe("Library: Local group", () => {
     expect(toggle.querySelector("svg")).toBeTruthy();
     expect(toggle.title).toBe("Workspace is open in another Chan process");
     expect(byAria("New window of notes")!.disabled).toBe(true);
+  });
+
+  it("shows a degraded row's reason, offers Turn off, and keeps New window disabled", () => {
+    // status:unavailable is a mount that is up over a root it cannot read. The
+    // row carries `on: true` and the reason the server built; the only action
+    // that helps is turning it off.
+    const reason =
+      "workspace root does not exist: /home/me/notes; turn this workspace off and on, " +
+      "or run chan close, to mount that path again";
+    mountList();
+    const id = library.workspaces.find((w) => w.devserver_id === null)!.workspace_id;
+    library.workspaces = library.workspaces.map(
+      (w): WorkspaceEntry =>
+        w.workspace_id === id ? { ...w, on: true, status: "unavailable", error: reason } : w,
+    );
+    flushSync();
+
+    // The reason is displayed exactly as it arrived: the launcher never matches
+    // on it, since it differs between a stalled mount and a replaced root.
+    const mark = target!.querySelector(".row-error") as HTMLElement;
+    expect(mark.title).toBe(reason);
+    expect(mark.classList.contains("degraded")).toBe(true);
+
+    const toggle = byAria("Turn off notes")!;
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.title).toBe("Turn off");
+    // Degraded, not healthy: the accent tint the running row carries is gone.
+    expect(toggle.classList.contains("degraded")).toBe(true);
+    expect(toggle.classList.contains("on")).toBe(false);
+    expect(toggle.classList.contains("locked")).toBe(false);
+    expect(toggle.querySelector("svg.spin")).toBeNull();
+    expect(byAria("New window of notes")!.disabled).toBe(true);
+  });
+
+  it("leaves running and error rows drawn the way they were", () => {
+    mountList();
+    const id = library.workspaces.find((w) => w.devserver_id === null)!.workspace_id;
+    // A running row: no reason mark, the accent-tinted toggle, New window open.
+    library.workspaces = library.workspaces.map(
+      (w): WorkspaceEntry =>
+        w.workspace_id === id ? { ...w, on: true, status: "running", error: undefined } : w,
+    );
+    flushSync();
+    expect(target!.querySelector(".row-error")).toBeNull();
+    const running = byAria("Turn off notes")!;
+    expect(running.classList.contains("on")).toBe(true);
+    expect(running.classList.contains("degraded")).toBe(false);
+    expect(byAria("New window of notes")!.disabled).toBe(false);
+
+    // An error row: the danger mark, not the degraded one.
+    library.workspaces = library.workspaces.map(
+      (w): WorkspaceEntry =>
+        w.workspace_id === id ? { ...w, on: true, status: "error", error: "open failed" } : w,
+    );
+    flushSync();
+    const mark = target!.querySelector('.row-error[title="open failed"]') as HTMLElement;
+    expect(mark).toBeTruthy();
+    expect(mark.classList.contains("degraded")).toBe(false);
   });
 
   it("checks the row when a local workspace is selected", () => {
@@ -539,6 +605,57 @@ describe("Library: workspace OFF confirm-and-retry", () => {
     expect(dlg?.getAttribute("aria-label")).toBe("Turn off workspace?");
     expect(target.textContent).toContain("still running");
     cancelConfirm();
+  });
+});
+
+describe("Library: a refused turn-on", () => {
+  // `POST .../on` over a tenant whose root is not usable answers 409 with the
+  // reason the row should be showing. The per-row handler has no special case
+  // for it: the rejection reaches the error bubble, and the re-list behind it
+  // replaces the stale row with the degraded one.
+  it("shows the server's reason and re-lists the row as degraded", async () => {
+    const { backend } = await import("../api/backend");
+    // The mutable-surface suites share one mock registry, so which local row is
+    // off depends on what ran before: name the row from the one found here.
+    const off = library.workspaces.find((w) => w.devserver_id === null && !w.on)!;
+    const name = off.label || off.path.split("/").filter(Boolean).at(-1)!;
+    const reason =
+      `workspace root does not exist: ${off.path}; turn this workspace off and on, ` +
+      "or run chan close, to mount that path again";
+    const onSpy = vi
+      .spyOn(backend, "setWorkspaceOn")
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: reason })));
+    const listSpy = vi.spyOn(backend, "listWorkspaces").mockImplementation(async () =>
+      library.workspaces.map((w) =>
+        w.workspace_id === off.workspace_id
+          ? { ...w, on: true, status: "unavailable" as const, error: reason }
+          : w,
+      ),
+    );
+    try {
+      mountList();
+      const calls = listSpy.mock.calls.length;
+
+      byAria(`Turn on ${name}`)!.click();
+      await settle();
+      flushSync();
+
+      // The bubble carries the reason alone, not the JSON the server wrapped
+      // it in.
+      expect(library.error).toBe(reason);
+      expect(listSpy.mock.calls.length).toBeGreaterThan(calls);
+      const row = library.workspaces.find((w) => w.workspace_id === off.workspace_id)!;
+      expect(row.status).toBe("unavailable");
+      expect(row.error).toBe(reason);
+      // And the row now draws the degraded state instead of the stale off one.
+      expect(target!.querySelector(`.row-error.degraded[title="${reason}"]`)).toBeTruthy();
+      expect(byAria(`Turn off ${name}`)).toBeTruthy();
+    } finally {
+      // The list stub answers for the whole registry, so a failure here would
+      // follow the shared mock state into the next case.
+      onSpy.mockRestore();
+      listSpy.mockRestore();
+    }
   });
 });
 

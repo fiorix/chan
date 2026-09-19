@@ -144,6 +144,12 @@ On the gateway surface the proxy strips browser `Cookie` and `Authorization` cre
 
 An unforced off answers `409 {error:"live_terminals", active_terminals:N}` on this surface; the launcher confirms and retries the same route with `force: true`.
 
+## A degraded workspace row
+
+`status: "unavailable"` is a tenant that is mounted over a root it can no longer read: a network mount whose client stalled, or a directory that was removed or replaced while the tenant held it open. Such a row carries `on: true`, because the mount is up and turning it off is the action that helps, and an `error` string built by the server. The launcher renders the reason on any row that carries one and never matches on its text: it differs between the two conditions and between platforms. The row reads as degraded rather than healthy or failed, so the power control keeps its enabled shape in the attention amber instead of the accent, offers **Turn off**, and the read-only surface's static badge says `Degraded`. `New window` stays disabled, because the library mints a window only over a running mount and refuses every other status with `409 workspace is not running`.
+
+`POST /{id}/on` answers `409 {error:"<reason>"}` rather than `204` over such a mount, since the verb is an idempotent registration that may not tear a live tenant down to rebuild it. That rejection carries no special shape: it reaches the error bubble as the reason alone, and the launcher re-lists the registry behind it so the row that was showing OFF settles into the degraded state instead of a stale one.
+
 ## Build integration
 
 The launcher bundle is embedded beside the main workspace bundle and follows the same rebuild contract: fresh checkouts and isolated gate worktrees compile before the frontend artifact exists, while a rebuilt launcher forces the embedding server crate to relink. The top-level web targets build the launcher before any CLI, desktop, packaging, or release consumer embeds the server bundle, so every distribution path ships the same launcher without per-consumer wiring.

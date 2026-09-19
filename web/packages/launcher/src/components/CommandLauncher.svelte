@@ -29,6 +29,7 @@
     Unplug,
     X,
   } from "lucide-svelte";
+  import { workspaceCondition } from "../api/library";
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
@@ -362,7 +363,7 @@
         return library.workspaces
           .filter(
             (workspace) =>
-              workspace.status === "running" &&
+              workspaceCondition(workspace.status) === "ready" &&
               !workspacePending(workspace) &&
               canOpenWorkspaceWindow(workspace),
           )
@@ -425,14 +426,20 @@
         return library.workspaces
           .filter(
             (workspace) =>
-              !workspace.on && workspace.status !== "locked" && !workspacePending(workspace),
+              !workspace.on &&
+              workspaceCondition(workspace.status) !== "foreign" &&
+              !workspacePending(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
+      // A degraded mount is on, so it lands here and nowhere else: turning it
+      // off is the one action that clears the state.
       case "turn-off":
         return library.workspaces
           .filter(
             (workspace) =>
-              workspace.on && workspace.status !== "locked" && !workspacePending(workspace),
+              workspace.on &&
+              workspaceCondition(workspace.status) !== "foreign" &&
+              !workspacePending(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
       default:

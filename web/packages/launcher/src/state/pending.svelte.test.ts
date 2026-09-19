@@ -59,6 +59,17 @@ describe("pending bridge", () => {
     expect(isPending(wsKey("b"))).toBe(false);
   });
 
+  it("holds an off bridge over a degraded row, the same as a running one", () => {
+    // A mount whose root stopped being usable is still mounted, so its Turn off
+    // starts from `unavailable` rather than `running`. The bridge has to span
+    // that click too, or the row loses its spinner the moment a poll lands.
+    beginPending(wsKey("d"), "off");
+    reconcile({ [wsKey("d")]: "unavailable" });
+    expect(isPending(wsKey("d"))).toBe(true);
+    reconcile({ [wsKey("d")]: "closing" });
+    expect(isPending(wsKey("d"))).toBe(false);
+  });
+
   it("holds a connect bridge until the dial leaves disconnected", () => {
     const k = dsKey("d");
     beginPending(k, "connected"); // pre-click state: "disconnected"

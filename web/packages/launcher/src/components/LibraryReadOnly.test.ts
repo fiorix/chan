@@ -12,7 +12,7 @@ import { mount, unmount, flushSync } from "svelte";
 import Library from "./Library.svelte";
 import { library, loadLibrary, stopWatching } from "../state/library.svelte";
 import { collapsedState } from "../state/machineCollapse.svelte";
-import type { DevserverEntry } from "../api/library";
+import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
 // Force the read-only surface for the whole file (hoisted before the imports):
 // no registry mutation, no desktop bridge, not self-managed.
@@ -104,6 +104,28 @@ describe("Library on the read-only surface", () => {
     expect(prod!.querySelector(".ds-glyph.lost")).not.toBeNull();
     expect(prod!.querySelector(".ds-glyph.live")).toBeNull();
     expect(prod!.textContent).not.toContain("Not connected");
+  });
+
+  it("reads a degraded mount as Degraded, not On", () => {
+    // The static badge is this surface's whole answer about a workspace, so a
+    // mount that cannot read its root must not sit there saying On.
+    const reason = "Transport endpoint is not connected (os error 107)";
+    library.workspaces = library.workspaces.map(
+      (w): WorkspaceEntry =>
+        w.devserver_id === null && w.on ? { ...w, status: "unavailable", error: reason } : w,
+    );
+    mountList();
+    const pill = [...target!.querySelectorAll(".pill")].find((p) =>
+      p.classList.contains("degraded"),
+    ) as HTMLElement;
+    expect(pill).toBeTruthy();
+    expect(pill.textContent?.trim()).toBe("Degraded");
+    expect(pill.classList.contains("on")).toBe(false);
+    expect(pill.title).toBe(reason);
+    // The healthy rows keep their own badge.
+    expect([...target!.querySelectorAll(".pill")].some((p) => p.textContent?.trim() === "On")).toBe(
+      true,
+    );
   });
 
   it("keeps the machine-collapse toggle: it is not a mutation control", () => {

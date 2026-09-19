@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, liveApi } from "./library";
+import { ApiError, liveApi, liveTerminalsCount } from "./library";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -36,5 +36,36 @@ describe("liveApi.liveTerminalCount", () => {
     await expect(liveApi.liveTerminalCount("missing")).rejects.toEqual(
       new ApiError(404, "missing window"),
     );
+  });
+});
+
+describe("ApiError", () => {
+  it("reads a refusal envelope as its message and keeps the raw body", () => {
+    // The library answers a refused on with `{"error": "<reason>"}`; the reason
+    // is what a person reads in the error bubble, the envelope is not.
+    const reason =
+      "workspace root does not exist: /home/me/proj; turn this workspace off and on, " +
+      "or run chan close, to mount that path again";
+    const e = new ApiError(409, JSON.stringify({ error: reason }));
+
+    expect(e.message).toBe(reason);
+    expect(e.body).toBe(JSON.stringify({ error: reason }));
+  });
+
+  it("leaves a plain-text body alone", () => {
+    expect(new ApiError(409, "NO_DESKTOP").message).toBe("NO_DESKTOP");
+    expect(new ApiError(500, "").message).toBe("HTTP 500");
+  });
+
+  it("still reads the live-terminals refusal off the raw body", () => {
+    // The envelope reader must not cost the confirm-and-retry flow its shape:
+    // that refusal carries a count beside its `error` tag.
+    const live = new ApiError(
+      409,
+      JSON.stringify({ error: "live_terminals", active_terminals: 3 }),
+    );
+    expect(liveTerminalsCount(live)).toBe(3);
+    expect(liveTerminalsCount(new ApiError(409, JSON.stringify({ error: "root gone" })))).toBeNull();
+    expect(liveTerminalsCount(new ApiError(409, "NO_DESKTOP"))).toBeNull();
   });
 });

@@ -24,7 +24,7 @@ import {
   windowLiveTerminalCount,
 } from "./library.svelte";
 import { ApiError } from "../api/library";
-import { beginPending, clearAllPending, dsKey, isPending } from "./pending.svelte";
+import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
 // Pin the in-memory mock as the backend so these tests drive the registry +
 // window feed with no live server, independent of how the app composes its
@@ -128,6 +128,40 @@ describe("workspace registry", () => {
     expect(library.workspaces.find((w) => w.workspace_id === ws.workspace_id)?.on).toBe(false);
     await toggleWorkspace(ws.workspace_id, true);
     expect(library.workspaces.find((w) => w.workspace_id === ws.workspace_id)?.on).toBe(true);
+  });
+
+  it("re-lists after a refused toggle so the row behind the error is the live one", async () => {
+    // A refused `on` is how the launcher learns its row was stale: the server
+    // answers 409 over a tenant whose root is not usable. The error still
+    // reaches the caller, and the list behind it is fetched again.
+    const { backend } = await import("../api/backend");
+    const reason = "workspace root does not exist: /tmp/stale";
+    await addLocalWorkspace("/tmp/stale");
+    const ws = library.workspaces.find((w) => w.path === "/tmp/stale")!;
+    const onSpy = vi
+      .spyOn(backend, "setWorkspaceOn")
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: reason })));
+    const listSpy = vi.spyOn(backend, "listWorkspaces").mockImplementation(async () =>
+      library.workspaces.map((w) =>
+        w.workspace_id === ws.workspace_id
+          ? { ...w, on: true, status: "unavailable" as const, error: reason }
+          : w,
+      ),
+    );
+
+    try {
+      await expect(toggleWorkspace(ws.workspace_id, true)).rejects.toThrow(reason);
+      expect(listSpy).toHaveBeenCalled();
+      const row = library.workspaces.find((w) => w.workspace_id === ws.workspace_id)!;
+      expect(row.status).toBe("unavailable");
+      expect(row.error).toBe(reason);
+      expect(isPending(wsKey(ws.workspace_id))).toBe(false);
+    } finally {
+      // The list stub answers for the whole registry, so a failure here would
+      // follow the shared mock state into the next case.
+      onSpy.mockRestore();
+      listSpy.mockRestore();
+    }
   });
 
   it("removes a workspace", async () => {

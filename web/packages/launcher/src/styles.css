@@ -16,6 +16,10 @@
   --accent: #3fb950;
   --brand: #e58c4d;
   --danger: #f85149;
+  /* Attention without failure: a foreign lock pulsing, a mount whose root is
+     not usable. Deliberately outside the light-theme block, because both
+     surfaces draw this state in the same amber. */
+  --warn: #e3b341;
 }
 
 :root[data-theme="light"] {
@@ -141,6 +145,15 @@ body {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* A mount that is up but cannot read its root: the same shape as `.on`, in the
+   attention amber instead of the accent, so the control still reads as enabled
+   without claiming the workspace is healthy. */
+.icon-btn.degraded {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
 .icon-btn.lost {
   border-color: var(--danger);
   color: var(--danger);
@@ -167,9 +180,9 @@ body {
   }
 
   50% {
-    border-color: #e3b341;
-    color: #e3b341;
-    background: color-mix(in srgb, #e3b341 18%, transparent);
+    border-color: var(--warn);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
   }
 }
 
@@ -191,9 +204,9 @@ body {
 
   .icon-btn.locked {
     animation: none;
-    border-color: #e3b341;
-    color: #e3b341;
-    background: color-mix(in srgb, #e3b341 18%, transparent);
+    border-color: var(--warn);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
   }
 }
 
@@ -282,13 +295,18 @@ body {
   color: var(--text);
 }
 
-/* Workspace mount-error affordance: a danger-tinted icon beside the row name,
-   carrying the backend's `error` reason as its tooltip. Shown when a row's
-   lifecycle status is "error". */
+/* Workspace mount-reason affordance: a tinted icon beside the row name,
+   carrying the backend's `error` reason as its tooltip. Shown on any row that
+   carries a reason; the amber variant is the degraded mount, which is not a
+   failed lifecycle operation and must not read as one. */
 .row-error {
   display: inline-flex;
   align-items: center;
   color: var(--danger);
+}
+
+.row-error.degraded {
+  color: var(--warn);
 }
 
 .row-sub {
@@ -323,6 +341,12 @@ body {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.pill.degraded {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
 }
 
 /* A stored-token chip on a devserver row. */

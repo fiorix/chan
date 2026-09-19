@@ -56,6 +56,7 @@
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
+  import { workspaceCondition } from "../api/library";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
   // The whole tree, recomputed when any of the three feeds change (the two-array
@@ -128,16 +129,19 @@
   // Workspace spinner = backend reports a lifecycle transition OR the optimistic
   // bridge is open between a click and the first refetch.
   function spinning(ws: WorkspaceEntry): boolean {
-    return (
-      ws.status === "starting" ||
-      ws.status === "closing" ||
-      ws.status === "removing" ||
-      isPending(rowKey(ws))
-    );
+    return workspaceCondition(ws.status) === "busy" || isPending(rowKey(ws));
   }
 
   function locked(ws: WorkspaceEntry): boolean {
-    return ws.status === "locked";
+    return workspaceCondition(ws.status) === "foreign";
+  }
+
+  // A mounted tenant whose root is not usable. The row keeps its controls (the
+  // mount is up and turning it off is the action that helps) but must not read
+  // as healthy, so the accent tint gives way to the degraded one and the
+  // reason rides beside the name.
+  function degraded(ws: WorkspaceEntry): boolean {
+    return workspaceCondition(ws.status) === "degraded";
   }
 
   const connected = (ds: DevserverEntry): boolean => ds.status === "connected";
@@ -234,8 +238,8 @@
       <div class="row-main">
         <span class="row-name">
           {displayName(ws)}
-          {#if ws.status === "error"}
-            <span class="row-error" title={ws.error ?? ""}>
+          {#if ws.error}
+            <span class="row-error" class:degraded={degraded(ws)} title={ws.error}>
               <CircleAlert size={14} />
             </span>
           {/if}
@@ -255,14 +259,19 @@
         </button>
       {/if}
       {#if readOnly}
-        <span class="pill" class:on={ws.on} aria-disabled="true">
-          {locked(ws) ? "Locked" : ws.on ? "On" : "Off"}
+        <span
+          class="pill"
+          class:on={ws.on && !degraded(ws)}
+          class:degraded={degraded(ws)}
+          title={degraded(ws) ? ws.error : undefined}
+          aria-disabled="true">
+          {locked(ws) ? "Locked" : degraded(ws) ? "Degraded" : ws.on ? "On" : "Off"}
         </span>
       {:else}
         <button
           class="icon-btn"
           type="button"
-          disabled={ws.status !== "running" ||
+          disabled={workspaceCondition(ws.status) !== "ready" ||
             spinning(ws) ||
             !canOpenWorkspaceWindow(ws)}
           title={!canOpenWorkspaceWindow(ws)
@@ -274,7 +283,8 @@
         </button>
         <button
           class="icon-btn"
-          class:on={ws.on}
+          class:on={ws.on && !degraded(ws)}
+          class:degraded={degraded(ws)}
           class:locked={locked(ws)}
           type="button"
           disabled={spinning(ws) || locked(ws)}

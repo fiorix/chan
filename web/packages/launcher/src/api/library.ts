@@ -90,13 +90,15 @@ export interface WindowSet {
  * Live mount lifecycle of a workspace tenant. `on` is the persisted DESIRED
  * state; `status` is where the mount actually is right now, so the launcher
  * drives spinners off real backend state instead of a timer:
- * - `stopped`  not mounted (desired off, or never started)
- * - `starting` mount requested / in flight (the spinner state)
- * - `running`  mounted and serving
- * - `locked`   mounted by another live/unknown Chan process; not actionable here
- * - `closing`  unmount requested / in flight (spinner + locked controls)
- * - `removing` remove requested / in flight (spinner + locked controls)
- * - `error`    mount failed (open error); see `WorkspaceEntry.error`
+ * - `stopped`     not mounted (desired off, or never started)
+ * - `starting`    mount requested / in flight (the spinner state)
+ * - `running`     mounted and serving
+ * - `locked`      mounted by another live/unknown Chan process; not actionable here
+ * - `closing`     unmount requested / in flight (spinner + locked controls)
+ * - `removing`    remove requested / in flight (spinner + locked controls)
+ * - `error`       mount failed (open error); see `WorkspaceEntry.error`
+ * - `unavailable` mounted, but the directory under the root cannot be read;
+ *   see `WorkspaceEntry.error`
  */
 export type WorkspaceStatus =
   | "stopped"
@@ -105,7 +107,43 @@ export type WorkspaceStatus =
   | "locked"
   | "closing"
   | "removing"
-  | "error";
+  | "error"
+  | "unavailable";
+
+/**
+ * How a lifecycle status reads on a control surface. The workspace rows and the
+ * command deck ask this instead of comparing wire strings, so a status added to
+ * the wire is one decision here rather than a scattered set of comparisons that
+ * each quietly leave it looking healthy:
+ * - `idle`     nothing is mounted; the surface offers turning it on
+ * - `busy`     a lifecycle operation is in flight; controls spin and lock
+ * - `ready`    mounted and serving; the row offers its whole action set
+ * - `foreign`  another Chan process holds the mount; this one cannot act
+ * - `degraded` mounted, but its root is not usable, so only turning it off helps
+ * - `failed`   a lifecycle operation failed and is worth retrying
+ */
+export type WorkspaceCondition = "idle" | "busy" | "ready" | "foreign" | "degraded" | "failed";
+
+/** Classify a wire status. Total over the union: a status with no case here has
+ * no return value, which the build refuses. */
+export function workspaceCondition(status: WorkspaceStatus): WorkspaceCondition {
+  switch (status) {
+    case "stopped":
+      return "idle";
+    case "starting":
+    case "closing":
+    case "removing":
+      return "busy";
+    case "running":
+      return "ready";
+    case "locked":
+      return "foreign";
+    case "unavailable":
+      return "degraded";
+    case "error":
+      return "failed";
+  }
+}
 
 /**
  * A workspace row in the launcher's workspace feed. Local rows are folders in
@@ -124,10 +162,12 @@ export interface WorkspaceEntry {
   /** Persisted DESIRED state: tenant should be served (on) vs registered-but-off. */
   on: boolean;
   /** Live mount lifecycle. The spinner shows while transitional; `locked` disables
-   * local control; `error` renders a row error affordance carrying `error`.
-   * Drives the UI in place of `on`. */
+   * local control; `error` and `unavailable` render a row affordance carrying
+   * `error`. Drives the UI in place of `on`. */
   status: WorkspaceStatus;
-  /** Short human reason, present only when `status === "error"`. */
+  /** Short human reason behind `status`: the open failure for `error`, what is
+   * wrong with the root for `unavailable`. Absent for every other status, so a
+   * row that carries one has a reason worth showing. */
   error?: string;
   /** The library serving this row: host-local id for local rows (`local` in the
    * desktop app, `lib-*` in the standalone devserver); the remote library id for
@@ -407,15 +447,39 @@ export interface LibraryApi {
   setWindowLabel(id: string, label: string, actingWindowId?: string): Promise<void>;
 }
 
-/** A non-2xx response, carrying the status and the server's text body. */
+/**
+ * A non-2xx response, carrying the status and the server's text body.
+ *
+ * `body` is what the server sent; `message` is what a person reads. The library
+ * answers a refusal with `{"error": "<reason>"}`, so the message is that reason
+ * alone and the JSON envelope never reaches an error bubble. Callers that match
+ * on a refusal's SHAPE read `body`, not the message.
+ */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    body: string,
+    readonly body: string,
   ) {
-    super(body || `HTTP ${status}`);
+    super(refusalReason(body) || `HTTP ${status}`);
     this.name = "ApiError";
   }
+}
+
+/** The reason inside a `{"error": "<reason>"}` body, or the body unchanged when
+ * it is not one. The server's own text, never rewritten: the reasons differ
+ * between a stalled mount and a replaced root and between platforms, so the
+ * launcher displays whatever arrives. */
+function refusalReason(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object") {
+      const reason = (parsed as { error?: unknown }).error;
+      if (typeof reason === "string") return reason;
+    }
+  } catch {
+    // A plain-text body (the `NO_DESKTOP` refusals) is already readable.
+  }
+  return body;
 }
 
 /**
@@ -423,13 +487,14 @@ export class ApiError extends Error {
  * was refused because the workspace still has live terminal sessions. Returns
  * `active_terminals` when `e` is an `ApiError` whose 409 body parses to
  * `{error:"live_terminals", active_terminals:N}`, else null, so the launcher
- * can confirm-and-retry only that case and let a plain `NO_DESKTOP` 409 (whose
- * body is not that JSON) fall through to the generic error banner.
+ * can confirm-and-retry only that case and let every other 409 (a plain
+ * `NO_DESKTOP` string, or a reason the row shows) fall through to the generic
+ * error banner. Reads the raw `body`: the message is the unwrapped reason.
  */
 export function liveTerminalsCount(e: unknown): number | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null;
   try {
-    const body = JSON.parse(e.message) as { error?: unknown; active_terminals?: unknown };
+    const body = JSON.parse(e.body) as { error?: unknown; active_terminals?: unknown };
     if (body.error === "live_terminals" && typeof body.active_terminals === "number") {
       return body.active_terminals;
     }
