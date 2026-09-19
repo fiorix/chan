@@ -1672,6 +1672,7 @@ mod tests {
         // that stays open, the way a running devserver holds one.
         {
             let ws = lib.open_workspace(root.path()).unwrap();
+            ws.join_open_recovery();
             ws.write_text("alpha.md", "# alpha\nbody\n").unwrap();
             ws.index_file("alpha.md").unwrap();
         }
@@ -1683,7 +1684,11 @@ mod tests {
             },
         )
         .unwrap();
+        // Startup recovery holds an `Arc<Workspace>` of its own for the whole
+        // pass, and what this test reads is whether the handles it drops leave
+        // one live, so every open waits that pass out first.
         let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
         ws.write_text("beta.md", "# beta\nbody\n").unwrap();
         ws.index_file("beta.md").unwrap();
 
@@ -1710,6 +1715,7 @@ mod tests {
         // The sidecars survive the refusal intact: reopening reads them, it
         // does not find an index half-replaced under a live writer.
         let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
         assert_eq!(ws.search("alpha", &opts).unwrap().hits.len(), 1);
         assert_eq!(ws.search("beta", &opts).unwrap().hits.len(), 1);
         drop(ws);
