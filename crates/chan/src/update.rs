@@ -762,12 +762,15 @@ mod staging {
     ///
     /// The path is a type rather than a bare [`PathBuf`] because
     /// [`super::install_replacement`] takes nothing else, and the only
-    /// function that builds one derives the directory from the running
-    /// executable's own path. Every replacement rename is then a move within
-    /// one directory. A staging directory chosen independently, such as
-    /// [`std::env::temp_dir`], can sit on another volume, where the rename
-    /// fails with `EXDEV` on Unix and is not the same-directory move the
-    /// Windows sequence recovers from.
+    /// function that builds one, `beside`, puts it in the directory of the
+    /// path it is given. `run_upgrade` gives `beside` the running executable's
+    /// own path, and `ensure_staged_beside_executable`, which both platforms
+    /// reach before their first rename, refuses a staged binary in any other
+    /// directory: every replacement rename is then a move within one
+    /// directory. A staging directory chosen independently, such as
+    /// [`std::env::temp_dir`], can sit on another volume, where a rename fails
+    /// with `EXDEV` on Unix and is not the same-directory move the Windows
+    /// sequence recovers from.
     #[derive(Debug)]
     pub(super) struct StagedBinary {
         path: PathBuf,
