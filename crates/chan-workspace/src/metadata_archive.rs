@@ -2263,4 +2263,79 @@ mod tests {
         extract_payload(&archive, &payload).unwrap();
         assert!(payload.join("graph/rebuild.inprogress").is_file());
     }
+
+    /// The capture reads the recovery records before the index snapshot, not
+    /// after it. This save is released while the snapshot holds the
+    /// `meta.json` it has just read, so the save's chunks land after that read
+    /// and its entry is gone before anything later in the export could read
+    /// one. The archived journal is what says the index is behind, and a
+    /// capture below the index snapshot would find no entry at all.
+    #[test]
+    fn metadata_archive_captures_the_journal_before_the_index_snapshot() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("metadata.tar.zst");
+        let ws = lib.open_workspace(root.path()).unwrap();
+        ws.join_open_recovery();
+        ws.write_text("note.md", "# note\n\nbodyone\n").unwrap();
+        ws.reindex(None).unwrap();
+        assert_eq!(bm25_hits(&ws, "bodyone"), vec!["note.md".to_string()]);
+
+        // Park a real save between its graph commit and its index commit, so
+        // the graph carries the new row and the journal entry says the index
+        // does not.
+        ws.write_text("note.md", "# note\n\nbodytwo\n").unwrap();
+        let (reached, release) =
+            crate::workspace::arm_index_commit_pause_for_test(ws.root().to_path_buf());
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let saver = {
+            let ws = std::sync::Arc::clone(&ws);
+            std::thread::spawn(move || {
+                let result = ws.index_file("note.md");
+                let _ = done_tx.send(());
+                result.unwrap();
+            })
+        };
+        reached
+            .recv_timeout(TEST_WAIT_BUDGET)
+            .expect("the save reaches the barrier between its graph and index commits");
+        let journal = paths.graph_dir.join("pending_writes.json");
+        assert!(journal.exists(), "the parked save journalled its file");
+
+        // Release it while the index snapshot holds the `meta.json` it just
+        // read, so the save's chunks land after that read and its entry is
+        // gone by the time the snapshot returns.
+        let live_meta = paths.index.join("bm25").join("meta.json");
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = released.clone();
+        let _guard = ProbeGuard;
+        SNAPSHOT_PROBE.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move |path| {
+                if path == live_meta.as_path() && !observed.replace(true) {
+                    release.send(()).expect("the parked save still waits");
+                    done_rx
+                        .recv_timeout(TEST_WAIT_BUDGET)
+                        .expect("the released save finishes before the snapshot returns");
+                }
+            }))
+        });
+        lib.export_metadata_archive(
+            root.path(),
+            &archive,
+            MetadataExportOptions {
+                chan_version: "capture-order-test".into(),
+            },
+        )
+        .unwrap();
+        assert!(released.get(), "the index snapshot read the live meta.json");
+        saver.join().unwrap();
+        assert!(!journal.exists(), "the save cleared its journal entry");
+
+        let payload = out_dir.path().join("payload");
+        extract_payload(&archive, &payload).unwrap();
+        let archived = std::fs::read_to_string(payload.join("graph/pending_writes.json"))
+            .expect("the capture read the journal before the index snapshot");
+        assert!(archived.contains("note.md"), "archived journal: {archived}");
+    }
 }
