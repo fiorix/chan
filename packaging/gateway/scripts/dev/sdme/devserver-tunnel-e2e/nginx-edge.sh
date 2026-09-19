@@ -277,6 +277,34 @@ restart_dsp() {  # bring the terminator back exactly as the rig ran it
 ds_epoch()      { $SDME exec "$C_DS" -- /bin/date -u +%s; }
 ds_tunnel_url() { unit_argv "$C_DS" chands | sed -n 's/^--tunnel-url=//p' | head -1; }
 
+# The devserver's tunnel as it stands right now: the proxy holds a connection
+# on the port the devserver dials, and the newest tunnel event in the
+# devserver's journal is a connect. A rig nothing has touched answers at once,
+# which waiting for a fresh registration line cannot do: that line arrives only
+# when something has restarted the devserver.
+ds_registered() {
+    local port last journal
+    port="$(ds_tunnel_url | sed -n 's#.*:\([0-9][0-9]*\)/v1/tunnel$#\1#p')"
+    [ -n "$port" ] || return 1
+    [ "$(in_proxy /usr/bin/ss -Htn state established "sport = :$port" 2>/dev/null | grep -c .)" -gt 0 ] || return 1
+    journal="$(mktemp)"
+    $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -n 200 -o cat > "$journal" 2>/dev/null
+    last="$(grep -E 'tunnel connected|tunnel disconnected|tunnel dial failed' "$journal" | tail -1)"
+    rm -f "$journal"
+    case "$last" in *'tunnel connected'*) return 0 ;; esac
+    return 1
+}
+
+wait_registered() {  # seconds -> 0 as soon as the devserver's tunnel is up
+    local limit="$1" deadline
+    deadline=$(( $(date -u +%s) + limit ))
+    while :; do
+        ds_registered && return 0
+        [ "$(date -u +%s)" -lt "$deadline" ] || return 1
+        sleep 0.25
+    done
+}
+
 # chands is transient too, so a `systemd-run` that fails between the stop and
 # the start would take the unit's environment and argv with it. Both land under
 # STATE_DIR while the unit is still running, so `clean` can rebuild it.
@@ -479,9 +507,11 @@ cmd_clean() {
           || { info "the terminator is down; bringing it back"; restart_dsp || info "could not restart dsp"; }
     fi
     if running "$C_DS"; then
-        wait_for_ds_line "tunnel connected" 30 "$(( $(ds_epoch) - 2 ))" >/dev/null \
-          && info "the rig is registered on its own tunnel path again" \
-          || info "the rig has NOT re-registered; check journalctl -u chands in $C_DS"
+        if wait_registered 30; then
+            info "the devserver is registered on $(ds_tunnel_url)"
+        else
+            info "the devserver is NOT registered on $(ds_tunnel_url); check journalctl -u chands in $C_DS"
+        fi
     fi
     info "the rootfs '$RFS_NGINX' is left in place; remove it with: sudo sdme fs rm $RFS_NGINX"
 }
