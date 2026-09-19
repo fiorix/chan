@@ -59,6 +59,7 @@
     type ScopedLibraryWindow,
     type ScopedLibraryWorkspace,
   } from "../api/libraryCommand";
+  import { scopedWorkspaceOpenable } from "../api/workspaceStatus";
   import {
     buryLibraryWindow,
     createLibraryWindow,
@@ -528,7 +529,7 @@
         ];
       case "new-window":
         return snapshot.workspaces
-          .filter((workspace) => workspace.status === "running")
+          .filter((workspace) => scopedWorkspaceOpenable(workspace.status))
           .map(scopedWorkspaceEntry);
       case "windows": {
         // The roster order is the server's: this window first, then terminals

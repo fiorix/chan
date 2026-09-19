@@ -561,6 +561,35 @@ describe("contextual command deck", () => {
     expect(titles(target)).toContain("New terminal");
   });
 
+  test("the New window branch leaves out a mount that cannot read its root", async () => {
+    scopedLibrary.load.mockResolvedValue({
+      ...librarySnapshot,
+      workspaces: [
+        ...librarySnapshot.workspaces,
+        {
+          workspace_id: "project-b",
+          path: "/work/project-b",
+          label: "Project B",
+          on: true,
+          status: "unavailable" as const,
+          error: "workspace root does not exist: /work/project-b",
+          library_id: "lib-local-test",
+          devserver_id: null,
+          prefix: "project-b",
+        },
+      ],
+    });
+    const target = openLauncher();
+    await flush();
+    (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
+    await tick();
+    row(target, "New window").click();
+    await tick();
+    // The library refuses to mint a window over that tenant, so the deck must
+    // not offer one. This deck shows no workspace state of its own.
+    expect(titles(target)).toEqual(["Project A"]);
+  });
+
   async function openWindowList(target: HTMLElement): Promise<void> {
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();

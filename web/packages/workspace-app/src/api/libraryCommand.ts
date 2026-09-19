@@ -6,16 +6,11 @@
 import { sessionWindowId } from "./client";
 import { ApiError } from "./errors";
 import { requestRoot } from "./transport";
+import type { ScopedWorkspaceStatus } from "./workspaceStatus";
+
+export type { ScopedWorkspaceStatus } from "./workspaceStatus";
 
 export type ScopedWindowKind = "terminal" | "workspace";
-export type ScopedWorkspaceStatus =
-  | "stopped"
-  | "starting"
-  | "running"
-  | "locked"
-  | "closing"
-  | "removing"
-  | "error";
 
 export interface ScopedLibraryWindow {
   window_id: string;
@@ -37,6 +32,8 @@ export interface ScopedLibraryWorkspace {
   label: string;
   on: boolean;
   status: ScopedWorkspaceStatus;
+  /** Short human reason behind `status`, present only for `error` and
+   * `unavailable`. */
   error?: string;
   library_id: string | null;
   devserver_id: string | null;
