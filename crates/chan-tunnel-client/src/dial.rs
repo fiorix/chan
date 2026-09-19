@@ -12,6 +12,14 @@
 //! as h2c into devserver-proxy's tunnel listener. The h2c branch exists
 //! so a local stack can dial the devserver-proxy h2c port without
 //! standing up a TLS terminator.
+//!
+//! The dial below leaves the request body open for the life of the
+//! registration, so an edge in front of the listener needs raised
+//! idle timeouts on the tunnel location: for nginx that is
+//! `client_body_timeout`, whose 60s default ends an idle tunnel
+//! about once a minute with a clean `200` and no error on either
+//! side, plus `grpc_read_timeout` and `grpc_send_timeout` on the
+//! upstream leg.
 
 use std::sync::Arc;
 
