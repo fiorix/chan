@@ -6,10 +6,12 @@
 //! the `&str` the listener hands the validator and assert that it is
 //! freed while the tunnel is still registered. A second pin scans every
 //! live allocation for the raw token bytes after registration and
-//! allows exactly the h2 decoder's scratch buffer, so a later
-//! `tokio::spawn` inside `register_tunnel` that keeps a clone would turn
-//! red. The scan dials with a Hello name so it exercises the production
-//! name branch.
+//! allows exactly the h2 decoder's scratch buffer, so a copy still live
+//! when the scan runs, such as one a `tokio::spawn` inside
+//! `register_tunnel` kept, turns it red. Its reach is the path a dial
+//! carrying a Hello name takes through `register_tunnel` to
+//! registration; a dial with no name, and every path that refuses the
+//! dial, are outside it.
 //!
 //! The watch is this binary's global allocator, which is why these tests
 //! live in their own file. Tests in one binary run on parallel threads,
@@ -47,12 +49,19 @@ struct WatchingAllocator;
 #[global_allocator]
 static ALLOCATOR: WatchingAllocator = WatchingAllocator;
 
-// SAFETY: `alloc` and `alloc_zeroed` call `System` first and only then
-// take `LIVE_LOCK` while they insert the new block. `dealloc` takes
-// `LIVE_LOCK` before removing the block and before calling `System`, so
-// `live_scan` cannot read a block that is being freed. `realloc` holds
-// the lock across remove, system realloc and insert. The lock is never
-// held while the system allocator runs, so there is no deadlock.
+// SAFETY: every method forwards to `System` with the same arguments and
+// returns what `System` returns. `LIVE_LOCK` guards the live table.
+// `alloc` and `alloc_zeroed` call `System` first and only then take the
+// lock, to insert the new block. `dealloc` holds the lock from before
+// the remove until `System.dealloc` returns, and `realloc` holds it
+// across `System.realloc` and the table update, so `live_scan`, which
+// holds it for its whole pass, never reads a block that is being freed.
+// Holding the lock across `System` cannot deadlock, because nothing
+// that runs under the lock allocates through this `GlobalAlloc`:
+// `System` is the platform allocator and does not route back through
+// the registered one, `live_insert`, `live_remove`, `live_scan` and
+// `note_release` touch only statics, atomics and locals, and a full
+// table aborts instead of unwinding.
 unsafe impl GlobalAlloc for WatchingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = System.alloc(layout);
@@ -129,8 +138,10 @@ struct LiveTable {
     size: UnsafeCell<[usize; LIVE_CAP]>,
 }
 
-// SAFETY: `LIVE_TABLE` is mutated only while `LIVE_LOCK` is held, by
-// `live_insert`, `live_remove`, and the read in `live_scan`.
+// SAFETY: every access to `LIVE_TABLE`, read or write, happens while
+// `LIVE_LOCK` is held: `live_insert` and `live_remove` are called only
+// from the allocator methods, between `live_lock` and `live_unlock`,
+// and `live_scan` takes the lock for its own read.
 unsafe impl Sync for LiveTable {}
 
 static LIVE_TABLE: LiveTable = LiveTable {
