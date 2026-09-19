@@ -21,9 +21,11 @@
 # edge in another container cannot reach that listener at all. Nothing of the
 # rig's own path changes:
 # `tls-forward.py` keeps serving :7444, the proxy keeps its loopback bind, and
-# only the devserver's `--tunnel-url` moves. Everything `up` replaces is saved
-# under STATE_DIR and `clean` reads the same files, so a half-finished `up` is
-# still reversible.
+# only the devserver's `--tunnel-url` moves. Before `up` stops or replaces
+# anything of the rig's it saves what putting it back needs under STATE_DIR:
+# the terminator's environment, and the devserver's environment, argv and
+# tunnel url. `scenario` and `clean` read the same files, so a half-finished
+# `up` is still reversible.
 #
 #   nginx-edge.sh up         stand the edge up and route the devserver through it
 #   nginx-edge.sh scenario   stop/start the terminator, timing both sides
@@ -272,12 +274,26 @@ restart_dsp() {  # bring the terminator back exactly as the rig ran it
 ds_epoch()      { $SDME exec "$C_DS" -- /bin/date -u +%s; }
 ds_tunnel_url() { unit_argv "$C_DS" chands | sed -n 's/^--tunnel-url=//p' | head -1; }
 
-restart_chands() {  # tunnel url
-    local args argv
+# chands is transient too, so a `systemd-run` that fails between the stop and
+# the start would take the unit's environment and argv with it. Both land under
+# STATE_DIR while the unit is still running, so `clean` can rebuild it.
+save_chands_state() {
+    local env_file="$STATE_DIR/chands-setenv" argv_file="$STATE_DIR/chands-argv" args argv
     mapfile -t args < <(unit_setenv "$C_DS" chands "$DS_ENV_PREFIXES")
-    [ "${#args[@]}" -ge 4 ] || { printf 'read only %d env args from chands\n' "${#args[@]}" >&2; return 1; }
-    mapfile -t argv < <(unit_argv "$C_DS" chands | sed "s#^--tunnel-url=.*#--tunnel-url=$1#")
-    [ "${#argv[@]}" -ge 2 ] || { printf 'read only %d argv elements from chands\n' "${#argv[@]}" >&2; return 1; }
+    mapfile -t argv < <(unit_argv "$C_DS" chands)
+    [ "${#args[@]}" -ge 4 ] && [ "${#argv[@]}" -ge 2 ] || return 1
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "${args[@]}" > "$env_file.tmp" && mv "$env_file.tmp" "$env_file" || return 1
+    printf '%s\n' "${argv[@]}" > "$argv_file.tmp" && mv "$argv_file.tmp" "$argv_file" || return 1
+}
+
+restart_chands() {  # tunnel url
+    local env_file="$STATE_DIR/chands-setenv" argv_file="$STATE_DIR/chands-argv" args argv
+    save_chands_state
+    [ -s "$env_file" ] && [ -s "$argv_file" ] \
+      || { printf 'no saved devserver unit state in %s; run run.sh to rebuild the rig\n' "$STATE_DIR" >&2; return 1; }
+    mapfile -t args < "$env_file"
+    mapfile -t argv < <(sed "s#^--tunnel-url=.*#--tunnel-url=$1#" "$argv_file")
     $SDME exec "$C_DS" -- /usr/bin/systemctl stop chands
     $SDME exec "$C_DS" -- /usr/bin/systemd-run --unit=chands --collect \
       "${args[@]}" "${argv[@]}" >/dev/null || return 1
