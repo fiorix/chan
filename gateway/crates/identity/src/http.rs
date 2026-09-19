@@ -1765,9 +1765,10 @@ pub(crate) const TUNNEL_SCOPE: &str = "tunnel";
 /// [`TUNNEL_SCOPE`] -- a desktop.account or desktop.connect mint
 /// registers nothing (its id can never appear in the tunnel registry,
 /// so a row would be a phantom in the dashboard and the desktop
-/// roster). Best-effort: the row also auto-creates on first grant, and
-/// the caller's own work has already landed, so a profile hiccup must
-/// never fail it (warn only).
+/// roster). Best-effort, warn only: the row also auto-creates on first
+/// grant, a mint site's own work has already landed by the time it
+/// calls this, and the validate exchange does not wait for the call at
+/// all.
 pub(crate) async fn register_devserver_row(
     state: &AppState,
     user_id: Uuid,
@@ -2827,12 +2828,13 @@ async fn validate_token(
         .as_deref()
         .and_then(sanitize_devserver_display_name);
     // `Some(label)` means "ensure the devserver row with this label".
-    // The admission arm always ensures it: identity is the only holder
-    // of the raw PAT, so this exchange is the one place that can name
-    // the devserver id, and profile's `devserver_access` selects from
-    // `devservers` for the owner as well as for grantees, so a
-    // devserver whose row is gone refuses even its owner. A dial that
-    // announces no name therefore gets a label-less row, the same
+    // The admission arm always ensures it: a redial mints nothing and
+    // profile derives no devserver id of its own, so a row the sweeper
+    // took comes back on this exchange, which a live tunnel drives on
+    // every dial and every lease refresh. profile's `devserver_access`
+    // selects from `devservers` for the owner as well as for grantees,
+    // so a devserver whose row is gone refuses even its owner. A dial
+    // that announces no name therefore gets a label-less row, the same
     // shape the grant-create bootstrap inserts.
     let (v, row_label) = match (body.proxy_id, body.registration_id) {
         (Some(proxy_id), Some(registration_id)) if !registration_id.is_nil() => {

@@ -718,12 +718,13 @@ fn devserver_row(uid: Uuid, devserver_id: &str, label: &str) -> Value {
 #[tokio::test]
 async fn admission_validate_registers_the_devserver_row() {
     // The admission validate is the tunnel's own dial and its lease
-    // refresh. Identity holds the raw PAT, so it is the only party that
-    // can name the devserver id, and profile's `devserver_access`
-    // refuses even the owner entry to a devserver with no row: a dial
-    // that announces no name must therefore still get one, label-less.
-    // The announced name arrives on a separate validate moments later
-    // and labels the same row.
+    // refresh. A redial mints nothing and profile derives no devserver
+    // id of its own, so a row the sweeper took comes back on this
+    // exchange, and profile's `devserver_access` refuses even the owner
+    // entry to a devserver with no row: a dial that announces no name
+    // must therefore still get one, label-less. The announced name
+    // arrives on a separate validate moments later and labels the same
+    // row.
     let env = TestEnv::with_profile_mock().await;
     let uid = env.insert_user().await;
     let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;

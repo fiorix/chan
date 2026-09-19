@@ -1292,9 +1292,10 @@ async fn create_devserver(
         dedup_label(label, &taken)
     };
 
-    // ON CONFLICT DO NOTHING + RETURNING returns 0 rows on hit, so
-    // we follow up with an UPDATE-returning in that case. Two-step keeps
-    // the INSERT happy-path single-statement.
+    // ON CONFLICT DO NOTHING + RETURNING returns 0 rows on hit, so a
+    // second statement handles that case: a SELECT for a blank label,
+    // an UPDATE-returning for a real one. Two-step keeps the INSERT
+    // happy-path single-statement.
     let inserted = sqlx::query_as::<_, Devserver>(
         "INSERT INTO devservers (owner_user_id, devserver_id, label) VALUES ($1, $2, $3) \
          ON CONFLICT (owner_user_id, devserver_id) DO NOTHING \
@@ -1316,8 +1317,7 @@ async fn create_devserver(
     // each validate ensures this row. Reading it back instead of
     // assigning the label to itself keeps that steady state free of a
     // dead tuple per minute per devserver, and is what leaves a real
-    // name untouched when the grant-create auto-bootstrap or a
-    // nameless dial ensures the row.
+    // name untouched when a nameless dial ensures the row.
     let existing = if label.is_empty() {
         sqlx::query_as::<_, Devserver>(
             "SELECT id, owner_user_id, devserver_id, label, created_at FROM devservers \
