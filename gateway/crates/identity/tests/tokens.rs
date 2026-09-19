@@ -37,6 +37,9 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use wiremock::matchers::{method as mock_method, path as mock_path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 use identity::api_tokens::{NewToken, RequestMeta, TokenOrigin};
 use identity::config::Config;
 use identity::http;
@@ -51,6 +54,7 @@ struct TestEnv {
     schema: String,
     admin_url: String,
     pool: PgPool,
+    profile: Option<MockServer>,
 }
 
 impl TestEnv {
@@ -59,10 +63,22 @@ impl TestEnv {
     }
 
     async fn new() -> Self {
-        Self::new_with_policy_required(false).await
+        Self::build(false, None).await
     }
 
     async fn new_with_policy_required(policy_required: bool) -> Self {
+        Self::build(policy_required, None).await
+    }
+
+    /// A `TestEnv` whose profile client points at a wiremock server, so
+    /// a test can read back what identity posted to profile. The other
+    /// constructors aim it at a closed port on purpose: what they
+    /// exercise must hold even when profile never answers.
+    async fn with_profile_mock() -> Self {
+        Self::build(false, Some(MockServer::start().await)).await
+    }
+
+    async fn build(policy_required: bool, profile: Option<MockServer>) -> Self {
         let (url, schema, pool, store) =
             test_db::create_schema(test_db::MigrationOrder::GatewayFirst).await;
 
@@ -70,9 +86,12 @@ impl TestEnv {
         // provider state. We still need a provider configured because
         // Config requires non-empty `providers`.
         let provider = GitHubProvider::new("client".into(), "secret".into()).expect("gh");
-        let profile_client =
-            ProfileClient::new("http://127.0.0.1:65535/".parse().unwrap(), "unused".into())
-                .expect("profile client");
+        let profile_uri = match &profile {
+            Some(server) => server.uri(),
+            None => "http://127.0.0.1:65535/".to_string(),
+        };
+        let profile_client = ProfileClient::new(profile_uri.parse().unwrap(), "unused".into())
+            .expect("profile client");
 
         let api_tokens = identity::api_tokens::ApiTokenService::with_admission_signer(
             pool.clone(),
@@ -98,7 +117,25 @@ impl TestEnv {
             schema,
             admin_url: url,
             pool,
+            profile,
         }
+    }
+
+    fn profile(&self) -> &MockServer {
+        self.profile.as_ref().expect("built with a profile mock")
+    }
+
+    /// JSON bodies of the POSTs identity sent to `path`, in arrival
+    /// order.
+    async fn profile_posts(&self, path: &str) -> Vec<Value> {
+        self.profile()
+            .received_requests()
+            .await
+            .expect("profile request recording enabled")
+            .iter()
+            .filter(|request| request.method.as_str() == "POST" && request.url.path() == path)
+            .map(|request| serde_json::from_slice(&request.body).expect("json request body"))
+            .collect()
     }
 
     async fn cleanup(self) {
@@ -595,6 +632,147 @@ async fn pat_validate_endpoint_accepts_display_name() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["user_id"].as_str().unwrap(), uid.to_string());
     assert!(v["devserver_id"].as_str().is_some());
+
+    env.cleanup().await;
+}
+
+/// Mint a PAT carrying `scopes` for `uid` and return its raw secret.
+async fn pat_with_scopes(env: &TestEnv, uid: Uuid, scopes: &[&str]) -> String {
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+    env.api_tokens_service()
+        .create(
+            NewToken {
+                user_id: uid,
+                label: "tunnel",
+                expires_at: None,
+                scopes: &scopes,
+                origin: TokenOrigin::Spa,
+            },
+            &RequestMeta::default(),
+        )
+        .await
+        .expect("create pat")
+        .secret
+}
+
+/// A `create_devserver` 201 body, as profile answers it.
+fn devserver_row(uid: Uuid, devserver_id: &str, label: &str) -> Value {
+    json!({
+        "id": Uuid::new_v4(),
+        "owner_user_id": uid,
+        "devserver_id": devserver_id,
+        "label": label,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+#[tokio::test]
+async fn admission_validate_registers_the_devserver_row() {
+    // The admission validate is the tunnel's own dial and its lease
+    // refresh. Identity holds the raw PAT, so it is the only party that
+    // can name the devserver id, and profile's `devserver_access`
+    // refuses even the owner entry to a devserver with no row: a dial
+    // that announces no name must therefore still get one, label-less.
+    // The announced name arrives on a separate validate moments later
+    // and labels the same row.
+    let env = TestEnv::with_profile_mock().await;
+    let uid = env.insert_user().await;
+    let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;
+    let route = format!("/v1/users/{uid}/devservers");
+    Mock::given(mock_method("POST"))
+        .and(mock_path(route.clone()))
+        .respond_with(ResponseTemplate::new(201).set_body_json(devserver_row(uid, "", "")))
+        .mount(env.profile())
+        .await;
+
+    let (s, v) = json_post_with_auth(
+        &env.router,
+        "/internal/v1/tokens/validate",
+        "test-internal",
+        json!({"token": secret, "registration_id": Uuid::new_v4(), "proxy_id": "p1"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let devserver_id = v["devserver_id"]
+        .as_str()
+        .expect("devserver_id")
+        .to_string();
+
+    let posts = env.profile_posts(&route).await;
+    assert_eq!(posts.len(), 1, "one row ensure per admission validate");
+    assert_eq!(posts[0]["devserver_id"], devserver_id);
+    assert_eq!(
+        posts[0]["label"], "",
+        "a nameless dial gets a label-less row"
+    );
+
+    env.cleanup().await;
+}
+
+#[tokio::test]
+async fn name_announce_validate_labels_the_devserver_row() {
+    // devserver-proxy forwards the tunnel `Hello` name on a second
+    // validate once the registration is accepted. That call carries no
+    // proxy_id, and it must still reach profile with the announced
+    // label, whichever of the two validates lands first.
+    let env = TestEnv::with_profile_mock().await;
+    let uid = env.insert_user().await;
+    let secret = pat_with_scopes(&env, uid, &["tunnel"]).await;
+    let route = format!("/v1/users/{uid}/devservers");
+    Mock::given(mock_method("POST"))
+        .and(mock_path(route.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(devserver_row(
+            uid,
+            "",
+            "office box",
+        )))
+        .mount(env.profile())
+        .await;
+
+    let (s, v) = json_post_with_auth(
+        &env.router,
+        "/internal/v1/tokens/validate",
+        "test-internal",
+        json!({"token": secret, "name": "office box"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let devserver_id = v["devserver_id"]
+        .as_str()
+        .expect("devserver_id")
+        .to_string();
+
+    let posts = env.profile_posts(&route).await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0]["devserver_id"], devserver_id);
+    assert_eq!(posts[0]["label"], "office box");
+
+    env.cleanup().await;
+}
+
+#[tokio::test]
+async fn admission_validate_without_the_tunnel_scope_registers_nothing() {
+    // A PAT that cannot dial can never appear in the tunnel registry,
+    // so a row for its id would be a phantom on the dashboard and in
+    // the desktop roster. The validate itself still succeeds: the
+    // tunnel-server, not this route, refuses the dial.
+    let env = TestEnv::with_profile_mock().await;
+    let uid = env.insert_user().await;
+    let secret = pat_with_scopes(&env, uid, &["desktop.account"]).await;
+
+    let (s, _) = json_post_with_auth(
+        &env.router,
+        "/internal/v1/tokens/validate",
+        "test-internal",
+        json!({"token": secret, "registration_id": Uuid::new_v4(), "proxy_id": "p1"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let posts = env
+        .profile_posts(&format!("/v1/users/{uid}/devservers"))
+        .await;
+    assert!(posts.is_empty(), "got {posts:?}");
 
     env.cleanup().await;
 }

@@ -1758,15 +1758,16 @@ pub(crate) const DESKTOP_ACCOUNT_SCOPE: &str = "desktop.account";
 /// registration at every mint site ([`register_devserver_row`]).
 pub(crate) const TUNNEL_SCOPE: &str = "tunnel";
 
-/// Register the devserver row for a freshly minted PAT. One shared
-/// path for every mint site (SPA, operator, desktop authorize): a PAT
-/// is a devserver ONLY when it can dial, so a row is registered iff
-/// `scopes` carries [`TUNNEL_SCOPE`] -- a desktop.account or
-/// desktop.connect mint registers nothing (its id can never appear in
-/// the tunnel registry, so a row would be a phantom in the dashboard
-/// and the desktop roster). Best-effort: the row also auto-creates on
-/// first grant, and the PAT is already persisted, so a profile hiccup
-/// must not fail the mint (warn only).
+/// Register the devserver row for a PAT. One shared path for every
+/// caller: the mint sites (SPA, operator, desktop authorize) and the
+/// validate exchange a dialling tunnel drives. A PAT is a devserver
+/// ONLY when it can dial, so a row is registered iff `scopes` carries
+/// [`TUNNEL_SCOPE`] -- a desktop.account or desktop.connect mint
+/// registers nothing (its id can never appear in the tunnel registry,
+/// so a row would be a phantom in the dashboard and the desktop
+/// roster). Best-effort: the row also auto-creates on first grant, and
+/// the caller's own work has already landed, so a profile hiccup must
+/// never fail it (warn only).
 pub(crate) async fn register_devserver_row(
     state: &AppState,
     user_id: Uuid,
@@ -1784,7 +1785,7 @@ pub(crate) async fn register_devserver_row(
         .create_devserver(user_id, &devserver_id, label)
         .await
     {
-        tracing::warn!(error = ?e, user = %user_id, "register devserver after PAT mint failed");
+        tracing::warn!(error = ?e, user = %user_id, "register devserver row failed");
     }
 }
 
@@ -2818,15 +2819,32 @@ async fn validate_token(
     // validator sends neither header, so both stay NULL on its calls
     // unless a hop in between adds them.
     let meta = request_meta(&headers);
-    let v = match (body.proxy_id, body.registration_id) {
+    // Sanitized to profile's label bound so profile never has to
+    // reject it; the upsert dedups within the owner's rows. `None`
+    // for a name that is blank once the spoofing filter has run.
+    let announced = body
+        .name
+        .as_deref()
+        .and_then(sanitize_devserver_display_name);
+    // `Some(label)` means "ensure the devserver row with this label".
+    // The admission arm always ensures it: identity is the only holder
+    // of the raw PAT, so this exchange is the one place that can name
+    // the devserver id, and profile's `devserver_access` selects from
+    // `devservers` for the owner as well as for grantees, so a
+    // devserver whose row is gone refuses even its owner. A dial that
+    // announces no name therefore gets a label-less row, the same
+    // shape the grant-create bootstrap inserts.
+    let (v, row_label) = match (body.proxy_id, body.registration_id) {
         (Some(proxy_id), Some(registration_id)) if !registration_id.is_nil() => {
-            state
+            let v = state
                 .api_tokens
                 .validate_for_admission(&body.token, proxy_id, registration_id, &meta)
-                .await?
+                .await?;
+            (v, Some(announced.as_deref().unwrap_or("")))
         }
         (None, None) if body.name.is_some() => {
-            state.api_tokens.validate(&body.token, &meta).await?
+            let v = state.api_tokens.validate(&body.token, &meta).await?;
+            (v, announced.as_deref())
         }
         _ => {
             return Err(Error::BadRequest(
@@ -2834,17 +2852,10 @@ async fn validate_token(
             ))
         }
     };
-    // A tunnel-announced display name refreshes the devserver row's
-    // label through the same gated upsert every mint site uses
-    // (tunnel scope only, best-effort). Sanitized to the label bound
-    // so profile never has to reject it; the upsert dedups within the
-    // owner's rows.
-    if let Some(name) = body
-        .name
-        .as_deref()
-        .and_then(sanitize_devserver_display_name)
-    {
-        register_devserver_row(&state, v.user_id, &body.token, &name, &v.scopes).await;
+    // Through the same gated upsert every mint site uses: tunnel scope
+    // only, best-effort.
+    if let Some(label) = row_label {
+        register_devserver_row(&state, v.user_id, &body.token, label, &v.scopes).await;
     }
     Ok(Json(v))
 }
