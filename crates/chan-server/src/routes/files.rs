@@ -730,6 +730,13 @@ fn planned_workspace_download_response(
                     .parse()
                     .expect("archive filename is header-safe"),
             );
+            // The archive is an attachment, so it takes nosniff. It always
+            // declares a tar, whatever its root is named, so it takes no
+            // sandbox CSP.
+            response.headers_mut().insert(
+                "x-content-type-options",
+                "nosniff".parse().expect("static header value"),
+            );
             return response;
         }
     };
@@ -6436,13 +6443,14 @@ mod doc_divert_tests {
         );
     }
 
-    /// The workspace download keeps the sandbox CSP conditional on
+    /// The workspace file download keeps the sandbox CSP conditional on
     /// `is_active_content_path` and sets `x-content-type-options: nosniff`
-    /// unconditionally on every attachment. HTML and SVG are sandboxed and
+    /// unconditionally on every file attachment. HTML and SVG are sandboxed and
     /// never sniffed; a raster image and an ordinary binary carry nosniff but
     /// no CSP; HTML bytes under a non-active extension are not sandboxed but
     /// are still never sniffed. No session is attached, so each body is the
-    /// bytes on disk.
+    /// bytes on disk. The directory arm of the same route is pinned by
+    /// `a_workspace_directory_download_is_an_attachment_with_nosniff`.
     #[tokio::test]
     async fn a_workspace_download_sandboxes_only_active_content() {
         let (_cfg, root, state) = divert_app();
@@ -6518,6 +6526,81 @@ mod doc_divert_tests {
             let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             assert_eq!(bytes.as_ref(), content, "{path}");
         }
+    }
+
+    /// A workspace directory download is an attachment too: the archive arm
+    /// declares a tar and sets `x-content-type-options: nosniff`. It carries no
+    /// sandbox CSP, because it always declares `application/x-tar` whatever its
+    /// root is named. The root here is named with an active-content extension,
+    /// so the absent CSP is the archive arm's doing and not the predicate's.
+    #[tokio::test]
+    async fn a_workspace_directory_download_is_an_attachment_with_nosniff() {
+        let (_cfg, root, state) = divert_app();
+        let tree = root.path().join("tree.html");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("a.txt"), b"a").unwrap();
+
+        let resp = api_read_file(
+            State(state),
+            AxumPath("tree.html".to_string()),
+            Query(ReadFileQuery {
+                download: Some("1".into()),
+                stream: None,
+                root: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers().clone();
+        let value = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            value("content-type").as_deref(),
+            Some("application/x-tar"),
+            "{headers:?}"
+        );
+        assert_eq!(
+            value("content-disposition").as_deref(),
+            Some("attachment; filename=\"tree.html.tar\""),
+            "{headers:?}"
+        );
+        assert_eq!(
+            value("x-content-type-options").as_deref(),
+            Some("nosniff"),
+            "{headers:?}"
+        );
+        assert_eq!(value("content-security-policy"), None, "{headers:?}");
+
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut archive = tar::Archive::new(bytes.as_ref());
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name.ends_with("a.txt")),
+            "the streamed tar carries the tree: {names:?}"
+        );
     }
 
     /// A session download keeps the sandbox CSP conditional on
@@ -6608,6 +6691,14 @@ mod doc_divert_tests {
     /// unconditionally when the caller asks for an attachment, and keeps the
     /// sandbox CSP conditional on `is_active_content_path`. HTML bytes under a
     /// non-active extension are not sandboxed but are still never sniffed.
+    ///
+    /// `attachment = true` reaches `stream_binary_plan` only from the
+    /// `#[cfg(test)]` helpers `stream_binary_download` and
+    /// `stream_binary_download_with_completion`; `binary_stream_response` and
+    /// `standalone_read_file` both pass `false`. This therefore covers a path
+    /// production does not take. The half of the condition production does
+    /// take, an inline read of active content, is pinned by
+    /// `svg_read_is_an_attached_sandboxed_resource`.
     #[tokio::test]
     async fn binary_attachment_plan_sends_nosniff_unconditionally() {
         use axum::body::to_bytes;

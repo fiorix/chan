@@ -449,15 +449,15 @@ async fn stream_planned_download_tracked(
         body,
     )
         .into_response();
-    // The file arm mirrors the workspace download: nosniff is unconditional
-    // on an attachment, and the sandbox CSP is kept conditional on the
-    // active-content predicate. The archive arm always declares a tar, whatever
-    // its root is named, so it is left out.
+    // This mirrors the workspace download. Both arms are attachments, so
+    // nosniff is unconditional. Only the file arm takes the sandbox CSP, kept
+    // conditional on the active-content predicate; the archive arm always
+    // declares a tar, whatever its root is named.
+    response.headers_mut().insert(
+        "x-content-type-options",
+        "nosniff".parse().expect("static header value"),
+    );
     if let PlannedDownload::File { name } = &planned {
-        response.headers_mut().insert(
-            "x-content-type-options",
-            "nosniff".parse().expect("static header value"),
-        );
         if is_active_content_path(name) {
             response.headers_mut().insert(
                 header::CONTENT_SECURITY_POLICY,
@@ -2524,27 +2524,60 @@ mod tests {
         }
     }
 
+    /// A terminal directory download declares a tar, streams it on the fly and
+    /// is an attachment, so it carries `x-content-type-options: nosniff`. It
+    /// carries no sandbox CSP, because the archive arm always declares
+    /// `application/x-tar` whatever its root is named. The root here is named
+    /// with an active-content extension, so the absent CSP is the archive arm's
+    /// doing and not the predicate's. The name is asserted as a suffix because
+    /// `download_filename` splits on `/` only, so a Windows absolute path keeps
+    /// its separators as `_`.
     #[tokio::test]
     async fn a_terminal_directory_download_streams_a_valid_tar_on_the_fly() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
-        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tree.html");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b").unwrap();
 
         let bulk = crate::state::test_support::make_test_bulk_transfer_tenant();
-        let resp =
-            stream_planned_download_tracked(&bulk, None, None, dir.path().to_path_buf(), u64::MAX)
-                .await;
+        let resp = stream_planned_download_tracked(&bulk, None, None, dir, u64::MAX).await;
 
+        let headers = resp.headers().clone();
         assert_eq!(
-            resp.headers()
+            headers
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok()),
             Some("application/x-tar"),
             "a directory download declares itself an archive"
         );
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let disposition = headers
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            disposition.starts_with("attachment; filename=\"")
+                && disposition.ends_with("tree.html.tar\""),
+            "a directory download is an attachment: {disposition:?}"
+        );
+        assert_eq!(
+            headers
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "{headers:?}"
+        );
+        assert!(
+            headers.get(header::CONTENT_SECURITY_POLICY).is_none(),
+            "the archive arm takes no sandbox CSP: {headers:?}"
+        );
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(resp.into_body(), usize::MAX),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(!bytes.is_empty());
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes[..]));
         let names: Vec<String> = archive
