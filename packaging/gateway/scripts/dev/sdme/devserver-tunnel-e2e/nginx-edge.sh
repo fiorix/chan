@@ -164,7 +164,8 @@ cmd_up() {
 
     say "configure the edge"
     render_edge_conf > "$STATE_DIR/nginx.conf"
-    $SDME cp "$STATE_DIR/nginx.conf" "$C_PROXY:$EDGE_DIR/nginx.conf"
+    $SDME cp "$STATE_DIR/nginx.conf" "$C_PROXY:$EDGE_DIR/nginx.conf" \
+      || die "could not stage the edge configuration"
     in_proxy "$EDGE_DIR/sbin/nginx" -p "$EDGE_DIR" -c "$EDGE_DIR/nginx.conf" -t 2>&1 | sed 's/^/   /'
     in_proxy "$EDGE_DIR/sbin/nginx" -p "$EDGE_DIR" -c "$EDGE_DIR/nginx.conf" -t >/dev/null 2>&1 \
       || die "nginx rejected the edge configuration"
@@ -332,17 +333,23 @@ restart_chands() {  # tunnel url
 }
 
 wait_for_ds_line() {  # pattern seconds since-epoch -> seconds waited on stdout
-    local pattern="$1" limit="$2" since="$3" start end
+    local pattern="$1" limit="$2" since="$3" start end journal
+    journal="$(mktemp)"
     start="$(date +%s.%N)"
     for _ in $(seq 1 $((limit * 4))); do
-        if $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -S "@$since" 2>/dev/null \
-             | grep -q "$pattern"; then
+        # The journal lands in a file first: a `grep -q` that closes the pipe
+        # can SIGPIPE its writer, and under pipefail a match then reads as none.
+        $SDME exec "$C_DS" -- /usr/bin/journalctl -u chands --no-pager -S "@$since" \
+          > "$journal" 2>/dev/null
+        if grep -q "$pattern" "$journal"; then
+            rm -f "$journal"
             end="$(date +%s.%N)"
             python3 -c 'import sys;print("%.1f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$end" "$start"
             return 0
         fi
         sleep 0.25
     done
+    rm -f "$journal"
     printf 'none\n'
     return 1
 }
