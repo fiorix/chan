@@ -18,10 +18,23 @@ export async function request<T>(
     ? await res.json()
     : await res.text();
   if (!res.ok) {
-    const msg = typeof body === "string"
-      ? body
-      : (body?.error ?? res.statusText);
-    throw new HttpError(res.status, String(msg));
+    throw new HttpError(
+      res.status,
+      failureMessage(typeof body === "string" ? body : body?.error, res.status),
+    );
   }
   return body as T;
+}
+
+/// What a failed request says, which is never nothing.
+///
+/// The status code is the only field always present. An error body can be
+/// empty, `{"error": ""}` is not nullish so it survives a `??`, and
+/// `res.statusText` is empty over HTTP/2, which carries no reason phrase and is
+/// how this SPA is served. A view that renders the message on truthiness draws
+/// nothing for any of those, so a failed request reads as a successful one.
+/// The service's own words are better than a number whenever it has any.
+function failureMessage(reported: unknown, status: number): string {
+  const text = reported == null ? "" : String(reported);
+  return text.trim() === "" ? `HTTP ${status}` : text;
 }
