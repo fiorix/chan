@@ -735,20 +735,6 @@ function canonicalKey(e: KeyboardEvent): string | null {
   return k;
 }
 
-/// Chord-escape lookup. Returns true when the incoming `KeyboardEvent`
-/// matches a user-assigned override chord OR any registry entry flagged
-/// `escapeTerminal: true`.
-///
-/// The override arm keeps a rebound command reachable from terminal focus even
-/// after its built-in default (and its `escapeTerminal` flag) is gone.
-///
-/// The registry arm matches BOTH the platform-resolved chord AND the
-/// cross-platform `Cmd+` literal alias (the registry's `Mod`
-/// expands to Cmd on Mac + Ctrl elsewhere; `Cmd+` is the
-/// literal Cmd key used by the web-fallback chords). The
-/// matcher normalises both sides to a canonical token set so
-/// `Mod+Alt+P` (event) === `Cmd+Alt+P` (registry web Mac
-/// fallback) on Mac.
 /// Whether `e` carries the platform-resolved chord for `id`, user remaps
 /// included. The terminal's root handler reads this so the chord it acts on
 /// and the chord the escape registry lets out of xterm are one resolution
@@ -765,6 +751,20 @@ export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
   return chordsEqual(chord, resolved);
 }
 
+/// Chord-escape lookup. Returns true when the incoming `KeyboardEvent`
+/// matches a user-assigned override chord OR any registry entry flagged
+/// `escapeTerminal: true`.
+///
+/// The override arm keeps a rebound command reachable from terminal focus even
+/// after its built-in default (and its `escapeTerminal` flag) is gone.
+///
+/// The registry arm matches BOTH the platform-resolved chord AND the
+/// cross-platform `Cmd+` literal alias (the registry's `Mod`
+/// expands to Cmd on Mac + Ctrl elsewhere; `Cmd+` is the
+/// literal Cmd key used by the web-fallback chords). The
+/// matcher normalises both sides to a canonical token set so
+/// `Mod+Alt+P` (event) === `Cmd+Alt+P` (registry web Mac
+/// fallback) on Mac.
 export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   const chord = chordFromEvent(e);
   if (!chord) return false;
