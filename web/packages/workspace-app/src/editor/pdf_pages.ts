@@ -2,6 +2,11 @@
 // pagination over measured block rects, window-clone page elements for
 // documents, and per-slide page elements for decks.
 //
+// Pagination is only as good as the measurement it reads, and the
+// measurement is only meaningful once the composition's completion
+// promise has resolved: that promise waits for every diagram render and
+// every image, so the blocks have the heights the reader will see.
+//
 // Documents render portrait with 0.65in margins and their content laid
 // out at a fixed printable width in CSS px, so pagination measures
 // final geometry. Decks render one slide per page, A4 landscape, the
@@ -14,6 +19,7 @@ import {
   contentStyle,
   editorTokens,
   prepareSlideImages,
+  replaceEmbedsWithLinks,
   renderSlideDiagrams,
   renderSlideMarkdown,
   slidePageBoxStyle,
@@ -322,6 +328,9 @@ export function buildSlidePageDom(opts: {
   content.innerHTML = renderSlideMarkdown(opts.markdown);
   slide.appendChild(content);
 
+  // Same reason as the document path: a page cannot paint an iframe and
+  // the snapshot audit refuses one, so the slide carries the stand-in.
+  replaceEmbedsWithLinks(content);
   const completion = Promise.all([
     prepareSlideImages(content, opts.fromPath, opts.theme, () => true),
     renderSlideDiagrams(content, opts.markdown, opts.theme, () => true),

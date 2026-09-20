@@ -373,7 +373,15 @@ function normalizeDiagramSvgSizing(body: HTMLElement): void {
 /// Resolve image srcs (including the #w=/#left/#right grammar), replace
 /// Excalidraw image embeds with rendered SVG, and retarget links. The
 /// synchronous work happens before this returns; the returned promise
-/// resolves once the async Excalidraw renders settled as well.
+/// resolves once the async Excalidraw renders and every ordinary image
+/// have settled.
+///
+/// Waiting for the plain images is what lets a caller measure them. An
+/// image contributes nothing to layout until its bytes arrive, so a
+/// consumer that measures as soon as this resolves would otherwise
+/// measure every image as a zero-height box. Only a caller that awaits
+/// the promise waits at all: the live preview drops it on the floor and
+/// paints as the images land.
 export function prepareSlideImages(
   root: ParentNode,
   fromPath: string | null,
@@ -407,12 +415,48 @@ export function prepareSlideImages(
     if (resolved && chrome?.image) {
       imageChromeOnLoad(img, raw, isCurrent, chrome.image);
     }
+    if (resolved) renders.push(imageSettled(img));
   }
   for (const link of Array.from(root.querySelectorAll("a"))) {
     link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noreferrer");
   }
   return Promise.all(renders).then(() => undefined);
+}
+
+/// Resolve once the image has settled, whether it loaded or failed.
+///
+/// `complete` is the browser's own answer to "is this image still
+/// loading", and it is true for a failure as well, which is what this
+/// wants: a broken image paints as the empty box it will be and the
+/// export measures that, instead of waiting out a page timeout for an
+/// event that is never coming.
+function imageSettled(img: HTMLImageElement): Promise<void> {
+  if (img.complete) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    img.addEventListener("load", () => resolve(), { once: true });
+    img.addEventListener("error", () => resolve(), { once: true });
+  });
+}
+
+/// Replace an embed iframe with a printable stand-in: a link carrying the
+/// embed's title.
+///
+/// An export cannot paint an iframe. The snapshot audit refuses one
+/// outright, so a single YouTube or Maps embed anywhere in a document
+/// used to cost the user the whole PDF. The substitution belongs here, on
+/// the composition side, so the audit stays as strict as it is and the
+/// live surfaces keep their playable embed.
+export function replaceEmbedsWithLinks(root: ParentNode): void {
+  for (const frame of Array.from(root.querySelectorAll("iframe.md-embed"))) {
+    const link = document.createElement("a");
+    const src = frame.getAttribute("src") ?? "";
+    link.setAttribute("href", src);
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noreferrer");
+    link.textContent = frame.getAttribute("title") || src;
+    frame.replaceWith(link);
+  }
 }
 
 /// Fire the image hook only for a load that actually succeeded. A

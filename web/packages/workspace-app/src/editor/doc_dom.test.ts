@@ -70,6 +70,11 @@ describe("buildDocDom", () => {
     });
     document.body.append(root);
 
+    // The completion waits for the images as well as the renders, and
+    // jsdom never loads one, so the photo settles here.
+    for (const img of Array.from(root.querySelectorAll("img"))) {
+      img.dispatchEvent(new Event("load"));
+    }
     await completion;
     expect(
       root.querySelector(".md-slide-excalidraw-body svg")?.getAttribute(

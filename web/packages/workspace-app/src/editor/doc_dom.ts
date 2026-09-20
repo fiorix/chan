@@ -3,13 +3,15 @@
 // `.chan-print-page`, so it can live inside the app document (offscreen)
 // without leaking styles. Diagram fences, Excalidraw embeds, and image
 // resolution hydrate through the same editor/slide_dom renderers the
-// slide preview uses; the completion promise resolves when every async
-// render settled.
+// slide preview uses; the completion promise resolves once every diagram
+// render and every image in the document have settled, which is what
+// makes the block measurement that follows it meaningful.
 
 import { renderMarkdown } from "../api/markdown";
 import {
   editorTokens,
   prepareSlideImages,
+  replaceEmbedsWithLinks,
   renderSlideDiagrams,
   slideMediaCss,
   type SlideDomTheme,
@@ -81,7 +83,10 @@ export type DocDom = {
   root: HTMLElement;
   /// The content element holding the rendered markdown blocks.
   content: HTMLElement;
-  /// Resolves when every diagram and Excalidraw render settled.
+  /// Resolves once every diagram and Excalidraw render has settled AND
+  /// every image has loaded or failed. Measure only after awaiting it: an
+  /// image that has not arrived has no height, and the page cuts taken
+  /// from that are not the cuts the reader gets.
   completion: Promise<void>;
 };
 
@@ -118,6 +123,10 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
   content.innerHTML = renderMarkdown(opts.markdown);
   root.appendChild(content);
 
+  // An embed cannot be painted into a page, and the snapshot audit refuses
+  // it by name; the printable stand-in goes in before anything measures or
+  // clones the content.
+  replaceEmbedsWithLinks(content);
   const completion = Promise.all([
     prepareSlideImages(content, opts.path, opts.theme, () => true),
     renderSlideDiagrams(content, opts.markdown, opts.theme, () => true),

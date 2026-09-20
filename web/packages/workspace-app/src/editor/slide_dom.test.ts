@@ -338,7 +338,9 @@ describe("slide media chrome hook", () => {
   test("the image hook fires only after a successful load", async () => {
     const root = mount('<p><img src="shot.png"></p><p><img src=""></p>');
     const image = vi.fn();
-    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    // Not awaited: the returned promise now waits for these images to
+    // settle, and settling them is what this test does below.
+    void prepareSlideImages(root, "deck.md", "light", () => true, { image });
     // Resolvable is not loaded: nothing fires until the load event.
     expect(image).not.toHaveBeenCalled();
     const imgs = Array.from(root.querySelectorAll("img"));
@@ -353,7 +355,7 @@ describe("slide media chrome hook", () => {
   test("an image load error never fires the hook", async () => {
     const root = mount('<p><img src="shot.png"></p>');
     const image = vi.fn();
-    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    void prepareSlideImages(root, "deck.md", "light", () => true, { image });
     root.querySelector("img")!.dispatchEvent(new Event("error"));
     expect(image).not.toHaveBeenCalled();
   });
@@ -361,7 +363,7 @@ describe("slide media chrome hook", () => {
   test("a stale isCurrent guard keeps a loaded image chrome-free", async () => {
     const root = mount('<p><img src="shot.png"></p>');
     const image = vi.fn();
-    await prepareSlideImages(root, "deck.md", "light", () => false, { image });
+    void prepareSlideImages(root, "deck.md", "light", () => false, { image });
     root.querySelector("img")!.dispatchEvent(new Event("load"));
     expect(image).not.toHaveBeenCalled();
   });
@@ -369,7 +371,7 @@ describe("slide media chrome hook", () => {
   test("a disconnected image never fires the hook", async () => {
     const root = mount('<p><img src="shot.png"></p>');
     const image = vi.fn();
-    await prepareSlideImages(root, "deck.md", "light", () => true, { image });
+    void prepareSlideImages(root, "deck.md", "light", () => true, { image });
     const img = root.querySelector("img")!;
     img.remove();
     img.dispatchEvent(new Event("load"));
@@ -410,6 +412,9 @@ describe("slide media chrome hook", () => {
     const images = prepareSlideImages(root, "deck.md", "light", () => true);
     const diagrams = renderSlideDiagrams(root, MERMAID_MD, "light", () => true);
     deferred.resolveMermaid!({ ok: true, svg: "<svg></svg>" });
+    for (const img of Array.from(root.querySelectorAll("img"))) {
+      img.dispatchEvent(new Event("load"));
+    }
     await Promise.all([images, diagrams]);
     expect(root.querySelector(".md-slide-media-actions")).toBeNull();
     expect(root.querySelector(".md-slide-media-wrap")).toBeNull();

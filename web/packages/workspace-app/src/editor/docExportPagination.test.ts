@@ -93,15 +93,19 @@ function layoutRect(el: Element): DOMRect {
   return rect(top, top + blockHeight(el));
 }
 
-/// Deliver every image currently in the document, one macrotask from now,
-/// the way a network response arrives after the export has started.
-function deliverImagesLate(): void {
-  setTimeout(() => {
+/// Deliver images the way a network response arrives after the export has
+/// started: not before it runs, and not all at one instant. The poll keeps
+/// it late without being fragile, since the export composes its DOM
+/// several turns into its own work and only then waits for them.
+function deliverImagesLate(): { stop: () => void } {
+  const timer = setInterval(() => {
     for (const img of Array.from(document.querySelectorAll("img"))) {
+      if (loaded.has(img)) continue;
       loaded.add(img);
       img.dispatchEvent(new Event("load"));
     }
-  }, 0);
+  }, 1);
+  return { stop: () => clearInterval(timer) };
 }
 
 /// The page windows the document would be cut into with every image
@@ -144,7 +148,7 @@ afterEach(() => {
 describe("the export cuts pages where a loaded document cuts them", () => {
   test("images that arrive late still decide the page cuts", async () => {
     const heights: number[] = [];
-    deliverImagesLate();
+    const delivery = deliverImagesLate();
     await exportMarkdownToPdf(
       { path: "notes/doc.md", markdown: IMAGE_DOC, theme: "light" },
       {
@@ -154,6 +158,7 @@ describe("the export cuts pages where a loaded document cuts them", () => {
         },
       },
     );
+    delivery.stop();
     const reference = windowsAfterLoad(IMAGE_DOC).map((h) => Math.round(h));
     expect(heights).toEqual(reference);
   });
@@ -161,11 +166,14 @@ describe("the export cuts pages where a loaded document cuts them", () => {
 
 describe("the export inlines each image once", () => {
   test("three images over several pages are fetched three times", async () => {
+    // Only the image requests are counted. Fonts are a separate resource
+    // with its own inliner, and the claim is about the images the pages
+    // carry: one fetch each for the whole export, not one per page.
     const fetched: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        fetched.push(String(url));
+        if (String(url).includes("/api/fs/")) fetched.push(String(url));
         return {
           ok: true,
           blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
@@ -173,7 +181,7 @@ describe("the export inlines each image once", () => {
       }),
     );
     const pages: HTMLElement[] = [];
-    deliverImagesLate();
+    const delivery = deliverImagesLate();
     await exportMarkdownToPdf(
       { path: "notes/doc.md", markdown: IMAGE_DOC, theme: "light" },
       {
@@ -183,6 +191,7 @@ describe("the export inlines each image once", () => {
         },
       },
     );
+    delivery.stop();
     expect(fetched).toHaveLength(3);
     expect(pages.length).toBeGreaterThan(1);
     const srcs = pages.flatMap((page) =>
