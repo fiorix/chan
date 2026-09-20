@@ -1744,18 +1744,20 @@
     role="group"
     aria-label="pane content"
   >
-    <!-- A throw while a tab body renders used to take the whole window down,
-         which is what turned this release's duplicate-key defects into a dead
-         app rather than a missing row. The boundary keeps the failure inside
-         this pane's body: the tab strip above it, the pane's other tabs and
-         every other pane stay usable, and the body says what failed.
+    <!-- The outer net for this pane's body. Each tab body carries its own
+         boundary below, so what reaches this one is the rest of what the body
+         draws: the Hybrid Nav preview, the empty-pane placeholder, and the
+         keying of the tab lists themselves, which is where a duplicate id is
+         raised.
 
          It catches a throw from rendering these children, not one raised
-         while this component computes what it passes down. Pane's own
-         deriveds (`everyTab`, `visibleTabs`, the tab labels) and the tab
-         strip render outside it, so a throw in those still reaches the
-         window. That is the price of keeping the strip alive, and the strip
-         is the way back. -->
+         while this component computes what it passes down. `visibleTabs` and
+         the tab labels feed the strip, which renders outside it, so a throw
+         in those still reaches the window; that is the price of keeping the
+         strip alive. `everyTab` is read only inside it, so a throw from
+         `allPaneTabs` is contained here, which matters because that is the
+         one list in this file concatenating both Hybrid sides and so the one
+         that can carry a duplicate id. -->
     <svelte:boundary>
     {#if paneMode.active}
           <div class="pane-mode-preview" aria-label="Hybrid Nav preview">
@@ -1831,13 +1833,18 @@
           hiding).
         -->
     {#each everyTab.filter((t) => t.kind === "terminal") as t (t.id)}
-      <TerminalTab
-        tab={t}
-        paneId={pane.id}
-        side={sideForTab(t)}
-        active={isLiveActive(t)}
-        focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
-      />
+      <svelte:boundary>
+        <TerminalTab
+          tab={t}
+          paneId={pane.id}
+          side={sideForTab(t)}
+          active={isLiveActive(t)}
+          focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(t, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {/each}
         <!--
           File tabs are kept mounted for the same reason as terminals
@@ -1853,11 +1860,16 @@
           session restore of N background tabs never steals the caret.
         -->
     {#each everyTab.filter((t) => t.kind === "file") as t (t.id)}
-      <FileEditorTab
-        tab={t}
-        active={isLiveActive(t)}
-        focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
-      />
+      <svelte:boundary>
+        <FileEditorTab
+          tab={t}
+          active={isLiveActive(t)}
+          focused={isLiveActive(t) && viewLayout.activePaneId === pane.id}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(t, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {/each}
         <!--
           Graph tabs join the keep-alive family: rendering GraphPanel
@@ -1873,13 +1885,18 @@
           focuses on click, the menu is portal-anchored).
         -->
     {#each everyTab.filter((t) => t.kind === "graph") as t (t.id)}
-      <GraphPanel
-        tab={t}
-        active={isLiveActive(t)}
-        onClose={() => {
-          void closeTab(pane.id, t.id);
-        }}
-      />
+      <svelte:boundary>
+        <GraphPanel
+          tab={t}
+          active={isLiveActive(t)}
+          onClose={() => {
+            void closeTab(pane.id, t.id);
+          }}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(t, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {/each}
         <!--
           Dashboard tabs join the keep-alive family for the same reason as
@@ -1895,21 +1912,31 @@
           keyboard caret.
         -->
     {#each everyTab.filter((t) => t.kind === "dashboard") as t (t.id)}
-      <DashboardTab
-        tab={t}
-        active={isLiveActive(t)}
-      />
+      <svelte:boundary>
+        <DashboardTab
+          tab={t}
+          active={isLiveActive(t)}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(t, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {/each}
         <!-- Extension iframes stay mounted so switching tabs does not reload
              the subprocess-owned page or discard its in-page state. The
              component resolves its credentialed URL from the memory-only
              catalog; the tab itself carries only a stable id. -->
     {#each everyTab.filter((t) => t.kind === "extension") as t (t.id)}
-      <ExtensionTab
-        tab={t}
-        paneId={pane.id}
-        active={isLiveActive(t)}
-      />
+      <svelte:boundary>
+        <ExtensionTab
+          tab={t}
+          paneId={pane.id}
+          active={isLiveActive(t)}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(t, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {/each}
 
     {#snippet failed(error, reset)}
@@ -1919,12 +1946,15 @@
           {error instanceof Error ? error.message : String(error)}
         </p>
         <p class="pane-failed-hint">
-          Its tab strip still works, and the other panes are unaffected.
+          The other panes are unaffected. This one draws again once whatever
+          raised it is gone.
         </p>
         <div class="pane-failed-actions">
           <button onclick={() => reset()}>Try again</button>
           {#if active}
-            <button onclick={() => void closeTab(pane.id, active.id)}>Close tab</button>
+            <button onclick={() => void closeTab(pane.id, active.id)}>
+              Close {tabLabel(active, browserCtxFor(active))}
+            </button>
           {/if}
         </div>
       </div>
@@ -1936,7 +1966,44 @@
   </div>
 </div>
 
+<!-- One tab body failed. It is the unit that can fail on its own, so the
+     card names that tab and closes that tab, and its siblings in the pane
+     keep their sockets, scrollback and editor views. A background tab's
+     card is hidden the way a background tab's body is, so it appears when
+     the strip switches to it. -->
+{#snippet tabFailed(t: Tab, error: unknown, reset: () => void)}
+  <div class="tab-failed" class:offscreen={!isLiveActive(t)}>
+    <div class="pane-failed" role="alert">
+      <p class="pane-failed-title">This tab could not be drawn.</p>
+      <p class="pane-failed-detail">
+        {error instanceof Error ? error.message : String(error)}
+      </p>
+      <p class="pane-failed-hint">
+        The pane's other tabs still work, and so does every other pane.
+      </p>
+      <div class="pane-failed-actions">
+        <button onclick={() => reset()}>Try again</button>
+        <button onclick={() => void closeTab(pane.id, t.id)}>
+          Close {tabLabel(t, browserCtxFor(t))}
+        </button>
+      </div>
+    </div>
+  </div>
+{/snippet}
+
 <style>
+  /* Hosts one tab's failure where that tab's body would be, and hides it
+     on the same terms as a background body so two cards never stack. */
+  .tab-failed {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+
+  .tab-failed.offscreen {
+    display: none;
+  }
+
   /* Sits where the tab bodies would be, so a failure reads as this pane's
      own rather than as the window having lost it. */
   .pane-failed {

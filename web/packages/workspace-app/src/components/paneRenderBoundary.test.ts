@@ -1,23 +1,27 @@
 // @vitest-environment jsdom
 //
-// A render throw inside a pane is contained by that pane: its sibling tabs,
-// the other pane and its own tab strip keep working, and the pane's body says
-// what failed and offers a way back.
+// A render throw in one tab body is contained by that tab: its siblings in
+// the pane, the other pane and the tab strip keep working, the failed tab
+// says what failed, and the card names and closes the tab that raised it.
 //
 // The app is mounted for real, because the claim is about what survives
 // AROUND the failure: a smaller harness could show the failed body but not
 // that the rest of the window is still there.
 //
 // One tab component is replaced by one that throws while rendering, which is
-// the item's acceptance stated directly, and is what this release's
-// duplicate-key defects look like from a pane's side: `each_key_duplicate` is
-// thrown while a keyed list renders.
+// the item's acceptance stated directly, and is what a duplicate key looks
+// like from a pane's side: `each_key_duplicate` is thrown while a keyed list
+// renders.
 //
-// What the boundary does NOT catch, stated because it decides where the next
-// one goes: `<svelte:boundary>` contains a throw from rendering its children,
-// not one raised while the PARENT computes the props it passes down. Pane's
-// own `$derived`s (`everyTab`, `visibleTabs`, the tab labels) and the tab
-// strip render outside it, so a throw in those still reaches the window.
+// Where the two boundaries divide, stated because it decides where the next
+// one goes. The per-tab boundary takes a throw from that tab's own render;
+// the pane boundary around the whole body takes everything else the body
+// draws, including the keying of the lists themselves, which is where
+// `each_key_duplicate` is raised. Pane's `visibleTabs` and its tab labels
+// feed the strip, which renders outside both, so a throw there still reaches
+// the window. `everyTab` is read only inside the pane boundary, so a throw
+// from `allPaneTabs` is contained: it concatenates both Hybrid sides and is
+// the one list here that can carry a duplicate id.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -146,13 +150,13 @@ function fileTab(id: string): FileTab {
 /// Two panes side by side. The left holds the tab that throws plus a healthy
 /// sibling; the right holds a healthy tab of its own, so "the rest of the
 /// window" is something the assertions can see.
-function seedLayout(): void {
+function seedLayout(activeTabId = "boundary-dashboard"): void {
   const dashboard: Tab = { kind: "dashboard", id: "boundary-dashboard", title: "Dashboard" };
   const left: LeafNode = {
     kind: "leaf",
     id: PANE_A,
     tabs: [dashboard, fileTab("boundary-file-a")],
-    activeTabId: dashboard.id,
+    activeTabId,
   };
   const right: LeafNode = {
     kind: "leaf",
@@ -169,14 +173,14 @@ function seedLayout(): void {
   layout.activePaneId = PANE_A;
 }
 
-async function mountApp(): Promise<HTMLElement> {
+async function mountApp(activeTabId?: string): Promise<HTMLElement> {
   installDemoWorkspace(demoData());
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(App, { target }) as Record<string, unknown>);
   await tick();
   await tick();
-  seedLayout();
+  seedLayout(activeTabId);
   await tick();
   await tick();
   return target;
@@ -198,7 +202,7 @@ function paneEl(target: HTMLElement, id: string): HTMLElement {
 }
 
 describe("a tab whose render throws", () => {
-  test("is contained in its pane, which says what failed and offers a way back", async () => {
+  test("is contained in its own tab, which says what failed and names its way out", async () => {
     const target = await mountApp();
     const left = paneEl(target, PANE_A);
 
@@ -207,14 +211,33 @@ describe("a tab whose render throws", () => {
     expect(failed?.textContent, "it names what failed").toContain(
       "dashboard render blew up",
     );
+    expect(failed?.textContent, "and says the unit that failed").toContain(
+      "This tab could not be drawn",
+    );
 
     const buttons = [
       ...left.querySelectorAll<HTMLButtonElement>(".pane-failed-actions button"),
     ];
+    // The close names the tab that threw rather than saying "tab", because
+    // the pane mounts every tab body and the one that failed is not
+    // necessarily the active one.
     expect(
       buttons.map((b) => b.textContent?.trim()),
-      "a retry and a way out are offered",
-    ).toEqual(["Try again", "Close tab"]);
+      "a retry and a named way out are offered",
+    ).toEqual(["Try again", "Close Dashboard"]);
+  });
+
+  test("does not fail the pane when the tab that throws is in the background", async () => {
+    // The keep-alive eaches mount every tab body, so a background tab renders
+    // and can throw while the user is working in a different tab of the same
+    // pane. Its card waits behind the strip the way its body would.
+    const target = await mountApp("boundary-file-a");
+    const left = paneEl(target, PANE_A);
+
+    expect(left.querySelector(".editor-tab"), "the active tab draws").not.toBeNull();
+    const host = left.querySelector(".tab-failed");
+    expect(host, "the failure is held by the tab that raised it").not.toBeNull();
+    expect(host?.classList.contains("offscreen"), "and is hidden with it").toBe(true);
   });
 
   test("leaves a healthy sibling drawable, and the strip switches to it", async () => {
@@ -251,8 +274,10 @@ describe("a tab whose render throws", () => {
     const tabs = [...left.querySelectorAll(".tabs .tab")];
     expect(tabs, "the failed pane keeps its tab strip").toHaveLength(2);
 
-    // The other pane never saw the throw.
+    // The other pane never saw the throw. `.editor-tab` is the file tab
+    // component's own root: `.editor-wrap` is the pane's body container and
+    // renders whether the body drew or not, so it cannot fail for this.
     expect(right.querySelector(".pane-failed"), "the right pane is unaffected").toBeNull();
-    expect(right.querySelector(".editor-wrap"), "and still renders its body").not.toBeNull();
+    expect(right.querySelector(".editor-tab"), "and still renders its body").not.toBeNull();
   });
 });
