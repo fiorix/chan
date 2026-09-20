@@ -329,56 +329,105 @@ pub enum SetWorkspaceOnError {
 /// Longest peer refusal message kept, in characters.
 const MAX_REFUSAL_MESSAGE_CHARS: usize = 200;
 
-/// A character a peer's words may not carry into a banner or a terminal.
+/// A character that changes what a surface DOES rather than what it says, so
+/// a peer may not put one in front of a reader: the ASCII and C1 controls,
+/// where an escape sequence lives; the line and paragraph separators, which
+/// end a line in a surface promised one string; the bidirectional controls,
+/// which reorder what is displayed without changing what the string contains;
+/// and the zero-width characters, which hide text outright.
 ///
-/// `char::is_control` names only the Cc category, the ASCII and C1 controls,
-/// which is where an escape sequence lives but not where the rest of the
-/// trouble does. Three more classes matter here and none of them is a control:
-/// the line and paragraph separators, which end a line in a surface that was
-/// promised one string; the bidirectional formatting characters, which reorder
-/// what is displayed without changing what the string contains, so the text a
-/// user reads is not the text that arrived; and the zero-width and invisible
-/// characters, which occupy a message while showing nothing, so a body made
-/// only of them is not empty and would reach a banner as a blank.
-///
-/// The list is explicit rather than a category lookup: it needs no dependency,
-/// it can be read and argued with, and every entry is a class this surface
-/// actually has to answer for.
+/// Deliberately absent: the zero-width joiners, the variation selectors and
+/// the tag characters. Those carry meaning inside ordinary text, an emoji
+/// family or flag sequence among them, and editing them out of a legitimate
+/// message would damage what it says. That they cannot
+/// render alone is [`is_invisible`]'s business, which answers a different
+/// question.
 fn is_unshowable(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{00ad}'                  // soft hyphen
             | '\u{061c}'                // arabic letter mark
             | '\u{180e}'                // mongolian vowel separator
-            | '\u{200b}'..='\u{200f}'   // zero width set, LRM, RLM
+            | '\u{200b}'                // zero width space
+            | '\u{200e}' | '\u{200f}'   // LRM, RLM
             | '\u{2028}'                // line separator
             | '\u{2029}'                // paragraph separator
             | '\u{202a}'..='\u{202e}'   // bidi embeddings and overrides
-            | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
             | '\u{2066}'..='\u{2069}'   // bidi isolates
             | '\u{feff}'                // zero width no-break space
         )
 }
 
+/// A character that renders nothing on its own. A string of only these is not
+/// empty, so without this it would reach a banner as a blank, and a
+/// discriminator with one appended would not compare equal to itself.
+///
+/// Broader than [`is_unshowable`] because the question is different: not
+/// whether a reader may be shown this, but whether there is anything to see.
+/// It adds the selectors and tags that the editing pass deliberately keeps.
+fn is_invisible(c: char) -> bool {
+    is_unshowable(c)
+        || matches!(c,
+            '\u{200c}' | '\u{200d}'     // zero width non-joiner, joiner
+            | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+            | '\u{fe00}'..='\u{fe0f}'   // variation selectors
+            | '\u{e0000}'..='\u{e007f}' // tags
+            | '\u{e0100}'..='\u{e01ef}' // variation selectors supplement
+        )
+}
+
+/// Whether `text` holds anything a reader could actually see.
+fn has_visible_content(text: &str) -> bool {
+    text.chars().any(|c| !c.is_whitespace() && !is_invisible(c))
+}
+
+/// Whether `message` says only the live-terminals discriminator, whatever
+/// invisible characters surround it. Compared on the visible characters alone
+/// so a tag or a selector appended to the token cannot smuggle it past.
+fn is_bare_discriminator(message: &str) -> bool {
+    message
+        .chars()
+        .filter(|c| !is_invisible(*c) && !c.is_whitespace())
+        .eq(LIVE_TERMINALS.chars())
+}
+
 /// Make a peer's own words fit to show. Anything [`is_unshowable`] names
-/// becomes a space, so an escape sequence cannot reach the terminal `chan`
-/// prints the message on, a separator cannot break the line, and an override
-/// cannot reorder it; the result is trimmed and cut to
-/// [`MAX_REFUSAL_MESSAGE_CHARS`], on a character boundary, so a proxy error
-/// page cannot arrive where a sentence was expected. An empty result means the
-/// peer said nothing a reader can use, which now includes a body that was
-/// never visible in the first place.
+/// becomes a space, runs of whitespace collapse to one, and the result is cut
+/// to [`MAX_REFUSAL_MESSAGE_CHARS`] on a character boundary.
+///
+/// The collapse is what keeps the cap useful: a body of two hundred control
+/// characters followed by a sentence would otherwise spend the whole budget on
+/// substituted spaces and discard the reason. Ordinary text, including
+/// non-ASCII, is left as it is.
 fn peer_message(raw: &str) -> String {
-    let inert: String = raw
-        .chars()
-        .map(|c| if is_unshowable(c) { ' ' } else { c })
-        .collect();
-    let capped: String = inert
-        .trim()
-        .chars()
-        .take(MAX_REFUSAL_MESSAGE_CHARS)
-        .collect();
-    capped.trim_end().to_string()
+    let mut out = String::new();
+    let mut kept = 0usize;
+    let mut pending_space = false;
+    for raw_char in raw.chars() {
+        let c = if is_unshowable(raw_char) {
+            ' '
+        } else {
+            raw_char
+        };
+        if c.is_whitespace() {
+            pending_space = kept > 0;
+            continue;
+        }
+        if pending_space {
+            if kept == MAX_REFUSAL_MESSAGE_CHARS {
+                break;
+            }
+            out.push(' ');
+            kept += 1;
+            pending_space = false;
+        }
+        if kept == MAX_REFUSAL_MESSAGE_CHARS {
+            break;
+        }
+        out.push(c);
+        kept += 1;
+    }
+    out
 }
 
 /// Read a `409 Conflict` by its body rather than by its status.
@@ -434,10 +483,10 @@ async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
     // the same fallback as their plain forms.
     let reason = error
         .map(peer_message)
-        .filter(|message| message != LIVE_TERMINALS && !message.is_empty())
+        .filter(|message| has_visible_content(message) && !is_bare_discriminator(message))
         .unwrap_or_else(|| {
             let body = peer_message(&body);
-            if body.is_empty() || error.is_some() {
+            if !has_visible_content(&body) || error.is_some() {
                 format!("devserver refused with HTTP {status}")
             } else {
                 body
@@ -3783,7 +3832,9 @@ mod tests {
             // the string holds, so the text read is not the text that arrived.
             (
                 "locked: \u{202e}drowssap\u{202c}".to_string(),
-                "locked:  drowssap",
+                // One space, not two: the substituted override merges with the
+                // space already there, which is what the collapse is for.
+                "locked: drowssap",
             ),
         ] {
             let got = refused(&body).await;
@@ -3808,7 +3859,16 @@ mod tests {
                 cut.chars().count()
             ));
         }
-        // Nothing a peer sent may still be unshowable afterwards.
+        // Spelled out here ON PURPOSE, independent of the production predicate:
+        // a survival check written with `is_unshowable` cannot notice that
+        // `is_unshowable` is incomplete, because it asks the code under test
+        // what the answer is. This list is the contract.
+        const MUST_NOT_SURVIVE: &[char] = &[
+            '\u{0}', '\u{7}', '\u{1b}', '\n', '\r', '\t', '\u{85}', '\u{00ad}', '\u{061c}',
+            '\u{180e}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202a}',
+            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
+            '\u{2069}', '\u{feff}',
+        ];
         for body in [
             "workspace is locked\u{1b}]0;title\u{7}",
             r#"{"error":"workspace is locked\u001b[2J"}"#,
@@ -3816,10 +3876,38 @@ mod tests {
             "workspace is locked\u{2028}by another process",
             "locked: \u{202e}drowssap\u{202c}",
             "locked\u{200b}: \u{feff}held",
+            "locked\u{85}: \u{061c}held",
         ] {
             let got = refused(body).await;
-            if got.chars().any(is_unshowable) {
-                wrong.push(format!("{body:?} kept an unshowable character: {got:?}"));
+            if let Some(found) = got.chars().find(|c| MUST_NOT_SURVIVE.contains(c)) {
+                wrong.push(format!("{body:?} kept {found:?}: {got:?}"));
+            }
+        }
+
+        // A reason behind a wall of controls must still arrive: without the
+        // whitespace collapse the substituted spaces spend the whole cap and
+        // the sentence is thrown away.
+        let buried = format!("{}workspace is locked", "\u{1b}".repeat(240));
+        let got = refused(&buried).await;
+        if got != "workspace is locked" {
+            wrong.push(format!("a buried reason was lost: {got:?}"));
+        }
+
+        // Ordinary text is not the enemy. Non-ASCII, a joiner and a variation
+        // selector all carry meaning and must survive intact, and a
+        // one-character message is a message.
+        for (body, want) in [
+            ("dépôt is locked", "dépôt is locked"),
+            (
+                "locked \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+                "locked \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            ),
+            ("locked \u{2764}\u{fe0f}", "locked \u{2764}\u{fe0f}"),
+            ("x", "x"),
+        ] {
+            let got = refused(body).await;
+            if got != want {
+                wrong.push(format!("{body:?} -> {got:?}, wanted {want:?}"));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -3848,12 +3936,23 @@ mod tests {
         }
 
         let mut wrong: Vec<String> = Vec::new();
+        let tagged_discriminator =
+            serde_json::json!({ "error": format!("{LIVE_TERMINALS}\u{e0041}") }).to_string();
+        let only_selectors = serde_json::json!({ "error": "\u{fe0f}\u{fe0e}" }).to_string();
+        let only_tags = serde_json::json!({ "error": "\u{e0041}\u{e0042}" }).to_string();
         for body in [
             "\u{7}\u{1b}\u{0}",
             r#"{"error":"\u0007\u001b"}"#,
             // Nonempty, and invisible.
             "\u{200b}\u{200b}\u{feff}",
             r#"{"error":"\u200b\u2060"}"#,
+            // Nothing visible, though nothing here is a control either: these
+            // render as themselves nowhere.
+            only_selectors.as_str(),
+            only_tags.as_str(),
+            // The discriminator is still the discriminator with an invisible
+            // character stuck to it, and must not reach a user as a word.
+            tagged_discriminator.as_str(),
             // The discriminator padded with whitespace is the banner this
             // reader exists to remove, in another spelling.
             r#"{"error":" live_terminals "}"#,
