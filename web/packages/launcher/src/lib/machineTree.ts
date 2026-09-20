@@ -166,12 +166,19 @@ export function buildMachineTree(
     devserverName(a).localeCompare(devserverName(b)),
   );
   for (const ds of sortedDevservers) {
+    // Two rows can resolve to one library: a directly registered devserver and
+    // its gateway roster row, or a box registered twice. Every machine claiming
+    // the id would otherwise be handed the same WindowRecord objects, and the
+    // deck flattens machine windows into one keyed list, so the window would be
+    // a duplicate key there. The first claimant keeps the windows; a later row
+    // still renders as its own machine, with none.
+    const alreadyClaimed = ds.library_id !== null && claimed.has(ds.library_id);
     if (ds.library_id) claimed.add(ds.library_id);
     machines.push(
       machineNode(
         "devserver",
         ds,
-        ds.library_id,
+        alreadyClaimed ? null : ds.library_id,
         windowsByLibrary,
         workspaces.filter((w) => w.devserver_id === ds.id),
       ),

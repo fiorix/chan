@@ -357,6 +357,16 @@
   let backlinks = $state<GraphEdge[]>([]);
   let backlinksLoading = $state(false);
   let backlinksError = $state<string | null>(null);
+
+  /// Key for one incoming edge. The edges table's key is
+  /// (src, dst, kind, anchor), so one document can link this target more
+  /// than once, by two anchors or by a wikilink and a markdown link. The
+  /// source path alone is not unique for that shape and a repeat is a
+  /// duplicate Svelte key, which takes the section down until the inspector
+  /// is reopened.
+  function backlinkKey(edge: GraphEdge): string {
+    return `${edge.src}\u0000${edge.kind}\u0000${edge.anchor ?? ""}`;
+  }
   let backlinkReq = 0;
 
   $effect(() => {
@@ -1215,7 +1225,7 @@
           <section class="refs">
             <h4>Backlinks</h4>
             <ul>
-              {#each backlinks as b (b.src)}
+              {#each backlinks as b (backlinkKey(b))}
                 <li>
                   {#if classifyRef(b.src) === "image"}
                     <button

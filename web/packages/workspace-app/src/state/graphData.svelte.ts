@@ -132,14 +132,30 @@ export function selectionEdgesFor(path: string): {
   );
   if (!fileNode) return out;
   const nodeById = new Map(view.nodes.map((n) => [n.id, n]));
+  // One bucket entry per target node, not per edge. The edges table's key is
+  // (src, dst, kind, anchor), so a document that links one target twice, or
+  // carries one tag twice, sends two edges to the same node; the consumer keys
+  // these lists on the node id, where a repeat is a duplicate Svelte key.
+  const seen = new Set<string>();
   for (const e of view.edges) {
     if (e.source !== fileNode.id) continue;
     const target = nodeById.get(e.target);
     if (!target) continue;
-    if (e.kind === "tag") out.tags.push(target);
-    else if (e.kind === "mention") out.mentions.push(target);
-    else if (e.kind === "date") out.dates.push(target);
-    else if (e.kind === "link") out.links.push(target);
+    const bucket =
+      e.kind === "tag"
+        ? out.tags
+        : e.kind === "mention"
+          ? out.mentions
+          : e.kind === "date"
+            ? out.dates
+            : e.kind === "link"
+              ? out.links
+              : null;
+    if (!bucket) continue;
+    const key = `${e.kind}\u0000${target.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bucket.push(target);
   }
   return out;
 }
