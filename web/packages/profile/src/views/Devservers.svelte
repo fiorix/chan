@@ -190,7 +190,10 @@
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   }
 
+  // Two submits land in one frame, so the disabled attribute this sets is
+  // not on screen when the second arrives; the flag is what stops it.
   async function addGrant(devserverId: string) {
+    if (addBusy[devserverId]) return;
     const email = (addEmail[devserverId] ?? "").trim();
     if (!isLikelyEmail(email)) {
       addError[devserverId] = "Enter a valid email (local@host.tld)";
