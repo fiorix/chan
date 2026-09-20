@@ -422,20 +422,34 @@ export function withHybridSurfaceTheme(
   return next;
 }
 
+/// The apply is optimistic so the surface repaints at once, and the
+/// rollback is what keeps that honest: the live table is what the next
+/// write serialises from, so an override the server refused would be
+/// saved by the next write that succeeds. Rolling back on rejection
+/// leaves the table holding only what the server confirmed, and the
+/// rejection still reaches the caller that reports it.
 export function setHybridSurfaceTheme(
   kind: HybridSurfaceKind,
   choice: SurfaceThemeChoice,
 ): Promise<void> {
+  const confirmed = hybridSurfaceThemesSnapshot();
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
-  return persistHybridSurfaceThemes();
+  return persistHybridSurfaceThemes().catch((error: unknown) => {
+    applyHybridSurfaceThemes(confirmed);
+    throw error;
+  });
 }
 
 /// Drop a surface's body-theme override so it falls back to the global
 /// `theme`. The settings surface's per-surface control offers this as
 /// "Inherit".
 export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> {
+  const confirmed = hybridSurfaceThemesSnapshot();
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
-  return persistHybridSurfaceThemes();
+  return persistHybridSurfaceThemes().catch((error: unknown) => {
+    applyHybridSurfaceThemes(confirmed);
+    throw error;
+  });
 }
 
 // updateGlobalConfigSerial lives in ./configWrite (a leaf module with no store
@@ -684,8 +698,12 @@ function setThemeLocal(choice: ThemeChoice): void {
  *  so every other open window picks up the change over the WS
  *  `config_changed` event. */
 export function setThemeChoice(choice: ThemeChoice): Promise<void> {
+  const confirmed = ui.themeChoice;
   setThemeLocal(choice);
-  return persistThemeChoice(choice);
+  return persistThemeChoice(choice).catch((error: unknown) => {
+    setThemeLocal(confirmed);
+    throw error;
+  });
 }
 
 /** Apply the launcher's local-theme choice to a standalone terminal window.
