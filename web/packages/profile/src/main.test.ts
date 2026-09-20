@@ -1,4 +1,4 @@
-// The profile entry point owns the global rejection boundary. Mounting the real entry point and dispatching its browser event proves both halves: the listener is installed before App, and the notice reaches markup a user can see.
+// The mounted entry-point test proves installed listener wiring and a rendered notice. Source inspection establishes listener installation before mount.
 
 import { flushSync } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
