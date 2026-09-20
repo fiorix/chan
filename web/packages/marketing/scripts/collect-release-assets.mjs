@@ -9,7 +9,7 @@ import {
   archiveOptionalCliAssets,
   cliAssets,
   desktopAssets,
-  gatewayDebAssets,
+  gatewayDebAssetsAsPublished,
   updaterPayloads,
   windowsAssets,
 } from "./release-assets.mjs";
@@ -292,7 +292,9 @@ async function collectManifest(release, options) {
   // legitimately predates the FreeBSD target, a gateway service
   // (devserver-control arrived in 0.74.0), or the Windows artifacts. Collect
   // each only when the release actually shipped it.
-  for (const name of [...gatewayDebAssets(version), ...windowsAssets(version)]) {
+  // Published names: the collector walks a release's assets, where a
+  // prerelease tilde has already been rewritten to a dot by the upload.
+  for (const name of [...gatewayDebAssetsAsPublished(version), ...windowsAssets(version)]) {
     if (!releaseAssets.has(name)) continue;
     assets.push(await collectAsset(name, releaseAssets, options));
   }

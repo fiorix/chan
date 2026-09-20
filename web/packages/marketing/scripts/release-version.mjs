@@ -16,7 +16,25 @@ export function validateReleaseTag(tag, label = "tag") {
   }
 }
 
+/// The version cargo-deb writes into a gateway .deb filename. Debian spells a
+/// prerelease with a tilde, which sorts before the release it precedes, so
+/// `0.99.0-rc1` becomes `0.99.0~rc1`.
+///
+/// The required-assets list names this, the Debian form, because that is what
+/// a `publish=false` dry run compares against the artifacts on disk. A GitHub
+/// release upload rewrites `~` to `.` in an asset name, so a name read back
+/// from a published release carries the dot instead: that spelling is
+/// `gatewayAssetVersion`. At a GA version the two agree, which is why the
+/// difference showed up only in an rc dry run.
 export function gatewayPackageVersion(version) {
+  return version.replace("-", "~");
+}
+
+/// The version in a gateway .deb asset name as GitHub reports it, after the
+/// upload rewrote the tilde. Anything reading the assets of a published
+/// release uses this; anything naming what the build produces uses
+/// `gatewayPackageVersion`.
+export function gatewayAssetVersion(version) {
   return version.replace("-", ".");
 }
 

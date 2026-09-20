@@ -14,7 +14,7 @@ import {
 import {
   compareVersions,
   escapeRegExp,
-  gatewayPackageVersion,
+  gatewayAssetVersion,
   versionFromTag,
 } from "./release-version.mjs";
 
@@ -133,7 +133,10 @@ function cliDownloads(manifest) {
 // actually shipped (service names can differ across releases) with no list to
 // drift. Asset name shape: `chan-gateway-<service>_<version>-1_<arch>.deb`.
 function gatewayDownloads(manifest) {
-  const versionRe = escapeRegExp(gatewayPackageVersion(manifest.version));
+  // The manifest holds asset names as GitHub reports them, where the upload
+  // has already rewritten a prerelease tilde to a dot, so this reads the
+  // asset spelling rather than the one cargo-deb wrote.
+  const versionRe = escapeRegExp(gatewayAssetVersion(manifest.version));
   const re = new RegExp(`^chan-gateway-(.+)_${versionRe}-1_(amd64|arm64)\\.deb$`);
   const found = [];
   for (const name of manifest.assets.keys()) {

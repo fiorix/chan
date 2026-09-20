@@ -10,7 +10,7 @@
 // drift these lists.
 
 import { gatewayServices } from "./gateway-services.mjs";
-import { gatewayPackageVersion } from "./release-version.mjs";
+import { gatewayAssetVersion, gatewayPackageVersion } from "./release-version.mjs";
 
 // FreeBSD first ships in v0.96.0. The verifier requires it for the release
 // being cut, while the collector and metadata generator may omit it from
@@ -44,16 +44,29 @@ export function desktopAssets(version) {
   ];
 }
 
-// One chan-gateway .deb per service per arch. The gateway package version can
-// differ from the release version (cargo-deb's spelling of a prerelease), so
-// this takes the release version and applies the same transform the build does.
-export function gatewayDebAssets(version) {
-  const gatewayVersion = gatewayPackageVersion(version);
+// One chan-gateway .deb per service per arch, in the two spellings a
+// prerelease has. cargo-deb writes the Debian form with a tilde, and a GitHub
+// release upload rewrites that tilde to a dot, so the names on disk and the
+// names a published release reports are not the same string. At a GA version
+// they are, which is why this only matters to a release candidate.
+function gatewayDebNames(gatewayVersion) {
   return gatewayServices.flatMap((service) =>
     ["amd64", "arm64"].map(
       (arch) => `chan-gateway-${service}_${gatewayVersion}-1_${arch}.deb`,
     ),
   );
+}
+
+/// The names the build produces, which is what the required-assets list and
+/// the verifier compare against the artifacts on disk.
+export function gatewayDebAssets(version) {
+  return gatewayDebNames(gatewayPackageVersion(version));
+}
+
+/// The names a published GitHub release reports, after the upload rewrote the
+/// tilde. Anything reading the assets of a release uses this.
+export function gatewayDebAssetsAsPublished(version) {
+  return gatewayDebNames(gatewayAssetVersion(version));
 }
 
 // The Windows CLI zip and desktop NSIS installer. Every release run builds both

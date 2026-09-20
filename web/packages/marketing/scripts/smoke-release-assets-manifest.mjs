@@ -7,12 +7,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { gatewayAssetVersion, gatewayPackageVersion } from "./release-version.mjs";
 import {
   archiveOptionalCliAssets,
   cliAssets,
   desktopAssets,
   gatewayDebAssets,
+  gatewayDebAssetsAsPublished,
   publicAssets,
+  requiredAssets,
   updaterAssets,
   updaterPayloads,
   windowsAssets,
@@ -124,6 +127,42 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
   } finally {
     rmSync(notFoundRoot, { force: true, recursive: true });
   }
+}
+
+// How a prerelease is spelled in a gateway .deb name, and why it is spelled
+// twice. cargo-deb writes the Debian form, `0.99.0~rc1-1`, and the
+// required-assets list names that because a `publish=false` dry run compares
+// it against the artifacts on disk. A GitHub release upload rewrites the
+// tilde to a dot, so a name read back from a published release is
+// `0.99.0.rc1-1`, which is what the metadata generator matches. At a GA
+// version both transforms are the identity, which is why an rc dry run is
+// where the two readings first disagreed.
+{
+  const rc = "0.99.0-rc1";
+  assertEqual(gatewayPackageVersion(rc), "0.99.0~rc1", "cargo-deb spelling");
+  assertEqual(gatewayAssetVersion(rc), "0.99.0.rc1", "uploaded asset spelling");
+
+  const rcDebs = gatewayDebAssets(rc);
+  assert(rcDebs.length > 0, "no gateway debs are named for an rc");
+  for (const name of rcDebs) {
+    assert(
+      name.includes("_0.99.0~rc1-1_"),
+      `a prerelease gateway deb carries the Debian tilde, got ${name}`,
+    );
+  }
+
+  // A GA version: both spellings are the version itself, and the full
+  // required set is the 25 names a GA release carries.
+  const ga = "0.99.0";
+  assertEqual(gatewayPackageVersion(ga), ga, "GA cargo-deb spelling");
+  assertEqual(gatewayAssetVersion(ga), ga, "GA uploaded asset spelling");
+  const gaRequired = requiredAssets(ga);
+  assertEqual(gaRequired.length, 25, "required assets at a GA version");
+  assertEqual(new Set(gaRequired).size, 25, "required assets are distinct");
+  for (const name of gaRequired) {
+    assert(!name.includes("~"), `a GA asset name carries no tilde, got ${name}`);
+  }
+  console.log("smoked the prerelease gateway deb spelling");
 }
 
 const root = mkdtempSync(path.join(tmpdir(), "chan-release-assets-"));
@@ -484,11 +523,15 @@ try {
 // The required names (including the updater payload and its detached .sig, both
 // written to the fixture asset dir) and the optional Windows names, both
 // single-sourced from release-assets.mjs.
+// The fixture stands in for a PUBLISHED release, so its gateway debs carry
+// the names GitHub reports, with a prerelease tilde already rewritten to a
+// dot. Writing the build's own spelling here would model a release that
+// cannot exist and would hide whether the collector reads the right one.
 function namesFor(releaseVersion) {
   return [
     ...cliAssets(),
     ...desktopAssets(releaseVersion),
-    ...gatewayDebAssets(releaseVersion),
+    ...gatewayDebAssetsAsPublished(releaseVersion),
     ...updaterAssets(releaseVersion),
   ];
 }
