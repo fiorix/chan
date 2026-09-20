@@ -31,11 +31,15 @@ async function main() {
 
     // --allow-missing-release: before the first release there is nothing
     // to publish, and a marketing deploy must still succeed. When no
-    // release exists the collector skips writing the manifest.
+    // release exists the collector skips writing the manifest. It is passed
+    // only when no tag was asked for: a named tag that is not published is a
+    // mistake, and a deploy that skipped /dl over it would leave every
+    // install pointing at nothing.
     // --latest-count 5 mirrors release.yml: /dl keeps the latest GA release
     // plus the 4 previous GA releases upgradeable by explicit version.
-    const collectArgs = ["--allow-missing-release", "--latest-count", "5", "--out", manifest];
+    const collectArgs = ["--latest-count", "5", "--out", manifest];
     if (options.tag) collectArgs.push("--tag", options.tag);
+    else collectArgs.unshift("--allow-missing-release");
     runScript("collect-release-assets.mjs", collectArgs);
 
     if (!(await fileExists(manifest))) {

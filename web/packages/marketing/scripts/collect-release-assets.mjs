@@ -145,6 +145,17 @@ async function loadRelease(options) {
 
 async function fetchRelease(url, options) {
   const response = await request(url);
+  // --allow-missing-release covers one case, and only one: a site built before
+  // any release exists, where /releases/latest is legitimately absent. A tag
+  // the caller named and GitHub does not have is a typo or a version not cut
+  // yet, and skipping it would deploy chan.app with no /dl at all from a build
+  // that reported success, which changes what every existing install downloads
+  // next. So a requested tag that is not published is an error either way.
+  if (response.status === 404 && options.tag) {
+    throw new Error(
+      `requested tag ${options.tag} is not a published release of ${options.repo}`,
+    );
+  }
   if (response.status === 404 && options.allowMissingRelease) {
     console.warn("warning: no GitHub Release found; skipping /dl metadata");
     return null;

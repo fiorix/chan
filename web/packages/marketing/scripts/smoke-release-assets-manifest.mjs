@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   archiveOptionalCliAssets,
@@ -64,6 +64,66 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
     );
   }
   console.log("smoked updater payload / asset agreement");
+}
+
+// A tag that was asked for and cannot be found is an error, with and without
+// --allow-missing-release. The flag's one legitimate use is a site built
+// before any release exists; letting it also swallow a 404 on a named tag
+// meant a typo, or a version not cut yet, deployed chan.app with no /dl from
+// a build that reported success.
+//
+// The network is stubbed by preloading a module that replaces global fetch,
+// so the real CLI runs its real argument parsing and its real code path
+// against a 404. There is no production seam for the API base and this does
+// not add one.
+{
+  const notFoundRoot = mkdtempSync(path.join(tmpdir(), "chan-release-404-"));
+  try {
+    const preload = path.join(notFoundRoot, "stub-404.mjs");
+    writeFileSync(
+      preload,
+      "globalThis.fetch = async () => new Response('', { status: 404 });\n",
+    );
+    const missingTag = "v99.99.99";
+    const cases = [
+      { label: "history mode, allowing a missing release", args: ["--allow-missing-release", "--latest-count", "5"] },
+      { label: "history mode", args: ["--latest-count", "5"] },
+      { label: "single-release mode, allowing a missing release", args: ["--allow-missing-release"] },
+    ];
+    for (const { label, args } of cases) {
+      const out = path.join(notFoundRoot, "manifest.json");
+      rmSync(out, { force: true });
+      let failed = false;
+      let stderr = "";
+      try {
+        execFileSync(
+          process.execPath,
+          ["scripts/collect-release-assets.mjs", "--tag", missingTag, "--out", out, ...args],
+          {
+            cwd: siteRoot,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` },
+          },
+        );
+      } catch (err) {
+        failed = true;
+        stderr = String(err.stderr ?? "");
+      }
+      assert(failed, `${label}: a tag that is not published must exit non-zero`);
+      assert(
+        stderr.includes(missingTag),
+        `${label}: the error must name the tag that was not found, got: ${stderr}`,
+      );
+      assert(
+        !existsSync(out),
+        `${label}: no manifest may be written for a tag that is not published`,
+      );
+    }
+    console.log("smoked the collector refusing a tag that is not published");
+  } finally {
+    rmSync(notFoundRoot, { force: true, recursive: true });
+  }
 }
 
 const root = mkdtempSync(path.join(tmpdir(), "chan-release-assets-"));
