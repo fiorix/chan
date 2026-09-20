@@ -428,7 +428,12 @@ export default {
       await closeTerminal(TAB_OFF);
 
       // ---- Leg 5: GHOSTTY (unavailable, no decoration code) ----
-      await patchTerminalConfig({ ghostty: true });
+      // Masking goes back ON here. Leg 4 turned it off, and leaving it off
+      // made "no mask decorations on the wasm backend" true because the
+      // feature was disabled, not because the backend has no decoration code.
+      // The assertion could not fail for the reason it names.
+      await patchTerminalConfig({ secret_masking: true, ghostty: true });
+      await assertToml(/secret_masking\s*=\s*true/, "secret_masking = true");
       await assertToml(/ghostty\s*=\s*true/, "ghostty = true");
       await sleep(2_000);
       await openTerminal(TAB_G, ".terminal-host canvas");
@@ -446,7 +451,11 @@ export default {
       if ((await awaitMaskCount(0)) !== 0) {
         throw new Error("ghostty leg: mask decorations on the wasm backend");
       }
-      details.ghosttyLeg = { unavailableReported: true, decorations: 0 };
+      details.ghosttyLeg = {
+        unavailableReported: true,
+        decorations: 0,
+        maskingEnabled: true,
+      };
       await ctx.shot("ghostty-unavailable");
       await closeTerminal(TAB_G);
       return details;
