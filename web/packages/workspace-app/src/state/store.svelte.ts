@@ -4919,7 +4919,12 @@ export function revealAndEnterDirectory(path: string): void {
   expandAncestorsInAllInstances(path, true);
   fbSelectSingle(path || null);
   browserSelection.showWorkspace = false;
-  if (path) void loadTreeDir(path);
+  // Nothing awaits this load, and `loadTreeDir` rethrows after recording the
+  // failure, so the rejection is swallowed here rather than left unhandled.
+  // The reader is `tree.dirErrors`, which the directory's own row renders; an
+  // unhandled rejection would raise a second, contextless report of a failure
+  // the tree is already showing.
+  if (path) void loadTreeDir(path).catch(() => {});
   persistTreeExpanded();
 }
 
