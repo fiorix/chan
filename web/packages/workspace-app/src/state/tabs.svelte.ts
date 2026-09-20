@@ -4028,14 +4028,18 @@ export function paneModeSetMouseSplit(
 /// transition once, to the attachments of that moment, so a lost flag is not
 /// resent: the banner never shows, the tab still reads attached so autosave
 /// stands down, and the server goes on accepting pushes it will not flush.
-/// `doc`, `error` and `fileMissing` are facts about the tab and the path
-/// that the draft's clone cannot restore either.
+/// `externalChange` is silent the same way: the watcher delivers its frame
+/// once, so a raised banner the commit drops never comes back, and a banner
+/// the user dismissed during the mode comes back at the commit. `doc`,
+/// `error` and `fileMissing` are facts about the tab and the path that the
+/// draft's clone cannot restore either.
 ///
 /// Everything else stays the draft's, `content` first of all: the editors
 /// stay mounted on the draft's tabs while the mode is up, so a remote edit
 /// applied then lives there and has to survive the commit.
 const PANE_MODE_SESSION_FIELDS = [
   "diskConflicted",
+  "externalChange",
   "doc",
   "error",
   "fileMissing",
