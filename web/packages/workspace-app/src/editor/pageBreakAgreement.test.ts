@@ -116,6 +116,38 @@ const ROWS: Row[] = [
     line: MARKER,
     expected: false,
   },
+  {
+    // The composition marks the page breaks it finds. An author can
+    // write that attribute too, and the sanitizer keeps it.
+    name: "a forged mark beside the class",
+    body: ['<hr class="chan-page-break" data-page-break>'],
+    line: '<hr class="chan-page-break" data-page-break>',
+    expected: false,
+  },
+  {
+    name: "a forged mark alone",
+    body: ["<hr data-page-break>"],
+    line: "<hr data-page-break>",
+    expected: false,
+  },
+  {
+    name: "a marker inside a blockquote",
+    body: [`> ${MARKER}`],
+    line: `> ${MARKER}`,
+    expected: false,
+  },
+  {
+    name: "a marker indented four columns",
+    body: [`    ${MARKER}`],
+    line: `    ${MARKER}`,
+    expected: false,
+  },
+  {
+    name: "an unquoted class value",
+    body: ["<hr class=chan-page-break>"],
+    line: "<hr class=chan-page-break>",
+    expected: true,
+  },
 ];
 
 let host: HTMLElement | undefined;
