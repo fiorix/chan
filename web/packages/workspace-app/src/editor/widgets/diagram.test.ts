@@ -5,6 +5,7 @@ import { EditorView } from "@codemirror/view";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
+import { chanDecorations } from "../decorations";
 import {
   EXCALIDRAW_LANG,
   diagramDecorations,
@@ -13,10 +14,8 @@ import {
 } from "./diagram";
 import { writeClipboardPayload } from "../../api/clipboard";
 import diagramSrc from "./diagram.ts?raw";
-import diagramCopySrc from "./diagram_copy.ts?raw";
 import mermaidRenderSrc from "../mermaid_render.ts?raw";
 import excalidrawRenderSrc from "../excalidraw_render.ts?raw";
-import blocksSrc from "../decorations/blocks.ts?raw";
 import wysiwygSrc from "../Wysiwyg.svelte?raw";
 
 vi.mock("../../api/clipboard", () => ({
@@ -389,6 +388,27 @@ describe("errored diagram face click-through", () => {
     parent.remove();
   });
 
+  test("the face leads with the renderer label and the blamed line", async () => {
+    const { parent, view } = await mountErrored(erroring(2));
+    const face = parent.querySelector(".cm-md-diagram-error");
+    expect(face?.textContent).toContain("Mermaid error - line 2");
+    view.destroy();
+    parent.remove();
+  });
+
+  test("stepping into the source accents the blamed line", async () => {
+    const { parent, view } = await mountErrored(erroring(2));
+    parent
+      .querySelector(".cm-md-diagram-error-src")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    // Source line 2 is doc line 5, the first data row of the pie chart.
+    const accented = parent.querySelectorAll(".cm-md-diagram-error-line");
+    expect(accented).toHaveLength(1);
+    expect(accented[0]!.textContent).toContain('"Dogs" : 3');
+    view.destroy();
+    parent.remove();
+  });
+
   test("a blamed line past the source clamps to the last fence line", async () => {
     // Mermaid EOF errors blame a line beyond the source. No echoed row
     // renders for it, and the WHOLE face (head + reason rows) is
@@ -405,7 +425,11 @@ describe("errored diagram face click-through", () => {
   });
 });
 
-describe("diagram wiring", () => {
+describe("diagram bundle composition", () => {
+  // Bundle composition is not observable from a mounted view: the point is
+  // which modules the initial chunk pulls, which only the import graph
+  // shows. These two read the source deliberately.
+
   test("mermaid is dynamic-imported (never in the initial bundle)", () => {
     expect(mermaidRenderSrc).toMatch(/import\("mermaid"\)/);
     expect(mermaidRenderSrc).not.toMatch(/^import .* from "mermaid"/m);
@@ -418,45 +442,124 @@ describe("diagram wiring", () => {
     expect(excalidrawRenderSrc).toMatch(/import\("@excalidraw\/excalidraw"\)/);
     expect(excalidrawRenderSrc).not.toMatch(/^import .* from "@excalidraw\//m);
   });
+});
 
-  test("blocks.ts stays generic (no diagram special-case)", () => {
-    expect(blocksSrc).not.toMatch(/mermaid/i);
-    expect(blocksSrc).not.toMatch(/excalidraw/i);
+describe("the generic block decorations know nothing about diagrams", () => {
+  test("a mermaid fence renders as ordinary fenced code without the renderer", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: MERMAID_DOC,
+        selection: EditorSelection.cursor(0),
+        extensions: [chanMarkdown(), chanDecorations()],
+      }),
+    });
+    forceParsing(view, view.state.doc.length, 5000);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    expect(parent.textContent).toContain("pie title Pets");
+    view.destroy();
+    parent.remove();
   });
+});
 
-  test("View affordance opens the zoom overlay with a light render", () => {
-    // The hover "View" button is the explicit zoom trigger, gated on the
-    // onView option and only revealed after a successful render; clicking the
-    // diagram body still defers to CM6 caret placement (cursor-out reveal).
-    expect(diagramSrc).toMatch(/onView\?: \(svg: string\) => void/);
-    expect(diagramSrc).toMatch(/if \(onView\)/);
-    expect(diagramSrc).toMatch(/createElement\("button"\)/);
-    // The zoom always presents the light render on a light panel: a dark
-    // editor re-renders light for the overlay, a light editor passes the
-    // cached (already light) face.
-    expect(diagramSrc).toMatch(/this\.spec\.render\(this\.source, false\)/);
-    expect(diagramSrc).toMatch(/onView\(renderedSvg\)/);
-  });
+describe("the View affordance", () => {
+  const LIGHT = '<svg id="light"></svg>';
+  const DARK = '<svg id="dark"></svg>';
 
-  test("copy affordance offers vector SVG and raster PNG payloads", () => {
-    // The fenced-block widget exposes both formats. PNG rides the native
-    // image bridge; SVG markup rides the portable text clipboard.
-    expect(diagramSrc).toMatch(
-      /cm-md-diagram-copy-svg/,
+  function viewer(dark: boolean): {
+    deco: ReturnType<typeof diagramDecorations>;
+    render: ReturnType<typeof vi.fn>;
+    onView: ReturnType<typeof vi.fn>;
+  } {
+    const render = vi.fn(async (_source: string, isDark: boolean) => ({
+      ok: true as const,
+      svg: isDark ? DARK : LIGHT,
+    }));
+    const onView = vi.fn();
+    return {
+      deco: diagramDecorations({
+        lang: "mermaid",
+        label: "Mermaid",
+        render,
+        isDark: () => dark,
+        onView,
+      }),
+      render,
+      onView,
+    };
+  }
+
+  /// The View button, distinguished from the copy buttons that share its
+  /// class.
+  function viewButton(parent: HTMLElement): HTMLButtonElement {
+    const btn = parent.querySelector<HTMLButtonElement>(
+      ".cm-md-diagram-view:not(.cm-md-diagram-copy)",
     );
-    expect(diagramSrc).toMatch(/cm-md-diagram-copy-png/);
-    expect(diagramCopySrc).toMatch(/writeClipboardPayload\("image\/png"/);
-    expect(diagramCopySrc).toMatch(/"text\/plain;charset=utf-8"/);
-    expect(wysiwygSrc).toMatch(/cm-md-diagram-actions/);
+    expect(btn).toBeTruthy();
+    return btn!;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = "";
   });
+
+  test("hides until the render lands, then opens the viewer on the cached face", async () => {
+    const { deco, render, onView } = viewer(false);
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    const btn = viewButton(parent);
+    expect(btn.style.display).toBe("none");
+    await vi.waitFor(() => {
+      expect(btn.style.display).toBe("");
+    });
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onView).toHaveBeenCalledWith(LIGHT);
+    expect(render).toHaveBeenCalledTimes(1);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a dark editor re-renders light for the viewer's light panel", async () => {
+    const { deco, render, onView } = viewer(true);
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    const btn = viewButton(parent);
+    await vi.waitFor(() => {
+      expect(btn.style.display).toBe("");
+    });
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(onView).toHaveBeenCalledWith(LIGHT);
+    });
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render).toHaveBeenLastCalledWith(expect.any(String), false);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("the actions row carries the buttons the editor styles", async () => {
+    const { deco } = viewer(false);
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    const actions = parent.querySelector(".cm-md-diagram-actions");
+    expect(actions).toBeTruthy();
+    expect(actions!.querySelector(".cm-md-diagram-copy-svg")).toBeTruthy();
+    expect(actions!.querySelector(".cm-md-diagram-copy-png")).toBeTruthy();
+    view.destroy();
+    parent.remove();
+  });
+});
+
+describe("mechanisms this environment cannot drive", () => {
+  // Each of these needs something jsdom does not have: real layout for the
+  // vertical-motion tests, the Web Animations API for the flip, and a
+  // mounted Wysiwyg for the wiring. They are browser-verified, and the
+  // assertions below pin the mechanism so it cannot silently drop out.
 
   test("vertical arrow keys step INTO a rendered block (no widget skip)", () => {
     // A block-replace widget has no internal lines, so ArrowUp/Down skip it
     // (atomicRanges snaps the caret past the atom). The fix is an
     // ArrowUp/ArrowDown keymap that redirects a crossing move onto the block
-    // edge so scan() de-renders it. moveVertically needs real layout (jsdom
-    // has none), so the behaviour is browser-verified; this pins the
-    // mechanism so it can't silently drop out.
+    // edge so scan() de-renders it. moveVertically needs real layout.
     expect(diagramSrc).toMatch(/key:\s*"ArrowUp",\s*run:\s*stepInto\(false\)/);
     expect(diagramSrc).toMatch(/key:\s*"ArrowDown",\s*run:\s*stepInto\(true\)/);
     expect(diagramSrc).toMatch(/view\.moveVertically\(range, forward\)/);
@@ -465,45 +568,16 @@ describe("diagram wiring", () => {
 
   test("reverse flip: cursor-enter ghosts the cached face and folds it out", () => {
     // The forward flip plays on widget mount; the reverse needs a ghost
-    // because CM removes the widget DOM instantly on enter. Needs real layout
-    // + WAAPI (jsdom has neither), so behaviour is browser-verified; this pins
-    // the mechanism. The ghost rotateX-folds from 0 to +90, CONTINUING the
-    // forward rotation the mount flip started (-90 -> 0) rather than
-    // mirroring it, over the same duration.
+    // because CM removes the widget DOM instantly on enter. The ghost
+    // rotateX-folds from 0 to +90, CONTINUING the forward rotation the mount
+    // flip started (-90 -> 0) rather than mirroring it, over the same
+    // duration. Needs real layout and WAAPI.
     expect(diagramSrc).toMatch(/cacheFace\(this\.spec, this\.source, this\.dark, res\.svg\)/);
     expect(diagramSrc).toMatch(/function flipOutGhost/);
     expect(diagramSrc).toMatch(/rotateX\(0deg\)/);
     expect(diagramSrc).toMatch(/rotateX\(90deg\)/);
     expect(diagramSrc).toMatch(/if \(update\.docChanged \|\| !update\.selectionSet\) return/);
     expect(diagramSrc).toMatch(/flipOutGhost\(update\.view, it\.from, widget\)/);
-  });
-
-  test("error locatability: failing line accented in source + actionable face", () => {
-    // Errors are cached per source on render and the source line they blame
-    // (openLine + N) is line-decorated while the cursor is inside the block;
-    // the rendered face leads with the line number. Browser-verified end to
-    // end (needs the library + layout); pinned here.
-    expect(diagramSrc).toMatch(/errorCache: new Map/);
-    expect(diagramSrc).toMatch(/cm-md-diagram-error-line/);
-    expect(diagramSrc).toMatch(/info\.openLine \+ err\.line/);
-    // Actionable face leads with the renderer label + line number.
-    expect(diagramSrc).toMatch(/\$\{label\} error - line \$\{res\.errorLine\}/);
-    // Error cleared on a successful re-render so a fixed line stops accenting.
-    expect(diagramSrc).toMatch(/cacheError\(this\.spec, this\.source, null\)/);
-  });
-
-  test("errored face click-through resolves the block at event time", () => {
-    // The jsdom tests above cover the caret landings; this pins the
-    // mechanism: the ERROR branch swallows mousedown and places the caret
-    // itself via posAtDOM on the wrap (the block may have moved since
-    // toDOM), while the success face keeps CM6's edge mapping.
-    expect(diagramSrc).toMatch(/function placeCaretOnErrorLine/);
-    expect(diagramSrc).toMatch(/view\.posAtDOM\(wrap\)/);
-    expect(diagramSrc).toMatch(
-      /placeCaretOnErrorLine\(view, wrap, this\.source, res\)/,
-    );
-    // Exactly one attach site: the error branch, never the success face.
-    expect(diagramSrc.match(/placeCaretOnErrorLine\(/g)).toHaveLength(2);
   });
 
   test("Wysiwyg wires BOTH renderers and the diagram-zoom opener", () => {
@@ -516,5 +590,8 @@ describe("diagram wiring", () => {
       /excalidrawDecorations\([\s\S]{1,120}effectiveHybridSurfaceTheme\(surface\) === "dark"/,
     );
     expect(wysiwygSrc).toMatch(/openDiagramZoom\(svg\)/);
+    // The actions row the widget builds is the hook the editor's stylesheet
+    // targets; the rendered DOM half is asserted above.
+    expect(wysiwygSrc).toMatch(/cm-md-diagram-actions/);
   });
 });
