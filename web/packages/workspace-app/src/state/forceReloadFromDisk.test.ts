@@ -26,15 +26,23 @@ import {
   forceReloadFromDisk,
   layout,
   overwriteDiskConflict,
-  registerDocUnflushedQuery,
+  registerLiveSessionKind,
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
 
-/// Per-test control over the doc-unflushed query (registered once,
-/// module-global, like docSync's real registration).
+/// Per-test control over the unflushed query (registered once,
+/// module-global, like the real ones). A kind registers all five members,
+/// so the four this fixture has no opinion on are written as the no-ops
+/// they are rather than left out.
 const unflushedIds = new Set<string>();
-registerDocUnflushedQuery((tabId) => unflushedIds.has(tabId));
+registerLiveSessionKind({
+  save: async () => "classic",
+  release: () => {},
+  savePaused: () => false,
+  unflushed: (tabId) => unflushedIds.has(tabId),
+  fallbackSaved: () => {},
+});
 
 let nextTabId = 0;
 

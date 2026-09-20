@@ -5279,47 +5279,56 @@ export async function overwriteConflictedTab(): Promise<void> {
 export type DocSaveDelegate = (
   t: FileTab,
 ) => Promise<"saved" | "degraded" | "classic">;
+
+/// One live-session kind's whole integration with the classic save path.
+///
+/// Every member is required. A kind that fills only some of them is
+/// indistinguishable at runtime from one whose sessions all answer no, so
+/// the gap surfaces as a prompt that does not warn or a session that never
+/// takes ownership back, with nothing to read. A member a kind has nothing
+/// to do for is written here as a no-op, where the decision is visible.
+export type LiveSessionKind = {
+  save: DocSaveDelegate;
+  /// Release `tabId`'s session, if this kind holds it. `immediate` skips
+  /// the remount linger: tab close, rename rekey and file discard detach
+  /// now, which also asks the server for a prompt flush.
+  release: (tabId: string, immediate: boolean) => void;
+  /// Is `tabId`'s session degraded by a still-retrying CONNECTION outage
+  /// (dead server)? When true the classic autosave PUT is doomed and its
+  /// `tab.error` would unmount the editor, so the save path stays quiet
+  /// and leaves the buffer for the reattach diff-push.
+  savePaused: (tabId: string) => boolean;
+  /// Does `tabId`'s session hold state the DISK does not (unconfirmed
+  /// edits, an in-flight push, or a confirmed-but-unflushed authority)?
+  /// The force-reload prompt keys on this; for an attached tab
+  /// `content === saved` only means "confirmed", not "on disk".
+  unflushed: (tabId: string) => boolean;
+  /// A classic PUT for `tabId` just landed on disk. A session degraded
+  /// with its channel still up uses this to resync and take ownership of
+  /// saves back, so there is one writer again instead of a session that
+  /// stays degraded-classic for the rest of its life.
+  fallbackSaved: (tabId: string) => void;
+};
+
 const docSaveDelegates: DocSaveDelegate[] = [];
-export function registerDocSaveDelegate(fn: DocSaveDelegate): void {
-  docSaveDelegates.push(fn);
-}
-
 const docReleaseHooks: ((tabId: string, immediate: boolean) => void)[] = [];
-export function registerDocReleaseHook(
-  fn: (tabId: string, immediate: boolean) => void,
-): void {
-  docReleaseHooks.push(fn);
-}
-
-/// Query: is `tabId`'s live session degraded by a still-retrying CONNECTION
-/// outage (dead server)? When true the classic autosave PUT is doomed and
-/// its `tab.error` would unmount the editor, so the save path stays quiet
-/// and leaves the buffer for the reattach diff-push.
 const docSavePausedQueries: ((tabId: string) => boolean)[] = [];
-export function registerDocSavePausedQuery(fn: (tabId: string) => boolean): void {
-  docSavePausedQueries.push(fn);
+const docUnflushedQueries: ((tabId: string) => boolean)[] = [];
+const docFallbackSavedHooks: ((tabId: string) => void)[] = [];
+
+/// Register a live-session kind, once per sync module at ITS module load.
+/// A kind answers for the tab ids it holds and defers on the rest, so the
+/// members run in registration order and the first non-classic answer wins.
+export function registerLiveSessionKind(kind: LiveSessionKind): void {
+  docSaveDelegates.push(kind.save);
+  docReleaseHooks.push(kind.release);
+  docSavePausedQueries.push(kind.savePaused);
+  docUnflushedQueries.push(kind.unflushed);
+  docFallbackSavedHooks.push(kind.fallbackSaved);
 }
 
-/// Query: does `tabId`'s live session hold state the DISK does not
-/// (unconfirmed edits, an in-flight push, or a confirmed-but-unflushed
-/// authority)? The force-reload prompt keys on this; for attached tabs
-/// `content === saved` only means "confirmed", not "on disk".
-const docUnflushedQueries: ((tabId: string) => boolean)[] = [];
-export function registerDocUnflushedQuery(fn: (tabId: string) => boolean): void {
-  docUnflushedQueries.push(fn);
-}
 export function isDocUnflushed(tabId: string): boolean {
   return docUnflushedQueries.some((q) => q(tabId));
-}
-
-/// Hook: a classic PUT for `tabId` just landed on disk. A session
-/// degraded with its channel still up uses this to resync and take
-/// ownership of saves back (single writer) instead of staying
-/// degraded-classic forever; session modules ignore ids they do not
-/// hold.
-const docFallbackSavedHooks: ((tabId: string) => void)[] = [];
-export function registerDocFallbackSavedHook(fn: (tabId: string) => void): void {
-  docFallbackSavedHooks.push(fn);
 }
 
 /// Release a tab's live session, if any. Every registered hook runs (a

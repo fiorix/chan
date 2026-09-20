@@ -220,7 +220,9 @@ class FakeBinding implements SceneCanvasBinding {
   }
   flushPendingLocal(): void {
     if (this.pending.length === 0 || !this.session) return;
-    this.session.pushScene(this.pending.splice(0));
+    // Mirrors the canvas: the deltas stay pending unless the session took
+    // them, which is what lets a dropped push survive to the reconnect.
+    if (this.session.pushScene(this.pending)) this.pending = [];
   }
 }
 
@@ -702,6 +704,47 @@ function sceneBufferWith(elementId: string): string {
     files: {},
   });
 }
+
+describe("an element drawn while the channel is down", () => {
+  test("reaches the authority on the reconnect", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding } = attached(tab!);
+
+    // Past the reconnect grace: degraded, socket down, redial running.
+    lastSocket().drop();
+    vi.advanceTimersByTime(600);
+    lastSocket().drop();
+    vi.advanceTimersByTime(1200);
+    lastSocket().drop();
+    expect(readTab(tab!.id)!.doc?.state).toBe("degraded");
+
+    // The user draws. Nothing can carry it right now, and the canvas has
+    // to keep it: a push marked as sent here is the element that is lost.
+    binding.pending.push(elem("drawn-during-outage", 2));
+    binding.flushPendingLocal();
+    expect(binding.hasPendingLocal()).toBe(true);
+
+    // The redial lands and the authority answers with its snapshot. The
+    // backoff doubles per attempt, so step until a new socket appears
+    // rather than guessing a delay.
+    const beforeRedial = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === beforeRedial; i += 1) {
+      vi.advanceTimersByTime(250);
+    }
+    expect(sockets.length).toBeGreaterThan(beforeRedial);
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+
+    expect(back.frames("push")).toHaveLength(1);
+    expect(
+      (back.frames("push")[0]!.elements as WireElement[]).map((e) => e.id),
+    ).toEqual(["drawn-during-outage"]);
+    expect(binding.hasPendingLocal()).toBe(false);
+    vi.useRealTimers();
+  });
+});
 
 describe("the classic PUT during an outage", () => {
   test("a still-retrying socket outage sends nothing at all", async () => {

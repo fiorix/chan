@@ -23,11 +23,11 @@
 /// nothing left unpushed, so dirty keeps meaning "unconfirmed local
 /// changes" for every existing consumer.
 ///
-/// Import cycle note: tabs.svelte.ts consumes this module only through
-/// the registered hooks at the bottom (save delegate + release hook +
-/// save-paused query, shared array slots with docSync), so the import
-/// edge points one way (sceneSync -> tabs) and the classic save path
-/// works even if this module never loads.
+/// Import cycle note: tabs.svelte.ts consumes this module only through the
+/// live-session kind registered at the bottom, whose members are shared
+/// array slots with docSync, so the import edge points one way (sceneSync
+/// -> tabs) and the classic save path works even if this module never
+/// loads.
 
 import {
   createSocket,
@@ -42,10 +42,8 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   markTabFileMissing,
+  registerLiveSessionKind,
   registerPaneModeSettledSink,
-  registerDocReleaseHook,
-  registerDocSaveDelegate,
-  registerDocSavePausedQuery,
   setTabDocState,
   type DocSyncStatus,
   type FileTab,
@@ -319,6 +317,32 @@ export class SceneSession {
     return !(this.ws !== null && this.ws.readyState === WebSocket.OPEN);
   }
 
+  /// True while the authority holds scene state the DISK does not: deltas
+  /// the canvas has not handed over, a push on the wire, a coalesced push
+  /// waiting behind it, or an authority that has taken changes it has not
+  /// flushed. The force-reload prompt keys on this, because for an
+  /// attached canvas `content === saved` only means the authority took
+  /// the elements, never that they reached the file.
+  hasUnflushedState(): boolean {
+    if (this.serverDirty || this.pushInFlight || this.queued !== null) return true;
+    return this.binding?.hasPendingLocal() ?? false;
+  }
+
+  /// A classic PUT for this tab just landed on disk while the session was
+  /// degraded with its channel still up. The authority's scene is now
+  /// behind the file, so promoting on the snapshot it already has would
+  /// re-adopt stale elements: redial instead, and the fresh snapshot both
+  /// heals the status and replays whatever is still only local. Sessions
+  /// degraded by a socket-down outage keep their own retry loop, and a
+  /// permanently stopped one stays stopped.
+  healAfterFallbackSave(): void {
+    if (this.retryStopped || this.closedByUs) return;
+    if (this.status !== "degraded") return;
+    if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return;
+    this.setStatus("reconnecting");
+    this.dial();
+  }
+
   peers(): number {
     const self = sessionWindowId();
     const windows = new Set<string>();
@@ -359,12 +383,25 @@ export class SceneSession {
   }
 
   /// Outbound push entry for the binding. Coalesces while a push is in
-  /// flight; the ack pump drains the queue. No-ops (binding re-pushes
-  /// after the next snapshot) when the channel is down or the attach is
-  /// read-only.
-  pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.haveSnapshot) return;
-    if (this.isReadOnlyAttach()) return;
+  /// flight; the ack pump drains the queue.
+  ///
+  /// Returns whether the authority has these deltas or will: false means
+  /// nothing was taken and the caller still owns the change, so a canvas
+  /// that marks its elements as broadcast must do so only on true. A
+  /// coalesced push IS taken, which is why the in-flight branch answers
+  /// true. The binding re-pushes whatever stayed local after the next
+  /// snapshot.
+  pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.haveSnapshot) {
+      return false;
+    }
+    // Single-writer discipline: a degraded tab's saves belong to the
+    // classic PUT path, so this must not keep pushing on a still-open
+    // socket. The same edit travelling both channels is the duplicated
+    // element and stale-token recipe. Healing back to `attached` re-opens
+    // it, and the snapshot that heals also replays what stayed local.
+    if (this.status === "degraded" || this.status === "off") return false;
+    if (this.isReadOnlyAttach()) return false;
     for (const el of elements) this.foldIntoShadow(el);
     if (this.pushInFlight) {
       const q = this.queued ?? {
@@ -379,7 +416,7 @@ export class SceneSession {
       if (appState !== undefined) q.appState = appState;
       if (files !== undefined) q.files = { ...(q.files ?? {}), ...files };
       this.queued = q;
-      return;
+      return true;
     }
     this.pushInFlight = true;
     this.send({
@@ -388,6 +425,7 @@ export class SceneSession {
       ...(appState !== undefined ? { appState } : {}),
       ...(files !== undefined ? { files } : {}),
     });
+    return true;
   }
 
   /// Outbound presence: trailing-edge throttle on pointer moves.
@@ -694,11 +732,14 @@ export class SceneSession {
     if (this.binding) {
       this.binding.applySnapshot(f.elements, f.appState, f.files);
       this.binding.collaboratorsChanged();
-      // Locally-newer elements survive the canvas reconciliation and
-      // must reach the authority (offline-edit and reattach cases).
-      this.binding.flushPendingLocal();
     }
     this.promoteIfChannelUp();
+    // Locally-newer elements survive the canvas reconciliation and must
+    // reach the authority (offline-edit and reattach cases). This runs
+    // AFTER the promotion because `pushScene` refuses to send while the
+    // session is degraded, and a snapshot landing on a degraded session is
+    // exactly the reattach this rescue exists for.
+    this.binding?.flushPendingLocal();
     this.checkFlushWaiters();
   }
 
@@ -895,12 +936,26 @@ export function resetSceneSyncForTests(): void {
 // canvas); the shared slots are arrays, so doc and scene sessions coexist
 // and each delegate answers "classic" for tabs it does not own.
 
-registerDocSaveDelegate(async (t: FileTab) => {
-  const session = registry.get(t.id);
-  if (!session || !session.ownsSaves()) return "classic";
-  if (await session.flush()) return "saved";
-  session.degrade();
-  return "degraded";
+registerLiveSessionKind({
+  async save(t: FileTab) {
+    const session = registry.get(t.id);
+    if (!session || !session.ownsSaves()) return "classic";
+    if (await session.flush()) return "saved";
+    session.degrade();
+    return "degraded";
+  },
+  release(tabId: string, immediate: boolean) {
+    releaseSceneSession(tabId, { immediate });
+  },
+  savePaused(tabId: string) {
+    return registry.get(tabId)?.isOutagePaused() ?? false;
+  },
+  unflushed(tabId: string) {
+    return registry.get(tabId)?.hasUnflushedState() ?? false;
+  },
+  fallbackSaved(tabId: string) {
+    registry.get(tabId)?.healAfterFallbackSave();
+  },
 });
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab
@@ -909,12 +964,4 @@ registerDocSaveDelegate(async (t: FileTab) => {
 // (cancel, where this is a no-op).
 registerPaneModeSettledSink(() => {
   for (const session of registry.values()) session.resyncMirror();
-});
-
-registerDocReleaseHook((tabId: string, immediate: boolean) => {
-  releaseSceneSession(tabId, { immediate });
-});
-
-registerDocSavePausedQuery((tabId: string) => {
-  return registry.get(tabId)?.isOutagePaused() ?? false;
 });

@@ -201,14 +201,20 @@
         : undefined;
     const hasFiles = Object.keys(newFiles).length > 0;
     if (deltas.length === 0 && appState === undefined && !hasFiles) return;
-    noteVersions(lastBroadcast, deltas);
-    for (const k of Object.keys(newFiles)) knownFiles.add(k);
-    if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
-    session.pushScene(
+    const taken = session.pushScene(
       deltas as WireElement[],
       appState,
       hasFiles ? newFiles : undefined,
     );
+    // Everything below records "the authority has this", so it runs only
+    // when the session took the push. A dropped one leaves the deltas,
+    // the new files and the appState pending, and the next flush sends
+    // them; marking them first is how a shape drawn while the channel was
+    // down was never pushed again.
+    if (!taken) return;
+    noteVersions(lastBroadcast, deltas);
+    for (const k of Object.keys(newFiles)) knownFiles.add(k);
+    if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
   }
 
   const binding: SceneCanvasBinding = {

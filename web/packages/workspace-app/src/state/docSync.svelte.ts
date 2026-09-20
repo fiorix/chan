@@ -61,12 +61,8 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   markTabFileMissing,
+  registerLiveSessionKind,
   registerPaneModeSettledSink,
-  registerDocFallbackSavedHook,
-  registerDocReleaseHook,
-  registerDocSaveDelegate,
-  registerDocSavePausedQuery,
-  registerDocUnflushedQuery,
   setTabDocState,
   type DocSyncStatus,
   type FileTab,
@@ -1303,17 +1299,31 @@ export function resetDocSyncForTests(): void {
 // app); the classic save path runs unhooked until then, which is correct
 // because no session can exist before this module loads.
 
-registerDocSaveDelegate(async (t: FileTab) => {
-  const session = registry.get(t.id);
-  if (!session || !session.ownsSaves()) return "classic";
-  if (await session.flush()) return "saved";
-  session.degrade();
-  // Single-writer handoff: the degrade gated the pump; wait out any
-  // push already on the wire before the classic PUT fires so the two
-  // writers never interleave and the freshest flush token is on the
-  // tab when the PUT stamps its CAS check.
-  await session.awaitPushSettled();
-  return "degraded";
+registerLiveSessionKind({
+  async save(t: FileTab) {
+    const session = registry.get(t.id);
+    if (!session || !session.ownsSaves()) return "classic";
+    if (await session.flush()) return "saved";
+    session.degrade();
+    // Single-writer handoff: the degrade gated the pump; wait out any
+    // push already on the wire before the classic PUT fires so the two
+    // writers never interleave and the freshest flush token is on the
+    // tab when the PUT stamps its CAS check.
+    await session.awaitPushSettled();
+    return "degraded";
+  },
+  release(tabId: string, immediate: boolean) {
+    releaseDocSession(tabId, { immediate });
+  },
+  savePaused(tabId: string) {
+    return registry.get(tabId)?.isOutagePaused() ?? false;
+  },
+  unflushed(tabId: string) {
+    return registry.get(tabId)?.hasUnflushedState() ?? false;
+  },
+  fallbackSaved(tabId: string) {
+    registry.get(tabId)?.healAfterFallbackSave();
+  },
 });
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab
@@ -1322,20 +1332,4 @@ registerDocSaveDelegate(async (t: FileTab) => {
 // (cancel, where this is a no-op).
 registerPaneModeSettledSink(() => {
   for (const session of registry.values()) session.resyncMirror();
-});
-
-registerDocReleaseHook((tabId: string, immediate: boolean) => {
-  releaseDocSession(tabId, { immediate });
-});
-
-registerDocFallbackSavedHook((tabId: string) => {
-  registry.get(tabId)?.healAfterFallbackSave();
-});
-
-registerDocSavePausedQuery((tabId: string) => {
-  return registry.get(tabId)?.isOutagePaused() ?? false;
-});
-
-registerDocUnflushedQuery((tabId: string) => {
-  return registry.get(tabId)?.hasUnflushedState() ?? false;
 });

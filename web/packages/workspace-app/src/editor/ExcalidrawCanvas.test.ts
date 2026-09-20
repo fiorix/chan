@@ -230,7 +230,7 @@ async function mountBound(
       bound = b;
     }),
     unbindCanvas: vi.fn(),
-    pushScene: vi.fn(),
+    pushScene: vi.fn(() => true),
     sendCursor: vi.fn(),
     peerCursorSnapshot: () => new Map([[7, { w: "win-peer", x: 1.5, y: 2 }]]),
   };
