@@ -373,7 +373,6 @@ class ImageWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    ensureDeselectListener(view);
     installUserScrollIntentTracker(view.scrollDOM);
     const wrap = document.createElement("span");
     wrap.className = "cm-md-image-wrap";
@@ -826,7 +825,7 @@ class ImageWidget extends WidgetType {
     actions.appendChild(copyBtn);
     wrap.appendChild(actions);
 
-    // Per-image data the document-level keymap (ensureDeselectListener)
+    // Per-image data the document-level keymap (imageSelectionListeners)
     // needs to route Cmd+Enter (view) and Cmd+C (copy) without having
     // to walk the syntax tree. The keymap finds the wrap via the
     // `data-selected` ring, then reads this property to dispatch the
@@ -860,92 +859,130 @@ function clearImageSelection(view: EditorView): void {
   }
 }
 
-/// Per-view flag so the document-level "click-outside clears
-/// selection" + keyboard listeners install exactly once even when
-/// many image widgets render. Stored on the EditorView's DOM so
-/// they get torn down with the view.
-function ensureDeselectListener(view: EditorView): void {
-  const dom = view.dom as HTMLElement & { _chanImgDeselect?: boolean };
-  if (dom._chanImgDeselect) return;
-  dom._chanImgDeselect = true;
-  document.addEventListener("mousedown", (e) => {
-    const t = e.target as Node | null;
-    if (!t) return;
-    // Click inside an image wrap (or its hover overlay buttons)
-    // leaves selection alone - the widget's own mousedown will
-    // re-set the ring on the clicked wrap.
-    if ((t as Element).closest?.(".cm-md-image-wrap")) return;
-    clearImageSelection(view);
-  });
-  document.addEventListener("keydown", (e) => {
-    const selected = view.dom.querySelector(
-      ".cm-md-image-wrap[data-selected]",
-    ) as HTMLElement | null;
-    if (!selected) return;
-    const posAttr = selected.dataset.imagePos;
-    if (posAttr === undefined) return;
-    const hintPos = Number(posAttr);
-    if (!Number.isFinite(hintPos)) return;
-    const payload = (selected as HTMLElement & {
-      _chanImg?: ImageActionPayload;
-    })._chanImg;
-    const hasMod = e.metaKey || e.ctrlKey;
-    // Cmd/Ctrl+Enter - same as clicking the View button (zoom modal).
-    if (hasMod && e.key === "Enter" && !e.altKey && !e.shiftKey) {
-      e.preventDefault();
-      if (payload?.onClick && !isExcalidrawImageSrc(payload.src)) {
-        payload.onClick({
-          src: payload.src,
-          alt: payload.alt,
-          pos: payload.nodePos,
-        });
-      }
-      clearImageSelection(view);
-      return;
+/// The document-level listeners the image ring needs, owned by the view
+/// that installs them.
+///
+/// They have to be on `document`: a click anywhere in the app clears the
+/// ring, and a key pressed with an image selected acts on it wherever the
+/// focus sits. What they must not do is outlive their view or answer for
+/// another one. A ViewPlugin gives them the view's lifetime, `destroy`
+/// takes them off again, and each handler ignores an event that belongs to
+/// a different editor, so two open panes no longer reach into each other:
+/// an Enter typed in one pane used to move the other pane's caret into an
+/// image URL and steal the focus back.
+const imageSelectionListeners = ViewPlugin.fromClass(
+  class {
+    private readonly onMouseDown: (e: MouseEvent) => void;
+    private readonly onKeyDown: (e: KeyboardEvent) => void;
+
+    constructor(readonly view: EditorView) {
+      this.onMouseDown = (e: MouseEvent) => {
+        if (!this.ownsEvent(e)) return;
+        // A press inside an image wrap (or on its hover overlay buttons)
+        // leaves the ring alone: the widget's own mousedown re-sets it on
+        // the wrap that was clicked.
+        if ((e.target as Element).closest?.(".cm-md-image-wrap")) return;
+        clearImageSelection(view);
+      };
+      this.onKeyDown = (e: KeyboardEvent) => {
+        if (!this.ownsEvent(e)) return;
+
+        const selected = view.dom.querySelector(
+          ".cm-md-image-wrap[data-selected]",
+        ) as HTMLElement | null;
+        if (!selected) return;
+        const posAttr = selected.dataset.imagePos;
+        if (posAttr === undefined) return;
+        const hintPos = Number(posAttr);
+        if (!Number.isFinite(hintPos)) return;
+        const payload = (selected as HTMLElement & {
+          _chanImg?: ImageActionPayload;
+        })._chanImg;
+        const hasMod = e.metaKey || e.ctrlKey;
+        // Cmd/Ctrl+Enter - same as clicking the View button (zoom modal).
+        if (hasMod && e.key === "Enter" && !e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          if (payload?.onClick && !isExcalidrawImageSrc(payload.src)) {
+            payload.onClick({
+              src: payload.src,
+              alt: payload.alt,
+              pos: payload.nodePos,
+            });
+          }
+          clearImageSelection(view);
+          return;
+        }
+        // Cmd/Ctrl+C - same as clicking the Copy button. We only consume
+        // the key when no text range is selected, so a regular text copy
+        // (range selection that happens to span an image) keeps working.
+        if (
+          hasMod &&
+          (e.key === "c" || e.key === "C") &&
+          !e.altKey &&
+          !e.shiftKey &&
+          view.state.selection.main.empty
+        ) {
+          if (payload && !isExcalidrawImageSrc(payload.src)) {
+            e.preventDefault();
+            void copyImageMarkdown(view, selected, payload.nodePos).catch(
+              () => {
+                // The copy surfaces its own failure on the button; from the
+                // keyboard there is no button, and an unhandled rejection is
+                // not a report.
+              },
+            );
+          }
+          return;
+        }
+        // Plain Enter - same as clicking the Edit button.
+        if (!hasMod && !e.altKey && !e.shiftKey && e.key === "Enter") {
+          e.preventDefault();
+          placeCaretInImageUrl(view, selected, hintPos);
+          clearImageSelection(view);
+          return;
+        }
+        // Backspace / Delete are deliberately NOT handled here. The
+        // EditorView.atomicRanges entry (imageDecorations) already gives
+        // correct, DIRECTIONAL deletion: Backspace with the caret at the
+        // image's trailing edge (or Delete at the leading edge) removes the
+        // whole `![alt](src)` atom in one stroke, while a delete one or two
+        // positions OUTSIDE the image edits the adjacent character. A global
+        // delete keyed on the `data-selected` ring was non-directional and
+        // fired off a ring the caret had already left: a one-past Backspace
+        // deletes the char and lands the caret on the edge, which sets the
+        // ring synchronously, and the same keydown then nuked the image too
+        // (char + image gone in one press). Letting CM6's atomic deletion
+        // stand fixes that; the ring still drives Enter / Cmd+Enter / Cmd+C.
+      };
+      document.addEventListener("mousedown", this.onMouseDown);
+      document.addEventListener("keydown", this.onKeyDown);
     }
-    // Cmd/Ctrl+C - same as clicking the Copy button. We only consume
-    // the key when no text range is selected, so a regular text copy
-    // (range selection that happens to span an image) keeps working.
-    if (
-      hasMod &&
-      (e.key === "c" || e.key === "C") &&
-      !e.altKey &&
-      !e.shiftKey &&
-      view.state.selection.main.empty
-    ) {
-      if (payload && !isExcalidrawImageSrc(payload.src)) {
-        e.preventDefault();
-        void copyImageMarkdown(view, selected, payload.nodePos).catch(
-          () => {
-            // The copy surfaces its own failure on the button; from the
-            // keyboard there is no button, and an unhandled rejection is
-            // not a report.
-          },
-        );
-      }
-      return;
+
+    /// Whether this view may answer the event: it came from inside this
+    /// view, or from no editor at all.
+    ///
+    /// The test is "not another editor's", not "inside mine". An event
+    /// carrying another view's DOM is that view's business, which is what
+    /// stops two panes reaching into each other. An event with no editor
+    /// behind it still reaches every view, because a ring is set by
+    /// clicking the image and that click does not put the caret in the
+    /// document: the keystroke that follows can come from the body with
+    /// no editor focused, and dropping it would kill Cmd+C for the ring
+    /// it exists to serve.
+    private ownsEvent(e: Event): boolean {
+      const target = e.target as Element | null;
+      if (target === null) return true;
+      if (this.view.dom.contains(target)) return true;
+      if (typeof target.closest !== "function") return true;
+      return target.closest(".cm-editor") === null;
     }
-    // Plain Enter - same as clicking the Edit button.
-    if (!hasMod && !e.altKey && !e.shiftKey && e.key === "Enter") {
-      e.preventDefault();
-      placeCaretInImageUrl(view, selected, hintPos);
-      clearImageSelection(view);
-      return;
+
+    destroy(): void {
+      document.removeEventListener("mousedown", this.onMouseDown);
+      document.removeEventListener("keydown", this.onKeyDown);
     }
-    // Backspace / Delete are deliberately NOT handled here. The
-    // EditorView.atomicRanges entry (imageDecorations) already gives
-    // correct, DIRECTIONAL deletion: Backspace with the caret at the
-    // image's trailing edge (or Delete at the leading edge) removes the
-    // whole `![alt](src)` atom in one stroke, while a delete one or two
-    // positions OUTSIDE the image edits the adjacent character. A global
-    // delete keyed on the `data-selected` ring was non-directional and
-    // fired off a ring the caret had already left: a one-past Backspace
-    // deletes the char and lands the caret on the edge, which sets the
-    // ring synchronously, and the same keydown then nuked the image too
-    // (char + image gone in one press). Letting CM6's atomic deletion
-    // stand fixes that; the ring still drives Enter / Cmd+Enter / Cmd+C.
-  });
-}
+  },
+);
 
 /// Outer source range of the Image node a widget stands for, or null when
 /// the tree cannot answer (transient during edits). Shared by every action
@@ -1074,7 +1111,7 @@ function commitImageWidth(
 /// experienced as a stray click "landing in the source". Edit mode
 /// is now an explicit verb: the Edit button on the hover overlay,
 /// or Cmd/Ctrl+Enter while the image is selected (see the keydown
-/// handler in ensureDeselectListener).
+/// handler in imageSelectionListeners).
 export function imageCaretRedirect(): Extension {
   return EditorView.updateListener.of((u) => {
     if (!u.selectionSet && !u.docChanged && !u.viewportChanged) return;
@@ -1179,6 +1216,7 @@ export function imageDecorations(opts: ImageOptions): Extension {
   });
   return [
     plugin,
+    imageSelectionListeners,
     blockField,
     EditorView.atomicRanges.of(
       (view) => view.plugin(plugin)?.decorations ?? Decoration.none,
