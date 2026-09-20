@@ -2,8 +2,9 @@
 // command + Select controls and the New-workspace button. Registry/feed rendering loads
 // asynchronously from the backend and is covered by the state + component
 // tests; this keeps the mount path itself green. Also covers the error
-// notice bubble's Dismiss -- a real component mount, since an error with no
-// way to clear it short of a reload was the reported bug.
+// notice bubble's Dismiss, in a real component mount: a bubble that Dismiss
+// does not clear leaves the launcher carrying a stale error with no way back
+// short of a reload.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";

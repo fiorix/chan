@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 //
-// A render throw inside the command deck used to take the whole launcher
-// surface down, with no way back short of a reload. The boundary around the
-// deck contains it: the launcher stays mounted and listening, and the deck's
-// place says what failed and offers a retry.
+// The command deck renders behind a boundary in CommandLauncher, so a render
+// throw inside the deck is contained where the deck was: the launcher stays
+// mounted and listening, and the deck's place says what failed and offers a
+// retry. Without the boundary the throw takes the whole launcher surface down
+// with no way back short of a reload.
 //
 // The deck is replaced by a component that throws while rendering, which is
-// acceptance 3's case stated directly. It is also what the duplicate-key
-// failures of this item look like from the launcher's side, since
-// each_key_duplicate is thrown while the deck renders its keyed list.
+// that failure stated directly. It is also what a duplicate key looks like
+// from the launcher's side, since each_key_duplicate is thrown while the deck
+// renders its keyed list.
 //
 // Worth knowing for anyone placing the next boundary: <svelte:boundary>
 // catches throws from rendering its children, NOT a throw raised while the
