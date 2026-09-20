@@ -850,10 +850,6 @@ impl DevserverState {
             settlement.disarm();
             return Ok(attempt.prefix.clone());
         }
-        // What this attempt may undo if its bound expires. Read it before the
-        // bounded call, because afterwards a mounted root proves nothing about
-        // who mounted it.
-        let root_was_mounted = self.host.is_root_mounted(&attempt.root);
         let result = time_bound_mount(
             timeout,
             self.host.open_or_get_registered_workspace(
@@ -899,13 +895,15 @@ impl DevserverState {
                 Err(error)
             }
             Err(MountTimedOut) => {
+                // An expired bound has nothing of its own to undo. The host
+                // publishes a tenant and returns in the same poll, with no
+                // await in between, so a mount that published always completes
+                // and lands in the success arm above; reaching here means this
+                // attempt published nothing. Any tenant at this root is another
+                // caller's, and closing it would end terminal sessions nobody
+                // asked to end.
                 let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
-                if root_was_mounted {
-                    self.finish_failed_attempt_leaving_root(&attempt, reason.clone());
-                } else {
-                    let _ = self.host.close_workspace(&attempt.prefix, true).await;
-                    self.finish_failed_attempt(&attempt, reason.clone());
-                }
+                self.finish_failed_attempt(&attempt, reason.clone());
                 settlement.disarm();
                 Err(Error::Config(reason))
             }
@@ -943,15 +941,17 @@ impl DevserverState {
         record.generation == attempt.generation && record.desired == DesiredMount::On
     }
 
+    /// Settle a mount attempt that did not produce a tenant: record the failure
+    /// against this attempt's own record, and mark the ROOT failed only when
+    /// nothing is serving it.
+    ///
+    /// The mounted check is taken here, after the attempt has finished, rather
+    /// than before it began: a root something else has mounted is not this
+    /// attempt's to describe, and only the present state says whose it is. A
+    /// mark laid over a live tenant is invisible while it serves, because
+    /// [`WorkspaceHost::workspace_status`] reports a mounted root as running,
+    /// and surfaces later as a stale failure once that tenant closes.
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
-        self.record_failed_attempt(attempt, reason, true);
-    }
-
-    fn finish_failed_attempt_leaving_root(&self, attempt: &MountAttempt, reason: String) {
-        self.record_failed_attempt(attempt, reason, false);
-    }
-
-    fn record_failed_attempt(&self, attempt: &MountAttempt, reason: String, mark_root: bool) {
         let adopted_failure = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
@@ -959,7 +959,7 @@ impl DevserverState {
                 .is_some_and(|record| record.complete_failure(attempt.generation, reason.clone()))
         };
         if adopted_failure {
-            if mark_root {
+            if !self.host.is_root_mounted(&attempt.root) {
                 self.host.mark_workspace_failed(&attempt.root, reason);
             }
         } else {
@@ -1384,6 +1384,11 @@ impl DevserverState {
         let mounted = self.host.is_root_mounted(&record.root);
         let (status, error) = match &record.phase {
             MountPhase::Starting => (WorkspaceStatus::Starting, None),
+            // A failed attempt does not get to describe a root something else
+            // is serving. The row such a root earns is the one it would have
+            // with no record here at all, and the attempt's own failure went to
+            // whoever asked for the mount.
+            MountPhase::Failed(_) if mounted => self.host.workspace_status(&record.root),
             MountPhase::Failed(reason) => (WorkspaceStatus::Error, Some(reason.clone())),
             // A mounted tenant is `running` UNLESS the health probe has found
             // its filesystem unreachable. Short-circuiting to `running` here is
