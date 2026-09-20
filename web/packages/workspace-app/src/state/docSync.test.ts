@@ -35,6 +35,7 @@ import {
   isDocAttached,
   isDocSavePaused,
   layout,
+  reorderTab,
   saveTab,
   scheduleAutosave,
   scheduleMissingFileCheck,
@@ -1310,3 +1311,64 @@ describe("conflicts", () => {
     mounted.cleanup();
   });
 });
+
+// ---- a session whose tab was replaced under it ------------------------------
+//
+// Every reorder, cross-pane move and Hybrid Nav commit rebuilds a tab as a
+// clone, and a session survives those without rebinding. A session that holds
+// the object it was constructed with therefore writes its status onto a copy
+// nobody renders or saves from, and the tab in the layout keeps whatever it
+// was last mirrored with.
+
+describe("a session follows its tab through a move", () => {
+  function liveTab(id: string): FileTab {
+    const pane = layout.nodes["pane-test"] as LeafNode;
+    return pane.tabs.find((t) => t.id === id) as FileTab;
+  }
+
+  test("a status change after a reorder reaches the tab in the layout", async () => {
+    const tab = fileTab();
+    const other = fileTab();
+    resetLayout([tab, other]);
+    const { sock, cleanup } = await attached(tab);
+    expect(liveTab(tab.id).doc?.state).toBe("attached");
+
+    reorderTab("pane-test", tab.id, 1);
+    // The clone is a different object; the session was not told.
+    expect(liveTab(tab.id)).not.toBe(tab);
+
+    sock.drop();
+    await flushMicro();
+
+    // Reconnecting or degraded, the point is that it moved off "attached".
+    expect(liveTab(tab.id).doc?.state).not.toBe("attached");
+    cleanup();
+  });
+
+  test("a degraded session after a reorder does not suppress the classic save", async () => {
+    // isDocSavePaused answers true for anything isDocAttached answers true
+    // for, so a tab frozen at "attached" over a session that has stopped
+    // owning saves swallows the PUT and the buffer never reaches disk.
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = fileTab();
+    const other = fileTab();
+    resetLayout([tab, other]);
+    const { session, cleanup } = await attached(tab);
+
+    reorderTab("pane-test", tab.id, 1);
+    session.degrade();
+    await flushMicro();
+
+    const moved = liveTab(tab.id);
+    expect(isDocAttached(moved)).toBe(false);
+    expect(isDocSavePaused(moved)).toBe(false);
+
+    moved.content = moved.content + "\n";
+    await saveTab(moved);
+    await flushMicro();
+
+    expect(write).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+});
+
