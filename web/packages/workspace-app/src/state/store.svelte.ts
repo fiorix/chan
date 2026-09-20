@@ -5293,9 +5293,7 @@ async function performMove(path: string, target: string): Promise<void> {
       );
     }
     if (resp.conflicts.length > 0) {
-      linkBits.push(
-        `${resp.conflicts.length} conflict${resp.conflicts.length === 1 ? "" : "s"}`,
-      );
+      linkBits.push(conflictSummary(resp.conflicts));
     }
     // Route the success message through the transient helper so
     // it auto-dismisses. Error path stays persistent so the user
@@ -5319,6 +5317,25 @@ async function performMove(path: string, target: string): Promise<void> {
     movingPaths.delete(path);
     movingPaths.delete(target);
   }
+}
+
+/// How many conflicting paths a notice names before it starts counting. The
+/// list comes from the server and has no bound, while `ui.status` is one line,
+/// so the notice says how many there are, shows enough to start looking, and
+/// counts the rest. Three is what fits beside the count without pushing the
+/// scale off the end of the line.
+const NAMED_CONFLICTS = 3;
+
+/// One sentence for the link rewrites a move could not apply, the same for one
+/// file and for many. The count leads because it is the scale of the problem;
+/// the paths follow because they are where to go and fix it.
+function conflictSummary(conflicts: string[]): string {
+  const shown = conflicts.slice(0, NAMED_CONFLICTS);
+  const rest = conflicts.length - shown.length;
+  return (
+    `${conflicts.length} link conflict${conflicts.length === 1 ? "" : "s"}: ` +
+    `${shown.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`
+  );
 }
 
 /// One sentence for a destination name that is already taken, so every
@@ -5402,12 +5419,7 @@ async function performTransferInto(
       for (const { tabId } of tabsForPath(to)) clearTabError(tabId);
     }
   }
-  ui.status =
-    resp.conflicts.length > 0
-      ? `${resp.conflicts.length} link conflict${
-          resp.conflicts.length === 1 ? "" : "s"
-        }: ${resp.conflicts.join(", ")}`
-      : null;
+  ui.status = resp.conflicts.length > 0 ? conflictSummary(resp.conflicts) : null;
   return resp.moved.map((m) => m.to);
 }
 

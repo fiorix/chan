@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const moved = vi.hoisted(() => ({ calls: [] as Array<[string, string]> }));
+const conflicts = vi.hoisted(() => ({ paths: [] as string[] }));
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -19,7 +20,7 @@ vi.mock("../api/client", async (importOriginal) => {
       list: vi.fn(async () => []),
       move: vi.fn(async (from: string, to: string) => {
         moved.calls.push([from, to]);
-        return { rewritten: [], conflicts: [] };
+        return { rewritten: [], conflicts: conflicts.paths };
       }),
     },
   };
@@ -29,6 +30,7 @@ import { fileOps, tree, ui } from "./store.svelte";
 
 beforeEach(() => {
   moved.calls = [];
+  conflicts.paths = [];
   ui.status = null;
   tree.entries = [
     { path: "a.md", is_dir: false, kind: "document", size: 1, mtime: null },
@@ -65,5 +67,14 @@ describe("a move onto a name that is taken", () => {
     await fileOps.moveTo("a.md", "free.md");
 
     expect(moved.calls).toEqual([["a.md", "free.md"]]);
+  });
+
+  test("a single move names its conflicts and counts the rest, as a many-move does", async () => {
+    conflicts.paths = ["c1.md", "c2.md", "c3.md", "c4.md"];
+
+    await fileOps.moveTo("a.md", "free.md");
+
+    expect(ui.status).toContain("4 link conflicts: c1.md, c2.md, c3.md, and 1 more");
+    expect(ui.status, "the rest are counted, not printed").not.toContain("c4.md");
   });
 });

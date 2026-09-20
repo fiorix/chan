@@ -214,7 +214,21 @@ describe("a multi-row move", () => {
     dropOnDir(target, "dest", ["a.md", "b.md"]);
     await settle();
 
-    expect(said(), "the conflicting path is named").toContain("notes/links.md");
+    expect(said()).toContain("1 link conflict: notes/links.md");
+  });
+
+  test("counts the conflicts it does not name", async () => {
+    // The list comes from the server and has no bound; the status line does.
+    served.transfer.moved = [{ from: "b.md", to: "dest/b.md" }];
+    served.transfer.conflicts = ["c1.md", "c2.md", "c3.md", "c4.md", "c5.md"];
+    const target = mountTree();
+    await settle();
+
+    dropOnDir(target, "dest", ["a.md", "b.md"]);
+    await settle();
+
+    expect(said()).toContain("5 link conflicts: c1.md, c2.md, c3.md, and 2 more");
+    expect(said(), "the rest are counted, not printed").not.toContain("c4.md");
   });
 
   test("refuses an occupied name in a listed destination", async () => {
