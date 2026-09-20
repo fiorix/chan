@@ -27,6 +27,7 @@ const listOwnedDevservers = vi.fn();
 const listIncomingShares = vi.fn();
 const listDevserverGrants = vi.fn();
 const deleteDevserverGrant = vi.fn();
+const addDevserverGrant = vi.fn();
 
 vi.mock("../lib/api", async () => ({
   HttpError: (await import("@chan/web-shared/api")).HttpError,
@@ -39,7 +40,7 @@ vi.mock("../lib/api", async () => ({
     listIncomingShares: () => listIncomingShares(),
     listDevserverGrants: (id: string) => listDevserverGrants(id),
     deleteDevserverGrant: (id: string) => deleteDevserverGrant(id),
-    addDevserverGrant: vi.fn(),
+    addDevserverGrant: (id: string, email: string) => addDevserverGrant(id, email),
     listInvites: vi.fn(async () => []),
   },
 }));
@@ -108,6 +109,7 @@ beforeEach(() => {
     { id: "g1", grantee_email: "friend@example.com", accepted_at: null },
   ]);
   deleteDevserverGrant.mockRejectedValue(new Error(REFUSAL));
+  addDevserverGrant.mockRejectedValue(new Error(REFUSAL));
 });
 
 afterEach(() => {
@@ -277,5 +279,47 @@ describe("reopening a share panel", () => {
     expect(target.textContent).toContain("other@example.com");
     expect(target.textContent).not.toContain("friend@example.com");
     expect(target.textContent).not.toContain("Not revoked");
+  });
+});
+
+describe("the add-grant form submitted twice", () => {
+  test("adds one grant, however fast the second submit lands", async () => {
+    let settleFirst: () => void = () => {};
+    let calls = 0;
+    addDevserverGrant.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          settleFirst = () =>
+            resolve({ id: "g9", grantee_email: "new@example.com", accepted_at: null });
+        });
+      }
+      return Promise.reject(new Error(REFUSAL));
+    });
+
+    const target = await mountView("./Devservers.svelte", { devservers: [] });
+    buttonWith(target, "Share").click();
+    await flush();
+
+    const email = target.querySelector<HTMLInputElement>('input[type="email"]');
+    expect(email, "the grantee input").toBeTruthy();
+    email!.value = "new@example.com";
+    email!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    // Same gesture as the revoke: two submits inside one frame, before the
+    // disabled attribute the handler sets has reached the DOM.
+    const add = buttonWith(target, "Add");
+    add.click();
+    add.click();
+    await flush();
+
+    settleFirst();
+    await flush();
+
+    expect(addDevserverGrant).toHaveBeenCalledTimes(1);
+    expect(unhandled).toEqual([]);
+    expect(target.textContent).toContain("new@example.com");
+    expect(target.textContent).not.toContain(REFUSAL);
   });
 });
