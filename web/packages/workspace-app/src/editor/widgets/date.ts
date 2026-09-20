@@ -37,6 +37,7 @@ import {
 import { findDateMatches, type DateFormatId } from "../dateFormats";
 import { selectionInRange } from "../decorations/selection";
 import { openDatePopover } from "../overlays/date_popover";
+import { isWidgetWritable } from "./writable";
 import { currentPreferences, persistDateFormat } from "../../state/store.svelte";
 
 /// Nodes whose interior should never get pilled. Code (inline +
@@ -93,17 +94,20 @@ class DateWidget extends WidgetType {
       if (pos < 0) return;
       const from = pos;
       const to = pos + this.text.length;
-      // Live read-only check so the same widget covers all three
-      // surfaces (chat replies, user "read" toggle, fs-locked file)
-      // without rebuilding decorations. The editable facet reflects
-      // the current Wysiwyg.readonly state through editableCompartment.
-      const editable = view.state.facet(EditorView.editable);
+      // Live read-only check so the same widget covers every locked
+      // surface (chat replies, the user "read" toggle, an fs-locked file,
+      // a locked prompt draft) without rebuilding decorations. The shared
+      // predicate reads both spellings of the lock.
+      const writable = isWidgetWritable(view);
       openDatePopover({
         anchor: el,
         initialDate: this.date,
         initialFormatId: this.formatId,
-        readonly: !editable,
+        readonly: !writable,
         onCommit: (formatted, formatId) => {
+          // The popover opens read-only above, so this is the second line
+          // of defence rather than the first: the write asks for itself.
+          if (!isWidgetWritable(view)) return;
           // Caret must always land OUTSIDE the date range so the
           // pill re-renders (anywhere inside / at the boundary
           // keeps it in source-edit mode). Two cases:

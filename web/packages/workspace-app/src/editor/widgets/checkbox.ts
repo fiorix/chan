@@ -13,6 +13,7 @@
 // same DOM, no remount on unrelated transactions.
 
 import { WidgetType, type EditorView } from "@codemirror/view";
+import { isWidgetWritable } from "./writable";
 
 export class CheckboxWidget extends WidgetType {
   constructor(readonly checked: boolean) {
@@ -56,6 +57,11 @@ export class CheckboxWidget extends WidgetType {
 }
 
 function togglePosition(view: EditorView, el: HTMLElement): void {
+  // A checkbox is the one widget the user can operate without typing, so
+  // it is the one that reaches a view they cannot type into: a document in
+  // read mode, a file the filesystem refuses, a locked prompt draft. The
+  // toggle is a document change, so it asks first.
+  if (!isWidgetWritable(view)) return;
   const pos = view.posAtDOM(el);
   if (pos < 0 || pos > view.state.doc.length - 3) return;
   const text = view.state.doc.sliceString(pos, pos + 3);

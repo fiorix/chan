@@ -59,6 +59,7 @@ import {
   clearImageDragIndicator,
   startImageDragIndicator,
 } from "../image_drag_indicator";
+import { isWidgetWritable } from "./writable";
 
 const MIN_IMG_WIDTH = 40;
 const USER_SCROLL_QUIET_MS = 900;
@@ -1003,6 +1004,10 @@ function commitImageWidth(
   wrap: HTMLElement,
   width: number,
 ): void {
+  // The resize handle renders from the widget's captured `writable` flag;
+  // this is the write itself, so it asks the live predicate, which also
+  // covers the surface that locks the state while leaving it editable.
+  if (!isWidgetWritable(view)) return;
   const wrapPos = view.posAtDOM(wrap);
   if (wrapPos < 0) return;
   // Walk the syntax tree from wrapPos out to the enclosing Image node

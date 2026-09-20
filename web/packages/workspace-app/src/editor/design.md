@@ -26,7 +26,7 @@ Because the source is the single source of truth, the editor sidesteps a class o
    - **Atom widgets**: show widget unless selection intersects the source range; on intersect, suppress the widget and reveal source so the user can edit literally.
    - **Always-visible markers** (`>`, list markers, `---`, fences): styled via marks/line decorations, never hidden.
 
-5. **Atom strategy (split by token type).**
+5. **Atom strategy (split by token type).** A widget dispatches a document change only into a view the user can edit, and `widgets/writable.ts` is the one predicate that answers it: read-only is spelled two ways, `EditorState.readOnly` for the prompt composer and the `EditorView.editable` facet for the document surfaces, and CodeMirror enforces neither against a programmatic dispatch. Selection and effect dispatches are not writes and do not consult it.
    - **Wikilinks (`[[note|alias#anchor]]` and `[label](path)` where `path` is internal)**: atomic pill widget. Pill kind (file / contact / image / broken) resolves via `GET /api/resolve-link`, cached per target. Editing means caret-adjacent reveals raw text, OR click pill -> wiki bubble.
    - **External markdown links `[label](https://...)`**: hide markers only (`[`, `](`, `)`); `link` mark on label; URL editable in place.
    - **Naked URLs**: mark only, no hide.
