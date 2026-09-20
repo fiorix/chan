@@ -452,7 +452,10 @@
       }
     }
     collect(root.children);
-    for (const path of pending) void loadTreeDir(path);
+    // loadTreeDir records the failure in tree.dirErrors and rethrows. The row
+    // below the directory renders that record, so the rejection has a reader
+    // and does not need to reach the window as an unhandled one.
+    for (const path of pending) void loadTreeDir(path).catch(() => {});
   });
 
   function buildTree(entries: TreeEntry[]): Folder {
@@ -534,7 +537,9 @@
     // session-scoped). FileBrowserSurface's per-instance effects mirror
     // the map into the tab record; this just workspaces the reload snapshot.
     persistFbTreeInstanceExpansion(instanceId);
-    if (value) void loadTreeDir(path);
+    // Same reader as the load effect above: an expansion that cannot be listed
+    // says so on the directory's own row.
+    if (value) void loadTreeDir(path).catch(() => {});
   }
 
   function onOpen(path: string): void {

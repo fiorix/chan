@@ -183,7 +183,15 @@
     const parent = path.includes("/")
       ? path.slice(0, path.lastIndexOf("/"))
       : "";
-    void loadTreeDir(parent);
+    // A parent that could not be listed is a state, not an absence of one.
+    // loadTreeDir records the failure and clears loadingDirs without ever
+    // setting loadedDirs, so an effect that asked only "loaded or loading"
+    // would re-arm the instant the failure landed and ask forever. The
+    // failure is recorded for the File Tree's row to render, and the
+    // inspector shows what it has, which is nothing for an entry it cannot
+    // reach. Clearing the record (a collapse, a refresh) asks again.
+    if (parent in tree.dirErrors) return;
+    void loadTreeDir(parent).catch(() => {});
   });
 
   const dirStats = $derived.by(() => {

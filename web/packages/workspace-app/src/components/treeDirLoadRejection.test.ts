@@ -20,6 +20,11 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+// jsdom has no layout, so it implements no scrollIntoView. Selecting a row
+// schedules one in an animation frame, and an uncaught TypeError from a frame
+// callback fails the whole run.
+Element.prototype.scrollIntoView = vi.fn();
+
 /// How many failures the stub serves before it relents. The stub is bounded on
 /// purpose: a caller that re-arms on failure would otherwise take the worker
 /// out of memory, and a crashed run proves nothing. Bounded, the same defect
