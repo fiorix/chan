@@ -26,6 +26,10 @@
   let grants = $state<Record<string, DevserverGrant[]>>({});
   let grantsLoading = $state<Record<string, boolean>>({});
   let grantsError = $state<Record<string, string | null>>({});
+  // A failed grant REMOVAL is not a failed grant LOAD. The list is what
+  // says who holds shell-equivalent access, so a refused delete reports
+  // beside it and never in place of it.
+  let grantActionError = $state<Record<string, string>>({});
 
   // Which devserver's share panel is open (single-open keeps it compact).
   let expanded = $state<string | null>(null);
@@ -116,7 +120,10 @@
       return;
     }
     expanded = devserverId;
-    void loadGrants(devserverId);
+    // Reopening re-reads the list, so a panel never shows a cached one
+    // that a failed change has since made stale.
+    delete grantActionError[devserverId];
+    void loadGrants(devserverId, true);
   }
 
   // The `?d=` selector for a devserver: the first 12 hex chars of its
@@ -196,12 +203,14 @@
   }
 
   async function removeGrant(devserverId: string, id: string) {
+    delete grantActionError[devserverId];
     try {
       await api.deleteDevserverGrant(id);
       grants[devserverId] = (grants[devserverId] ?? []).filter((g) => g.id !== id);
       void loadLists();
     } catch (e) {
-      grantsError[devserverId] = e instanceof Error ? e.message : String(e);
+      grantActionError[devserverId] =
+        e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -323,6 +332,11 @@
                   <p class="err small">{addError[d.id]}</p>
                 {/if}
 
+                {#if grantActionError[d.id]}
+                  <p class="err small" role="alert">
+                    Not revoked: {grantActionError[d.id]}
+                  </p>
+                {/if}
                 {#if grantsLoading[d.id]}
                   <p class="muted small">Loading grants...</p>
                 {:else if grantsError[d.id]}

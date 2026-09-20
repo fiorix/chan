@@ -20,6 +20,13 @@
   let justCreated = $state<CreatedToken | null>(null);
   let copied = $state(false);
 
+  // Revoke: the token awaiting confirmation, and the last failure per
+  // token id. A refused revoke leaves a live credential, so it is
+  // reported on the row rather than anywhere else.
+  let confirmRevoke = $state<Token | null>(null);
+  let revoking = $state(false);
+  let revokeError = $state<Record<string, string>>({});
+
   // Per-token audit drilldown: id -> rows | "loading" | "error".
   // Absent key means the row is collapsed.
   let auditOpen = $state<Record<string, AuditEntry[] | "loading" | "error">>(
@@ -89,10 +96,21 @@
     showCreate = false;
   }
 
-  async function revoke(id: string) {
-    if (!confirm("Revoke this token? Existing chan devserver sessions using it will be disconnected.")) return;
-    await api.revokeToken(id);
-    await refresh();
+  async function revoke(token: Token) {
+    revoking = true;
+    delete revokeError[token.id];
+    try {
+      await api.revokeToken(token.id);
+      confirmRevoke = null;
+      await refresh();
+    } catch (e) {
+      // The row stays, carrying the reason: the credential is still
+      // live and the user has to know that.
+      revokeError[token.id] = e instanceof Error ? e.message : String(e);
+      confirmRevoke = null;
+    } finally {
+      revoking = false;
+    }
   }
 
   async function toggleAudit(id: string) {
@@ -156,12 +174,17 @@
                 {auditOpen[t.id] ? "Hide audit" : "Audit"}
               </button>
               {#if !t.revoked_at}
-                <button class="destructive" onclick={() => revoke(t.id)}>
+                <button class="destructive" onclick={() => (confirmRevoke = t)}>
                   Revoke
                 </button>
               {/if}
             </span>
           </div>
+          {#if revokeError[t.id]}
+            <p class="error small" role="alert">
+              Not revoked: {revokeError[t.id]}
+            </p>
+          {/if}
           {#if auditOpen[t.id]}
             <div class="audit">
               {#if auditOpen[t.id] === "loading"}
@@ -198,9 +221,53 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (showCreate && e.key === "Escape") dismissCreated();
+    if (e.key !== "Escape") return;
+    if (confirmRevoke) confirmRevoke = null;
+    else if (showCreate) dismissCreated();
   }}
 />
+
+{#if confirmRevoke}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- Backdrop closes on click; keyboard close is handled by the
+       window Escape listener above, so the backdrop itself does
+       not need a keydown handler. -->
+  <div
+    class="modal-backdrop"
+    onclick={() => (confirmRevoke = null)}
+    role="presentation"
+  >
+    <div
+      class="modal"
+      onclick={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+    >
+      <h2>Revoke token</h2>
+      <p class="muted small">
+        Revoke <strong>{confirmRevoke.label}</strong>? Existing chan devserver
+        sessions using it will be disconnected.
+      </p>
+      <div class="modal-actions">
+        <button type="button" onclick={() => (confirmRevoke = null)}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="destructive"
+          disabled={revoking}
+          onclick={() => {
+            const token = confirmRevoke;
+            if (token) void revoke(token);
+          }}
+        >
+          {revoking ? "Revoking..." : "Revoke token"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if showCreate}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
