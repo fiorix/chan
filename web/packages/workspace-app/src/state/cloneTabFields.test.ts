@@ -159,15 +159,22 @@ describe("a reorder keeps every field it was not told to drop", () => {
   test("the keyboard protocol travels by reference", () => {
     // A by-value copy is the Shift+Enter regression the terminal's own
     // comment records as already fixed once: the xterm handlers hold the
-    // object the negotiation writes into.
+    // object the running program writes its negotiation into, and they take
+    // it from the tab in the layout, so that is where both references are
+    // read from here.
     const source = loadedTerminalTab();
-    const protocol = source.keyboardProtocol;
     resetLayout([source, { ...loadedFileTab(), id: "file-neighbour" }]);
+    const before = (paneTabs().find((t) => t.id === source.id) as TerminalTab)
+      .keyboardProtocol!;
 
     reorderTab(PANE_ID, source.id, 1);
 
     const moved = paneTabs().find((t) => t.id === source.id) as TerminalTab;
-    expect(moved.keyboardProtocol).toBe(protocol);
+    expect(moved.keyboardProtocol).toBe(before);
+    // What the identity is for: a negotiation written through the reference
+    // the handlers hold has to be visible on the tab after the move.
+    before.xtermModifyOtherKeys = 2;
+    expect(moved.keyboardProtocol?.xtermModifyOtherKeys).toBe(2);
   });
 });
 

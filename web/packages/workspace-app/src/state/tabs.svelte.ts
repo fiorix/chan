@@ -1387,6 +1387,10 @@ function tabIdExists(tabId: string): boolean {
   );
 }
 
+/// A reopened tab is a NEW session over the same identity, so everything the
+/// clone carries that belongs to the session that ended is stripped here.
+/// The terminal's Rich Prompt draft folder is deleted by the close itself, so
+/// carrying its path would rebind the bubble to a folder that is gone.
 function tabForReopen(src: Tab): Tab {
   const tab = cloneTab(src);
   if (tab.kind === "terminal") {
@@ -1400,6 +1404,17 @@ function tabForReopen(src: Tab): Tab {
     tab.terminalMetadataDraft = undefined;
     tab.terminalMetadataPending = undefined;
     tab.terminalMetadataError = undefined;
+    tab.richPromptDraftPath = undefined;
+    tab.richPromptCaret = undefined;
+    tab.pendingPrompt = undefined;
+    tab.queueDepth = undefined;
+    tab.terminalActivity = undefined;
+    tab.terminalActivityPulsing = undefined;
+    tab.teamWorkPending = undefined;
+  }
+  if (tab.kind === "file") {
+    tab.doc = undefined;
+    tab.externalChange = undefined;
   }
   return tab;
 }
@@ -3700,133 +3715,165 @@ export function reorderTab(
   setPaneActiveTabId(p, moved.id, side);
 }
 
-/// Plain-data copy of a tab. The deep proxy that wraps `Tab` array
-/// elements doesn't survive splice + insert cleanly across panes, so
-/// we re-build a fresh object literal.
+/// Keys of every member of a union, rather than the keys they share.
+type KeysOfUnion<T> = T extends unknown ? keyof T : never;
+
+type TabFieldName = KeysOfUnion<Tab>;
+
+/// Every field any tab kind declares, each marked carry or drop. The mapped
+/// type is the point: a field added to any `Tab` type without a line here does
+/// not compile, so a clone cannot silently forget one. Cloning runs on every
+/// reorder, cross-pane move and Hybrid Nav commit, and it also builds the
+/// reopen record, so a forgotten field is lost from live state and from the
+/// persisted session at once.
+const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
+  authorityVersion: "carry",
+  autoRotate: "carry",
+  broadcastEnabled: "carry",
+  broadcastTargetIds: "carry",
+  caret: "carry",
+  carouselSlide: "carry",
+  codeBlocksCollapsed: "carry",
+  content: "carry",
+  controlledTerminal: "carry",
+  createdAt: "carry",
+  cwd: "carry",
+  depth: "carry",
+  disabledSlots: "carry",
+  diskConflicted: "carry",
+  doc: "carry",
+  error: "carry",
+  expanded: "carry",
+  extensionId: "carry",
+  externalChange: "carry",
+  fileKind: "carry",
+  fileMissing: "carry",
+  filters: "carry",
+  fsWritable: "carry",
+  group: "carry",
+  highlightTrailingWhitespace: "carry",
+  id: "carry",
+  inspectorOpen: "carry",
+  inspectorWidth: "carry",
+  keyboardProtocol: "carry",
+  kind: "carry",
+  loading: "carry",
+  mode: "carry",
+  openedEmpty: "carry",
+  outlineOpen: "carry",
+  outlineWidth: "carry",
+  path: "carry",
+  pendingGlobalName: "carry",
+  pendingPrompt: "carry",
+  pendingSelectId: "carry",
+  profile: "carry",
+  queueDepth: "carry",
+  readMode: "carry",
+  repoRoot: "carry",
+  richPromptCaret: "carry",
+  richPromptDraftPath: "carry",
+  richPromptHeight: "carry",
+  saved: "carry",
+  savedMtime: "carry",
+  savedMtimeNs: "carry",
+  scopeId: "carry",
+  scroll: "carry",
+  seedInput: "carry",
+  selected: "carry",
+  selectedNodeId: "carry",
+  selectedNodeLabel: "carry",
+  selectedPaths: "carry",
+  showWorkspace: "carry",
+  slidePreview: "carry",
+  spawnCommand: "carry",
+  spawnEnv: "carry",
+  styleToolbarOpen: "carry",
+  submitAgent: "carry",
+  syntaxHighlight: "carry",
+  teamWorkPending: "carry",
+  terminalActivity: "carry",
+  terminalActivityPulsing: "carry",
+  terminalEnvNamePromptDismissed: "carry",
+  terminalEnvPromptDismissedFor: "carry",
+  terminalEnvTabGroup: "carry",
+  terminalEnvTabName: "carry",
+  terminalMetadataDraft: "carry",
+  terminalMetadataError: "carry",
+  terminalMetadataPending: "carry",
+  terminalSessionId: "carry",
+  title: "carry",
+  // Per-mount state, not per-tab. The find bar belongs to the editor that
+  // mounted it and points at an adapter the destination does not have; the
+  // caret command is a one-shot the mounting editor latches and consumes; load
+  // progress describes a fetch that is not running any more.
+  find: "drop",
+  caretCommand: "drop",
+  loadProgress: "drop",
+};
+
+const TAB_CLONE_DROPPED_FIELDS: readonly TabFieldName[] = (
+  Object.entries(TAB_CLONE_DECISIONS) as [TabFieldName, "carry" | "drop"][]
+)
+  .filter(([, decision]) => decision === "drop")
+  .map(([field]) => field);
+
+/// Plain-data copy of a tab. The deep proxy that wraps `Tab` array elements
+/// doesn't survive splice + insert cleanly across panes, so the clone is a
+/// fresh object.
+///
+/// Everything is carried except the fields marked `drop` above. Containers are
+/// copied one level down, so a clone held elsewhere (the reopen record, a
+/// Hybrid Nav draft) cannot be mutated through the live tab. `keyboardProtocol`
+/// is the deliberate exception: the renderer's key handlers hold that object
+/// and the running program writes its negotiation into it, so copying it by
+/// value is what regressed Shift+Enter into a plain submit once already.
 function cloneTab(src: Tab): Tab {
-  if (src.kind === "terminal") {
-    return {
-      kind: "terminal",
-      id: src.id,
-      title: src.title,
-      createdAt: src.createdAt,
-      broadcastEnabled: src.broadcastEnabled,
-      broadcastTargetIds: [...src.broadcastTargetIds],
-      terminalEnvTabName: src.terminalEnvTabName,
-      terminalEnvTabGroup: src.terminalEnvTabGroup,
-      terminalEnvNamePromptDismissed: src.terminalEnvNamePromptDismissed,
-      terminalEnvPromptDismissedFor: src.terminalEnvPromptDismissedFor,
-      terminalMetadataDraft: src.terminalMetadataDraft
-        ? { ...src.terminalMetadataDraft }
-        : undefined,
-      terminalMetadataPending: src.terminalMetadataPending
-        ? { ...src.terminalMetadataPending }
-        : undefined,
-      terminalMetadataError: src.terminalMetadataError,
-      terminalSessionId: src.terminalSessionId,
-      controlledTerminal: src.controlledTerminal,
-      cwd: src.cwd,
-      seedInput: src.seedInput,
-      spawnCommand: src.spawnCommand,
-      spawnEnv: src.spawnEnv ? { ...src.spawnEnv } : undefined,
-      pendingGlobalName: src.pendingGlobalName,
-      group: src.group,
-    };
+  const clone = { ...src };
+  for (const field of TAB_CLONE_DROPPED_FIELDS) {
+    delete (clone as Record<string, unknown>)[field];
   }
-  if (src.kind === "graph") {
-    return {
-      kind: "graph",
-      id: src.id,
-      title: src.title,
-      mode: src.mode,
-      scopeId: src.scopeId,
-      depth: src.depth,
-      expanded: { ...src.expanded },
-      filters: { ...src.filters },
-      inspectorOpen: src.inspectorOpen,
-      pendingSelectId: src.pendingSelectId,
-      selectedNodeId: src.selectedNodeId,
-      selectedNodeLabel: src.selectedNodeLabel,
-    };
+  if (clone.kind === "terminal") {
+    clone.broadcastTargetIds = [...clone.broadcastTargetIds];
+    if (clone.terminalMetadataDraft) {
+      clone.terminalMetadataDraft = { ...clone.terminalMetadataDraft };
+    }
+    if (clone.terminalMetadataPending) {
+      clone.terminalMetadataPending = { ...clone.terminalMetadataPending };
+    }
+    if (clone.spawnEnv) clone.spawnEnv = { ...clone.spawnEnv };
+    if (clone.pendingPrompt) clone.pendingPrompt = { ...clone.pendingPrompt };
+    if (clone.richPromptCaret) {
+      clone.richPromptCaret = { ...clone.richPromptCaret };
+    }
+    if (clone.teamWorkPending) {
+      clone.teamWorkPending = {
+        ...clone.teamWorkPending,
+        members: clone.teamWorkPending.members.map((m) => ({ ...m })),
+        realEstate: { ...clone.teamWorkPending.realEstate },
+      };
+    }
+    return clone;
   }
-  if (src.kind === "browser") {
-    return {
-      kind: "browser",
-      id: src.id,
-      title: src.title,
-      inspectorOpen: src.inspectorOpen,
-      // Carry the per-tab File Browser view state across a clone, the
-      // same way the graph branch above carries its own. Without this a
-      // split / move / reopen-closed (Cmd+Shift+T) drops the user's
-      // expanded directories, selection, scroll, and workspace toggle --
-      // the reopened tab snaps back to a collapsed root. Arrays are
-      // copied (not aliased) so the clone and source don't share a
-      // mutable reference.
-      selected: src.selected,
-      selectedPaths: src.selectedPaths ? [...src.selectedPaths] : undefined,
-      showWorkspace: src.showWorkspace,
-      expanded: src.expanded ? [...src.expanded] : undefined,
-      scroll: src.scroll,
-      inspectorWidth: src.inspectorWidth,
-    };
+  if (clone.kind === "graph") {
+    clone.expanded = { ...clone.expanded };
+    clone.filters = { ...clone.filters };
+    return clone;
   }
-  if (src.kind === "dashboard") {
-    return {
-      kind: "dashboard",
-      id: src.id,
-      title: src.title,
-      // Preserve the per-tab carousel cursor + slot on/off set across a
-      // clone (split / move). Only emit them when set so a default
-      // Dashboard tab clones to the same minimal shape as before.
-      ...(typeof src.carouselSlide === "number"
-        ? { carouselSlide: src.carouselSlide }
-        : {}),
-      ...(src.disabledSlots && src.disabledSlots.length > 0
-        ? { disabledSlots: [...src.disabledSlots] }
-        : {}),
-      ...(src.autoRotate === false ? { autoRotate: false } : {}),
-    };
+  if (clone.kind === "browser") {
+    if (clone.selectedPaths) clone.selectedPaths = [...clone.selectedPaths];
+    if (clone.expanded) clone.expanded = [...clone.expanded];
+    return clone;
   }
-  if (src.kind === "extension") {
-    return {
-      kind: "extension",
-      id: src.id,
-      title: src.title,
-      extensionId: src.extensionId,
-    };
+  if (clone.kind === "dashboard") {
+    if (clone.disabledSlots) clone.disabledSlots = [...clone.disabledSlots];
+    return clone;
   }
-  return {
-    kind: "file",
-    fileKind: src.fileKind,
-    id: src.id,
-    path: src.path,
-    content: src.content,
-    saved: src.saved,
-    savedMtime: src.savedMtime,
-    savedMtimeNs: src.savedMtimeNs ?? null,
-    authorityVersion: src.authorityVersion ?? null,
-    diskConflicted: src.diskConflicted ?? false,
-    mode: src.mode,
-    loading: src.loading,
-    error: src.error,
-    fileMissing: src.fileMissing ? { ...src.fileMissing } : null,
-    inspectorOpen: src.inspectorOpen,
-    outlineOpen: src.outlineOpen,
-    ...(src.slidePreview
-      ? { slidePreview: { ...src.slidePreview } }
-      : {}),
-    repoRoot: src.repoRoot,
-    readMode: src.readMode,
-    fsWritable: src.fsWritable,
-    styleToolbarOpen: src.styleToolbarOpen,
-    syntaxHighlight: src.syntaxHighlight,
-    highlightTrailingWhitespace: src.highlightTrailingWhitespace,
-    codeBlocksCollapsed: src.codeBlocksCollapsed,
-    caret: src.caret ? { ...src.caret } : undefined,
-    // Find state is per-tab UI state; drop it when the tab moves
-    // panes so the destination opens fresh without a half-mounted
-    // bar pointing at a now-defunct adapter.
-  };
+  if (clone.kind === "extension") return clone;
+  if (clone.fileMissing) clone.fileMissing = { ...clone.fileMissing };
+  if (clone.slidePreview) clone.slidePreview = { ...clone.slidePreview };
+  if (clone.caret) clone.caret = { ...clone.caret };
+  if (clone.doc) clone.doc = { ...clone.doc };
+  return clone;
 }
 
 function cloneNode(src: Node): Node {
