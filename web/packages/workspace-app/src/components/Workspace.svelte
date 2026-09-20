@@ -26,7 +26,6 @@
   const effectiveId = $derived(nodeId ?? viewLayout.rootId);
   const node = $derived(viewLayout.nodes[effectiveId]);
 
-
   function startResize(e: MouseEvent, split: SplitNode): void {
     e.preventDefault();
     const splitEl = (e.currentTarget as HTMLElement).parentElement;

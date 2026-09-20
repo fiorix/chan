@@ -384,7 +384,6 @@
     }
   }
 
-
   function graphSelection(): void {
     const path = browserSelection.path;
     if (path === null) return;
