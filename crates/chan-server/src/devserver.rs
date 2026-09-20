@@ -4821,6 +4821,157 @@ mod tests {
         assert!(!state.host.is_root_mounted(workspace.path()));
     }
 
+    /// A registration for a workspace whose root the health probe currently
+    /// calls unavailable still mounts, still mints its window and still
+    /// answers with the prefix.
+    ///
+    /// Refusing would hand the user back to the prompt with nothing, which is
+    /// the failure the serve contract exists to remove, and `unavailable` is a
+    /// sampled, self-clearing overlay, so a refusal keyed to it would make the
+    /// same command succeed or fail on probe timing. The degraded state is
+    /// reported through the window and the launcher row instead.
+    ///
+    /// Unix only: the state is reached by replacing the root directory under a
+    /// live tenant, and Windows refuses to delete a tree whose handles the
+    /// tenant holds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registration_for_an_unavailable_root_still_mints_its_window() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.md"), "# A\n").expect("seed");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+
+        // Mount it first WITHOUT going through the discovery handler, so the
+        // window the assertion counts can only have come from the registration
+        // under test.
+        let prefix = state
+            .register_workspace(workspace.path())
+            .await
+            .expect("the first mount");
+        assert!(
+            state.host.is_root_mounted(workspace.path()),
+            "fixture: the tenant is serving"
+        );
+        assert!(
+            state
+                .host
+                .window_registry()
+                .expect("the registry is installed")
+                .snapshot()
+                .is_empty(),
+            "fixture: mounting alone mints no window record"
+        );
+
+        // Same path, new inode: the tenant's root identity check fails, which
+        // is what the probe publishes as `unavailable`.
+        std::fs::remove_dir_all(workspace.path()).expect("remove the root");
+        std::fs::create_dir(workspace.path()).expect("replace the root");
+        state.host.probe_mounted_roots();
+        assert_eq!(
+            state.host.workspace_status(workspace.path()).0,
+            WorkspaceStatus::Unavailable,
+            "fixture: a replaced root reads unavailable"
+        );
+
+        let response = handle_discovery_request(
+            &state,
+            8787,
+            crate::devserver_handoff::Request::RegisterWorkspace {
+                protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+                cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+                workspace_path: workspace.path().display().to_string(),
+            },
+        )
+        .await;
+
+        match response {
+            crate::devserver_handoff::Response::Registered {
+                prefix: answered, ..
+            } => assert_eq!(answered, prefix, "the degraded workspace keeps its prefix"),
+            other => panic!("a degraded root is still registered: {other:?}"),
+        }
+        assert_eq!(
+            state
+                .host
+                .window_registry()
+                .expect("the registry is installed")
+                .snapshot()
+                .len(),
+            1,
+            "the registration mints exactly one window record"
+        );
+        let records = state.host.assemble_window_records();
+        assert_eq!(
+            records.len(),
+            1,
+            "the registration mints exactly one window"
+        );
+        assert_eq!(records[0].kind, WindowKind::Workspace);
+        assert_eq!(records[0].prefix, prefix);
+    }
+
+    /// The refusal that stays a refusal: a registration whose mount fails
+    /// answers an error and mints nothing. The window is minted only after the
+    /// mount succeeds, so the two outcomes cannot both happen.
+    #[tokio::test]
+    async fn a_registration_whose_mount_fails_mints_no_window() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        // A regular file is not a workspace root, so the mount refuses before
+        // anything is published.
+        let not_a_root = workspace.path().join("a.md");
+        std::fs::write(&not_a_root, "# A\n").expect("seed");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+
+        let response = handle_discovery_request(
+            &state,
+            8787,
+            crate::devserver_handoff::Request::RegisterWorkspace {
+                protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+                cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+                workspace_path: not_a_root.display().to_string(),
+            },
+        )
+        .await;
+
+        // Naming the variant is not enough: the handler answers `Error` for a
+        // missing window registry too, before it reaches the mount, so an
+        // assertion that only matches the variant would pass for the wrong
+        // reason. This one requires the refusal NOT to be that one.
+        match &response {
+            crate::devserver_handoff::Response::Error { message } => assert!(
+                !message.contains("window registry"),
+                "the refusal must come from the mount, not the registry gate: {message}"
+            ),
+            other => panic!("a mount that failed is not a registration: {other:?}"),
+        }
+        // Read the REGISTRY, not the assembled feed. `assemble_window_records`
+        // filters out windows whose workspace is not mounted, so a window
+        // minted for a root that never mounted is invisible there and the
+        // assertion could not fail.
+        assert!(
+            state
+                .host
+                .window_registry()
+                .expect("the registry is installed")
+                .snapshot()
+                .is_empty(),
+            "a failed mount mints no window record"
+        );
+        assert!(!state.host.is_root_mounted(&not_a_root));
+    }
+
     async fn complete_test_startup(state: &DevserverState) {
         state
             .startup
