@@ -425,17 +425,17 @@ export function withHybridSurfaceTheme(
 export function setHybridSurfaceTheme(
   kind: HybridSurfaceKind,
   choice: SurfaceThemeChoice,
-): void {
+): Promise<void> {
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
-  void persistHybridSurfaceThemes();
+  return persistHybridSurfaceThemes();
 }
 
 /// Drop a surface's body-theme override so it falls back to the global
 /// `theme`. The settings surface's per-surface control offers this as
 /// "Inherit".
-export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): void {
+export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> {
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
-  void persistHybridSurfaceThemes();
+  return persistHybridSurfaceThemes();
 }
 
 // updateGlobalConfigSerial lives in ./configWrite (a leaf module with no store
@@ -683,9 +683,9 @@ function setThemeLocal(choice: ThemeChoice): void {
 /** Pick a theme. Optimistic local apply, then PATCH the global config
  *  so every other open window picks up the change over the WS
  *  `config_changed` event. */
-export function setThemeChoice(choice: ThemeChoice): void {
+export function setThemeChoice(choice: ThemeChoice): Promise<void> {
   setThemeLocal(choice);
-  void persistThemeChoice(choice);
+  return persistThemeChoice(choice);
 }
 
 /** Apply the launcher's local-theme choice to a standalone terminal window.
