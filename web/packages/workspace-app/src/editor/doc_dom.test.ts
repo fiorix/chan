@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { DOC_CONTAINER_CLASS, buildDocDom, docCss } from "./doc_dom";
-import { PAGE_BREAK_SELECTOR } from "./page_break";
+import { DOC_CONTAINER_CLASS,
+  DOC_CONTENT_CLASS, buildDocDom, docCss } from "./doc_dom";
+import {
+  PAGE_BREAK_ATTR,
+  PAGE_BREAK_CHILD_SELECTOR,
+  PAGE_BREAK_SELECTOR,
+} from "./page_break";
 
 vi.mock("./mermaid_render", () => ({
   renderMermaid: vi.fn(async (_source: string, dark: boolean) => ({
@@ -115,7 +120,27 @@ describe("buildDocDom", () => {
     // The rule selects the mark the composition applies, which is the
     // only way to say "and no other attribute" to CSS.
     expect(hr!.matches(PAGE_BREAK_SELECTOR)).toBe(true);
-    expect(docCss()).toContain(`.${DOC_CONTAINER_CLASS} ${PAGE_BREAK_SELECTOR}`);
+    expect(docCss()).toContain(
+      `.${DOC_CONTAINER_CLASS} > .${DOC_CONTENT_CLASS} > ${PAGE_BREAK_SELECTOR}`,
+    );
+  });
+
+  test("does not style a nested hr that acquires the mark later", () => {
+    const { root, content } = buildDocDom({
+      markdown: "a\n\n> quoted\n\nb\n",
+      path: "doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+    document.body.append(root);
+    // Whatever runs after the marking walk, a diagram's HTML label for
+    // instance, can put the attribute on an element the walk never saw.
+    const hr = document.createElement("hr");
+    hr.setAttribute("class", "chan-page-break");
+    hr.setAttribute(PAGE_BREAK_ATTR, "");
+    content.querySelector("blockquote")!.append(hr);
+    expect(hr.matches(PAGE_BREAK_SELECTOR)).toBe(true);
+    expect(content.querySelector(PAGE_BREAK_CHILD_SELECTOR)).toBeNull();
   });
 
   test("leaves a near miss as the ordinary rule it is", () => {

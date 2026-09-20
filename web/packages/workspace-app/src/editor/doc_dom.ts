@@ -19,6 +19,9 @@ import {
 } from "./slide_dom";
 
 export const DOC_CONTAINER_CLASS = "chan-print-page";
+/// The element the document's blocks are children of: what the page
+/// measurement walks and what the printable rules are scoped to.
+export const DOC_CONTENT_CLASS = "chan-print-content";
 
 // Editor tokens a printable document consumes: the slide set plus the
 // body/background tokens and the h2 border pair that document headings
@@ -115,7 +118,7 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
   root.appendChild(style);
 
   const content = document.createElement("div");
-  content.className = "chan-print-content";
+  content.className = DOC_CONTENT_CLASS;
   // flow-root keeps child margins inside the content box, so block
   // offsets measured against it hold in any container: page clones clip
   // inside a BFC, and a collapsed-through margin would shift every
@@ -245,7 +248,7 @@ export function docCss(): string {
   margin: 1em auto;
 }
 .${DOC_CONTAINER_CLASS} .chan-slide-media > img { margin: 1em 0; }
-.${DOC_CONTAINER_CLASS} ${PAGE_BREAK_SELECTOR} {
+.${DOC_CONTAINER_CLASS} > .${DOC_CONTENT_CLASS} > ${PAGE_BREAK_SELECTOR} {
   border: 0;
   margin: 0;
 }

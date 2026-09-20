@@ -15,12 +15,11 @@
 // the line's text has to give both rows the same answer and one of them
 // would be wrong whatever the code did.
 //
-// The owner's ruling is the narrow one: an `hr` whose only attribute is a
-// class of exactly `chan-page-break` is the page break, anything else is a
-// near miss left as the author wrote it, and `@pagebreak` is a typing
+// A page break is a top-level `hr` whose only attribute is a class of
+// exactly `chan-page-break`. Anything else is a near miss, left as the
+// author wrote it and cutting nothing, and `@pagebreak` is a typing
 // macro that writes the marker rather than a break in its own right.
-// The ruling settles every row here, so each pins a verdict; a row it
-// left open would assert agreement alone.
+// Every row below pins the one verdict its line gets.
 //
 // jsdom lays nothing out, so the document PDF path gets stubbed block rects
 // and a page tall enough that only a forced break can cut. That is the
@@ -37,7 +36,7 @@ import {
   expandPageBreakMacro,
   pageBreakDecorations,
 } from "./commands/page_break";
-import { PAGE_BREAK_SELECTOR } from "./page_break";
+import { PAGE_BREAK_CHILD_SELECTOR, PAGE_BREAK_SELECTOR } from "./page_break";
 import { buildDocDom } from "./doc_dom";
 import { measureDocBlocks, paginateDocBlocks } from "./pdf_pages";
 import { exportMarkdownToPdf } from "./pdf_export";
@@ -60,9 +59,8 @@ type Row = {
   name: string;
   body: string[];
   line: string;
-  /// The verdict the ruling settles on. A row it left open would assert
-  /// agreement alone; the ruling settles every row of this corpus.
-  expected?: boolean;
+  /// The one verdict every surface owes this line.
+  expected: boolean;
 };
 
 const ROWS: Row[] = [
@@ -246,7 +244,7 @@ function editorDraws(markdown: string, lineIndex: number): boolean {
 function verdicts(row: Row): Record<string, boolean> {
   const markdown = source(row);
   const domContent = renderedDom(markdown);
-  const domMarker = domContent.querySelector(PAGE_BREAK_SELECTOR) !== null;
+  const domMarker = domContent.querySelector(PAGE_BREAK_CHILD_SELECTOR) !== null;
   host?.remove();
   host = undefined;
   return {
@@ -265,13 +263,7 @@ afterEach(() => {
 
 describe("every surface gives one source line the same answer", () => {
   test.each(ROWS)("$name", (row) => {
-    const answers = verdicts(row);
-    if (row.expected === undefined) {
-      // The ruling does not settle this row; agreement is still required.
-      expect(new Set(Object.values(answers)).size).toBe(1);
-      return;
-    }
-    expect(answers).toEqual({
+    expect(verdicts(row)).toEqual({
       deckCut: row.expected,
       editorDivider: row.expected,
       domMarker: row.expected,

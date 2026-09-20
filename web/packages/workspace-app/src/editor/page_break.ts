@@ -23,13 +23,20 @@ export const PAGE_BREAK_CLASS = "chan-page-break";
 export const PAGE_BREAK_MARKER = `<hr class="${PAGE_BREAK_CLASS}">`;
 
 /// The attribute a composed document carries on its page breaks, and the
-/// selector the printable stylesheet uses. CSS can ask neither whether an
-/// element has no OTHER attribute nor whether it is a top-level block, so
-/// `markPageBreaks` decides both once and the DOM carries its answer;
-/// every reader of a composed document asks for this attribute and
-/// applies no test of its own.
+/// selector the printable stylesheet uses. CSS cannot ask whether an
+/// element has no OTHER attribute, so `markPageBreaks` decides that once
+/// and the DOM carries its answer; every reader of a composed document
+/// asks for this attribute and applies no test of its own.
+///
+/// The selector still says "a direct child", which CSS can say, so an
+/// `hr` that acquires the attribute after the walk (a diagram's HTML
+/// label, say) is not styled as a break by sitting deeper in the tree.
 export const PAGE_BREAK_ATTR = "data-page-break";
 export const PAGE_BREAK_SELECTOR = `hr[${PAGE_BREAK_ATTR}]`;
+
+/// The same marker, asked for as a direct child of the element being
+/// queried, which is what a page break is.
+export const PAGE_BREAK_CHILD_SELECTOR = `:scope > ${PAGE_BREAK_SELECTOR}`;
 
 /// Up to three columns of indentation, because four is a code block and
 /// the marker is not code. The class value may be quoted either way or
@@ -66,11 +73,11 @@ function isPageBreakElement(el: Element): boolean {
 /// attribute as it keeps any other, so a forged one arrives looking like
 /// a decision already made. Every mark is cleared, and a forged one is
 /// an authored attribute like any other while the test looks, so the
-/// element carrying it carries an attribute besides its class, which
-/// is what a near miss is, rather than being laundered into a marker
-/// by its own removal. That is why
-/// the decision is taken before anything is cleared, and why this runs
-/// once, on a document that has just been rendered.
+/// element carrying it carries an attribute besides its class, which is
+/// what a near miss is, rather than being laundered into a marker by its
+/// own removal. That is why the decision is taken before anything is
+/// cleared, and why this runs once, on a document that has just been
+/// rendered.
 ///
 /// A page break is a TOP-LEVEL block. It cuts the page it ends, and only
 /// a direct child of the content is a block the pagination measures, so
