@@ -354,8 +354,18 @@
     // `language:<name>` is a workspace-wide query, so hydrate directory
     // listings before scanning per-file report rows.
     for (let i = 0; i < 1000; i += 1) {
+      // A directory whose listing failed is neither loaded nor loading, so
+      // without its recorded error it would stay pending and this loop would
+      // ask for it again on every one of its 1000 turns. A failure is a
+      // state: it ends the walk for that directory until something clears it.
       const pending = tree.entries
-        .filter((e) => e.is_dir && !tree.loadedDirs[e.path] && !tree.loadingDirs[e.path])
+        .filter(
+          (e) =>
+            e.is_dir &&
+            !tree.loadedDirs[e.path] &&
+            !tree.loadingDirs[e.path] &&
+            !(e.path in tree.dirErrors),
+        )
         .map((e) => e.path);
       if (pending.length === 0) return;
       await Promise.allSettled(pending.map((path) => loadTreeDir(path)));
