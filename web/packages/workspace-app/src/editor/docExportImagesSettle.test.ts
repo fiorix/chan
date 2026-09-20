@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 //
 // The document export measures block heights to decide where to cut pages,
-// and it measures as soon as the render completion resolves. An ordinary
-// image contributes nothing to that completion, so the measurement can run
-// while every image is still zero-height and the cuts land in the wrong
-// places. The completion is the contract these tests hold: it resolves once
-// the images have settled, loaded or failed, and it never waits forever.
+// and it measures as soon as the render completion resolves. So what that
+// completion waits for decides whether the cuts land where the reader sees
+// them: were an ordinary image to contribute nothing, the measurement would
+// run while every image was still zero-height. The completion is the
+// contract these tests hold: it resolves once the images have settled,
+// loaded or failed, and it never waits forever.
 //
 // The cuts themselves are not asserted here. jsdom reports every element as
 // zero-height, so a page cut has no meaning in this environment; what the

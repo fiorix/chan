@@ -20,6 +20,7 @@ import {
   paginateDocBlocks,
 } from "./pdf_pages";
 import { exportMarkdownToPdf } from "./pdf_export";
+import { inlinePageResources } from "./pdf_snapshot";
 import type { PageBoxPx, PageSnapshot } from "./pdf_snapshot";
 
 vi.mock("./mermaid_render", () => ({
@@ -94,9 +95,10 @@ function layoutRect(el: Element): DOMRect {
 }
 
 /// Deliver images the way a network response arrives after the export has
-/// started: not before it runs, and not all at one instant. The poll keeps
-/// it late without being fragile, since the export composes its DOM
-/// several turns into its own work and only then waits for them.
+/// started, rather than before it runs. Every image pending at a tick is
+/// delivered in that tick, so this pins late arrival and not a spread
+/// across ticks; the export composes its DOM several turns into its own
+/// work and only then waits for them.
 function deliverImagesLate(): { stop: () => void } {
   const timer = setInterval(() => {
     for (const img of Array.from(document.querySelectorAll("img"))) {
@@ -185,8 +187,13 @@ describe("the export inlines each image once", () => {
     await exportMarkdownToPdf(
       { path: "notes/doc.md", markdown: IMAGE_DOC, theme: "light" },
       {
+        // The seam replaces snapshotPage outright, and the per-page
+        // inline pass lives inside it. Without this call the count sees
+        // only the document-level pass, which is the half that cannot
+        // show the defect: a page fetching its own copies.
         rasterize: async (root: HTMLElement): Promise<PageSnapshot> => {
           pages.push(root);
+          await inlinePageResources(root);
           return { png: TINY_PNG, widthPx: 2, heightPx: 2 };
         },
       },

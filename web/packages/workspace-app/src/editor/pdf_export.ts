@@ -289,11 +289,12 @@ export async function exportMarkdownToPdf(
       geometry.pageContentHeightPx,
     );
     // Inline every resource once, on the composed document, before the
-    // pages clone it. Each clone then carries its own `data:` copies and
-    // the per-page snapshot finds nothing left to fetch, where cloning
-    // first made an N-page document with M images fetch N times M. It
-    // runs after the measurement so the swap cannot disturb the layout
-    // the cuts were taken from.
+    // pages clone it. Each clone carries its own `data:` copies, so the
+    // per-page snapshot has no image left to fetch; without this an
+    // N-page document with M images would fetch N times M. Fonts are not
+    // covered: the per-page pass collects and fetches them again for
+    // every page. It runs after the measurement so the swap cannot
+    // disturb the layout the cuts were taken from.
     await withPageTimeout(inlinePageResources(doc.root), "document resources");
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");

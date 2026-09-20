@@ -338,13 +338,19 @@ describe("slide media chrome hook", () => {
   test("the image hook fires only after a successful load", async () => {
     const root = mount('<p><img src="shot.png"></p><p><img src=""></p>');
     const image = vi.fn();
-    // Not awaited: the returned promise now waits for these images to
-    // settle, and settling them is what this test does below.
-    void prepareSlideImages(root, "deck.md", "light", () => true, { image });
-    // Resolvable is not loaded: nothing fires until the load event.
+    // Held rather than awaited: the returned promise waits for these
+    // images to settle, and settling them is what this test does below.
+    const prepared = prepareSlideImages(root, "deck.md", "light", () => true, {
+      image,
+    });
+    // Resolvable is not loaded: nothing fires until the load event. The
+    // tick matters, because the cached-complete branch fires a microtask
+    // late and a synchronous check would not see it misfire.
+    await Promise.resolve();
     expect(image).not.toHaveBeenCalled();
     const imgs = Array.from(root.querySelectorAll("img"));
     for (const img of imgs) img.dispatchEvent(new Event("load"));
+    await prepared;
     // Only the resolvable src had a listener; the empty one stays dark.
     expect(image).toHaveBeenCalledTimes(1);
     const [img, raw] = image.mock.calls[0]!;

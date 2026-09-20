@@ -424,37 +424,66 @@ export function prepareSlideImages(
   return Promise.all(renders).then(() => undefined);
 }
 
+/// Longest a composition waits for one image. Past it the image is the
+/// inline pass's problem and then the audit's, both of which name it by
+/// src; the only other ceiling is the export's page timeout, which names
+/// nothing, so without this one silent image costs the whole export and
+/// says nothing about which.
+const IMAGE_SETTLE_TIMEOUT_MS = 10_000;
+
 /// Resolve once the image has settled, whether it loaded or failed.
 ///
 /// `complete` is the browser's own answer to "is this image still
 /// loading", and it is true for a failure as well, which is what this
 /// wants: a broken image paints as the empty box it will be and the
-/// export measures that, instead of waiting out a page timeout for an
-/// event that is never coming.
+/// export measures that, instead of waiting for an event that is never
+/// coming.
+///
+/// A lazy image never starts loading outside a viewport, and no
+/// composition is in one: a deck page is detached until it rasterizes
+/// and a document page sits off-screen. Waiting on one would be waiting
+/// for nothing, so the wait makes it eager first.
 function imageSettled(img: HTMLImageElement): Promise<void> {
+  if (img.getAttribute("loading") === "lazy") {
+    img.setAttribute("loading", "eager");
+  }
   if (img.complete) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    img.addEventListener("load", () => resolve(), { once: true });
-    img.addEventListener("error", () => resolve(), { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(settle, IMAGE_SETTLE_TIMEOUT_MS);
+    img.addEventListener("load", settle, { once: true });
+    img.addEventListener("error", settle, { once: true });
   });
 }
 
-/// Replace an embed iframe with a printable stand-in: a link carrying the
-/// embed's title.
+/// Replace an embed iframe with a printable stand-in: a link naming the
+/// embed and carrying its address.
 ///
-/// An export cannot paint an iframe. The snapshot audit refuses one
-/// outright, so a single YouTube or Maps embed anywhere in a document
-/// used to cost the user the whole PDF. The substitution belongs here, on
-/// the composition side, so the audit stays as strict as it is and the
-/// live surfaces keep their playable embed.
+/// Every iframe, not only the one the image syntax builds: the sanitizer
+/// admits a raw `<iframe>` whose src is on the embed host allowlist, and
+/// that is what a "share this map" snippet is. An export cannot paint
+/// either of them and the snapshot audit refuses both, so without the
+/// substitution one embed anywhere in a document costs the user the
+/// whole PDF. It belongs here, on the composition side, so the audit
+/// stays as strict as it is and the live surfaces keep their playable
+/// embed.
+///
+/// The text carries the address as well as the title. A page is a
+/// raster with no link annotations, so an href is neither visible nor
+/// clickable: what a reader can act on has to be printed.
 export function replaceEmbedsWithLinks(root: ParentNode): void {
-  for (const frame of Array.from(root.querySelectorAll("iframe.md-embed"))) {
+  for (const frame of Array.from(root.querySelectorAll("iframe"))) {
     const link = document.createElement("a");
     const src = frame.getAttribute("src") ?? "";
+    const title = frame.getAttribute("title");
     link.setAttribute("href", src);
     link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noreferrer");
-    link.textContent = frame.getAttribute("title") || src;
+    link.textContent = title ? `${title}: ${src}` : src;
     frame.replaceWith(link);
   }
 }
