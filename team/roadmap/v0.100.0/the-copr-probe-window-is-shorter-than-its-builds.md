@@ -35,6 +35,8 @@ Two shapes worth weighing. Raising the constant is the smallest change and keeps
 
 `packaging/distros/copr/verify-copr-publication.sh` and the `copr` job in `.github/workflows/publish-downstream.yml`.
 
+The verify step is re-runnable in isolation today only outside CI: the script takes `COPR_OWNER`, `COPR_PROJECT`, `COPR_API_BASE`, `POSTED_AT`, `WEBHOOK_PRESENT` and `RELEASE_TAG` from the environment, which is how a real red can be reproduced for acceptance 2 without submitting a build. Splitting the job means duplicating the `if:` guard and the `PUBLISH` env onto the new job and promoting `posted_at` from a step output to a job output.
+
 No change to the freeze rule itself, which is correct and load-bearing; this item is about making its detector trustworthy.
 
 ## Acceptance

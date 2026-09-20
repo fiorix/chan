@@ -4,9 +4,9 @@ Status: raised for v0.100.0 from the independent review of the v0.99.0 turn-on c
 
 ## What was seen
 
-The desktop's turn-on and turn-off calls in `desktop/src-tauri/src/devserver.rs` treat any `409 Conflict` as the live-terminals refusal: they parse the body as `ActiveTerminalsRejection`, fall back to `unwrap_or(0)` when it does not parse, and return `SetWorkspaceOnError::ActiveTerminals`. Four call sites share the shape.
+The desktop's workspace calls in `desktop/src-tauri/src/devserver.rs` treat any `409 Conflict` as the live-terminals refusal: they parse the body as `ActiveTerminalsRejection`, fall back to `unwrap_or(0)` when it does not parse, and return `SetWorkspaceOnError::ActiveTerminals`. Four call sites share the shape: the gateway and direct arms of `set_workspace_on`, and the gateway and direct arms of `forget_workspace`.
 
-Turn-on has a different 409. `handle_workspace_on` answers a workspace that another Chan process holds with a plain-text 409, "workspace is open in another Chan process". That body is not JSON, so the desktop returns `ActiveTerminals` with a count of 0, the error that stands for "stopping this would kill live terminals", for a workspace that cannot be turned on at all. What the launcher then shows the user was not traced.
+Turn-on has a different 409. Over a gateway the desktop reaches the devserver's launcher route, and `handle_workspace_on` answers a workspace that another Chan process holds with a plain-text 409, "workspace is open in another Chan process". That body is not JSON, so the desktop returns `ActiveTerminals` with a count of 0, and the launcher route re-serializes it as `{"error":"live_terminals","active_terminals":0}`. The launcher raises the terminal confirm on the off path only, so turn-on falls through to the generic error banner, which reads `live_terminals` because `ApiError` takes the `error` field as the message. The server's sentence never reaches the user. The direct arm posts to the devserver's own on route, whose only 409 is the JSON one, so this path is the gateway's. The launcher disables the power toggle on a row that already reads locked, so reaching it needs a row whose status has not caught up, which narrows the window without closing it.
 
 v0.99.0 nearly added a second such 409 for a degraded root; the owner's "200 everywhere" ruling removed it before it landed, which is how this was found.
 
@@ -16,7 +16,7 @@ The desktop distinguishes the refusals a route can answer. A live-terminals 409 
 
 ## Boundaries
 
-`desktop/src-tauri/src/devserver.rs` (the four call sites and `SetWorkspaceOnError`) and whatever in the launcher renders that error. Making the server's locked refusal JSON as well is a possible companion change in `crates/chan-server/src/routes/library.rs`, and it moves a wire contract, so it is a decision rather than a cleanup.
+`desktop/src-tauri/src/devserver.rs` (the four call sites and `SetWorkspaceOnError`), `desktop/src-tauri/src/main.rs` and `crates/chan-library/src/desktop_window_ops.rs` (the outcome the bridge carries, which has no variant for a refusal that is neither done nor a terminal count), and the launcher's rendering: `web/packages/launcher/src/state/computerActions.ts` (the confirm is on the off path only), `components/Library.svelte` (the `run` and `reportError` wrapper) and `api/library.ts` (`ApiError`, `refusalReason` and `liveTerminalsCount`, which already tells the two 409s apart and is the model to match). The desktop test module already binds a loopback axum router, so a 409 double needs no new harness. Sequence this item after [one-on-route-still-answers-204](one-on-route-still-answers-204.md), which reshapes the same bridge outcome. Making the server's locked refusal JSON as well is a possible companion change in `crates/chan-server/src/routes/library.rs`, and it moves a wire contract, so it is a decision rather than a cleanup.
 
 ## Acceptance
 

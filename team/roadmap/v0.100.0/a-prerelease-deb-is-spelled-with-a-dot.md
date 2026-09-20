@@ -1,0 +1,22 @@
+# The required-assets list spells a prerelease deb with a dot
+
+Status: raised for v0.100.0 from the v0.99.0 release, whose rc1 dry run showed the mismatch. Nothing is broken at a GA version; the next release candidate meets it again.
+
+## What was seen
+
+`requiredAssets` builds the gateway deb names from `gatewayPackageVersion` (`web/packages/marketing/scripts/release-assets.mjs`), which replaces `-` with `.` (`release-version.mjs`), so for `0.99.0-rc1` it expects `chan-gateway-*_0.99.0.rc1-1_{amd64,arm64}.deb` while cargo-deb writes the Debian form `0.99.0~rc1-1`. In the rc1 dry run (Release 35465776424) the other fifteen asset names matched exactly and the ten gateway debs did not. At a GA version the list and the artifacts agree 25 to 25, so nothing is broken today; which reading is right is unverified, because a GitHub release upload rewrites `~` in an asset name to `.`.
+
+## Desired contract
+
+The required-assets list names the artifacts the pipeline actually produces at every version shape it is asked about, or it says in one place, next to the transform, why a prerelease is spelled differently and that nothing consumes it.
+
+## Boundaries
+
+`web/packages/marketing/scripts/release-version.mjs` (`gatewayPackageVersion`), `web/packages/marketing/scripts/release-assets.mjs` (`requiredAssets`), and their tests. The release workflow and cargo-deb are not changed.
+
+## Acceptance
+
+1. A unit test over a `-rcN` version asserts the name shape that the pipeline produces, with the chosen reading stated in the test's own words.
+2. A GA version still produces 25 of 25 matching names, pinned.
+3. The decision between the tilde and the dot is recorded where the transform lives, naming the GitHub upload rewrite.
+4. The next rc dry run's asset diff is empty for the gateway debs, or the diff is explained by the recorded decision.

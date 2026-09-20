@@ -28,7 +28,7 @@ The four detectors, and what each one is:
 1. `PAGE_BREAK_RE` in `web/packages/workspace-app/src/editor/slides.ts`, which drives `splitSlidePages` and therefore slide preview, present mode, and deck PDF export. Its class test is quote-anchored, so the attribute value must be exactly the class, while other attributes on the tag are allowed and the whole match is case-insensitive.
 2. `isPageBreakLine` in `web/packages/workspace-app/src/editor/commands/page_break.ts`, which draws the source editor's page-break divider. Stricter: it refuses any additional attribute.
 3. DOM class-list membership, `classList.contains("chan-page-break")` in `pdf_pages.ts` and the `hr.chan-page-break` selector in `doc_dom.ts`. This is HTML semantics, so a multi-class element matches and the class value's case is significant.
-4. `expandPageBreakMacro`, the authoring command, which accepts `@pagebreak` and `@break` and rewrites either to the canonical marker. It is caret-position sensitive and `@break` exists nowhere else.
+4. `expandPageBreakMacro`, the authoring command, which accepts `@pagebreak` and `@break` and rewrites either to the canonical marker. It is caret-position sensitive, and nothing reads `@break` out of a written file.
 
 ## Why that matters
 
@@ -40,7 +40,9 @@ Two of the rows are user-visible defects rather than curiosities.
 
 This is the same shape as the empty-table-cell defect v0.98.0 fixed: several parsers for one concept, disagreeing about one source, with the editor and the export reaching different answers. That item's lesson was that the fix is to make the parsers reproduce one another, and the pin that keeps them honest is an assertion across surfaces rather than within one.
 
-`@break` is a smaller, separate observation: it is an authoring alias that works while typing and means nothing in a written file, which is a reasonable design as long as nothing writes it into a file expecting a break.
+`@break` is a smaller, separate observation: it is an authoring alias that works while typing, is reserved so it does not open the contact bubble (`bubbles/triggers.ts`), and means nothing in a written file, which is a reasonable design as long as nothing writes it into a file expecting a break.
+
+**The detectors are also blind to code fences**, a dimension the matrix above does not cover (frontend review findings ECS-01 and the page-break half of ECS-03, re-verified at `d3de0180b`). `splitSlidePages` tests every body line against `PAGE_BREAK_RE` without tracking fences, so a markdown file that documents the macro inside a fenced block splits into two slides in preview, present mode and deck PDF, with orphaned fence markers rendering as empty code blocks at the seam, and `normalizeDocPageBreaks` substitutes the marker inside the code block for document PDF. `expandPageBreakMacro` has the same hole while typing: `@pagebreak` then Space inside a fence rewrites the literal code line. `enclosingFence` in `editor/commands/fence.ts` already answers the question and neither path asks it.
 
 ## Desired contract
 
@@ -55,11 +57,12 @@ Which set that definition admits is the open decision, and it should be made del
 
 `slides.ts`, `commands/page_break.ts`, `pdf_pages.ts`, and `doc_dom.ts`, plus their tests. `normalizeDocPageBreaks` already canonicalizes regex matches before document PDF measures the DOM, so it is the closest thing to a reconciliation point that exists today and is the natural place to look first.
 
-No change to `renderMarkdown`, and none to the authoring corpus in `crates/chan-shell/src/help.rs`, which tells an agent to write the canonical `<hr>` form and remains correct under either reading.
+No change to `renderMarkdown`. `web/packages/workspace-app/src/editor/pdf_export.ts` and `src/state/slidePreview.ts` are the call sites that decide which detector each surface consults, so a single shared definition is wired in there. The authoring corpus in `crates/chan-shell/src/help.rs` stays correct under the broad reading, but under the narrow one its paragraph about a literal `@pagebreak` still splitting decks and PDF export becomes false and has to move with the code. `pdf_pages.ts` is shared with [document-pdf-export-measures-before-images-load](document-pdf-export-measures-before-images-load.md), so the two are sequenced in one lane.
 
 ## Acceptance
 
 1. Every row of the matrix above resolves to one answer per source line, consistent across all four detectors and both PDF paths.
-2. Whichever reading is chosen, `<hr class="chan-page-break extra">` and `<HR CLASS="CHAN-PAGE-BREAK">` behave identically in deck and document export. They currently differ in opposite directions, and either one is enough to demonstrate a fix.
+2. Whichever reading is chosen, `<hr class="chan-page-break extra">` behaves the same in deck and document export, and `<HR CLASS="CHAN-PAGE-BREAK">` behaves the same in export as it does in the rendered document. The first currently splits a document and not a deck; the second currently splits both exports while nothing in the render agrees a break is there. Either one is enough to demonstrate a fix.
 3. The v0.98.0 deck seed still opens as one slide with its instructional bullet inert, and typing `@pagebreak` on an empty line below it still produces two slides.
-4. A test asserts the agreement across surfaces for the whole corpus, rather than asserting each detector separately against its own expectation, because per-detector tests are what let these four drift apart.
+4. A test asserts the agreement across surfaces for the whole corpus, rather than asserting each detector separately against its own expectation, because per-detector tests are what let these four drift apart. The corpus includes a `@pagebreak` line and a canonical marker line inside a fenced code block, and no surface cuts on either.
+5. Typing `@pagebreak` then Space inside a fenced code block leaves the line literal.

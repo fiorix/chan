@@ -1,6 +1,6 @@
 # Nothing pins the contract that an unavailable workspace still gets a window
 
-Status: carried to v0.100.0. Raised for v0.99.0 by the owner, from a decision taken in the v0.98.0 round; v0.99.0 did not pin the contract. Read it against v0.99.0 before choosing a seam: `Unavailable` there also covers a root that was deleted or replaced, and chan-server's tests reach that state on Unix without a seam by replacing the root directory (`add_answers_a_replaced_root_with_the_row_the_list_reports` in `crates/chan-server/src/routes/library.rs`), which the section on why it is not already pinned predates.
+Status: carried to v0.100.0. Raised for v0.99.0 by the owner, from a decision taken in the v0.98.0 round; v0.99.0 did not pin the contract. Re-read against `main` at `d3de0180b`: v0.99.0 made `Unavailable` cover a root that was deleted or replaced and made the state reachable from a test without a seam, which shrinks this item from a design decision to one test module.
 
 ## What was seen
 
@@ -14,9 +14,11 @@ Recorded here because an untested contract survives only as long as its rational
 
 ## Why it is not already pinned
 
-The state cannot currently be reached from a test. `MountState` lives in a private map in `crates/chan-library/src/host.rs` with no setter, and the only thing that writes `MountState::Unavailable` is the probe, which requires a root that genuinely fails `revalidate_root`. A unit test cannot produce that without a real unreachable mount, and `scripts/e2e/flaky-mount.sh` can, but it needs rclone and FUSE and is a manual harness outside the gate.
+Because nobody wrote the test, not because the state is out of reach. On Unix it is reachable from a `chan-server` test with no new surface. `WorkspaceHost::probe_mounted_roots` and `WorkspaceHost::workspace_status` are both public, and replacing the root directory under a live tenant (same path, new inode) makes `revalidate_root` fail the identity check, which is the technique `add_answers_a_replaced_root_with_the_row_the_list_reports` already uses in `crates/chan-server/src/routes/library.rs`. Mount the workspace, replace its directory, probe, assert the row reads `unavailable`, then register.
 
-Adding a test-only way to force the state is the obvious move and it is a real design decision rather than a test to slip in, which is why it was deferred rather than done: it introduces new surface into a subsystem for the benefit of a different subsystem's test, and where that hook lives determines whether it stays honest.
+The probe's own transitions are covered too, in `crates/chan-library/src/host.rs`: `probe_reports_a_replaced_root_as_unavailable` and `a_replaced_root_clears_only_when_the_original_directory_returns`, the second of which is the away-and-back case. Windows has no equivalent: it refuses to delete a tree the tenant holds handles inside, and `RootedFs::revalidate`'s non-unix arm has no inode check, so the test is `#[cfg(unix)]` like its precedents.
+
+This section replaces the item's original reasoning, which predates v0.99.0 and held that the state could not be reached without a test-only setter, a feature-gated seam or a probe trait. None of the three has to be chosen.
 
 ## Desired contract
 
@@ -24,15 +26,11 @@ The behavior is unchanged: a registration for a mounted but degraded workspace m
 
 ## Boundaries
 
-`crates/chan-library/src/host.rs` for whatever mechanism exposes the state to a test, and the discovery handler's tests in `crates/chan-server/src/devserver.rs`.
-
-Three shapes are worth weighing before one is chosen: a `#[cfg(test)]` setter, which cannot be reached from another crate's tests and therefore does not help `chan-server`; a `pub(crate)` or feature-gated seam, which does but widens the crate's surface; or a fake or trait boundary for the probe, which is the largest change and the only one that also makes the probe's own transitions testable.
-
-That third option is worth real consideration rather than dismissal. The probe currently has no test that exercises a root going away and coming back, so the hook this item needs may be the smaller half of a gap that is already there.
+The discovery handler's tests in `crates/chan-server/src/devserver.rs`. No change to `crates/chan-library/src/host.rs`: the replaced-root technique needs nothing that is not already public there, so this item adds no seam to one subsystem for another subsystem's test.
 
 ## Acceptance
 
 1. A test drives a mounted workspace into `Unavailable`, sends a registration for it, and asserts the response is a success carrying a prefix and that exactly one window record was minted.
 2. A test asserts the refusals that remain refusals: a missing window registry declines before the mount and before the flock, and a mount failure returns an error with no window minted.
-3. The mechanism that forces the state is not reachable from a release build, or is confined to a test-only seam that is named as such where it is defined.
-4. If the probe seam is chosen, a test also covers a root going unavailable and then becoming reachable again, clearing the degraded mark.
+3. No test-only seam is added. If one turns out to be unavoidable, it is confined to a seam named as such where it is defined and unreachable from a release build.
+4. The probe's away-and-back transition stays covered; `a_replaced_root_clears_only_when_the_original_directory_returns` already covers it, so this item only has to keep it green.

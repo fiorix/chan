@@ -15,7 +15,7 @@ Source: [lclarkmichalek/chan, fix/layout-aware-shortcuts](https://github.com/lcl
 - `61e5f09d8dd1935571c79da9872779090ce77c93`: Respect keyboard layouts for letter shortcuts. Adds the shared letter helper and updates workspace handlers, launcher, desktop bridge, terminal escape matching, and tests.
 - `43e1bfed353c33f24519d2dbe6988a807500825e`: Compile the shared helper when generating shortcut help. Compiles the helper alongside the registry and invokes TypeScript with an argument array instead of shell parsing.
 
-The reviewed diff is 16 files, +127/-40, with no new dependencies. A trial merge against upstream `52251eac02ff0be99204c4b873477ba7ce89fe54` had no conflicts. This is historical evidence, not a claim about the tree after the frontend review.
+The reviewed diff is 16 files, +127/-40, with no new dependencies. A trial merge against upstream `52251eac02ff0be99204c4b873477ba7ce89fe54` had no conflicts. This is historical evidence, not a claim about the tree after the frontend review. That base is now 516 commits behind `main`, and neither reviewed commit is present in this checkout: no remote for the fork is configured, so the import begins by fetching one.
 
 Two regression classes were established with synthetic keyboard events:
 
@@ -27,7 +27,8 @@ At review time, 236 targeted tests, both affected SPA type checks and production
 ## Relationship to the frontend review
 
 - Finish the frontend-review work first. Re-read the resulting keyboard ownership, propagation, override, and extension code before importing this change. Reuse the owners and helpers established there instead of restoring old structure from Laurie's patch.
-- Reconcile recommendations that assume physical letter matching. In particular, DESKTOP-05 recommends moving connecting-window handlers to `e.code`, and the Ctrl+D consistency recommendation prefers App.svelte's physical KeyD predicate. Their propagation, ownership, and modifier corrections still matter; their physical-letter choice must yield to this plan's layout-aware policy.
+- Reconcile recommendations that assume physical letter matching. In particular, DESKTOP-05 recommends moving the connecting window's close handlers to `e.code` and updating three substring assertions in `serve.rs` in the same commit, and the Ctrl+D consistency recommendation prefers App.svelte's physical `KeyD` predicate over TerminalTab's `e.key` one. Their propagation, ownership, and modifier corrections still matter, including TerminalTab's missing Shift exclusion; their physical-letter choice must yield to this plan's layout-aware policy. Both touch `desktop/src-tauri/src/serve.rs`, whose `KEY_BRIDGE_JS` is a Rust string literal pinned by unit assertions, so a JavaScript-only edit there turns pre-push red.
+- The frontend-review work this import waits for is now accepted scope in this same version: [terminal-chords-run-twice-or-not-at-all](terminal-chords-run-twice-or-not-at-all.md), [full-window-covers-do-not-block-input](full-window-covers-do-not-block-input.md) and [escape-closes-the-overlay-under-an-open-menu](escape-closes-the-overlay-under-an-open-menu.md). The import starts after all three have landed, and moves to the next version rather than holding this release if they land late.
 - Preserve frontend-review fixes for duplicate dispatch, terminal escape, modal blocking, command availability, and modifier exclusions when applying this import.
 - Require Laurie's Colemak behavior to remain green throughout integration. Neither a conflict resolution nor a source-pattern test may silently restore physical letter matching.
 
@@ -49,6 +50,18 @@ Compared with Laurie's branch, the additions are logical punctuation, Shift-awar
 - Create an isolated integration branch from refreshed upstream main after the frontend-review changes land.
 - Import the two reviewed commits ending at `43e1bfed`, preserving their history and authorship. Add corrections as separate commits. Do not silently substitute a newer fork revision without reviewing its additional changes.
 - Prepare separate branches for affected extension consumers. Keep unrelated work out of each branch.
+
+### Surfaces at `d3de0180b`
+
+The fork's diff was 16 files; the work here is enumerated against the current tree, where nothing matches letters by layout (`canonicalKey` in `state/shortcuts.ts` and the `e.code !== "KeyD"` predicate in `App.svelte` are both physical):
+
+- `web/packages/workspace-app/src/state/shortcuts.ts` (`canonicalKey`, `chordFromEvent`, `shouldEscapeTerminal`, `canonicalChordTokens`). There is no separate keyboard helper file today; this module is where one is extracted from.
+- `state/keymapAssign.ts` (shortcut capture), `state/keymapOverrides.svelte.ts` (override resolution and conflict detection), `state/extensionBridge.ts` (the v1 keyboard contract).
+- `App.svelte` (the global handlers and the Ctrl+D capture), `components/Pane.svelte` (`e.code === "KeyT"`), `components/TerminalTab.svelte` (terminal escape dispatch and `isCloseExitedTabKey`).
+- `web/packages/launcher/src/components/CommandLauncher.svelte` (the launcher's `KeyK` matching).
+- `desktop/src-tauri/src/serve.rs` (`KEY_BRIDGE_JS`, a Rust string literal with substring assertions pinning its spellings) and `desktop/src/connecting.js` (the second injected bridge).
+- `web/packages/workspace-app/scripts/shortcuts-table.mjs`, `scripts/check-shortcuts-help.py`, and `KEYBINDINGS_TABLE` in `crates/chan/src/lib.rs` with its guard test, which `make shortcuts-check` diffs.
+- `crates/chan-server/examples/echo-extension.rs` (the in-tree extension fixture on the v1 contract), `docs/extensions.md` and `docs/config-reference.md`, whose relay description says "match only the supplied physical-key descriptors".
 
 ### Keyboard matching
 

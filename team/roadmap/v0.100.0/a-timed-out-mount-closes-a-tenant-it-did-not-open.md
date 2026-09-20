@@ -16,10 +16,10 @@ A timed-out attempt compensates only for what it may have created. If the root w
 
 ## Boundaries
 
-`crates/chan-server/src/devserver.rs`: the timeout arm of `execute_mount_attempt`, and the second forced close later in the same function, which deserves the same question. The reviewer's suggested shape is to read `is_root_mounted(&attempt.root)` before the bounded call and compensate only when it was false; that suggestion is unverified. A timeout inside the revalidation does not fix it, because any await after the deadline trips the outer timer.
+`crates/chan-server/src/devserver.rs`: the timeout arm of `execute_mount_attempt`, and the identical forced close in `cancel_mount_attempt`, which deserves the same question. The success path's `CloseStale` close earlier in `execute_mount_attempt` is not the same case: that attempt did publish the tenant it closes. The reviewer's suggested shape is to read `is_root_mounted(&attempt.root)` before the bounded call and compensate only when it was false; that suggestion is unverified. A timeout inside the revalidation does not fix it, because any await after the deadline trips the outer timer.
 
 ## Acceptance
 
-1. A test mounts a workspace, makes a second attempt for the same root exceed the bound through a seam rather than a sleep, and asserts the tenant, its prefix and a live terminal session survive.
+1. A test mounts a workspace, makes a second attempt for the same root exceed the bound through a seam rather than a sleep (`execute_mount_attempt` already takes its bound as a parameter, so the seam exists), and asserts the tenant, its prefix and a live terminal session survive.
 2. A test keeps the existing compensation: an attempt that did publish a tenant and then timed out still closes it.
 3. The failed-row record says the attempt timed out and does not claim the workspace is off.
