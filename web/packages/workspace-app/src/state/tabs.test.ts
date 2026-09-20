@@ -38,9 +38,11 @@ import {
   dismissConflict,
   dismissTerminalEnvironmentPrompt,
   draftCloseState,
+  applyFsWritable,
   enterPaneMode,
   enterPaneModeTransaction,
   flagExternalChange,
+  reloadTabFromDisk,
   flipHybrid,
   failTerminalMetadataRename,
   focusColorForWindow,
@@ -3739,6 +3741,55 @@ describe("autosave", () => {
 
     const live = activePane().tabs[0] as FileTab;
     expect(live.externalChange).toBe(true);
+  });
+
+  test("the commit adopts a reload that finished while the mode was up", async () => {
+    // A load resolves through the live tree, and its `content`, `saved`,
+    // version and `loading` move together. The commit keeps the draft's
+    // buffer, so a tab whose load finished during the mode comes back stuck
+    // at `loading` with an empty buffer, no controller and no way out but
+    // closing it. Nothing was typed into the draft, so the live tree holds
+    // what the user would have been looking at and the commit takes it.
+    let resolveRead: (value: Awaited<ReturnType<typeof api.readStream>>) => void = () => {};
+    vi.spyOn(api, "readStream").mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    resetLayout([fileTab({ path: "notes/a.md", content: "old", saved: "old" })]);
+
+    const loading = reloadTabFromDisk("file-1");
+    enterPaneMode();
+    expect((activePane().tabs[0] as FileTab).loading).toBe(true);
+    resolveRead({
+      path: "notes/a.md",
+      content: "fresh",
+      mtime: 9,
+      mtime_ns: "9000000009",
+      writable: true,
+    });
+    await loading;
+    commitPaneMode();
+
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.loading, "the load is over").toBe(false);
+    expect(live.content).toBe("fresh");
+    expect(live.saved).toBe("fresh");
+    expect(live.savedMtimeNs).toBe("9000000009");
+  });
+
+  test("the commit keeps a permission flip the watcher reported", async () => {
+    // `fsWritable` comes from a watcher frame, not from the buffer: chmod
+    // does not touch mtime, so nothing re-samples it until the next load.
+    // A flip the commit drops leaves the lamp and the editor's readOnly
+    // wrong, and a canvas silently resumes or stops pushing.
+    resetLayout([fileTab({ path: "notes/a.md", content: "body", saved: "body" })]);
+
+    enterPaneMode();
+    applyFsWritable("file-1", false);
+    commitPaneMode();
+
+    expect((activePane().tabs[0] as FileTab).fsWritable).toBe(false);
   });
 
   test("an autosave that fails mid-save reports on the tab in the layout", async () => {
