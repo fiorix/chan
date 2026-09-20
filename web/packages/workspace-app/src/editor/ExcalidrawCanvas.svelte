@@ -252,13 +252,23 @@
     flushPendingLocal() {
       pushDeltas();
     },
-    forgetBroadcast(elements) {
-      // Their push was claimed and then discarded, so the authority never
-      // took them. Dropping the broadcast mark is what puts them back in
-      // `sceneDeltas`, and the next flush offers them again.
+    forgetBroadcast(elements, appState, files) {
+      // The push was claimed and then discarded, so the authority never took
+      // any of it. Dropping each mark is what puts its part back in the next
+      // flush: the elements in `sceneDeltas`, the files in the `newFiles`
+      // scan, the appState in the baseline comparison.
       for (const el of elements) {
         const id = (el as { id?: unknown }).id;
         if (typeof id === "string") lastBroadcast.delete(id);
+      }
+      if (files !== undefined) {
+        for (const k of Object.keys(files)) knownFiles.delete(k);
+      }
+      if (appState !== undefined) {
+        // The appState rides a push as a whole value rather than a delta, so
+        // clearing the baseline offers whatever the canvas holds now. At
+        // worst that is one redundant push of a value the authority has.
+        lastAuthorityAppStateJson = "";
       }
     },
   };

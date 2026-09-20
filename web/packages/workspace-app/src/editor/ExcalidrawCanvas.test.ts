@@ -181,11 +181,13 @@ type FakeApi = {
   updateScene: ReturnType<typeof vi.fn>;
   setElements: (next: Record<string, unknown>[]) => void;
   setAppState: (patch: Record<string, unknown>) => void;
+  setFiles: (next: Record<string, unknown>) => void;
 };
 
 function fakeApi(initial: WireElement[] = []): FakeApi {
   let elements: Record<string, unknown>[] = [...initial];
   let appState: Record<string, unknown> = { selectedElementIds: {} };
+  let files: Record<string, unknown> = {};
   const updateScene = vi.fn((s: Record<string, unknown>) => {
     if (Array.isArray(s.elements)) elements = s.elements as Record<string, unknown>[];
     if (s.appState && typeof s.appState === "object") {
@@ -196,7 +198,7 @@ function fakeApi(initial: WireElement[] = []): FakeApi {
     getSceneElementsIncludingDeleted: () => elements,
     getSceneElements: () => elements.filter((e) => e.isDeleted !== true),
     getAppState: () => appState,
-    getFiles: () => ({}),
+    getFiles: () => files,
     addFiles: vi.fn(),
     updateScene,
     setElements(next) {
@@ -204,6 +206,9 @@ function fakeApi(initial: WireElement[] = []): FakeApi {
     },
     setAppState(patch) {
       appState = { ...appState, ...patch };
+    },
+    setFiles(next) {
+      files = next;
     },
   };
 }
@@ -332,6 +337,57 @@ describe("scene session binding loop safety", () => {
     rendered.props.onChange();
     vi.advanceTimersByTime(300);
     expect(session.pushScene).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  test("forgetting a push offers its files again", async () => {
+    // `knownFiles` is the mark that keeps a file out of every later push,
+    // so a push the authority never accepted has to drop it or the element
+    // arrives referencing bytes nobody else has.
+    const { api, session, binding } = await mountBound([]);
+    const pasted = { "file-a": { dataURL: "data:image/png;base64,AAA" } };
+    api.setFiles(pasted);
+    api.setElements([wireEl("pasted", 2)]);
+
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledTimes(1);
+    expect(session.pushScene.mock.calls[0]![2]).toEqual(pasted);
+    // Marked: nothing is offered a second time.
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledTimes(1);
+
+    binding.forgetBroadcast([wireEl("pasted", 2)], undefined, pasted);
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledTimes(2);
+    expect(session.pushScene.mock.calls[1]![2]).toEqual(pasted);
+  });
+
+  test("forgetting a push offers its appState again", async () => {
+    // `lastAuthorityAppStateJson` is the same kind of mark for the appState,
+    // and the canvas sets it from the value it pushed rather than from one
+    // the authority sent back.
+    vi.useFakeTimers();
+    const { api, session, binding } = await mountBound([]);
+    const rendered = renderMock.mock.calls.at(-1)![0] as {
+      props: { onChange: () => void };
+    };
+
+    api.setAppState({ gridSize: 9 });
+    rendered.props.onChange();
+    vi.advanceTimersByTime(300);
+    expect(session.pushScene).toHaveBeenCalledTimes(1);
+    const claimed = session.pushScene.mock.calls[0]![1] as Record<string, unknown>;
+    expect(claimed).toBeDefined();
+    // Marked: an unchanged appState is not offered again.
+    rendered.props.onChange();
+    vi.advanceTimersByTime(300);
+    expect(session.pushScene).toHaveBeenCalledTimes(1);
+
+    binding.forgetBroadcast([], claimed, undefined);
+    rendered.props.onChange();
+    vi.advanceTimersByTime(300);
+    expect(session.pushScene).toHaveBeenCalledTimes(2);
+    expect(session.pushScene.mock.calls[1]![1]).toEqual(claimed);
     vi.useRealTimers();
   });
 

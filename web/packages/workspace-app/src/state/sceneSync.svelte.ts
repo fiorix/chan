@@ -212,12 +212,15 @@ export type SceneCanvasBinding = {
   /// analogue; called after snapshots and when the save funnel needs
   /// quiescence).
   flushPendingLocal(): void;
-  /// Forget that these elements were handed over. `pushScene` answers true
-  /// for a coalesced push and for one on the wire, and neither has been
-  /// accepted yet: a drop or a resync throws both away. The canvas has
-  /// already marked them broadcast, so without this they are never offered
-  /// again and sit on the canvas having reached nobody.
-  forgetBroadcast(elements: WireElement[]): void;
+  /// Forget that this payload was handed over. `pushScene` answers true for
+  /// a coalesced push and for one on the wire, and neither has been accepted
+  /// yet: a drop or a resync throws both away. It takes the same three parts
+  /// `pushScene` does, because the canvas marks all three on a true and each
+  /// mark keeps its part out of every later push: an element stays on the
+  /// canvas having reached nobody, a file leaves the authority holding an
+  /// element that references bytes it does not have, and an appState change
+  /// never arrives at all.
+  forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void;
 };
 
 // ---- session ---------------------------------------------------------------
@@ -233,6 +236,22 @@ type QueuedPush = {
   appState: WireAppState | null;
   files: WireFiles | null;
 };
+
+/// What a push claimed, in the shape `pushScene` was handed it, so the wire
+/// payload and the coalesced one are one type and the hand-back cannot cover
+/// one part of a claim and miss another.
+function claimedPush(
+  elements: WireElement[],
+  appState: WireAppState | undefined,
+  files: WireFiles | undefined,
+): QueuedPush {
+  const byId = new Map<string, WireElement>();
+  for (const el of elements) {
+    const id = el.id;
+    if (typeof id === "string") byId.set(id, el);
+  }
+  return { elements: byId, appState: appState ?? null, files: files ?? null };
+}
 
 export class SceneSession {
   readonly tabId: string;
@@ -281,9 +300,10 @@ export class SceneSession {
   private serverDirty = false;
 
   private pushInFlight = false;
-  /// The elements of the push currently on the wire, so a drop or a resync
-  /// can tell the canvas they never landed. Cleared by the ack.
-  private unacked: WireElement[] = [];
+  /// The push currently on the wire, in the same three parts the queued one
+  /// has, so a drop or a resync can tell the canvas that none of it landed.
+  /// Cleared by the ack.
+  private unacked: QueuedPush | null = null;
   private queued: QueuedPush | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
@@ -428,7 +448,7 @@ export class SceneSession {
       return true;
     }
     this.pushInFlight = true;
-    this.unacked = [...elements];
+    this.unacked = claimedPush(elements, appState, files);
     this.send({
       type: "push",
       elements,
@@ -530,12 +550,25 @@ export class SceneSession {
 
   /// Tell the canvas that everything `pushScene` claimed but the authority
   /// never accepted is local again: the payload on the wire and the one
-  /// coalesced behind it. Called wherever those are discarded.
+  /// coalesced behind it, in all three of their parts. Called wherever
+  /// those are discarded.
   private releaseUnaccepted(): void {
-    const stranded = [...this.unacked, ...(this.queued?.elements.values() ?? [])];
-    this.unacked = [];
-    if (stranded.length === 0) return;
-    this.binding?.forgetBroadcast(stranded);
+    const wire = this.unacked;
+    const queued = this.queued;
+    this.unacked = null;
+    const elements = [
+      ...(wire?.elements.values() ?? []),
+      ...(queued?.elements.values() ?? []),
+    ];
+    const files =
+      wire?.files !== null && wire?.files !== undefined
+        ? { ...wire.files, ...(queued?.files ?? {}) }
+        : (queued?.files ?? undefined);
+    // Either claim clears the canvas's baseline, so the newer one is what
+    // goes back.
+    const appState = queued?.appState ?? wire?.appState ?? undefined;
+    if (elements.length === 0 && files === undefined && appState === undefined) return;
+    this.binding?.forgetBroadcast(elements, appState, files);
   }
 
   private foldIntoShadow(el: WireElement): void {
@@ -549,7 +582,7 @@ export class SceneSession {
     this.queued = null;
     if (q.elements.size === 0 && q.appState === null && q.files === null) return;
     this.pushInFlight = true;
-    this.unacked = [...q.elements.values()];
+    this.unacked = q;
     this.send({
       type: "push",
       elements: [...q.elements.values()],
@@ -679,7 +712,7 @@ export class SceneSession {
       case "push-ok":
         this.tab.authorityVersion = f.version;
         this.pushInFlight = false;
-        this.unacked = [];
+        this.unacked = null;
         this.drainQueued();
         if (!this.pushInFlight && !(this.binding?.hasPendingLocal() ?? false)) {
           // Ack-based saved semantics: everything local is confirmed.
