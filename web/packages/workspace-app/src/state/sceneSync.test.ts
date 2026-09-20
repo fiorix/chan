@@ -28,6 +28,7 @@ import { resetDocSyncForTests } from "./docSync.svelte";
 import {
   isDocAttached,
   isDocSavePaused,
+  isDocUnflushed,
   layout,
   saveTab,
   type FileTab,
@@ -555,5 +556,54 @@ describe("lifecycle", () => {
     expect(sceneSessionFor(tab.id)).toBeUndefined();
     expect(sock.closedByClient).toBe(true);
     expect(tab.doc).toBeUndefined();
+  });
+});
+
+// ---- one writer, and the whole live-session contract -------------------------
+
+describe("a degraded session has exactly one writer", () => {
+  test("pushScene stops sending once the session degrades", () => {
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const { session, sock } = attached(tab);
+    expect(sock.frames("push")).toHaveLength(0);
+
+    // Degrade with the channel still up: the classic autosave PUT takes over
+    // (isDocAttached goes false) while this socket stays usable.
+    session.degrade();
+    expect(isDocAttached(tab)).toBe(false);
+
+    session.pushScene([elem("a", 2)]);
+
+    expect(sock.frames("push")).toHaveLength(0);
+  });
+
+  test("a classic save hands ownership back to a degraded session", async () => {
+    vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const { session } = attached(tab);
+    session.degrade();
+    expect(session.ownsSaves()).toBe(false);
+
+    tab.content = tab.content + "\n";
+    await saveTab(tab);
+    await flushMicro();
+
+    expect(session.ownsSaves()).toBe(true);
+  });
+});
+
+describe("the force-reload prompt can see unflushed scene state", () => {
+  test("a canvas tab with an unconfirmed push reports unflushed", () => {
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const { session, sock } = attached(tab);
+
+    session.pushScene([elem("a", 2)]);
+    expect(sock.frames("push")).toHaveLength(1);
+
+    // No push-ok has landed, so the authority holds state the disk does not.
+    expect(isDocUnflushed(tab.id)).toBe(true);
   });
 });

@@ -359,3 +359,25 @@ describe("sceneDeltas bookkeeping", () => {
     expect(sceneDeltas(bumped, map).map((e) => e.id)).toEqual(["a"]);
   });
 });
+
+describe("a dropped push is not recorded as sent", () => {
+  test("an element drawn while the channel is down survives to the reconnect", async () => {
+    const { api, session, binding } = await mountBound([]);
+    // The session drops the push: a closed socket, a missing snapshot, or a
+    // read-only attach. Nothing reached the authority.
+    session.pushScene.mockReturnValue(false);
+
+    api.setElements([wireEl("a", 3)]);
+    expect(binding.hasPendingLocal()).toBe(true);
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledTimes(1);
+
+    // The element is still only local, so the reconnect flush must re-send it.
+    expect(binding.hasPendingLocal()).toBe(true);
+    session.pushScene.mockReturnValue(true);
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledTimes(2);
+    expect(binding.hasPendingLocal()).toBe(false);
+  });
+});
+
