@@ -18,8 +18,10 @@ import {
 } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import { setSocketFactory } from "../api/transport";
 import type { FileResponse } from "../api/types";
-import { resolveConfirm } from "./confirm.svelte";
+import { confirmState, resolveConfirm } from "./confirm.svelte";
+import { acquireSceneSession, resetSceneSyncForTests } from "./sceneSync.svelte";
 import {
   forceReloadFromDisk,
   layout,
@@ -220,3 +222,117 @@ describe("overwriteDiskConflict", () => {
     expect(resolveSpy).not.toHaveBeenCalled();
   });
 });
+
+// ---- a live canvas session --------------------------------------------------
+//
+// The query above is this file's own stand-in for docSync's registration. The
+// case below needs the REAL one: sceneSync fills three of the five
+// live-session slots and registers no unflushed query at all, so a canvas tab
+// holding a push the authority has not acknowledged answers "nothing
+// unflushed" and the destructive reload runs with no warning.
+
+const SCENE_BUFFER = JSON.stringify({
+  type: "excalidraw",
+  version: 2,
+  source: "test",
+  elements: [],
+  appState: {},
+  files: {},
+});
+
+class FakeSceneSocket {
+  readyState = 0;
+  sent: string[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly url: string) {
+    sceneSockets.push(this);
+  }
+  send(s: string): void {
+    this.sent.push(s);
+  }
+  close(): void {
+    this.readyState = 3;
+  }
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.();
+  }
+  frame(f: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(f) });
+  }
+  frames(type: string): Record<string, unknown>[] {
+    return this.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((f) => f.type === type);
+  }
+}
+
+const sceneSockets: FakeSceneSocket[] = [];
+
+function sceneTab(): FileTab {
+  return fileTab({
+    path: "boards/b.excalidraw",
+    mode: "canvas",
+    content: SCENE_BUFFER,
+    saved: SCENE_BUFFER,
+  });
+}
+
+describe("a canvas tab whose push the authority has not acknowledged", () => {
+  beforeEach(() => {
+    localStorage.setItem("chan.scenesync", "1");
+    sceneSockets.length = 0;
+    setSocketFactory((url) => new FakeSceneSocket(url) as unknown as WebSocket);
+  });
+
+  afterEach(() => {
+    resetSceneSyncForTests();
+    setSocketFactory(null);
+    localStorage.clear();
+  });
+
+  test("warns before the reload discards it", async () => {
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const session = acquireSceneSession(tab)!;
+    const sock = sceneSockets[sceneSockets.length - 1]!;
+    sock.open();
+    sock.frame({
+      type: "snapshot",
+      path: tab.path,
+      version: 0,
+      elements: [],
+      appState: {},
+      files: {},
+      dirty: false,
+      mtime_ns: "1751234567890123456",
+      cursors: [],
+    });
+
+    session.pushScene([
+      { id: "a", type: "rectangle", version: 2, versionNonce: 1, isDeleted: false },
+    ]);
+    // On the wire and unacknowledged: no push-ok has come back.
+    expect(sock.frames("push")).toHaveLength(1);
+    // The buffer itself is clean, so the prompt has exactly one reason to
+    // fire and the assertions below cannot pass for another one.
+    expect(tab.content).toBe(tab.saved);
+    expect(tab.diskConflicted).toBeFalsy();
+
+    const done = forceReloadFromDisk(tab.id);
+    await Promise.resolve();
+    const prompted = confirmState.open;
+    resolveConfirm(false);
+    await done;
+
+    // Soft: the missing prompt is the defect and the two lines under it are
+    // what the user loses because of it.
+    expect.soft(prompted).toBe(true);
+    expect.soft(resolveSpy).not.toHaveBeenCalled();
+    expect.soft(readTab(tab.id)?.content).toBe(SCENE_BUFFER);
+  });
+});
+
