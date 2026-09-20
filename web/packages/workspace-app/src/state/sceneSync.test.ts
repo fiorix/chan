@@ -133,6 +133,27 @@ function resetLayout(tabs: FileTab[]): LeafNode {
   return pane;
 }
 
+/// Read a tab back through the $state proxy. `layout` is $state, so it
+/// wraps every tab it is handed: a write through the raw object and a
+/// write through the proxy do not meet.
+function readTab(id: string): FileTab | undefined {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    const t = node.tabs.find((t) => t.id === id);
+    if (t && t.kind === "file") return t;
+  }
+  return undefined;
+}
+
+/// Install these tabs and hand back the objects the layout holds. Every
+/// component reads its tab from the layout, so the proxy is the only
+/// object production hands to a session or to saveTab; a test holding
+/// the raw object it built exercises a shape the app does not have.
+function installTabs(tabs: FileTab[]): FileTab[] {
+  resetLayout(tabs);
+  return tabs.map((t) => readTab(t.id)!);
+}
+
 const MTIME = "1751234567890123456";
 
 function elem(id: string, version = 1, extra: Record<string, unknown> = {}): WireElement {
@@ -504,8 +525,7 @@ describe("save funnel", () => {
 
   test("attached scene tabs save through the delegate arrays, never a PUT", async () => {
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     attached(tab);
     await saveTab(tab);
     await flushMicro();
@@ -515,8 +535,7 @@ describe("save funnel", () => {
 
   test("degraded scene tabs fall back to the classic PUT", async () => {
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { session, sock } = attached(tab);
     sock.frame({ type: "closed", reason: "reset" });
     expect(session.ownsSaves()).toBe(false);
@@ -532,8 +551,7 @@ describe("save funnel", () => {
 
 describe("lifecycle", () => {
   test("removed routes into the missing-file machinery", () => {
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { sock } = attached(tab);
     sock.frame({ type: "removed" });
     expect(tab.savedMtimeNs).toBeNull();
@@ -563,8 +581,7 @@ describe("lifecycle", () => {
 
 describe("a degraded session has exactly one writer", () => {
   test("pushScene stops sending once the session degrades", () => {
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { session, sock } = attached(tab);
     expect(sock.frames("push")).toHaveLength(0);
 
@@ -580,8 +597,7 @@ describe("a degraded session has exactly one writer", () => {
 
   test("a classic save hands ownership back to a degraded session", async () => {
     vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { session } = attached(tab);
     session.degrade();
     expect(session.ownsSaves()).toBe(false);
@@ -596,8 +612,7 @@ describe("a degraded session has exactly one writer", () => {
 
 describe("the force-reload prompt can see unflushed scene state", () => {
   test("a canvas tab with an unconfirmed push reports unflushed", () => {
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { session, sock } = attached(tab);
 
     session.pushScene([elem("a", 2)]);
@@ -637,8 +652,7 @@ describe("the classic PUT during an outage", () => {
   test("a still-retrying socket outage sends nothing at all", async () => {
     vi.useFakeTimers();
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { sock } = attached(tab);
 
     // Past the reconnect grace: degraded, socket down, redial still running.
@@ -661,8 +675,7 @@ describe("the classic PUT during an outage", () => {
 
   test("a degraded session whose socket is up PUTs the element", async () => {
     const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
-    const tab = sceneTab();
-    resetLayout([tab]);
+    const [tab] = installTabs([sceneTab()]);
     const { session } = attached(tab);
     session.degrade();
     expect(isDocSavePaused(tab)).toBe(false);

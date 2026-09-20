@@ -40,6 +40,7 @@ import { isDraftPath } from "./workspace.svelte";
 import { isExcalidraw } from "./fileTypes";
 import { windowCaps } from "./windowCaps";
 import {
+  liveFileTabById,
   markTabFileMissing,
   registerDocReleaseHook,
   registerDocSaveDelegate,
@@ -231,7 +232,20 @@ type QueuedPush = {
 export class SceneSession {
   readonly tabId: string;
   readonly path: string;
-  private readonly tab: FileTab;
+  /// The tab handed to the constructor. Read only through `tab`, which
+  /// prefers the layout's current object; this is the fallback for the
+  /// window between the tab leaving the layout and this session being
+  /// released.
+  private readonly boundTab: FileTab;
+
+  /// The tab this session mirrors status onto and reads the scene from.
+  /// A move replaces the tab object in the layout, so a session that
+  /// kept its constructor argument would write to an object nothing
+  /// renders or saves from, and the frozen mirror would tell the classic
+  /// save path to stand down for a session that has stopped owning saves.
+  private get tab(): FileTab {
+    return liveFileTabById(this.tabId) ?? this.boundTab;
+  }
 
   private status: DocSyncStatus = "connecting";
   private ws: WebSocket | null = null;
@@ -277,7 +291,7 @@ export class SceneSession {
   constructor(tab: FileTab) {
     this.tabId = tab.id;
     this.path = tab.path;
-    this.tab = tab;
+    this.boundTab = tab;
     this.mirror();
     this.dial();
   }

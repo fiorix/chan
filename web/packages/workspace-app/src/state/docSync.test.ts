@@ -1282,13 +1282,13 @@ describe("conflicts", () => {
     const tab = fileTab();
     resetLayout([tab]);
     const { sock, cleanup } = await attached(tab);
-    expect(tab.diskConflicted ?? false).toBe(false);
+    expect(readTab(tab.id)!.diskConflicted ?? false).toBe(false);
 
     sock.frame({ type: "conflict", active: true, disk_mtime_ns: MTIME });
-    expect(tab.diskConflicted).toBe(true);
+    expect(readTab(tab.id)!.diskConflicted).toBe(true);
 
     sock.frame({ type: "conflict", active: false });
-    expect(tab.diskConflicted).toBe(false);
+    expect(readTab(tab.id)!.diskConflicted).toBe(false);
     cleanup();
   });
 
@@ -1303,11 +1303,11 @@ describe("conflicts", () => {
     sock.open();
     sock.frame({ ...snap(tab.content, 0, { dirty: true }), conflicted: true });
     await flushMicro();
-    expect(tab.diskConflicted).toBe(true);
+    expect(readTab(tab.id)!.diskConflicted).toBe(true);
     // A later clean snapshot (hard resync after resolution) clears it.
     sock.frame(snap(tab.content, 0));
     await flushMicro();
-    expect(tab.diskConflicted).toBe(false);
+    expect(readTab(tab.id)!.diskConflicted).toBe(false);
     mounted.cleanup();
   });
 });

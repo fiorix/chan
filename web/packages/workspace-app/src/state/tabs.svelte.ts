@@ -5144,6 +5144,16 @@ function findFileTabById(tabId: string): { paneId: string; tab: FileTab } | null
   return null;
 }
 
+/// The file tab the layout holds for `tabId` right now, or null when no
+/// pane holds it. Every path that moves a tab puts a NEW object in the
+/// layout (see `cloneTab`), so a reference captured once stops being the
+/// object the app renders and saves from: a holder that outlives a move
+/// resolves through here on each access instead of keeping the tab it
+/// was handed.
+export function liveFileTabById(tabId: string): FileTab | null {
+  return findFileTabById(tabId)?.tab ?? null;
+}
+
 function adoptConflictResolution(tab: FileTab, response: FileResponse): void {
   tab.content = response.content;
   tab.saved = response.content;
