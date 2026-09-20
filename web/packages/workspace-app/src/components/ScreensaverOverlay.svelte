@@ -84,7 +84,21 @@
   /// this safe to wire unconditionally. When a PIN is
   /// set the helper bails out + the existing PIN form
   /// owns input.
+  function trapTab(e: KeyboardEvent): void {
+    // Keep focus inside the lock. The PIN field is the only thing here that
+    // can be acted on, so Tab and Shift+Tab return to it rather than stepping
+    // into the workspace the cover is hiding; with no PIN set there is no
+    // field and focus stays on the backdrop.
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    (inputEl ?? backdropEl)?.focus();
+  }
+
   function onBackdropKey(e: KeyboardEvent): void {
+    if (e.key === "Tab") {
+      trapTab(e);
+      return;
+    }
     if (!cardVisible) {
       e.preventDefault();
       cardVisible = true;
@@ -132,6 +146,10 @@
   }
 
   function onKey(e: KeyboardEvent): void {
+    if (e.key === "Tab") {
+      trapTab(e);
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
       void submit();

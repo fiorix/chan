@@ -183,6 +183,7 @@ afterEach(() => {
   uninstallDemoWorkspace();
   document.body.innerHTML = "";
   screensaver.locked = false;
+  screensaver.pin_set = false;
   windowLifecycle.ended = null;
   ui.authMissing = false;
   ui.disconnectBlocking = false;
@@ -370,6 +371,39 @@ describe("a chord behind a full-window cover", () => {
     await settle();
 
     expect(tabIds()).toEqual(["cover-file"]);
+  });
+});
+
+describe("the screen lock keeps focus", () => {
+  test("Tab does not reach the lock's own dismissal", async () => {
+    // jsdom moves no focus on Tab and the card-reveal branch prevents every
+    // key, so "focus did not move" and "the event was prevented" are both
+    // true with or without the trap. What separates them is what the key
+    // reaches: on a workspace with no PIN the backdrop's own handler treats
+    // any key on a revealed card as the unlock gesture, so an untrapped Tab
+    // unlocks the screen.
+    await mountApp();
+    screensaver.locked = true;
+    await settle();
+    const backdrop = document.body.querySelector<HTMLElement>(".screensaver-backdrop");
+    expect(backdrop, "the lock is up").not.toBeNull();
+
+    // First key reveals the card; the unlock gesture is the one after it.
+    backdrop!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }),
+    );
+    await settle();
+    expect(
+      document.body.querySelector(".screensaver-card"),
+      "the card is revealed",
+    ).not.toBeNull();
+
+    backdrop!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+    );
+    await settle();
+
+    expect(screensaver.locked, "Tab is not an unlock").toBe(true);
   });
 });
 
