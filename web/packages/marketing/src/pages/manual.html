@@ -224,7 +224,7 @@ aliases: [jq, jdoe]
 chan:
   kind: contact
 ---</code></pre>
-  <p><code>kind: slides</code> turns the file into a slide deck; start a new slide with <code>@pagebreak</code> on its own line. The <code>slides:</code> block is optional: <code>aspect_ratio</code> takes <code>"16:9"</code> or <code>"4:3"</code>, and <code>zoom_factor</code> scales the slide content (a number, default 2, or a percentage like <code>"150%"</code>):</p>
+  <p><code>kind: slides</code> turns the file into a slide deck. A page break starts the next slide, and the page break is <code>&lt;hr class="chan-page-break"&gt;</code> alone on a line: type <code>@pagebreak</code> on an empty line and press Space, and the editor rewrites the line to that marker. The macro expands as you type, so a <code>@pagebreak</code> that reaches a file any other way stays plain text. The <code>slides:</code> block is optional: <code>aspect_ratio</code> takes <code>"16:9"</code> or <code>"4:3"</code>, and <code>zoom_factor</code> scales the slide content (a number, default 2, or a percentage like <code>"150%"</code>):</p>
   <pre><code>---
 chan:
   kind: slides

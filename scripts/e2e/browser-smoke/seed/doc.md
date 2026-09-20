@@ -43,7 +43,7 @@ Paragraph nine of the filler stream. The quick brown fox jumps over the lazy dog
 
 Paragraph ten of the filler stream. The quick brown fox jumps over the lazy dog while the pagination engine measures block rectangles.
 
-@pagebreak
+<hr class="chan-page-break">
 
 ## Section two, after the forced break
 

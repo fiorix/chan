@@ -158,7 +158,7 @@ Marker 138: the composer shifts the content stream under the fixed content width
 
 Marker 140: the composer shifts the content stream under the fixed content width (5180 units). Marker 141: the composer walks the page background before the next page begins (5217 units).
 
-@pagebreak
+<hr class="chan-page-break">
 
 ### After the forced break
 
