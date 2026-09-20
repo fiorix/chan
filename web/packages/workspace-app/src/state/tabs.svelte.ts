@@ -3359,6 +3359,7 @@ async function closeTabOnce(
   // `terminalsMovingOut`. A cross-window MOVE marks the tab moving-out
   // (Pane.svelte drag-end) right before this call.
   const movingOut = tab.kind === "terminal" && terminalsMovingOut.has(tabId);
+  let discarded = false;
   if (isDraftTab(tab) && !opts?.force) {
     if (!(await handleDraftTabClose(tab))) return;
   } else if (
@@ -3370,6 +3371,7 @@ async function closeTabOnce(
     // tab. Skipping confirmCloseTabs is deliberate: it autosaves dirty tabs,
     // which would write the empty buffer to disk before the close. The sync
     // predicate short-circuits non-files so their close timing is unchanged.
+    discarded = true;
   } else if (!(await confirmCloseTabs([tab], opts))) {
     return;
   }
@@ -3386,7 +3388,12 @@ async function closeTabOnce(
   // a later genuine discard, and set right before the splice so the reactive
   // empty-window `$effect` reads it deterministically.
   lastTerminalCloseWasMoveOut = movingOut;
-  rememberClosedTab(now.paneId, now.side, now.tab);
+  // A discarded file has nothing to reopen: the close deleted it, and every
+  // claim the record would carry about disk (`saved`, the mtime token, the
+  // authority version, `openedEmpty`) belongs to a load that ended. Replaying
+  // one onto a path something else has since recreated is how a later close
+  // deletes a file this tab never read.
+  if (!discarded) rememberClosedTab(now.paneId, now.side, now.tab);
   // Close releases the doc session NOW (no remount linger): any dirty
   // buffer was flushed through the save funnel above, and the immediate
   // detach asks the server for a prompt flush of anything residual.

@@ -848,9 +848,10 @@ describe("tab close confirmation", () => {
       const pane = resetLayout([
         fileTab({ path: "notes/a.md", content: "", saved: "", openedEmpty: true }),
       ]);
-      await closeTab(pane.id, "file-1");
-      expect(remove).toHaveBeenCalledWith("notes/a.md");
-      remove.mockClear();
+      // Forced, so the close records the tab instead of discarding it; the
+      // marker is what rides into the record either way.
+      await closeTab(pane.id, "file-1", { force: true });
+      expect(remove).not.toHaveBeenCalled();
 
       // The reopen replays the closed buffer and loads nothing, so the
       // reopened tab has read no disk of its own. Something else may have
@@ -865,6 +866,27 @@ describe("tab close confirmation", () => {
       await closeTab(activePane().id, reopened.id);
       expect(remove).not.toHaveBeenCalled();
       expect(activePane().tabs).toHaveLength(0);
+    });
+
+    test("an auto-discarded file leaves nothing to reopen", async () => {
+      // The other arm of the same predicate: a file emptied and closed
+      // before its save confirms is dirty rather than opened-empty, so
+      // clearing the marker alone would still let a reopen replay a record
+      // whose `saved` claims a load that ended, and the next close would
+      // delete whatever now holds the path.
+      const remove = vi.spyOn(api, "remove").mockResolvedValue(undefined);
+      const pane = resetLayout([
+        fileTab({ path: "notes/a.md", content: "", saved: "had content" }),
+      ]);
+      await closeTab(pane.id, "file-1");
+      expect(remove).toHaveBeenCalledWith("notes/a.md");
+      remove.mockClear();
+
+      reopenClosedTab();
+      expect(
+        activePane().tabs.some((t) => t.kind === "file" && t.path === "notes/a.md"),
+      ).toBe(false);
+      expect(remove).not.toHaveBeenCalled();
     });
   });
 
