@@ -59,7 +59,7 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | [bubble-triggers-fire-inside-existing-syntax][trig] | accepted | build |
 | [image-actions-die-after-an-edit-above-the-image][img] | accepted | build |
 | [document-pdf-export-measures-before-images-load][pdf] | accepted | build |
-| [four-detectors-disagree-about-page-breaks][pgbrk] | carried | decide |
+| [four-detectors-disagree-about-page-breaks][pgbrk] | carried | build |
 
 **App shell, state and terminal**
 
@@ -69,8 +69,8 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | [a-tab-reorder-drops-live-tab-state][clone] | accepted | build |
 | [a-restored-transfer-id-collides-with-a-new-one][xfer] | accepted | build |
 | [a-canvas-edit-made-during-an-outage-can-be-lost][scene] | accepted | build |
-| [terminal-chords-run-twice-or-not-at-all][chord] | accepted | build, decide |
-| [full-window-covers-do-not-block-input][cover] | accepted | build, decide |
+| [terminal-chords-run-twice-or-not-at-all][chord] | accepted | build |
+| [full-window-covers-do-not-block-input][cover] | accepted | build |
 | [escape-closes-the-overlay-under-an-open-menu][esc] | accepted | build |
 | [shortcuts-ignore-the-keyboard-layout][kbd] | accepted | last |
 

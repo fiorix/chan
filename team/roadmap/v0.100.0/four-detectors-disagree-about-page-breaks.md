@@ -48,10 +48,12 @@ This is the same shape as the empty-table-cell defect v0.98.0 fixed: several par
 
 One definition of a page break, expressed once, that every surface consults: the source editor's divider, `splitSlidePages`, document PDF, deck PDF, present mode, and the CSS. A line is a page break if and only if every surface says it is.
 
-Which set that definition admits is the open decision, and it should be made deliberately rather than inherited from whichever regex happens to be consulted:
+Which set that definition admits was the open decision, to be made deliberately rather than inherited from whichever regex happens to be consulted:
 
 - The narrow reading is that the canonical marker is the only page break, and everything else is a near miss that gets normalized on write. It is simple and it makes the source unambiguous, at the cost of silently ignoring an `hr` a user hand-wrote with an extra class.
 - The broad reading is that any `hr` carrying the class in the DOM sense is a page break, matching what the browser and CSS already do, which requires the source-side detectors to stop being regexes over a line and start agreeing with a parsed element.
+
+Owner ruling, 2026-09-20: the narrow reading. `<hr class="chan-page-break">` is the page break, a near miss is normalized to it on write, and `@pagebreak` stays an authoring macro that expands to it. The paragraph in `crates/chan-shell/src/help.rs` that says a literal `@pagebreak` line still splits decks and PDF export moves with the code.
 
 ## Boundaries
 

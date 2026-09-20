@@ -14,7 +14,7 @@ Two neighbours belong to the same piece of work. A preflight poll that gives up 
 
 Every full-window cover blocks app input for as long as it is mounted, through one registration that a new cover cannot forget: keyboard chords, the Ctrl+D capture and host commands all consult it. The Backquote escape hatch keeps working. A cover that gives up releases both the pixels and the block. A command is offered only in windows where it can run.
 
-What the screensaver lock is meant to be is an owner ruling that shapes the rest: a real boundary (the host bridge and native menu gated, focus trapped) or a cosmetic cover that says so. The contract above is the floor either way.
+What the screensaver lock is meant to be is an owner ruling that shapes the rest: a real boundary (the host bridge and native menu gated, focus trapped) or a cosmetic cover that says so. The contract above is the floor either way. Owner ruling, 2026-09-20: a real boundary for this window. While the lock is up, host-bridge commands and native menu items are gated through the same registration, and focus is trapped in the PIN field. It locks this window's input and not the server: another window, or the bearer token, still reaches the sessions, and the text that documents the lock says so.
 
 ## Boundaries
 
@@ -27,3 +27,4 @@ What the screensaver lock is meant to be is an owner ruling that shapes the rest
 3. A preflight that gives up drops its cover and its block, and the window is usable.
 4. The lock command is absent from the command list of a standalone terminal and a control window, and present and working in a workspace window.
 5. With the screensaver lock up, the desktop's close button still raises the Hide, Close or Cancel prompt; with the reconnect overlay up it still closes without one.
+6. With the screensaver lock up, focus cannot leave the PIN field, a native menu command changes nothing until the PIN is accepted, and the text that documents the lock says it locks this window's input and not the server.
