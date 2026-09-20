@@ -2,7 +2,13 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
+import {
+  cliAssets,
+  desktopAssets,
+  windowsAssets,
+} from "./release-assets.mjs";
 import {
   compareVersions,
   escapeRegExp,
@@ -343,7 +349,53 @@ function buildMetadata(manifests) {
   return { entries, releases };
 }
 
+// The tables above carry each download's identity (id, label, target, format)
+// as well as its asset name, so they cannot simply be the lists in
+// release-assets.mjs. The names they spell are held to those lists instead: a
+// rename on either side fails generation here rather than silently dropping
+// the row, which is what the manifest-presence filters would otherwise do to
+// an asset that no longer answers to the name this file knows it by. The
+// gateway debs are excluded on purpose, because they are derived from the
+// manifest's own assets by pattern and have no list to drift.
+export function spelledAssetNames(version) {
+  return [
+    ...cliTargets.map((target) => target.asset),
+    ...desktopDownloads(version).map((download) => download.asset),
+    `Chan_${version}_x64-setup.exe`,
+  ];
+}
+
+export function declaredAssetNames(version) {
+  return [...cliAssets(), ...desktopAssets(version), ...windowsAssets(version)];
+}
+
+/// The names each side has and the other does not. Exported so the smoke can
+/// feed it a disagreement directly: the real lists agree, so a test over them
+/// alone would pass whether or not this comparison works.
+export function assetNameDisagreement(spelled, declared) {
+  return {
+    missing: declared.filter((name) => !spelled.includes(name)),
+    extra: spelled.filter((name) => !declared.includes(name)),
+  };
+}
+
+function assertAssetNamesAgree(version) {
+  const { missing, extra } = assetNameDisagreement(
+    spelledAssetNames(version),
+    declaredAssetNames(version),
+  );
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `asset names disagree with release-assets.mjs for ${version}: ` +
+        `${missing.length} named there and not here (${missing.join(", ") || "none"}), ` +
+        `${extra.length} named here and not there (${extra.join(", ") || "none"}). ` +
+        "Rename in release-assets.mjs and here together.",
+    );
+  }
+}
+
 function buildRelease(manifest) {
+  assertAssetNamesAgree(manifest.version);
   const cli = {
     schema_version: 1,
     version: manifest.version,
@@ -436,7 +488,11 @@ async function writeJson(file, value) {
   await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-main().catch((err) => {
-  console.error(`release metadata generation failed: ${err.message}`);
-  process.exitCode = 1;
-});
+// Run only as a CLI. The name comparison above is exported so its smoke can
+// feed it a disagreement, and an import must not also generate metadata.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`release metadata generation failed: ${err.message}`);
+    process.exitCode = 1;
+  });
+}

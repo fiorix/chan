@@ -7,6 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  assetNameDisagreement,
+  declaredAssetNames,
+  spelledAssetNames,
+} from "./generate-release-metadata.mjs";
+
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptsRoot = path.dirname(scriptPath);
 const siteRoot = path.resolve(scriptsRoot, "..");
@@ -15,6 +21,45 @@ const fixtureVersion = "0.15.4";
 const prereleaseVersion = "0.56.0-rc1";
 
 async function main() {
+  // A rename on one side of the asset-name split has to fail generation, not
+  // silently drop the download row. The generator used to re-spell the DMG,
+  // both AppImages, the NSIS installer and all six CLI names itself with no
+  // import from release-assets.mjs, and its manifest-presence filter then kept
+  // only the candidates the manifest still had, so a rename on one side
+  // removed that download and reported success.
+  //
+  // The comparison is fed a disagreement directly. Asserting only that the
+  // real lists agree would pass whether or not the comparison works.
+  {
+    const version = "1.2.3";
+    const spelled = spelledAssetNames(version);
+    const declared = declaredAssetNames(version);
+    const rename = (names) =>
+      names.map((name) => (name.endsWith(".dmg") ? `${name}.renamed` : name));
+
+    const agree = assetNameDisagreement(spelled, declared);
+    assert(
+      agree.missing.length === 0 && agree.extra.length === 0,
+      "the generator's asset names disagree with release-assets.mjs: " +
+        `missing ${agree.missing.join(", ") || "none"}, ` +
+        `extra ${agree.extra.join(", ") || "none"}`,
+    );
+
+    const renamedHere = assetNameDisagreement(rename(spelled), declared);
+    assert(
+      renamedHere.missing.length === 1 && renamedHere.extra.length === 1,
+      "a name renamed in the generator and not in release-assets.mjs must be reported both ways",
+    );
+
+    const renamedThere = assetNameDisagreement(spelled, rename(declared));
+    assert(
+      renamedThere.missing.length === 1 && renamedThere.extra.length === 1,
+      "a name renamed in release-assets.mjs and not in the generator must be reported both ways",
+    );
+
+    console.log("smoked the generator's asset names against release-assets.mjs");
+  }
+
   const out = await fs.mkdtemp(path.join(os.tmpdir(), "chan-release-metadata-"));
   try {
     await runNode(path.join(scriptsRoot, "generate-release-metadata.mjs"), [
