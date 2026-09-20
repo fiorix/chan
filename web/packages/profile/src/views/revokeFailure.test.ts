@@ -182,13 +182,15 @@ describe("a grant revoke clicked twice", () => {
   });
 
   test("sends one DELETE, so a revoke that worked is not reported as failed", async () => {
-    let settleFirst: (() => void) | null = null;
+    // Seeded, not nullable: the executor below runs synchronously, and a
+    // nullable handle narrows to `never` at the call site.
+    let settleFirst: () => void = () => {};
     let calls = 0;
     deleteDevserverGrant.mockImplementation(() => {
       calls += 1;
       if (calls === 1) {
         return new Promise<void>((resolve) => {
-          settleFirst = () => resolve();
+          settleFirst = resolve;
         });
       }
       return Promise.reject(new Error(GONE));
@@ -206,7 +208,7 @@ describe("a grant revoke clicked twice", () => {
     revoke.click();
     await flush();
 
-    settleFirst?.();
+    settleFirst();
     await flush();
 
     expect(deleteDevserverGrant).toHaveBeenCalledTimes(1);
