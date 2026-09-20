@@ -14,7 +14,7 @@ The frontend review filed the multi-row case as overwriting the destination with
 
 A move onto an occupied name has one behaviour, whatever the gesture: rename prompt, single drag, multi-row drag or cut and paste. The app never offers an action the server will refuse, and never lets the server resolve a collision without saying so. Every moved file gets what a single move gets: the drafts refusal, the conflict report, and open tabs that follow the file.
 
-Which behaviour is the one (refuse and name the occupied path, or keep both under a suffix and say so) is a small product decision to settle first.
+Which behaviour is the one (refuse and name the occupied path, or keep both under a suffix and say so) was a small product decision to settle first. Owner ruling, 2026-09-20: refuse, and name the occupied path. It is what the server already does, it needs no naming rule, and nothing is written that the user did not ask for. The "Overwrite existing file?" confirm goes, because it offers an action the server refuses.
 
 ## Boundaries
 

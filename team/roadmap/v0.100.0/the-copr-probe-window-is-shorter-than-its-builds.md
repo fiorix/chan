@@ -35,7 +35,9 @@ The probe's window is longer than a realistic COPR build for this project, and a
 
 Whatever window is chosen is justified by the measurement above rather than by a round number, and the owner chooses between the shapes below with those numbers in hand.
 
-Two shapes worth weighing. Raising the constant is the smallest change and keeps one mechanism. Splitting the job so a trigger step and a separate, independently re-runnable verify step do not share a cell is a larger change that also fixes the re-run problem, because verification could then be repeated without submitting a build.
+Owner ruling, 2026-09-20, with the measurement above in hand: both. The job is split so that a trigger step and a separate verify step do not share a cell and verify can be re-run alone, and the window is raised to 7200 seconds, which restores a real margin over the worst normal release (1.57 times 4577 seconds) and would have covered v0.82.0. The stale header comment is rewritten against the current data as part of the same change.
+
+The two shapes that were weighed. Raising the constant is the smallest change and keeps one mechanism. Splitting the job so a trigger step and a separate, independently re-runnable verify step do not share a cell is a larger change that also fixes the re-run problem, because verification could then be repeated without submitting a build.
 
 ## Boundaries
 
@@ -47,6 +49,6 @@ No change to the freeze rule itself, which is correct and load-bearing; this ite
 
 ## Acceptance
 
-1. A COPR publication that takes as long as v0.98.0's does not red the job.
+1. A COPR publication that takes as long as v0.82.0's (6058 seconds) does not red the job. One that takes as long as v0.98.0's still expires as UNCONFIRMED, which no window worth its freeze prevents, and re-running the verify step alone once COPR has finished turns it green without a second webhook POST.
 2. A genuine COPR failure, or a build whose version does not match the tag, still reds it. Prove this against a real red rather than by reading the script, because a detector nobody has watched fail is not a detector.
 3. If the trigger and verify steps are split, the verify step can be re-run alone without POSTing the webhook a second time.

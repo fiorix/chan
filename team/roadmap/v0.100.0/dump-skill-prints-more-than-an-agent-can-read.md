@@ -18,7 +18,7 @@ The default output of `chan dump-skill` is the full index: the frontmatter, the 
 
 `cs dump-skill` exists, speaks the same topics, and splits further: a page over the size budget answers with its own index of parts, and each part fits the budget. An agent never needs `chan` to read the manual of `cs`.
 
-No single invocation prints more than the budget. The number is the owner's to name. This item proposes 8 KiB: today's index meets it, and three topic pages (`serve`, `devserver`, `cs-terminal-team`) do not. Whether the whole document stays reachable behind an explicit flag, for a human or a file, is part of the same ruling.
+No single invocation prints more than the budget. The number is the owner's to name. This item proposes 8 KiB: today's index meets it, and three topic pages (`serve`, `devserver`, `cs-terminal-team`) do not. Whether the whole document stays reachable behind an explicit flag, for a human or a file, is part of the same ruling. Owner ruling, 2026-09-20: 8 KiB, and the whole document stays reachable behind an explicit flag.
 
 ## Boundaries
 

@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.100.0
 
-Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20 and added two the same day, the two CLI spellings and the `dump-skill` index, sequenced last in their lane and moving to v0.101.0 if it runs late; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
+Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20 and added two the same day, the two CLI spellings and the `dump-skill` index, sequenced last in their lane and moving to v0.101.0 if it runs late. Two more came out of the round itself, both found by the shell lane beside the tab-reorder fix and accepted by the owner the same day with the same exit: a terminal that loses its tab state when it moves to another window, and a file tab that shows loading for good after a move mid-load. That makes 40; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
 
 **Server, desktop and library**
 
@@ -74,6 +74,8 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | [terminal-chords-run-twice-or-not-at-all][chord] | accepted | build |
 | [full-window-covers-do-not-block-input][cover] | accepted | build |
 | [escape-closes-the-overlay-under-an-open-menu][esc] | accepted | build |
+| [a-terminal-moved-to-another-window-loses-its-tab-state][xwin] | accepted | late |
+| [a-file-tab-moved-mid-load-shows-loading-for-good][midload] | accepted | late |
 | [shortcuts-ignore-the-keyboard-layout][kbd] | accepted | last |
 
 **Feature surfaces, launcher and identity**
@@ -163,6 +165,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [pgbrk]: v0.100.0/four-detectors-disagree-about-page-breaks.md
 [close]: v0.100.0/a-close-after-a-prompt-can-remove-the-wrong-tab.md
 [clone]: v0.100.0/a-tab-reorder-drops-live-tab-state.md
+[xwin]: v0.100.0/a-terminal-moved-to-another-window-loses-its-tab-state.md
+[midload]: v0.100.0/a-file-tab-moved-mid-load-shows-loading-for-good.md
 [xfer]: v0.100.0/a-restored-transfer-id-collides-with-a-new-one.md
 [scene]: v0.100.0/a-canvas-edit-made-during-an-outage-can-be-lost.md
 [chord]: v0.100.0/terminal-chords-run-twice-or-not-at-all.md
