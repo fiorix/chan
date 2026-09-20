@@ -28,8 +28,11 @@
   let grantsError = $state<Record<string, string | null>>({});
   // A failed grant REMOVAL is not a failed grant LOAD. The list is what
   // says who holds shell-equivalent access, so a refused delete reports
-  // beside it and never in place of it.
+  // on the row it refused and never in place of the list. Keyed by
+  // grant id for that reason: one grantee's failure is not the others'.
   let grantActionError = $state<Record<string, string>>({});
+  // A revoke in flight, keyed by grant id.
+  let grantBusy = $state<Record<string, boolean>>({});
 
   // Which devserver's share panel is open (single-open keeps it compact).
   let expanded = $state<string | null>(null);
@@ -105,6 +108,9 @@
     if (grants[devserverId] && !force) return;
     grantsLoading[devserverId] = true;
     grantsError[devserverId] = null;
+    // The rows about to be replaced carry the failures, so a reload is
+    // what clears them.
+    for (const g of grants[devserverId] ?? []) delete grantActionError[g.id];
     try {
       grants[devserverId] = await api.listDevserverGrants(devserverId);
     } catch (e) {
@@ -122,7 +128,6 @@
     expanded = devserverId;
     // Reopening re-reads the list, so a panel never shows a cached one
     // that a failed change has since made stale.
-    delete grantActionError[devserverId];
     void loadGrants(devserverId, true);
   }
 
@@ -202,15 +207,22 @@
     }
   }
 
+  // The second DELETE of a double click would find the grant already
+  // gone and report that refusal over a revoke that worked, so the flag
+  // is what stops it: two clicks land in one frame and the disabled
+  // attribute is not on screen yet when the second arrives.
   async function removeGrant(devserverId: string, id: string) {
-    delete grantActionError[devserverId];
+    if (grantBusy[id]) return;
+    grantBusy[id] = true;
+    delete grantActionError[id];
     try {
       await api.deleteDevserverGrant(id);
       grants[devserverId] = (grants[devserverId] ?? []).filter((g) => g.id !== id);
       void loadLists();
     } catch (e) {
-      grantActionError[devserverId] =
-        e instanceof Error ? e.message : String(e);
+      grantActionError[id] = e instanceof Error ? e.message : String(e);
+    } finally {
+      grantBusy[id] = false;
     }
   }
 
@@ -332,11 +344,6 @@
                   <p class="err small">{addError[d.id]}</p>
                 {/if}
 
-                {#if grantActionError[d.id]}
-                  <p class="err small" role="alert">
-                    Not revoked: {grantActionError[d.id]}
-                  </p>
-                {/if}
                 {#if grantsLoading[d.id]}
                   <p class="muted small">Loading grants...</p>
                 {:else if grantsError[d.id]}
@@ -356,10 +363,16 @@
                           type="button"
                           class="ghost small-btn"
                           onclick={() => removeGrant(d.id, g.id)}
+                          disabled={grantBusy[g.id]}
                           aria-label="Revoke"
                         >
-                          Revoke
+                          {grantBusy[g.id] ? "..." : "Revoke"}
                         </button>
+                        {#if grantActionError[g.id]}
+                          <p class="err small grant-error" role="alert">
+                            Not revoked: {grantActionError[g.id]}
+                          </p>
+                        {/if}
                       </li>
                     {/each}
                   </ul>
@@ -525,6 +538,10 @@
   }
   .grantlist li:hover {
     background: var(--card-bg-hover, rgba(127, 127, 127, .06));
+  }
+  .grant-error {
+    grid-column: 1 / -1;
+    margin: .15rem 0 0 0;
   }
   .grant-email {
     overflow: hidden;
