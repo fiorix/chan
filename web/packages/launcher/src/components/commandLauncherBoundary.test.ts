@@ -1,20 +1,10 @@
 // @vitest-environment jsdom
 //
-// The command deck renders behind a boundary in CommandLauncher, so a render
-// throw inside the deck is contained where the deck was: the launcher stays
-// mounted and listening, and the deck's place says what failed and offers a
-// retry. Without the boundary the throw takes the whole launcher surface down
-// with no way back short of a reload.
+// The command deck renders behind a boundary in CommandLauncher, so a render throw inside the deck is contained where the deck was: the launcher stays mounted, and the deck's place says what failed and offers a retry. Without the boundary the throw takes the whole launcher surface down with no way back short of a reload.
 //
-// The deck is replaced by a component that throws while rendering, which is
-// that failure stated directly. It is also what a duplicate key looks like
-// from the launcher's side, since each_key_duplicate is thrown while the deck
-// renders its keyed list.
+// The deck is replaced by a component that throws while rendering, which is that failure stated directly. It is also what a duplicate key looks like from the launcher's side, since each_key_duplicate is thrown while the deck renders its keyed list.
 //
-// Worth knowing for anyone placing the next boundary: <svelte:boundary>
-// catches throws from rendering its children, NOT a throw raised while the
-// PARENT computes the props it passes down. A $derived in CommandLauncher that
-// throws escapes this boundary and reaches the window as an unhandled error.
+// Worth knowing for anyone placing the next boundary: <svelte:boundary> catches throws from rendering its children, NOT a throw raised while the PARENT computes the props it passes down. A $derived in CommandLauncher that throws escapes this boundary and reaches the window as an unhandled error.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
@@ -121,12 +111,11 @@ describe("a component that throws while the deck renders", () => {
     ).toEqual(["Try again", "Close"]);
   });
 
-  it("leaves the launcher around it mounted and listening", () => {
+  it("leaves the launcher around it mounted through a close state change", () => {
     openDeck();
 
     expect(target.querySelector(".deck-failed"), "the deck failed").not.toBeNull();
-    // The launcher's own window listener still runs: closing still works, which
-    // it could not if the throw had unmounted the surface.
+    // Exercise the close state transition while the fallback is present; this does not dispatch a window event.
     expect(() => closeCommandLauncher()).not.toThrow();
     flushSync();
     expect(document.body.contains(target), "the surface survives the throw").toBe(true);

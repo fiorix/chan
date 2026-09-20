@@ -1,11 +1,6 @@
 // @vitest-environment jsdom
 //
-// Two machine rows can resolve to one library_id: a directly registered
-// devserver beside its gateway roster row, or one box registered twice. The
-// deck flattens machine windows into one keyed list, so only the first
-// claimant of the id is handed them: two rows holding the same WindowRecord
-// objects put one window in that list twice, and each_key_duplicate takes the
-// whole command surface down. Any root-level query reaches that list.
+// Two machine rows can resolve to one library_id: a directly registered devserver beside its gateway roster row, or one box registered twice. The deck flattens machine windows into one keyed list, so only the first claimant of the id is handed them: two rows holding the same WindowRecord objects put one window in that list twice, and each_key_duplicate takes the whole command surface down. Any root-level query reaches that list.
 //
 // Mounted, because the failure is a render throw in the deck itself.
 
