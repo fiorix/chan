@@ -40,6 +40,7 @@ import {
   draftCloseState,
   enterPaneMode,
   enterPaneModeTransaction,
+  flagExternalChange,
   flipHybrid,
   failTerminalMetadataRename,
   focusColorForWindow,
@@ -3723,6 +3724,21 @@ describe("autosave", () => {
 
     const live = activePane().tabs[0] as FileTab;
     expect(live.content).toBe("a peer typed this while the mode was up");
+  });
+
+  test("the commit keeps a banner the watcher raised during the mode", async () => {
+    // `flagExternalChange` resolves through the live tree, and the watcher
+    // delivers that frame once: a flag the commit discards is not raised
+    // again. The user goes on typing over a file that moved under them and
+    // hears nothing about it until their next save answers 409.
+    resetLayout([fileTab({ path: "notes/a.md", content: "body", saved: "body" })]);
+
+    enterPaneMode();
+    flagExternalChange("file-1");
+    commitPaneMode();
+
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.externalChange).toBe(true);
   });
 
   test("an autosave that fails mid-save reports on the tab in the layout", async () => {
