@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # Confirm a COPR webhook build actually published, at the released version.
 #
-# The `copr` job in publish-downstream.yml POSTs a custom webhook and, until
-# now, trusted the 200 on enqueue as the whole story. That proves the webhook
-# was accepted, not that a build ran, not that any chroot succeeded, and not
-# that the built version is the released tag: the SCM packages carry an empty
-# committish and rebuild main's HEAD, so a push between the tag and COPR
-# dequeuing produces a package labelled X.Y.Z whose contents are not X.Y.Z.
+# The COPR trigger jobs in publish-downstream.yml POST custom webhooks and
+# record when each package was submitted. Their matching verify jobs run this
+# probe to confirm that a build ran, every chroot succeeded, and the built
+# version is the released tag. The SCM packages carry an empty committish and
+# rebuild main's HEAD, so main stays frozen until both packages are confirmed.
 #
 # This probe reads the unauthenticated COPR API (no secret) for the build the
 # webhook created and ends nonzero unless every chroot succeeded at the
-# released version. Four outcomes, following the PPA dry-run precedent:
+# released version. Outcomes, following the PPA dry-run precedent:
 #
 #   - every chroot succeeded at the expected version           -> green
 #   - a chroot failed or was cancelled                         -> red (named)
@@ -21,10 +20,11 @@
 #     (a green no-op on forks)
 #
 # The 7200s budget is 1.57x the worst normal total measured across v0.89.0 to
-# v0.99.0 (4577s for chan-desktop) and covers v0.82.0's 6058s slow build. It
-# deliberately does not keep main frozen long enough to cover the exceptional
-# v0.98.0 and v0.76.1 events (13986s and 25930s); those expire as UNCONFIRMED
-# and this workflow's separate verify job can be re-run after COPR finishes.
+# v0.99.0 (4577s for chan-desktop) and covers v0.82.0's 6058s slow build.
+# Exceptional slow builds may outlast 7200s and expire as UNCONFIRMED; the
+# package's separate verify job can be re-run after COPR finishes. The budget
+# bounds this polling attempt only: main remains frozen until both packages are
+# confirmed.
 #
 # It reports the chroot set it observed but does not assert it: the enabled
 # chroots and the EL9 desktop denylist are console-only state, so the human
