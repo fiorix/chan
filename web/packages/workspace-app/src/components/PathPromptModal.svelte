@@ -294,8 +294,22 @@
     let acc = "";
     for (const seg of q.slice(0, slash).split("/")) {
       acc = acc ? `${acc}/${seg}` : seg;
-      if (folderSet.has(acc) && !tree.loadedDirs[acc] && !tree.loadingDirs[acc]) {
-        void loadTreeDir(acc);
+      // A directory that failed to list is neither loaded nor loading, so
+      // without the recorded error this guard would be false again on the
+      // next run and would re-arm the request at once. A failed load is a
+      // state: it waits for something that could change the answer, which is
+      // `clearTreeDirError` (the File Tree's collapse) or a `refreshTree`,
+      // which replaces the whole record.
+      if (
+        folderSet.has(acc) &&
+        !tree.loadedDirs[acc] &&
+        !tree.loadingDirs[acc] &&
+        !(acc in tree.dirErrors)
+      ) {
+        // loadTreeDir records the failure in tree.dirErrors and rethrows.
+        // The status row below reads that record, so the rejection has a
+        // reader and does not need to reach the window as an unhandled one.
+        void loadTreeDir(acc).catch(() => {});
       }
     }
   });
@@ -327,6 +341,10 @@
   type Status =
     | { kind: "empty" }
     | { kind: "invalid"; reason: string }
+    /// An ancestor directory that could not be listed. The checks below read
+    /// the tree, so this says the listing failed rather than reasoning from a
+    /// tree that is missing a level.
+    | { kind: "dir-unreadable"; path: string; reason: string }
     | { kind: "kind-mismatch"; reason: string }
     | { kind: "no-op" }
     | { kind: "overwrites"; path: string; isFolder: boolean }
@@ -344,6 +362,20 @@
         mode: PathPromptMode;
       };
 
+  /// The shallowest ancestor of `path` whose listing failed, or null. The
+  /// load effect skips a directory with a recorded failure, so this is what
+  /// the user is waiting on rather than a load still in flight.
+  function unreadableAncestor(path: string): string | null {
+    const slash = path.lastIndexOf("/");
+    if (slash <= 0) return null;
+    let acc = "";
+    for (const seg of path.slice(0, slash).split("/")) {
+      acc = acc ? `${acc}/${seg}` : seg;
+      if (acc in tree.dirErrors) return acc;
+    }
+    return null;
+  }
+
   const status = $derived.by<Status>(() => {
     // Use the bare (no trailing slash) path for all workspace-relative
     // reasoning; the submit value with the slash lives in
@@ -352,6 +384,15 @@
     if (path === "") return { kind: "empty" };
     if (!validation.ok) return { kind: "invalid", reason: validation.reason };
     if (openGraphLink) return { kind: "opens-graph" };
+
+    const unreadable = unreadableAncestor(path);
+    if (unreadable) {
+      return {
+        kind: "dir-unreadable",
+        path: unreadable,
+        reason: tree.dirErrors[unreadable] ?? "cannot be listed",
+      };
+    }
 
     // Existing entry at the exact typed path: file overwrite (move)
     // or kind-mismatch. Directory overwrite is also a mismatch because
@@ -640,7 +681,8 @@
       <div
         class="status"
         class:err={status.kind === "invalid" || status.kind === "kind-mismatch"}
-        class:warn={status.kind === "overwrites" ||
+        class:warn={status.kind === "dir-unreadable" ||
+          status.kind === "overwrites" ||
           (status.kind === "creates" && status.newAncestors.length > 0)}
       >
         {#if status.kind === "empty"}
@@ -649,6 +691,8 @@
           ✗ {status.reason}
         {:else if status.kind === "kind-mismatch"}
           ✗ {status.reason}
+        {:else if status.kind === "dir-unreadable"}
+          ⚠ cannot list <span class="mono">{status.path}</span>: {status.reason}
         {:else if status.kind === "overwrites"}
           ⚠ overwrites existing {status.isFolder ? "directory" : "file"}
           <span class="mono">{status.path}{status.isFolder ? "/" : ""}</span>

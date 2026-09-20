@@ -101,6 +101,12 @@ describe("the path prompt over a directory that cannot be listed", () => {
     const badCalls = listed.calls.filter((d) => d === "bad");
     expect(badCalls, `one request, got ${badCalls.length}`).toHaveLength(1);
     expect(tree.dirErrors["bad"], "the failure is recorded").toContain("cannot list bad");
+
+    // The contract puts the failure where the content would have been.
+    const status = target.querySelector(".status")!.textContent!.replace(/\s+/g, " ");
+    expect(status, "the prompt says the directory could not be listed").toContain(
+      "cannot list bad",
+    );
   });
 
   test("a retry asks once more", async () => {
@@ -119,6 +125,21 @@ describe("the path prompt over a directory that cannot be listed", () => {
 
     const badCalls = listed.calls.filter((d) => d === "bad");
     expect(badCalls, `a second request, got ${badCalls.length}`).toHaveLength(2);
+  });
+
+  test("a segment that is not a known directory is never asked for", async () => {
+    // What the retired source-text pin guarded: the load is gated on the
+    // directory already existing, so a mistyped segment cannot make a request
+    // (and so cannot produce a 404 the user never caused).
+    const target = mountModal();
+    void uiPathPrompt({ title: "New file", kind: "file", mode: "create" });
+    await tick();
+    const input = target.querySelector("input")!;
+    input.value = "nosuchdir/new.md";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    expect(listed.calls, `nothing was requested, got ${listed.calls}`).toHaveLength(0);
   });
 
   test("a directory that lists is still loaded once", async () => {

@@ -58,7 +58,8 @@ describe("PathPromptModal progressive autocomplete", () => {
   // suggested. Gated on folderSet so a mistyped segment can't 404.
   test("modal lazily loads typed ancestor directories for suggestions", () => {
     expect(modal).toContain("loadTreeDir");
-    // The load is gated on the directory already existing in folderSet.
-    expect(modal).toMatch(/folderSet\.has\(acc\)[\s\S]{0,80}loadTreeDir\(acc\)/);
+    // That the load is gated on the directory already existing, so a mistyped
+    // segment never asks the server, is asserted behaviourally in
+    // pathPromptFailedAncestor.test.ts.
   });
 });
