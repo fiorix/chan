@@ -1744,6 +1744,19 @@
     role="group"
     aria-label="pane content"
   >
+    <!-- A throw while a tab body renders used to take the whole window down,
+         which is what turned this release's duplicate-key defects into a dead
+         app rather than a missing row. The boundary keeps the failure inside
+         this pane's body: the tab strip above it, the pane's other tabs and
+         every other pane stay usable, and the body says what failed.
+
+         It catches a throw from rendering these children, not one raised
+         while this component computes what it passes down. Pane's own
+         deriveds (`everyTab`, `visibleTabs`, the tab labels) and the tab
+         strip render outside it, so a throw in those still reaches the
+         window. That is the price of keeping the strip alive, and the strip
+         is the way back. -->
+    <svelte:boundary>
     {#if paneMode.active}
           <div class="pane-mode-preview" aria-label="Hybrid Nav preview">
             {#if paneMode.stale && viewLayout.activePaneId === pane.id}
@@ -1898,6 +1911,25 @@
         active={isLiveActive(t)}
       />
     {/each}
+
+    {#snippet failed(error, reset)}
+      <div class="pane-failed" role="alert">
+        <p class="pane-failed-title">This pane could not be drawn.</p>
+        <p class="pane-failed-detail">
+          {error instanceof Error ? error.message : String(error)}
+        </p>
+        <p class="pane-failed-hint">
+          Its tab strip still works, and the other panes are unaffected.
+        </p>
+        <div class="pane-failed-actions">
+          <button onclick={() => reset()}>Try again</button>
+          {#if active}
+            <button onclick={() => void closeTab(pane.id, active.id)}>Close tab</button>
+          {/if}
+        </div>
+      </div>
+    {/snippet}
+    </svelte:boundary>
   </div>
       </div>
     </div>
@@ -1905,6 +1937,41 @@
 </div>
 
 <style>
+  /* Sits where the tab bodies would be, so a failure reads as this pane's
+     own rather than as the window having lost it. */
+  .pane-failed {
+    margin: auto;
+    max-width: min(32rem, calc(100% - 2rem));
+    padding: 1rem 1.15rem;
+    border-radius: 10px;
+    background: var(--bg-card);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+    color: var(--text);
+  }
+
+  .pane-failed-title {
+    margin: 0 0 0.35rem;
+    font-weight: 600;
+  }
+
+  .pane-failed-detail {
+    margin: 0 0 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+  }
+
+  .pane-failed-hint {
+    margin: 0 0 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+  }
+
+  .pane-failed-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
   .pane {
     display: flex;
     flex-direction: column;
