@@ -689,11 +689,11 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-<!-- A render throw inside the deck used to take the whole command surface
-     down with no way back short of a reload. The boundary keeps the failure
-     inside the deck: the launcher behind it stays usable, and the deck's place
-     says what happened and offers a retry, which re-renders it against
-     whatever the library holds now.
+<!-- Without this boundary a render throw inside the deck takes the whole
+     command surface down with no way back short of a reload. The boundary
+     keeps the failure inside the deck: the launcher behind it stays usable,
+     and the deck's place says what happened and offers a retry, which
+     re-renders it against whatever the library holds now.
 
      It catches a throw from rendering the deck, not one raised while this
      component computes the props it passes down. -->
