@@ -3818,6 +3818,36 @@ describe("autosave", () => {
     vi.useRealTimers();
   });
 
+  test("a close whose save fails mid-move reports on the tab in the layout", async () => {
+    // Same shape as the autosave message one call up: `confirmCloseTabs`
+    // awaits the save, and a move in that window replaces the tab object, so
+    // the message lands on something nothing renders. The close refuses and
+    // the user is told nothing about why.
+    vi.useFakeTimers();
+    let fail: (e: Error) => void = () => {};
+    vi.spyOn(api, "write").mockReturnValue(
+      new Promise<never>((_resolve, reject) => {
+        fail = reject;
+      }) as ReturnType<typeof api.write>,
+    );
+    const pane = resetLayout([
+      fileTab({ path: "notes/a.md", content: "body", saved: "old" }),
+      fileTab({ id: "file-2", path: "notes/b.md" }),
+    ]);
+
+    const closing = closeTab(pane.id, "file-1");
+    await vi.advanceTimersByTimeAsync(0);
+    reorderTab(pane.id, "file-1", 1);
+    fail(new Error("disk full"));
+    await vi.advanceTimersByTimeAsync(10);
+    await closing;
+
+    const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
+    expect(live, "the close was refused, so the tab is still open").toBeDefined();
+    expect(live.error ?? "", "and the tab says why").toContain("save failed");
+    vi.useRealTimers();
+  });
+
   test("a save that lands during Hybrid Nav stamps the committed tab", async () => {
     // The save writes the live tree, which is right while the draft is up,
     // and the commit then throws that tree away. The next autosave sends
