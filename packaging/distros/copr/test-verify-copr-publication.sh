@@ -15,12 +15,17 @@
 # source_package.version, submitted_on, chroots; build-chroot/list carries
 # per-chroot name and state).
 #
+# The workflow checks keep each package's trigger and verifier in separate
+# jobs, pass the trigger time through a job output, and keep POST out of the
+# independently re-runnable verifier.
+#
 # Run: packaging/distros/copr/test-verify-copr-publication.sh
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROBE="$SCRIPT_DIR/verify-copr-publication.sh"
+PROBE="${COPR_PROBE_UNDER_TEST:-$SCRIPT_DIR/verify-copr-publication.sh}"
+WORKFLOW="${COPR_WORKFLOW_UNDER_TEST:-$SCRIPT_DIR/../../../.github/workflows/publish-downstream.yml}"
 WORK="$(mktemp -d)"
 FAILURES=0
 
@@ -42,6 +47,12 @@ for a in "$@"; do
     case "$a" in http*) url="$a" ;; esac
 done
 [ -n "$url" ] || { echo "stub curl: no URL in args" >&2; exit 2; }
+case " $* " in
+    *" -X POST "*)
+        echo "stub curl: the verifier must not POST" >&2
+        exit 2
+        ;;
+esac
 case "$url" in
     *build-chroot/list*)
         cat "$fix/build-chroot.json"
@@ -82,6 +93,36 @@ assert_grep() {
         bad "$3: '$1' missing from $2"
         sed 's/^/     | /' "$2"
     fi
+}
+assert_verify_only() {
+    if grep -qF -- 'run: packaging/distros/copr/verify-copr-publication.sh' "$1" &&
+        ! grep -qF -- 'curl -sf -X POST' "$1"; then
+        ok "$2"
+    else
+        bad "$2: the verify job is missing the probe or contains a webhook POST"
+        sed 's/^/     | /' "$1"
+    fi
+}
+assert_same_guard() {
+    local trigger_block="$1" verify_block="$2" label="$3"
+    local trigger_guard="$WORK/$label-trigger.guard"
+    local verify_guard="$WORK/$label-verify.guard"
+    sed -n '/^    if: >-$/,/^    runs-on:/p' "$trigger_block" >"$trigger_guard"
+    sed -n '/^    if: >-$/,/^    runs-on:/p' "$verify_block" >"$verify_guard"
+    if [ -s "$trigger_guard" ] && cmp -s "$trigger_guard" "$verify_guard"; then
+        ok "$label trigger and verify use the same release guard"
+    else
+        bad "$label trigger and verify release guards differ"
+    fi
+}
+
+# job_block <job id> <destination>; extract one top-level Actions job.
+job_block() {
+    awk -v heading="  $1:" '
+        $0 == heading { found = 1 }
+        found && $0 != heading && /^  [A-Za-z0-9][A-Za-z0-9_-]*:$/ { exit }
+        found { print }
+    ' "$WORKFLOW" >"$2"
 }
 
 # new_fixture <name> -> prints a fresh fixture dir path
@@ -132,6 +173,17 @@ run_probe() {
         PACKAGE=chan RELEASE_TAG=v0.74.0 WEBHOOK_PRESENT=1 CANONICAL=true \
         POSTED_AT=1000 COPR_POLL_INTERVAL=1 COPR_POLL_BUDGET=30 \
         "$@" "$PROBE" >"$log" 2>&1
+    return $?
+}
+
+# Run against the production default budget while seeding Bash's elapsed-time
+# clock. This models a later observation without making the fixture wait hours.
+run_probe_at() {
+    local fix="$1" log="$2" elapsed="$3"
+    env -u COPR_POLL_BUDGET PATH="$WORK/bin:$PATH" COPR_FIXTURE_DIR="$fix" \
+        PACKAGE=chan RELEASE_TAG=v0.74.0 WEBHOOK_PRESENT=1 CANONICAL=true \
+        POSTED_AT=1000 COPR_POLL_INTERVAL=0 SECONDS="$elapsed" \
+        "$PROBE" >"$log" 2>&1
     return $?
 }
 
@@ -189,6 +241,60 @@ chroots_all_ok >"$fix/build-chroot.json"
 run_probe "$fix" "$WORK/wait.log"
 assert_status 0 $? "a build that finishes within budget greens after polling"
 assert_grep "build 10800005 succeeded at 0.74.0-1" "$WORK/wait.log" "the green arrives after the running polls"
+
+echo "== a v0.82.0-length build finishes inside the default window"
+fix="$(new_fixture slow-within-window)"
+build_json 10800006 running 0.74.0-1 1000 >"$fix/build-list.1.json"
+build_json 10800006 succeeded 0.74.0-1 1000 >"$fix/build-list.json"
+chroots_all_ok >"$fix/build-chroot.json"
+run_probe_at "$fix" "$WORK/slow-within-window.log" 6058
+assert_status 0 $? "a build still running at 6058s can finish inside the default budget"
+assert_grep "build 10800006 succeeded at 0.74.0-1" "$WORK/slow-within-window.log" "the 6058s case reaches the later success"
+
+echo "== a v0.98.0-length build expires unconfirmed, then verify alone succeeds"
+fix="$(new_fixture slow-past-window)"
+build_json 10800007 running 0.74.0-1 1000 >"$fix/build-list.json"
+chroots_all_ok >"$fix/build-chroot.json"
+run_probe_at "$fix" "$WORK/slow-past-window.log" 13986
+assert_status 1 $? "a build still running at 13986s exceeds the default budget"
+assert_grep "still 'running' after 7200s" "$WORK/slow-past-window.log" "the timeout names the 7200s window"
+assert_grep "UNCONFIRMED (not failed)" "$WORK/slow-past-window.log" "the exceptional slow build is unconfirmed rather than failed"
+
+# A verify-only rerun sees the same webhook build after it becomes terminal.
+# The curl stub rejects POST, so this green cannot conceal a second trigger.
+build_json 10800007 succeeded 0.74.0-1 1000 >"$fix/build-list.json"
+rm -f "$fix/.calls"
+run_probe_at "$fix" "$WORK/verify-rerun.log" 0
+assert_status 0 $? "a later verify-only run succeeds against the original build"
+assert_grep "build 10800007 succeeded at 0.74.0-1" "$WORK/verify-rerun.log" "the verify-only rerun confirms publication"
+
+echo "== trigger and verify are separate re-runnable workflow jobs"
+for row in \
+    "chan|copr-chan-trigger|copr-chan-verify" \
+    "chan-desktop|copr-desktop-trigger|copr-desktop-verify"; do
+    IFS='|' read -r package trigger_job verify_job <<<"$row"
+    trigger_block="$WORK/$trigger_job.yml"
+    verify_block="$WORK/$verify_job.yml"
+    job_block "$trigger_job" "$trigger_block"
+    job_block "$verify_job" "$verify_block"
+
+    assert_grep "name: COPR $package trigger" "$trigger_block" "$package has a trigger job"
+    assert_grep 'if: >-' "$trigger_block" "$package trigger keeps the release guard"
+    assert_grep 'PUBLISH: ${{ github.event_name' "$trigger_block" "$package trigger keeps the publish guard"
+    assert_grep 'posted_at: ${{ steps.trigger.outputs.posted_at }}' "$trigger_block" "$package promotes the POST time to a job output"
+    assert_grep 'webhook_present: ${{ steps.trigger.outputs.webhook_present }}' "$trigger_block" "$package promotes webhook presence to a job output"
+    assert_grep 'curl -sf -X POST' "$trigger_block" "$package trigger owns the webhook POST"
+
+    assert_grep "name: COPR $package verify" "$verify_block" "$package has a separate verify job"
+    assert_grep "needs: $trigger_job" "$verify_block" "$package verify depends on its trigger"
+    assert_grep 'if: >-' "$verify_block" "$package verify duplicates the release guard"
+    assert_grep 'PUBLISH: ${{ github.event_name' "$verify_block" "$package verify duplicates the publish guard"
+    assert_grep "POSTED_AT: \${{ needs.$trigger_job.outputs.posted_at }}" "$verify_block" "$package verify consumes the original POST time"
+    assert_grep "WEBHOOK_PRESENT: \${{ needs.$trigger_job.outputs.webhook_present }}" "$verify_block" "$package verify consumes the original webhook verdict"
+    assert_grep 'run: packaging/distros/copr/verify-copr-publication.sh' "$verify_block" "$package verify runs the probe"
+    assert_verify_only "$verify_block" "$package verify runs only the probe and cannot POST"
+    assert_same_guard "$trigger_block" "$verify_block" "$package"
+done
 
 echo "== COPR_WEBHOOK absent on the canonical repository -> red"
 fix="$(new_fixture canonabsent)"

@@ -133,8 +133,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-  copr:
-    name: COPR ${{ matrix.package }}
+  copr-chan-trigger:
+    name: COPR chan trigger
     if: >-
       (github.event_name == 'workflow_dispatch' &&
        (inputs.targets == 'all' || inputs.targets == 'copr') &&
@@ -143,31 +143,22 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        startsWith(github.event.workflow_run.head_branch, 'v') &&
        !contains(github.event.workflow_run.head_branch, '-'))
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [chan, chan-desktop]
     runs-on: ubuntu-latest
     env:
       PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    outputs:
+      posted_at: ${{ steps.trigger.outputs.posted_at }}
+      webhook_present: ${{ steps.trigger.outputs.webhook_present }}
     steps:
-      # The probe script lives in the repo, so this job checks the release out
-      # to run it.
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
-
-      # Keep the packages in separate matrix cells: one webhook failure stays
-      # red and attributable without suppressing the other package's trigger.
-      - name: Trigger COPR ${{ matrix.package }} build
+      - name: Trigger COPR chan build
         id: trigger
         env:
-          PACKAGE: ${{ matrix.package }}
+          PACKAGE: chan
           WEBHOOK: ${{ secrets.COPR_WEBHOOK }}
         run: |
           set -euo pipefail
           if [ "$PUBLISH" != "true" ]; then
-            echo "publish=false; skipping the COPR trigger and its publication probe."
+            echo "publish=false; skipping the COPR trigger."
             exit 0
           fi
           if [ -z "$WEBHOOK" ]; then
@@ -183,17 +174,106 @@ jobs:
           echo "webhook_present=1" >> "$GITHUB_OUTPUT"
           curl -sf -X POST "${WEBHOOK}${PACKAGE}/"
 
+  copr-chan-verify:
+    name: COPR chan verify
+    needs: copr-chan-trigger
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'copr') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    runs-on: ubuntu-latest
+    env:
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+
       # The 200 on enqueue is not publication. Poll the unauthenticated COPR
-      # API until every chroot for this package reports at the released
-      # version, and fail on a broken freeze, a failed chroot, or a budget
-      # that expires with the build unconfirmed.
-      - name: Verify COPR ${{ matrix.package }} publication
+      # API until every chroot reports at the released version, and fail on a
+      # broken freeze, a failed chroot, or an unconfirmed build. Keeping this
+      # in its own job lets a timeout be re-run without a second webhook POST.
+      - name: Verify COPR chan publication
         if: ${{ success() && env.PUBLISH == 'true' }}
         env:
-          PACKAGE: ${{ matrix.package }}
+          PACKAGE: chan
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
-          POSTED_AT: ${{ steps.trigger.outputs.posted_at }}
-          WEBHOOK_PRESENT: ${{ steps.trigger.outputs.webhook_present }}
+          POSTED_AT: ${{ needs.copr-chan-trigger.outputs.posted_at }}
+          WEBHOOK_PRESENT: ${{ needs.copr-chan-trigger.outputs.webhook_present }}
+          CANONICAL: ${{ github.repository == 'fiorix/chan' }}
+        run: packaging/distros/copr/verify-copr-publication.sh
+
+  copr-desktop-trigger:
+    name: COPR chan-desktop trigger
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'copr') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    runs-on: ubuntu-latest
+    env:
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    outputs:
+      posted_at: ${{ steps.trigger.outputs.posted_at }}
+      webhook_present: ${{ steps.trigger.outputs.webhook_present }}
+    steps:
+      - name: Trigger COPR chan-desktop build
+        id: trigger
+        env:
+          PACKAGE: chan-desktop
+          WEBHOOK: ${{ secrets.COPR_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" != "true" ]; then
+            echo "publish=false; skipping the COPR trigger."
+            exit 0
+          fi
+          if [ -z "$WEBHOOK" ]; then
+            echo "COPR_WEBHOOK not set; skipping the POST. The publication probe reports whether that is a fork no-op or a canonical-repository error."
+            echo "webhook_present=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # COPR SCM rebuilds main's HEAD (empty committish), so main must stay
+          # frozen from the tag push until the probe confirms both packages.
+          # Record the POST time so the probe can tell this build from an
+          # earlier one, then trigger.
+          echo "posted_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "webhook_present=1" >> "$GITHUB_OUTPUT"
+          curl -sf -X POST "${WEBHOOK}${PACKAGE}/"
+
+  copr-desktop-verify:
+    name: COPR chan-desktop verify
+    needs: copr-desktop-trigger
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.targets == 'all' || inputs.targets == 'copr') &&
+       !contains(inputs.tag, '-')) ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-'))
+    runs-on: ubuntu-latest
+    env:
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+
+      - name: Verify COPR chan-desktop publication
+        if: ${{ success() && env.PUBLISH == 'true' }}
+        env:
+          PACKAGE: chan-desktop
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+          POSTED_AT: ${{ needs.copr-desktop-trigger.outputs.posted_at }}
+          WEBHOOK_PRESENT: ${{ needs.copr-desktop-trigger.outputs.webhook_present }}
           CANONICAL: ${{ github.repository == 'fiorix/chan' }}
         run: packaging/distros/copr/verify-copr-publication.sh
 

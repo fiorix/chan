@@ -20,13 +20,11 @@
 #   - COPR_WEBHOOK absent on the canonical repository          -> red
 #     (a green no-op on forks)
 #
-# The budget exceeds the observed worst-case COPR build so expiry is a real
-# anomaly. From the recorded build ids in
-# team/roadmap/done/packaging-aarch64-validation.md, harvested via this same
-# API, the worst submitted->ended total across v0.67.0-v0.73.0 is chan-desktop
-# 0.68.0 at 3237s (~54 min; worst build phase 3060s, worst queue 466s). The
-# default budget is 5400s (90 min), ~1.67x that worst total, leaving ~36 min of
-# headroom over the worst build, which is ~4.6x the worst observed queue.
+# The 7200s budget is 1.57x the worst normal total measured across v0.89.0 to
+# v0.99.0 (4577s for chan-desktop) and covers v0.82.0's 6058s slow build. It
+# deliberately does not keep main frozen long enough to cover the exceptional
+# v0.98.0 and v0.76.1 events (13986s and 25930s); those expire as UNCONFIRMED
+# and this workflow's separate verify job can be re-run after COPR finishes.
 #
 # It reports the chroot set it observed but does not assert it: the enabled
 # chroots and the EL9 desktop denylist are console-only state, so the human
@@ -43,7 +41,7 @@
 #   COPR_PROJECT       default chan
 #   COPR_API_BASE      default https://copr.fedorainfracloud.org/api_3
 #   COPR_POLL_INTERVAL default 30 (seconds between polls)
-#   COPR_POLL_BUDGET   default 5400 (seconds; see arithmetic above)
+#   COPR_POLL_BUDGET   default 7200 (seconds; see arithmetic above)
 #
 # Flags: -v/--verbose streams each poll's state to stderr.
 #
@@ -72,7 +70,7 @@ COPR_OWNER="${COPR_OWNER:-fiorix}"
 COPR_PROJECT="${COPR_PROJECT:-chan}"
 COPR_API_BASE="${COPR_API_BASE:-https://copr.fedorainfracloud.org/api_3}"
 COPR_POLL_INTERVAL="${COPR_POLL_INTERVAL:-30}"
-COPR_POLL_BUDGET="${COPR_POLL_BUDGET:-5400}"
+COPR_POLL_BUDGET="${COPR_POLL_BUDGET:-7200}"
 
 # The tag is the upstream version; COPR stamps source_package.version as
 # <upstream>-<rpmrelease>, so provenance compares the upstream half only.
