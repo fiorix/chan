@@ -201,6 +201,11 @@ class FakeBinding implements SceneCanvasBinding {
   updates: { elements: WireElement[]; appState?: WireAppState; files?: WireFiles }[] = [];
   collabCalls = 0;
   pending: WireElement[] = [];
+  // The canvas's other two marks: `knownFiles` excludes a file from every
+  // later push once it is added, and `lastAuthorityAppStateJson` does the
+  // same for the appState. Here "still pending" stands for "not marked".
+  pendingFiles: WireFiles = {};
+  pendingAppState: WireAppState | null = null;
   session: SceneSession | null = null;
   applySnapshot(elements: WireElement[], appState: WireAppState, files: WireFiles): void {
     this.snapshots.push({ elements, appState, files });
@@ -219,15 +224,25 @@ class FakeBinding implements SceneCanvasBinding {
     return this.pending.length > 0;
   }
   flushPendingLocal(): void {
-    if (this.pending.length === 0 || !this.session) return;
+    if (!this.session) return;
+    const files = Object.keys(this.pendingFiles).length > 0 ? this.pendingFiles : undefined;
+    const appState = this.pendingAppState ?? undefined;
+    if (this.pending.length === 0 && files === undefined && appState === undefined) return;
     // Mirrors the canvas: the deltas stay pending unless the session took
     // them, which is what lets a dropped push survive to the reconnect.
-    if (this.session.pushScene(this.pending)) this.pending = [];
+    if (this.session.pushScene(this.pending, appState, files)) {
+      this.pending = [];
+      this.pendingFiles = {};
+      this.pendingAppState = null;
+    }
   }
-  forgetBroadcast(elements: WireElement[]): void {
+  forgetBroadcast(elements: WireElement[], appState?: WireAppState, files?: WireFiles): void {
     // The canvas drops the broadcast mark, which puts the element back in
-    // its delta set; here the pending list is that set.
+    // its delta set; here the pending list is that set. The file keys and
+    // the appState come back the same way.
     this.pending.push(...elements);
+    if (files !== undefined) this.pendingFiles = { ...this.pendingFiles, ...files };
+    if (appState !== undefined) this.pendingAppState = appState;
   }
 }
 
@@ -791,6 +806,82 @@ describe("a push coalesced behind another", () => {
       .frames("push")
       .flatMap((f) => (f.elements as WireElement[]).map((e) => e.id));
     expect(ids, "the coalesced element reaches the authority").toContain("b");
+    vi.useRealTimers();
+  });
+});
+
+describe("a push the authority never accepted", () => {
+  /// Drive one push, drop the socket before its ack, and run the redial to
+  /// the snapshot that opens the next epoch. Returns the reconnected socket.
+  function dropAndRedial(): FakeSocket {
+    lastSocket().drop();
+    vi.advanceTimersByTime(600);
+    const beforeRedial = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === beforeRedial; i += 1) {
+      vi.advanceTimersByTime(250);
+    }
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+    return back;
+  }
+
+  test("offers its files again", () => {
+    // Paste an image and blip the socket before the ack. The element is
+    // handed back, so the authority gets it on the reconnect, but a file
+    // key that stays marked is excluded from every later push: the
+    // authority ends up holding an element that references a file it does
+    // not have, which is a broken image for every other participant and
+    // after any reload. The snapshot cannot repair it either, because
+    // applying one only adds the keys the authority already has.
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding } = attached(tab!);
+
+    binding.pending.push(elem("pasted", 2));
+    binding.pendingFiles = { "file-a": { dataURL: "data:image/png;base64,AAA" } };
+    binding.flushPendingLocal();
+    expect(lastSocket().frames("push")).toHaveLength(1);
+
+    const back = dropAndRedial();
+
+    const ids = back
+      .frames("push")
+      .flatMap((f) => (f.elements as WireElement[]).map((e) => e.id));
+    expect(ids, "the element half already works").toContain("pasted");
+    const keys = back
+      .frames("push")
+      .flatMap((f) => Object.keys((f.files ?? {}) as WireFiles));
+    expect(keys, "the pasted file reaches the authority").toContain("file-a");
+    vi.useRealTimers();
+  });
+
+  test("offers its appState again", () => {
+    // Same drop with an appState change riding the push. The canvas takes
+    // the pushed value as the authority's new baseline, so a later push
+    // computes no appState change at all and the value never arrives.
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding } = attached(tab!);
+
+    binding.pending.push(elem("a", 2));
+    binding.pendingAppState = { gridSize: 40 };
+    binding.flushPendingLocal();
+    expect(lastSocket().frames("push")).toHaveLength(1);
+
+    const back = dropAndRedial();
+
+    const ids = back
+      .frames("push")
+      .flatMap((f) => (f.elements as WireElement[]).map((e) => e.id));
+    expect(ids, "the element half already works").toContain("a");
+    const states = back
+      .frames("push")
+      .map((f) => f.appState)
+      .filter((a): a is WireAppState => a !== undefined);
+    expect(states, "the appState change reaches the authority").toContainEqual({
+      gridSize: 40,
+    });
     vi.useRealTimers();
   });
 });
