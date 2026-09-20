@@ -289,21 +289,37 @@ export default {
         writeFileSync(join(ctx.workspaceDir, badFile), buf);
         await csOpen(badFile);
         await sleep(4000);
-        const state = await page.evaluate(() => {
-          const el = document.querySelector(".cm-content");
+        const state = await page.evaluate((name) => {
+          // Every editor on the page, not the first one. By this scenario the
+          // window holds more than one, and the first belongs to an earlier
+          // scenario, so reading `querySelector` made the assertion below true
+          // by short circuit whatever the bad file did.
           return {
-            editorText: el?.textContent ?? null,
+            editors: [...document.querySelectorAll(".cm-content")].map(
+              (el) => el.textContent ?? "",
+            ),
+            tabOpen: [...document.querySelectorAll(".tab")].some((tab) =>
+              tab.textContent?.includes(name),
+            ),
             body: (document.body.innerText ?? "").slice(0, 2000),
           };
-        });
-        const honest =
-          !state.editorText?.includes("BAD-HEAD") ||
-          /invalid utf-8|error|failed/i.test(state.body);
+        }, badFile);
+        const showsContent = state.editors.some((text) => text.includes("BAD-HEAD"));
+        const reportsError = /invalid utf-8|error|failed/i.test(state.body);
+        const honest = !showsContent || reportsError;
         record("D-bad-utf8", {
-          showsContent: state.editorText?.includes("BAD-HEAD") ?? false,
+          showsContent,
+          reportsError,
           honest,
+          tabOpen: state.tabOpen,
+          editors: state.editors.length,
           snippet: state.body.slice(0, 300),
         });
+        // "No editor shows the head" is only evidence when the file was
+        // opened at all; otherwise the scenario measured an empty window.
+        if (!state.tabOpen) {
+          failures.push(`D: ${badFile} never opened, so nothing was measured`);
+        }
         if (!honest) {
           failures.push(`D: invalid UTF-8 silently truncated/mis-shown`);
         }
