@@ -66,6 +66,16 @@ const onUnhandled = (reason: unknown): void => {
   unhandled.push(reason);
 };
 
+/// The runner's own process, typed here rather than package-wide: an
+/// unhandled rejection in a jsdom test is Node's, not the window's, and
+/// a listener on jsdom's `window` would never hear it.
+const runner = globalThis as unknown as {
+  process: {
+    on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+    off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+  };
+};
+
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) {
     await tick();
@@ -96,7 +106,7 @@ beforeEach(() => {
   server = { revision: 1, preferences: basePrefs(), workspaces: [] };
   patchCount = 0;
   unhandled.length = 0;
-  process.on("unhandledRejection", onUnhandled);
+  runner.process.on("unhandledRejection", onUnhandled);
   settingsPanel.open = false;
   document.documentElement.dataset.theme = "dark";
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -122,7 +132,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  process.off("unhandledRejection", onUnhandled);
+  runner.process.off("unhandledRejection", onUnhandled);
   for (const c of mounted.splice(0)) unmount(c);
   settingsPanel.open = false;
   document.body.innerHTML = "";
