@@ -202,6 +202,49 @@ describe("the colour picker", () => {
   });
 });
 
+describe("a refused colour write", () => {
+  test("reports on the swatch that made it, not on the fields above it", async () => {
+    server.preferences.terminal_colors = {
+      mode: "custom",
+      custom: {
+        contrast: "auto",
+        background: "#101010",
+        foreground: "#e0e0e0",
+        cursor: "#ffcc00",
+      },
+    };
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Terminal");
+    await flush();
+
+    const hex = target.querySelector<HTMLInputElement>("#terminal-colour-background");
+    expect(hex, "the background colour input").not.toBeNull();
+    hex!.value = "#445566";
+    hex!.dispatchEvent(new Event("input", { bubbles: true }));
+    hex!.dispatchEvent(new Event("blur", { bubbles: true }));
+    await flush();
+
+    expect(patchCount).toBeGreaterThan(0);
+    expect(unhandled).toEqual([]);
+
+    // The control that wrote is the one that reports.
+    const row = hex!.closest(".colour-row") as HTMLElement | null;
+    expect(row, "the swatch's row").not.toBeNull();
+    expect(row!.textContent ?? "").toContain("Not saved");
+
+    // And the fields that merely declare the preferences it wrote say
+    // nothing: one refusal, one line, on the thing that was refused.
+    // Both of them carried it before this, neither of them being the
+    // control the user touched.
+    expect(
+      [...target.querySelectorAll("section.field .save-error")].map((e) =>
+        (e.textContent ?? "").trim(),
+      ),
+    ).toEqual([]);
+  });
+});
+
 // The three theme setters apply to the live store first so the surface
 // responds at once, and the store is what the next write serialises. A
 // refused write that is not taken back is therefore committed by the next
