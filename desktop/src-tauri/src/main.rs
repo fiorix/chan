@@ -8333,6 +8333,75 @@ mod tests {
         );
     }
 
+    /// The seam neither the route test nor the transport test reaches: the
+    /// bridge handler that turns the devserver's answer into this devserver's
+    /// launcher row. The route test builds its own row and asserts that literal
+    /// back, so a handler that stopped carrying the row up would leave every
+    /// other test green while every real turn-on answered 204.
+    #[tokio::test]
+    async fn set_devserver_workspace_on_impl_carries_the_row_for_an_on_only() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/api/devserver/workspaces/{*rest}",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "prefix": "/notes",
+                    "path": "/home/alice/notes",
+                    "label": "notes",
+                    "on": true,
+                    "status": "unavailable",
+                    "error": "root is gone",
+                    "token": "tenant-token",
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let state = empty_state();
+        state.devservers.set(
+            "ds1".to_string(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: "devserver-token".into(),
+                name: "test".into(),
+                gateway: None,
+            },
+        );
+
+        let outcome =
+            set_devserver_workspace_on_impl(&state, "ds1".into(), "notes".into(), true, false)
+                .await
+                .expect("a turn-on against a reachable devserver");
+        let chan_server::SetWorkspaceOnOutcome::Done { workspace } = outcome else {
+            panic!("a turn-on that mounted is Done");
+        };
+        let row = workspace.expect("an on carries the devserver's row up");
+        assert_eq!(
+            row.devserver_id.as_deref(),
+            Some("ds1"),
+            "tagged with the devserver it came from"
+        );
+        assert_eq!(row.prefix, "notes", "the launcher slug drops the slash");
+        assert_eq!(row.workspace_id, "notes");
+        assert!(row.on, "a degraded mount stays on");
+        assert_eq!(row.status, chan_server::WorkspaceStatus::Unavailable);
+        assert_eq!(row.error.as_deref(), Some("root is gone"));
+
+        // The same devserver answers an off with an entry too; the off route has
+        // no use for it, so the bridge must not carry one up.
+        let outcome =
+            set_devserver_workspace_on_impl(&state, "ds1".into(), "notes".into(), false, true)
+                .await
+                .expect("a forced off against a reachable devserver");
+        let chan_server::SetWorkspaceOnOutcome::Done { workspace } = outcome else {
+            panic!("a forced off that unmounted is Done");
+        };
+        assert!(workspace.is_none(), "an off carries no row");
+
+        server.abort();
+    }
+
     fn empty_state() -> Arc<AppState> {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
