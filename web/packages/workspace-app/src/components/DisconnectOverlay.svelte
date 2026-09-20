@@ -11,7 +11,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // single Abandon action to give up on a stuck remote connection.
 
-  import { ui } from "../state/store.svelte";
+  import { setCoverBlocking, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -92,9 +92,11 @@
   // so a stale `true` can't outlive the overlay.
   $effect(() => {
     ui.disconnectBlocking = visible;
+    setCoverBlocking("reconnect", visible);
   });
   onDestroy(() => {
     ui.disconnectBlocking = false;
+    setCoverBlocking("reconnect", false);
   });
 
   $effect(() => {

@@ -15,7 +15,7 @@
   import { onMount, onDestroy } from "svelte";
   import { api } from "../api/client";
   import { ApiError } from "../api/errors";
-  import { workspace } from "../state/store.svelte";
+  import { setCoverBlocking, workspace } from "../state/store.svelte";
   import type { PreflightSnapshot } from "../api/types";
 
   const POLL_MS = 750;
@@ -32,6 +32,14 @@
 
   // Show only while the server reports the workspace is not yet ready.
   const locked = $derived(snapshot?.locked === true);
+
+  // A cover hides the app but not its keyboard: the global handlers are
+  // document-level and fire whatever has focus. Register the block for as
+  // long as this surface is up, and release it on teardown so a stale one
+  // cannot outlive the cover.
+  $effect(() => {
+    setCoverBlocking("preflight", locked && snapshot !== null);
+  });
 
   function errText(e: unknown): string {
     if (e instanceof ApiError) {
@@ -218,7 +226,16 @@
       if (!settled(snapshot)) schedule();
     } catch {
       errorStreak += 1;
-      if (errorStreak < MAX_ERROR_STREAK) schedule(POLL_MS * 2);
+      if (errorStreak < MAX_ERROR_STREAK) {
+        schedule(POLL_MS * 2);
+        return;
+      }
+      // Giving up. This poll is the only thing that can lift the cover, so
+      // keeping the last snapshot leaves an opaque surface over a window
+      // with nothing behind it to retry and no way back but a reload.
+      // Release the pixels and the block together.
+      stopped = true;
+      snapshot = null;
     }
   }
 
@@ -241,6 +258,7 @@
   onDestroy(() => {
     stopped = true;
     if (timer) clearTimeout(timer);
+    setCoverBlocking("preflight", false);
   });
 </script>
 

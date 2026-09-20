@@ -28,7 +28,8 @@
     unlockWithPin,
     unlockWithoutPin,
   } from "../state/screensaver.svelte";
-  import { workspace } from "../state/store.svelte";
+  import { onDestroy } from "svelte";
+  import { setCoverBlocking, workspace } from "../state/store.svelte";
   import MatrixRain from "./screensaver/MatrixRain.svelte";
 
   let pin = $state("");
@@ -136,6 +137,15 @@
       void submit();
     }
   }
+
+  // A cover hides the app but not its keyboard: the global handlers are
+  // document-level and fire whatever has focus. Register the block for as
+  // long as this surface is up, and release it on teardown so a stale one
+  // cannot outlive the cover.
+  $effect(() => {
+    setCoverBlocking("screensaver", screensaver.locked);
+  });
+  onDestroy(() => setCoverBlocking("screensaver", false));
 </script>
 
 {#if screensaver.locked}

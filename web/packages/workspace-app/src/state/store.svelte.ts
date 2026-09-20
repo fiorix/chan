@@ -328,6 +328,45 @@ export const ui = $state<{
   terminalControl: isControlTerminalWindow(),
 });
 
+/// The full-window covers, by the key each registers under while it is up.
+///
+/// A cover hides the app behind an opaque surface, and the app's global
+/// keyboard handlers are document-level: they fire whatever has focus, so
+/// without a block a chord closes a tab or spawns a terminal the user cannot
+/// see. One registration serves every guard, so a cover that forgets it is
+/// wrong in one place rather than absent from each guard in turn, and the
+/// parity test walks this list.
+export const FULL_WINDOW_COVERS = [
+  "reconnect",
+  "session-ended",
+  "missing-token",
+  "preflight",
+  "screensaver",
+] as const;
+
+export type FullWindowCover = (typeof FULL_WINDOW_COVERS)[number];
+
+const raisedCovers = $state<Record<string, boolean>>({});
+
+/// Raise or drop the input block for one cover. Each cover calls this from an
+/// effect keyed on its own visibility and again on destroy, so a cover that
+/// unmounts while raised cannot leave the app blocked.
+export function setCoverBlocking(cover: FullWindowCover, blocking: boolean): void {
+  if (blocking) raisedCovers[cover] = true;
+  else delete raisedCovers[cover];
+}
+
+/// True while any cover is up. Read by the window key handler, the Ctrl+D
+/// capture and the host-command bridge.
+export function appInputBlocked(): boolean {
+  return Object.keys(raisedCovers).length > 0;
+}
+
+/// Which covers are up, for tests and for anything that needs to name one.
+export function raisedCoverKeys(): string[] {
+  return Object.keys(raisedCovers);
+}
+
 /// Detect terminal-only mode: a window with no workspace AND no filesystem
 /// surface, so terminal panes are all it can hold. Both `kind=terminal` (a
 /// regular standalone terminal) and `kind=control` (the singleton control

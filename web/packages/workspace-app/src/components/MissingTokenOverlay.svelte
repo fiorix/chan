@@ -12,7 +12,17 @@
   // the "something is wrong here" UX is consistent across the two
   // surfaces a user can land on with an unusable URL.
 
-  import { ui } from "../state/store.svelte";
+  import { onDestroy } from "svelte";
+  import { setCoverBlocking, ui } from "../state/store.svelte";
+
+  // A cover hides the app but not its keyboard: the global handlers are
+  // document-level and fire whatever has focus. Register the block for as
+  // long as this surface is up, and release it on teardown so a stale one
+  // cannot outlive the cover.
+  $effect(() => {
+    setCoverBlocking("missing-token", ui.authMissing);
+  });
+  onDestroy(() => setCoverBlocking("missing-token", false));
 </script>
 
 {#if ui.authMissing}

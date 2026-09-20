@@ -5,12 +5,23 @@
   // end, not a live wait, and it stacks above the reconnect overlay. Web-only (a
   // native desktop window is torn down by the watcher and never reaches here).
 
+  import { onDestroy } from "svelte";
   import { windowLifecycle } from "../state/windowLifecycle.svelte";
+  import { setCoverBlocking } from "../state/store.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let closeBtn: HTMLButtonElement | null = $state(null);
 
   const ended = $derived(windowLifecycle.ended);
+
+  // A cover hides the app but not its keyboard: the global handlers are
+  // document-level and fire whatever has focus. Register the block for as
+  // long as this surface is up, and release it on teardown so a stale one
+  // cannot outlive the cover.
+  $effect(() => {
+    setCoverBlocking("session-ended", ended !== null);
+  });
+  onDestroy(() => setCoverBlocking("session-ended", false));
 
   const title = $derived(
     ended === "hidden" ? "hidden by the session leader" : "closed by the session leader",

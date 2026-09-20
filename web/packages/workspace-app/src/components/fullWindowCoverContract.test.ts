@@ -33,7 +33,13 @@ import {
 import "../state/commands/install";
 import { screensaver } from "../state/screensaver.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
-import { ui } from "../state/store.svelte";
+import {
+  FULL_WINDOW_COVERS,
+  raisedCoverKeys,
+  setCoverBlocking,
+  ui,
+  type FullWindowCover,
+} from "../state/store.svelte";
 import { capsForMode } from "../state/windowCaps";
 import { windowLifecycle } from "../state/windowLifecycle.svelte";
 
@@ -209,6 +215,17 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 10; i += 1) await tick();
 }
 
+/// Raise the reconnect overlay's block.
+///
+/// Its own visibility is driven by the watcher status, and this harness's demo
+/// backend re-opens the socket under the test, so the overlay is raised here
+/// through the registration it makes for itself. That the overlay makes it is
+/// asserted where the overlay is mounted alone and the watcher can be held
+/// down: `disconnectOverlayWatcherStatus.test.ts`.
+function raiseReconnect(): void {
+  setCoverBlocking("reconnect", true);
+}
+
 const CTRL_D: KeyboardEventInit = { key: "d", code: "KeyD", ctrlKey: true };
 const CTRL_SHIFT_T: KeyboardEventInit = {
   key: "T",
@@ -259,8 +276,7 @@ describe("a chord behind a full-window cover", () => {
 
   test("control: the reconnect overlay blocks it", async () => {
     await mountApp();
-    // The one cover wired to the only blocking flag there is.
-    ui.disconnectBlocking = true;
+    raiseReconnect();
     await tick();
 
     press(CTRL_D);
@@ -271,7 +287,7 @@ describe("a chord behind a full-window cover", () => {
 
   test("control: the reconnect overlay still lets Backquote through", async () => {
     await mountApp();
-    ui.disconnectBlocking = true;
+    raiseReconnect();
     await tick();
 
     const event = press({ key: "`", code: "Backquote", metaKey: true });
@@ -324,6 +340,68 @@ describe("a chord behind a full-window cover", () => {
 
     expect(tabIds()).toEqual(["cover-file"]);
   });
+});
+
+describe("every cover registers and releases the input block", () => {
+  // Acceptance 1, and the reason it is a table: a sixth cover has to appear in
+  // `FULL_WINDOW_COVERS` to register at all, and this test fails until it also
+  // appears here, either with the state that raises it or with a pointer to
+  // where raising it is asserted.
+  const PROVED: Record<FullWindowCover, { raise: () => void; lower: () => void } | string> = {
+    reconnect:
+      "disconnectOverlayWatcherStatus.test.ts: its visibility is the watcher's, " +
+      "and this harness's demo backend re-opens the socket underneath it",
+    preflight:
+      "the preflight cover blocks it, and a preflight that gives up drops its " +
+      "cover, both in this file: raising it needs the poll mocked",
+    screensaver: {
+      raise: () => {
+        screensaver.locked = true;
+      },
+      lower: () => {
+        screensaver.locked = false;
+      },
+    },
+    "session-ended": {
+      raise: () => {
+        windowLifecycle.ended = "discarded";
+      },
+      lower: () => {
+        windowLifecycle.ended = null;
+      },
+    },
+    "missing-token": {
+      raise: () => {
+        ui.authMissing = true;
+      },
+      lower: () => {
+        ui.authMissing = false;
+      },
+    },
+  };
+
+  test("every cover in the list is accounted for here", () => {
+    for (const cover of FULL_WINDOW_COVERS) {
+      expect(PROVED[cover], `${cover} has no entry`).toBeDefined();
+    }
+  });
+
+  for (const cover of FULL_WINDOW_COVERS) {
+    const entry = PROVED[cover];
+    if (typeof entry === "string") continue;
+    test(`${cover} registers while up and releases when lowered`, async () => {
+      await mountApp();
+      expect(raisedCoverKeys()).not.toContain(cover);
+
+      entry.raise();
+      await settle();
+      expect(raisedCoverKeys(), "raised").toContain(cover);
+
+      entry.lower();
+      await settle();
+      expect(raisedCoverKeys(), "lowered").not.toContain(cover);
+    });
+  }
 });
 
 describe("a preflight that gives up", () => {

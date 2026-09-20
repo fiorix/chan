@@ -3,7 +3,7 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
-import { ui } from "../state/store.svelte";
+import { raisedCoverKeys, ui } from "../state/store.svelte";
 
 // The watcher transport now force-closes a zombie /ws -- when the read-deadline
 // expires with no inbound frame, or when the wall-clock wake detector fires --
@@ -45,11 +45,16 @@ describe("DisconnectOverlay follows the watcher status (no change needed)", () =
     const overlay = target.querySelector(".overlay");
     expect(overlay).not.toBeNull();
     expect(target.querySelector(".title")?.textContent).toContain("reconnecting");
+    // The cover registers the app-wide input block while it is up: the global
+    // key handlers are document-level and would otherwise keep driving the app
+    // behind it.
+    expect(raisedCoverKeys()).toContain("reconnect");
 
     // The redial's fresh socket re-opens -> ui.ws "open" -> the overlay heals on
     // its own, no manual dismissal.
     ui.ws = "open";
     await tick();
     expect(target.querySelector(".overlay")).toBeNull();
+    expect(raisedCoverKeys()).not.toContain("reconnect");
   });
 });

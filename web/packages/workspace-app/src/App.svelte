@@ -67,6 +67,7 @@
     importContactsPanel,
     closeImportContacts,
     toggleCommandLauncher,
+    appInputBlocked,
     setTransientStatus,
     syncOverlayStack,
     toggleBrowserSidePane,
@@ -604,12 +605,12 @@
 
   function onWindowKey(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
-    // While the disconnect overlay blocks the UI, swallow every global
-    // shortcut: the backdrop stops clicks but not document-level keystrokes,
-    // so without this a chord like Ctrl+D would still close a tab behind the
-    // overlay. The overlay's own Retry button (a focused element) is
-    // unaffected; there is nothing else to drive while the server is gone.
-    if (ui.disconnectBlocking) {
+    // While any full-window cover is up, swallow every global shortcut: the
+    // backdrop stops clicks but not document-level keystrokes, so without
+    // this a chord like Ctrl+D would still close a tab behind an opaque
+    // surface. Whatever the cover offers (a Retry button, a PIN field) is a
+    // focused element and is unaffected; there is nothing else to drive.
+    if (appInputBlocked()) {
       // Let cmd+` through to the native window cycler: the overlay must not trap
       // the macOS window-switch chord, so the user can leave a disconnected
       // window for another (mac-relevant only; a harmless no-op elsewhere).
@@ -1204,10 +1205,10 @@
     // both. The keystroke we care about is the literal Ctrl + the
     // physical D key, not a shifted variant or a Cmd-modified one.
     if (e.code !== "KeyD") return;
-    // The disconnect overlay blocks the UI: swallow Ctrl+D entirely (capture
-    // phase, so the terminal/editor behind the overlay never sees it) rather
-    // than closing a tab the user can't act on.
-    if (ui.disconnectBlocking) {
+    // A full-window cover is up: swallow Ctrl+D entirely (capture phase, so
+    // the terminal or editor behind the cover never sees it) rather than
+    // closing a tab the user cannot act on or even see.
+    if (appInputBlocked()) {
       e.preventDefault();
       e.stopPropagation();
       return;
