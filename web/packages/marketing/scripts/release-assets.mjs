@@ -83,17 +83,17 @@ export function updaterPayloads(version) {
   ];
 }
 
-// The updater assets a GA release carries beyond the public downloads: the
-// macOS payload plus every payload's detached signature. The AppImage and
-// installer payloads themselves are already listed in desktopAssets and
-// windowsAssets.
+// The updater assets a GA release carries beyond the public downloads, derived
+// from `updaterPayloads` so a platform added there cannot ship with a
+// signature nothing requires. A payload that is not already a public download
+// (the macOS app archive) is an asset in its own right; every payload, public
+// download or not, contributes its detached signature.
 export function updaterAssets(version) {
+  const payloads = updaterPayloads(version);
+  const downloads = new Set(publicAssets(version));
   return [
-    `Chan_${version}_aarch64.app.tar.gz`,
-    `Chan_${version}_aarch64.app.tar.gz.sig`,
-    `Chan_${version}_amd64.AppImage.sig`,
-    `Chan_${version}_aarch64.AppImage.sig`,
-    `Chan_${version}_x64-setup.exe.sig`,
+    ...payloads.map((payload) => payload.asset).filter((asset) => !downloads.has(asset)),
+    ...payloads.map((payload) => `${payload.asset}.sig`),
   ];
 }
 

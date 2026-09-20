@@ -12,7 +12,9 @@ import {
   cliAssets,
   desktopAssets,
   gatewayDebAssets,
+  publicAssets,
   updaterAssets,
+  updaterPayloads,
   windowsAssets,
 } from "./release-assets.mjs";
 
@@ -28,6 +30,41 @@ const firstCliAsset = cliAssets()[0];
 const baseAssetCount =
   cliAssets().length + desktopAssets(version).length + gatewayDebAssets(version).length + 1;
 const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
+
+// Every updater payload the collector can publish is one the verifier requires
+// a signature for. The two lists used to be written out by hand side by side,
+// so adding a platform to one and not the other shipped an updater entry whose
+// detached .sig nothing ever checked. `updaterAssets` derives from
+// `updaterPayloads` now, and this holds that derivation to its contract rather
+// than to its current spelling: add a payload and both sides move together, or
+// this fails.
+{
+  const payloadVersion = "1.2.3";
+  const payloads = updaterPayloads(payloadVersion);
+  const updater = updaterAssets(payloadVersion);
+  const downloads = new Set(publicAssets(payloadVersion));
+  assert(payloads.length > 0, "updaterPayloads is empty");
+  for (const payload of payloads) {
+    assert(
+      updater.includes(`${payload.asset}.sig`),
+      `${payload.platform}: ${payload.asset}.sig is not in updaterAssets, so the ` +
+        "verifier would never require a signature for a payload the collector publishes",
+    );
+    assert(
+      downloads.has(payload.asset) || updater.includes(payload.asset),
+      `${payload.platform}: ${payload.asset} is neither a public download nor an ` +
+        "updater asset, so the release would carry a payload nothing requires",
+    );
+  }
+  for (const name of updater) {
+    const payloadAsset = name.endsWith(".sig") ? name.slice(0, -".sig".length) : name;
+    assert(
+      payloads.some((payload) => payload.asset === payloadAsset),
+      `${name} is in updaterAssets with no payload in updaterPayloads`,
+    );
+  }
+  console.log("smoked updater payload / asset agreement");
+}
 
 const root = mkdtempSync(path.join(tmpdir(), "chan-release-assets-"));
 try {
@@ -382,6 +419,7 @@ try {
 } finally {
   rmSync(root, { force: true, recursive: true });
 }
+
 
 // The required names (including the updater payload and its detached .sig, both
 // written to the fixture asset dir) and the optional Windows names, both
