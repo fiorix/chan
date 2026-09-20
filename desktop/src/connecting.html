@@ -23,7 +23,11 @@
         </div>
       </div>
 
-      <div class="connecting-meta" role="status" aria-live="polite">
+      <!-- Not a live region: the elapsed value is rewritten once a second,
+           and a polite region here queues the whole row that often. The
+           attempt log below is the single live region, and it carries each
+           attempt once. -->
+      <div class="connecting-meta">
         Trying for <span class="mono" id="elapsed">00:00</span>
         <span class="meta-sep">&middot;</span>
         attempt <span class="mono" id="attempt">0</span>
