@@ -82,6 +82,10 @@ The deferred work is tracked in the project's parking lot. By theme, what is ope
 
 - **Untriaged.** The review's 1,017 low findings have never been triaged, by the owner's ruling. They are the largest single body of unexamined work the review left behind.
 
+## Platform and pipeline
+
+The GA commit `85a3fb1e4` proved itself before the tag with its own `ci.yml` run `35471634837`, dispatched by hand because a release branch gets none automatically, and with a `release.yml` dry run `35471636180` at `publish=false` on the same commit. That CI run's `Nix chan-desktop` job is the only place both harvested fixed-output hashes are verified against a real build, and its two AUR cells, which refuse a prerelease version, are green at a GA version. The candidate was validated the same way one commit earlier: the `release.yml` dry run `35465776424` that exercised the macOS sign and notarize path and the signed Windows packages, its own `ci.yml` run `35465777641`, green everywhere except the two AUR cells, and two `publish-downstream` dry runs covering Docker `35465779205` and Cachix `35465780792`. The tagged Release run is `35474207903`, `main`'s own runs on the tagged commit are `35474198839` and `35474198826`, and the downstream run the release triggered is `35476612286`. Its single failure was the Homebrew cask audit, on a parameter Homebrew deprecated upstream; the one-stanza repair on `main` is `e191046e4` and its Homebrew-only publishing dispatch is `35489118663`.
+
 ## Known gaps
 
 - **Nothing in this release was observed on a screen.** The release host is a headless KVM box with no GPU and no display. The degraded-workspace row's amber in both themes, the close-confirmation cards and every other visual change rest on unit tests and on reading. The owner's macOS install covers the desktop app in general use and covers the compatibility reading against an older devserver, but no one has looked at the specific colours this release changed.
