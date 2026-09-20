@@ -334,6 +334,12 @@ export default {
       await ctx.shot("ready-to-delete", page);
 
       const canonicalRoot = assertOwnedThrowawayRoot(ctx.workspaceDir);
+      // Marked handled at creation, and still awaited below. Every assertion
+      // between here and that await throws on failure, and an evaluate left
+      // unattended rejects when the page closes on the way out: unhandled,
+      // that took the node process down and lost every check's verdict
+      // instead of failing this one. Attaching here keeps the failure inside
+      // this check without swallowing it on the path that reads the value.
       const uiTimelinePromise = page.evaluate(
         () =>
           new Promise((resolve) => {
@@ -371,6 +377,7 @@ export default {
             sample();
           }),
       );
+      uiTimelinePromise.catch(() => {});
 
       let deleteDone = false;
       const deleteStarted = Date.now();

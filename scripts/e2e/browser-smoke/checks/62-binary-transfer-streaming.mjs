@@ -52,21 +52,34 @@ async function waitFor(probe, description, timeoutMs = 30_000, intervalMs = 50) 
 async function monitorResources(pid, promise) {
   const baseline = processResources(pid);
   const peak = { ...baseline };
-  const timer = setInterval(() => {
-    const sample = processResources(pid);
-    peak.rssBytes = Math.max(peak.rssBytes, sample.rssBytes);
-    peak.threads = Math.max(peak.threads, sample.threads);
-    peak.openFds = Math.max(peak.openFds, sample.openFds);
-  }, 25);
+  // The server pid going away mid-transfer is the regression this check
+  // hunts, and reading /proc for a pid that is gone throws. Thrown from a
+  // timer, which is nobody's await, that took the whole node process down
+  // and the run lost every check's verdict instead of failing this one.
+  // Record it and fail here, where it means something.
+  let samplingError = null;
+  const sample = () => {
+    try {
+      const now = processResources(pid);
+      peak.rssBytes = Math.max(peak.rssBytes, now.rssBytes);
+      peak.threads = Math.max(peak.threads, now.threads);
+      peak.openFds = Math.max(peak.openFds, now.openFds);
+    } catch (e) {
+      samplingError ??= e;
+    }
+  };
+  const timer = setInterval(sample, 25);
   let value;
   try {
     value = await promise;
   } finally {
     clearInterval(timer);
-    const sample = processResources(pid);
-    peak.rssBytes = Math.max(peak.rssBytes, sample.rssBytes);
-    peak.threads = Math.max(peak.threads, sample.threads);
-    peak.openFds = Math.max(peak.openFds, sample.openFds);
+    sample();
+  }
+  if (samplingError) {
+    throw new Error(
+      `server pid ${pid} became unreadable during the transfer: ${samplingError.message}`,
+    );
   }
   return { value, baseline, peak };
 }
