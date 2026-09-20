@@ -28,19 +28,21 @@ import {
 /// rulings, and out of this item's scope.
 ///
 /// app.find.open carries a NATIVE-only Mod+F (web find is the browser's
-/// own dialog); terminal.find carries Mod+F on web AND native. So the
-/// collision exists on the three native (platform, os) pairs only.
+/// own dialog); terminal.find carries Mod+F on web AND native, and off macOS
+/// it resolves to Mod+Shift+F so the shell keeps a bare Ctrl+F. So the
+/// collision exists on native macOS alone.
 /// Plausibly deliberate surface-scoped dispatch - editor find vs terminal
 /// find dispatch in different contexts - but the registry has no field
 /// that says so; the defect may be the missing declaration, not the
 /// duplicate. Found 2026-08-11 by the swap item's first (absolute)
 /// uniqueness draft, which went red on arrival on shipped defaults.
-const KNOWN_COLLISIONS: { a: string; b: string; reason: string }[] = [
+const KNOWN_COLLISIONS: { a: string; b: string; os: OS; reason: string }[] = [
   {
     a: "app.find.open",
     b: "terminal.find",
+    os: "mac",
     reason:
-      "surface-scoped find (editor vs terminal); declared here because the registry has no sanctioned-duplicate field",
+      "surface-scoped find (editor vs terminal) on the one OS where both are Cmd+F; declared here because the registry has no sanctioned-duplicate field",
   },
 ];
 
@@ -80,15 +82,16 @@ describe("registry chord uniqueness", () => {
   });
 
   test("no two entries resolve to the same chord for any (platform, os), modulo the declared exceptions", () => {
-    const declared = new Set(
-      KNOWN_COLLISIONS.map(({ a, b }) => [a, b].sort().join("|")),
-    );
     for (const platform of PLATFORMS) {
       for (const os of OSES) {
         const actual = collisionsFor(platform, os);
         // The web pairs carry no declared exception: app.find.open has
         // no web chord, so its Mod+F never meets terminal.find's there.
-        const expected = platform === "native" ? declared : new Set<string>();
+        const expected = new Set(
+          KNOWN_COLLISIONS.filter((c) => platform === "native" && c.os === os).map(
+            ({ a, b }) => [a, b].sort().join("|"),
+          ),
+        );
         expect(
           actual,
           `${platform}/${os}: collisions ${[...actual]} vs declared ${[...expected]} ` +
@@ -101,11 +104,17 @@ describe("registry chord uniqueness", () => {
 
   test("the declared exception records the pair it sanctions", () => {
     // Non-vacuity pin: the exception table names a pair that REALLY
-    // collides today on the native pairs, so the equality assertion
-    // above is exercising its accept arm rather than comparing two
-    // empty sets.
+    // collides today, so the equality assertion above is exercising its
+    // accept arm rather than comparing two empty sets. Only on macOS: off it,
+    // terminal find carries Shift and the two no longer meet, which is the
+    // other half of the same claim.
     for (const os of OSES) {
-      expect(collisionsFor("native", os)).toContain("app.find.open|terminal.find");
+      const collisions = collisionsFor("native", os);
+      if (os === "mac") {
+        expect(collisions).toContain("app.find.open|terminal.find");
+      } else {
+        expect(collisions).not.toContain("app.find.open|terminal.find");
+      }
     }
     expect(KNOWN_COLLISIONS[0].reason.length).toBeGreaterThan(0);
   });

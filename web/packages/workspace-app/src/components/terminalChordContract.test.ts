@@ -92,10 +92,18 @@ vi.mock("@xterm/xterm", () => ({
         "keydown",
         (event: KeyboardEvent) => {
           if (this.customKeyEventHandler?.(event) === false) return;
-          // Upstream would run its own encoder here. Only the EOF byte is
-          // modelled, which is the one encoding this file asserts on.
-          if (event.ctrlKey && !event.shiftKey && event.code === "KeyD") {
-            this.dataHandler?.("\x04");
+          // Upstream would run its own encoder here. The control-byte family
+          // is modelled, which is what this file asserts on: Ctrl and a letter
+          // is that letter's control code whether or not Shift is down, the
+          // way xterm encodes it, and Ctrl+[ is Escape. Shift matters here:
+          // it is what makes a chord the renderer should NOT have visible as
+          // a byte the shell received.
+          if (event.ctrlKey && !event.metaKey && !event.altKey) {
+            if (/^Key[A-Z]$/.test(event.code)) {
+              this.dataHandler?.(String.fromCharCode(event.code.charCodeAt(3) - 64));
+            } else if (event.code === "BracketLeft") {
+              this.dataHandler?.("\x1b");
+            }
           }
         },
         true,
@@ -335,6 +343,54 @@ describe("the chord the terminal claims for copy", () => {
     await settle();
 
     expect(writeText.mock.calls).toEqual([[SELECTION]]);
+  });
+});
+
+describe("the chord that opens terminal find", () => {
+  test("opens find from the renderer's own textarea", async () => {
+    // The find bar is the terminal's, and its chord is claimed by the
+    // component root. A renderer that consumed the key would leave the root
+    // waiting for a keystroke that never bubbles.
+
+    const socket = await mountTerminal(false);
+    textarea().dispatchEvent(
+      key({ key: "F", code: "KeyF", ctrlKey: true, shiftKey: true }),
+    );
+    await settle();
+
+    expect(document.body.querySelector(".terminal-find")).not.toBeNull();
+    // And the renderer let it out rather than encoding it: a chord that opens
+    // find and also types a byte at the shell is the double dispatch this
+    // item is about.
+    expect(inputFrames(socket)).toEqual([]);
+  });
+
+  test("a bare Ctrl+F is the shell's, not find's", async () => {
+    const socket = await mountTerminal(false);
+
+    textarea().dispatchEvent(key({ key: "f", code: "KeyF", ctrlKey: true }));
+    await settle();
+
+    expect(inputFrames(socket)).toContain("\x06");
+    expect(document.body.querySelector(".terminal-find")).toBeNull();
+  });
+
+  test("Ctrl+G reaches the shell too", async () => {
+    // The second of the three keys the ruling keeps for the shell. Off macOS
+    // nothing in the app competes for it; the macOS key bridge is where they
+    // were being taken, and that arm is native.
+    //
+    // Ctrl+[ is the third and is NOT asserted here: it reaches neither the
+    // shell nor any handler this fixture can see, and the escape registry is
+    // not what takes it (`shouldEscapeTerminal` answers false for it, and
+    // `terminalMetaKeyBytes` returns null so the key passes through). Where it
+    // goes is unresolved and written up rather than guessed at.
+    const socket = await mountTerminal(false);
+
+    textarea().dispatchEvent(key({ key: "g", code: "KeyG", ctrlKey: true }));
+    await settle();
+
+    expect(inputFrames(socket)).toContain("\x07");
   });
 });
 

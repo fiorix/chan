@@ -41,6 +41,7 @@
   import {
     chordFor,
     currentOS,
+    eventMatchesShortcut,
     shouldEscapeTerminal,
   } from "../state/shortcuts";
   import {
@@ -2390,14 +2391,10 @@
     }
     // Team-work entry points are Cmd+P (native), Cmd+Alt+P (web Mac), and
     // `Mod+. p` (Hybrid Nav) - nothing terminal-local here. The only chord
-    // this handler owns is `terminal.find` (registry entry in shortcuts.ts):
-    // the terminal-local find bar, accepting both Cmd and Ctrl forms.
-    if (
-      (e.metaKey || e.ctrlKey) &&
-      !e.shiftKey &&
-      !e.altKey &&
-      e.key.toLowerCase() === "f"
-    ) {
+    // this handler owns is `terminal.find`, resolved from the registry so the
+    // form it acts on is the one the escape registry lets out of xterm: Cmd+F
+    // on macOS, Ctrl+Shift+F elsewhere, and a bare Ctrl+F is the shell's.
+    if (eventMatchesShortcut(e, "terminal.find")) {
       e.preventDefault();
       openFind();
     }

@@ -463,15 +463,18 @@ export const SHORTCUTS: readonly Shortcut[] = [
     note: "macOS desktop only",
     escapeTerminal: true,
   },
-  // Terminal-local find (the terminal's own find bar). Dispatched by
-  // the terminal's keydown handler like copy / paste, not the App
-  // keymap; the handler accepts both the Cmd and Ctrl forms.
+  // Terminal-local find (the terminal's own find bar). Dispatched by the
+  // terminal's own root handler, not the App keymap, and flagged to escape
+  // xterm so it reaches that handler from a focused renderer too. Off macOS
+  // the chord carries Shift (see `osChord`), because a bare Ctrl+F belongs to
+  // the shell.
   {
     id: "terminal.find",
     label: "Find in terminal",
     web: "Mod+F",
     native: "Mod+F",
     group: "Terminal",
+    escapeTerminal: true,
   },
 ];
 
@@ -500,6 +503,10 @@ export function formatChord(chord: Chord, os: OS): string {
 const RELOAD_SHORTCUT_ID = "app.window.reload";
 const LAUNCHER_SHORTCUT_ID = "app.launcher.toggle";
 const TERMINAL_COPY_ID = "terminal.copy";
+/// Off macOS a bare Ctrl+F is the shell's own key, so terminal find takes the
+/// Shift form there and leaves Ctrl+F to the shell. macOS has no such claim on
+/// Cmd, so it keeps Cmd+F.
+const TERMINAL_FIND_ID = "terminal.find";
 const TERMINAL_PASTE_ID = "terminal.paste";
 const RICH_PROMPT_ID = "terminal.richPrompt";
 const BROADCAST_TOGGLE_ID = "app.terminal.broadcastToggle";
@@ -551,6 +558,7 @@ export function osChord(
     return "Ctrl+Alt+Shift+K";
   }
   if (s.id === TERMINAL_COPY_ID && os !== "mac") return "Mod+Shift+C";
+  if (s.id === TERMINAL_FIND_ID && os !== "mac") return "Mod+Shift+F";
   if (s.id === TERMINAL_PASTE_ID && os !== "mac") return "Mod+Shift+V";
   // Rich Prompt: Cmd+Shift+P on macOS. Off macOS the Win / Super key is ruled
   // out, so native and web both take Ctrl+Shift+P. On a browser that is the
@@ -741,6 +749,22 @@ function canonicalKey(e: KeyboardEvent): string | null {
 /// matcher normalises both sides to a canonical token set so
 /// `Mod+Alt+P` (event) === `Cmd+Alt+P` (registry web Mac
 /// fallback) on Mac.
+/// Whether `e` carries the platform-resolved chord for `id`, user remaps
+/// included. The terminal's root handler reads this so the chord it acts on
+/// and the chord the escape registry lets out of xterm are one resolution
+/// rather than two spellings that can drift apart.
+export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
+  const chord = chordFromEvent(e);
+  if (!chord) return false;
+  const s = SHORTCUTS.find((x) => x.id === id);
+  if (!s) return false;
+  const platform = currentPlatform();
+  const os = currentOS();
+  const resolved = overrideResolver?.(id, platform, os) ?? osChord(s, platform, os);
+  if (!resolved) return false;
+  return chordsEqual(chord, resolved);
+}
+
 export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   const chord = chordFromEvent(e);
   if (!chord) return false;
