@@ -13,10 +13,31 @@ import type { SyntaxNode } from "@lezer/common";
 /// fence still resolves into it. Centralizes the boundary handling
 /// so callers don't need to repeat the side trick.
 export function enclosingFence(state: EditorState, pos: number): SyntaxNode | null {
+  return enclosingNamed(state, pos, "FencedCode");
+}
+
+/// Walk ancestors at `pos` looking for code of either spelling: a fenced
+/// block or an indented one. Markdown has two, and a typing macro must
+/// stay literal in both, because either one is a sample the author is
+/// showing rather than prose being written. The fence-specific callers
+/// keep `enclosingFence`: they act on the fence's own range, which an
+/// indented block does not have.
+export function enclosingCode(state: EditorState, pos: number): SyntaxNode | null {
+  return (
+    enclosingNamed(state, pos, "FencedCode") ??
+    enclosingNamed(state, pos, "CodeBlock")
+  );
+}
+
+function enclosingNamed(
+  state: EditorState,
+  pos: number,
+  name: string,
+): SyntaxNode | null {
   for (const side of [-1, 1] as const) {
     let n: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side);
     while (n) {
-      if (n.name === "FencedCode") return n;
+      if (n.name === name) return n;
       n = n.parent;
     }
   }

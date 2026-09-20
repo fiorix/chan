@@ -7,7 +7,7 @@ import {
 } from "@codemirror/view";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { lineIntersect } from "../decorations/selection";
-import { enclosingFence } from "./fence";
+import { enclosingCode } from "./fence";
 import { PAGE_BREAK_MARKER, pageBreakLineFlags } from "../page_break";
 
 const TRIGGERS = ["@pagebreak", "@break"] as const;
@@ -83,9 +83,9 @@ function trimInlineSpaceAroundTrigger(
 export function expandPageBreakMacro(view: EditorViewType): boolean {
   const hit = detectTrigger(view);
   if (!hit) return false;
-  // Inside a fenced code block the trigger is a code sample the author
+  // Inside code, fenced or indented, the trigger is a sample the author
   // is typing out, so it stays literal, as it does in a written file.
-  if (enclosingFence(view.state, hit.from)) return false;
+  if (enclosingCode(view.state, hit.from)) return false;
   const line = view.state.doc.lineAt(hit.from);
   const before = line.text.slice(0, hit.from - line.from);
   const after = line.text.slice(hit.to - line.from);

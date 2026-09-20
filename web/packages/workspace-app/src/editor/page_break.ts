@@ -66,8 +66,9 @@ function isPageBreakElement(el: Element): boolean {
 /// attribute as it keeps any other, so a forged one arrives looking like
 /// a decision already made. Every mark is cleared, and a forged one is
 /// an authored attribute like any other while the test looks, so the
-/// element carrying it is the near miss the ruling says it is rather
-/// than being laundered into a marker by its own removal. That is why
+/// element carrying it carries an attribute besides its class, which
+/// is what a near miss is, rather than being laundered into a marker
+/// by its own removal. That is why
 /// the decision is taken before anything is cleared, and why this runs
 /// once, on a document that has just been rendered.
 ///
