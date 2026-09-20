@@ -387,9 +387,6 @@
     }
   }
 
-  function clearSelection(): void {
-    browserSelection.path = null;
-  }
 
   function graphSelection(): void {
     const path = browserSelection.path;
@@ -614,7 +611,6 @@
           <FileInfoBody
             path={browserSelection.path}
             onOpen={openSelected}
-            onClose={clearSelection}
             onSetAsScope={windowCaps.workspace ? graphSelection : undefined}
             showRefs
             onNavigate={(p) => {

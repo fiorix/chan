@@ -37,7 +37,6 @@
     selection,
     onOpen,
     onReveal,
-    onClose,
     onNavigate,
     onContactNavigate,
     onSetAsScope,
@@ -55,7 +54,6 @@
     /// handler for image entries. Hosts that already live inside
     /// the file browser pass undefined.
     onReveal?: () => void;
-    onClose?: () => void;
     onNavigate?: (path: string) => void;
     /// Forwarded to FileInfoBody. Graph overlay binds this so a
     /// contact pill clicked in the file inspector selects that
@@ -99,7 +97,6 @@
     path={selection.path}
     {onOpen}
     {onReveal}
-    {onClose}
     {onNavigate}
     {onContactNavigate}
     {onSetAsScope}
@@ -122,7 +119,6 @@
     {onSetAsScope}
     {onNewTerminal}
     {allowUpload}
-    {onClose}
     {onNavigate}
   />
 {:else if selection.kind === "language"}
@@ -142,7 +138,6 @@
     nodeId={selection.nodeId}
     label={selection.label}
     kind={selection.kind}
-    {onClose}
     {onNavigate}
     {onSetAsScope}
     {onOpen}

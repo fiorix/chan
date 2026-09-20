@@ -93,7 +93,6 @@
     label,
     onOpen,
     onReveal,
-    onClose,
     showRefs = false,
     onNavigate,
     onContactNavigate,
@@ -115,7 +114,6 @@
     /// (e.g. when the inspector already lives inside the file
     /// browser).
     onReveal?: () => void;
-    onClose?: () => void;
     /// When true, fetch + render tags / mentions / dates / links /
     /// backlinks for files. Off by default so the file editor's
     /// inline disclosure stays compact.

@@ -21,7 +21,6 @@
     nodeId,
     label,
     kind,
-    onClose,
     onNavigate,
     onSetAsScope,
     onOpen,
@@ -30,7 +29,6 @@
     nodeId: string;
     label: string;
     kind: "tag" | "mention" | "date";
-    onClose?: () => void;
     /// Click handler for a referencing document. Receives the doc's
     /// path. Hosts decide whether to open it in the active pane and
     /// close themselves; absent = entries render as non-clickable.

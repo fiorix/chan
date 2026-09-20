@@ -972,7 +972,6 @@
         >
           <InspectorBody
             selection={selection}
-            onClose={() => (searchPanel.inspectorOpen = false)}
             onNavigate={(p) => {
               close();
               void openInActivePane(p);
