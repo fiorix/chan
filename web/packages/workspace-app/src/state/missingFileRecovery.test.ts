@@ -2,12 +2,18 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import type { SearchHit } from "../api/types";
 import {
   attemptInPlaceReopen,
   cancelMissingFileCheck,
   closeTab,
+  commitPaneMode,
+  conflictDialog,
+  enterPaneMode,
   layout,
+  paneMode,
+  saveTab,
   scheduleMissingFileCheck,
   type FileTab,
   type LeafNode,
@@ -300,5 +306,98 @@ describe("closeTab - a draft whose file vanished is not trapped open", () => {
     // Nothing to save or discard: the draft is already gone on disk.
     expect(inspectSpy).not.toHaveBeenCalled();
     expect(discardSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("a watcher reload that lands during Hybrid Nav", () => {
+  /// The server's compare-and-swap, as the write route implements it: a PUT
+  /// whose expected version is not the one on disk is refused with a 409 and
+  /// the current version, which is what raises the conflict modal.
+  function casWrite(diskMtimeNs: string) {
+    return vi
+      .spyOn(api, "write")
+      .mockImplementation(async (_path, _content, expectedMtimeNs) => {
+        if ((expectedMtimeNs ?? null) !== diskMtimeNs) {
+          throw new ApiError(409, "conflict", {
+            current_mtime: 9,
+            current_mtime_ns: diskMtimeNs,
+          });
+        }
+        return { mtime: 10, mtime_ns: "10000000010" };
+      });
+  }
+
+  function reloadSeed(): FileTab {
+    return fileTab({
+      id: "tab-hn",
+      path: "notes/a.md",
+      content: "mine",
+      saved: "mine",
+      savedMtime: 1,
+      savedMtimeNs: "1000000001",
+    });
+  }
+
+  function armReload(): void {
+    vi.spyOn(api, "readStream").mockResolvedValue({
+      path: "notes/a.md",
+      content: "theirs",
+      mtime: 9,
+      mtime_ns: "9000000009",
+      writable: true,
+    });
+    vi.spyOn(api, "search").mockResolvedValue([]);
+  }
+
+  function draftTab(): FileTab {
+    const node = paneMode.draft?.nodes["pane-test"];
+    if (!node || node.kind !== "leaf") throw new Error("no draft pane");
+    const t = node.tabs[0];
+    if (!t || t.kind !== "file") throw new Error("no draft file tab");
+    return t;
+  }
+
+  test("does not let the draft's buffer overwrite the new file", async () => {
+    // The check resolves through the live tree, so a clean tab reloads while
+    // the mode is up and the live tab adopts the writer's bytes and version.
+    // The draft keeps the buffer the user is typing into; if the commit hands
+    // that buffer the reloaded version, the next save is accepted and the
+    // writer's bytes are gone with nothing said.
+    const seed = reloadSeed();
+    resetLayout([seed]);
+    armReload();
+    const write = casWrite("9000000009");
+
+    enterPaneMode();
+    draftTab().content = "mine, and more";
+    scheduleMissingFileCheck(seed.id, seed.path);
+    await flushDebounce();
+    commitPaneMode();
+
+    const committed = readTab(seed.id);
+    expect(committed?.content).toBe("mine, and more");
+    await saveTab(committed as FileTab);
+
+    expect(write).toHaveBeenCalled();
+    expect(write.mock.calls[0]?.[2]).toBe("1000000001");
+    expect(conflictDialog.open).toBe(true);
+  });
+
+  test("tells a tab with no unsaved edit that the file changed", async () => {
+    // Same reload with nothing typed into the draft. No save fires, so the
+    // banner is the only thing that can say the file moved; the watcher sends
+    // that transition once, to the live tab, and the commit is the last place
+    // it can reach the tab the user ends up looking at.
+    const seed = reloadSeed();
+    resetLayout([seed]);
+    armReload();
+    casWrite("9000000009");
+
+    enterPaneMode();
+    scheduleMissingFileCheck(seed.id, seed.path);
+    await flushDebounce();
+    commitPaneMode();
+
+    expect(readTab(seed.id)?.externalChange).toBe(true);
   });
 });
