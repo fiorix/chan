@@ -3979,6 +3979,41 @@ describe("autosave", () => {
   });
 });
 
+describe("closing a terminal whose component is not mounted", () => {
+  // The WS `close` frame rides the socket TerminalTab owns, and the close
+  // sink is registered by one of its effects. A render boundary that caught
+  // a throw from that tab has already unmounted it, so the sink is gone and
+  // the close used to remove the tab with nothing telling the server, which
+  // leaves a session with no tab referencing it.
+  test("closes the session through the route instead", async () => {
+    const close = vi.spyOn(api, "closeTerminal").mockResolvedValue(undefined);
+    const pane = resetLayout([
+      terminalTab({ id: "term-1", terminalSessionId: "sess-1" }),
+      fileTab({ id: "file-1" }),
+    ]);
+
+    await closeTab(pane.id, "term-1");
+
+    expect(close).toHaveBeenCalledWith("sess-1");
+    expect(activePane().tabs.map((t) => t.id)).toEqual(["file-1"]);
+  });
+
+  test("leaves the session alone when the tab is moving to another window", async () => {
+    // A session-preserving move removes the tab here and re-attaches it
+    // there, so the PTY has to outlive the close.
+    const close = vi.spyOn(api, "closeTerminal").mockResolvedValue(undefined);
+    const pane = resetLayout([
+      terminalTab({ id: "term-1", terminalSessionId: "sess-1" }),
+      fileTab({ id: "file-1" }),
+    ]);
+    markTerminalMovingOut("term-1");
+
+    await closeTab(pane.id, "term-1");
+
+    expect(close).not.toHaveBeenCalled();
+  });
+});
+
 describe("terminal broadcast groups", () => {
   test("target selection updates the single window-wide group", () => {
     const a = terminalTab({ id: "term-a", title: "A" });
