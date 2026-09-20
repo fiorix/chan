@@ -11,11 +11,25 @@
 // relative.
 
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { defineConfig } from "vite";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { defineConfig } from "vitest/config";
+
+const require = createRequire(import.meta.url);
+const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/index-client.js");
 
 export default defineConfig({
   base: "./",
   plugins: [svelte()],
+  // Mounting a component needs a DOM and Svelte's client build, the same
+  // pair web-shared and the launcher carry. Without it this package's
+  // suite runs in node and can only hold tests that touch no component.
+  test: {
+    environment: "jsdom",
+    alias: [{ find: /^svelte$/, replacement: svelteClient }],
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
   server: {
     port: 5173,
     // Proxy backend routes to a running identity-service so
