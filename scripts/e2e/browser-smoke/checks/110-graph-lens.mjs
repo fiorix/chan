@@ -31,6 +31,12 @@ export default {
     }, DOC);
     if (!selected) ctx.skip(`graph fixture document not present: ${DOC}`);
 
+    // The lens button is this check's subject, not one of its preconditions.
+    // Catching the wait and calling ctx.skip turned "the tag lens stopped
+    // rendering", the regression this check exists to catch, into an absent
+    // environment, and the suite printed ALL GREEN over it. Neighbour 111
+    // awaits the identical predicate with no catch. The catch here only
+    // renames the timeout after what was being waited for.
     try {
       await page.waitForFunction(
         (tag) =>
@@ -39,8 +45,10 @@ export default {
         { timeout: 30_000, polling: 250 },
         TAG,
       );
-    } catch {
-      ctx.skip("graph tag reference unavailable; wait for graph indexing dependencies");
+    } catch (e) {
+      throw new Error(
+        `tag lens button never rendered for ${TAG} on ${DOC}: ${e.message}`,
+      );
     }
 
     const opened = await page.evaluate((tag) => {
