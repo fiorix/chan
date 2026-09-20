@@ -2527,9 +2527,25 @@ export function registerTerminalCloseSink(tabId: string, sink: TerminalCloseSink
 
 async function runTerminalCloseSink(tab: TerminalTab): Promise<boolean> {
   const sink = terminalCloseSinks.get(tab.id);
-  if (!sink) return true;
-  const result = await sink();
-  return result !== false;
+  if (sink) {
+    const result = await sink();
+    return result !== false;
+  }
+  // No sink means the component that owns this terminal's socket is not
+  // mounted, which a render boundary catching a throw from that tab is
+  // enough to cause. The WS `close` frame rides that socket, so the route
+  // is the only way left to tell the server, and answering true without it
+  // would leave a session with no tab referencing it. A session-preserving
+  // move is the one close that must keep the PTY alive.
+  if (tab.terminalSessionId && !isTerminalMoving(tab.id)) {
+    try {
+      await api.closeTerminal(tab.terminalSessionId);
+    } catch {
+      // Best effort: the tab goes either way, and a session whose window is
+      // gone is reaped by the roster.
+    }
+  }
+  return true;
 }
 
 async function runTerminalCloseSinks(tabs: Tab[]): Promise<boolean> {
