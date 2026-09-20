@@ -22,40 +22,68 @@ export const PAGE_BREAK_CLASS = "chan-page-break";
 /// What chan writes when it writes a page break.
 export const PAGE_BREAK_MARKER = `<hr class="${PAGE_BREAK_CLASS}">`;
 
-/// The attribute a rendered document carries on its page breaks, and the
-/// selector the printable stylesheet uses. CSS cannot ask whether an
-/// element has no OTHER attribute, so the element test runs once, in
-/// `markPageBreaks`, and the DOM carries its answer.
+/// The attribute a composed document carries on its page breaks, and the
+/// selector the printable stylesheet uses. CSS can ask neither whether an
+/// element has no OTHER attribute nor whether it is a top-level block, so
+/// `markPageBreaks` decides both once and the DOM carries its answer;
+/// every reader of a composed document asks for this attribute and
+/// applies no test of its own.
 export const PAGE_BREAK_ATTR = "data-page-break";
 export const PAGE_BREAK_SELECTOR = `hr[${PAGE_BREAK_ATTR}]`;
 
-const MARKER_LINE_RE = /^\s*<hr\s+class\s*=\s*(["'])([^"']*)\1\s*\/?>\s*$/i;
+/// Up to three columns of indentation, because four is a code block and
+/// the marker is not code. The class value may be quoted either way or
+/// left bare: quoting is spelling HTML does not distinguish. The value
+/// itself is compared verbatim, because HTML class values are
+/// case-sensitive even though tag and attribute names are not.
+const MARKER_LINE_RE =
+  /^ {0,3}<hr\s+class\s*=\s*(?:(["'])([^"']*)\1|([^\s"'`=<>]+))\s*\/?>\s*$/i;
 
 /// Is this source line, on its own, the page-break marker? Line context
 /// is `pageBreakLineFlags`'s job: a marker inside a fenced code block is
 /// still a marker line, and still not a page break.
 export function isPageBreakMarkerLine(text: string): boolean {
-  return MARKER_LINE_RE.exec(text)?.[2] === PAGE_BREAK_CLASS;
+  const match = MARKER_LINE_RE.exec(text);
+  if (!match) return false;
+  return (match[2] ?? match[3]) === PAGE_BREAK_CLASS;
 }
 
-/// Is this rendered element a page break?
-export function isPageBreakElement(el: Element): boolean {
-  if (el.tagName !== "HR") return false;
-  if (el.getAttribute("class") !== PAGE_BREAK_CLASS) return false;
-  // The marker carries its class and nothing else. chan's own mark is
-  // not an authored attribute, so a second pass over a marked document
-  // reaches the same answer as the first.
-  return Array.from(el.attributes).every(
-    (attr) => attr.name === "class" || attr.name === PAGE_BREAK_ATTR,
+/// Is this element the marker? The class and nothing else, which is what
+/// the marker line parses to. Applied by `markPageBreaks` and by nothing
+/// else: a composed document is read through the mark.
+function isPageBreakElement(el: Element): boolean {
+  return (
+    el.tagName === "HR" &&
+    el.attributes.length === 1 &&
+    el.getAttribute("class") === PAGE_BREAK_CLASS
   );
 }
 
-/// Mark the page breaks of a rendered document so the stylesheet and the
-/// block measurement read one answer rather than each repeating the test.
+/// Decide the page breaks of a composed document, once, and record the
+/// answer on the elements themselves.
+///
+/// An author can write this attribute: the sanitizer keeps a `data-`
+/// attribute as it keeps any other, so a forged one arrives looking like
+/// a decision already made. Every mark is cleared, and a forged one is
+/// an authored attribute like any other while the test looks, so the
+/// element carrying it is the near miss the ruling says it is rather
+/// than being laundered into a marker by its own removal. That is why
+/// the decision is taken before anything is cleared, and why this runs
+/// once, on a document that has just been rendered.
+///
+/// A page break is a TOP-LEVEL block. It cuts the page it ends, and only
+/// a direct child of the content is a block the pagination measures, so
+/// a marker inside a quote, a list, a table cell or a raw HTML block is
+/// an ordinary horizontal rule: inert and unstyled, like every other
+/// near miss.
 export function markPageBreaks(content: Element): void {
-  for (const hr of content.querySelectorAll("hr")) {
-    if (isPageBreakElement(hr)) hr.setAttribute(PAGE_BREAK_ATTR, "");
+  const breaks = Array.from(content.children).filter(isPageBreakElement);
+  for (const forged of Array.from(
+    content.querySelectorAll(`[${PAGE_BREAK_ATTR}]`),
+  )) {
+    forged.removeAttribute(PAGE_BREAK_ATTR);
   }
+  for (const el of breaks) el.setAttribute(PAGE_BREAK_ATTR, "");
 }
 
 /// Which lines of a source document are page breaks, by line index.

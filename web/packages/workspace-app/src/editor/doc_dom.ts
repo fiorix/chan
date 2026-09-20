@@ -122,8 +122,8 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
   // measured cut by the first block's margin.
   content.style.display = "flow-root";
   content.innerHTML = renderMarkdown(opts.markdown);
-  // The element test runs here, once, and the stylesheet and the block
-  // measurement below both read what it decided.
+  // The page breaks are decided here, once, and the stylesheet and the
+  // block measurement below read nothing but the mark this leaves.
   markPageBreaks(content);
   root.appendChild(content);
 

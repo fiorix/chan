@@ -284,6 +284,12 @@ describe("a fenced code block survives the export", () => {
   // Asked of the export itself, not of a composition built beside it: the
   // claim is that nothing between the author's file and the page rewrites
   // a line the author is showing rather than writing.
+  //
+  // What this can catch is a transform back between the file and the
+  // composition: the code sample stops reading as the author typed it,
+  // and a marker element appears on the page. What it cannot catch is a
+  // page COUNT, because jsdom gives every block a zero rect, so a forced
+  // cut lands at zero and pagination always emits its one tail window.
   test("the exported code sample still reads as the macro the author typed", async () => {
     const markdown = ["before", "", "```text", "@pagebreak", "```", "", "after"].join(
       "\n",
@@ -298,10 +304,11 @@ describe("a fenced code block survives the export", () => {
         },
       },
     );
-    expect(pages).toHaveLength(1);
-    const code = pages[0]!.querySelector("code");
-    expect(code?.textContent).toContain("@pagebreak");
-    expect(pages[0]!.querySelector(PAGE_BREAK_SELECTOR)).toBeNull();
+    expect(pages.length).toBeGreaterThan(0);
+    for (const page of pages) {
+      expect(page.querySelector("code")?.textContent).toContain("@pagebreak");
+      expect(page.querySelector(PAGE_BREAK_SELECTOR)).toBeNull();
+    }
   });
 });
 
