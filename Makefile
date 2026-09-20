@@ -346,6 +346,7 @@ ifeq ($(UNAME_S),Linux)
 endif
 	$(MAKE) web-check
 	$(MAKE) web-marketing-check
+	$(MAKE) e2e-check
 	$(MAKE) shortcuts-check
 	$(MAKE) host-build-check WEB_ALREADY_BUILT=1
 
@@ -377,6 +378,7 @@ ci-linux: pre-push ## Run the Linux CI validation target.
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.
 	$(MAKE) build-matrix-check
+	$(MAKE) e2e-check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
 	$(MAKE) ci-macos-build
@@ -384,6 +386,7 @@ ci-macos: ## Run the focused macOS CI validation target.
 .PHONY: ci-windows
 ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
+	$(MAKE) e2e-check
 	# The Rust test run covers chan-library and chan-desktop, plus the named
 	# chan-server tests that exercise Windows named-pipe paths. The chan-library
 	# tests include the Windows ConPTY child-reaping paths, chan-desktop includes
@@ -658,6 +661,16 @@ shortcuts-check: ## Verify chan serve's keybinding table matches shortcuts.ts.
 .PHONY: web-marketing-check
 web-marketing-check: ## Run marketing site checks.
 	cd web && $(NPM) install && $(NPM) run check -w @chan/marketing
+
+.PHONY: e2e-check
+e2e-check: ## Syntax-check the e2e harness and the desktop shell's JavaScript.
+	# scripts/e2e produces nothing but a verdict and desktop/src ships in
+	# every desktop release, yet no cargo or npm target reads either, so a
+	# syntax error in them surfaces as a broken run instead of a failed
+	# gate. Same `node --check` web-marketing-check runs over the marketing
+	# scripts. The driver is Python because this target runs on the Windows
+	# runner too, and it fails when a pattern matches nothing.
+	$(PYTHON) scripts/check-e2e-syntax.py
 
 .PHONY: models
 models: ## Pre-fetch the optional embedded search model.
