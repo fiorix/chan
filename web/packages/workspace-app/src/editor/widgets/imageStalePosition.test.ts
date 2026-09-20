@@ -139,6 +139,17 @@ describe("an image action after an edit above the image", () => {
     expect(data.get(IMAGE_MOVE_MIME)).toBe(JSON.stringify(imageRange()));
   });
 
+  test("the widget's DOM is the same element after the edit", () => {
+    mount();
+    const before = wrap();
+    editAbove();
+    // The other tests here are only about a stale position if the DOM
+    // that carries it survives. Were the widget to compare unequal
+    // across the edit, CodeMirror would rebuild it with a fresh stamp
+    // and every one of them would pass without resolving anything.
+    expect(wrap()).toBe(before);
+  });
+
   test("the selection ring lights up at the image's boundary", () => {
     mount();
     editAbove();

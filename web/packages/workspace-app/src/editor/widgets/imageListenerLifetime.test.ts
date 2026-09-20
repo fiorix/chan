@@ -118,4 +118,43 @@ describe("the document listeners belong to their view", () => {
     expect(a.state.selection.main.head).toBe(before);
     expect(wrap.dataset.selected).toBe("true");
   });
+  test("a key typed outside every editor never acts on a ring", () => {
+    const a = mount();
+    const wrap = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrap.dataset.selected = "true";
+    const before = a.state.selection.main.head;
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(a.state.selection.main.head).toBe(before);
+    expect(wrap.dataset.selected).toBe("true");
+    input.remove();
+  });
+
+  test("a key with the focus nowhere still acts on the ring", () => {
+    const a = mount();
+    const wrap = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrap.dataset.selected = "true";
+    const before = a.state.selection.main.head;
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(a.state.selection.main.head).not.toBe(before);
+    // The caret landing in the URL flips the image into edit mode, so the
+    // ring's own wrap is replaced; ask the view, not the old element.
+    expect(a.dom.querySelector(".cm-md-image-wrap[data-selected]")).toBeNull();
+  });
+
+  test("a click in another view clears this view's ring", () => {
+    const a = mount();
+    const b = mount();
+    const wrap = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrap.dataset.selected = "true";
+    b.contentDOM.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true }),
+    );
+    expect(wrap.dataset.selected).toBeUndefined();
+  });
 });
