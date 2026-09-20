@@ -1,6 +1,13 @@
 import { describe, expect, test } from "vitest";
 import panel from "./GraphPanel.svelte?raw";
 
+// The dir probe's own behaviour, that it asks at the full depth and re-runs
+// when the dir scope changes, is asserted against a counting stub in
+// graphDepthProbeFailure.svelte.test.ts rather than pinned as source text.
+// The discard of a result for a scope that has moved on is not asserted
+// anywhere: `dirDepthProbeLoading` keeps a second probe from starting while
+// one is in flight, so that guard's case is not reachable from the outside.
+
 // Graph directory-node inspector hotfix. Directory-node actions (Show
 // Directory, Graph from here) and the depth slider were broken. These
 // source-level pins mirror graphInspectorActionsHotfix's ?raw pattern
@@ -76,19 +83,6 @@ describe("depth slider holds its dragged value via a full-depth dir probe", () =
     expect(panel).toMatch(/let dirDepthProbe: FsGraphResponse \| null = \$state\(null\);/);
     expect(panel).toMatch(/let dirDepthProbeLoading = \$state\(false\);/);
     expect(panel).toMatch(/let dirDepthProbePath: string \| null = \$state\(null\);/);
-  });
-
-  test("loadDirDepthProbe fetches the dir at FS_GRAPH_DEPTH_MAX, guarded by path", () => {
-    expect(panel).toMatch(
-      /async function loadDirDepthProbe\(path: string\): Promise<void> \{[\s\S]*?depth: FS_GRAPH_DEPTH_MAX,[\s\S]*?if \(dirDepthProbePath === path\) dirDepthProbe = probe;/,
-    );
-  });
-
-  test("an effect (re)runs the dir probe when the dir scope path changes", () => {
-    expect(panel).toMatch(
-      /if \(!visible \|\| currentScope\?\.kind !== "dir"\) \{\s*dirDepthProbe = null;\s*dirDepthProbePath = null;\s*return;\s*\}/,
-    );
-    expect(panel).toMatch(/untrack\(\(\) => void loadDirDepthProbe\(path\)\);/);
   });
 
   test("depthCap prefers the full-depth dir probe and never caps below the loaded depth", () => {

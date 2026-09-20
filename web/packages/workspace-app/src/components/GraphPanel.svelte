@@ -620,6 +620,12 @@
   let appliedScopeKey: string | null = null;
   let workspaceDepthProbe: FsGraphResponse | null = $state(null);
   let workspaceDepthProbeLoading = $state(false);
+  /// A probe that failed leaves no response and is not loading, which is the
+  /// same shape as one that has never run, so the effect below would ask again
+  /// at once and hold /api/graph/fs in a tight loop for as long as the tab is
+  /// visible. The failure is its own state, cleared wherever the probe is
+  /// legitimately reset.
+  let workspaceDepthProbeFailed = $state(false);
   /// Directory-scope depth probe. The depth slider's cap is the
   /// max relative depth REACHABLE under the scope, which we can only
   /// learn by walking deeper than the currently-loaded slice. At depth
@@ -632,6 +638,11 @@
   let dirDepthProbe: FsGraphResponse | null = $state(null);
   let dirDepthProbeLoading = $state(false);
   let dirDepthProbePath: string | null = $state(null);
+  /// The one directory scope whose probe failed, or null. It holds a path
+  /// rather than a flag so a failure on one directory does not suppress the
+  /// probe for every other: moving to another directory probes it, and that
+  /// probe's own result replaces this. A reload clears it too.
+  let dirDepthProbeFailedPath: string | null = $state(null);
   let languageMaxDepth = $state(0);
   let loading = $state(true);
   let error: string | null = $state(null);
@@ -908,8 +919,13 @@
   /// depth probe aligned at workspace scope.
   async function reloadGraph(): Promise<void> {
     closeTabMenu();
+    // A reload is one of the things that may make a failed probe succeed, so
+    // it releases the latch for whichever scope is current. The directory
+    // effect reads the latch tracked, so nulling it re-arms exactly one probe.
+    dirDepthProbeFailedPath = null;
     if (currentScope?.kind === "workspace") {
       workspaceDepthProbe = null;
+      workspaceDepthProbeFailed = false;
       await loadWorkspaceDepthProbe();
     }
     lastLoadedKey = loadKey;
@@ -945,8 +961,10 @@
         path: "",
         depth: FS_GRAPH_DEPTH_MAX,
       });
+      workspaceDepthProbeFailed = false;
     } catch {
       workspaceDepthProbe = null;
+      workspaceDepthProbeFailed = true;
     } finally {
       workspaceDepthProbeLoading = false;
     }
@@ -967,9 +985,15 @@
         depth: FS_GRAPH_DEPTH_MAX,
       });
       // Drop the result if the scope moved on while we were fetching.
-      if (dirDepthProbePath === path) dirDepthProbe = probe;
+      if (dirDepthProbePath === path) {
+        dirDepthProbe = probe;
+        dirDepthProbeFailedPath = null;
+      }
     } catch {
-      if (dirDepthProbePath === path) dirDepthProbe = null;
+      if (dirDepthProbePath === path) {
+        dirDepthProbe = null;
+        dirDepthProbeFailedPath = path;
+      }
     } finally {
       dirDepthProbeLoading = false;
     }
@@ -2476,13 +2500,16 @@
   });
 
   $effect(() => {
-    if (!visible) workspaceDepthProbe = null;
+    if (!visible) {
+      workspaceDepthProbe = null;
+      workspaceDepthProbeFailed = false;
+    }
   });
 
   $effect(() => {
     if (!visible) return;
     if (currentScope?.kind !== "workspace") return;
-    if (workspaceDepthProbe || workspaceDepthProbeLoading) return;
+    if (workspaceDepthProbe || workspaceDepthProbeLoading || workspaceDepthProbeFailed) return;
     void loadWorkspaceDepthProbe();
   });
 
@@ -2494,11 +2521,13 @@
     if (!visible || currentScope?.kind !== "dir") {
       dirDepthProbe = null;
       dirDepthProbePath = null;
+      dirDepthProbeFailedPath = null;
       return;
     }
     const path = currentScope.path;
     if (dirDepthProbeLoading) return;
     if (dirDepthProbePath === path && dirDepthProbe) return;
+    if (dirDepthProbeFailedPath === path) return;
     untrack(() => void loadDirDepthProbe(path));
   });
 
@@ -2573,8 +2602,10 @@
     watchReloadTimer = setTimeout(() => {
       watchReloadTimer = null;
       if (visible) {
+        dirDepthProbeFailedPath = null;
         if (currentScope?.kind === "workspace") {
           workspaceDepthProbe = null;
+          workspaceDepthProbeFailed = false;
           void loadWorkspaceDepthProbe();
         }
         lastLoadedKey = loadKey;
