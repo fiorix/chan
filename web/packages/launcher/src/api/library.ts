@@ -390,8 +390,20 @@ export interface LibraryApi {
   /** Turn a connected devserver's served workspace on/off by its mounted prefix
    * (desktop action, 409 with no bridge). An unforced off of a workspace that
    * still has live terminal sessions answers 409 `{error:"live_terminals",
-   * active_terminals:N}`; pass `force` to tear them down and turn off anyway. */
-  setDevserverWorkspaceOn(id: string, prefix: string, on: boolean, force?: boolean): Promise<void>;
+   * active_terminals:N}`; pass `force` to tear them down and turn off anyway.
+   *
+   * An `on` answers 200 with the workspace's row, the same shape the list
+   * route sends, so a caller reads a degraded mount off the answer instead of
+   * refetching for it. It answers 204, and this resolves undefined, where the
+   * desktop holds no row to report: a devserver that answered the turn-on
+   * without one, or a local devserver whose toggle it could not complete. An
+   * `off` carries no row and always resolves undefined. */
+  setDevserverWorkspaceOn(
+    id: string,
+    prefix: string,
+    on: boolean,
+    force?: boolean,
+  ): Promise<WorkspaceEntry | undefined>;
   /** Forget (unmount + drop) a connected devserver's served workspace by its
    * mounted prefix (desktop action, 409 with no bridge). An unforced forget with
    * live terminals answers the same live_terminals body as off. */

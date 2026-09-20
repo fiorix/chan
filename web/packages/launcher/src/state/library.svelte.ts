@@ -189,6 +189,19 @@ function stopWorkspacePolling(): void {
   workspacePoll = null;
 }
 
+/// Replace one workspace row in place, or append it when the list has not
+/// caught up yet. Keyed on `workspace_id`, which the registry owns.
+function applyWorkspaceRow(row: WorkspaceEntry): void {
+  const at = library.workspaces.findIndex((w) => w.workspace_id === row.workspace_id);
+  if (at < 0) {
+    library.workspaces = [...library.workspaces, row];
+    return;
+  }
+  const next = [...library.workspaces];
+  next[at] = row;
+  library.workspaces = next;
+}
+
 async function refreshWorkspaces(): Promise<void> {
   library.workspaces = await backend.listWorkspaces();
   reconcilePending();
@@ -456,16 +469,25 @@ export async function setDevserverWorkspaceOn(
 ): Promise<void> {
   const key = servedKey(id, prefix);
   beginPending(key, on ? "on" : "off");
+  let answered: WorkspaceEntry | undefined;
   try {
-    await backend.setDevserverWorkspaceOn(id, prefix, on, force);
+    answered = await backend.setDevserverWorkspaceOn(id, prefix, on, force);
   } catch (e) {
     clearPending(key); // stop the spinner; a 409 live-terminal opens the confirm
     throw e;
   }
+  // An `on` answers with the workspace's row, so the mount's state is known
+  // here. Apply it before the re-list, so the row updates without waiting on
+  // another round trip, and again after, because the list can still be
+  // carrying the pre-toggle row and would otherwise regress what the answer
+  // already settled. An `off`, and an `on` the desktop could not report a row
+  // for, answer 204 and leave the row to the re-list alone.
+  if (answered) applyWorkspaceRow(answered);
   // Re-list now rather than wait on the watch push alone: a dropped feed would
   // otherwise strand the served row's marker until the 10s backstop. reconcile
   // clears it once the served row flips; the watch push keeps it live thereafter.
   await refreshWorkspaces();
+  if (answered) applyWorkspaceRow(answered);
 }
 
 /** Forget (unmount + drop) a connected devserver's served workspace by prefix. */
