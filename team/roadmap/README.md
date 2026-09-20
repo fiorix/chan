@@ -88,7 +88,7 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0. Nothing here is accepted yet.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. Nothing here is accepted yet.
 
 **Frontend review, phased from v0.100.0**
 
@@ -113,6 +113,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0. Nothing here is accep
 | [stale-sentences-outlive-their-code][prose] | raised | accept |
 | [a-service-spawned-extension-gets-a-bare-path][extp] | raised | accept |
 | [the-aur-check-could-ship-a-test-only-feature][aurc] | raised | accept |
+
+**Raised during v0.100.0**
+
+| item | state | next |
+| --- | --- | --- |
+| [refusals-answer-in-four-shapes][refus] | raised | decide |
 
 [on204]: v0.100.0/one-on-route-still-answers-204.md
 [d409]: v0.100.0/the-desktop-reads-any-409-as-live-terminals.md
@@ -164,6 +170,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0. Nothing here is accep
 [prose]: v0.101.0/stale-sentences-outlive-their-code.md
 [extp]: v0.101.0/a-service-spawned-extension-gets-a-bare-path.md
 [aurc]: v0.101.0/the-aur-check-could-ship-a-test-only-feature.md
+[refus]: v0.101.0/refusals-answer-in-four-shapes.md
 
 ## Completed
 
