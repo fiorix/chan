@@ -17,10 +17,12 @@
 //
 // The copy is a sync-baseline + async-upgrade: the DOM copy event
 // synchronously sets both flavors with the workspace `<img>` srcs rewritten
-// to ABSOLUTE tokenized URLs (no fetch needed, always correct), then a
-// fire-and-forget pass inlines data: URIs and rewrites the clipboard (the
-// native `write_clipboard_html` IPC on desktop, `navigator.clipboard.write`
-// on web). If the async upgrade is rejected the sync baseline persists.
+// to ABSOLUTE URLs carrying no session bearer (no fetch needed, always
+// correct), then a fire-and-forget pass inlines data: URIs and rewrites the
+// clipboard (the native `write_clipboard_html` IPC on desktop,
+// `navigator.clipboard.write` on web). If the async upgrade is rejected the
+// sync baseline persists, so what an external consumer keeps is a URL it
+// cannot authenticate rather than a working credential (see toAbsoluteUrl).
 //
 // Ordinals for the ref tags come from ONE shared scan function
 // (`findWorkspaceImageRefs`) used by both copy and paste, so nothing
@@ -46,8 +48,8 @@ import { isTauriDesktop, writeClipboardHtml } from "../api/desktop";
 import { isImagePath, parseImageSrc, resolveImageSrc } from "./extensions/image";
 
 /// Largest raw image bytes we inline as data: URIs per copy. Images over
-/// this budget (or ones that fail to fetch) keep their absolute tokenized
-/// URL; the builder never rejects.
+/// this budget (or ones that fail to fetch) keep their absolute,
+/// bearer-free URL; the builder never rejects.
 const MAX_INLINE_BYTES = 20 * 1024 * 1024;
 
 /// Lazy getters the copy path reads at event time. Shared with the paste
@@ -141,19 +143,30 @@ export function findWorkspaceImageRefs(markdown: string): WorkspaceImageRef[] {
 }
 
 /// Resolve an editor-relative image URL to an absolute one against the
-/// current document location, so an external / cross-window consumer that
-/// reads the sync baseline can still load the bytes over the network.
+/// current document location, WITHOUT the session bearer, so a
+/// cross-window consumer can still address the bytes and an external one
+/// is handed no credential.
+///
+/// `resolveImageSrc` builds the `<img>` src through `withTokenQuery`,
+/// which appends `?t=<bearer>`; that query is a full bearer on its own
+/// (chan-server reads it before the Authorization header), and the
+/// clipboard is outside the app. Stripping it means an external paste
+/// that falls back to this URL is refused with 401 on a tokened serve
+/// and renders broken, which is why the data: upgrade below is what
+/// makes such a paste show the image.
 function toAbsoluteUrl(url: string): string {
   if (!url) return "";
   try {
-    return new URL(url, window.location.href).href;
+    const absolute = new URL(url, window.location.href);
+    absolute.searchParams.delete("t");
+    return absolute.href;
   } catch {
     return url;
   }
 }
 
 /// Render the selected markdown to a sanitized body, resolve every
-/// workspace `<img>` to an absolute tokenized URL, apply its width, and
+/// workspace `<img>` to an absolute, bearer-free URL, apply its width, and
 /// tag it with its ref ordinal when the resolvable `<img>` count matches
 /// the regex ref count (the count guard). Returns the body plus the
 /// workspace imgs so the inliner can upgrade their srcs to data: URIs.
@@ -204,8 +217,8 @@ function wrapBody(
 }
 
 /// Build the sync baseline HTML: the rendered body with workspace `<img>`
-/// srcs rewritten to absolute tokenized URLs. No fetches, so it is safe to
-/// produce inside a DOM copy event.
+/// srcs rewritten to absolute, bearer-free URLs. No fetches, so it is safe
+/// to produce inside a DOM copy event.
 export function buildBaselineHtml(
   markdown: string,
   fromPath: string | null,
@@ -251,7 +264,10 @@ export async function buildInlinedHtml(
       budget -= blob.size;
       img.setAttribute("src", await blobToDataUrl(blob));
     } catch {
-      // Keep the absolute URL; the payload stays loadable over the network.
+      // Keep the absolute URL. It addresses the bytes without
+      // authenticating for them, which is all a clipboard payload may
+      // carry; a chan-to-chan paste never loads it anyway (paste_html
+      // re-uploads data: refs and refuses anything else).
     }
   }
   return wrapBody(body, markdown, workspaceRoot, fromPath);

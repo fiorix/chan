@@ -130,13 +130,23 @@ describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
     expect(root?.getAttribute("data-chan-doc")).toBe("1");
   });
 
-  test("resolves srcs to absolute tokenless URLs and tags ordinals", () => {
+  test("resolves srcs to absolute URLs with no query and tags ordinals", () => {
     const md = "![](./a.png#w=250)\n\n![](./b.png)";
     const html = buildBaselineHtml(md, "notes/foo.md", "/ws");
     expect(html).toContain('data-chan-ref="0"');
     expect(html).toContain('data-chan-ref="1"');
-    expect(html).toContain("http://localhost:3000/api/fs/notes/a.png");
-    expect(html).toContain("http://localhost:3000/api/fs/notes/b.png");
+    // Exact, not `toContain`: a prefix match cannot see a query appended
+    // to the src, which is how the session bearer used to ride along. The
+    // tokened case, where this environment has no bearer to leak, is
+    // copyHtmlToken.test.ts.
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const srcs = Array.from(doc.querySelectorAll("img")).map((img) =>
+      img.getAttribute("src"),
+    );
+    expect(srcs).toEqual([
+      "http://localhost:3000/api/fs/notes/a.png",
+      "http://localhost:3000/api/fs/notes/b.png",
+    ]);
   });
 
   test("count guard: a reference-style image the regex misses skips tagging", () => {

@@ -83,6 +83,18 @@ export function authToken(): string | null {
 /// Append the auth token as a `?t=...` query. Use only for paths
 /// that cannot carry an `Authorization` header (WebSocket upgrade,
 /// `<img>` rendered by the browser).
+///
+/// The query IS the credential: chan-server reads `t=` before the
+/// Authorization header, so the whole bearer travels in the URL and
+/// anything that keeps that URL keeps the session. A URL from here may
+/// therefore be given only to a sink inside this window: an element the
+/// browser loads (`<img>`, `<video>`, `<audio>`, `<embed>`), a socket it
+/// opens, a fetch it makes, or the desktop host over IPC.
+///
+/// It may not reach a sink that leaves the app. The clipboard, a drag
+/// payload the OS can read, and any exported or rendered document are not
+/// among the permitted sinks: strip the query before the URL is written
+/// there (`editor/copy_html.ts` does this in `toAbsoluteUrl`).
 export function withTokenQuery(path: string): string {
   return transportWithTokenQuery(path);
 }
