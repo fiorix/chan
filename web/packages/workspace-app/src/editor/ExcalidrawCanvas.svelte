@@ -69,8 +69,19 @@
     /// Live scene session for this tab, if any; absent renders a solo
     /// board with every collab path inert.
     session?: SceneSession | null;
+    /// The tab is read only: read mode, or a file with no user-write bit.
+    /// The board renders in view mode, which is what keeps it from
+    /// producing changes a live session refuses and the disk will not take.
+    readonly?: boolean;
   };
-  let { content, dark, active = true, onSceneChange, session = null }: Props = $props();
+  let {
+    content,
+    dark,
+    active = true,
+    onSceneChange,
+    session = null,
+    readonly = false,
+  }: Props = $props();
 
   let host: HTMLDivElement | undefined = $state();
   let root: import("react-dom/client").Root | null = null;
@@ -336,6 +347,7 @@
       react.createElement(ex.Excalidraw, {
         ...(withInitial ? { initialData: parseScene(content) } : {}),
         theme: dark ? "dark" : "light",
+        viewModeEnabled: readonly,
         excalidrawAPI: (a: ExcalidrawImperativeAPI) => {
           api = a;
           apiReady = true;

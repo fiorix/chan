@@ -1429,6 +1429,7 @@
             dark={effectiveHybridSurfaceTheme("editor") === "dark"}
             onSceneChange={(json) => (tab.content = json)}
             session={sceneSession}
+            readonly={readOnly}
           />
         {/if}
       </div>
