@@ -1538,9 +1538,9 @@ fn live_terminals_response(active_terminals: usize) -> Response {
 /// bridge. 200 with the workspace's [`LauncherWorkspace`] row, the shape the
 /// local `on` answers with, so one turn-on verb has one answer and a caller reads
 /// a degraded mount off the row instead of refetching for it. 204 where the
-/// desktop has no row to report, which is a local devserver's best-effort toggle
-/// that never reached it. 409 on a refusal (`on` never blocks on terminals, so
-/// `force` is irrelevant).
+/// desktop holds no row to report: a devserver that answered the turn-on without
+/// one, or a local devserver whose toggle the desktop could not complete. 409 on
+/// a refusal (`on` never blocks on terminals, so `force` is irrelevant).
 async fn handle_devserver_workspace_on(
     State(host): State<Arc<WorkspaceHost>>,
     AxumPath(id): AxumPath<String>,

@@ -52,8 +52,8 @@ pub enum SetWorkspaceOnOutcome {
     /// it, so that caller reads the workspace's health off the answer instead of
     /// asking again. It is `None` for an off and for a forget, whose routes
     /// answer 204 and are handed no row to begin with, and for a turn-on whose
-    /// row the desktop never read: a local devserver's best-effort toggle
-    /// reports done without reaching the devserver at all.
+    /// row the desktop never read: a devserver that answered without one, or a
+    /// local devserver whose toggle the desktop could not complete.
     Done {
         workspace: Option<LauncherWorkspace>,
     },

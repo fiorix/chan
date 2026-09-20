@@ -2573,7 +2573,7 @@ pub(crate) async fn forget_devserver_workspace_impl(
 /// A `Done` for an on carries the devserver's row, tagged as this devserver's
 /// launcher row, so that route answers with the workspace's state. An off carries
 /// none, because its route has no use for one, and neither does the local
-/// best-effort arm below, which never reached the devserver to read one.
+/// best-effort arm below, which has no row to report.
 pub(crate) async fn set_devserver_workspace_on_impl(
     state: &Arc<AppState>,
     id: String,
@@ -2591,9 +2591,7 @@ pub(crate) async fn set_devserver_workspace_on_impl(
                 tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after toggle failed");
             }
             // Only an on carries its row up: the off route answers 204, and a
-            // row nobody reads is one more thing to keep true. Tag it after the
-            // refresh, which is the call that learns the devserver's library id,
-            // so a first toggle carries it too.
+            // row nobody reads is one more thing to keep true.
             let workspace = if on {
                 row.map(|row| {
                     to_launcher_workspace(&id, state.devserver_feed.library_id_of(&id), row)
@@ -2616,8 +2614,10 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::Other { message }) => {
             if devserver_is_local(state, &id) {
                 tracing::warn!(devserver = %id, "local devserver workspace toggle failed (non-fatal): {message}");
-                // The request never landed, so there is no row to report: answer
-                // done without one rather than assert a state nobody observed.
+                // This arm matches every failure the toggle reports, whether or
+                // not the request reached the devserver, so there is no row to
+                // report: answer done without one rather than assert a state
+                // nobody observed.
                 Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace: None })
             } else {
                 Err(message)
