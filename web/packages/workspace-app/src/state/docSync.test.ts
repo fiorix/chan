@@ -29,8 +29,11 @@ import {
   type DocSession,
 } from "./docSync.svelte";
 import {
+  cancelPaneMode,
   closeTab,
+  commitPaneMode,
   conflictDialog,
+  enterPaneMode,
   flagExternalChange,
   isDocAttached,
   isDocSavePaused,
@@ -260,6 +263,9 @@ beforeEach(() => {
 afterEach(() => {
   resetDocSyncForTests();
   setSocketFactory(null);
+  // Hybrid Nav is module state: a test that enters and does not commit
+  // would leave the next one reading a draft instead of the layout.
+  cancelPaneMode();
   vi.restoreAllMocks();
   vi.useRealTimers();
   localStorage.clear();
@@ -1342,6 +1348,34 @@ describe("a session follows its tab through a move", () => {
 
     // Reconnecting or degraded, the point is that it moved off "attached".
     expect(liveTab(tab.id).doc?.state).not.toBe("attached");
+    cleanup();
+  });
+
+  test("a status change during Hybrid Nav reaches the committed tab", async () => {
+    // A commit replaces the tree with a clone of the draft taken at entry,
+    // so a status the session mirrored while the draft was up lands on a
+    // tab the commit throws away. The committed tab then keeps the
+    // "attached" it entered with, and that frozen mirror is what tells the
+    // classic save path to stand down.
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = fileTab();
+    resetLayout([tab]);
+    const { session, cleanup } = await attached(tab);
+    expect(liveTab(tab.id).doc?.state).toBe("attached");
+
+    enterPaneMode();
+    session.degrade();
+    commitPaneMode();
+
+    const moved = liveTab(tab.id);
+    expect(isDocAttached(moved)).toBe(false);
+    expect(isDocSavePaused(moved)).toBe(false);
+
+    moved.content = moved.content + "\n";
+    await saveTab(moved);
+    await flushMicro();
+
+    expect(write).toHaveBeenCalledTimes(1);
     cleanup();
   });
 

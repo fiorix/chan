@@ -61,6 +61,7 @@ import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
   markTabFileMissing,
+  registerPaneModeSettledSink,
   registerDocFallbackSavedHook,
   registerDocReleaseHook,
   registerDocSaveDelegate,
@@ -533,6 +534,20 @@ export class DocSession {
     if (this.status !== "degraded") return;
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return;
     this.hardResync();
+  }
+
+  /// Re-apply the mirror onto whatever tab the layout holds now.
+  ///
+  /// A Hybrid Nav commit replaces every tab object with a clone taken when
+  /// the draft was entered, so a status mirrored while the draft was up
+  /// sits on an object the commit discarded and the tab that replaced it
+  /// reads the status this session had at entry. Nothing else corrects it:
+  /// `mirror` runs on a status change, a cursor frame or a snapshot, and a
+  /// re-acquire only retains. A tab frozen at `attached` over a session
+  /// that has stopped owning saves swallows the classic PUT, so this is a
+  /// save loss and not a stale label.
+  resyncMirror(): void {
+    this.mirror();
   }
 
   /// Tear the session down. `linger` keeps the socket + shadow alive for
@@ -1299,6 +1314,14 @@ registerDocSaveDelegate(async (t: FileTab) => {
   // tab when the PUT stamps its CAS check.
   await session.awaitPushSettled();
   return "degraded";
+});
+
+// Hybrid Nav settles by swapping the whole tree, which replaces the tab
+// object every live session mirrors onto. Re-apply each mirror against the
+// tree that won, whether that was the draft (commit) or the live one
+// (cancel, where this is a no-op).
+registerPaneModeSettledSink(() => {
+  for (const session of registry.values()) session.resyncMirror();
 });
 
 registerDocReleaseHook((tabId: string, immediate: boolean) => {

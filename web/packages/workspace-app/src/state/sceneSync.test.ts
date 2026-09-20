@@ -26,10 +26,14 @@ import {
 // delegates alongside the scene ones.
 import { resetDocSyncForTests } from "./docSync.svelte";
 import {
+  cancelPaneMode,
+  commitPaneMode,
+  enterPaneMode,
   isDocAttached,
   isDocSavePaused,
   isDocUnflushed,
   layout,
+  reorderTab,
   saveTab,
   type FileTab,
   type LeafNode,
@@ -251,6 +255,9 @@ afterEach(() => {
   resetSceneSyncForTests();
   resetDocSyncForTests();
   setSocketFactory(null);
+  // Hybrid Nav is module state: a test that enters and does not commit
+  // would leave the next one reading a draft instead of the layout.
+  cancelPaneMode();
   vi.restoreAllMocks();
   vi.useRealTimers();
   localStorage.clear();
@@ -607,6 +614,54 @@ describe("a degraded session has exactly one writer", () => {
     await flushMicro();
 
     expect(session.ownsSaves()).toBe(true);
+  });
+});
+
+
+// ---- a session whose tab was replaced under it -------------------------------
+//
+// A move rebuilds a tab as a clone and a Hybrid Nav commit replaces the whole
+// tree, while the session survives both without rebinding. Everything the
+// session writes has to land on the object the layout holds, or the canvas
+// reads a status its session left behind.
+
+describe("a scene session follows its tab through a move", () => {
+  test("a status change after a reorder reaches the tab in the layout", () => {
+    const [tab] = installTabs([sceneTab(), sceneTab()]);
+    const { session } = attached(tab!);
+    expect(readTab(tab!.id)!.doc?.state).toBe("attached");
+
+    reorderTab("pane-scene-test", tab!.id, 1);
+    // The clone is a different object; the session was not told.
+    expect(readTab(tab!.id)).not.toBe(tab);
+
+    session.degrade();
+
+    expect(readTab(tab!.id)!.doc?.state).toBe("degraded");
+  });
+
+  test("a status change during Hybrid Nav reaches the committed tab", async () => {
+    // A commit replaces the tree with a clone of the draft taken at entry, so
+    // a status mirrored while the draft was up lands on a tab the commit
+    // throws away, and the committed tab keeps the "attached" it entered with.
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const { session } = attached(tab!);
+    expect(readTab(tab!.id)!.doc?.state).toBe("attached");
+
+    enterPaneMode();
+    session.degrade();
+    commitPaneMode();
+
+    const moved = readTab(tab!.id)!;
+    expect(isDocAttached(moved)).toBe(false);
+    expect(isDocSavePaused(moved)).toBe(false);
+
+    moved.content = moved.content + "\n";
+    await saveTab(moved);
+    await flushMicro();
+
+    expect(write).toHaveBeenCalledTimes(1);
   });
 });
 
