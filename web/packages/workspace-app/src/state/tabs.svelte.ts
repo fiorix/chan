@@ -3267,12 +3267,15 @@ function locateTab(tabId: string): {
 
 /// Remove `ids` from wherever each one sits now, and only from there.
 ///
-/// This is `closeTabAsync`'s tail applied per id: resolve, remember the tab
-/// against the pane and side it ended on, splice it out and fix that side's
-/// active tab if it was the one removed. An id nobody holds any more was
-/// closed or discarded while the prompt was open, so it is skipped rather
-/// than chased. Everything not in the set is untouched, which is what leaves
-/// an arrival alone.
+/// Per id this does what the end of `closeTabAsync` does for its one tab:
+/// resolve it where it is now, remember it against the pane and side it
+/// ended on, splice it out and fix that side's active tab if it was the one
+/// removed. It does not do that function's other two steps, the move-out flag
+/// a cross-window terminal drag sets and the immediate doc-session release, so
+/// a file tab closed in bulk leaves its session to the unmount's lingering
+/// release instead. An id nobody holds any more was closed or discarded while
+/// the prompt was open, so it is skipped rather than chased. Everything not in
+/// the set is untouched, which is what leaves an arrival alone.
 function dropTabsById(ids: ReadonlySet<string>): void {
   for (const id of ids) {
     const found = locateTab(id);
