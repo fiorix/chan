@@ -16,7 +16,7 @@ Each of these destroys text the user already wrote, with the keystroke they woul
 
 ## Desired contract
 
-A trigger scan asks the tree before it fires. Inside an existing `Image` or `Link` node only the URL-slot branches may open a bubble; on a line whose text before the trigger is only whitespace and `#` the tag picker stays closed; inside a fenced code block no macro expands.
+A trigger scan asks the tree before it fires. Inside an existing `Image` or `Link` node only the URL-slot branches may open a bubble; the tag picker stays closed for the two shapes that can still become a heading marker, a bare `#` opening a line with no query yet and any trigger that already has a `#` before it on an otherwise blank prefix (`##`, `###`, `##todo`); inside a fenced code block no macro expands. A line that opens with `#tag` keeps its picker: `#t` cannot be a heading, and a line that starts with a tag is ordinary writing. The first wording of this contract closed the picker for every trigger after a whitespace-and-`#` prefix, which came from the review and not from the owner; the lead narrowed it on 2026-09-20 and told the owner.
 
 ## Boundaries
 
@@ -25,6 +25,6 @@ A trigger scan asks the tree before it fires. Inside an existing `Image` or `Lin
 ## Acceptance
 
 1. `computeBubbleSpec` returns no spec for a caret in the alt text of a formed image and of a formed link, including the empty-alt case, and still returns the wrap spec for a freshly typed `![query`.
-2. Typing `#`, `##` and `###` at the start of a line opens no tag picker, and a `#tag` later in a line still does.
+2. Typing `#`, `##` and `###` at the start of a line opens no tag picker, and neither does a query typed against `##`. A `#tag` later in a line still opens it, and so does a `#tag` that opens a line once its query is not empty.
 3. `@today` and `@date` inside a fenced code block stay literal, and still expand outside one.
 4. Each case is a behavioural test on a parsed state, not an assertion on source text.

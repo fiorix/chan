@@ -10,7 +10,7 @@ The path is `renderBody` in `web/packages/workspace-app/src/editor/copy_html.ts`
 
 Everywhere else the app treats that token as sensitive: `transport.ts` deletes `t` from the address bar on load. The consequence is highest for a window served through the tunnel, where the pasted URL is a working credential from anywhere.
 
-The same channel reaches more sinks than this one. `withTokenQuery` has about fourteen production call sites behind two wrappers (video sources, embeds, download URLs, the drag-and-drop payload), and nothing states which sinks a token-bearing URL may reach.
+The same channel reaches more sinks than this one. `withTokenQuery` has about fourteen production call sites behind two wrappers (video sources, embeds, download URLs), and nothing states which sinks a token-bearing URL may reach. The File Browser's drag-out is not one of them: it carries paths. The drag that may carry a tokened URL is the editor's native image drag in `editor/widgets/image.ts`, where the browser's own drag data takes the element's `src`; that was read and not observed, it is a separate contract, and it is outside this item.
 
 ## Desired contract
 

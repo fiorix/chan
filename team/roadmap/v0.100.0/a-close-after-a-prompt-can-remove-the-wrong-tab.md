@@ -14,11 +14,11 @@ A close acts on the tab it was asked to close, identified by id, wherever that t
 
 ## Boundaries
 
-`web/packages/workspace-app/src/state/tabs.svelte.ts` (`closeTabAsync`, `closeTabsInPane`, `closePane`) with `state/tabs.test.ts` and `state/closeConfirm.test.ts`. The review's one-line fix is not enough: re-resolving only the index inside the captured array still writes the reopen record and the active tab against a stale side. `tabs.svelte.ts` is shared with [a-tab-reorder-drops-live-tab-state](a-tab-reorder-drops-live-tab-state.md) and [a-canvas-edit-made-during-an-outage-can-be-lost](a-canvas-edit-made-during-an-outage-can-be-lost.md); one lane, sequenced.
+`web/packages/workspace-app/src/state/tabs.svelte.ts` (`closeTabAsync`, `closeTabsInPane`, `closePane`, `closeOtherTabsInPane`, `closeAllTabs`) with `state/tabs.test.ts` and `state/closeConfirm.test.ts`. The last two functions were added by the lead on 2026-09-20 after the review of the first fix confirmed the same capture-then-await defect in them: `closeOtherTabsInPane` wrote a filtered copy of its captured array back over the side, and `closeAllTabs` wiped tabs that arrived during its confirm and remembered the set it captured. The contract is about a close, not about three names. The review's one-line fix is not enough: re-resolving only the index inside the captured array still writes the reopen record and the active tab against a stale side. `tabs.svelte.ts` is shared with [a-tab-reorder-drops-live-tab-state](a-tab-reorder-drops-live-tab-state.md) and [a-canvas-edit-made-during-an-outage-can-be-lost](a-canvas-edit-made-during-an-outage-can-be-lost.md); one lane, sequenced.
 
 ## Acceptance
 
 1. A test opens a close confirm on tab B, reorders the pane while it is pending, confirms, and asserts that B is closed and every other tab, its buffer and its session survive.
 2. A test moves B to the other side of a split while the prompt is pending and asserts the same, with the reopen record and the active tab on the side B ended on.
 3. Two concurrent closes of the same tab close it once.
-4. The same cases pass for `closeTabsInPane` and `closePane`.
+4. The same cases pass for `closeTabsInPane` and `closePane`, and a tab that arrives during the prompt survives `closeOtherTabsInPane` and `closeAllTabs`.

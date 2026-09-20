@@ -11,7 +11,13 @@ COPR build 10900793 for chan was still 'running' after 5400s;
 its publication is UNCONFIRMED (not failed).
 ```
 
-Both builds then succeeded at `0.98.0-1`, `chan` across ten chroots and `chan-desktop` across eight. Nothing was wrong with the packages, the source, or the trigger. The 5400 second window in `packaging/distros/copr/verify-copr-publication.sh` is simply shorter than COPR's current build time for this project, which ran past 95 minutes.
+Both builds then succeeded at `0.98.0-1`, `chan` across ten chroots and `chan-desktop` across eight. Nothing was wrong with the packages, the source, or the trigger.
+
+This item first read the expiry as build time creeping past the 5400 second window in `packaging/distros/copr/verify-copr-publication.sh`. The measurement taken on 2026-09-20 from COPR's `api_3` says otherwise. Across v0.89.0 to v0.99.0 without v0.98.0, `chan-desktop` took between 3089 and 4577 seconds from submission to end and `chan` between 1353 and 2087, with no trend, so every other release in that range fit the window. v0.98.0 was a COPR-wide slowdown that hit both packages at once in the queue and in the build phase: build 10900794 (`chan-desktop`) took 13986 seconds and build 10900793 (`chan`) 12003, and the next release was back in range. A window that covered it would be close to four hours, and `main` stays frozen for as long as the probe runs.
+
+It was not the only such event. The same API lists builds back to v0.67.1, and two earlier releases ran past 5400 seconds as well: v0.76.1 on 2026-07-25 (`chan-desktop` build 10772737 took 25930 seconds, and the `chan` build beside it failed after 19842) and v0.82.0 on 2026-08-01 (`chan-desktop` build 10802362 took 6058 seconds, `chan` 5391). So a slow COPR day came about once a month over that stretch, one of the three would have fit a 7200 second window, and no window worth its freeze covers the other two.
+
+The script's header is stale as well. It justifies 5400 seconds as about 1.67 times a worst total of 3237 seconds seen across v0.67.0 to v0.73.0. Against the worst normal total above the factor is 1.18 and the headroom 14 minutes. Rewriting that comment against current data is part of this item whichever shape is chosen.
 
 ## Why it matters more than a red square
 
@@ -27,7 +33,7 @@ Most seriously, the probe is also the detector for a real hazard. `main` is froz
 
 The probe's window is longer than a realistic COPR build for this project, and a timeout means something is actually wrong.
 
-Whatever window is chosen should be justified by measurement rather than by a round number: the v0.98.0 builds are one data point at over 95 minutes, and the previous releases' durations are available from the COPR API for the same packages.
+Whatever window is chosen is justified by the measurement above rather than by a round number, and the owner chooses between the shapes below with those numbers in hand.
 
 Two shapes worth weighing. Raising the constant is the smallest change and keeps one mechanism. Splitting the job so a trigger step and a separate, independently re-runnable verify step do not share a cell is a larger change that also fixes the re-run problem, because verification could then be repeated without submitting a build.
 
