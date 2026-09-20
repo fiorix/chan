@@ -14,6 +14,8 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const REFUSAL = "account is blocked";
+/// What the service answers the second DELETE: the grant is already gone.
+const GONE = "no such grant";
 
 const listTokens = vi.fn();
 const revokeToken = vi.fn();
@@ -158,5 +160,54 @@ describe("a grant revoke the service refuses", () => {
         (b) => b.textContent?.trim() === "Revoke",
       ),
     ).toBe(true);
+  });
+});
+
+describe("a grant revoke clicked twice", () => {
+  test("holds the control down while its DELETE is in flight", async () => {
+    deleteDevserverGrant.mockReturnValue(new Promise(() => {}));
+    const target = await mountView("./Devservers.svelte", { devservers: [] });
+    buttonWith(target, "Share").click();
+    await flush();
+
+    const revoke = buttonWith(target, "Revoke");
+    revoke.click();
+    await flush();
+    expect(revoke.disabled).toBe(true);
+  });
+
+  test("sends one DELETE, so a revoke that worked is not reported as failed", async () => {
+    let settleFirst: (() => void) | null = null;
+    let calls = 0;
+    deleteDevserverGrant.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<void>((resolve) => {
+          settleFirst = () => resolve();
+        });
+      }
+      return Promise.reject(new Error(GONE));
+    });
+
+    const target = await mountView("./Devservers.svelte", { devservers: [] });
+    buttonWith(target, "Share").click();
+    await flush();
+
+    // Two clicks inside one frame, which is what a double click is. The
+    // DOM has not been updated between them, so the disabled attribute
+    // alone cannot be what stops the second.
+    const revoke = buttonWith(target, "Revoke");
+    revoke.click();
+    revoke.click();
+    await flush();
+
+    settleFirst?.();
+    await flush();
+
+    expect(deleteDevserverGrant).toHaveBeenCalledTimes(1);
+    expect(unhandled).toEqual([]);
+    // The grantee is gone and nothing claims otherwise.
+    expect(target.textContent).not.toContain("friend@example.com");
+    expect(target.textContent).not.toContain("Not revoked");
   });
 });
