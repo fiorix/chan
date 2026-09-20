@@ -4797,11 +4797,33 @@ mod tests {
         assert_ne!(records[0].window_id, records[1].window_id);
     }
 
+    /// The registry gate declines BEFORE the mount and before the workspace
+    /// flock, which an end-state assertion alone cannot show: a handler that
+    /// opened the workspace, dropped it and then answered the same registry
+    /// error would leave nothing mounted either.
+    ///
+    /// The flock is held independently for the duration, so touching the mount
+    /// path first cannot go unnoticed: it would contend, and the caller would
+    /// hear that instead of the registry.
     #[tokio::test]
     async fn discovery_registration_without_a_window_registry_does_not_mount() {
+        let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.md"), "# A\n").expect("seed");
         let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state
+            .host
+            .library()
+            .register_workspace(workspace.path())
+            .expect("library registration");
+        let paths = state
+            .host
+            .library()
+            .workspace_paths_for(workspace.path())
+            .expect("workspace metadata");
+        let _held = chan_workspace::lock::WorkspaceLock::acquire(&paths.lock, workspace.path())
+            .expect("hold the workspace lock for the whole request");
         let response = handle_discovery_request(
             &state,
             8787,
@@ -4813,12 +4835,24 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            response,
-            crate::devserver_handoff::Response::Error { ref message }
-                if message.contains("window registry")
-        ));
+        // The registry's refusal, not the lock's: reaching the mount first
+        // would answer the contended lock instead.
+        match &response {
+            crate::devserver_handoff::Response::Error { message } => assert!(
+                message.contains("window registry"),
+                "the registry must decline before the mount is attempted: {message}"
+            ),
+            other => panic!("a missing registry declines: {other:?}"),
+        }
         assert!(!state.host.is_root_mounted(workspace.path()));
+        // And nothing may have BEGUN one. A handler that reached the mount
+        // path before the gate leaves the lifecycle mark behind even if it
+        // then dropped the tenant, which the end state alone cannot show.
+        let (status, _) = state.host.workspace_status(workspace.path());
+        assert!(
+            !matches!(status, WorkspaceStatus::Starting | WorkspaceStatus::Error),
+            "the registry declined only after a mount was begun: {status:?}"
+        );
     }
 
     /// A registration for a workspace whose root the health probe currently
@@ -4945,15 +4979,23 @@ mod tests {
         )
         .await;
 
-        // Naming the variant is not enough: the handler answers `Error` for a
-        // missing window registry too, before it reaches the mount, so an
-        // assertion that only matches the variant would pass for the wrong
-        // reason. This one requires the refusal NOT to be that one.
+        // Name the writer, positively. Matching the variant is not enough: the
+        // handler answers `Error` for a missing window registry too, from an
+        // arm reached before the mount, and any refusal inserted between the
+        // two would satisfy a merely-not-that assertion. The mount's own
+        // refusal is the workspace layer's, and it carries both that layer's
+        // reason and the path it rejected.
         match &response {
-            crate::devserver_handoff::Response::Error { message } => assert!(
-                !message.contains("window registry"),
-                "the refusal must come from the mount, not the registry gate: {message}"
-            ),
+            crate::devserver_handoff::Response::Error { message } => {
+                assert!(
+                    message.contains("refusing to operate on non-regular file"),
+                    "the refusal must be the mount's own: {message}"
+                );
+                assert!(
+                    message.contains(&not_a_root.display().to_string()),
+                    "the refusal must name the root it rejected: {message}"
+                );
+            }
             other => panic!("a mount that failed is not a registration: {other:?}"),
         }
         // Read the REGISTRY, not the assembled feed. `assemble_window_records`
