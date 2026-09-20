@@ -217,6 +217,28 @@ describe("a tab whose render throws", () => {
     ).toEqual(["Try again", "Close tab"]);
   });
 
+  test("leaves a healthy sibling drawable, and the strip switches to it", async () => {
+    const target = await mountApp();
+    const left = paneEl(target, PANE_A);
+    expect(left.querySelector(".pane-failed"), "the throw is shown").not.toBeNull();
+
+    // The keep-alive eaches mount every tab body in the pane, so a failure
+    // that takes the pane's whole body takes the healthy sibling with it and
+    // clicking that sibling in the strip has nothing to draw.
+    const strip = [...left.querySelectorAll<HTMLElement>(".tabs .tab")];
+    expect(strip, "both tabs are in the strip").toHaveLength(2);
+    const healthy = strip.find((el) => !el.textContent?.includes("Dashboard"));
+    expect(healthy, "the sibling is in the strip").toBeDefined();
+    healthy!.click();
+    await tick();
+    await tick();
+
+    expect(
+      left.querySelector(".editor-tab"),
+      "the sibling's own body is drawn",
+    ).not.toBeNull();
+  });
+
   test("leaves its own tab strip, its sibling tabs and the other pane working", async () => {
     const target = await mountApp();
     const left = paneEl(target, PANE_A);
