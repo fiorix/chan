@@ -20,6 +20,7 @@ import {
 } from "./pdf_pages";
 import { api } from "../api/client";
 import {
+  inlinePageResources,
   snapshotPage,
   SnapshotError,
   type PageBoxPx,
@@ -287,6 +288,13 @@ export async function exportMarkdownToPdf(
       measureDocBlocks(doc.content),
       geometry.pageContentHeightPx,
     );
+    // Inline every resource once, on the composed document, before the
+    // pages clone it. Each clone then carries its own `data:` copies and
+    // the per-page snapshot finds nothing left to fetch, where cloning
+    // first made an N-page document with M images fetch N times M. It
+    // runs after the measurement so the swap cannot disturb the layout
+    // the cuts were taken from.
+    await withPageTimeout(inlinePageResources(doc.root), "document resources");
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");
     for (const [index, pageEl] of pages.entries()) {
