@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.100.0
 
-Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
+Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20 and added two the same day, the two CLI spellings and the `dump-skill` index, sequenced last in their lane and moving to v0.101.0 if it runs late; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
 
 **Server, desktop and library**
 
@@ -39,6 +39,8 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | [two-live-samples-of-one-lock-disagree][lock2] | accepted | build |
 | [cs-terminal-close-acks-a-close-that-did-not-happen][csc] | accepted | repro |
 | [the-rust-review-lows-were-never-triaged][lows] | accepted | fold along |
+| [chan-open-is-gone-and-forget-is-a-second-verb][alias] | accepted | last |
+| [dump-skill-prints-more-than-an-agent-can-read][skill] | accepted | last |
 
 **Packaging, release and gate**
 
@@ -130,6 +132,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [lock2]: v0.100.0/two-live-samples-of-one-lock-disagree.md
 [csc]: v0.100.0/cs-terminal-close-acks-a-close-that-did-not-happen.md
 [lows]: v0.100.0/the-rust-review-lows-were-never-triaged.md
+[alias]: v0.100.0/chan-open-is-gone-and-forget-is-a-second-verb.md
+[skill]: v0.100.0/dump-skill-prints-more-than-an-agent-can-read.md
 [copr]: v0.100.0/the-copr-probe-window-is-shorter-than-its-builds.md
 [deb]: v0.100.0/a-prerelease-deb-is-spelled-with-a-dot.md
 [gate]: v0.100.0/frontend-gate-holes-let-broken-bundles-ship.md
