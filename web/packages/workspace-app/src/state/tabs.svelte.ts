@@ -4030,9 +4030,11 @@ export function paneModeSetMouseSplit(
 /// stands down, and the server goes on accepting pushes it will not flush.
 /// `externalChange` is silent the same way: the watcher delivers its frame
 /// once, so a raised banner the commit drops never comes back, and a banner
-/// the user dismissed during the mode comes back at the commit. `doc`,
-/// `error` and `fileMissing` are facts about the tab and the path that the
-/// draft's clone cannot restore either.
+/// the user dismissed during the mode comes back at the commit. `fsWritable`
+/// comes from a watcher frame too, and chmod moves no mtime, so nothing
+/// re-samples the bit until the next load. `doc`, `error` and `fileMissing`
+/// are facts about the tab and the path that the draft's clone cannot
+/// restore either.
 ///
 /// Everything else stays the draft's, `content` first of all: the editors
 /// stay mounted on the draft's tabs while the mode is up, so a remote edit
@@ -4040,6 +4042,7 @@ export function paneModeSetMouseSplit(
 const PANE_MODE_SESSION_FIELDS = [
   "diskConflicted",
   "externalChange",
+  "fsWritable",
   "doc",
   "error",
   "fileMissing",
@@ -4069,6 +4072,22 @@ const PANE_MODE_AUTHORITY_FIELDS = [
   "savedMtime",
   "savedMtimeNs",
   "authorityVersion",
+] as const;
+
+/// The whole tuple, for the case where the draft has no claim on the
+/// buffer. A load owns every one of these: it empties them on the way in
+/// and writes them together on the way out, which is why `loading` can
+/// never move without `content` and `saved`.
+const PANE_MODE_BUFFER_FIELDS = [
+  "content",
+  "saved",
+  "savedMtime",
+  "savedMtimeNs",
+  "authorityVersion",
+  "loading",
+  "loadProgress",
+  "repoRoot",
+  "openedEmpty",
 ] as const;
 
 /// The live file tabs' buffers as they were when the mode was entered, keyed
@@ -4115,6 +4134,16 @@ function carryLiveAuthorityState(next: LayoutState): void {
       const entryBuffer = paneModeEntryBuffers.get(t.id);
       if (entryBuffer !== undefined && from.content === entryBuffer) {
         for (const field of PANE_MODE_AUTHORITY_FIELDS) {
+          (t as Record<string, unknown>)[field] = from[field];
+        }
+        continue;
+      }
+      // The live buffer moved. If nothing was typed into the draft's copy
+      // since the mode was entered, the draft has no claim on it and the
+      // live tree holds what the user would be looking at, so take the
+      // whole tuple, `loading` and the load's own fields included.
+      if (entryBuffer !== undefined && t.content === entryBuffer) {
+        for (const field of PANE_MODE_BUFFER_FIELDS) {
           (t as Record<string, unknown>)[field] = from[field];
         }
         continue;

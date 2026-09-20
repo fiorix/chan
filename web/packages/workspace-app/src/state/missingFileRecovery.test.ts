@@ -381,13 +381,15 @@ describe("a watcher reload that lands during Hybrid Nav", () => {
     expect(write).toHaveBeenCalled();
     expect(write.mock.calls[0]?.[2]).toBe("1000000001");
     expect(conflictDialog.open).toBe(true);
+    expect(readTab(seed.id)?.externalChange, "and the banner says why").toBe(true);
   });
 
-  test("tells a tab with no unsaved edit that the file changed", async () => {
-    // Same reload with nothing typed into the draft. No save fires, so the
-    // banner is the only thing that can say the file moved; the watcher sends
-    // that transition once, to the live tab, and the commit is the last place
-    // it can reach the tab the user ends up looking at.
+  test("adopts the reload when nothing was typed into the draft", async () => {
+    // Same reload with nothing typed into the draft. The draft has no claim
+    // on the buffer, the check already decided a clean buffer is safe to
+    // replace, and the live tree holds what the user would have been looking
+    // at: the commit takes the whole tuple rather than pairing the old bytes
+    // with the new version.
     const seed = reloadSeed();
     resetLayout([seed]);
     armReload();
@@ -398,6 +400,10 @@ describe("a watcher reload that lands during Hybrid Nav", () => {
     await flushDebounce();
     commitPaneMode();
 
-    expect(readTab(seed.id)?.externalChange).toBe(true);
+    const committed = readTab(seed.id);
+    expect(committed?.content).toBe("theirs");
+    expect(committed?.saved).toBe("theirs");
+    expect(committed?.savedMtimeNs).toBe("9000000009");
+    expect(committed?.externalChange ?? false, "nothing to warn about").toBe(false);
   });
 });
