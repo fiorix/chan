@@ -19,6 +19,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // out the corroboration delay that protects against a non-atomic
 // replace being read mid-flight.
 const BUDGET_MS = 8000;
+/// Passes of the rapid add/remove alternation in step 4.
+const RAPID_CYCLES = 3;
 
 const HEAD = `SHRINK-HEAD-${TS}`;
 const BODY = [
@@ -147,18 +149,29 @@ export default {
 
       // 4. Rapid alternation, the way an agent iterating on a file
       // looks. Each pass restores bytes seen moments earlier.
+      // A recorded result carries measured values. Leaving the previous
+      // cycle's timing in `cycleMs` on the way out of a cycle that never
+      // converged reported a pass built from an earlier pass's number, and
+      // `cycles: 3` said three cycles ran whatever the loop did. Count what
+      // happened and fail the step unless every cycle completed.
       let cycleMs = null;
-      for (let i = 0; i < 3; i += 1) {
+      let cycles = 0;
+      for (let i = 0; i < RAPID_CYCLES; i += 1) {
         const base = [HEAD, ...BODY.filter((l) => !l.startsWith("charlie"))].join("\n") + "\n";
         writeDisk(base.replace(HEAD, `${HEAD} CYCLE${i}`));
         if ((await waitEditor(page, `t.includes("CYCLE${i}")`, BUDGET_MS)) === null) {
+          cycleMs = null;
           break;
         }
         writeDisk(base);
         cycleMs = await waitEditor(page, `!t.includes("CYCLE${i}")`, BUDGET_MS);
         if (cycleMs === null) break;
+        cycles += 1;
       }
-      record("rapid-add-remove-cycles", cycleMs, { cycles: 3 });
+      record("rapid-add-remove-cycles", cycles === RAPID_CYCLES ? cycleMs : null, {
+        cycles,
+        requestedCycles: RAPID_CYCLES,
+      });
 
       // 5. Truncate to empty. Suspicious enough to corroborate, not
       // suspicious enough to refuse.
