@@ -78,12 +78,6 @@
     });
   });
 
-  /// No-PIN branch. Dismiss on any key / pointer event anywhere on
-  /// the backdrop. The
-  /// `pin_set` gate inside `unlockWithoutPin()` makes
-  /// this safe to wire unconditionally. When a PIN is
-  /// set the helper bails out + the existing PIN form
-  /// owns input.
   function trapTab(e: KeyboardEvent): void {
     // Keep focus inside the lock. The PIN field is the only thing here that
     // can be acted on, so Tab and Shift+Tab return to it rather than stepping
@@ -94,6 +88,12 @@
     (inputEl ?? backdropEl)?.focus();
   }
 
+  /// No-PIN branch. Dismiss on any key / pointer event anywhere on
+  /// the backdrop. The
+  /// `pin_set` gate inside `unlockWithoutPin()` makes
+  /// this safe to wire unconditionally. When a PIN is
+  /// set the helper bails out + the existing PIN form
+  /// owns input.
   function onBackdropKey(e: KeyboardEvent): void {
     if (e.key === "Tab") {
       trapTab(e);
