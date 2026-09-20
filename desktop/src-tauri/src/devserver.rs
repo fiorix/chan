@@ -329,16 +329,49 @@ pub enum SetWorkspaceOnError {
 /// Longest peer refusal message kept, in characters.
 const MAX_REFUSAL_MESSAGE_CHARS: usize = 200;
 
-/// Make a peer's own words fit to show. Control characters become spaces, so
-/// an escape sequence in the body cannot reach the terminal `chan` prints the
-/// message on; the result is trimmed and cut to
+/// A character a peer's words may not carry into a banner or a terminal.
+///
+/// `char::is_control` names only the Cc category, the ASCII and C1 controls,
+/// which is where an escape sequence lives but not where the rest of the
+/// trouble does. Three more classes matter here and none of them is a control:
+/// the line and paragraph separators, which end a line in a surface that was
+/// promised one string; the bidirectional formatting characters, which reorder
+/// what is displayed without changing what the string contains, so the text a
+/// user reads is not the text that arrived; and the zero-width and invisible
+/// characters, which occupy a message while showing nothing, so a body made
+/// only of them is not empty and would reach a banner as a blank.
+///
+/// The list is explicit rather than a category lookup: it needs no dependency,
+/// it can be read and argued with, and every entry is a class this surface
+/// actually has to answer for.
+fn is_unshowable(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00ad}'                  // soft hyphen
+            | '\u{061c}'                // arabic letter mark
+            | '\u{180e}'                // mongolian vowel separator
+            | '\u{200b}'..='\u{200f}'   // zero width set, LRM, RLM
+            | '\u{2028}'                // line separator
+            | '\u{2029}'                // paragraph separator
+            | '\u{202a}'..='\u{202e}'   // bidi embeddings and overrides
+            | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}'   // bidi isolates
+            | '\u{feff}'                // zero width no-break space
+        )
+}
+
+/// Make a peer's own words fit to show. Anything [`is_unshowable`] names
+/// becomes a space, so an escape sequence cannot reach the terminal `chan`
+/// prints the message on, a separator cannot break the line, and an override
+/// cannot reorder it; the result is trimmed and cut to
 /// [`MAX_REFUSAL_MESSAGE_CHARS`], on a character boundary, so a proxy error
 /// page cannot arrive where a sentence was expected. An empty result means the
-/// peer said nothing a reader can use.
+/// peer said nothing a reader can use, which now includes a body that was
+/// never visible in the first place.
 fn peer_message(raw: &str) -> String {
     let inert: String = raw
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_unshowable(c) { ' ' } else { c })
         .collect();
     let capped: String = inert
         .trim()
@@ -3736,6 +3769,22 @@ mod tests {
                 "workspace is locked\nby another process".to_string(),
                 "workspace is locked by another process",
             ),
+            // The Unicode line and paragraph separators end a line too, and
+            // are not control characters.
+            (
+                "workspace is locked\u{2028}by another process".to_string(),
+                "workspace is locked by another process",
+            ),
+            (
+                "workspace is locked\u{2029}by another process".to_string(),
+                "workspace is locked by another process",
+            ),
+            // A bidi override reorders what is displayed without changing what
+            // the string holds, so the text read is not the text that arrived.
+            (
+                "locked: \u{202e}drowssap\u{202c}".to_string(),
+                "locked:  drowssap",
+            ),
         ] {
             let got = refused(&body).await;
             if got != want {
@@ -3759,15 +3808,18 @@ mod tests {
                 cut.chars().count()
             ));
         }
-        // Nothing a peer sent may still be a control character afterwards.
+        // Nothing a peer sent may still be unshowable afterwards.
         for body in [
             "workspace is locked\u{1b}]0;title\u{7}",
             r#"{"error":"workspace is locked\u001b[2J"}"#,
             "workspace is locked\nby another process",
+            "workspace is locked\u{2028}by another process",
+            "locked: \u{202e}drowssap\u{202c}",
+            "locked\u{200b}: \u{feff}held",
         ] {
             let got = refused(body).await;
-            if got.chars().any(char::is_control) {
-                wrong.push(format!("{body:?} kept a control character: {got:?}"));
+            if got.chars().any(is_unshowable) {
+                wrong.push(format!("{body:?} kept an unshowable character: {got:?}"));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -3775,9 +3827,11 @@ mod tests {
 
     /// A body with nothing left in it after that pass is no message at all, so
     /// it takes the same fallback as an empty one instead of showing a blank
-    /// banner or the discriminator.
+    /// banner or the discriminator. That includes a body which was never
+    /// visible: a string of zero-width characters is not empty, and would
+    /// otherwise reach a banner as a blank.
     #[tokio::test]
-    async fn a_refusal_of_only_control_characters_names_the_status() {
+    async fn a_refusal_with_nothing_showable_names_the_status() {
         use axum::http::StatusCode;
 
         async fn refused(body: &str) -> String {
@@ -3797,6 +3851,9 @@ mod tests {
         for body in [
             "\u{7}\u{1b}\u{0}",
             r#"{"error":"\u0007\u001b"}"#,
+            // Nonempty, and invisible.
+            "\u{200b}\u{200b}\u{feff}",
+            r#"{"error":"\u200b\u2060"}"#,
             // The discriminator padded with whitespace is the banner this
             // reader exists to remove, in another spelling.
             r#"{"error":" live_terminals "}"#,
