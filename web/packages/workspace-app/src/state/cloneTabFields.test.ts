@@ -75,7 +75,7 @@ function loadedTerminalTab(): TerminalTab {
   } satisfies Required<TerminalTab>;
 }
 
-/// A file tab carrying the optional fields the file branch does not name.
+/// A file tab carrying every optional field its type allows.
 function loadedFileTab(): FileTab {
   return {
     kind: "file",

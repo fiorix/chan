@@ -3743,12 +3743,12 @@ type TabFieldName = KeysOfUnion<Tab>;
 /// together.
 ///
 /// Two things it does not decide. It is keyed by field name across the whole
-/// union rather than by kind and field, so a new field reusing a name another
-/// kind has already settled inherits that decision without a new line; a
-/// per-kind table would catch that, at the price of repeating most of these
-/// names six times to guard three that could collide. And it chooses carry or
-/// drop, not depth: how deep a carried container is copied is decided by the
-/// per-kind block in `cloneTab`.
+/// union rather than by kind and field, so the first kind to declare a name
+/// settles it for every kind that later reuses it, and several names are
+/// shared already. A per-kind table would catch that, at the cost of one line
+/// per kind that declares a field instead of one per name. And it chooses
+/// carry or drop, not depth: how deep a carried container is copied is decided
+/// by the per-kind block in `cloneTab`.
 const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   authorityVersion: "carry",
   autoRotate: "carry",
@@ -3825,12 +3825,15 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   terminalMetadataPending: "carry",
   terminalSessionId: "carry",
   title: "carry",
-  // Per-mount state, not per-tab. The find bar belongs to the editor that
-  // mounted it and points at an adapter the destination does not have; the
-  // caret command is a one-shot the mounting editor latches and consumes; a
-  // running load re-resolves its tab from the layout on every chunk and writes
-  // the progress itself, and aborts when that lookup misses, so a carried
-  // number is either about to be overwritten or frozen for good.
+  // Dropped on purpose, each for its own reason. A clone is also the reopen
+  // record and the Hybrid Nav draft, and `tabForReopen` clears neither of
+  // these, so carrying the find state would restore a bar holding a match
+  // list scanned against a document that has moved on; the next
+  // `app.find.open` rebuilds it. The caret command is a one-shot the
+  // mounting editor latches and consumes. A running load re-resolves its tab
+  // from the layout on every chunk and writes the progress itself, and aborts
+  // when that lookup misses, so a carried number is either about to be
+  // overwritten or frozen for good.
   find: "drop",
   caretCommand: "drop",
   loadProgress: "drop",
@@ -5176,12 +5179,17 @@ function findFileTabById(tabId: string): { paneId: string; tab: FileTab } | null
   return null;
 }
 
-/// The file tab the layout holds for `tabId` right now, or null when no
-/// pane holds it. Every path that moves a tab puts a NEW object in the
-/// layout (see `cloneTab`), so a reference captured once stops being the
-/// object the app renders and saves from: a holder that outlives a move
-/// resolves through here on each access instead of keeping the tab it
-/// was handed.
+/// The file tab `layout` holds for `tabId` right now, or null when no pane
+/// holds it. Every path that moves a tab puts a NEW object there (see
+/// `cloneTab`), so a reference captured once stops being the object the rest
+/// of the app reads: a holder that outlives a move resolves through here on
+/// each access instead of keeping the tab it was handed.
+///
+/// While Hybrid Nav is up this is not what the app renders. The draft is
+/// (`activeLayout`), and the commit replaces `layout` with a clone of it, so
+/// a holder that writes through here between entry and commit writes to a
+/// tree that is about to be discarded. The sessions re-apply their mirror
+/// when the mode settles for exactly that reason.
 export function liveFileTabById(tabId: string): FileTab | null {
   return findFileTabById(tabId)?.tab ?? null;
 }
