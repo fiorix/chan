@@ -2306,6 +2306,11 @@
     }
   }
 
+  /// The close-tab chord on an exited terminal is Ctrl+D and nothing near
+  /// it. Shift is excluded because Ctrl+Shift+D is a different chord the
+  /// terminal does not claim: matching it here closed a tab the user was
+  /// not closing, and the double dispatch below then took its neighbour
+  /// with it.
   function isCloseExitedTabKey(e: KeyboardEvent): boolean {
     return (
       e.type === "keydown" &&
@@ -2313,6 +2318,7 @@
       e.ctrlKey &&
       !e.metaKey &&
       !e.altKey &&
+      !e.shiftKey &&
       e.key.toLowerCase() === "d"
     );
   }
@@ -2346,6 +2352,13 @@
         copySelection: () => void copySelectionToClipboard(),
       })
     ) {
+      // The copy is done here, and the component root claims the same chord
+      // for a terminal whose renderer does NOT have focus. Neither renderer
+      // stops propagation on its own, so without this the event reaches the
+      // root and copies a second time. Paste is only MATCHED here, never
+      // acted on, and its work is the backend's native paste listener, so it
+      // keeps travelling.
+      if (isTerminalCopyChord(e, currentOS())) e.stopPropagation();
       return terminalClipboardKeyHandlerResult(e, currentOS(), backend);
     }
     // Chord-escape registry. When the incoming event matches a shortcut
@@ -2362,6 +2375,17 @@
 
   function onShellKeydown(e: KeyboardEvent): void {
     if (closeExitedTabFromKey(e)) {
+      return;
+    }
+    // The terminal claims the copy chord whether or not its renderer has
+    // focus, and this is the dispatch point that sees it when it does not:
+    // a chord raised on the component root never reaches the renderer's
+    // custom handler. A focused renderer handles it there and stops it
+    // before it arrives here, so it is acted on exactly once either way.
+    if (isTerminalCopyChord(e, currentOS())) {
+      e.preventDefault();
+      e.stopPropagation();
+      void copySelectionToClipboard();
       return;
     }
     // Team-work entry points are Cmd+P (native), Cmd+Alt+P (web Mac), and
