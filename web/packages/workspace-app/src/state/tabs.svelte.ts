@@ -3728,10 +3728,20 @@ type TabFieldName = KeysOfUnion<Tab>;
 
 /// Every field any tab kind declares, each marked carry or drop. The mapped
 /// type is the point: a field added to any `Tab` type without a line here does
-/// not compile, so a clone cannot silently forget one. Cloning runs on every
-/// reorder, cross-pane move and Hybrid Nav commit, and it also builds the
-/// reopen record, so a forgotten field is lost from live state and from the
-/// persisted session at once.
+/// not compile, so the decision has to be written down. The clone itself is a
+/// spread, so an undecided field would be carried in silence; what this table
+/// removes is the silence, not the carry. Cloning runs on every reorder,
+/// cross-pane move and Hybrid Nav commit and it also builds the reopen record,
+/// so one wrong line here reaches live state and the per-window session blob
+/// together.
+///
+/// Two things it does not decide. It is keyed by field name across the whole
+/// union rather than by kind and field, so a new field reusing a name another
+/// kind has already settled inherits that decision without a new line; a
+/// per-kind table would catch that, at the price of repeating most of these
+/// names six times to guard three that could collide. And it chooses carry or
+/// drop, not depth: how deep a carried container is copied is decided by the
+/// per-kind block in `cloneTab`.
 const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   authorityVersion: "carry",
   autoRotate: "carry",
@@ -3810,8 +3820,10 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   title: "carry",
   // Per-mount state, not per-tab. The find bar belongs to the editor that
   // mounted it and points at an adapter the destination does not have; the
-  // caret command is a one-shot the mounting editor latches and consumes; load
-  // progress describes a fetch that is not running any more.
+  // caret command is a one-shot the mounting editor latches and consumes; a
+  // running load re-resolves its tab from the layout on every chunk and writes
+  // the progress itself, and aborts when that lookup misses, so a carried
+  // number is either about to be overwritten or frozen for good.
   find: "drop",
   caretCommand: "drop",
   loadProgress: "drop",
@@ -3827,12 +3839,19 @@ const TAB_CLONE_DROPPED_FIELDS: readonly TabFieldName[] = (
 /// doesn't survive splice + insert cleanly across panes, so the clone is a
 /// fresh object.
 ///
-/// Everything is carried except the fields marked `drop` above. Containers are
-/// copied one level down, so a clone held elsewhere (the reopen record, a
-/// Hybrid Nav draft) cannot be mutated through the live tab. `keyboardProtocol`
-/// is the deliberate exception: the renderer's key handlers hold that object
-/// and the running program writes its negotiation into it, so copying it by
-/// value is what regressed Shift+Enter into a plain submit once already.
+/// Everything is carried except the fields marked `drop` above. The containers
+/// a tab holds directly are copied, so a clone held elsewhere (the reopen
+/// record, a Hybrid Nav draft) does not share them with the live tab. The copy
+/// stops there: a container nested inside one of those, such as the team
+/// config's `realEstate.slots` and `realEstate.grid`, is still shared. That is
+/// safe only because the team dialog replaces `realEstate` wholesale on every
+/// edit instead of mutating it in place.
+///
+/// `keyboardProtocol` is the deliberate exception. The terminal's key handlers
+/// capture that object at mount and the running program's negotiation is
+/// written into it, while every reader takes `tab.keyboardProtocol` from the
+/// tab the layout holds. A by-value copy puts the writer and the readers on
+/// different objects.
 function cloneTab(src: Tab): Tab {
   const clone = { ...src };
   for (const field of TAB_CLONE_DROPPED_FIELDS) {

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 //
 // Cloning a tab keeps every field unless the code names it as a deliberate
-// drop. `cloneTab` is a hand-maintained object literal per kind and it fails
-// open, so a field it does not name disappears on the next reorder, cross-pane
-// move or Hybrid Nav commit. The deliberate drops today are `find`,
-// `caretCommand` and `loadProgress`.
+// drop. A clone replaces the tab object on every reorder, cross-pane move and
+// Hybrid Nav commit, and it builds the reopen record too, so a field a clone
+// loses is gone from live state and from the persisted session together. The
+// deliberate drops are `find`, `caretCommand` and `loadProgress`.
 
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -260,11 +260,11 @@ describe("a reorder keeps every field it was not told to drop", () => {
   });
 
   test("the keyboard protocol travels by reference", () => {
-    // A by-value copy is the Shift+Enter regression the terminal's own
-    // comment records as already fixed once: the xterm handlers hold the
-    // object the running program writes its negotiation into, and they take
-    // it from the tab in the layout, so that is where both references are
-    // read from here.
+    // The xterm handlers capture this object at mount and the running
+    // program's negotiation is written into it, while the meta-key path and
+    // the Rich Prompt read `tab.keyboardProtocol` from the tab the layout
+    // holds. A by-value copy would put the writer and the readers on
+    // different objects, so both references here are read from the layout.
     const source = loadedTerminalTab();
     resetLayout([source, { ...loadedFileTab(), id: "file-neighbour" }]);
     const before = (paneTabs().find((t) => t.id === source.id) as TerminalTab)
@@ -305,12 +305,12 @@ describe("a Hybrid Nav commit keeps every field it was not told to drop", () => 
 // tab objects, so a field the clone drops is also gone from the per-window
 // session blob and does not come back on reload.
 //
-// Only the fields the serializer is meant to keep are asserted here. The clone
-// also drops `submitAgent`, `queueDepth`, `terminalActivity`,
-// `terminalActivityPulsing`, `externalChange`, `doc` and `openedEmpty`, and
-// none of those appear in `SerTab`: the type's own comments call them
-// transient, re-synced from the attach prelude or ephemeral. Their loss is a
-// live-state loss only, so asserting they persist would pin the wrong contract.
+// Only the fields the serializer is meant to keep are asserted here.
+// `submitAgent`, `queueDepth`, `terminalActivity`, `terminalActivityPulsing`,
+// `externalChange`, `doc` and `openedEmpty` have no `SerTab` key at all: the
+// type's own comments call them transient, re-synced from the attach prelude,
+// or ephemeral. A clone carries them and a reload does not, so asserting they
+// persist would pin the wrong contract.
 
 /// The per-window session payload for the pane. `terminalSessions` is what the
 /// session blob passes and the shareable URL hash does not.
