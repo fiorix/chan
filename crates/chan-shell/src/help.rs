@@ -224,13 +224,10 @@ works):
 
 Page breaks: `<hr class="chan-page-break">` alone on a line, blank
 line after it, splits a deck into slides and forces a document page
-cut. In the live editor, typing @pagebreak or @break followed by
-Space or Enter rewrites the line to that hr; the rewrite happens at
-typing time only, so a file written with the markers keeps them as
-plain text. One asymmetry: a literal @pagebreak line still splits
-decks and PDF export, but the editor shows it as raw text, so the hr
-form is the canonical one to write. `@break` left literally in the
-source does nothing anywhere.
+cut. It is the only form that cuts. In the live editor, typing
+@pagebreak or @break followed by Space or Enter rewrites the line to
+that hr; the rewrite happens at typing time, so either macro left
+literally in a file stays plain text and splits nothing anywhere.
 
 Diagrams: put the graph in a code fence tagged `mermaid`, or
 `mermaid-to-excalidraw` for the hand-drawn style. Rendering is
