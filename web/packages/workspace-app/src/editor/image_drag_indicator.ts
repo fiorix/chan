@@ -147,6 +147,16 @@ export function updateImageDropTarget(
 /// Hide the indicator but keep the captured source range, so a drag
 /// that leaves and re-enters the editor re-arms on the next dragover.
 /// Called on dragleave out of the editor.
+/// The source range of a move this view started and still holds, or
+/// null. Both checks a drop needs, in one value: only the view that
+/// armed the drag has this state, and it clears on any document change,
+/// so offsets the document has outrun are gone with it.
+export function imageDragSource(
+  view: EditorView,
+): { from: number; to: number } | null {
+  return view.state.field(dragField, false)?.source ?? null;
+}
+
 export function hideImageDropTarget(view: EditorView): void {
   const state = view.state.field(dragField, false);
   if (state?.target) {

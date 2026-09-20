@@ -19,6 +19,7 @@ import { listLineAt } from "../commands/list";
 import { IMAGE_MOVE_MIME } from "../widgets/image";
 import {
   clearImageDragIndicator,
+  imageDragSource,
   hideImageDropTarget,
   updateImageDropTarget,
 } from "../image_drag_indicator";
@@ -85,7 +86,12 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
       const moveData = event.dataTransfer?.getData(IMAGE_MOVE_MIME);
       if (moveData) {
         event.preventDefault();
-        moveImageSource(view, moveData, posFromEvent(view, event));
+        // The payload's offsets belong to the document that armed the
+        // drag, in the view that armed it. Ask that view's live drag
+        // state instead of trusting them: a drop in another pane, or
+        // after a change has shifted the source, moves nothing.
+        const source = imageDragSource(view);
+        if (source) moveImageSource(view, source, posFromEvent(view, event));
         // A real move clears the indicator via docChanged; a no-op drop
         // (own row) leaves the doc untouched, so clear it explicitly.
         clearImageDragIndicator(view);
@@ -151,23 +157,10 @@ export function pasteInsertPos(view: EditorView): number {
 /// round-trips.
 export function moveImageSource(
   view: EditorView,
-  moveData: string,
+  range: { from: number; to: number },
   dropPos: number,
 ): void {
-  let range: { from: number; to: number };
-  try {
-    const parsed = JSON.parse(moveData) as { from: number; to: number };
-    if (
-      typeof parsed.from !== "number" ||
-      typeof parsed.to !== "number" ||
-      parsed.from >= parsed.to
-    ) {
-      return;
-    }
-    range = parsed;
-  } catch {
-    return;
-  }
+  if (range.from >= range.to) return;
   const doc = view.state.doc;
   if (range.to > doc.length) return;
   // Dropping back inside (or immediately adjacent to) the source is a

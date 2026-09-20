@@ -68,7 +68,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const dropPos = md.indexOf("last");
     moveImageSource(
       view,
-      JSON.stringify({ from: imgFrom, to: imgTo }),
+      { from: imgFrom, to: imgTo },
       dropPos,
     );
     const out = view.state.doc.toString();
@@ -87,7 +87,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const dropPos = 0; // onto "first"
     moveImageSource(
       view,
-      JSON.stringify({ from: imgFrom, to: imgTo }),
+      { from: imgFrom, to: imgTo },
       dropPos,
     );
     const out = view.state.doc.toString();
@@ -105,7 +105,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const before = view.state.doc.toString();
     moveImageSource(
       view,
-      JSON.stringify({ from: imgFrom, to: imgTo }),
+      { from: imgFrom, to: imgTo },
       3, // inside the source range
     );
     expect(view.state.doc.toString()).toBe(before);
@@ -120,7 +120,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const dropPos = 2; // onto the bullet line
     moveImageSource(
       view,
-      JSON.stringify({ from: imgFrom, to: imgTo }),
+      { from: imgFrom, to: imgTo },
       dropPos,
     );
     const out = view.state.doc.toString();
@@ -138,7 +138,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const imgFrom = md.indexOf("![](");
     const imgTo = imgFrom + "![](x.png#w=250)".length;
     const dropPos = md.indexOf("last");
-    moveImageSource(view, JSON.stringify({ from: imgFrom, to: imgTo }), dropPos);
+    moveImageSource(view, { from: imgFrom, to: imgTo }, dropPos);
     const out = view.state.doc.toString();
     expect(out).toBe("\nbefore ![](x.png#w=250) after\nlast line\n");
     // Surrounding text moved with the image; nothing stranded / dropped.
@@ -152,7 +152,7 @@ describe("moveImageSource (image drag across rows)", () => {
     const imgFrom = md.indexOf("![](");
     const imgTo = imgFrom + "![](y.png)".length;
     const dropPos = md.indexOf("last");
-    moveImageSource(view, JSON.stringify({ from: imgFrom, to: imgTo }), dropPos);
+    moveImageSource(view, { from: imgFrom, to: imgTo }, dropPos);
     const out = view.state.doc.toString();
     // The `- ` marker travels too, so it stays a bullet at the new row.
     expect(out).toBe("\n- task ![](y.png) done\nlast\n");
@@ -169,19 +169,18 @@ describe("moveImageSource (image drag across rows)", () => {
     // Drop at "after" - same row as the image, outside the image range.
     moveImageSource(
       view,
-      JSON.stringify({ from: imgFrom, to: imgTo }),
+      { from: imgFrom, to: imgTo },
       md.indexOf("after"),
     );
     expect(view.state.doc.toString()).toBe(before);
     view.destroy();
   });
 
-  test("malformed move payload is ignored", () => {
+  test("an empty source range is ignored", () => {
     const md = "![](e.png)\nbody\n";
     const view = plainView(md);
     const before = view.state.doc.toString();
-    moveImageSource(view, "not json", 12);
-    moveImageSource(view, JSON.stringify({ from: 5, to: 5 }), 12);
+    moveImageSource(view, { from: 5, to: 5 }, 12);
     expect(view.state.doc.toString()).toBe(before);
     view.destroy();
   });
