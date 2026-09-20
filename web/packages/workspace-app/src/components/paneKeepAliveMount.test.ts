@@ -70,6 +70,7 @@ import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import "../state/commands/install";
 import {
   layout,
+  reorderTab,
   selectTabInPane,
   type FileTab,
   type LeafNode,
@@ -182,9 +183,11 @@ function paneEl(target: HTMLElement): HTMLElement {
   return el!;
 }
 
-/// Mount two tabs of one kind, switch to the second, and answer whether both
-/// bodies were present throughout and the first one is the SAME node after
-/// the switch. `selector` is the kind's own component root.
+/// Mount two tabs of one kind, switch to the second, then reorder them.
+/// Asserts both bodies were present throughout, that the first is the SAME
+/// node after the switch, and that the reorder moved the nodes rather than
+/// rewriting them, which is what keying by tab id buys. `selector` is the
+/// kind's own component root.
 async function survivesSwitch(tabs: Tab[], selector: string): Promise<void> {
   const target = await mountWith(tabs);
   const pane = paneEl(target);
@@ -200,6 +203,20 @@ async function survivesSwitch(tabs: Tab[], selector: string): Promise<void> {
   const after = [...pane.querySelectorAll(selector)];
   expect(after, "both are still mounted after the switch").toHaveLength(2);
   expect(after[0], "and the first is the same instance").toBe(first);
+
+  // The other half the source pins held: the each is keyed by tab id, so a
+  // reorder MOVES the existing nodes. An unkeyed each would leave the nodes
+  // where they are and update their contents in place, which is a remount of
+  // everything the keep-alive exists to preserve.
+  const second = after[1]!;
+  reorderTab(PANE, tabs[0]!.id, 1);
+  await tick();
+  await tick();
+
+  const reordered = [...pane.querySelectorAll(selector)];
+  expect(reordered, "still both").toHaveLength(2);
+  expect(reordered[0], "the tab that moved up brought its node").toBe(second);
+  expect(reordered[1], "and the one that moved down brought its own").toBe(first);
 }
 
 describe("a pane keeps every tab body mounted across a switch", () => {

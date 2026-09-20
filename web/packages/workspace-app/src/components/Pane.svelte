@@ -1744,11 +1744,19 @@
     role="group"
     aria-label="pane content"
   >
-    <!-- The outer net for this pane's body. Each tab body carries its own
-         boundary below, so what reaches this one is the rest of what the body
-         draws: the Hybrid Nav preview, the empty-pane placeholder, and the
-         keying of the tab lists themselves, which is where a duplicate id is
-         raised.
+    <!-- The outer net for this pane's body. Every tab body has a boundary of
+         its own, the five keep-alive kinds below and the browser kind in the
+         active-tab chain above, so what reaches this one is the rest of what
+         the body draws: the Hybrid Nav preview, the empty-pane placeholder,
+         and the keying of the tab lists themselves.
+
+         The keying is the part worth knowing. A keyed each evaluates its key
+         in the block's own effect, and each item's subtree is a branch below
+         that, while the boundary walk climbs parents only: a per-tab boundary
+         is never an ancestor of the block that raises a duplicate key, so
+         that failure lands here. What this boundary buys there is that a
+         duplicate id costs a pane rather than the window, and two clicks
+         rather than a reload; it is not a fix for the duplicate.
 
          It catches a throw from rendering these children, not one raised
          while this component computes what it passes down. `visibleTabs` and
@@ -1783,14 +1791,19 @@
             {/if}
           </div>
     {:else if active?.kind === "browser"}
-      <FileBrowserSurface
-        variant="tab"
-        tab={active}
-        onClose={() => {
-          void closeTab(pane.id, active.id);
-        }}
-        onFlip={() => flipHybrid(pane.id)}
-      />
+      <svelte:boundary>
+        <FileBrowserSurface
+          variant="tab"
+          tab={active}
+          onClose={() => {
+            void closeTab(pane.id, active.id);
+          }}
+          onFlip={() => flipHybrid(pane.id)}
+        />
+        {#snippet failed(error, reset)}
+          {@render tabFailed(active, error, reset)}
+        {/snippet}
+      </svelte:boundary>
     {:else if !active}
       <div
         class="placeholder"
@@ -1946,8 +1959,8 @@
           {error instanceof Error ? error.message : String(error)}
         </p>
         <p class="pane-failed-hint">
-          The other panes are unaffected. This one draws again once whatever
-          raised it is gone.
+          The other panes are unaffected. Try again redraws this pane; if it
+          fails again, close the tab below and try once more.
         </p>
         <div class="pane-failed-actions">
           <button onclick={() => reset()}>Try again</button>
