@@ -212,6 +212,12 @@ export type SceneCanvasBinding = {
   /// analogue; called after snapshots and when the save funnel needs
   /// quiescence).
   flushPendingLocal(): void;
+  /// Forget that these elements were handed over. `pushScene` answers true
+  /// for a coalesced push and for one on the wire, and neither has been
+  /// accepted yet: a drop or a resync throws both away. The canvas has
+  /// already marked them broadcast, so without this they are never offered
+  /// again and sit on the canvas having reached nobody.
+  forgetBroadcast(elements: WireElement[]): void;
 };
 
 // ---- session ---------------------------------------------------------------
@@ -275,6 +281,9 @@ export class SceneSession {
   private serverDirty = false;
 
   private pushInFlight = false;
+  /// The elements of the push currently on the wire, so a drop or a resync
+  /// can tell the canvas they never landed. Cleared by the ack.
+  private unacked: WireElement[] = [];
   private queued: QueuedPush | null = null;
 
   private cursors = new Map<number, ScenePeerCursor>();
@@ -419,6 +428,7 @@ export class SceneSession {
       return true;
     }
     this.pushInFlight = true;
+    this.unacked = [...elements];
     this.send({
       type: "push",
       elements,
@@ -518,6 +528,16 @@ export class SceneSession {
     return this.tab.readMode || !this.tab.fsWritable;
   }
 
+  /// Tell the canvas that everything `pushScene` claimed but the authority
+  /// never accepted is local again: the payload on the wire and the one
+  /// coalesced behind it. Called wherever those are discarded.
+  private releaseUnaccepted(): void {
+    const stranded = [...this.unacked, ...(this.queued?.elements.values() ?? [])];
+    this.unacked = [];
+    if (stranded.length === 0) return;
+    this.binding?.forgetBroadcast(stranded);
+  }
+
   private foldIntoShadow(el: WireElement): void {
     const id = el.id;
     if (typeof id === "string") this.shadowElements.set(id, el);
@@ -529,6 +549,7 @@ export class SceneSession {
     this.queued = null;
     if (q.elements.size === 0 && q.appState === null && q.files === null) return;
     this.pushInFlight = true;
+    this.unacked = [...q.elements.values()];
     this.send({
       type: "push",
       elements: [...q.elements.values()],
@@ -598,6 +619,7 @@ export class SceneSession {
   private onSocketClosed(): void {
     this.clearAttachTimer();
     this.ws = null;
+    this.releaseUnaccepted();
     this.pushInFlight = false;
     this.queued = null;
     if (this.closedByUs || this.retryStopped) return;
@@ -657,6 +679,7 @@ export class SceneSession {
       case "push-ok":
         this.tab.authorityVersion = f.version;
         this.pushInFlight = false;
+        this.unacked = [];
         this.drainQueued();
         if (!this.pushInFlight && !(this.binding?.hasPendingLocal() ?? false)) {
           // Ack-based saved semantics: everything local is confirmed.
@@ -719,7 +742,11 @@ export class SceneSession {
     this.haveSnapshot = true;
     this.tab.authorityVersion = f.version;
     // A snapshot opens a fresh sync epoch: an in-flight push belongs to
-    // the pre-resync world and will never be acked on this epoch.
+    // the pre-resync world and will never be acked on this epoch. Hand its
+    // elements back before dropping them; `applySnapshot` below re-marks
+    // whatever the authority actually holds, so only what never arrived
+    // stays offered.
+    this.releaseUnaccepted();
     this.pushInFlight = false;
     this.queued = null;
     this.serverDirty = f.dirty;

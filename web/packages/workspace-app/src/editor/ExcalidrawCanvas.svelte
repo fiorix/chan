@@ -252,6 +252,15 @@
     flushPendingLocal() {
       pushDeltas();
     },
+    forgetBroadcast(elements) {
+      // Their push was claimed and then discarded, so the authority never
+      // took them. Dropping the broadcast mark is what puts them back in
+      // `sceneDeltas`, and the next flush offers them again.
+      for (const el of elements) {
+        const id = (el as { id?: unknown }).id;
+        if (typeof id === "string") lastBroadcast.delete(id);
+      }
+    },
   };
 
   // Bind the session once the imperative API exists; rebind when the

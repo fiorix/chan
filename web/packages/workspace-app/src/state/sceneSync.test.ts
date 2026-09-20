@@ -224,6 +224,11 @@ class FakeBinding implements SceneCanvasBinding {
     // them, which is what lets a dropped push survive to the reconnect.
     if (this.session.pushScene(this.pending)) this.pending = [];
   }
+  forgetBroadcast(elements: WireElement[]): void {
+    // The canvas drops the broadcast mark, which puts the element back in
+    // its delta set; here the pending list is that set.
+    this.pending.push(...elements);
+  }
 }
 
 /// Acquire + snapshot: a fully attached session with a bound canvas.
@@ -742,6 +747,50 @@ describe("an element drawn while the channel is down", () => {
       (back.frames("push")[0]!.elements as WireElement[]).map((e) => e.id),
     ).toEqual(["drawn-during-outage"]);
     expect(binding.hasPendingLocal()).toBe(false);
+    vi.useRealTimers();
+  });
+});
+
+describe("a push coalesced behind another", () => {
+  // RED BY DESIGN until the coalescing branch stops claiming a payload it
+  // can still discard.
+  //
+  // `pushScene` answers true when it folds elements into `queued`, and the
+  // canvas reads true as "the authority has this" and marks them broadcast.
+  // But `onSocketClosed` and `onSnapshot` both drop `queued`, and nothing
+  // rewinds the broadcast marks, so those elements are never offered again:
+  // they sit on the canvas, never reached the authority, and the next
+  // push-ok finds nothing pending and advances `saved`, so the tab reads
+  // clean. Draw A, draw B inside A's ack window, blip the socket.
+  test("is re-offered after the drop that discarded it", () => {
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { binding } = attached(tab!);
+
+    binding.pending.push(elem("a", 2));
+    binding.flushPendingLocal();
+    expect(lastSocket().frames("push")).toHaveLength(1);
+
+    // B lands inside A's ack window, so it is coalesced, not sent.
+    binding.pending.push(elem("b", 2));
+    binding.flushPendingLocal();
+    expect(lastSocket().frames("push")).toHaveLength(1);
+
+    // The socket blips before either is acked; the queue goes with it.
+    lastSocket().drop();
+    vi.advanceTimersByTime(600);
+    const beforeRedial = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === beforeRedial; i += 1) {
+      vi.advanceTimersByTime(250);
+    }
+    const back = lastSocket();
+    back.open();
+    back.frame(snap([]));
+
+    const ids = back
+      .frames("push")
+      .flatMap((f) => (f.elements as WireElement[]).map((e) => e.id));
+    expect(ids, "the coalesced element reaches the authority").toContain("b");
     vi.useRealTimers();
   });
 });
