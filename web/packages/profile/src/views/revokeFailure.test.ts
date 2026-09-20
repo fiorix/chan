@@ -251,3 +251,29 @@ describe("a refusal that carries no message", () => {
     expect(target.textContent).toContain("502");
   });
 });
+
+describe("reopening a share panel", () => {
+  test("re-reads the grants instead of serving the list a failed change left", async () => {
+    const target = await mountView("./Devservers.svelte", { devservers: [] });
+    buttonWith(target, "Share").click();
+    await flush();
+    buttonWith(target, "Revoke").click();
+    await flush();
+    expect(target.textContent).toContain(REFUSAL);
+
+    // What the server says now: the grantee this panel still lists is
+    // gone, and somebody else holds access instead.
+    listDevserverGrants.mockResolvedValue([
+      { id: "g2", grantee_email: "other@example.com", accepted_at: null },
+    ]);
+    buttonWith(target, "Hide").click();
+    await flush();
+    buttonWith(target, "Share").click();
+    await flush();
+
+    expect(listDevserverGrants).toHaveBeenCalledTimes(2);
+    expect(target.textContent).toContain("other@example.com");
+    expect(target.textContent).not.toContain("friend@example.com");
+    expect(target.textContent).not.toContain("Not revoked");
+  });
+});
