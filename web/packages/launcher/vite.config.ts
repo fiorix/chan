@@ -114,5 +114,6 @@ export default defineConfig({
     alias: [{ find: /^svelte$/, replacement: svelteClient }],
     setupFiles: ["./vitest.setup.ts"],
     testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 });
