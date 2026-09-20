@@ -23,32 +23,7 @@ function matchMediaStub(opts: { light: boolean }) {
     }) as unknown as MediaQueryList;
 }
 
-function localStorageStub(): Storage {
-  let entries: Record<string, string> = {};
-  return {
-    get length() {
-      return Object.keys(entries).length;
-    },
-    clear() {
-      entries = {};
-    },
-    getItem(key: string) {
-      return entries[key] ?? null;
-    },
-    key(index: number) {
-      return Object.keys(entries)[index] ?? null;
-    },
-    removeItem(key: string) {
-      delete entries[key];
-    },
-    setItem(key: string, value: string) {
-      entries[key] = value;
-    },
-  };
-}
-
 beforeEach(() => {
-  if (!globalThis.localStorage) vi.stubGlobal("localStorage", localStorageStub());
   localStorage.clear();
   vi.resetModules();
 });

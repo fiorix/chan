@@ -112,6 +112,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     alias: [{ find: /^svelte$/, replacement: svelteClient }],
+    setupFiles: ["./vitest.setup.ts"],
     testTimeout: 30_000,
   },
 });
