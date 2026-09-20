@@ -3929,7 +3929,8 @@ mod window_op_route_tests {
     use crate::route_authority::test_support::Caller;
     use crate::{
         DesktopBridge, DesktopWindowOp, DevserverFeedSource, LauncherWorkspace,
-        SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WorkspaceHost, NO_DESKTOP,
+        SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WorkspaceHost,
+        WorkspaceStatus, NO_DESKTOP,
     };
 
     struct RemoteWindowFeed(WindowRecord);
@@ -4812,5 +4813,84 @@ mod window_op_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "forced forget");
+    }
+
+    #[tokio::test]
+    async fn devserver_workspace_on_answers_200_with_the_row() {
+        // A fake desktop that answers a turn-on with the row the devserver
+        // returned: `healthy` mounts cleanly, `broken` mounts but reports its
+        // root unavailable. Off and forget share the dispatcher and keep 204.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(4);
+        let bridge = DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library(),
+            bridge,
+            crate::route_builder(),
+        ));
+        tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                match op {
+                    DesktopWindowOp::SetDevserverWorkspaceOn { reply, .. }
+                    | DesktopWindowOp::ForgetDevserverWorkspace { reply, .. } => {
+                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let router = launcher_router(host, None, None);
+
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/api/library/devservers/ds1/workspaces/on",
+            Some(r#"{"prefix":"healthy"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on a healthy workspace");
+        let row: LauncherWorkspace =
+            serde_json::from_str(&body).expect("on answers a launcher row");
+        assert_eq!(row.prefix, "healthy");
+        assert_eq!(row.devserver_id.as_deref(), Some("ds1"));
+        assert!(row.on);
+        assert_eq!(row.status, WorkspaceStatus::Running);
+        assert_eq!(row.error, None);
+
+        // A degraded mount is the answer's point: the caller reads the condition
+        // off the row instead of refetching to learn it.
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/api/library/devservers/ds1/workspaces/on",
+            Some(r#"{"prefix":"broken"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on an unavailable workspace");
+        let row: LauncherWorkspace =
+            serde_json::from_str(&body).expect("on answers a launcher row");
+        assert_eq!(row.prefix, "broken");
+        assert!(row.on, "a degraded mount stays on");
+        assert_eq!(row.status, WorkspaceStatus::Unavailable);
+        assert_eq!(row.error.as_deref(), Some("root is gone"));
+
+        // Off and forget ride the same dispatcher and outcome; their contract
+        // does not move.
+        for uri in [
+            "/api/library/devservers/ds1/workspaces/off",
+            "/api/library/devservers/ds1/workspaces/forget",
+        ] {
+            let (status, body) = send(
+                &router,
+                "POST",
+                uri,
+                Some(r#"{"prefix":"healthy","force":true}"#),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{uri}");
+            assert!(body.is_empty(), "{uri} answers no body");
+        }
     }
 }
