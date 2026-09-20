@@ -428,8 +428,8 @@ class ImageWidget extends WidgetType {
     const wrap = document.createElement("span");
     wrap.className = "cm-md-image-wrap";
     // Stamp the source position on the wrap so the document-level
-    // keydown listener (Delete / Enter on a selected image) can
-    // round-trip back into the syntax tree without holding a
+    // keydown listener (Enter, Cmd+Enter and Cmd+C on a ring-selected
+    // image) can round-trip back into the syntax tree without holding a
     // reference to `this`.
     wrap.dataset.imagePos = String(this.nodePos);
     // `writable` is captured at scan time and carried on the widget so
@@ -439,11 +439,12 @@ class ImageWidget extends WidgetType {
     // child with its own handler (img, handle, action buttons,
     // broken-image badge). For a normal image the img covers the
     // whole interior so this rarely fires; for a BROKEN image the
-    // padded badge sits inside a wider wrap and the surrounding
-    // gap used to fall through to CM6's default caret placement,
-    // landing the caret inside the image source and flipping the
-    // widget into edit mode just from clicking near it. Swallow
-    // here and treat it as a select. The badge's own handler
+    // padded badge sits inside a wider wrap, and without this handler
+    // the surrounding gap would fall through to CM6's default caret
+    // placement, landing the caret inside the image source and
+    // flipping the widget into edit mode from a click that only came
+    // near it. Swallow here and treat it as a select. The badge's own
+    // handler
     // wins for clicks on the badge itself (it's a descendant and
     // stops propagation).
     wrap.addEventListener("mousedown", (e) => {
@@ -461,7 +462,7 @@ class ImageWidget extends WidgetType {
     // <iframe> instead of an <img>, reusing the `#w=` width hint. The
     // image-only chrome (resize handle, copy-to-clipboard, zoom) does
     // not apply, so we return early after wiring just enough for the
-    // shared keymap to still arrow-select + Delete the source.
+    // atomic decoration to still arrow-select and delete the source.
     const embedInfo = detectEmbed(base);
     if (embedInfo) {
       const r = embedRenderFromInfo(embedInfo, width);
@@ -481,7 +482,8 @@ class ImageWidget extends WidgetType {
       frame.style.border = "0";
       frame.style.borderRadius = "8px";
       wrap.appendChild(frame);
-      // Same payload the document-level keymap reads (Delete / select).
+      // Same payload the document-level key listener reads to route
+      // Cmd+Enter and Cmd+C off the ring.
       (wrap as HTMLElement & { _chanImg?: ImageActionPayload })._chanImg = {
         src: this.src,
         alt: this.alt,
