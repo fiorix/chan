@@ -23,10 +23,21 @@ import {
   findTeamWorkPendingLead,
   layout,
   reattachTerminalInPane,
+  TERMINAL_MOVE_DECISIONS,
   type LeafNode,
   type SerTab,
   type TerminalTab,
 } from "../state/tabs.svelte";
+
+/// The field names the move's decision table marks one way or the other. Read
+/// from the table rather than retyped, so flipping a line here is what the
+/// assertions below measure.
+function fieldsDecided(decision: "carry" | "drop"): string[] {
+  return Object.entries(TERMINAL_MOVE_DECISIONS)
+    .filter(([, value]) => value === decision)
+    .map(([field]) => field)
+    .sort();
+}
 
 const CROSS_TAB_MIME = "application/x-chan-tab+json";
 const SOURCE_PANE = "pane-move-source";
@@ -205,7 +216,26 @@ describe("a terminal moved to another window keeps its tab state", () => {
     expect(payload.ser).toBeTruthy();
   });
 
-  test("every field the contract carries arrives in the target window", async () => {
+  test("the decision table names every field the type declares", () => {
+    // The mapped type already refuses a missing line at compile time. This is
+    // the other direction: the fixture below is `Required<TerminalTab>`, so a
+    // name in the table that the type no longer declares shows up here rather
+    // than as a decision nobody applies.
+    expect([...fieldsDecided("carry"), ...fieldsDecided("drop")].sort()).toEqual(
+      Object.keys(loadedTerminalTab()).sort(),
+    );
+  });
+
+  test("every field the table marks carry arrives in the target window", async () => {
+    const { moved } = await moveLoadedTerminal();
+    const arrived = moved as unknown as Record<string, unknown>;
+
+    for (const field of fieldsDecided("carry")) {
+      expect(arrived[field], `${field} is marked carry`).toBeDefined();
+    }
+  });
+
+  test("each carried field arrives with the value the source held", async () => {
     const { moved } = await moveLoadedTerminal();
 
     expect(moved.kind).toBe("terminal");
@@ -229,6 +259,21 @@ describe("a terminal moved to another window keeps its tab state", () => {
     // so the visibility travels with it exactly as a reload restores it.
     expect(moved.pendingPrompt).toEqual({ id: "prompt-1", phase: "queued" });
     expect(isRichPromptVisible(moved.id)).toBe(true);
+  });
+
+  test("every field the table marks drop leaves the source's value behind", async () => {
+    const { moved } = await moveLoadedTerminal();
+    const source = loadedTerminalTab() as unknown as Record<string, unknown>;
+    const arrived = moved as unknown as Record<string, unknown>;
+
+    // Not "absent": four of the drops are rebuilt here with this window's own
+    // value (a fresh id, this window's timestamp, and broadcast membership
+    // reset). What no drop may do is arrive holding what the source held.
+    for (const field of fieldsDecided("drop")) {
+      expect(arrived[field], `${field} is marked drop`).not.toEqual(
+        source[field],
+      );
+    }
   });
 
   test("each deliberate drop is absent by name", async () => {
