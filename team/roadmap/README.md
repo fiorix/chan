@@ -90,7 +90,7 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added nine the same day, with a ruling on each: one from an issue report and eight from a re-read of the development archive's backlog. One item is accepted: the write queue's idle signal, which the owner asked for, had built and measured, and accepted the same day with its build kept on a branch as the reference. Nothing else here is accepted yet.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item is accepted: the write queue's idle signal, which the owner asked for, had built and measured, and accepted the same day with its build kept on a branch as the reference. Nothing else here is accepted yet.
 
 **Frontend review, phased from v0.100.0**
 
@@ -123,6 +123,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [refusals-answer-in-four-shapes][refus] | raised | decide |
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | raised | build |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | accepted | intake |
+| [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
 
 **From the development archive's backlog**
 
@@ -192,6 +193,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [refus]: v0.101.0/refusals-answer-in-four-shapes.md
 [poke]: v0.101.0/the-team-poke-names-a-path-it-does-not-anchor.md
 [rdrw]: v0.101.0/a-redrawing-tui-never-lets-the-write-queue-drain.md
+[surv]: v0.101.0/an-expired-survey-cannot-be-dismissed.md
 [clib]: v0.101.0/the-chan-cli-crate-is-one-13k-line-file.md
 [pins]: v0.101.0/two-exact-pins-hold-back-web-upgrades.md
 [tses]: v0.101.0/tower-sessions-lags-and-axum-has-a-dead-feature.md
