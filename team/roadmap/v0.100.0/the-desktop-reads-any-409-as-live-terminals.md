@@ -1,6 +1,6 @@
 # The desktop reads every 409 from turn-on as live terminals
 
-Status: raised for v0.100.0 from the independent review of the v0.99.0 turn-on change, carried over from that release's follow-ups. A source reading of code that is the same at v0.98.0 and v0.99.0.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the independent review of the v0.99.0 turn-on change, carried over from that release's follow-ups. A source reading of code that is the same at v0.98.0 and v0.99.0.
 
 ## What was seen
 

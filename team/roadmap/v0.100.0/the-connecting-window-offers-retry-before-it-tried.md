@@ -1,6 +1,6 @@
 # The connecting window offers Retry before it has tried
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings DESKTOP-01 and DESKTOP-04, medium, trivial), re-verified against `main` at `d3de0180b` by reading. `desktop/src` ships in every desktop release on three platforms and has no test and no static check.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings DESKTOP-01 and DESKTOP-04, medium, trivial), re-verified against `main` at `d3de0180b` by reading. `desktop/src` ships in every desktop release on three platforms and has no test and no static check.
 
 ## What was seen
 

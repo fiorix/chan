@@ -1,6 +1,6 @@
 # Holes in the frontend gate let broken bundles and unchecked code ship
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (its Phase 0, its two extra gate items, and finding TOOL-03), re-verified against `main` at `d3de0180b`. One of the review's holes closed during v0.99.0: `@chan/web-shared` now has `check` and `test` scripts and `make web-check` runs them first. Four remain, and one of them can ship an empty launcher.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (its Phase 0, its two extra gate items, and finding TOOL-03), re-verified against `main` at `d3de0180b`. One of the review's holes closed during v0.99.0: `@chan/web-shared` now has `check` and `test` scripts and `make web-check` runs them first. Four remain, and one of them can ship an empty launcher.
 
 ## What was seen
 

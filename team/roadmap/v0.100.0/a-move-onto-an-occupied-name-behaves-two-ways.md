@@ -1,6 +1,6 @@
 # A move onto an occupied name behaves two ways, and neither is honest
 
-Status: raised for v0.100.0. Two sources describe the two halves: a follow-up the v0.99.0 fix loop parked (the single move), and the frontend review's finding FB-05 (the multi-row move). Both were re-read against `main` at `d3de0180b`, and the review's stated consequence for FB-05 did not survive the reading; what follows is what the code does.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Two sources describe the two halves: a follow-up the v0.99.0 fix loop parked (the single move), and the frontend review's finding FB-05 (the multi-row move). Both were re-read against `main` at `d3de0180b`, and the review's stated consequence for FB-05 did not survive the reading; what follows is what the code does.
 
 ## What was seen
 

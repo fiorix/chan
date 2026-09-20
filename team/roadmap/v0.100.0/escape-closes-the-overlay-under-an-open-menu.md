@@ -1,6 +1,6 @@
 # Escape closes the overlay under an open menu
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SHELL-04, medium), re-verified against `main` at `d3de0180b` by reading. Small, and scheduled here because it is keyboard ownership that the layout-aware shortcut import must find settled.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SHELL-04, medium), re-verified against `main` at `d3de0180b` by reading. Small, and scheduled here because it is keyboard ownership that the layout-aware shortcut import must find settled.
 
 ## What was seen
 

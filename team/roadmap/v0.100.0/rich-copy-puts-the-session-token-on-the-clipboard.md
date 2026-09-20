@@ -1,6 +1,6 @@
 # Rich copy puts the session bearer token on the clipboard
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding WSIO-01, high), re-verified against `main` at `d3de0180b`. A static trace with every hop read; not reproduced in a browser, because the jsdom test has no token.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding WSIO-01, high), re-verified against `main` at `d3de0180b`. A static trace with every hop read; not reproduced in a browser, because the jsdom test has no token.
 
 ## What was seen
 

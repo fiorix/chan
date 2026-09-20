@@ -1,6 +1,6 @@
 # A timed-out devserver mount force-closes a tenant it did not open
 
-Status: raised for v0.100.0 from the independent review of the v0.99.0 degraded-root change, carried over from that release's follow-ups. A source reading; nothing was run to reproduce it.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the independent review of the v0.99.0 degraded-root change, carried over from that release's follow-ups. A source reading; nothing was run to reproduce it.
 
 ## What was seen
 

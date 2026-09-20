@@ -1,6 +1,6 @@
 # The e2e harnesses report results they did not measure
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding TERMPIX-01 high; E2EC-03, E2EB-03, E2EB-04, E2EA-01, E2EA-04, E2EB-02 and E2EC-02 medium), re-verified against `main` at `d3de0180b`. `scripts/e2e/browser-smoke` is untouched since the review, so every finding in it is verbatim.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding TERMPIX-01 high; E2EC-03, E2EB-03, E2EB-04, E2EA-01, E2EA-04, E2EB-02 and E2EC-02 medium), re-verified against `main` at `d3de0180b`. `scripts/e2e/browser-smoke` is untouched since the review, so every finding in it is verbatim.
 
 ## What was seen
 

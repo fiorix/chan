@@ -23,21 +23,21 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.100.0
 
-Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. An item marked `raised` is proposed scope the owner has not yet read; `accepted` and `carried` items were scope before. Grouped by the lane that owns the files.
+Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
 
 **Server, desktop and library**
 
 | item | state | next |
 | --- | --- | --- |
 | [one-on-route-still-answers-204][on204] | accepted | build |
-| [the-desktop-reads-any-409-as-live-terminals][d409] | raised | after on204 |
-| [a-timed-out-mount-closes-a-tenant-it-did-not-open][tmo] | raised | build |
+| [the-desktop-reads-any-409-as-live-terminals][d409] | accepted | after on204 |
+| [a-timed-out-mount-closes-a-tenant-it-did-not-open][tmo] | accepted | build |
 | [no-test-pins-the-unavailable-mint-contract][unav] | carried | build |
-| [a-replaced-root-still-reads-running-on-the-desktop][rrt] | raised | build |
-| [a-terminal-chunk-arrives-twice-on-attach][chunk] | raised | repro |
-| [a-dropped-indexer-strands-the-recovery-slot][idx] | raised | repro |
-| [two-live-samples-of-one-lock-disagree][lock2] | raised | build |
-| [cs-terminal-close-acks-a-close-that-did-not-happen][csc] | raised | repro |
+| [a-replaced-root-still-reads-running-on-the-desktop][rrt] | accepted | build |
+| [a-terminal-chunk-arrives-twice-on-attach][chunk] | accepted | repro |
+| [a-dropped-indexer-strands-the-recovery-slot][idx] | accepted | repro |
+| [two-live-samples-of-one-lock-disagree][lock2] | accepted | build |
+| [cs-terminal-close-acks-a-close-that-did-not-happen][csc] | accepted | repro |
 | [the-rust-review-lows-were-never-triaged][lows] | accepted | fold along |
 
 **Packaging, release and gate**
@@ -45,46 +45,46 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | item | state | next |
 | --- | --- | --- |
 | [the-copr-probe-window-is-shorter-than-its-builds][copr] | carried | measure |
-| [a-prerelease-deb-is-spelled-with-a-dot][deb] | raised | decide |
-| [frontend-gate-holes-let-broken-bundles-ship][gate] | raised | build first |
-| [the-dl-pipeline-fails-open][dl] | raised | build |
-| [browser-smoke-reports-results-it-did-not-measure][smoke] | raised | build |
+| [a-prerelease-deb-is-spelled-with-a-dot][deb] | accepted | decide |
+| [frontend-gate-holes-let-broken-bundles-ship][gate] | accepted | build first |
+| [the-dl-pipeline-fails-open][dl] | accepted | build |
+| [browser-smoke-reports-results-it-did-not-measure][smoke] | accepted | build |
 
 **Editor**
 
 | item | state | next |
 | --- | --- | --- |
-| [rich-copy-puts-the-session-token-on-the-clipboard][token] | raised | build |
-| [a-checkbox-click-writes-a-read-only-document][ro] | raised | build |
-| [bubble-triggers-fire-inside-existing-syntax][trig] | raised | build |
-| [image-actions-die-after-an-edit-above-the-image][img] | raised | build |
-| [document-pdf-export-measures-before-images-load][pdf] | raised | build |
+| [rich-copy-puts-the-session-token-on-the-clipboard][tok] | accepted | build |
+| [a-checkbox-click-writes-a-read-only-document][ro] | accepted | build |
+| [bubble-triggers-fire-inside-existing-syntax][trig] | accepted | build |
+| [image-actions-die-after-an-edit-above-the-image][img] | accepted | build |
+| [document-pdf-export-measures-before-images-load][pdf] | accepted | build |
 | [four-detectors-disagree-about-page-breaks][pgbrk] | carried | decide |
 
 **App shell, state and terminal**
 
 | item | state | next |
 | --- | --- | --- |
-| [a-close-after-a-prompt-can-remove-the-wrong-tab][close] | raised | build |
-| [a-tab-reorder-drops-live-tab-state][clone] | raised | build |
-| [a-restored-transfer-id-collides-with-a-new-one][xfer] | raised | build |
-| [a-canvas-edit-made-during-an-outage-can-be-lost][scene] | raised | build |
-| [terminal-chords-run-twice-or-not-at-all][chord] | raised | build, decide |
-| [full-window-covers-do-not-block-input][cover] | raised | build, decide |
-| [escape-closes-the-overlay-under-an-open-menu][esc] | raised | build |
+| [a-close-after-a-prompt-can-remove-the-wrong-tab][close] | accepted | build |
+| [a-tab-reorder-drops-live-tab-state][clone] | accepted | build |
+| [a-restored-transfer-id-collides-with-a-new-one][xfer] | accepted | build |
+| [a-canvas-edit-made-during-an-outage-can-be-lost][scene] | accepted | build |
+| [terminal-chords-run-twice-or-not-at-all][chord] | accepted | build, decide |
+| [full-window-covers-do-not-block-input][cover] | accepted | build, decide |
+| [escape-closes-the-overlay-under-an-open-menu][esc] | accepted | build |
 | [shortcuts-ignore-the-keyboard-layout][kbd] | accepted | last |
 
 **Feature surfaces, launcher and identity**
 
 | item | state | next |
 | --- | --- | --- |
-| [a-move-onto-an-occupied-name-behaves-two-ways][move] | raised | decide |
-| [a-duplicate-list-key-kills-its-panel][dupkey] | raised | build |
-| [a-failed-load-is-retried-forever][retry] | raised | build |
-| [a-rejected-settings-write-looks-saved][set] | raised | build |
-| [rich-prompt-submit-throws-on-plain-http][uuid] | raised | build |
-| [a-failed-revoke-looks-like-a-revoke][revoke] | raised | build |
-| [the-connecting-window-offers-retry-before-it-tried][conn] | raised | build |
+| [a-move-onto-an-occupied-name-behaves-two-ways][move] | accepted | decide |
+| [a-duplicate-list-key-kills-its-panel][dupkey] | accepted | build |
+| [a-failed-load-is-retried-forever][retry] | accepted | build |
+| [a-rejected-settings-write-looks-saved][set] | accepted | build |
+| [rich-prompt-submit-throws-on-plain-http][uuid] | accepted | build |
+| [a-failed-revoke-looks-like-a-revoke][revoke] | accepted | build |
+| [the-connecting-window-offers-retry-before-it-tried][con] | accepted | build |
 
 ### v0.101.0
 
@@ -129,7 +129,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0. Nothing here is accep
 [gate]: v0.100.0/frontend-gate-holes-let-broken-bundles-ship.md
 [dl]: v0.100.0/the-dl-pipeline-fails-open.md
 [smoke]: v0.100.0/browser-smoke-reports-results-it-did-not-measure.md
-[token]: v0.100.0/rich-copy-puts-the-session-token-on-the-clipboard.md
+[tok]: v0.100.0/rich-copy-puts-the-session-token-on-the-clipboard.md
 [ro]: v0.100.0/a-checkbox-click-writes-a-read-only-document.md
 [trig]: v0.100.0/bubble-triggers-fire-inside-existing-syntax.md
 [img]: v0.100.0/image-actions-die-after-an-edit-above-the-image.md
@@ -149,7 +149,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0. Nothing here is accep
 [set]: v0.100.0/a-rejected-settings-write-looks-saved.md
 [uuid]: v0.100.0/rich-prompt-submit-throws-on-plain-http.md
 [revoke]: v0.100.0/a-failed-revoke-looks-like-a-revoke.md
-[conn]: v0.100.0/the-connecting-window-offers-retry-before-it-tried.md
+[con]: v0.100.0/the-connecting-window-offers-retry-before-it-tried.md
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.101.0/frontend-comments-narrate-history.md

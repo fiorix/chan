@@ -1,6 +1,6 @@
 # A load that fails is retried forever
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding FB-01 high, WSC-02 and GPANEL-05 medium), re-verified against `main` at `d3de0180b` by reading. Three instances of one missing latch.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding FB-01 high, WSC-02 and GPANEL-05 medium), re-verified against `main` at `d3de0180b` by reading. Three instances of one missing latch.
 
 ## What was seen
 

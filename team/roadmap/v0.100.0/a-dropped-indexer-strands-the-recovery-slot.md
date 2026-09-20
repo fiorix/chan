@@ -1,6 +1,6 @@
 # A dropped indexer strands the recovery slot it claimed
 
-Status: raised for v0.100.0 from the v0.99.0 fix loop's follow-ups, two entries that share one loop. A source reading against `main` at `d3de0180b`; neither half has a reproduction yet.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.0 fix loop's follow-ups, two entries that share one loop. A source reading against `main` at `d3de0180b`; neither half has a reproduction yet.
 
 ## What was seen
 

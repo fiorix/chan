@@ -1,6 +1,6 @@
 # Editor triggers fire inside syntax that already exists
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings BUBBLES-01 high, BUBBLES-02 and the date half of ECS-03 medium), re-verified against `main` at `d3de0180b`. The reviewer reproduced BUBBLES-01 in a scratch vitest against a parsed markdown state.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings BUBBLES-01 high, BUBBLES-02 and the date half of ECS-03 medium), re-verified against `main` at `d3de0180b`. The reviewer reproduced BUBBLES-01 in a scratch vitest against a parsed markdown state.
 
 ## What was seen
 

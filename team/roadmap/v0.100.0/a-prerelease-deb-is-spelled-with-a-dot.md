@@ -1,6 +1,6 @@
 # The required-assets list spells a prerelease deb with a dot
 
-Status: raised for v0.100.0 from the v0.99.0 release, whose rc1 dry run showed the mismatch. Nothing is broken at a GA version; the next release candidate meets it again.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.0 release, whose rc1 dry run showed the mismatch. Nothing is broken at a GA version; the next release candidate meets it again.
 
 ## What was seen
 

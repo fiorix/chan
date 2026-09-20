@@ -1,6 +1,6 @@
 # A test compares two live samples of one lock probe, and they can disagree
 
-Status: raised for v0.100.0 from the v0.99.0 fix loop's follow-ups. The test has failed once in a gate job and passed on the same code elsewhere; the mechanism is a source reading against `main` at `d3de0180b`.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.0 fix loop's follow-ups. The test has failed once in a gate job and passed on the same code elsewhere; the mechanism is a source reading against `main` at `d3de0180b`.
 
 ## What was seen
 

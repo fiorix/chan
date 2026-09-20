@@ -1,6 +1,6 @@
 # Document PDF export paginates before its images have loaded
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding ECS-02 high, ECS-05 and ECS-04 medium), re-verified against `main` at `d3de0180b` by reading. Three edits to one export composition path.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding ECS-02 high, ECS-05 and ECS-04 medium), re-verified against `main` at `d3de0180b` by reading. Three edits to one export composition path.
 
 ## What was seen
 

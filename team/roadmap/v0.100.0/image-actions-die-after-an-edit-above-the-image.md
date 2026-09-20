@@ -1,6 +1,6 @@
 # Image actions die after an edit above the image
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings MEDIA-01 and MEDIA-02 high, MEDIA-05 and MEDIA-10 medium), re-verified against `main` at `d3de0180b` by reading. All four live in one file, `web/packages/workspace-app/src/editor/widgets/image.ts`, and are one piece of work.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings MEDIA-01 and MEDIA-02 high, MEDIA-05 and MEDIA-10 medium), re-verified against `main` at `d3de0180b` by reading. All four live in one file, `web/packages/workspace-app/src/editor/widgets/image.ts`, and are one piece of work.
 
 ## What was seen
 

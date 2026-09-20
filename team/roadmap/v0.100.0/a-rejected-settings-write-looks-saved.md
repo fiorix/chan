@@ -1,6 +1,6 @@
 # A rejected settings write looks saved
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SET-01 high, SET-03 medium), re-verified against `main` at `d3de0180b` by reading.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SET-01 high, SET-03 medium), re-verified against `main` at `d3de0180b` by reading.
 
 ## What was seen
 

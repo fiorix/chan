@@ -1,6 +1,6 @@
 # A canvas edit made during an outage can be lost
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SYNC-05 high, SYNC-01 medium, and the live-session delegate contract of its Phase 2), re-verified against `main` at `d3de0180b` by reading.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (finding SYNC-05 high, SYNC-01 medium, and the live-session delegate contract of its Phase 2), re-verified against `main` at `d3de0180b` by reading.
 
 ## What was seen
 

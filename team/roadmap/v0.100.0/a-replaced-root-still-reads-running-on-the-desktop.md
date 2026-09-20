@@ -1,6 +1,6 @@
 # A replaced root still reads running on the desktop
 
-Status: raised for v0.100.0 from the v0.99.0 fix loop's follow-ups: the reporting half of the degraded-root work that release left for the desktop. A source reading against `main` at `d3de0180b`.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.0 fix loop's follow-ups: the reporting half of the degraded-root work that release left for the desktop. A source reading against `main` at `d3de0180b`.
 
 ## What was seen
 

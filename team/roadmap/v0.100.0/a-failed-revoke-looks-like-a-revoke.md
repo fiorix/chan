@@ -1,6 +1,6 @@
 # A failed revoke looks like a revoke
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings PROFILE-01, PROFILE-02 and PROFILE-03, medium, on the credential surface, plus the profile half of its gate holes), re-verified against `main` at `d3de0180b` by reading. The review reproduced both failures against stubbed 403 responses, which the identity service answers on every management endpoint for a blocked account.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings PROFILE-01, PROFILE-02 and PROFILE-03, medium, on the credential surface, plus the profile half of its gate holes), re-verified against `main` at `d3de0180b` by reading. The review reproduced both failures against stubbed 403 responses, which the identity service answers on every management endpoint for a blocked account.
 
 ## What was seen
 

@@ -1,6 +1,6 @@
 # `cs terminal close` acknowledges a close that did not happen
 
-Status: raised for v0.100.0 from the v0.99.0 fix loop, where it was an operational observation repeated over several cycles and never reduced to a test. The team process this version returns to depends on these verbs.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.0 fix loop, where it was an operational observation repeated over several cycles and never reduced to a test. The team process this version returns to depends on these verbs.
 
 ## What was seen
 

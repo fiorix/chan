@@ -1,6 +1,6 @@
 # The /dl release pipeline fails open
 
-Status: raised for v0.100.0 on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings REL-01, REL-02 and REL-03, medium), re-verified against `main` at `d3de0180b`. The v0.99.0 cut changed nothing here: `web/packages/marketing` moved only its version pin, and all three reproduce byte for byte.
+Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's instruction to fold the frontend review's most critical findings into this version. From the review (findings REL-01, REL-02 and REL-03, medium), re-verified against `main` at `d3de0180b`. The v0.99.0 cut changed nothing here: `web/packages/marketing` moved only its version pin, and all three reproduce byte for byte.
 
 ## What was seen
 
