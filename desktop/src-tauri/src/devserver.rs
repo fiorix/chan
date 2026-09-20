@@ -3526,6 +3526,82 @@ mod tests {
         server.assert_responses_drained();
     }
 
+    /// Every 409 a devserver can answer, read by its body rather than by its
+    /// status. Assertions avoid naming the variant that carries a message, so
+    /// this test says the same thing before and after the reader exists.
+    #[tokio::test]
+    async fn a_conflict_is_read_by_its_body_not_its_status() {
+        use axum::http::StatusCode;
+
+        async fn conflict(body: &str) -> SetWorkspaceOnError {
+            let server =
+                MockManagementServer::start(vec![mock_response(StatusCode::CONFLICT, body)]).await;
+            let error = set_workspace_on(&server.gateway_conn(), "/notes", true, false)
+                .await
+                .expect_err("a 409 is a refusal");
+            server.assert_responses_drained();
+            error
+        }
+
+        // The launcher route's locked refusal is plain text. It must reach the
+        // user as itself, and must never be read as a terminal count.
+        let error = conflict("workspace is open in another Chan process").await;
+        assert!(
+            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
+            "a plain-text 409 is not a terminal count: {error:?}"
+        );
+        assert!(
+            format!("{error:?}").contains("workspace is open in another Chan process"),
+            "the devserver's own sentence survives: {error:?}"
+        );
+
+        // The live-terminals refusal keeps its confirm and its count.
+        let error = conflict(r#"{"error":"live_terminals","active_terminals":3}"#).await;
+        assert!(
+            matches!(
+                error,
+                SetWorkspaceOnError::ActiveTerminals {
+                    active_terminals: 3
+                }
+            ),
+            "the discriminated body still asks for confirmation: {error:?}"
+        );
+
+        // Any other refusal in the `{"error": ...}` envelope shows its string,
+        // so a server that later answers every refusal that way needs no
+        // change here.
+        let error = conflict(r#"{"error":"workspace is not registered"}"#).await;
+        assert!(
+            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
+            "an enveloped refusal is not a terminal count: {error:?}"
+        );
+        assert!(
+            format!("{error:?}").contains("workspace is not registered"),
+            "the envelope's reason is the message: {error:?}"
+        );
+
+        // A body that is neither must not invent a measurement.
+        let error = conflict(r#"{"unrelated":true}"#).await;
+        assert!(
+            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
+            "an unreadable 409 never reports a count it did not measure: {error:?}"
+        );
+
+        // A devserver released before the discriminator existed answers the
+        // count alone. It is still the live-terminals refusal, and the desktop
+        // reaches such a peer because the connect gate is the protocol number.
+        let error = conflict(r#"{"active_terminals":2}"#).await;
+        assert!(
+            matches!(
+                error,
+                SetWorkspaceOnError::ActiveTerminals {
+                    active_terminals: 2
+                }
+            ),
+            "a pre-discriminator body still asks for confirmation: {error:?}"
+        );
+    }
+
     fn other_message(error: SetWorkspaceOnError) -> String {
         match error {
             SetWorkspaceOnError::Other { message } => message,
