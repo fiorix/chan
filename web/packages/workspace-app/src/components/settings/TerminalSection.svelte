@@ -20,7 +20,7 @@
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
   import { readStandardTerminalColors } from "../../state/paneColor";
-  import type { CommitFn } from "./commit";
+  import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
   import PillRadio from "./PillRadio.svelte";
@@ -129,20 +129,28 @@
 
   function commitCustomTerminalColors(
     update: (custom: TerminalCustomColors) => TerminalCustomColors,
-  ): void {
-    commit((p) => {
+    options?: CommitOptions,
+  ): Promise<SaveStatus> {
+    return commit((p) => {
       const current = p.terminal_colors?.custom;
       if (!current) return p;
       return {
         ...p,
         terminal_colors: { mode: "custom", custom: update({ ...current }) },
       };
-    });
+    }, undefined, options);
   }
 
   /// Write one normalized hex (from ColorField) into the custom payload.
-  function commitTerminalColor(field: TerminalColorField, hex: string): void {
-    commitCustomTerminalColors((custom) => ({ ...custom, [field]: hex }));
+  /// The row reports for itself: the three of them write one preference,
+  /// so the preference cannot say which row a refusal belongs to.
+  function commitTerminalColor(
+    field: TerminalColorField,
+    hex: string,
+  ): Promise<SaveStatus> {
+    return commitCustomTerminalColors((custom) => ({ ...custom, [field]: hex }), {
+      ownStatus: true,
+    });
   }
 
   function setTerminalContrast(contrast: string): void {
@@ -312,7 +320,7 @@
         id={`terminal-colour-${row.key}`}
         label={row.label}
         value={customTerminalColors[row.key]}
-        oncommit={(hex) => hex !== null && commitTerminalColor(row.key, hex)}
+        oncommit={(hex) => (hex === null ? undefined : commitTerminalColor(row.key, hex))}
       />
     {/each}
     <button type="button" class="reset-terminal-colours" onclick={resetTerminalColors}>

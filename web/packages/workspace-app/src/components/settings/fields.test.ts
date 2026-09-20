@@ -180,7 +180,9 @@ describe("ColorField", () => {
         id: "c1",
         label: "Background",
         value: "#112233",
-        oncommit: (hex: string | null) => commits.push(hex),
+        oncommit: (hex: string | null) => {
+            commits.push(hex);
+          },
         ...props,
       },
     });

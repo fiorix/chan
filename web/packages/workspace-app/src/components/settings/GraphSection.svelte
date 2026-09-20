@@ -14,7 +14,7 @@
     type GraphColorKind,
     type GraphColorTheme,
   } from "../../state/graphPalette.svelte";
-  import type { CommitFn } from "./commit";
+  import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
   import PillRadio from "./PillRadio.svelte";
@@ -50,8 +50,11 @@
   /// dormant palette for the other scheme. Stored palettes are
   /// sanitized on the way in, so `update` and the PATCH body only ever
   /// see valid hues.
-  function commitGraphColors(update: (current: GraphColorPrefs) => GraphColorPrefs): void {
-    commit((p) => {
+  function commitGraphColors(
+    update: (current: GraphColorPrefs) => GraphColorPrefs,
+    options?: CommitOptions,
+  ): Promise<SaveStatus> {
+    return commit((p) => {
       const current = p.graph_colors;
       const dark = sanitizedStoredPalette(current?.dark);
       const light = sanitizedStoredPalette(current?.light);
@@ -63,7 +66,7 @@
           ...(light ? { light } : {}),
         }),
       };
-    });
+    }, undefined, options);
   }
 
   function toggleCustomGraphColors(on: boolean): void {
@@ -74,8 +77,11 @@
 
   /// Write or clear one hue in the edited scheme's palette. `hex` null
   /// clears the override (the hue falls back to the theme palette).
-  function writeGraphColor(kind: GraphColorKind, hex: string | null): void {
-    commitGraphColors((c) => {
+  function writeGraphColor(
+    kind: GraphColorKind,
+    hex: string | null,
+  ): Promise<SaveStatus> {
+    return commitGraphColors((c) => {
       const palette: GraphPalette = { ...(c[graphEditTheme] ?? {}) };
       if (hex === null) delete palette[kind];
       else palette[kind] = hex;
@@ -86,17 +92,22 @@
       return graphEditTheme === "dark"
         ? { ...c, mode: "custom", dark: pruned }
         : { ...c, mode: "custom", light: pruned };
-    });
+    }, { ownStatus: true });
   }
 
   /// Write or clear one hue in the edited scheme's palette (ColorField
   /// hands over a normalized hex, or null when the row was cleared or
   /// holds the default). Skips no-op writes.
-  function commitGraphColor(kind: GraphColorKind, hex: string | null): void {
+  /// The row reports for itself, the same as the terminal palette: every
+  /// row writes one preference, so the preference cannot name the row.
+  function commitGraphColor(
+    kind: GraphColorKind,
+    hex: string | null,
+  ): Promise<SaveStatus> | undefined {
     const existing = prefs.graph_colors?.[graphEditTheme]?.[kind];
-    if (hex === null && existing === undefined) return;
-    if (hex !== null && hex === existing) return;
-    writeGraphColor(kind, hex);
+    if (hex === null && existing === undefined) return undefined;
+    if (hex !== null && hex === existing) return undefined;
+    return writeGraphColor(kind, hex);
   }
 
   function resetGraphPalette(): void {

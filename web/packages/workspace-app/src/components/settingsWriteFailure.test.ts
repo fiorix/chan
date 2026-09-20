@@ -183,7 +183,9 @@ describe("the colour picker", () => {
           id: "c",
           label: "Accent",
           value: "#112233",
-          oncommit: (hex: string | null) => commits.push(hex),
+          oncommit: (hex: string | null) => {
+            commits.push(hex);
+          },
         },
       }) as Record<string, unknown>,
     );

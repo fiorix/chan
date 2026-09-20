@@ -10,10 +10,20 @@ import type { Preferences } from "../../api/types";
 /// user made the change rather than as a notice with no field attached.
 export type SaveStatus = "idle" | "saving" | "saved" | { error: string };
 
+/// A control that renders its own status asks for `ownStatus`, and the
+/// write is then not attributed to the fields presenting its
+/// preferences. Several colour rows write one preference, so the
+/// preference cannot say which row was refused; the row can.
+export type CommitOptions = { ownStatus?: boolean };
+
+/// Hands back where the write ended, so a control that asked to report
+/// for itself has something to report. It never rejects: a refusal is
+/// the `{ error }` value.
 export type CommitFn = (
   mutate: (p: Preferences) => Preferences,
   persist?: () => Promise<unknown>,
-) => void;
+  options?: CommitOptions,
+) => Promise<SaveStatus>;
 
 /// Where the save statuses live for the fields of one settings surface.
 /// The surface owns the writes, so it owns the statuses; a field asks

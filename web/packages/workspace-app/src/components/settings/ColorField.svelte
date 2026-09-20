@@ -15,6 +15,7 @@
   // here is a whole read-modify-write of the config.
 
   import { normalizeHexColor } from "../../state/paneColor";
+  import type { SaveStatus } from "./commit";
 
   let {
     id,
@@ -29,7 +30,11 @@
     value: string;
     defaultHex?: string;
     description?: string;
-    oncommit: (hex: string | null) => void;
+    /// Hands back where the write ended when the caller commits through
+    /// a surface that reports per control; the row then says so itself,
+    /// because several rows write one preference and the preference
+    /// cannot say which row was refused.
+    oncommit: (hex: string | null) => void | Promise<SaveStatus>;
   } = $props();
 
   // Static placeholder seed; the effect reseeds from `value` on mount
@@ -37,6 +42,19 @@
   // the initial value, and svelte-check flags it).
   let draft = $state("");
   let error = $state<string | undefined>(undefined);
+  let status = $state<SaveStatus>("idle");
+  const refusal = $derived(typeof status === "object" ? status.error : null);
+
+  /// A write the caller handed back: show it running, then show a
+  /// refusal. Success returns the row to quiet, since the swatch already
+  /// shows the value that was stored.
+  function report(result: void | Promise<SaveStatus>): void {
+    if (!result) return;
+    status = "saving";
+    void result.then((settled) => {
+      status = settled === "saved" ? "idle" : settled;
+    });
+  }
   $effect(() => {
     draft = value;
     error = undefined;
@@ -47,7 +65,7 @@
     if (trimmed === "" && defaultHex !== undefined) {
       error = undefined;
       draft = defaultHex;
-      oncommit(null);
+      report(oncommit(null));
       return;
     }
     const normalized = normalizeHexColor(trimmed);
@@ -59,7 +77,7 @@
     draft = normalized;
     // Entering the default clears the override instead of storing a
     // redundant one, keeping the stored palette sparse.
-    oncommit(defaultHex !== undefined && normalized === defaultHex ? null : normalized);
+    report(oncommit(defaultHex !== undefined && normalized === defaultHex ? null : normalized));
   }
 
   function onKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
@@ -92,6 +110,11 @@
   {/if}
   {#if error}
     <span class="colour-error" role="alert">{error}</span>
+  {/if}
+  {#if refusal}
+    <span class="colour-error" role="alert">Not saved: {refusal}</span>
+  {:else if status === "saving"}
+    <span class="colour-desc">Saving...</span>
   {/if}
 </div>
 

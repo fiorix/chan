@@ -235,33 +235,36 @@ function mutationPatch(
   /// reflecting any server-side sanitization; the inflight counter holds
   /// that effect off until the write settles so it can't revert the
   /// optimistic value mid-round-trip.
-  const commit: CommitFn = (mutate, persist) => {
-    if (!editing) return;
+  const commit: CommitFn = async (mutate, persist, options) => {
+    if (!editing) return "idle";
     const before = clone(editing);
     const next = normalize(mutate(clone(editing)));
-    const keys = changedKeys(before, next);
+    // A control reporting for itself claims no preference keys, so the
+    // fields presenting those preferences stay quiet for this write.
+    const keys = options?.ownStatus ? [] : changedKeys(before, next);
     editing = next;
     inflight++;
     setSaveStatus(keys, "saving");
     const run = persist
       ? persist()
       : updateGlobalConfigSerial((prefs) => mutationPatch(prefs, mutate));
-    void Promise.resolve(run)
-      .then(() => {
-        setSaveStatus(keys, "saved");
-      })
-      .catch(async (error: unknown) => {
-        // The optimistic buffer is still showing the value the server
-        // refused, so say so on the field and put the server's value
-        // back. Without this the control reads as saved.
-        setSaveStatus(keys, {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        await reload();
-      })
-      .finally(() => {
-        inflight--;
-      });
+    try {
+      await run;
+      setSaveStatus(keys, "saved");
+      return "saved";
+    } catch (error: unknown) {
+      // The optimistic buffer is still showing the value the server
+      // refused, so say so and put the server's value back. Without this
+      // the control reads as saved.
+      const refused: SaveStatus = {
+        error: error instanceof Error ? error.message : String(error),
+      };
+      setSaveStatus(keys, refused);
+      await reload();
+      return refused;
+    } finally {
+      inflight--;
+    }
   };
 
   // The rail is derived from the command registry's category set (see
