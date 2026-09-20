@@ -18,6 +18,8 @@ Owner ruling, 2026-09-20: every settings write reports through the `SaveStatus` 
 
 `web/packages/workspace-app/src/components/SettingsOverlay.svelte`, `components/settings/GlobalSection.svelte`, `components/settings/SurfaceThemeField.svelte`, `components/settings/ColorField.svelte`, and tests (`components/SettingsOverlay.render.test.ts`, a new `ColorField` test). No server change: a locked configuration already answers 403 and that answer is what has to become visible.
 
+The ruling reaches further than that list. A vocabulary every field speaks cannot live in three files when the fields live in seven, so `components/settings/SettingField.svelte` carries the status and `BrowserSection`, `EditorSection`, `GraphSection`, `SearchSection` and `TerminalSection` declare which preference each field writes, with `components/settings/commit.ts` beside them. A colour swatch reports on itself for the same reason: the status is a context keyed by preference key and `ColorField` knows only a DOM id, so its call site has to name the preference. The three theme setters in `state/store.svelte.ts` and `persistHybridSurfaceThemes` belong to the item too, because an optimistic apply that is never rolled back is how a refused write reaches the server inside the next one.
+
 ## Acceptance
 
 1. A `PATCH /api/config` answered 400 shows an error on that field and restores the server's value, with no unhandled rejection.

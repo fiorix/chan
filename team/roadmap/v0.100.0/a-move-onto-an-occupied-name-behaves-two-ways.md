@@ -27,3 +27,11 @@ Which behaviour is the one (refuse and name the occupied path, or keep both unde
 3. A multi-row move and a cut-and-paste onto an occupied name behave the same as the single move.
 4. After a multi-row move, open tabs on the moved files point at the new paths, and rewrite conflicts are reported.
 5. No server route changes.
+
+## Which side of the wire the guarantee lives on
+
+The refusal is client side, because acceptance 5 forbids a route change and the transfer route never refuses: it resolves a collision to a " copy" suffix and reports only the link rewrites it could not apply. A check against the client's cached listing cannot be the guarantee, and reading it as one is what made the first attempt at this item wrong. `loadTreeDir` returns at once when a directory is already loaded or already in flight, so awaiting it does not mean having a listing that speaks for the moment of the transfer; a case-insensitive filesystem defeats a string compare; and an entry can arrive between the listing and the request.
+
+So the response is the authority. `TransferResponse.moved` carries each source's final destination after collision suffixing, and a `to` that differs from the landing path the caller asked for is a name that was taken and resolved, which the user is told by name. The pre-check keeps its place as what it can honestly be: a round trip saved when the collision is already visible. `skipped` is named to the user as well, without interpretation, because the wire carries the no-op move and the escaped path in one field.
+
+A copy is deliberately outside this: landing beside the original under a suffix is what a copy is for.

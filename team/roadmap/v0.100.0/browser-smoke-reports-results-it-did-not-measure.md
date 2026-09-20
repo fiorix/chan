@@ -30,3 +30,26 @@ A check that cannot evaluate its core assertion fails or says it skipped for a n
 2. Killing the server mid-run in check 62, and forcing a failure in 98, each leave a `results.json` that names the failing check.
 3. `terminal-pixels.mjs` reads the font chain from `terminal/font.ts` and reaches its first scenario; the Windows run itself is the owner's to make.
 4. The suite's count against a baseline on unmodified code is recorded, so the repaired checks' new reds are told apart from this box's known ones.
+
+## The baseline, by name rather than by count
+
+Measured on unmodified code in a build container: **47 recorded, 10 failed, 1 skipped**, not the larger number this round carried in its notes before anyone ran it. The ten are `binary-transfer-streaming-queue`, `cs submit refusal exits non-zero`, `editor-appearance`, `large-file-streaming`, `launcher-open`, `terminal-appearance`, `terminal-ghostty-toggle`, `terminal-mouse-toggle`, `terminal-secret-masking` and `video-inspector`. The skip is `graph-lens`, which is this item's own first finding showing itself.
+
+A count cannot do the job acceptance 4 asks of it, because a repaired check produces a red the baseline does not have. `graph-lens` is the case: it passes when run alone and skips in the full suite, so it does not hold the suite-position property the harness requires, and the skip is what kept that invisible. Its repair turns a hidden skip into a visible red, which is the item working rather than a regression. So a reading compares names and failure text, and a check that is still red is checked against the text it is red for: `large-file-streaming` now fails on scenario F rather than D, which says the D repair took and the baseline red was always elsewhere.
+
+`workspace-root-loss` failed on its teardown in the post-change run and not in the baseline, passes twice when run alone, and cannot be made to fail by the change this item made to it. One run each side cannot separate an intermittent failure from a newly exposed one, and no verdict is recorded here beyond those three facts.
+
+## What acceptance 1 cost, and where it stopped
+
+Four checks were shown red against the real thing or by replaying both recording rules over the same outcomes. Four were not, and each for a stated reason rather than for want of trying:
+
+- `binary-transfer-streaming-queue`: the environment break never lands, because the check fails earlier on its own baseline red, before the guarded code runs. The repair is unreachable until that earlier failure is somebody's item, which is a fact about the order those two sit in.
+- `pdf-cs-export`: removing the seeded file mid-run does not redden it, so the export does not depend on that file being on disk at that moment.
+- `large-file-streaming` scenario D: the open guard is reddenable by pointing at a name that never opens; the UTF-8 assertion itself needs a product that displays invalid UTF-8 as valid.
+- `terminal-secret-masking` leg 5: needs a backend that paints mask decorations with masking on. No fixture or environment does it.
+
+The last two need a broken product build per check, which is not a trade this version makes against a disk that is the round's constraint.
+
+## A defect the repair surfaced
+
+`selectTerminalFont` leads with Source Code Pro when the preference asks for it **or** the operating system is Linux, so both Python harnesses were returning a bare fallback chain for `os-default` that the product never ships. That is a quiet wrong measurement rather than a loud death, and it is more this item's theme than the failure the item was raised for. The harnesses read the chain from `terminal/font.ts` rather than importing it, because importing needs that module restructured for a node without TypeScript support; the read is a residual that belongs with the source-text test convention.
