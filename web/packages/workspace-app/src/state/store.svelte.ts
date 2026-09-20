@@ -10,6 +10,8 @@ import type {
   IndexStatus,
   SurfaceThemeChoice,
   TerminalRosterEntry,
+  TransferOp,
+  TransferResponse,
   TreeEntry,
 } from "../api/types";
 import {
@@ -4375,23 +4377,19 @@ export function fbClipboardClear(): void {
 /// Paste the clipboard into `destDir` (workspace-rooted POSIX, "" = root).
 /// copy duplicates; cut moves (and clears the clipboard on success so a
 /// second paste does not move-from-a-now-empty source). Routes through
-/// POST /api/fs/transfer, which resolves name collisions to a " copy"
-/// suffix and emits watcher events so every FB instance + the Graph
-/// refresh. Returns the destination paths the entries landed at.
+/// `performTransferInto`, so a cut onto an occupied name is refused by name
+/// the way a single move is, while a copy keeps the route's " copy" suffix.
+/// Returns the destination paths the entries landed at.
 export async function fbClipboardPaste(destDir: string): Promise<string[]> {
   const mode = fbClipboard.mode;
   const sources = [...fbClipboard.paths];
   if (!mode || sources.length === 0) return [];
   const op = mode === "cut" ? "move" : "copy";
-  try {
-    const resp = await api.fsTransfer(op, sources, destDir);
-    // A cut is a one-shot move: clear so the source can't be re-moved.
-    if (mode === "cut") fbClipboardClear();
-    return resp.moved.map((m) => m.to);
-  } catch (err) {
-    ui.status = `paste failed: ${(err as Error).message}`;
-    return [];
-  }
+  const landed = await performTransferInto(op, sources, destDir, "paste failed");
+  // A cut is a one-shot move: clear so the source can't be re-moved. A refused
+  // paste keeps the clipboard, so the user can retry into another directory.
+  if (mode === "cut" && landed.length > 0) fbClipboardClear();
+  return landed;
 }
 
 let widthsPersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5229,9 +5227,10 @@ export function resolvePathPrompt(value: string | null): void {
 // idempotent layer (the modal already resolved the extension).
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
-/// prompt) and drag-and-drop. No-ops if source == target. Prompts for
-/// overwrite confirmation when the target is a file; existing
-/// directories are rejected because chan-workspace will not replace them.
+/// prompt) and drag-and-drop. No-ops if source == target. An occupied
+/// target is refused by name: `preflight_rename` in chan-workspace answers
+/// 409 for any destination that already exists and is not the same file, so
+/// there is nothing to offer the user beyond saying which path is taken.
 /// Refreshes the tree and re-keys open tabs so in-memory state follows
 /// the rename without a refetch round-trip.
 ///
@@ -5256,13 +5255,8 @@ async function performMove(path: string, target: string): Promise<void> {
       ui.status = `rename failed: '${target}' is an existing directory`;
       return;
     }
-    const confirmed = await uiConfirm({
-      title: "Overwrite existing file?",
-      message: `'${target}' already exists. The current file will be replaced.`,
-      confirmLabel: "Overwrite",
-      destructive: true,
-    });
-    if (!confirmed) return;
+    ui.status = occupiedNameStatus("move failed", target);
+    return;
   }
   let movingTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
     ui.status = "Moving...";
@@ -5325,6 +5319,96 @@ async function performMove(path: string, target: string): Promise<void> {
     movingPaths.delete(path);
     movingPaths.delete(target);
   }
+}
+
+/// One sentence for a destination name that is already taken, so every
+/// gesture that can hit one says the same thing. A move onto an occupied name
+/// is refused rather than confirmed: `preflight_rename` in chan-workspace
+/// answers 409 for it, and the transfer route would resolve it to a " copy"
+/// suffix, so offering to overwrite offers something the product never does.
+function occupiedNameStatus(label: string, target: string): string {
+  return `${label}: '${target}' already exists`;
+}
+
+/// Where `source` lands when it is moved or copied into `destDir`.
+function transferLandingPath(source: string, destDir: string): string {
+  const base = source.split("/").pop() ?? source;
+  return destDir === "" ? base : `${destDir}/${base}`;
+}
+
+/// Move or copy many entries into `destDir` through the transfer route, with
+/// everything a single move does around it.
+///
+/// The route resolves a name collision to a " copy" suffix and reports the
+/// link-rewrite conflicts it could not apply. A move must not let it do the
+/// first silently, so an occupied landing name is refused here by name, and it
+/// must never drop the second, so whatever comes back in `conflicts` is named
+/// to the user. A copy keeps the suffix: duplicating beside the original is
+/// what a copy is for.
+///
+/// The collision check is only as good as what it can see, and `tree.entries`
+/// holds only directories that were listed, so the destination's listing is
+/// loaded first. A destination that cannot be listed is its own refusal: the
+/// alternative is treating "unknown" as "free" and moving into it blind.
+async function performTransferInto(
+  op: TransferOp,
+  sources: string[],
+  destDir: string,
+  label: string,
+): Promise<string[]> {
+  if (sources.length === 0) return [];
+  const draftsReason =
+    fileBrowserDraftsPathReason(destDir) ??
+    sources.map((s) => fileBrowserDraftsPathReason(s)).find((r) => r !== null) ??
+    null;
+  if (draftsReason) {
+    ui.status = `${label}: ${draftsReason}`;
+    return [];
+  }
+  if (op === "move") {
+    try {
+      await loadTreeDir(destDir);
+    } catch (e) {
+      ui.status = `${label}: cannot list '${destDir}': ${(e as Error).message}`;
+      return [];
+    }
+    const occupied = sources
+      .map((source) => transferLandingPath(source, destDir))
+      .find((landing) => tree.entries.some((e) => e.path === landing));
+    if (occupied) {
+      ui.status = occupiedNameStatus(label, occupied);
+      return [];
+    }
+  }
+  let resp: TransferResponse;
+  try {
+    resp = await api.fsTransfer(op, sources, destDir);
+  } catch (err) {
+    ui.status = `${label}: ${(err as Error).message}`;
+    return [];
+  }
+  // The entries have moved. Anything that fails from here leaves a stale
+  // view, not a failed move, and must not be reported as one: `refreshTree`
+  // records its own failure in `tree.error` for the tree to render, and the
+  // watcher refreshes again behind it.
+  try {
+    await refreshTree();
+  } catch {
+    // Read from `tree.error`, where refreshTree put it.
+  }
+  if (op === "move") {
+    for (const { from, to } of resp.moved) {
+      rekeyTabsForRename(from, to);
+      for (const { tabId } of tabsForPath(to)) clearTabError(tabId);
+    }
+  }
+  ui.status =
+    resp.conflicts.length > 0
+      ? `${resp.conflicts.length} link conflict${
+          resp.conflicts.length === 1 ? "" : "s"
+        }: ${resp.conflicts.join(", ")}`
+      : null;
+  return resp.moved.map((m) => m.to);
 }
 
 function uploadCancelledError(): Error {
@@ -5674,8 +5758,15 @@ export const fileOps = {
   async moveTo(from: string, to: string): Promise<void> {
     await performMove(from, to);
   },
+  /// Multi-entry drop target. One atomic transfer for the whole set, with the
+  /// drafts refusal, the occupied-name refusal, the tab re-key and the
+  /// conflict report a single move runs. Returns where the entries landed so
+  /// the caller can select them.
+  async moveManyTo(sources: string[], destDir: string): Promise<string[]> {
+    return await performTransferInto("move", sources, destDir, "move failed");
+  },
   /// Inline-rename entry point for the FileEditorTab's header-band UX.
-  /// Same `performMove` machinery (overwrite confirm, link rewrite, tab
+  /// Same `performMove` machinery (occupied-name refusal, link rewrite, tab
   /// rekey, watcher suppression) as `rename` above; just bypasses the
   /// modal so the header band can drive the input directly. Preserves
   /// the source extension when `next` lacks one.

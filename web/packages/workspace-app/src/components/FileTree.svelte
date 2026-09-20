@@ -302,13 +302,11 @@
       await fileOps.moveTo(candidates[0], target);
       return;
     }
-    // Many: one atomic multi-entry move through the transfer route.
-    try {
-      const resp = await api.fsTransfer("move", candidates, destDir);
-      if (resp.moved.length > 0) fbSelectSet(resp.moved.map((m) => m.to));
-    } catch (err) {
-      notify(`move failed: ${(err as Error).message}`);
-    }
+    // Many: one atomic multi-entry move, through the same helper the clipboard
+    // paste uses, so a drop onto an occupied name is refused by name the way a
+    // single move is and the moved files' open tabs follow them.
+    const landed = await fileOps.moveManyTo(candidates, destDir);
+    if (landed.length > 0) fbSelectSet(landed);
   }
 
   /// Best-effort isDir lookup for a path from the visible rows (used by

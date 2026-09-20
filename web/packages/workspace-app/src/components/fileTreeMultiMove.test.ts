@@ -113,11 +113,12 @@ beforeEach(() => {
     { path: "a.md", is_dir: false, kind: "document", size: 1, mtime: null },
     { path: "b.md", is_dir: false, kind: "document", size: 1, mtime: null },
     { path: "dest", is_dir: true, size: 0, mtime: null },
-    { path: "dest/a.md", is_dir: false, kind: "document", size: 1, mtime: null },
+    { path: "busy", is_dir: true, size: 0, mtime: null },
+    { path: "busy/a.md", is_dir: false, kind: "document", size: 1, mtime: null },
     { path: "hidden", is_dir: true, size: 0, mtime: null },
     { path: ".Drafts", is_dir: true, size: 0, mtime: null },
   ];
-  tree.loadedDirs = { "": true, dest: true };
+  tree.loadedDirs = { "": true, dest: true, busy: true };
   tree.loadingDirs = {};
   tree.dirErrors = {};
 });
@@ -214,6 +215,17 @@ describe("a multi-row move", () => {
     await settle();
 
     expect(said(), "the conflicting path is named").toContain("notes/links.md");
+  });
+
+  test("refuses an occupied name in a listed destination", async () => {
+    const target = mountTree();
+    await settle();
+
+    dropOnDir(target, "busy", ["a.md", "b.md"]);
+    await settle();
+
+    expect(served.calls, "nothing is sent").toHaveLength(0);
+    expect(said(), "the occupied path is named").toContain("busy/a.md");
   });
 
   test("refuses an occupied name in a destination whose listing was never loaded", async () => {

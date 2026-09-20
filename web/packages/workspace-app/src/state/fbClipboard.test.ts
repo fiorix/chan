@@ -19,10 +19,16 @@ const fsTransfer =
     ) => Promise<{ moved: Array<{ from: string; to: string }>; skipped: string[]; conflicts: string[] }>
   >();
 
+// `list` is part of the surface a paste touches: a cut checks the
+// destination's listing for an occupied name before it sends anything, and
+// the tree refreshes after the transfer lands.
+const list = vi.fn<(dir: string) => Promise<unknown[]>>();
+
 vi.mock("../api/client", () => ({
   api: {
     fsTransfer: (op: "move" | "copy", sources: string[], destDir: string) =>
       fsTransfer(op, sources, destDir),
+    list: (dir: string) => list(dir),
   },
 }));
 
@@ -30,8 +36,13 @@ let store: typeof import("./store.svelte");
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  list.mockResolvedValue([]);
   store = await import("./store.svelte");
   store.fbClipboardClear();
+  store.tree.entries = [];
+  store.tree.loadedDirs = {};
+  store.tree.loadingDirs = {};
+  store.tree.dirErrors = {};
 });
 
 afterEach(() => {
@@ -92,6 +103,25 @@ describe("FB clipboard (FB2)", () => {
     // moved a second time.
     expect(store.fbClipboard.mode).toBeNull();
     expect(store.fbClipboard.paths).toEqual([]);
+  });
+
+  test("paste of a cut onto an occupied name is refused and keeps the clipboard", async () => {
+    // Same answer a single move gives: the name is taken, so nothing is sent
+    // and the path is named. The clipboard survives so the user can paste
+    // somewhere else without re-cutting.
+    store.tree.entries = [
+      { path: "archive", is_dir: true, size: 0, mtime: null },
+      { path: "archive/a.md", is_dir: false, size: 1, mtime: null },
+    ] as never;
+    store.tree.loadedDirs = { archive: true };
+    store.fbClipboardSet("cut", ["notes/a.md"]);
+
+    const landed = await store.fbClipboardPaste("archive");
+
+    expect(fsTransfer).not.toHaveBeenCalled();
+    expect(landed).toEqual([]);
+    expect(store.ui.status).toBe("paste failed: 'archive/a.md' already exists");
+    expect(store.fbClipboard.mode).toBe("cut");
   });
 
   test("paste with an empty clipboard is a no-op (no transfer call)", async () => {

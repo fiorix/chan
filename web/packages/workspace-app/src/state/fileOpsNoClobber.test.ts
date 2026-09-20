@@ -8,12 +8,6 @@ describe("File Browser no-clobber move policy", () => {
       /const draftsReason =[\s\S]{1,200}fileBrowserDraftsPathReason\(path\) \?\? fileBrowserDraftsPathReason\(target\);[\s\S]{1,200}ui\.status = `move failed: \$\{draftsReason\}`;[\s\S]{1,80}return;/,
     );
   });
-
-  test("performMove refuses existing directory targets without overwrite confirm", () => {
-    expect(store).toMatch(
-      /if \(existing\.is_dir\) \{[\s\S]{1,160}ui\.status = `rename failed: '\$\{target\}' is an existing directory`;[\s\S]{1,80}return;[\s\S]{1,120}title: "Overwrite existing file\?"/,
-    );
-  });
 });
 
 describe("File Browser Drafts create guard", () => {
