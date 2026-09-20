@@ -2320,6 +2320,13 @@
   function closeExitedTabFromKey(e: KeyboardEvent): boolean {
     if (!isCloseExitedTabKey(e)) return false;
     e.preventDefault();
+    // Both renderers call their custom key handler and then let the event
+    // keep going: xterm.js returns out of its keydown without touching it,
+    // ghostty-web calls preventDefault and returns. Neither stops
+    // propagation, so without this the event reaches the terminal root's
+    // onkeydown and runs this close a second time. Two closes race on one
+    // captured index and the second removes whatever now sits there.
+    e.stopPropagation();
     void closeTab(paneId, tab.id, { force: true });
     return true;
   }
