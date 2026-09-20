@@ -2730,13 +2730,17 @@ async function confirmCloseTabs(
   for (const tab of tabs) {
     if (tab.kind !== "file") continue;
     if (!isDirty(tab)) continue;
+    // The save takes a turn or more, so `tab` is not necessarily the object
+    // the layout holds afterwards: a message written on the old one is never
+    // shown, and the dirtiness re-read asks a copy the save never stamped.
     try {
       await performSave(tab);
     } catch (e) {
-      tab.error = `save failed: ${(e as Error).message}`;
+      const live = liveFileTabById(tab.id) ?? tab;
+      live.error = `save failed: ${(e as Error).message}`;
       return false;
     }
-    if (isDirty(tab)) return false;
+    if (isDirty(liveFileTabById(tab.id) ?? tab)) return false;
   }
   const risky = tabs.filter((t) => closeRisk(t) !== null);
   if (risky.length === 0) return true;
