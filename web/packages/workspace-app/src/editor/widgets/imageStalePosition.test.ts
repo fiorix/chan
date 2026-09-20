@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// Every image action resolves the image's source range from a position
-// captured when the widget was built. An edit anywhere above the image
-// moves the image and leaves that capture behind, and because the widget
-// compares equal the DOM (and the position stamped on it) is reused. Each
+// Every image action resolves the image's source range when it runs. The
+// position stamped on the widget when it was built cannot carry that on
+// its own: the widget compares equal across an edit above it, so the DOM
+// and the stamp are reused while the document has moved underneath. Each
 // test below types one character above the image and then takes one action.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";

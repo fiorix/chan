@@ -61,6 +61,7 @@ import {
   startImageDragIndicator,
 } from "../image_drag_indicator";
 import { isWidgetWritable } from "./writable";
+import { notify } from "../../state/notify.svelte";
 
 const MIN_IMG_WIDTH = 40;
 const USER_SCROLL_QUIET_MS = 900;
@@ -74,65 +75,115 @@ const USER_SCROLL_QUIET_MS = 900;
 export const IMAGE_MOVE_MIME = "application/x-chan-image-move";
 
 /// The parts of an Image node every action reads: its four LinkMark
-/// ranges (`[`, `]`, `(`, `)`) and its URL slot. One walk, because five
-/// copies of this loop are why one stale position had five separate
-/// failure modes. `urlFrom` stays -1 when the slot is empty (`![alt]()`),
-/// which the LinkMark-based callers handle themselves.
+/// ranges (`[`, `]`, `(`, `)`) and its URL slot. One walk, so a stale
+/// position has one place to be wrong rather than five.
+///
+/// The slot is the URL inside the parentheses, which is the URL child
+/// that follows the third LinkMark. An Image can hold more than one of
+/// them: GFM autolinks a bare URL written in the alt text and the parser
+/// folds that element into the Image, where it is prose and not the
+/// image's source. `urlFrom` stays -1 when the slot is empty
+/// (`![alt]()`), and every caller returns on that itself.
 function imageNodeParts(node: SyntaxNode): {
   linkMarks: { from: number; to: number }[];
   urlFrom: number;
   urlTo: number;
 } {
   const linkMarks: { from: number; to: number }[] = [];
-  let urlFrom = -1;
-  let urlTo = -1;
+  const urls: { from: number; to: number }[] = [];
   const cursor = node.cursor();
   if (cursor.firstChild()) {
     do {
       if (cursor.name === "LinkMark") {
         linkMarks.push({ from: cursor.from, to: cursor.to });
-      } else if (cursor.name === "URL" && urlFrom < 0) {
-        urlFrom = cursor.from;
-        urlTo = cursor.to;
+      } else if (cursor.name === "URL") {
+        urls.push({ from: cursor.from, to: cursor.to });
       }
     } while (cursor.nextSibling());
   }
-  return { linkMarks, urlFrom, urlTo };
+  const openParen = linkMarks[2]?.to;
+  const url =
+    openParen === undefined
+      ? undefined
+      : urls.find((u) => u.from >= openParen);
+  return { linkMarks, urlFrom: url?.from ?? -1, urlTo: url?.to ?? -1 };
 }
 
 /// The Image node a widget's DOM stands for, resolved at the moment the
 /// action runs.
 ///
-/// The live position comes from the widget element: CodeMirror maps it for
-/// us, so an edit anywhere above the image moves the answer with the
-/// document instead of leaving it behind. The position stamped when the
-/// widget was built is the fallback, for the block-above editing preview
-/// where the wrap sits at the line start and a walk from there climbs
-/// through Paragraph to Document without ever reaching the Image.
+/// Three candidates, in order. The widget element's live position, which
+/// CodeMirror maps, so an edit anywhere above the image moves the answer
+/// with the document instead of leaving it behind. Then, for an editing
+/// preview, the image on that line the caret is inside: the preview is a
+/// block ABOVE its source line, so its live position is the line's start,
+/// and on a line carrying several images that start belongs to the first
+/// one. Last the position stamped when the widget was built, which `eq`
+/// ignores, so a reused widget still carries the position it was built
+/// with.
+///
+/// A candidate is returned only when it renders the source the wrap
+/// shows; a wrap that names no source is trusted as it comes. An action
+/// that does nothing beats one that rewrites a different image.
 function imageNodeFor(
   view: EditorView,
   wrap: HTMLElement | null,
   stamp?: number,
 ): SyntaxNode | null {
-  const tree = syntaxTree(view.state);
-  const candidates: number[] = [];
+  const doc = view.state.doc;
+  const shows = (
+    wrap as (HTMLElement & { _chanImg?: ImageActionPayload }) | null
+  )?._chanImg?.src;
+  const candidates: (SyntaxNode | null)[] = [];
   if (wrap?.isConnected) {
     const live = view.posAtDOM(wrap);
-    if (live >= 0) candidates.push(live);
+    if (live <= doc.length) {
+      candidates.push(imageNodeAt(view, live));
+      candidates.push(editedImageOnLine(view, doc.lineAt(live)));
+    }
   }
-  if (stamp !== undefined && stamp >= 0) candidates.push(stamp);
-  for (const pos of candidates) {
-    if (pos > view.state.doc.length) continue;
-    let node: SyntaxNode | null = tree.resolveInner(pos, 1);
-    while (node && node.name !== "Image") node = node.parent ?? null;
-    if (node?.name === "Image") return node;
+  if (stamp !== undefined && stamp >= 0 && stamp <= doc.length) {
+    candidates.push(imageNodeAt(view, stamp));
+  }
+  for (const node of candidates) {
+    if (!node) continue;
+    if (shows === undefined) return node;
+    const { urlFrom, urlTo } = imageNodeParts(node);
+    if (urlFrom >= 0 && doc.sliceString(urlFrom, urlTo) === shows) return node;
   }
   return null;
 }
 
+/// The Image node enclosing `pos`, or null when nothing there is one.
+function imageNodeAt(view: EditorView, pos: number): SyntaxNode | null {
+  let node: SyntaxNode | null = syntaxTree(view.state).resolveInner(pos, 1);
+  while (node && node.name !== "Image") node = node.parent ?? null;
+  return node?.name === "Image" ? node : null;
+}
+
+/// The image on `line` whose source the caret sits inside, which is the
+/// one an editing preview stands for.
+function editedImageOnLine(
+  view: EditorView,
+  line: { from: number; to: number },
+): SyntaxNode | null {
+  const found: SyntaxNode[] = [];
+  syntaxTree(view.state).iterate({
+    from: line.from,
+    to: line.to,
+    enter(node) {
+      if (found.length > 0 || node.name !== "Image") return;
+      if (imageEditEntered(view.state.selection, node.from, node.to)) {
+        found.push(node.node);
+      }
+    },
+  });
+  return found[0] ?? null;
+}
+
 /// Start an internal image-move drag from an image atom widget. Reads
 /// the live Image node range (positions drift as the doc changes, so
-/// we resolve from the stamped nodePos rather than trusting a cached
+/// we resolve it when the drag starts rather than trusting a cached
 /// range) and stashes it on the dataTransfer so the drop handler can
 /// relocate the source. Sets a `data-dragging` marker for styling.
 function beginImageDrag(
@@ -223,8 +274,8 @@ function imageEditEntered(
 
 /// Copy an image's underlying markdown source (`![alt](src)`) to the
 /// clipboard, so a paste re-inserts the markdown and it re-renders as the
-/// image. Resolves the live Image node range from the stamped nodePos, so
-/// it survives edits that shift the doc. Desktop routes through the native
+/// image. Resolves the Image node range when the copy runs, so it
+/// survives edits that shift the doc. Desktop routes through the native
 /// text IPC (sidesteps WKWebView's async-clipboard image quirks that broke
 /// the old pixel copy); web falls back to writeText.
 async function copyImageMarkdown(
@@ -848,9 +899,9 @@ class ImageWidget extends WidgetType {
 
 /// Drop the `data-selected` ring from any image wrap that has it.
 /// Called from the per-widget click handler before lighting up the
-/// new selection, and from a document-level mousedown listener
-/// (installed once on first widget mount) so a click anywhere
-/// outside an image clears the ring.
+/// new selection, and from the document-level mousedown listener the
+/// view's plugin installs, so a click anywhere outside an image clears
+/// the ring.
 function clearImageSelection(view: EditorView): void {
   for (const el of view.dom.querySelectorAll(
     ".cm-md-image-wrap[data-selected]",
@@ -863,13 +914,14 @@ function clearImageSelection(view: EditorView): void {
 /// that installs them.
 ///
 /// They have to be on `document`: a click anywhere in the app clears the
-/// ring, and a key pressed with an image selected acts on it wherever the
-/// focus sits. What they must not do is outlive their view or answer for
-/// another one. A ViewPlugin gives them the view's lifetime, `destroy`
-/// takes them off again, and each handler ignores an event that belongs to
-/// a different editor, so two open panes no longer reach into each other:
-/// an Enter typed in one pane used to move the other pane's caret into an
-/// image URL and steal the focus back.
+/// ring, and a key pressed with an image selected acts on it even when the
+/// focus is nowhere. What they must not do is outlive their view, which a
+/// ViewPlugin's lifetime and `destroy` settle, or act on a key that was
+/// meant for something else, which is the key handler's own test.
+///
+/// The click needs no such test. It only ever removes the ring, and it
+/// removes it from its own view's DOM, so every view clearing on every
+/// click is the behaviour the ring wants.
 const imageSelectionListeners = ViewPlugin.fromClass(
   class {
     private readonly onMouseDown: (e: MouseEvent) => void;
@@ -877,7 +929,6 @@ const imageSelectionListeners = ViewPlugin.fromClass(
 
     constructor(readonly view: EditorView) {
       this.onMouseDown = (e: MouseEvent) => {
-        if (!this.ownsEvent(e)) return;
         // A press inside an image wrap (or on its hover overlay buttons)
         // leaves the ring alone: the widget's own mousedown re-sets it on
         // the wrap that was clicked.
@@ -885,7 +936,7 @@ const imageSelectionListeners = ViewPlugin.fromClass(
         clearImageSelection(view);
       };
       this.onKeyDown = (e: KeyboardEvent) => {
-        if (!this.ownsEvent(e)) return;
+        if (!this.ownsKey(e)) return;
 
         const selected = view.dom.querySelector(
           ".cm-md-image-wrap[data-selected]",
@@ -925,10 +976,12 @@ const imageSelectionListeners = ViewPlugin.fromClass(
           if (payload && !isExcalidrawImageSrc(payload.src)) {
             e.preventDefault();
             void copyImageMarkdown(view, selected, payload.nodePos).catch(
-              () => {
-                // The copy surfaces its own failure on the button; from the
-                // keyboard there is no button, and an unhandled rejection is
-                // not a report.
+              (err: unknown) => {
+                // There is no button to fail on from the keyboard, and a
+                // silent rejection leaves the user pasting whatever the
+                // clipboard held before.
+                console.warn("image copy failed", err);
+                notify("Couldn't copy to clipboard");
               },
             );
           }
@@ -941,40 +994,42 @@ const imageSelectionListeners = ViewPlugin.fromClass(
           clearImageSelection(view);
           return;
         }
-        // Backspace / Delete are deliberately NOT handled here. The
+        // Backspace and Delete are deliberately NOT handled here. The
         // EditorView.atomicRanges entry (imageDecorations) already gives
         // correct, DIRECTIONAL deletion: Backspace with the caret at the
         // image's trailing edge (or Delete at the leading edge) removes the
         // whole `![alt](src)` atom in one stroke, while a delete one or two
-        // positions OUTSIDE the image edits the adjacent character. A global
-        // delete keyed on the `data-selected` ring was non-directional and
-        // fired off a ring the caret had already left: a one-past Backspace
-        // deletes the char and lands the caret on the edge, which sets the
-        // ring synchronously, and the same keydown then nuked the image too
-        // (char + image gone in one press). Letting CM6's atomic deletion
-        // stand fixes that; the ring still drives Enter / Cmd+Enter / Cmd+C.
+        // positions OUTSIDE the image edits the adjacent character. A
+        // delete keyed on the `data-selected` ring instead would have
+        // neither property: it fires wherever the ring is lit, and the ring
+        // is lit synchronously by a caret landing on an image edge, so one
+        // press would eat the character AND the image. The ring drives
+        // Enter, Cmd+Enter and Cmd+C, and nothing that deletes.
       };
       document.addEventListener("mousedown", this.onMouseDown);
       document.addEventListener("keydown", this.onKeyDown);
     }
 
-    /// Whether this view may answer the event: it came from inside this
-    /// view, or from no editor at all.
+    /// Whether this view may act on the key: it was typed inside this
+    /// view, or nowhere in particular.
     ///
-    /// The test is "not another editor's", not "inside mine". An event
-    /// carrying another view's DOM is that view's business, which is what
-    /// stops two panes reaching into each other. An event with no editor
-    /// behind it still reaches every view, because a ring is set by
-    /// clicking the image and that click does not put the caret in the
-    /// document: the keystroke that follows can come from the body with
-    /// no editor focused, and dropping it would kill Cmd+C for the ring
-    /// it exists to serve.
-    private ownsEvent(e: Event): boolean {
-      const target = e.target as Element | null;
-      if (target === null) return true;
+    /// Nowhere in particular is the case the ring exists for. A ring is
+    /// set by clicking the image, and that click does not put the caret
+    /// in the document, so the keystroke that follows arrives with the
+    /// focus still on the body or on no element at all. Dropping those
+    /// would kill Cmd+C for the ring it serves.
+    ///
+    /// Every other element owns its own keys: another pane's editor, and
+    /// equally an input of the app's own chrome such as the find bar,
+    /// whose Enter would otherwise move this view's caret into an image
+    /// URL and take the focus out of the field being typed in.
+    private ownsKey(e: KeyboardEvent): boolean {
+      const target = e.target;
+      if (!(target instanceof Element)) return true;
       if (this.view.dom.contains(target)) return true;
-      if (typeof target.closest !== "function") return true;
-      return target.closest(".cm-editor") === null;
+      return (
+        target === document.body || target === document.documentElement
+      );
     }
 
     destroy(): void {

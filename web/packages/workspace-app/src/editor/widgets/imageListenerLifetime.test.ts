@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 //
-// The image widget installs two document-level listeners the first time it
-// renders in a view, and both close over that view. A document listener
-// that outlives its view keeps the view, its state and its detached DOM
-// alive and keeps answering events, and one that does not ask where the
-// event came from answers for a view the user is not typing in.
+// The image widget's ring needs two document-level listeners, and both
+// close over the view that owns them. A listener that outlives its view
+// keeps the view, its state and its detached DOM alive and goes on
+// answering events, so a ViewPlugin installs and removes them. The key
+// listener also has to say which keys are the ring's: the ones typed
+// inside its own view, and the ones typed nowhere in particular, which
+// is the case the ring exists for.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EditorState } from "@codemirror/state";

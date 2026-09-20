@@ -65,8 +65,24 @@ function wrapFor(src: string): HTMLElement {
   return found!;
 }
 
+/// Type in front of the first image. The line keeps both images and
+/// their markdown, so the preview widget compares equal and its DOM,
+/// with the position stamped on it, is reused while the document moved.
+const INSERT = "xx";
+function editBefore(): void {
+  view!.dispatch({ changes: { from: 0, insert: INSERT } });
+}
+
+/// Where Edit lands the caret in the second image: one past the URL
+/// slot's opening parenthesis. A range test alone cannot tell that from
+/// the caret already sitting in the slot, and Edit doing nothing at all
+/// would pass one.
+function secondUrlCaret(): number {
+  return view!.state.doc.toString().indexOf("2.png", secondRange().from) + 1;
+}
+
 function secondRange(): { from: number; to: number } {
-  const from = DOC.indexOf(SECOND);
+  const from = view!.state.doc.toString().indexOf(SECOND);
   return { from, to: from + SECOND.length };
 }
 
@@ -116,10 +132,7 @@ describe("the editing preview of the second image on a line", () => {
     wrapFor("2.png")
       .querySelector(".cm-md-image-action")!
       .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    const { from, to } = secondRange();
-    const head = view!.state.selection.main.head;
-    expect(head).toBeGreaterThan(from);
-    expect(head).toBeLessThan(to);
+    expect(view!.state.selection.main.head).toBe(secondUrlCaret());
   });
 
   test("drag-to-move carries the second image's range", () => {
@@ -135,5 +148,28 @@ describe("the editing preview of the second image on a line", () => {
     });
     wrapFor("2.png").querySelector("img")!.dispatchEvent(event);
     expect(data.get(IMAGE_MOVE_MIME)).toBe(JSON.stringify(secondRange()));
+  });
+});
+
+describe("the same preview after an edit in front of both images", () => {
+  test("right-click Copy still reads the second image's markdown", () => {
+    mount();
+    const before = wrapFor("2.png");
+    editBefore();
+    // Neither position can answer alone now: the widget's live position
+    // is the line's start, which is text, and its stamp points into the
+    // first image. The caret is what says which image the preview is.
+    expect(wrapFor("2.png")).toBe(before);
+    wrapFor("2.png").dataset.selected = "true";
+    expect(selectedImageMarkdown(view!)).toBe(SECOND);
+  });
+
+  test("Edit still puts the caret in the second image's URL", () => {
+    mount();
+    editBefore();
+    wrapFor("2.png")
+      .querySelector(".cm-md-image-action")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(view!.state.selection.main.head).toBe(secondUrlCaret());
   });
 });
