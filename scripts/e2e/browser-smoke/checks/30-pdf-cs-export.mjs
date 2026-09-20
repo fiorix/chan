@@ -38,9 +38,12 @@ export default {
       stderr = res.stderr;
     } catch (e) {
       const text = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-      if (/unrecognized|unexpected|unknown|invalid.*export/i.test(text)) {
-        ctx.skip(`cs export not available yet: ${text.split("\n")[0]}`);
-      }
+      // `chan shell export` ships, so a failure here is a failure. The skip
+      // that used to sit on this path was written while the subcommand did
+      // not exist, and by now its pattern matched any message carrying
+      // "invalid" or "unexpected", which is most of what a real export
+      // failure says: the check reported the defect it exists to catch as an
+      // absent environment.
       throw new Error(`cs export failed: ${e.message}\n${text}`);
     }
 
