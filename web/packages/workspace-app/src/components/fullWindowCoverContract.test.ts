@@ -323,6 +323,37 @@ describe("a chord behind a full-window cover", () => {
     });
   }
 
+  function hostCommand(name: string): void {
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name } }));
+  }
+
+  for (const cover of UNREGISTERED_COVERS) {
+    test(`${cover.name} blocks a host command`, async () => {
+      // Every native menu row reaches the SPA as a `chan:command` event, so
+      // this is the menu as well as the bridge.
+      await mountApp();
+      cover.raise();
+      await settle();
+      expect(document.body.querySelector(cover.selector)).not.toBeNull();
+
+      hostCommand("app.terminal.toggle");
+      await settle();
+
+      expect(terminalCount()).toBe(0);
+    });
+  }
+
+  test("control: with no cover up, a host command spawns a terminal", async () => {
+    // Without this the blocking assertions below are vacuous: an event that
+    // never reaches `runCommand` spawns nothing either.
+    await mountApp();
+
+    hostCommand("app.terminal.toggle");
+    await settle();
+
+    expect(terminalCount()).toBe(1);
+  });
+
   test("the preflight cover blocks it", async () => {
     vi.spyOn(api, "preflight").mockResolvedValue({
       phase: "needs_decision",

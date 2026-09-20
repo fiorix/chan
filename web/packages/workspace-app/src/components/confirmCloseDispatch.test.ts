@@ -28,6 +28,19 @@ describe("app.window.confirmClose dispatch", () => {
     expect(arm).toContain("if (isTauriDesktop()) void requestCloseWindow();");
   });
 
+  test("a full-window cover does not swallow it", () => {
+    // Every other command is dropped while a cover is up, because a native
+    // menu row reaches the SPA as a `chan:command` event exactly as a chord
+    // does. This one is the host asking what to do about a close it has
+    // already prevented: dropping it leaves the desktop holding a close
+    // nothing answers, and the arm below is what makes the screen lock ask
+    // and the reconnect overlay close.
+    expect(app).toContain('const COVER_EXEMPT_COMMANDS = new Set(["app.window.confirmClose"]);');
+    expect(app).toContain(
+      "if (appInputBlocked() && !COVER_EXEMPT_COMMANDS.has(commandName)) return;",
+    );
+  });
+
   test("otherwise opens the 3-way overlay", () => {
     const arm = app
       .split('case "app.window.confirmClose":')
