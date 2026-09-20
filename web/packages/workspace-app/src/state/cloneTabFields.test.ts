@@ -72,7 +72,7 @@ function loadedTerminalTab(): TerminalTab {
     group: "ops",
     keyboardProtocol: createTerminalKeyboardProtocolState(),
     teamWorkPending: defaultTeamConfig(),
-  };
+  } satisfies Required<TerminalTab>;
 }
 
 /// A file tab carrying the optional fields the file branch does not name.
@@ -91,7 +91,7 @@ function loadedFileTab(): FileTab {
     mode: "wysiwyg",
     loading: false,
     error: null,
-    fileMissing: null,
+    fileMissing: { path: "notes/loaded.md", fragment: null, suggestedPath: null },
     inspectorOpen: true,
     outlineOpen: true,
     repoRoot: "/repo",
@@ -107,7 +107,11 @@ function loadedFileTab(): FileTab {
     openedEmpty: true,
     inspectorWidth: 321,
     outlineWidth: 123,
-  };
+    slidePreview: { open: true, index: 2, mode: "preview" },
+    find: makeFindState(),
+    caretCommand: { from: 3, to: 9 },
+    loadProgress: { loadedBytes: 10, totalBytes: 100 },
+  } satisfies Required<FileTab>;
 }
 
 /// A graph tab carrying every optional field its kind allows.
@@ -135,7 +139,7 @@ function loadedGraphTab(): GraphTab {
     selectedNodeId: "node-3",
     selectedNodeLabel: "src/main.rs",
     inspectorWidth: 287,
-  };
+  } satisfies Required<GraphTab>;
 }
 
 /// A File Browser tab carrying every optional field its kind allows.
@@ -151,7 +155,7 @@ function loadedBrowserTab(): BrowserTab {
     expanded: ["src", "src/state"],
     scroll: 412,
     inspectorWidth: 265,
-  };
+  } satisfies Required<BrowserTab>;
 }
 
 /// A dashboard tab carrying every optional field its kind allows. All three
@@ -165,7 +169,7 @@ function loadedDashboardTab(): DashboardTab {
     carouselSlide: 2,
     disabledSlots: [1],
     autoRotate: false,
-  };
+  } satisfies Required<DashboardTab>;
 }
 
 function loadedExtensionTab(): ExtensionTab {
@@ -174,7 +178,7 @@ function loadedExtensionTab(): ExtensionTab {
     id: "extension-loaded",
     title: "notes",
     extensionId: "ext-1",
-  };
+  } satisfies Required<ExtensionTab>;
 }
 
 /// One fixture per tab kind, so a move is exercised on every branch of the
@@ -278,6 +282,64 @@ describe("a reorder keeps every field it was not told to drop", () => {
     // the handlers hold has to be visible on the tab after the move.
     before.xtermModifyOtherKeys = 2;
     expect(moved.keyboardProtocol?.xtermModifyOtherKeys).toBe(2);
+  });
+});
+
+/// The one container the clone shares on purpose: the terminal's key
+/// handlers hold this object and the running program writes its negotiation
+/// into it, so a copy would split the writer from the readers.
+const SHARED_BY_DESIGN = new Set(["keyboardProtocol"]);
+
+describe("a clone copies the containers a tab holds", () => {
+  // `toEqual` cannot see sharing, so without this every copy line in the
+  // per-kind block could be deleted with all the other tests still green.
+  // Both sides are read from the layout: a shared container comes back as
+  // the same proxy, a copied one as a different object.
+  for (const { kind, make } of EVERY_KIND) {
+    test(kind, () => {
+      const source = make();
+      resetLayout([source, neighbour("neighbour-tab")]);
+      const before = paneTabs().find((t) => t.id === source.id) as unknown as Record<
+        string,
+        unknown
+      >;
+      const held = new Map<string, unknown>();
+      for (const [key, value] of Object.entries(before)) {
+        if (value === null || typeof value !== "object") continue;
+        if (SHARED_BY_DESIGN.has(key)) continue;
+        held.set(key, value);
+      }
+      if (kind === "extension") {
+        // It declares no container field at all, so there is nothing here
+        // to copy. That is the kind, not a gap in the fixture.
+        expect(held.size).toBe(0);
+      } else {
+        expect(held.size).toBeGreaterThan(0);
+      }
+
+      reorderTab(PANE_ID, source.id, 1);
+
+      const moved = paneTabs().find((t) => t.id === source.id) as unknown as Record<
+        string,
+        unknown
+      >;
+      const shared = [...held.entries()]
+        .filter(([key, value]) => moved[key] === value)
+        .map(([key]) => key);
+      expect(shared).toEqual([]);
+    });
+  }
+
+  test("the keyboard protocol is the exception, and stays shared", () => {
+    const source = loadedTerminalTab();
+    resetLayout([source, neighbour("neighbour-tab")]);
+    const before = (paneTabs().find((t) => t.id === source.id) as TerminalTab)
+      .keyboardProtocol;
+
+    reorderTab(PANE_ID, source.id, 1);
+
+    const moved = paneTabs().find((t) => t.id === source.id) as TerminalTab;
+    expect(moved.keyboardProtocol).toBe(before);
   });
 });
 
