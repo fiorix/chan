@@ -18,9 +18,9 @@
 // The owner's ruling is the narrow one: an `hr` whose only attribute is a
 // class of exactly `chan-page-break` is the page break, anything else is a
 // near miss left as the author wrote it, and `@pagebreak` is a typing
-// macro that writes the marker rather than a break in its own right. Rows
-// the ruling settles pin their verdict; a row it leaves open asserts
-// agreement alone and is listed in the task-back.
+// macro that writes the marker rather than a break in its own right.
+// The ruling settles every row here, so each pins a verdict; a row it
+// left open would assert agreement alone.
 //
 // jsdom lays nothing out, so the document PDF path gets stubbed block rects
 // and a page tall enough that only a forced break can cut. That is the
@@ -60,8 +60,8 @@ type Row = {
   name: string;
   body: string[];
   line: string;
-  /// The verdict the ruling settles on, or undefined where it does not and
-  /// the row asserts agreement alone.
+  /// The verdict the ruling settles on. A row it left open would assert
+  /// agreement alone; the ruling settles every row of this corpus.
   expected?: boolean;
 };
 
@@ -95,6 +95,7 @@ const ROWS: Row[] = [
     name: "single quotes and a self-closing slash",
     body: ["<hr class='chan-page-break'/>"],
     line: "<hr class='chan-page-break'/>",
+    expected: true,
   },
   {
     name: "a written @pagebreak line",
