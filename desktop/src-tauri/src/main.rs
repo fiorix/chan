@@ -2558,7 +2558,8 @@ pub(crate) async fn forget_devserver_workspace_impl(
         Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => {
             Ok(chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals })
         }
-        Err(devserver::SetWorkspaceOnError::Other { message }) => Err(message),
+        Err(devserver::SetWorkspaceOnError::Refused { message })
+        | Err(devserver::SetWorkspaceOnError::Other { message }) => Err(message),
     }
 }
 
@@ -2606,6 +2607,9 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => {
             Ok(chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals })
         }
+        // A devserver that answered has spoken for itself, local or not: pass
+        // its refusal on rather than let the leniency below absorb it.
+        Err(devserver::SetWorkspaceOnError::Refused { message }) => Err(message),
         // A LOCAL devserver registers its workspaces over the well-known
         // discovery socket, which is the source of truth; the HTTP toggle is
         // best-effort, so a transport failure (e.g. a stale port after a restart)
@@ -2614,10 +2618,9 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::Other { message }) => {
             if devserver_is_local(state, &id) {
                 tracing::warn!(devserver = %id, "local devserver workspace toggle failed (non-fatal): {message}");
-                // This arm matches every failure the toggle reports, whether or
-                // not the request reached the devserver, so there is no row to
-                // report: answer done without one rather than assert a state
-                // nobody observed.
+                // This arm matches the failures that are not an answer from
+                // the devserver, so there is no row to report: answer done
+                // without one rather than assert a state nobody observed.
                 Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace: None })
             } else {
                 Err(message)
@@ -2803,7 +2806,8 @@ async fn close_remote_workspace_from_handoff(
             chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals },
             was_served,
         )),
-        Err(devserver::SetWorkspaceOnError::Other { message }) => Err(message),
+        Err(devserver::SetWorkspaceOnError::Refused { message })
+        | Err(devserver::SetWorkspaceOnError::Other { message }) => Err(message),
     }
 }
 

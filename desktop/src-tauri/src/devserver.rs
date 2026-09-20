@@ -295,24 +295,78 @@ struct SetWorkspaceOnRequest {
     force: bool,
 }
 
-/// The server's 409 body when an unforced off is rejected because the tenant
-/// still has live terminals -- mirrors `ActiveTerminalsRejection`.
-#[derive(Debug, serde::Deserialize)]
-struct ActiveTerminalsRejection {
-    active_terminals: usize,
-}
+/// The discriminator a live-terminals refusal carries in its `error` field.
+const LIVE_TERMINALS: &str = "live_terminals";
 
-/// Why a devserver workspace on/off failed, structured so the SPA can tell a
-/// confirm-before-off (live terminals → offer to force) apart from a plain
-/// failure. Serialized to the frontend as the command's error.
+/// Why a devserver workspace on/off/forget failed, structured so a caller can
+/// tell a confirm-before-off (live terminals, offer to force) from a refusal
+/// the devserver explained, and both from a request that never got an answer.
+/// It stays inside the desktop: the bridge handlers in `main.rs` map it onto
+/// the outcome the launcher route answers with.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind")]
 pub enum SetWorkspaceOnError {
-    /// An unforced off was rejected: `active_terminals` live terminals would be
-    /// killed. The SPA confirms, then retries with `force: true`.
+    /// An unforced off or forget was rejected: `active_terminals` live
+    /// terminals would be killed. The caller confirms, then retries with
+    /// `force: true`.
     ActiveTerminals { active_terminals: usize },
+    /// The devserver refused and said why, in its own words, to be shown
+    /// unchanged. Distinct from [`Other`](Self::Other) because the request
+    /// reached the devserver and was answered, so no caller may downgrade it
+    /// to a success the way it may a failed transport.
+    Refused { message: String },
     /// Any other failure (network, decode, non-409 status), as a plain message.
     Other { message: String },
+}
+
+/// Read a `409 Conflict` by its body rather than by its status.
+///
+/// The server answers refusals in more than one shape and a route's set of
+/// them can grow, so the body decides: a JSON object carrying a numeric
+/// `active_terminals` is the confirm-before-off signal; a JSON object whose
+/// `error` is any other string carries that string as the message, which is
+/// the shape a server moving its refusals into an `{"error": ...}` envelope
+/// sends; anything else is its own message. Nothing here invents a count, so
+/// a body that carries none can never read as a measured zero.
+///
+/// The launcher reads the same body with `refusalReason` and
+/// `liveTerminalsCount`, and this is deliberately one case wider than those
+/// two. The launcher only ever calls its own server; the desktop dials
+/// devservers of other releases, and the count arrived without the
+/// `live_terminals` discriminator before that field existed, while the
+/// connect gate is the protocol number rather than the version.
+async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str);
+    let count = parsed
+        .as_ref()
+        .and_then(|value| value.get("active_terminals"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok());
+    // A named refusal that is not the terminal one is a message, even if the
+    // body also carries a count: the count is not what refused the request.
+    if let Some(message) = error {
+        if message != LIVE_TERMINALS {
+            return SetWorkspaceOnError::Refused {
+                message: message.to_string(),
+            };
+        }
+    }
+    if let Some(active_terminals) = count {
+        return SetWorkspaceOnError::ActiveTerminals { active_terminals };
+    }
+    SetWorkspaceOnError::Refused {
+        message: match error {
+            Some(message) => message.to_string(),
+            None if body.trim().is_empty() => format!("devserver refused with HTTP {status}"),
+            None => body,
+        },
+    }
 }
 
 impl SetWorkspaceOnError {
@@ -1949,12 +2003,7 @@ pub async fn forget_workspace(
         .await
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
-            let active_terminals = resp
-                .json::<ActiveTerminalsRejection>()
-                .await
-                .map(|r| r.active_terminals)
-                .unwrap_or(0);
-            return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
+            return Err(refusal_from_conflict(resp).await);
         }
         if !resp.status().is_success() {
             return Err(SetWorkspaceOnError::other(format!(
@@ -1976,12 +2025,7 @@ pub async fn forget_workspace(
     .await
     .map_err(SetWorkspaceOnError::other)?;
     if resp.status() == reqwest::StatusCode::CONFLICT {
-        let active_terminals = resp
-            .json::<ActiveTerminalsRejection>()
-            .await
-            .map(|r| r.active_terminals)
-            .unwrap_or(0);
-        return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
+        return Err(refusal_from_conflict(resp).await);
     }
     if !resp.status().is_success() {
         return Err(SetWorkspaceOnError::other(format!(
@@ -2199,12 +2243,7 @@ pub async fn set_workspace_on(
         .await
         .map_err(SetWorkspaceOnError::other)?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
-            let active_terminals = resp
-                .json::<ActiveTerminalsRejection>()
-                .await
-                .map(|r| r.active_terminals)
-                .unwrap_or(0);
-            return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
+            return Err(refusal_from_conflict(resp).await);
         }
         if !resp.status().is_success() {
             return Err(SetWorkspaceOnError::other(format!(
@@ -2244,13 +2283,7 @@ pub async fn set_workspace_on(
     .await
     .map_err(SetWorkspaceOnError::other)?;
     if resp.status() == reqwest::StatusCode::CONFLICT {
-        // Off blocked by live terminals: surface the count for the confirm.
-        let active_terminals = resp
-            .json::<ActiveTerminalsRejection>()
-            .await
-            .map(|r| r.active_terminals)
-            .unwrap_or(0);
-        return Err(SetWorkspaceOnError::ActiveTerminals { active_terminals });
+        return Err(refusal_from_conflict(resp).await);
     }
     if !resp.status().is_success() {
         return Err(SetWorkspaceOnError::other(format!(
