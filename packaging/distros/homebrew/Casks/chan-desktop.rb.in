@@ -6,8 +6,7 @@ cask "chan-desktop" do
   version "@PKGVER@"
   sha256 "@SHA256_DMG@"
 
-  url "https://github.com/fiorix/chan/releases/download/v#{version}/Chan_#{version}.dmg",
-      verified: "github.com/fiorix/chan/"
+  url "https://github.com/fiorix/chan/releases/download/v#{version}/Chan_#{version}.dmg"
   name "Chan"
   desc "Desktop terminal multiplexer and workspace manager"
   homepage "https://chan.app/"
