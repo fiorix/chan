@@ -6,7 +6,11 @@ import preferenceWriteSource from "../api/preferenceWrite.ts?raw";
 import storeSource from "./store.svelte.ts?raw";
 import configWriteSource from "./configWrite.ts?raw";
 import editorToolsSource from "./editorTools.svelte.ts?raw";
-import { updateGlobalConfigSerial } from "./store.svelte";
+import {
+  clearHybridSurfaceTheme,
+  setHybridSurfaceTheme,
+  updateGlobalConfigSerial,
+} from "./store.svelte";
 
 type Cfg = {
   revision: number;
@@ -141,10 +145,22 @@ describe("all config writers share one helper", () => {
     expect(clientSource).not.toMatch(/queuePrefWrite|prefsWriteInflight/);
   });
 
+  // The surface-theme writer is asserted by driving it rather than by
+  // matching its source: what matters is the body it sends, and it
+  // builds that inside the mutation now, where no single line spells it.
+  test("a surface-theme write patches only its own field", async () => {
+    await setHybridSurfaceTheme("editor", "dark");
+    expect(patchBodies).toHaveLength(1);
+    expect(Object.keys(patchBodies[0]!.preferences)).toEqual([
+      "hybrid_surface_themes",
+    ]);
+    expect(patchBodies[0]!.preferences.hybrid_surface_themes).toEqual({
+      editor: "dark",
+    });
+    await clearHybridSurfaceTheme("editor");
+  });
+
   test("store writers return partial field patches", () => {
-    expect(storeSource).toMatch(
-      /persistHybridSurfaceThemes\(\)[\s\S]*?\(\) => \(\{ hybrid_surface_themes: next \}\)/,
-    );
     expect(storeSource).toMatch(
       /persistThemeChoice\([\s\S]*?\{ theme: choice \}/,
     );
