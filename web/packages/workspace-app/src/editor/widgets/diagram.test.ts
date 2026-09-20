@@ -462,6 +462,24 @@ describe("the generic block decorations know nothing about diagrams", () => {
     view.destroy();
     parent.remove();
   });
+
+  test("an excalidraw fence renders as ordinary fenced code too", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: EXCALIDRAW_DOC,
+        selection: EditorSelection.cursor(0),
+        extensions: [chanMarkdown(), chanDecorations()],
+      }),
+    });
+    forceParsing(view, view.state.doc.length, 5000);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    expect(parent.textContent).toContain("flowchart TD");
+    view.destroy();
+    parent.remove();
+  });
 });
 
 describe("the View affordance", () => {
@@ -533,6 +551,21 @@ describe("the View affordance", () => {
     });
     expect(render).toHaveBeenCalledTimes(2);
     expect(render).toHaveBeenLastCalledWith(expect.any(String), false);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("no View button when the editor wires no viewer", () => {
+    const deco = diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render: async () => ({ ok: true as const, svg: LIGHT }),
+      isDark: () => false,
+    });
+    const { parent, view } = mount(deco, MERMAID_DOC, 0);
+    expect(
+      parent.querySelector(".cm-md-diagram-view:not(.cm-md-diagram-copy)"),
+    ).toBeNull();
     view.destroy();
     parent.remove();
   });
