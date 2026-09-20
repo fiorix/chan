@@ -850,6 +850,10 @@ impl DevserverState {
             settlement.disarm();
             return Ok(attempt.prefix.clone());
         }
+        // What this attempt may undo if its bound expires. Read it before the
+        // bounded call, because afterwards a mounted root proves nothing about
+        // who mounted it.
+        let root_was_mounted = self.host.is_root_mounted(&attempt.root);
         let result = time_bound_mount(
             timeout,
             self.host.open_or_get_registered_workspace(
@@ -895,11 +899,19 @@ impl DevserverState {
                 Err(error)
             }
             Err(MountTimedOut) => {
-                // The timeout drops the in-flight future. Compensate in case it
-                // inserted a tenant immediately before cancellation.
-                let _ = self.host.close_workspace(&attempt.prefix, true).await;
                 let reason = format!("mount timed out after {} seconds", timeout.as_secs().max(1));
-                self.finish_failed_attempt(&attempt, reason.clone());
+                if root_was_mounted {
+                    // The tenant serving this root is not this attempt's to
+                    // close, and forcing it down ends terminal sessions nobody
+                    // asked to end. Recording the root failed would be the same
+                    // mistake in the row: it is still serving.
+                    self.finish_failed_attempt_leaving_root(&attempt, reason.clone());
+                } else {
+                    // The timeout drops the in-flight future. Compensate in case
+                    // it inserted a tenant immediately before cancellation.
+                    let _ = self.host.close_workspace(&attempt.prefix, true).await;
+                    self.finish_failed_attempt(&attempt, reason.clone());
+                }
                 settlement.disarm();
                 Err(Error::Config(reason))
             }
@@ -938,6 +950,18 @@ impl DevserverState {
     }
 
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
+        self.record_failed_attempt(attempt, reason, true);
+    }
+
+    /// As [`Self::finish_failed_attempt`], but leaves the host's row for the
+    /// root alone. For an attempt that failed over a root something else has
+    /// mounted: the tenant there is not this attempt's to describe, and marking
+    /// it failed reads as `off` on a workspace that is serving.
+    fn finish_failed_attempt_leaving_root(&self, attempt: &MountAttempt, reason: String) {
+        self.record_failed_attempt(attempt, reason, false);
+    }
+
+    fn record_failed_attempt(&self, attempt: &MountAttempt, reason: String, mark_root: bool) {
         let adopted_failure = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
@@ -945,7 +969,9 @@ impl DevserverState {
                 .is_some_and(|record| record.complete_failure(attempt.generation, reason.clone()))
         };
         if adopted_failure {
-            self.host.mark_workspace_failed(&attempt.root, reason);
+            if mark_root {
+                self.host.mark_workspace_failed(&attempt.root, reason);
+            }
         } else {
             self.restore_current_host_lifecycle(&attempt.prefix);
             self.remove_finished_tombstone(&attempt.prefix);
