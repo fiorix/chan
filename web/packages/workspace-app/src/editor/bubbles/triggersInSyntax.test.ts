@@ -52,6 +52,12 @@ describe("a caret inside a formed image or link opens no trigger bubble", () => 
     });
   });
 
+  test("a tag typed against a following link keeps its picker", () => {
+    // The caret sits at the link's start boundary, where none of the
+    // link's text is behind it, so the scan reads only the tag.
+    expect(specAt("#ta[x](u)", 3)).toMatchObject({ kind: "tag", query: "ta" });
+  });
+
   test("a formed image's URL slot still opens the raw image bubble", () => {
     const doc = "![alt](./img.png)";
     expect(specAt(doc, doc.indexOf("./img.png") + 3)).toMatchObject({
@@ -74,11 +80,14 @@ describe("a heading marker is not a tag trigger", () => {
     expect(specAt(doc, doc.length)).toMatchObject({ kind: "tag", query: "topic" });
   });
 
-  test("a tag at the start of a line opens no picker either", () => {
-    // A consequence of the rule, not a separate intent: the text before
-    // the trigger is the test, and for a line-initial tag there is none.
-    // The tag itself is unaffected, written and rendered as always; what
-    // it loses is the completion list while typing.
-    expect(specAt("#todo", 5)).toBeNull();
+  test("a tag opening a line keeps its picker", () => {
+    // `#t` cannot be a heading, so a query after whitespace alone is a
+    // tag. A bare `#` still may be a heading, which is the case above.
+    expect(specAt("#todo", 5)).toMatchObject({ kind: "tag", query: "todo" });
+    expect(specAt("  #todo", 7)).toMatchObject({ kind: "tag", query: "todo" });
+  });
+
+  test("a query behind a second hash is still the marker", () => {
+    expect(specAt("##todo", 6)).toBeNull();
   });
 });

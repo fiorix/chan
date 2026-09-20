@@ -33,8 +33,8 @@ import { windowCaps } from "../../state/windowCaps";
 /// know how to replace part of it.
 const NODE_BAIL = ["Image", "Link"] as const;
 
-/// A line that is only whitespace and `#` before the trigger is a heading
-/// marker being typed, not a tag.
+/// Text before a trigger that is only whitespace and `#`: the trigger may
+/// be a heading marker rather than a tag.
 const HEADING_PREFIX_RE = /^[\s#]*$/;
 
 const SKIP_INSIDE = new Set<string>([
@@ -193,13 +193,21 @@ export function computeBubbleSpec(
   // typing.
   const tag = matchAtTrigger(before, "#");
   if (tag !== null && windowCaps.workspace) {
-    // A heading marker is not a tag trigger. On a line whose text before
-    // the trigger is only whitespace and `#`, the user is typing `#`,
-    // `##`, `###`, and the Enter that ends that line would otherwise
-    // commit a tag over the marker. The test is the text before the
-    // trigger rather than the column, because for `##` the trigger is the
-    // second `#`.
-    if (HEADING_PREFIX_RE.test(line.text.slice(0, tag.start))) return null;
+    // A heading marker is not a tag trigger, so the Enter that ends a
+    // heading line cannot commit a tag over the marker. Two shapes are the
+    // marker: a bare `#` opening a line, which has no query yet and may
+    // still become a heading, and any trigger with a `#` already before it
+    // (`##`, `###`, `##todo`). A non-empty query after whitespace alone is
+    // a tag: `#t` cannot be a heading, and a line that opens with a tag is
+    // ordinary writing. The test reads the text before the trigger rather
+    // than the column, because for `##` the trigger is the second `#`.
+    const beforeTrigger = line.text.slice(0, tag.start);
+    if (
+      HEADING_PREFIX_RE.test(beforeTrigger) &&
+      (beforeTrigger.includes("#") || tag.query === "")
+    ) {
+      return null;
+    }
     return {
       kind: "tag",
       triggerStart: line.from + tag.start,
@@ -267,7 +275,12 @@ function caretInsideNode(
       state,
     ).resolveInner(pos, side);
     while (node) {
-      if (names.includes(node.name)) return true;
+      // The start boundary is exclusive: at `node.from` none of the node's
+      // text is behind the caret, so nothing the scans read can belong to
+      // it. A tag typed directly against a following link (`#ta[x](u)`)
+      // sits there and keeps its picker. The end stays inclusive, where
+      // the whole node is behind the caret.
+      if (names.includes(node.name) && pos > node.from) return true;
       node = node.parent;
     }
   }
