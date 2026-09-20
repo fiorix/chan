@@ -306,16 +306,17 @@ const LIVE_TERMINALS: &str = "live_terminals";
 /// transport failure alike land in `Other`. It stays inside the desktop: the
 /// bridge handlers in `main.rs` map it onto the outcome the launcher route
 /// answers with.
-#[derive(Debug, serde::Serialize)]
-#[serde(tag = "kind")]
+#[derive(Debug)]
 pub enum SetWorkspaceOnError {
     /// An unforced off or forget was rejected: `active_terminals` live
     /// terminals would be killed. The caller confirms, then retries with
     /// `force: true`.
     ActiveTerminals { active_terminals: usize },
     /// A 409: the devserver declined the request and said why. The message is
-    /// its own words wherever it sent any, so it is shown unchanged. Distinct
-    /// from [`Other`](Self::Other) because a decline is an answer about this
+    /// the peer's own words wherever it sent any, carrying no wording of ours,
+    /// though they pass [`peer_message`] first so a caller may print them;
+    /// where it sent none, the message names the status instead. Distinct from
+    /// [`Other`](Self::Other) because a decline is an answer about this
     /// request, which is what makes it the one failure no caller may absorb
     /// into a success.
     Refused { message: String },
@@ -323,6 +324,28 @@ pub enum SetWorkspaceOnError {
     /// message. Answered or not: a 500 from a reachable devserver lands here
     /// beside a connection that never opened.
     Other { message: String },
+}
+
+/// Longest peer refusal message kept, in characters.
+const MAX_REFUSAL_MESSAGE_CHARS: usize = 200;
+
+/// Make a peer's own words fit to show. Control characters become spaces, so
+/// an escape sequence in the body cannot reach the terminal `chan` prints the
+/// message on; the result is trimmed and cut to
+/// [`MAX_REFUSAL_MESSAGE_CHARS`], on a character boundary, so a proxy error
+/// page cannot arrive where a sentence was expected. An empty result means the
+/// peer said nothing a reader can use.
+fn peer_message(raw: &str) -> String {
+    let inert: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let capped: String = inert
+        .trim()
+        .chars()
+        .take(MAX_REFUSAL_MESSAGE_CHARS)
+        .collect();
+    capped.trim_end().to_string()
 }
 
 /// Read a `409 Conflict` by its body rather than by its status.
@@ -348,6 +371,11 @@ pub enum SetWorkspaceOnError {
 /// devservers of other releases, and the count arrived without the
 /// `live_terminals` discriminator before that field existed, while the
 /// connect gate is the protocol number rather than the version.
+///
+/// A peer's own words go through [`peer_message`] before they are tested or
+/// kept, so what a banner and the `chan` terminal receive is bounded and inert
+/// whatever answered, and a discriminator padded with whitespace is caught by
+/// the same pass that would have shown it.
 async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
@@ -368,18 +396,18 @@ async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
     // An `error` holding only the discriminator names no reason either, and a
     // blank one names nothing at all: both fall through to the status, because
     // a banner reading `live_terminals` or reading empty is the failure this
-    // reader exists to remove.
+    // reader exists to remove. Both tests read the normalized message, so a
+    // padded discriminator and a body of nothing but control characters take
+    // the same fallback as their plain forms.
     let reason = error
-        .filter(|message| *message != LIVE_TERMINALS)
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-        .map(str::to_string)
+        .map(peer_message)
+        .filter(|message| message != LIVE_TERMINALS && !message.is_empty())
         .unwrap_or_else(|| {
-            let body = body.trim();
+            let body = peer_message(&body);
             if body.is_empty() || error.is_some() {
                 format!("devserver refused with HTTP {status}")
             } else {
-                body.to_string()
+                body
             }
         });
     SetWorkspaceOnError::Refused { message: reason }
@@ -3665,6 +3693,120 @@ mod tests {
             message(&error).contains("409"),
             "a countless discriminator is not a message: {error:?}"
         );
+    }
+
+    /// A peer's refusal reaches a banner and the `chan` terminal, and the peer
+    /// may be any release or a proxy standing in for one, so what it sent is
+    /// made inert and bounded before it is kept.
+    #[tokio::test]
+    async fn a_peer_refusal_is_made_inert_and_bounded() {
+        use axum::http::StatusCode;
+
+        async fn refused(body: &str) -> String {
+            let server =
+                MockManagementServer::start(vec![mock_response(StatusCode::CONFLICT, body)]).await;
+            let error = set_workspace_on(&server.raw_conn(), "/notes", true, false)
+                .await
+                .expect_err("a 409 is a refusal");
+            server.assert_responses_drained();
+            match error {
+                SetWorkspaceOnError::Refused { message } => message,
+                other => panic!("expected a refusal carrying a message, got {other:?}"),
+            }
+        }
+
+        let long = "x".repeat(MAX_REFUSAL_MESSAGE_CHARS + 300);
+        // Every case reports, so one run names all of them rather than stopping
+        // at the first.
+        let mut wrong: Vec<String> = Vec::new();
+        for (body, want) in [
+            // An escape sequence in a plain-text refusal must not reach a
+            // terminal that prints the message.
+            (
+                "workspace is locked\u{1b}]0;title\u{7}".to_string(),
+                "workspace is locked ]0;title",
+            ),
+            // The same inside the `{"error": ...}` envelope.
+            (
+                r#"{"error":"workspace is locked\u001b[2J"}"#.to_string(),
+                "workspace is locked [2J",
+            ),
+            // A multi-line body becomes one line rather than a banner of many.
+            (
+                "workspace is locked\nby another process".to_string(),
+                "workspace is locked by another process",
+            ),
+        ] {
+            let got = refused(&body).await;
+            if got != want {
+                wrong.push(format!("{body:?} -> {got:?}, wanted {want:?}"));
+            }
+        }
+        // A page-sized body is cut to the cap, on a character boundary.
+        let capped = refused(&long).await;
+        if capped.chars().count() != MAX_REFUSAL_MESSAGE_CHARS {
+            wrong.push(format!(
+                "a {} character body kept {} characters, wanted {MAX_REFUSAL_MESSAGE_CHARS}",
+                long.chars().count(),
+                capped.chars().count()
+            ));
+        }
+        let multibyte = "\u{e9}".repeat(MAX_REFUSAL_MESSAGE_CHARS + 50);
+        let cut = refused(&multibyte).await;
+        if cut.chars().count() != MAX_REFUSAL_MESSAGE_CHARS {
+            wrong.push(format!(
+                "a multibyte body kept {} characters, wanted {MAX_REFUSAL_MESSAGE_CHARS}",
+                cut.chars().count()
+            ));
+        }
+        // Nothing a peer sent may still be a control character afterwards.
+        for body in [
+            "workspace is locked\u{1b}]0;title\u{7}",
+            r#"{"error":"workspace is locked\u001b[2J"}"#,
+            "workspace is locked\nby another process",
+        ] {
+            let got = refused(body).await;
+            if got.chars().any(char::is_control) {
+                wrong.push(format!("{body:?} kept a control character: {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A body with nothing left in it after that pass is no message at all, so
+    /// it takes the same fallback as an empty one instead of showing a blank
+    /// banner or the discriminator.
+    #[tokio::test]
+    async fn a_refusal_of_only_control_characters_names_the_status() {
+        use axum::http::StatusCode;
+
+        async fn refused(body: &str) -> String {
+            let server =
+                MockManagementServer::start(vec![mock_response(StatusCode::CONFLICT, body)]).await;
+            let error = set_workspace_on(&server.raw_conn(), "/notes", true, false)
+                .await
+                .expect_err("a 409 is a refusal");
+            server.assert_responses_drained();
+            match error {
+                SetWorkspaceOnError::Refused { message } => message,
+                other => panic!("expected a refusal carrying a message, got {other:?}"),
+            }
+        }
+
+        let mut wrong: Vec<String> = Vec::new();
+        for body in [
+            "\u{7}\u{1b}\u{0}",
+            r#"{"error":"\u0007\u001b"}"#,
+            // The discriminator padded with whitespace is the banner this
+            // reader exists to remove, in another spelling.
+            r#"{"error":" live_terminals "}"#,
+        ] {
+            let got = refused(body).await;
+            if !got.contains("409") {
+                wrong.push(format!("{body:?} -> {got:?}, wanted the status named"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     fn other_message(error: SetWorkspaceOnError) -> String {
