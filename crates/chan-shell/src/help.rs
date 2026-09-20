@@ -1523,9 +1523,10 @@ once; it never waits for the agent's reply.
 The queue holds 100 entries per target, where a gemini message
 costs two entries and every other message costs one. The queue is
 dropped when the session is recycled (restarted). "Idle" is
-detected from output quiescence, so a target sitting at its
-prompt with a PAUSED, half-typed buffer reads as idle; that rare
-case is not detected.
+detected from the quiescence of visible output (a repaint that
+is escape sequences alone does not count), so a target sitting
+at its prompt with a PAUSED, half-typed buffer reads as idle;
+that rare case is not detected.
 
 --submit submits the bytes into each target hands-free. A non-empty
 body is delivered as its trailing newlines trimmed, then exactly
@@ -1605,10 +1606,10 @@ CAUTIONS:
   error ("no live terminal session matched"), not a silent no-op.
 
 CAVEATS:
-  Idle is inferred from output quiescence, so a target parked at
-  its prompt with a paused, half-typed buffer reads as idle and
-  gets written into anyway. Selection spans the whole server, so a
-  duplicated tab name is written to twice.
+  Idle is inferred from the quiescence of visible output, so a
+  target parked at its prompt with a paused, half-typed buffer
+  reads as idle and gets written into anyway. Selection spans the
+  whole server, so a duplicated tab name is written to twice.
 
 SEE ALSO:
   cs terminal survey (ask and BLOCK for an answer), cs terminal scrollback

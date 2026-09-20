@@ -381,9 +381,10 @@ pub(crate) fn generate_bootstrap_md(
          finish or park any active command, stop issuing tools, and yield/end the\n\
          turn so queued input can become the next prompt.\n\
          Do not simulate this with a sleep command.\n\
-         The queue's idle signal is PTY output silence: stdout/stderr postpones\n\
-         the drain, while a silent sleep may let bytes enter the terminal without\n\
-         ending the active model turn that needs to consume them.\n\n\
+         The queue's idle signal is the silence of visible PTY output:\n\
+         stdout/stderr postpones the drain, while a silent sleep may let bytes\n\
+         enter the terminal without ending the active model turn that needs to\n\
+         consume them.\n\n\
          When nothing is pending and your brief defines a next step, CONTINUE;\n\
          waiting on an empty queue is a stall, not discipline. Never end a turn\n\
          solely to wait for input that may not exist.\n\n",
@@ -1064,7 +1065,7 @@ mod tests {
             "sleep is distinguished from yielding the active turn"
         );
         assert!(
-            bootstrap.contains("queue's idle signal is PTY output silence"),
+            bootstrap.contains("queue's idle signal is the silence of visible PTY output"),
             "the implemented output-quiescence signal is documented"
         );
         // No em dashes; ASCII only.

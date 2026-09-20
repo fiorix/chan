@@ -39,7 +39,7 @@ mod redraw;
 mod ring;
 pub mod shell_profiles;
 
-use bytes::{contains_subslice, visible_activity_bytes};
+use bytes::{contains_subslice, VisibleScan};
 #[cfg(windows)]
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
@@ -76,13 +76,15 @@ pub const CLOSE_EXIT_BOUND: Duration = Duration::from_secs(5);
 const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 
 // `cs terminal write` serialization queue (the auto-deliver poke chain).
-// Each session has a bounded logical FIFO. When the agent is IDLE (its output
-// has quiesced), the drainer delivers the largest safe batch at the head and
-// awaits the agent's generation-START before the next drain. The signal is
-// purely output quiescence (`last_output_at`).
+// Each session has a bounded logical FIFO. When the agent is IDLE (it has
+// stopped printing), the drainer delivers the largest safe batch at the head
+// and awaits the agent's generation-START before the next drain. The signal is
+// purely the quiescence of VISIBLE output (`last_output_at`): a TUI that
+// repaints an unchanged screen writes colour resets and cursor moves with no
+// text, and counting those would hold its queue for as long as it runs.
 const WRITE_QUEUE_CAP: usize = 100;
 /// Output-idle threshold: the agent is considered done generating when no
-/// output has arrived for this long. Conservative to ride over brief
+/// visible output has arrived for this long. Conservative to ride over brief
 /// mid-stream gaps; tune against real agent streaming.
 const WRITE_QUEUE_QUIET_MS: i64 = 800;
 /// After a deliver+submit, wait at most this long for the agent's generation
@@ -3352,11 +3354,15 @@ struct Session {
     ring: Mutex<RingBuffer>,
     seq: AtomicU64,
     last_activity: AtomicI64,
-    /// Wall-clock millis of the most recent OUTPUT byte (the agent
-    /// rendering / generating), distinct from `last_activity` (which also
-    /// bumps on input). The `cs terminal write` queue drains only when this
-    /// has been quiet for `WRITE_QUEUE_QUIET_MS` (the agent is idle).
+    /// Wall-clock millis of the most recent VISIBLE output (the agent
+    /// rendering / generating), distinct from `last_activity` (which bumps on
+    /// input and on every output byte). The `cs terminal write` queue drains
+    /// only when this has been quiet for `WRITE_QUEUE_QUIET_MS` (the agent is
+    /// idle). Escape-only output does not move it; see [`VisibleScan`].
     last_output_at: AtomicI64,
+    /// Escape-sequence position carried across PTY reads for the visible-byte
+    /// count behind `last_output_at` and the tab activity dot.
+    visible_scan: Mutex<VisibleScan>,
     /// FIFO of pending logical messages for this session -- `cs terminal
     /// write` pokes and Rich Prompt messages share it -- drained when the
     /// agent is idle. Bounded at `WRITE_QUEUE_CAP` entries; dropped on session
@@ -3655,6 +3661,7 @@ impl Session {
             // Seed output-idle at spawn time so a brand-new session is not
             // treated as instantly idle before it has rendered anything.
             last_output_at: AtomicI64::new(now_unix_millis()),
+            visible_scan: Mutex::new(VisibleScan::default()),
             write_queue,
             last_deliver_at,
             awaiting_gen,
@@ -3954,6 +3961,7 @@ impl Session {
             seq: AtomicU64::new(meta.seq),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
+            visible_scan: Mutex::new(VisibleScan::default()),
             write_queue,
             last_deliver_at,
             awaiting_gen,
@@ -4711,10 +4719,19 @@ impl Session {
         }
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
-        // Output-only timestamp for the write-queue's idle/quiescence signal
-        // (the agent is rendering / generating).
-        self.last_output_at
-            .store(now_unix_millis(), Ordering::Relaxed);
+        let visible = self
+            .visible_scan
+            .lock()
+            .expect("terminal visible scan poisoned")
+            .count(bytes);
+        // The write queue's idle/quiescence signal (the agent is rendering /
+        // generating). PTYs emit cursor motion, SGR, OSC title changes, BEL,
+        // and CR/LF redraw noise while idle, some TUIs on every frame, so only
+        // user-visible non-whitespace text counts as the agent printing.
+        if visible > 0 {
+            self.last_output_at
+                .store(now_unix_millis(), Ordering::Relaxed);
+        }
         self.update_alt_screen(bytes);
         self.update_private_modes(bytes);
         self.note_dsr_query(bytes);
@@ -4724,18 +4741,14 @@ impl Session {
         let mut ring = self.ring.lock().expect("terminal ring poisoned");
         ring.push(bytes);
         self.seq.store(ring.end_seq(), Ordering::Relaxed);
-        if !self.focused.load(Ordering::Relaxed) {
-            // PTYs emit cursor motion, SGR, OSC title changes, BEL,
-            // and CR/LF redraw noise while idle. Only user-visible
-            // non-whitespace text should trip the tab activity dot.
-            let visible = visible_activity_bytes(bytes);
-            if visible > 0 {
-                let previous = self.bytes_since_focus.fetch_add(visible, Ordering::Relaxed);
-                if previous == 0 {
-                    self.broadcast(SessionEvent::Activity {
-                        bytes_since_focus: visible,
-                    });
-                }
+        // The tab activity dot trips on the same visible text, for the same
+        // reason.
+        if visible > 0 && !self.focused.load(Ordering::Relaxed) {
+            let previous = self.bytes_since_focus.fetch_add(visible, Ordering::Relaxed);
+            if previous == 0 {
+                self.broadcast(SessionEvent::Activity {
+                    bytes_since_focus: visible,
+                });
             }
         }
         self.broadcast(SessionEvent::Output(bytes.to_vec()));
@@ -5367,6 +5380,7 @@ mod tests {
             seq: AtomicU64::new(0),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
+            visible_scan: Mutex::new(VisibleScan::default()),
             write_queue,
             last_deliver_at,
             awaiting_gen,
@@ -6306,6 +6320,89 @@ mod tests {
         // delivers (idle the whole time).
         session.try_drain_batch(t1 + WRITE_QUEUE_GEN_START_CAP_MS + 10);
         assert_eq!(session.write_queue.lock().expect("queue").len(), 0);
+    }
+
+    /// One idle frame of a ratatui TUI drawing an unchanged buffer through the
+    /// crossterm backend, as Muse Code 1.3.0 writes it: three colour resets,
+    /// an attribute reset and a cursor placement, with no text.
+    const IDLE_REDRAW_FRAME: &[u8] = b"\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[38;3H";
+
+    #[test]
+    fn a_redraw_with_no_visible_text_does_not_hold_the_write_queue() {
+        let (session, command_rx) = test_session_with_commands(1024);
+        session.enqueue_cs_write("poke".into(), None);
+        let base = now_unix_millis() - 60_000;
+        session.last_output_at.store(base, Ordering::Relaxed);
+
+        for _ in 0..120 {
+            session.record_output(IDLE_REDRAW_FRAME);
+        }
+        assert_eq!(session.last_output_at.load(Ordering::Relaxed), base);
+
+        session.try_drain_batch(now_unix_millis());
+        assert!(command_rx.try_recv().is_ok(), "an idle repaint drains");
+        assert_eq!(session.queue_depth(), 0);
+    }
+
+    #[test]
+    fn a_redraw_that_prints_text_still_holds_the_write_queue() {
+        let (session, command_rx) = test_session_with_commands(1024);
+        session.enqueue_cs_write("poke".into(), None);
+        let base = now_unix_millis() - 60_000;
+        session.last_output_at.store(base, Ordering::Relaxed);
+
+        // The same frame with a spinner glyph drawn into it.
+        session.record_output(IDLE_REDRAW_FRAME);
+        session.record_output("\x1b[3G\u{273d}".as_bytes());
+        let printed_at = session.last_output_at.load(Ordering::Relaxed);
+        assert!(printed_at > base, "visible text moves the idle signal");
+
+        session.try_drain_batch(printed_at + WRITE_QUEUE_QUIET_MS - 1);
+        assert!(command_rx.try_recv().is_err(), "a printing agent holds");
+        assert_eq!(session.queue_depth(), 1);
+    }
+
+    #[test]
+    fn a_redraw_cut_across_reads_never_counts_as_visible() {
+        for cut in 1..IDLE_REDRAW_FRAME.len() {
+            let session = test_session_with_ring(1024);
+            let base = now_unix_millis() - 60_000;
+            session.last_output_at.store(base, Ordering::Relaxed);
+
+            session.record_output(&IDLE_REDRAW_FRAME[..cut]);
+            session.record_output(&IDLE_REDRAW_FRAME[cut..]);
+
+            assert_eq!(
+                session.last_output_at.load(Ordering::Relaxed),
+                base,
+                "cut at {cut}"
+            );
+            assert_eq!(session.bytes_since_focus(), 0, "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn a_redraw_does_not_pass_for_generation_start() {
+        let session = test_session_with_ring(1024);
+        session.enqueue_cs_write("one".into(), None);
+        session.enqueue_cs_write("two".into(), None);
+        let base = now_unix_millis() - 60_000;
+        session.last_output_at.store(base, Ordering::Relaxed);
+        let delivered_at = base + WRITE_QUEUE_QUIET_MS + 10;
+        session.try_drain_batch(delivered_at);
+        assert!(session.awaiting_gen.load(Ordering::Relaxed));
+
+        // A repaint after the delivery is not the agent starting to generate.
+        session.record_output(IDLE_REDRAW_FRAME);
+        session.try_drain_batch(delivered_at + 10);
+        assert!(session.awaiting_gen.load(Ordering::Relaxed));
+        assert_eq!(session.queue_depth(), 1);
+
+        // Text is, and the second message then waits for that turn to end.
+        session.record_output(b"Thinking");
+        session.try_drain_batch(delivered_at + 10);
+        assert!(!session.awaiting_gen.load(Ordering::Relaxed));
+        assert_eq!(session.queue_depth(), 1);
     }
 
     #[test]
