@@ -79,7 +79,7 @@ import urllib.parse
 REPO = pathlib.Path(__file__).resolve().parents[2]
 WEB = REPO / "web"
 WORKSPACE_APP = WEB / "packages/workspace-app"
-TERMINAL_TAB = WORKSPACE_APP / "src/components/TerminalTab.svelte"
+FONT_MODULE = WORKSPACE_APP / "src/terminal/font.ts"
 FONTS_CSS = WORKSPACE_APP / "src/fonts.css"
 PAGE_DIR = pathlib.Path(__file__).resolve().parent / "webgl-present-stall"
 
@@ -116,26 +116,28 @@ MARKER_SETTLE_MS = 200
 
 
 def linux_font_chain() -> str:
-    """The chain TerminalTab hands the renderer on Linux for `os-default`.
+    """The chain the terminal hands the renderer on Linux for `os-default`.
 
-    Read out of the component rather than restated, for the same reason
+    Read out of terminal/font.ts, which owns it, for the same reason
     terminal-pixels.py reads it: a chain edit has to move the harness with it.
+    On Linux `selectTerminalFont` always leads with the bundled face, whatever
+    the preference says, so the head is not conditional here.
     """
-    text = TERMINAL_TAB.read_text(encoding="utf-8")
+    text = FONT_MODULE.read_text(encoding="utf-8")
     # The same expression terminal-pixels.py uses, so the two harnesses cannot
-    # disagree about what the component says.
+    # disagree about what the module says.
     match = re.search(r"linux:\s*\n?\s*'([^']*)'", text)
     if not match:
         # The probe does not measure glyph shape, so an unreadable chain is
         # not fatal here the way it is in the pixels harness. Say so loudly
         # and carry on with the face the product bundles.
         print(
-            "warn: could not read the Linux font chain out of TerminalTab.svelte;"
+            "warn: could not read the Linux font chain out of terminal/font.ts;"
             " falling back to the bundled face",
             file=sys.stderr,
         )
         return '"Source Code Pro", monospace'
-    return match.group(1)
+    return f'"Source Code Pro", {match.group(1)}'
 
 
 def font_face_block() -> str:

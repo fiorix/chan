@@ -53,7 +53,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const WEB = path.join(REPO, "web");
 const WORKSPACE_APP = path.join(WEB, "packages/workspace-app");
-const TERMINAL_TAB = path.join(WORKSPACE_APP, "src/components/TerminalTab.svelte");
+const FONT_MODULE = path.join(WORKSPACE_APP, "src/terminal/font.ts");
 const FONTS_CSS = path.join(WORKSPACE_APP, "src/fonts.css");
 const GHOSTTY_COMPAT = path.join(WORKSPACE_APP, "src/terminal/ghosttyCompat.ts");
 const PAGE_DIR = path.join(HERE, "terminal-pixels");
@@ -81,22 +81,27 @@ const MIN_BLOCK_COVERAGE = 0.995;
 // stale pixels or an overlay drawing over content.
 const MAX_BLANK_INK = 0.001;
 
-/** The chain TerminalTab hands the renderer on Windows for this preference.
+/** The chain the terminal hands the renderer for this OS and preference.
  *
- * Read from the component rather than restated, and it mirrors the
- * component's promotion rule: opting into Source Code Pro puts the face at
- * the head of the same chain unless it already leads it.
+ * Read from `terminal/font.ts`, which owns it. `selectTerminalFont` there
+ * puts Source Code Pro at the head when the preference asks for it OR the OS
+ * is Linux, where the bundled face is always used; the fallback families are
+ * `SYSTEM_FONT_FAMILIES`. A harness that restates either of those measures a
+ * chain the product may not ship, so both are read and the promotion rule is
+ * mirrored with its source named.
  */
-function windowsFontChain(pref) {
-  const text = fs.readFileSync(TERMINAL_TAB, "utf8");
-  const match = text.match(/windows:\s*\n?\s*'([^']*)'/);
-  if (!match) throw new Error(`${TERMINAL_TAB}: no windows font chain found`);
-  const chain = match[1];
+function terminalFontChain(os, pref) {
+  const text = fs.readFileSync(FONT_MODULE, "utf8");
+  const match = text.match(new RegExp(`${os}:\\s*\\n?\\s*'([^']*)'`));
+  if (!match) throw new Error(`${FONT_MODULE}: no ${os} font chain found`);
+  const fallback = match[1];
   const sourceCodePro = '"Source Code Pro"';
-  if (pref === "source-code-pro" && !chain.startsWith(sourceCodePro)) {
-    return `${sourceCodePro}, ${chain}`;
-  }
-  return chain;
+  const leadsWithWebFont = pref === "source-code-pro" || os === "linux";
+  return leadsWithWebFont ? `${sourceCodePro}, ${fallback}` : fallback;
+}
+
+function windowsFontChain(pref) {
+  return terminalFontChain("windows", pref);
 }
 
 /** The app's own @font-face rule, for injection into the page. */

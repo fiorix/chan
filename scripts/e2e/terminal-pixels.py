@@ -62,7 +62,7 @@ import urllib.parse
 REPO = pathlib.Path(__file__).resolve().parents[2]
 WEB = REPO / "web"
 WORKSPACE_APP = WEB / "packages/workspace-app"
-TERMINAL_TAB = WORKSPACE_APP / "src/components/TerminalTab.svelte"
+FONT_MODULE = WORKSPACE_APP / "src/terminal/font.ts"
 FONTS_CSS = WORKSPACE_APP / "src/fonts.css"
 GHOSTTY_COMPAT = WORKSPACE_APP / "src/terminal/ghosttyCompat.ts"
 PAGE_DIR = pathlib.Path(__file__).resolve().parent / "terminal-pixels"
@@ -92,21 +92,20 @@ MAX_BLANK_INK = 0.001
 
 
 def linux_font_chain(pref: str) -> str:
-    """The chain TerminalTab hands the renderer on Linux for this preference.
+    """The chain the terminal hands the renderer on Linux for this preference.
 
-    Read from the component rather than restated, and it mirrors the
-    component's promotion rule: opting into Source Code Pro puts the face at
-    the head of the same chain unless it already leads it.
+    Read from terminal/font.ts, which owns it. `selectTerminalFont` there puts
+    Source Code Pro at the head when the preference asks for it OR the OS is
+    Linux, so on Linux the bundled face always leads whatever the preference
+    says, and the bare fallback chain this used to return for `os-default` is
+    one the product never ships.
     """
-    text = TERMINAL_TAB.read_text(encoding="utf-8")
+    text = FONT_MODULE.read_text(encoding="utf-8")
     match = re.search(r"linux:\s*\n?\s*'([^']*)'", text)
     if not match:
-        raise SystemExit(f"{TERMINAL_TAB}: no linux font chain found")
-    chain = match.group(1)
-    source_code_pro = '"Source Code Pro"'
-    if pref == "source-code-pro" and not chain.startswith(source_code_pro):
-        return f"{source_code_pro}, {chain}"
-    return chain
+        raise SystemExit(f"{FONT_MODULE}: no linux font chain found")
+    del pref  # Linux leads with the bundled face for every preference.
+    return f'"Source Code Pro", {match.group(1)}'
 
 
 def font_face_block() -> str:
