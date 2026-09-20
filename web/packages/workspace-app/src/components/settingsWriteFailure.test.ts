@@ -271,6 +271,22 @@ describe("a refused theme write", () => {
     expect(store.surfaceThemeOverride("editor")).toBe("dark");
   });
 
+  test("a write queued behind a refused one does not carry it", async () => {
+    const bodies = patchLog((nth) => nth === 1);
+    const store = await freshStore();
+
+    // Both begun before the first PATCH is answered, which is the case a
+    // rollback in the setter cannot reach on its own: the body of the
+    // second was captured when it was called, not when it is sent.
+    const first = store.setHybridSurfaceTheme("editor", "dark");
+    const second = store.setHybridSurfaceTheme("graph", "light");
+    await expect(first).rejects.toThrow();
+    await second;
+
+    expect(bodies.at(-1)).toEqual({ hybrid_surface_themes: { graph: "light" } });
+    expect(store.surfaceThemeOverride("editor")).toBeUndefined();
+  });
+
   test("setThemeChoice leaves the choice the server confirmed", async () => {
     patchLog((nth) => nth === 1);
     const store = await freshStore();
