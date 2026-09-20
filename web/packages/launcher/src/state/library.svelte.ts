@@ -190,9 +190,19 @@ function stopWorkspacePolling(): void {
 }
 
 /// Replace one workspace row in place, or append it when the list has not
-/// caught up yet. Keyed on `workspace_id`, which the registry owns.
+/// caught up yet.
+///
+/// Identity is the same pair `reconcilePending` keys on, and `workspace_id`
+/// alone is not it: a served row's id is its mount prefix without the slash
+/// (the desktop's `to_launcher_workspace`), so the same checkout served by two
+/// devservers gives two rows one id, and only `devserver_id` tells them apart.
+/// A local row carries `devserver_id: null`, so the pair is total.
+function sameRow(a: WorkspaceEntry, b: WorkspaceEntry): boolean {
+  return a.devserver_id === b.devserver_id && a.workspace_id === b.workspace_id;
+}
+
 function applyWorkspaceRow(row: WorkspaceEntry): void {
-  const at = library.workspaces.findIndex((w) => w.workspace_id === row.workspace_id);
+  const at = library.workspaces.findIndex((w) => sameRow(w, row));
   if (at < 0) {
     library.workspaces = [...library.workspaces, row];
     return;

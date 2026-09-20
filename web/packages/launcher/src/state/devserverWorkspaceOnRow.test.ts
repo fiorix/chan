@@ -59,6 +59,32 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("two devservers serving the same slug", () => {
+  // A devserver row's workspace_id is its mount prefix without the slash: the
+  // desktop builds it that way in to_launcher_workspace. The same checkout on
+  // two machines therefore gives two rows one workspace_id, told apart only by
+  // devserver_id. Matching on the id alone replaces the wrong machine's row,
+  // which leaves the list holding one row twice and the other not at all, and
+  // the Workspaces each is keyed on that id: each_key_duplicate, and the first
+  // machine's card gone.
+  it("replaces only the row of the devserver that was turned on", async () => {
+    const first = row({ workspace_id: "notes", prefix: "notes", devserver_id: "ds-a" });
+    const second = row({ workspace_id: "notes", prefix: "notes", devserver_id: "ds-b" });
+    library.workspaces = [first, { ...second, status: "stopped", on: false }];
+    served.answer = { ...second, status: "unavailable", error: "root is gone" };
+    served.listed = library.workspaces;
+
+    await setDevserverWorkspaceOn("ds-b", "notes", true);
+
+    const a = library.workspaces.filter((w) => w.devserver_id === "ds-a");
+    const b = library.workspaces.filter((w) => w.devserver_id === "ds-b");
+    expect(a, "the other machine keeps exactly one row").toHaveLength(1);
+    expect(a[0]!.status, "and it is untouched").toBe("running");
+    expect(b, "the turned-on machine has exactly one row").toHaveLength(1);
+    expect(b[0]!.status, "carrying the answer").toBe("unavailable");
+  });
+});
+
 describe("turning on a connected devserver's workspace", () => {
   it("shows the degraded mount the answer carries, without needing the re-list", async () => {
     // The route answers 200 with a row the devserver reports unavailable.
