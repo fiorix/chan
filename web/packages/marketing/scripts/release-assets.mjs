@@ -57,8 +57,8 @@ function gatewayDebNames(gatewayVersion) {
   );
 }
 
-/// The names the build produces, which is what the required-assets list and
-/// the verifier compare against the artifacts on disk.
+/// The names the build produces, which the build-side required-assets manifest
+/// compares against the artifacts on disk.
 export function gatewayDebAssets(version) {
   return gatewayDebNames(gatewayPackageVersion(version));
 }
@@ -110,18 +110,35 @@ export function updaterAssets(version) {
   ];
 }
 
-// Every non-updater asset a GA release must carry. Windows is required here.
-export function publicAssets(version) {
+function publicAssetsWithGatewayDebs(version, gatewayDebs) {
   return [
     ...cliAssets(),
     ...desktopAssets(version),
-    ...gatewayDebAssets(version),
+    ...gatewayDebs,
     ...windowsAssets(version),
   ];
 }
 
-// Every asset a GA release must carry: the public downloads plus the updater
-// payload and its signature.
+// Every non-updater asset the build-side manifest must stage. Windows is
+// required here, and prerelease gateway debs keep cargo-deb's tilde spelling.
+export function publicAssets(version) {
+  return publicAssetsWithGatewayDebs(version, gatewayDebAssets(version));
+}
+
+// The same public assets as a published GitHub release reports them. GitHub's
+// tilde-to-dot rewrite affects only prerelease gateway debs.
+export function publicAssetsAsPublished(version) {
+  return publicAssetsWithGatewayDebs(version, gatewayDebAssetsAsPublished(version));
+}
+
+// Every asset the build-side manifest must stage: public downloads plus the
+// updater payload and its signature.
 export function requiredAssets(version) {
   return [...publicAssets(version), ...updaterAssets(version)];
+}
+
+// Every asset a published release must report. Updater asset names do not use
+// Debian package-version spelling, so only the public gateway list differs.
+export function requiredAssetsAsPublished(version) {
+  return [...publicAssetsAsPublished(version), ...updaterAssets(version)];
 }

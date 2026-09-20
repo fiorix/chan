@@ -5,8 +5,8 @@ import { readFile } from "node:fs/promises";
 
 import {
   cliAssets,
-  publicAssets,
-  requiredAssets,
+  publicAssetsAsPublished,
+  requiredAssetsAsPublished,
   updaterAssets,
 } from "./release-assets.mjs";
 import { versionFromTag } from "./release-version.mjs";
@@ -22,10 +22,10 @@ async function main() {
   const version = versionFromTag(tag);
   const assets = new Map((release.assets ?? []).map((asset) => [asset.name, asset]));
 
-  const publics = publicAssets(version);
+  const publics = publicAssetsAsPublished(version);
   const updater = updaterAssets(version);
   const clis = cliAssets();
-  const required = requiredAssets(version);
+  const required = requiredAssetsAsPublished(version);
 
   const errors = [];
   const warnings = [];

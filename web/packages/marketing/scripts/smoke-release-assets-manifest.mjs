@@ -16,6 +16,7 @@ import {
   gatewayDebAssetsAsPublished,
   publicAssets,
   requiredAssets,
+  requiredAssetsAsPublished,
   updaterAssets,
   updaterPayloads,
   windowsAssets,
@@ -131,12 +132,11 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
 
 // How a prerelease is spelled in a gateway .deb name, and why it is spelled
 // twice. cargo-deb writes the Debian form, `0.99.0~rc1-1`, and the
-// required-assets list names that because a `publish=false` dry run compares
-// it against the artifacts on disk. A GitHub release upload rewrites the
-// tilde to a dot, so a name read back from a published release is
-// `0.99.0.rc1-1`, which is what the metadata generator matches. At a GA
-// version both transforms are the identity, which is why an rc dry run is
-// where the two readings first disagreed.
+// build-side required-assets list names that because staging compares against
+// the artifacts on disk. A GitHub release upload rewrites the tilde to a dot,
+// so the published-release manifest names `0.99.0.rc1-1` for the verifier and
+// other API readers. At a GA version both transforms are the identity, which
+// is why an rc dry run is where the two readings first disagreed.
 {
   const rc = "0.99.0-rc1";
   assertEqual(gatewayPackageVersion(rc), "0.99.0~rc1", "cargo-deb spelling");
@@ -148,6 +148,25 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
     assert(
       name.includes("_0.99.0~rc1-1_"),
       `a prerelease gateway deb carries the Debian tilde, got ${name}`,
+    );
+  }
+  const rcBuildRequired = requiredAssets(rc);
+  for (const name of rcDebs) {
+    assert(
+      rcBuildRequired.includes(name),
+      `the build-side manifest omits cargo-deb output ${name}`,
+    );
+  }
+  const rcPublishedDebs = gatewayDebAssetsAsPublished(rc);
+  const rcPublishedRequired = requiredAssetsAsPublished(rc);
+  for (const name of rcPublishedDebs) {
+    assert(
+      name.includes("_0.99.0.rc1-1_"),
+      `a published prerelease gateway deb carries GitHub's dot spelling, got ${name}`,
+    );
+    assert(
+      rcPublishedRequired.includes(name),
+      `the published-release manifest omits GitHub API asset ${name}`,
     );
   }
 
@@ -241,8 +260,8 @@ try {
   assertEqual(winInstaller.name, windowsNames[0], "windows-x86_64 payload is the installer");
   assertEqual(winInstaller.signature, "fixture-updater-signature", "windows-x86_64 signature");
 
-  // Prerelease assets keep the Cargo version in desktop names but gateway
-  // debs use cargo-deb's package-version spelling.
+  // This fixture is a published release: desktop names keep the Cargo version,
+  // while GitHub reports prerelease gateway debs with a dot in the version.
   const prereleaseVersion = "0.56.0-rc1";
   const prerelease = runCollect("prerelease", prereleaseVersion, optionalNames(prereleaseVersion));
   assertEqual(prerelease.version, prereleaseVersion, "prerelease version");
