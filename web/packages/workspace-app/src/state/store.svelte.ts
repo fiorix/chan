@@ -423,19 +423,20 @@ export function withHybridSurfaceTheme(
 }
 
 /// The apply is optimistic so the surface repaints at once, and the
-/// rollback is what keeps that honest: the live table is what the next
+/// rollback is what keeps that honest: the live table is what every
 /// write serialises from, so an override the server refused would be
-/// saved by the next write that succeeds. Rolling back on rejection
-/// leaves the table holding only what the server confirmed, and the
+/// saved by the next write that succeeds. The rollback restores one
+/// surface, not the whole table, because a write begun while this one
+/// was in flight has already applied its own and must keep it. The
 /// rejection still reaches the caller that reports it.
 export function setHybridSurfaceTheme(
   kind: HybridSurfaceKind,
   choice: SurfaceThemeChoice,
 ): Promise<void> {
-  const confirmed = hybridSurfaceThemesSnapshot();
+  const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
   return persistHybridSurfaceThemes().catch((error: unknown) => {
-    applyHybridSurfaceThemes(confirmed);
+    applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
     throw error;
   });
 }
@@ -444,10 +445,10 @@ export function setHybridSurfaceTheme(
 /// `theme`. The settings surface's per-surface control offers this as
 /// "Inherit".
 export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> {
-  const confirmed = hybridSurfaceThemesSnapshot();
+  const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
   return persistHybridSurfaceThemes().catch((error: unknown) => {
-    applyHybridSurfaceThemes(confirmed);
+    applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
     throw error;
   });
 }
@@ -459,9 +460,13 @@ export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> 
 // the store barrel.
 export { updateGlobalConfigSerial };
 
+// The snapshot is taken inside the mutation, which the write chain runs
+// after its GET rather than when this is called, so a write queued behind
+// a refused one sends the table as the rollback left it.
 function persistHybridSurfaceThemes(): Promise<void> {
-  const next = hybridSurfaceThemesSnapshot();
-  return updateGlobalConfigSerial(() => ({ hybrid_surface_themes: next }));
+  return updateGlobalConfigSerial(() => ({
+    hybrid_surface_themes: hybridSurfaceThemesSnapshot(),
+  }));
 }
 
 // Route the keymap override layer's writes through the shared config helper:
