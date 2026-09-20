@@ -13,6 +13,10 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+// The real error class, so the views' `instanceof` sees the same one the
+// mocked module hands them.
+import { HttpError } from "@chan/web-shared/api";
+
 const REFUSAL = "account is blocked";
 /// What the service answers the second DELETE: the grant is already gone.
 const GONE = "no such grant";
@@ -24,7 +28,8 @@ const listIncomingShares = vi.fn();
 const listDevserverGrants = vi.fn();
 const deleteDevserverGrant = vi.fn();
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async () => ({
+  HttpError: (await import("@chan/web-shared/api")).HttpError,
   api: {
     listTokens: () => listTokens(),
     revokeToken: (id: string) => revokeToken(id),
@@ -209,5 +214,40 @@ describe("a grant revoke clicked twice", () => {
     // The grantee is gone and nothing claims otherwise.
     expect(target.textContent).not.toContain("friend@example.com");
     expect(target.textContent).not.toContain("Not revoked");
+  });
+});
+
+describe("a refusal that carries no message", () => {
+  // A body-less 502 from a proxy: `HttpError.message` is empty, and so is
+  // the status text it would fall back to, because HTTP/2 carries no
+  // reason phrase and that is how this SPA is served.
+  test("says the status on the token row", async () => {
+    revokeToken.mockRejectedValue(new HttpError(502, ""));
+    const target = await mountView("./Tokens.svelte");
+
+    buttonWith(target, "Revoke").click();
+    await flush();
+    buttonWith(target, "Revoke token").click();
+    await flush();
+
+    expect(unhandled).toEqual([]);
+    expect(target.textContent).toContain("laptop");
+    expect(target.textContent).toContain("Not revoked");
+    expect(target.textContent).toContain("502");
+  });
+
+  test("says the status on the grant row", async () => {
+    deleteDevserverGrant.mockRejectedValue(new HttpError(502, ""));
+    const target = await mountView("./Devservers.svelte", { devservers: [] });
+    buttonWith(target, "Share").click();
+    await flush();
+
+    buttonWith(target, "Revoke").click();
+    await flush();
+
+    expect(unhandled).toEqual([]);
+    expect(target.textContent).toContain("friend@example.com");
+    expect(target.textContent).toContain("Not revoked");
+    expect(target.textContent).toContain("502");
   });
 });
