@@ -201,3 +201,82 @@ describe("the colour picker", () => {
     expect(commits).toEqual(["#445566"]);
   });
 });
+
+// The three theme setters apply to the live store first so the surface
+// responds at once, and the store is what the next write serialises. A
+// refused write that is not taken back is therefore committed by the next
+// one that succeeds: the app says a write failed and then saves it anyway.
+describe("a refused theme write", () => {
+  /// A config endpoint that refuses the PATCHes `refuse` names, applies the
+  /// rest, and records every `preferences` body it was sent.
+  function patchLog(refuse: (nth: number) => boolean): Array<Record<string, unknown>> {
+    const bodies: Array<Record<string, unknown>> = [];
+    let patches = 0;
+    const json = (value: unknown, status: number): Response =>
+      new Response(JSON.stringify(value), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!url.includes("/api/config")) return new Response(null, { status: 404 });
+      if ((init?.method ?? "GET") !== "PATCH") return json(server, 200);
+      patches += 1;
+      const sent = JSON.parse(String(init?.body ?? "{}")) as {
+        preferences: Record<string, unknown>;
+      };
+      bodies.push(sent.preferences);
+      if (refuse(patches)) return json({ error: REFUSAL }, 400);
+      server = {
+        ...server,
+        revision: server.revision + 1,
+        preferences: { ...server.preferences, ...sent.preferences },
+      };
+      return json(server, 200);
+    });
+    return bodies;
+  }
+
+  async function freshStore(): Promise<typeof import("../state/store.svelte")> {
+    vi.resetModules();
+    return await import("../state/store.svelte");
+  }
+
+  test("setHybridSurfaceTheme leaves nothing for the next write to carry", async () => {
+    const bodies = patchLog((nth) => nth === 1);
+    const store = await freshStore();
+
+    await expect(store.setHybridSurfaceTheme("editor", "dark")).rejects.toThrow();
+    await store.setHybridSurfaceTheme("graph", "light");
+
+    // The body of the write that succeeded is where the refused one gets
+    // saved, so that is the assertion this test exists for.
+    expect(bodies.at(-1)).toEqual({ hybrid_surface_themes: { graph: "light" } });
+    expect(store.surfaceThemeOverride("editor")).toBeUndefined();
+  });
+
+  test("clearHybridSurfaceTheme leaves the override the server still holds", async () => {
+    const bodies = patchLog((nth) => nth === 2);
+    const store = await freshStore();
+
+    await store.setHybridSurfaceTheme("editor", "dark");
+    await expect(store.clearHybridSurfaceTheme("editor")).rejects.toThrow();
+    await store.setHybridSurfaceTheme("graph", "light");
+
+    // A refused clear rides along the same way, as a deletion: the next
+    // write drops an override the server never stopped holding.
+    expect(bodies.at(-1)).toEqual({
+      hybrid_surface_themes: { editor: "dark", graph: "light" },
+    });
+    expect(store.surfaceThemeOverride("editor")).toBe("dark");
+  });
+
+  test("setThemeChoice leaves the choice the server confirmed", async () => {
+    patchLog((nth) => nth === 1);
+    const store = await freshStore();
+    expect(store.ui.themeChoice).toBe("system");
+
+    await expect(store.setThemeChoice("dark")).rejects.toThrow();
+    expect(store.ui.themeChoice).toBe("system");
+  });
+});
