@@ -12,13 +12,17 @@ The required-assets list names the artifacts the pipeline actually produces at e
 
 Owner ruling, 2026-09-20: the tilde. `requiredAssets` names the Debian form cargo-deb writes (`0.99.0~rc1-1`), which is what a `publish=false` dry run compares it against, and the comment beside the transform names the GitHub upload rewrite of `~` to `.`.
 
+The two readers need distinct spellings. `gatewayPackageVersion` and `gatewayDebAssets` describe build artifacts and supply the tilde form to `requiredAssets` and the verifier. `gatewayAssetVersion` and `gatewayDebAssetsAsPublished` describe uploaded assets and supply the dot form to the published-release collector and metadata generator. The names agree at GA. A published-release fixture uses the uploaded spelling, so a prerelease test exercises the same names its reader receives.
+
 ## Boundaries
 
-`web/packages/marketing/scripts/release-version.mjs` (`gatewayPackageVersion`), `web/packages/marketing/scripts/release-assets.mjs` (`requiredAssets`), and their tests. The release workflow and cargo-deb are not changed.
+`web/packages/marketing/scripts/release-version.mjs`, `web/packages/marketing/scripts/release-assets.mjs`, the published-asset readers `collect-release-assets.mjs` and `generate-release-metadata.mjs` in the same directory, and their tests. The release workflow and cargo-deb are not changed.
 
 ## Acceptance
 
-1. A unit test over a `-rcN` version asserts the name shape that the pipeline produces, with the chosen reading stated in the test's own words.
+1. A unit test over a `-rcN` version asserts the tilde name shape produced by the build and the dot name shape read from a published release, with each reading stated in the test's own words.
 2. A GA version still produces 25 of 25 matching names, pinned.
 3. The decision between the tilde and the dot is recorded where the transform lives, naming the GitHub upload rewrite.
 4. The next rc dry run's asset diff is empty for the gateway debs, or the diff is explained by the recorded decision.
+
+Implementation evidence is on `main` at `9a368ed7c`: the transforms, their callers and the prerelease manifest fixtures keep the two readings separate. Acceptance 4 still needs the release candidate's artifact comparison; the unit tests do not establish that result.
