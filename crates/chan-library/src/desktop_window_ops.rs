@@ -19,6 +19,7 @@
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::host::LauncherWorkspace;
 use crate::window_titles::SharedWindowTitles;
 
 /// Which kind of window `cs window new` spawns. The control socket fills
@@ -42,11 +43,20 @@ pub enum NewWindowKind {
 /// Richer than the plain `Result<(), String>` the other ops reply with: the live
 /// terminal COUNT has to round-trip the bridge so the launcher shows it in the
 /// confirm prompt and retries with `force: true` -- parity with the local/remote
-/// workspace-off confirm flow.
+/// workspace-off confirm flow -- and a turn-on's row has to round-trip it so the
+/// route answers the workspace's state instead of a bare success.
 #[derive(Debug)]
 pub enum SetWorkspaceOnOutcome {
-    /// The mount state was set (on, off, or a forced off).
-    Done,
+    /// The mount state was set (on, off, or a forced off). `workspace` carries
+    /// the devserver's row for a turn-on, the one verb whose route answers with
+    /// it, so that caller reads the workspace's health off the answer instead of
+    /// asking again. It is `None` for an off and for a forget, whose routes
+    /// answer 204 and are handed no row to begin with, and for a turn-on whose
+    /// row the desktop never read: a local devserver's best-effort toggle
+    /// reports done without reaching the devserver at all.
+    Done {
+        workspace: Option<LauncherWorkspace>,
+    },
     /// An unforced off was refused: `active_terminals` live terminal sessions
     /// would be killed. The launcher confirms, then retries with `force: true`.
     NeedsForce { active_terminals: usize },
@@ -143,7 +153,8 @@ pub enum DesktopWindowOp {
     /// workspace with live terminals replies [`SetWorkspaceOnOutcome::NeedsForce`]
     /// (carrying the count) so the launcher confirms-then-retries with
     /// `force: true`; an on, or a forced off, replies
-    /// [`SetWorkspaceOnOutcome::Done`]. Inert without a desktop attached -- the
+    /// [`SetWorkspaceOnOutcome::Done`], carrying the devserver's row for an on so
+    /// the route can answer with it. Inert without a desktop attached -- the
     /// route then answers [`NO_DESKTOP`].
     SetDevserverWorkspaceOn {
         id: String,
@@ -154,8 +165,10 @@ pub enum DesktopWindowOp {
     },
     /// Forget (unregister) a connected devserver's workspace, keyed by
     /// `(id, prefix)`. The launcher's devserver-workspace Remove button drives
-    /// this; the reply is `Ok(())` once the remote registry drops it. Inert
-    /// without a desktop attached -- the route then answers [`NO_DESKTOP`].
+    /// this; the reply is [`SetWorkspaceOnOutcome::Done`] with no row once the
+    /// remote registry drops it, or [`SetWorkspaceOnOutcome::NeedsForce`] when an
+    /// unforced forget would kill live terminals. Inert without a desktop
+    /// attached -- the route then answers [`NO_DESKTOP`].
     ForgetDevserverWorkspace {
         id: String,
         prefix: String,

@@ -1535,7 +1535,12 @@ fn live_terminals_response(active_terminals: usize) -> Response {
 
 /// `POST /api/library/devservers/{id}/workspaces/on` `{prefix}`: turn a connected
 /// devserver's workspace (the remote mount `prefix`) on through the desktop
-/// bridge. 204/409 (`on` never blocks on terminals, so `force` is irrelevant).
+/// bridge. 200 with the workspace's [`LauncherWorkspace`] row, the shape the
+/// local `on` answers with, so one turn-on verb has one answer and a caller reads
+/// a degraded mount off the row instead of refetching for it. 204 where the
+/// desktop has no row to report, which is a local devserver's best-effort toggle
+/// that never reached it. 409 on a refusal (`on` never blocks on terminals, so
+/// `force` is irrelevant).
 async fn handle_devserver_workspace_on(
     State(host): State<Arc<WorkspaceHost>>,
     AxumPath(id): AxumPath<String>,
@@ -1557,9 +1562,11 @@ async fn handle_devserver_workspace_off(
 }
 
 /// Shared on/off dispatch for a connected devserver's workspace. Maps the bridge
-/// outcome: `Done` → 204; `NeedsForce` → 409 + [`LiveTerminalsRejection`] (the
-/// distinguishable confirm signal); a bridge error → 409 with the message (no
-/// desktop attached / devserver not connected).
+/// outcome: `Done` → 200 with the row for an on that carried one, 204 otherwise;
+/// `NeedsForce` → 409 + [`LiveTerminalsRejection`] (the distinguishable confirm
+/// signal); a bridge error → 409 with the message (no desktop attached /
+/// devserver not connected). Only the on verb answers with a row: an off reports
+/// no state the caller does not already hold, so it keeps its 204.
 async fn set_devserver_workspace_on(
     host: &WorkspaceHost,
     id: String,
@@ -1578,7 +1585,10 @@ async fn set_devserver_workspace_on(
         })
         .await
     {
-        Ok(SetWorkspaceOnOutcome::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(SetWorkspaceOnOutcome::Done { workspace }) => match workspace {
+            Some(row) if on => Json(row).into_response(),
+            _ => StatusCode::NO_CONTENT.into_response(),
+        },
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
             live_terminals_response(active_terminals)
         }
@@ -1605,7 +1615,7 @@ async fn handle_forget_devserver_workspace(
         })
         .await
     {
-        Ok(SetWorkspaceOnOutcome::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(SetWorkspaceOnOutcome::Done { .. }) => StatusCode::NO_CONTENT.into_response(),
         Ok(SetWorkspaceOnOutcome::NeedsForce { active_terminals }) => {
             live_terminals_response(active_terminals)
         }
@@ -3962,6 +3972,27 @@ mod window_op_route_tests {
         send(router, "POST", uri, None).await
     }
 
+    /// One connected devserver's workspace row as the desktop tags it before
+    /// handing it back over the bridge: keyed by its remote mount slug and
+    /// discriminated by `devserver_id`. `error` carries the reason a mounted
+    /// workspace is `unavailable` rather than `running`.
+    fn devserver_row(prefix: &str, on: bool, error: Option<&str>) -> LauncherWorkspace {
+        LauncherWorkspace {
+            workspace_id: prefix.to_string(),
+            path: format!("/remote/{prefix}"),
+            label: prefix.to_string(),
+            on,
+            library_id: Some("lib-abc".to_string()),
+            devserver_id: Some("ds1".to_string()),
+            prefix: prefix.to_string(),
+            status: match error {
+                Some(_) => WorkspaceStatus::Unavailable,
+                None => WorkspaceStatus::Running,
+            },
+            error: error.map(str::to_string),
+        }
+    }
+
     /// Drive any method, optionally with a JSON body (sets the content-type so the
     /// `Json` extractor accepts it -- needed for `workspaces/open`).
     async fn send(
@@ -4083,7 +4114,7 @@ mod window_op_route_tests {
                     }
                     DesktopWindowOp::SetDevserverWorkspaceOn { reply, .. }
                     | DesktopWindowOp::ForgetDevserverWorkspace { reply, .. } => {
-                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done));
+                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done { workspace: None }));
                     }
                     DesktopWindowOp::PickFolder { reply } => {
                         let _ = reply.send(Ok(Some("/picked/dir".to_string())));
@@ -4137,13 +4168,27 @@ mod window_op_route_tests {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "workspaces/open");
         for uri in [
-            "/api/library/devservers/ds1/workspaces/on",
             "/api/library/devservers/ds1/workspaces/off",
             "/api/library/devservers/ds1/workspaces/forget",
         ] {
             let (status, _) = send(&router, "POST", uri, Some(r#"{"prefix":"myws"}"#)).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{uri}");
         }
+        // Turn-on answers the row the desktop carried back, and 204 when it
+        // carried none -- this desktop replies without one.
+        let (status, body) = send(
+            &router,
+            "POST",
+            "/api/library/devservers/ds1/workspaces/on",
+            Some(r#"{"prefix":"myws"}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "workspaces/on without a row"
+        );
+        assert!(body.is_empty(), "a row-less on answers no body");
         // Pick-folder returns the chosen path as a JSON string (200).
         let (status, body) = post(&router, "/api/library/fs/pick-folder").await;
         assert_eq!(status, StatusCode::OK, "pick-folder");
@@ -4741,7 +4786,9 @@ mod window_op_route_tests {
                                 active_terminals: 2,
                             }
                         } else {
-                            SetWorkspaceOnOutcome::Done
+                            SetWorkspaceOnOutcome::Done {
+                                workspace: on.then(|| devserver_row("myws", true, None)),
+                            }
                         };
                         let _ = reply.send(Ok(outcome));
                     }
@@ -4751,7 +4798,7 @@ mod window_op_route_tests {
                                 active_terminals: 2,
                             }
                         } else {
-                            SetWorkspaceOnOutcome::Done
+                            SetWorkspaceOnOutcome::Done { workspace: None }
                         };
                         let _ = reply.send(Ok(outcome));
                     }
@@ -4783,7 +4830,7 @@ mod window_op_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "forced off");
-        // On never blocks on terminals → 204 (force irrelevant).
+        // On never blocks on terminals → 200 with the row (force irrelevant).
         let (status, _) = send(
             &router,
             "POST",
@@ -4791,7 +4838,7 @@ mod window_op_route_tests {
             Some(r#"{"prefix":"myws"}"#),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "on");
+        assert_eq!(status, StatusCode::OK, "on");
         // Forget shares the same refusal body and force retry contract.
         let (status, body) = send(
             &router,
@@ -4833,9 +4880,17 @@ mod window_op_route_tests {
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
                 match op {
-                    DesktopWindowOp::SetDevserverWorkspaceOn { reply, .. }
-                    | DesktopWindowOp::ForgetDevserverWorkspace { reply, .. } => {
-                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done));
+                    DesktopWindowOp::SetDevserverWorkspaceOn { prefix, reply, .. } => {
+                        let workspace = match prefix.as_str() {
+                            "broken" => devserver_row("broken", true, Some("root is gone")),
+                            other => devserver_row(other, true, None),
+                        };
+                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done {
+                            workspace: Some(workspace),
+                        }));
+                    }
+                    DesktopWindowOp::ForgetDevserverWorkspace { reply, .. } => {
+                        let _ = reply.send(Ok(SetWorkspaceOnOutcome::Done { workspace: None }));
                     }
                     _ => {}
                 }

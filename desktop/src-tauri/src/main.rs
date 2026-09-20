@@ -2553,7 +2553,7 @@ pub(crate) async fn forget_devserver_workspace_impl(
             if let Err(e) = refresh_devserver_workspace_cache(state, &id, &conn).await {
                 tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after forget failed");
             }
-            Ok(chan_server::SetWorkspaceOnOutcome::Done)
+            Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace: None })
         }
         Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => {
             Ok(chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals })
@@ -2570,6 +2570,10 @@ pub(crate) async fn forget_devserver_workspace_impl(
 /// resolves to [`NeedsForce`](chan_server::SetWorkspaceOnOutcome::NeedsForce)
 /// with the live-terminal count, so the launcher confirms then retries with
 /// `force: true` (which force-offs -> [`Done`](chan_server::SetWorkspaceOnOutcome::Done)).
+/// A `Done` for an on carries the devserver's row, tagged as this devserver's
+/// launcher row, so that route answers with the workspace's state. An off carries
+/// none, because its route has no use for one, and neither does the local
+/// best-effort arm below, which never reached the devserver to read one.
 pub(crate) async fn set_devserver_workspace_on_impl(
     state: &Arc<AppState>,
     id: String,
@@ -2582,11 +2586,22 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         .get(&id)
         .ok_or_else(|| format!("devserver {id} is not connected"))?;
     match devserver::set_workspace_on(&conn, &devserver_route_prefix(&prefix), on, force).await {
-        Ok(()) => {
+        Ok(row) => {
             if let Err(e) = refresh_devserver_workspace_cache(state, &id, &conn).await {
                 tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after toggle failed");
             }
-            Ok(chan_server::SetWorkspaceOnOutcome::Done)
+            // Only an on carries its row up: the off route answers 204, and a
+            // row nobody reads is one more thing to keep true. Tag it after the
+            // refresh, which is the call that learns the devserver's library id,
+            // so a first toggle carries it too.
+            let workspace = if on {
+                row.map(|row| {
+                    to_launcher_workspace(&id, state.devserver_feed.library_id_of(&id), row)
+                })
+            } else {
+                None
+            };
+            Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace })
         }
         // Live-terminal block is a confirmable outcome, not a failure: round-trip
         // the count so the launcher can offer the force-off.
@@ -2601,7 +2616,9 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::Other { message }) => {
             if devserver_is_local(state, &id) {
                 tracing::warn!(devserver = %id, "local devserver workspace toggle failed (non-fatal): {message}");
-                Ok(chan_server::SetWorkspaceOnOutcome::Done)
+                // The request never landed, so there is no row to report: answer
+                // done without one rather than assert a state nobody observed.
+                Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace: None })
             } else {
                 Err(message)
             }
@@ -2767,14 +2784,20 @@ async fn close_remote_workspace_from_handoff(
     let result = if remove {
         devserver::forget_workspace(&conn, &prefix, false).await
     } else {
-        devserver::set_workspace_on(&conn, &prefix, false, false).await
+        // An off; the CLI handoff answers done or refused, never a row.
+        devserver::set_workspace_on(&conn, &prefix, false, false)
+            .await
+            .map(|_| ())
     };
     match result {
         Ok(()) => {
             if let Err(e) = refresh_devserver_workspace_cache(state, &id, &conn).await {
                 tracing::warn!(devserver = %id, error = %e, "refreshing devserver workspaces after a remote close failed");
             }
-            Ok((chan_server::SetWorkspaceOnOutcome::Done, was_served))
+            Ok((
+                chan_server::SetWorkspaceOnOutcome::Done { workspace: None },
+                was_served,
+            ))
         }
         Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => Ok((
             chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals },
@@ -5431,7 +5454,10 @@ fn main() {
                                 )
                                 .await
                                 {
-                                    Ok((chan_server::SetWorkspaceOnOutcome::Done, was_served)) => {
+                                    Ok((
+                                        chan_server::SetWorkspaceOnOutcome::Done { .. },
+                                        was_served,
+                                    )) => {
                                         Response::RemoteWorkspaceClosed {
                                             desktop_version: CHAN_VERSION.into(),
                                             was_served,
@@ -5460,7 +5486,7 @@ fn main() {
                                 )
                                 .await
                                 {
-                                    Ok((chan_server::SetWorkspaceOnOutcome::Done, _)) => {
+                                    Ok((chan_server::SetWorkspaceOnOutcome::Done { .. }, _)) => {
                                         Response::RemoteWorkspaceForgotten {
                                             desktop_version: CHAN_VERSION.into(),
                                         }

@@ -2175,12 +2175,18 @@ fn launcher_workspace_toggle_request(
 /// the SPA can confirm-then-force; `force: true` overrides the guard. The gateway
 /// arm speaks the devserver's launcher routes instead (see
 /// [`launcher_workspace_toggle_request`]); its `/off` answers the same 409 body.
+///
+/// A success carries the workspace's updated row, so the caller reads a degraded
+/// mount off the answer rather than re-listing for it: the direct arm from the
+/// devserver's own [`WorkspaceEntry`], the gateway arm from the launcher route's
+/// [`chan_server::LauncherWorkspace`]. The launcher's `/off` answers 204, so a
+/// gateway off is the one success with no row.
 pub async fn set_workspace_on(
     conn: &DevserverConn,
     prefix: &str,
     on: bool,
     force: bool,
-) -> Result<(), SetWorkspaceOnError> {
+) -> Result<Option<DevserverWorkspaceRow>, SetWorkspaceOnError> {
     if let Some(gw) = &conn.gateway {
         let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
         let resp = gateway_request(
@@ -2206,7 +2212,19 @@ pub async fn set_workspace_on(
                 resp.status()
             )));
         }
-        return Ok(());
+        if !on {
+            return Ok(None);
+        }
+        let entry = resp
+            .json::<chan_server::LauncherWorkspace>()
+            .await
+            .map_err(|e| {
+                SetWorkspaceOnError::other(format!("decoding gateway workspace on: {e}"))
+            })?;
+        let row = row_from_launcher(conn, entry)
+            .await
+            .map_err(SetWorkspaceOnError::other)?;
+        return Ok(Some(row));
     }
     let url = workspace_on_url(&conn.host, conn.port, prefix);
     let body = SetWorkspaceOnRequest { on, force };
@@ -2235,7 +2253,11 @@ pub async fn set_workspace_on(
             resp.status()
         )));
     }
-    Ok(())
+    let entry = resp.json::<WorkspaceEntry>().await.map_err(|e| {
+        SetWorkspaceOnError::other(format!("decoding devserver workspace on/off: {e}"))
+    })?;
+    let row = row_from_entry(conn, entry).map_err(SetWorkspaceOnError::other)?;
+    Ok(Some(row))
 }
 
 #[cfg(test)]
@@ -3385,6 +3407,75 @@ mod tests {
         (status, body.into())
     }
 
+    #[tokio::test]
+    async fn set_workspace_on_answers_the_row_per_arm() {
+        use axum::http::StatusCode;
+
+        // The direct arm reads the devserver's own entry, the gateway arm the
+        // launcher route's row. Both report a degraded mount as `unavailable`,
+        // which is what the turn-on answer exists to carry.
+        let entry = serde_json::json!({
+            "prefix": "/notes",
+            "path": "/home/alice/notes",
+            "label": "notes",
+            "on": true,
+            "status": "unavailable",
+            "error": "root is gone",
+            "token": "tenant-token",
+        })
+        .to_string();
+        let server = MockManagementServer::start(vec![mock_response(StatusCode::OK, entry)]).await;
+        let row = set_workspace_on(&server.raw_conn(), "/notes", true, false)
+            .await
+            .expect("direct on")
+            .expect("the devserver answers its entry");
+        assert_eq!(row.prefix, "/notes");
+        assert!(row.on, "a degraded mount stays on");
+        assert_eq!(row.status, chan_server::WorkspaceStatus::Unavailable);
+        assert_eq!(row.error.as_deref(), Some("root is gone"));
+        assert!(
+            row.url.contains("t=tenant-token"),
+            "the entry's token becomes the tenant url: {}",
+            row.url
+        );
+        server.assert_responses_drained();
+
+        let launcher_row = serde_json::json!({
+            "workspace_id": "notes",
+            "prefix": "notes",
+            "path": "/home/alice/notes",
+            "label": "notes",
+            "on": true,
+            "status": "unavailable",
+            "error": "root is gone",
+            "library_id": "lib-remote",
+        })
+        .to_string();
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::OK, launcher_row)]).await;
+        let row = set_workspace_on(&server.gateway_conn(), "/notes", true, false)
+            .await
+            .expect("gateway on")
+            .expect("the launcher route answers its row");
+        assert_eq!(row.prefix, "/notes");
+        assert!(row.on, "a degraded mount stays on");
+        assert_eq!(row.status, chan_server::WorkspaceStatus::Unavailable);
+        assert_eq!(row.error.as_deref(), Some("root is gone"));
+        server.assert_responses_drained();
+
+        // The launcher's `/off` answers 204, so a gateway off carries no row.
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::NO_CONTENT, "")]).await;
+        assert!(
+            set_workspace_on(&server.gateway_conn(), "/notes", false, false)
+                .await
+                .expect("gateway off")
+                .is_none(),
+            "an off over a gateway answers no row"
+        );
+        server.assert_responses_drained();
+    }
+
     fn other_message(error: SetWorkspaceOnError) -> String {
         match error {
             SetWorkspaceOnError::Other { message } => message,
@@ -4258,7 +4349,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(6)).await;
             axum::Json(serde_json::json!({
                 "prefix": "workspace-test", "workspace_id": "workspace-test",
-                "path": "/test", "label": "test", "on": true,
+                "path": "/test", "label": "test", "on": true, "token": "tenant-token",
             }))
         });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -4294,12 +4385,15 @@ mod tests {
                             .map(|prefix| assert_eq!(prefix, "workspace-test")),
                         "on" => set_workspace_on(&conn, "/workspace-test", true, false)
                             .await
+                            .map(|_| ())
                             .map_err(|e| format!("{e:?}")),
                         "off" => set_workspace_on(&conn, "/workspace-test", false, false)
                             .await
+                            .map(|_| ())
                             .map_err(|e| format!("{e:?}")),
                         "forced-off" => set_workspace_on(&conn, "/workspace-test", false, true)
                             .await
+                            .map(|_| ())
                             .map_err(|e| format!("{e:?}")),
                         "forget" => forget_workspace(&conn, "/workspace-test", true)
                             .await
@@ -4435,7 +4529,16 @@ mod tests {
                                 &headers,
                                 body,
                             );
-                            StatusCode::NO_CONTENT
+                            // The devserver's launcher `/on` answers the row.
+                            axum::Json(serde_json::json!({
+                                "workspace_id": "diary-4ead05be",
+                                "prefix": "diary-4ead05be",
+                                "path": "/home/alice/diary",
+                                "label": "diary",
+                                "on": true,
+                                "status": "running",
+                                "library_id": "lib-remote",
+                            }))
                         }
                     },
                 ),
@@ -4494,9 +4597,13 @@ mod tests {
         set_workspace_on(&conn, "/diary-4ead05be", false, true)
             .await
             .expect("forced off");
-        set_workspace_on(&conn, "/diary-4ead05be", true, false)
+        let row = set_workspace_on(&conn, "/diary-4ead05be", true, false)
             .await
-            .expect("on");
+            .expect("on")
+            .expect("the launcher route answers the row");
+        assert_eq!(row.prefix, "/diary-4ead05be");
+        assert!(row.on);
+        assert_eq!(row.status, chan_server::WorkspaceStatus::Running);
 
         let seen = seen.lock().unwrap().clone();
         let paths: Vec<&str> = seen.iter().map(|(path, _, _)| path.as_str()).collect();
