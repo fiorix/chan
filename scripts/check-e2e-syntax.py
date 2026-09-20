@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # so a failure names what the file is for rather than only where it sits.
 SOURCES = (
     ("scripts/e2e", "**/*.mjs", "browser-smoke and e2e harness"),
-    ("desktop/src", "*.js", "desktop shell, shipped in every release"),
+    ("desktop/src", "**/*.js", "desktop shell, shipped in every release"),
 )
 
 
