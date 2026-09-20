@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     api,
+    HttpError,
     type Token,
     type CreatedToken,
     type AuditEntry,
@@ -41,7 +42,7 @@
     try {
       tokens = await api.listTokens();
     } catch (e) {
-      listError = e instanceof Error ? e.message : String(e);
+      listError = reasonOf(e);
     } finally {
       loading = false;
     }
@@ -71,7 +72,7 @@
       newExpiry = "90d";
       await refresh();
     } catch (err) {
-      createError = err instanceof Error ? err.message : String(err);
+      createError = reasonOf(err);
     } finally {
       creating = false;
     }
@@ -96,6 +97,17 @@
     showCreate = false;
   }
 
+  /// A refusal can arrive with nothing to say: a body-less response
+  /// leaves the message empty, a JSON `{"error": ""}` does too, and the
+  /// status text the transport falls back to is empty over HTTP/2, which
+  /// is how this SPA is served. The status code is the field that is
+  /// always there, so a refusal always has a line to render.
+  function reasonOf(e: unknown): string {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.trim()) return msg;
+    return e instanceof HttpError ? `HTTP ${e.status}` : "the request failed";
+  }
+
   async function revoke(token: Token) {
     revoking = true;
     delete revokeError[token.id];
@@ -106,7 +118,7 @@
     } catch (e) {
       // The row stays, carrying the reason: the credential is still
       // live and the user has to know that.
-      revokeError[token.id] = e instanceof Error ? e.message : String(e);
+      revokeError[token.id] = reasonOf(e);
       confirmRevoke = null;
     } finally {
       revoking = false;

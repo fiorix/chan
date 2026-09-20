@@ -78,6 +78,17 @@
 
   let myDevservers = $derived(unifyDevservers());
 
+  /// A refusal can arrive with nothing to say: a body-less response
+  /// leaves the message empty, a JSON `{"error": ""}` does too, and the
+  /// status text the transport falls back to is empty over HTTP/2, which
+  /// is how this SPA is served. The status code is the field that is
+  /// always there, so a refusal always has a line to render.
+  function reasonOf(e: unknown): string {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.trim()) return msg;
+    return e instanceof HttpError ? `HTTP ${e.status}` : "the request failed";
+  }
+
   async function loadLists() {
     loadingLists = true;
     listsError = null;
@@ -89,7 +100,7 @@
       owned = o;
       incoming = i;
     } catch (e) {
-      listsError = e instanceof Error ? e.message : String(e);
+      listsError = reasonOf(e);
     } finally {
       loadingLists = false;
     }
@@ -114,7 +125,7 @@
     try {
       grants[devserverId] = await api.listDevserverGrants(devserverId);
     } catch (e) {
-      grantsError[devserverId] = e instanceof Error ? e.message : String(e);
+      grantsError[devserverId] = reasonOf(e);
     } finally {
       grantsLoading[devserverId] = false;
     }
@@ -199,9 +210,7 @@
       addEmail[devserverId] = "";
       void loadLists();
     } catch (e) {
-      addError[devserverId] = e instanceof HttpError
-        ? e.message
-        : e instanceof Error ? e.message : String(e);
+      addError[devserverId] = reasonOf(e);
     } finally {
       addBusy[devserverId] = false;
     }
@@ -220,7 +229,7 @@
       grants[devserverId] = (grants[devserverId] ?? []).filter((g) => g.id !== id);
       void loadLists();
     } catch (e) {
-      grantActionError[id] = e instanceof Error ? e.message : String(e);
+      grantActionError[id] = reasonOf(e);
     } finally {
       grantBusy[id] = false;
     }
