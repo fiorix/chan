@@ -11,6 +11,7 @@
     adoptCrossWindowTab,
     closeFileTabAfterMove,
     crossWindowTabSnapshot,
+    crossWindowTerminalSnapshot,
     enterPaneModeTransaction,
     flipHybrid,
     focusColorForWindow,
@@ -859,6 +860,10 @@
                 terminalEnvTabName: t.terminalEnvTabName,
                 group: t.group,
                 cwd: t.cwd,
+                // Everything else the tab carries, snapshotted by the session
+                // serializer so the target rebuilds it the way a reload does.
+                // What this drops, and why, is TERMINAL_MOVE_DECISIONS.
+                ser: crossWindowTerminalSnapshot(t),
               }
             : {}),
         };
@@ -962,6 +967,9 @@
           terminalEnvTabName: parsed.terminalEnvTabName,
           group: parsed.group,
           cwd: parsed.cwd,
+          // Absent from a window on an older build; the re-attach falls back
+          // to the fields above rather than refusing the drop.
+          ser: parsed.ser,
         });
         return true;
       }

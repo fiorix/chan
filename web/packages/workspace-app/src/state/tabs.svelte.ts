@@ -1698,6 +1698,10 @@ export type TerminalMovePayload = {
   terminalEnvTabName?: string;
   group?: string;
   cwd?: string;
+  /// The source tab's session snapshot (`crossWindowTerminalSnapshot`), which
+  /// carries everything a reload restores. Optional because the sending window
+  /// may be an older build; absent, the fields above rebuild the shell alone.
+  ser?: SerTab;
 };
 
 /// Re-attach a MOVED terminal to its existing live PTY in the target window's
@@ -1707,6 +1711,14 @@ export type TerminalMovePayload = {
 /// the PTY (see `closeTab`'s `keepSession`), so the net effect is the terminal
 /// leaving the source and appearing here with the same shell + history and no
 /// duplicate. The PTY lives in the shared registry, so the attach succeeds.
+///
+/// The tab is rebuilt from the payload's session snapshot, by the same code a
+/// reload runs, so a moved terminal arrives with the state a reload of it
+/// would restore and a field added to the session payload is taught to one
+/// mapping rather than two that drift. A payload without a snapshot, or with
+/// one this build does not read as a terminal, comes from a window on another
+/// version: the shell still arrives, on the fields the wire has always
+/// carried.
 export function reattachTerminalInPane(
   paneId: string,
   payload: TerminalMovePayload,
@@ -1717,29 +1729,38 @@ export function reattachTerminalInPane(
   const tabs = mutablePaneTabs(p, side);
   const sessionId = payload.terminalSessionId?.trim();
   if (!sessionId) return null;
+  const snapshot = payload.ser?.k === "t" ? payload.ser : undefined;
   const group = payload.group?.trim();
-  const tab: TerminalTab = {
-    kind: "terminal",
-    id: id("term"),
-    // Preserve the last rendered value until the authoritative attach prelude
-    // returns the live pair for this existing session.
-    title: payload.title?.trim() || "Terminal",
-    createdAt: Date.now(),
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    terminalSessionId: sessionId,
-    // Carry immutable environment provenance until the same session's attach
-    // prelude refreshes it.
-    terminalEnvTabName: payload.terminalEnvTabName,
-    controlledTerminal: undefined,
-    cwd: payload.cwd?.trim() || undefined,
-    seedInput: undefined,
-    group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
-  };
+  const tab: TerminalTab = snapshot
+    ? restoreTerminalTabFromSer(snapshot)
+    : {
+        kind: "terminal",
+        id: id("term"),
+        // Preserve the last rendered value until the authoritative attach
+        // prelude returns the live pair for this existing session.
+        title: payload.title?.trim() || "Terminal",
+        createdAt: Date.now(),
+        broadcastEnabled: false,
+        broadcastTargetIds: [],
+        group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
+      };
+  // The three a session snapshot has no slot for. The live session is what
+  // makes this a move rather than a fresh spawn; the environment provenance is
+  // immutable and carried until the same session's attach prelude refreshes
+  // it; the working directory mirrors the source so the re-attach replays from
+  // where that window left off.
+  tab.terminalSessionId = sessionId;
+  tab.terminalEnvTabName = payload.terminalEnvTabName;
+  tab.cwd = payload.cwd?.trim() || undefined;
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
   p.side = side;
   layout.activePaneId = p.id;
+  // Bubble visibility is per-window UI state keyed by tab id, not a tab field,
+  // so it does not ride the snapshot into the rebuilt tab. A prompt still in
+  // the queue is only actionable with the bubble open, which is why a reload
+  // reopens it and why a move does too.
+  if (snapshot?.rpv) showRichPromptForTab(tab.id);
   // Pull keyboard focus to the just-dropped terminal: making it the active
   // tab isn't enough on its own (the terminal's focus effect only grabs the
   // xterm on a focus pulse), so fire the same pulse a chord-driven tab switch
@@ -6722,11 +6743,101 @@ export async function closeFileTabAfterMove(
 /// Snapshot a tab so ANOTHER window can rebuild it. See adoptCrossWindowTab
 /// for why this rides the session serializer.
 export function crossWindowTabSnapshot(t: Tab): SerTab {
-  // `terminalSessions` is off: the terminal payload carries its PTY re-attach
-  // fields on the wire object itself (a live session id is not view state),
-  // and the kinds routed through this snapshot have no session to preserve.
+  // `terminalSessions` is off: a terminal is snapshotted by
+  // crossWindowTerminalSnapshot instead, and the kinds routed through here
+  // have no session to preserve.
   return serializeTab(t, false, {});
 }
+
+/// Snapshot a terminal so ANOTHER window can rebuild it, riding the session
+/// serializer for the reason adoptCrossWindowTab gives: a moved tab is
+/// reconstructed by exactly the code a reload runs.
+///
+/// `terminalSessions` is ON, unlike the view-state kinds above. A move
+/// preserves the live shell, so what the target needs is what a reload of a
+/// reattaching session restores: the shell profile, the negotiated keyboard
+/// protocol, the Rich Prompt draft with its caret, height and bubble
+/// visibility, a still-queued prompt, and a pending Team Work configuration.
+/// The session id rides the wire object beside this snapshot rather than only
+/// inside it, because a window on an older build sends no snapshot at all and
+/// its terminal still has to arrive.
+export function crossWindowTerminalSnapshot(t: TerminalTab): SerTab {
+  return serializeTab(t, false, { terminalSessions: true });
+}
+
+/// Every field a `TerminalTab` declares, each marked carry or drop for a move
+/// to another window. The mapped type is the point: a field added to
+/// `TerminalTab` without a line here does not compile, so no field can be lost
+/// from a move by omission, which is how the nine below were lost before.
+///
+/// The table is the decision; `crossWindowTerminalSnapshot` is the mechanism,
+/// and it carries a field exactly when the session payload does. The two are
+/// held together by the move's own test, which reads every name from here and
+/// asserts it against a real payload and the tab rebuilt from it, so a line
+/// that disagrees with the serializer fails there.
+///
+/// Three carried fields do not reach the target through the snapshot: the live
+/// session id and the environment provenance and working directory beside it
+/// ride the wire object, where `reattachTerminalInPane` reads them.
+export const TERMINAL_MOVE_DECISIONS: Record<
+  keyof TerminalTab,
+  "carry" | "drop"
+> = {
+  controlledTerminal: "carry",
+  cwd: "carry",
+  group: "carry",
+  keyboardProtocol: "carry",
+  kind: "carry",
+  pendingPrompt: "carry",
+  profile: "carry",
+  richPromptCaret: "carry",
+  richPromptDraftPath: "carry",
+  richPromptHeight: "carry",
+  /// The spawn-agents dialog's config draft, verbatim, so the dialog reopens
+  /// over the terminal in its new window with what the user was editing. A
+  /// member's `env` rides in it, as it already does in the on-disk session
+  /// blob this snapshot comes from.
+  teamWorkPending: "carry",
+  terminalEnvTabName: "carry",
+  terminalSessionId: "carry",
+  title: "carry",
+  // Dropped on purpose, in four groups. The receiving window mints the tab's
+  // identity, so a move can never collide with a tab already live there and
+  // the timestamp says when this window built it.
+  createdAt: "drop",
+  id: "drop",
+  // Fan-out membership is per-window: the target's roster sync decides who
+  // this terminal broadcasts to, and a carried target list would name tab ids
+  // from the window the terminal just left.
+  broadcastEnabled: "drop",
+  broadcastTargetIds: "drop",
+  // Server-owned, and re-established by this window's attach prelude or its
+  // `session` frame within a frame of the drop. Carrying them would show the
+  // source window's reading until the first frame replaced it.
+  queueDepth: "drop",
+  submitAgent: "drop",
+  terminalActivity: "drop",
+  terminalActivityPulsing: "drop",
+  terminalEnvTabGroup: "drop",
+  // Local and never authoritative: a rename the user is typing, a proposal
+  // waiting on the server, the error from the last one, and the two dismissal
+  // marks for the stale-environment prompt. None of them survive a reload
+  // either.
+  terminalMetadataDraft: "drop",
+  terminalMetadataError: "drop",
+  terminalMetadataPending: "drop",
+  terminalEnvNamePromptDismissed: "drop",
+  terminalEnvPromptDismissedFor: "drop",
+  // A provisional label the registry has already settled, a first line the
+  // source shell has already been given, and the two spawn overrides, which
+  // belong to creating a session rather than to moving a running one. The
+  // attach prelude clears both overrides on the source as well, their values
+  // being potentially sensitive.
+  pendingGlobalName: "drop",
+  seedInput: "drop",
+  spawnCommand: "drop",
+  spawnEnv: "drop",
+};
 
 /// Rebuild a tab from another window's snapshot and append it to `paneId`.
 ///
