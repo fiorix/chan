@@ -30,23 +30,14 @@ import RichPrompt from "./RichPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
-const unhandledRejections: unknown[] = [];
-
-function captureUnhandledRejection(event: PromiseRejectionEvent): void {
-  unhandledRejections.push(event.reason);
-  event.preventDefault();
-}
 
 beforeEach(() => {
   apiMocks.createDraft.mockReset();
   apiMocks.read.mockReset();
   apiMocks.write.mockClear();
-  unhandledRejections.length = 0;
-  window.addEventListener("unhandledrejection", captureUnhandledRejection);
 });
 
 afterEach(() => {
-  window.removeEventListener("unhandledrejection", captureUnhandledRejection);
   for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
 });
@@ -103,12 +94,11 @@ async function waitForEditor(
   throw new Error(`editor did not load ${JSON.stringify(expectedContent)}`);
 }
 
-async function flushUnhandledRejections(): Promise<void> {
-  await tick();
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-}
-
+// An unhandled rejection escaping the mount path fails this run on its own:
+// Vitest reports it under "Unhandled Errors" and exits non-zero even when every
+// test passes. Nothing here can assert on it instead. The rejection is Node's,
+// the runner takes it first, and a jsdom `window` "unhandledrejection" listener
+// never fires.
 describe("Rich Prompt mount guard", () => {
   test("a create failure is visible and retry mounts the recovered draft", async () => {
     apiMocks.createDraft
@@ -134,8 +124,6 @@ describe("Rich Prompt mount guard", () => {
     expect(target.querySelector(".rp-load-error")).toBeNull();
     expect(apiMocks.createDraft).toHaveBeenCalledTimes(2);
     expect(apiMocks.read).toHaveBeenCalledOnce();
-    await flushUnhandledRejections();
-    expect(unhandledRejections).toEqual([]);
   });
 
   test("a content-load failure is visible and retry reloads the same draft", async () => {
@@ -158,7 +146,5 @@ describe("Rich Prompt mount guard", () => {
     expect(view.state.doc.toString()).toBe("loaded on retry");
     expect(apiMocks.createDraft).not.toHaveBeenCalled();
     expect(apiMocks.read).toHaveBeenCalledTimes(2);
-    await flushUnhandledRejections();
-    expect(unhandledRejections).toEqual([]);
   });
 });
