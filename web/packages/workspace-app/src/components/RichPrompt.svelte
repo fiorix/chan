@@ -14,6 +14,7 @@
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import { indentListItem, outdentListItem } from "../editor/commands/list";
   import { rewriteImagePathsForDelivery } from "../editor/deliver_images";
+  import { newUuid } from "../state/ids";
   import { workspace } from "../state/store.svelte";
   import { filesContext } from "../state/fileContext.svelte";
   import { currentOS } from "../state/shortcuts";
@@ -318,7 +319,7 @@
     if (isPending) return true;
     const text = view.state.doc.toString();
     if (!text.trim()) return true;
-    const id = crypto.randomUUID();
+    const id = newUuid();
     const delivered = rewriteImagePathsForDelivery(
       text,
       draftPath,

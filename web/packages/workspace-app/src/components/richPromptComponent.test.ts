@@ -78,9 +78,9 @@ describe("RichPrompt.svelte component", () => {
 
   test("submit routes to THIS terminal, then KEEPS the text as the greyed read-only card", () => {
     // Routes to the bubble's OWN tab with the chord THIS terminal reads
-    // (submitAgent()) + a client message id, only beginning a pending when the
-    // frame actually went out (the data-loss guard).
-    expect(richPromptSrc).toMatch(/const id = crypto\.randomUUID\(\);/);
+    // (submitAgent()). The message id it carries, and the data-loss guard that
+    // begins a pending only once the frame went out, are asserted as behaviour
+    // in richPromptInsecureContext.svelte.test.ts.
     expect(richPromptSrc).toMatch(
       /import \{ rewriteImagePathsForDelivery \} from "\.\.\/editor\/deliver_images"/,
     );
