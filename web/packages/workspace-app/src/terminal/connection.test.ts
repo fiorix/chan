@@ -157,4 +157,16 @@ describe("terminal connection invariants", () => {
     expect(isReplayGeneratedTerminalInput("\x1b[A")).toBe(true);
     expect(isReplayGeneratedTerminalInput("a")).toBe(false);
   });
+
+  test("lets a lone ESC through: it is a keystroke, not a reply", () => {
+    // Escape, and Ctrl+[ which encodes to the same byte, are the user's. The
+    // fail-closed rule above is about replies replay can re-trigger, and a
+    // reply is never one character: it carries an introducer and a terminator
+    // after the ESC. Dropping this one loses a key the user pressed while a
+    // reattach is still replaying.
+    expect(isReplayGeneratedTerminalInput("\x1b")).toBe(false);
+    // The shapes it must keep catching are all longer than one byte.
+    expect(isReplayGeneratedTerminalInput("\x1b[")).toBe(true);
+    expect(isReplayGeneratedTerminalInput("\x1bP")).toBe(true);
+  });
 });

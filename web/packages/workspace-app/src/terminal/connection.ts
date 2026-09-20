@@ -81,6 +81,12 @@ export function isReplayGeneratedTerminalInput(data: string): boolean {
   // Let it reach the PTY while retaining the fail-closed rule for unknown
   // escape-prefixed replies replay may generate.
   if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) return false;
+  // A lone ESC is the user's Escape key, or Ctrl+[ which encodes to the same
+  // byte. No terminal reply is one character: every one of them carries an
+  // introducer and a terminator after the ESC, so this cannot be the traffic
+  // the rule below is fail-closed about, and dropping it loses a keystroke
+  // the user pressed.
+  if (data === "\x1b") return false;
   return data.startsWith("\x1b");
 }
 

@@ -375,22 +375,22 @@ describe("the chord that opens terminal find", () => {
     expect(document.body.querySelector(".terminal-find")).toBeNull();
   });
 
-  test("Ctrl+G reaches the shell too", async () => {
-    // The second of the three keys the ruling keeps for the shell. Off macOS
-    // nothing in the app competes for it; the macOS key bridge is where they
-    // were being taken, and that arm is native.
+  test("Ctrl+G and Ctrl+[ reach the shell too", async () => {
+    // The other two keys the ruling keeps for the shell. Off macOS nothing in
+    // the app competes for them; the macOS key bridge is where they were being
+    // taken, and that arm is native.
     //
-    // Ctrl+[ is the third and is NOT asserted here: it reaches neither the
-    // shell nor any handler this fixture can see, and the escape registry is
-    // not what takes it (`shouldEscapeTerminal` answers false for it, and
-    // `terminalMetaKeyBytes` returns null so the key passes through). Where it
-    // goes is unresolved and written up rather than guessed at.
+    // Ctrl+[ encodes to a bare ESC, which the replay filter used to drop as a
+    // possible terminal reply, so it reached the shell only once a reattach
+    // had finished replaying.
     const socket = await mountTerminal(false);
 
     textarea().dispatchEvent(key({ key: "g", code: "KeyG", ctrlKey: true }));
+    textarea().dispatchEvent(key({ key: "[", code: "BracketLeft", ctrlKey: true }));
     await settle();
 
     expect(inputFrames(socket)).toContain("\x07");
+    expect(inputFrames(socket)).toContain("\x1b");
   });
 });
 
