@@ -134,6 +134,55 @@ const workspaceDir = seedWorkspace();
 const server = launchServer(chanBin, workspaceDir, (line) => console.log(line));
 let browser = null;
 let failed = 0;
+// Hoisted out of the check loop so the crash handlers below can name the check
+// that was running when the process went down.
+let currentCheck = null;
+let resultsWritten = false;
+
+/// Write the verdict file. Idempotent: the normal path and the crash handlers
+/// both call it, and only the first one writes.
+function writeResults() {
+  const path = join(outDir, "results.json");
+  if (resultsWritten) return path;
+  resultsWritten = true;
+  results.finishedAt = new Date().toISOString();
+  results.ok = failed === 0;
+  const skippedChecks = results.checks.filter((c) => c.skipped);
+  results.skipped = skippedChecks.length;
+  writeFileSync(path, JSON.stringify(results, null, 2));
+  return path;
+}
+
+/// A check can take the whole process down from outside the loop's try: a
+/// rejection nobody attached a handler to, or a throw inside a timer. Node's
+/// default is to print it and exit, which loses every verdict in the run
+/// rather than the one check that misbehaved, and a verdict file is the only
+/// product this suite has. Name the check, write the file, and leave nothing
+/// running.
+function recordCrash(kind, error) {
+  const detail = error?.stack ?? String(error);
+  const where = currentCheck?.name ?? "no check";
+  results.fatal = `${kind} while running ${where}: ${detail}`;
+  if (currentCheck) {
+    currentCheck.error ??= detail;
+    if (!results.checks.includes(currentCheck)) results.checks.push(currentCheck);
+  }
+  failed += 1;
+  console.error(`[smoke] ${kind} while running ${where}: ${detail}`);
+  console.log(`[smoke] results: ${writeResults()}`);
+  // Best effort, and synchronous on purpose: an async teardown would not
+  // finish before the exit below, and a leaked chan server outlives the run.
+  try {
+    server.child?.kill("SIGKILL");
+  } catch {}
+  try {
+    browser?.process()?.kill("SIGKILL");
+  } catch {}
+  process.exit(1);
+}
+
+process.on("unhandledRejection", (e) => recordCrash("unhandled rejection", e));
+process.on("uncaughtException", (e) => recordCrash("uncaught exception", e));
 
 try {
   const serverUrl = await server.url;
@@ -168,7 +217,6 @@ try {
   await page.waitForSelector(".pane", { timeout: 30_000 });
 
   // Shared check context (see README.md).
-  let currentCheck = null;
   const ctx = {
     page,
     browser,
@@ -310,17 +358,13 @@ try {
   );
 }
 
-results.finishedAt = new Date().toISOString();
-results.ok = failed === 0;
 // A skipped check did not run, so it cannot have passed. It does not fail the
 // run (its precondition is absent, not broken), but it is named on the verdict
 // line rather than left for whoever thinks to open results.json: "ALL GREEN"
 // over a suite that quietly skipped half of itself is the reading this suite
 // exists to prevent.
+console.log(`[smoke] results: ${writeResults()}`);
 const skipped = results.checks.filter((c) => c.skipped);
-results.skipped = skipped.length;
-writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2));
-console.log(`[smoke] results: ${join(outDir, "results.json")}`);
 const verdict = results.ok ? "ALL GREEN" : `${failed} FAILURE(S)`;
 const ran = results.checks.length - skipped.length;
 console.log(
