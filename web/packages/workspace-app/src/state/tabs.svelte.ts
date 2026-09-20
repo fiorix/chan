@@ -2537,7 +2537,11 @@ async function runTerminalCloseSink(tab: TerminalTab): Promise<boolean> {
   // is the only way left to tell the server, and answering true without it
   // would leave a session with no tab referencing it. A session-preserving
   // move is the one close that must keep the PTY alive.
-  if (tab.terminalSessionId && !isTerminalMoving(tab.id)) {
+  // Consult the move marker first, whatever the tab carries: it is a one-shot
+  // that `isTerminalMoving` drains, and leaving it behind would make a later
+  // close of a re-created tab with the same id skip the kill it needs.
+  const moving = isTerminalMoving(tab.id);
+  if (tab.terminalSessionId && !moving) {
     try {
       await api.closeTerminal(tab.terminalSessionId);
     } catch {

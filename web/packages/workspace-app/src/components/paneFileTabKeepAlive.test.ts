@@ -13,9 +13,9 @@ import fileEditorTab from "./FileEditorTab.svelte?raw";
 // catch any regression back to render-only-the-active-file-tab.
 
 describe("file tabs survive tab switches (keep-alive)", () => {
-  // Where the mounting itself is asserted: paneKeepAliveMount.test.ts mounts two file tabs, switches between
-// them and compares the DOM nodes, which is the claim the each-block was
-// standing in for.
+  // The mounting and the keying are asserted in paneKeepAliveMount.test.ts,
+  // which mounts two file tabs, switches, reorders, and compares the DOM
+  // nodes. The pins below cover the props each body is handed.
 
   test("file tabs no longer mount from the active-tab if-chain", () => {
     // The pre-fix branch mounted ONLY the active file tab

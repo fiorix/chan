@@ -15,10 +15,10 @@ import graphCanvas from "./GraphCanvas.svelte?raw";
 // catch any regression back to that.
 
 describe("graph tabs survive tab switches (keep-alive)", () => {
-  // Where the mounting itself is asserted: GraphPanel paints a real canvas and jsdom has none, so a graph body
-// cannot be mounted twice here. The negative pin below is what guards the
-// regression; paneKeepAliveMount.test.ts covers the same each-block shape
-// for the kinds that can mount.
+  // A graph body cannot be mounted here: GraphPanel paints a real canvas and
+  // jsdom has none. So the pins below are all this kind has, and its mounting
+  // and keying are covered only by the shape it shares with the file and
+  // dashboard lists in paneKeepAliveMount.test.ts.
 
   test("graph tabs no longer mount from the active-tab if-chain", () => {
     // The pre-fix branch mounted ONLY the active graph

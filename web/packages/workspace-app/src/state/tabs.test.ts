@@ -3998,6 +3998,28 @@ describe("closing a terminal whose component is not mounted", () => {
     expect(activePane().tabs.map((t) => t.id)).toEqual(["file-1"]);
   });
 
+  test("drains the move marker even for a tab with no session yet", async () => {
+    // The marker is a one-shot: consulting it clears it, so a later tab that
+    // reuses the id still kills its own PTY. Reading the session id first
+    // would leave the marker behind for a tab that had none.
+    const close = vi.spyOn(api, "closeTerminal").mockResolvedValue(undefined);
+    const pane = resetLayout([terminalTab({ id: "term-1" }), fileTab({ id: "file-1" })]);
+    markTerminalMovingOut("term-1");
+
+    await closeTab(pane.id, "term-1");
+    expect(close, "nothing to close without a session").not.toHaveBeenCalled();
+
+    // Same id, now with a session, closed normally: the stale marker must not
+    // spare it.
+    resetLayout([
+      terminalTab({ id: "term-1", terminalSessionId: "sess-late" }),
+      fileTab({ id: "file-2" }),
+    ]);
+    await closeTab(activePane().id, "term-1");
+
+    expect(close).toHaveBeenCalledWith("sess-late");
+  });
+
   test("leaves the session alone when the tab is moving to another window", async () => {
     // A session-preserving move removes the tab here and re-attaches it
     // there, so the PTY has to outlive the close.

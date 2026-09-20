@@ -14,9 +14,9 @@ import carousel from "./EmptyPaneCarousel.svelte?raw";
 // each-block keep-alive against that.
 
 describe("dashboard tabs survive tab switches (keep-alive)", () => {
-  // Where the mounting itself is asserted: paneKeepAliveMount.test.ts mounts two dashboard tabs, switches between
-// them and compares the DOM nodes, which is the claim the each-block was
-// standing in for.
+  // The mounting and the keying are asserted in paneKeepAliveMount.test.ts,
+  // which mounts two dashboard tabs, switches, reorders, and compares the DOM
+  // nodes. The pins below cover the props each body is handed.
 
   test("dashboard tabs never mount from the active-tab if-chain", () => {
     // Mounting the active dashboard from a front-face if-chain arm
