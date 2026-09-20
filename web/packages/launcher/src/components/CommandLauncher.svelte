@@ -689,18 +689,78 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-<CommandDeck
-  open={draft.visible}
-  bind:draft={commandLauncher.drafts[commandLauncher.entryMode]}
-  items={visibleEntries}
-  {scopes}
-  {placeholder}
-  bodyKey={`${draft.path.join("/")}:${draft.scope ?? "all"}`}
-  {direction}
-  onClose={closeDeck}
-  onChoose={choose}
-  onBack={back}
-  {onScope}
-  onClearScope={clearScope}
-  onSuccess={succeeded}
-/>
+<!-- A render throw inside the deck used to take the whole command surface
+     down with no way back short of a reload. The boundary keeps the failure
+     inside the deck: the launcher behind it stays usable, and the deck's place
+     says what happened and offers a retry, which re-renders it against
+     whatever the library holds now.
+
+     It catches a throw from rendering the deck, not one raised while this
+     component computes the props it passes down. -->
+<svelte:boundary>
+  <CommandDeck
+    open={draft.visible}
+    bind:draft={commandLauncher.drafts[commandLauncher.entryMode]}
+    items={visibleEntries}
+    {scopes}
+    {placeholder}
+    bodyKey={`${draft.path.join("/")}:${draft.scope ?? "all"}`}
+    {direction}
+    onClose={closeDeck}
+    onChoose={choose}
+    onBack={back}
+    {onScope}
+    onClearScope={clearScope}
+    onSuccess={succeeded}
+  />
+
+  {#snippet failed(error, reset)}
+    {#if draft.visible}
+      <div class="deck-failed" role="alert">
+        <p class="deck-failed-title">The command deck could not be drawn.</p>
+        <p class="deck-failed-detail">
+          {error instanceof Error ? error.message : String(error)}
+        </p>
+        <div class="deck-failed-actions">
+          <button onclick={() => reset()}>Try again</button>
+          <button onclick={closeDeck}>Close</button>
+        </div>
+      </div>
+    {/if}
+  {/snippet}
+</svelte:boundary>
+
+<style>
+  /* Sits where the deck would be, so a failure reads as the deck's own rather
+     than as the launcher having lost it. */
+  .deck-failed {
+    position: fixed;
+    top: 12vh;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 60;
+    width: min(32rem, calc(100vw - 2rem));
+    padding: 1rem 1.15rem;
+    border-radius: 10px;
+    background: var(--bg-card);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+    color: var(--text);
+  }
+
+  .deck-failed-title {
+    margin: 0 0 0.35rem;
+    font-weight: 600;
+  }
+
+  .deck-failed-detail {
+    margin: 0 0 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+  }
+
+  .deck-failed-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+</style>
