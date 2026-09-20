@@ -22,7 +22,6 @@ describe("TerminalTab WebGL renderer", () => {
     // GPU reset or tab backgrounding can lose the WebGL context.
     // Disposing the addon lets xterm.js fall back to DOM rendering.
     expect(tab).toMatch(/webgl\.onContextLoss\(/);
-    expect(tab).toMatch(/webglRendererActive\s*=\s*false/);
     expect(tab).toMatch(/webgl\.dispose\(\)/);
   });
 

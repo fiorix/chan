@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import dialog from "./TeamDialog.svelte?raw";
 import {
   defaultTeamConfig,
-  TEAM_MAX_SIZE,
   TEAM_MIN_SIZE,
   validateTeamConfig,
 } from "../state/teamDialog.svelte";

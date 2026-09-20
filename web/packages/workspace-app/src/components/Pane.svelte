@@ -25,7 +25,6 @@
     openTerminalInPane,
     reattachTerminalInPane,
     paneMode,
-    paneModeSplit,
     paneModeMoveGrabToEdge,
     paneModeRemoveStagedDraftEditor,
     paneModeSetGrab,

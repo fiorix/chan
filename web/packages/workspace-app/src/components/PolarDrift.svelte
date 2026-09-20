@@ -17,7 +17,6 @@
   const SOURCE_FRAMES_PER_SECOND = 60;
   const SOURCE_FADE_ALPHA = 5 / 255;
   const MAX_FRAME_SCALE = 4;
-  const STATIC_PHASE = Math.PI / 3;
 
   let canvas = $state<HTMLCanvasElement | undefined>();
 

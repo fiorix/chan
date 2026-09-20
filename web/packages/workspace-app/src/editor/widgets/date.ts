@@ -37,7 +37,7 @@ import {
 import { findDateMatches, type DateFormatId } from "../dateFormats";
 import { selectionInRange } from "../decorations/selection";
 import { openDatePopover } from "../overlays/date_popover";
-import { currentPreferences, workspace, persistDateFormat } from "../../state/store.svelte";
+import { currentPreferences, persistDateFormat } from "../../state/store.svelte";
 
 /// Nodes whose interior should never get pilled. Code (inline +
 /// fenced) is obvious: dates in `2026-04-15` snippets are part of

@@ -315,7 +315,6 @@
   let status = $state<"closed" | "connecting" | "connected" | "exited">("closed");
   let statusDetail = $state("");
   let missedBytes = $state(0);
-  let sessionClosedReason = $state<CloseReason | null>(null);
   let findOpen = $state(false);
   let findQuery = $state("");
   let sawSessionControl = false;
@@ -323,7 +322,6 @@
   let promptSeedSent = false;
   let terminalCwdAbs: string | null = $state(null);
   let terminalCwdVirtual: string | null = $state(null);
-  let webglRendererActive = false;
   let webglContextLossRetries = 0;
   const ptyWrites = new PtyWriteTracker();
   const customTerminalColors = $derived(
@@ -835,7 +833,6 @@
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
-        webglRendererActive = false;
         webgl.dispose();
         if (term && webglContextLossRetries < WEBGL_MAX_CONTEXT_LOSS_RETRIES) {
           webglContextLossRetries += 1;
@@ -855,7 +852,6 @@
         }
       });
       (term as Terminal).loadAddon(webgl);
-      webglRendererActive = true;
       // Repaint so a recreated renderer redraws the visible rows and
       // clears any garbled glyphs left behind by the lost context.
       refreshTerminalRenderer();
@@ -1289,7 +1285,6 @@
     status = "connecting";
     statusDetail = "";
     missedBytes = 0;
-    sessionClosedReason = null;
     const reattaching = Boolean(tab.terminalSessionId);
     const liveResumeSince =
       reattaching && sawSessionControl && serverGeneration !== null
@@ -1533,7 +1528,6 @@
         // updates the badge separately. Stale/foreign ids no-op in the helper.
         resolvePromptCancelled(tab, frame.id, frame.removed);
       } else if (frame.type === "closed") {
-        sessionClosedReason = frame.reason;
         status = "exited";
         statusDetail = `session ended (${frame.reason})`;
         // The session (and its write queue) is gone: zero the badge and
@@ -2013,7 +2007,6 @@
     osc52Bridge = null;
     ghosttyViewport = null;
     backend = "xterm";
-    webglRendererActive = false;
     fit = null;
     search = null;
     serialize = null;

@@ -1,8 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import {
-    ArrowLeft,
-    ArrowRight,
     FolderOpen,
     HardDrive,
     Maximize2,
@@ -57,7 +55,6 @@
     fbWatchReconcile,
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
-  import { api } from "../api/client";
 
   type Variant = "overlay" | "dock" | "tab";
   type Side = "left" | "right";

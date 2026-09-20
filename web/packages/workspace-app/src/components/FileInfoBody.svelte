@@ -52,7 +52,6 @@
     loadTreeDir,
     openGraphAtNode,
     openGraphForContact,
-    openGraphForFile,
     openGraphForLanguage,
     openGraphForMention,
     openGraphForTag,

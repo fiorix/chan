@@ -26,7 +26,6 @@ import {
   allTerminalTabs,
   buildSplitGrid,
   closeTab,
-  layout,
   openTerminalInPane,
   sendPromptToTerminal,
   setActivePane,

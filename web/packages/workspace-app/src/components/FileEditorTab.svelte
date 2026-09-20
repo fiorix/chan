@@ -84,11 +84,9 @@
     fileOps,
     isDraftPath,
     openFsGraphForFile,
-    openGraphForFile,
     openGraphForMention,
     openGraphForTag,
     searchPanel,
-    openGraphAtNode,
     paneWidths,
     persistPaneWidths,
     revealPathInBrowser,
@@ -99,11 +97,9 @@
   import {
     openInActivePane,
     openLinkTarget,
-    openTerminalInPane,
     saveDraftTabToWorkspace,
     tabFocusPulse,
   } from "../state/tabs.svelte";
-  import { terminalFromHereTarget } from "../terminal/fromHere";
   import { csvDelimiter, isCsv, isExcalidraw, isJson } from "../state/fileTypes";
   import {
     acquireDocSession,
@@ -918,19 +914,6 @@
     const fragment = tab.fileMissing?.fragment;
     if (fragment) searchPanel.query = fragment;
     searchPanel.open = true;
-  }
-
-  function doOpenGraph(): void {
-    closeTabMenu();
-    // "Graph from here" from a file's menu scopes the graph to that
-    // file (file:<path>), not the whole workspace. Hashtags etc. still
-    // route through openGraphAtNode at workspace scope.
-    openGraphForFile(tab.path);
-  }
-
-  function doTerminalFromHere(): void {
-    closeTabMenu();
-    openTerminalInPane(layout.activePaneId, terminalFromHereTarget(tab.path, false));
   }
 
   /// Chord lookup for the editor menu rows, override-aware (user

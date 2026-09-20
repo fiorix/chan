@@ -456,7 +456,7 @@ describe("TerminalTab menu", () => {
     "kebab menu keeps broadcast controls and Close only at the foot",
     async () => {
       const tab = terminalTab({ terminalSessionId: "term-session-1" });
-      const { target } = await renderTerminal(tab, true);
+      await renderTerminal(tab, true);
 
       openTabMenu(tab.id, { left: 0, top: 0, right: 0, bottom: 0 });
       await tick();

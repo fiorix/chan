@@ -82,7 +82,6 @@ export function openContactBubble(opts: ContactBubbleOpts): ContactBubbleHandle 
   /// commits a wiki-link under `@` (`commit`), a mention-only
   /// hit commits `@@<Name>` under either trigger
   /// (`commitMention`).
-  const mode: ContactBubbleMode = opts.mode ?? "wiki";
   const includeMentions = true;
 
   const list = document.createElement("div");

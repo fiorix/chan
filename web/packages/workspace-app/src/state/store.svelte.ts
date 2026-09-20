@@ -145,7 +145,7 @@ import {
   tabsForPath,
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
-import { graphData, invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
+import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
 import { chanFetch, handleDemoDownload, withTokenQuery } from "../api/transport";
 import { uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
@@ -3740,7 +3740,7 @@ function openGraphAtDestination(
 /** Open the graph overlay, snapping the scope to the active file
  *  when applicable. Idempotent. */
 export function openGraph(): void {
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId: defaultScopeId(),
     pendingSelectId: null,
@@ -3763,7 +3763,7 @@ export function openGraphWithContext(ctx: SpawnContext): void {
       ? `dir:${ctx.dir}`
       : "workspace";
   const pendingSelectId = ctx.file ?? (ctx.dir || null);
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId,
     depth: 1,
@@ -3793,7 +3793,7 @@ export function openGraphForWorkspace(
  *  scope guarantees the node is in the rendered set regardless of
  *  prior scope. */
 export function openGraphAtNode(nodeId: string): void {
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId: "workspace",
     depth: 1,
@@ -3833,7 +3833,7 @@ export function openFsGraphForFile(path: string): void {
   // workspace root fall back to workspace scope.
   const slash = path.lastIndexOf("/");
   const parent = slash > 0 ? path.slice(0, slash) : "";
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "filesystem",
     scopeId: parent ? `dir:${parent}` : "workspace",
     depth: 1,
@@ -3873,7 +3873,7 @@ export function openFsGraphForDirectory(path: string): void {
   // depth-slider in semantic mode, so "Graph from here" on a directory
   // (from the file browser, mirroring the in-graph re-scope) keeps the
   // rich graph instead of collapsing to a bare directory tree.
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId: path ? `dir:${path}` : "workspace",
     depth: 1,
@@ -3883,7 +3883,7 @@ export function openFsGraphForDirectory(path: string): void {
 }
 
 export function scopeFsGraphFromHere(path: string, isDir: boolean): void {
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "filesystem",
     scopeId: isDir ? `dir:${path}` : `file:${path}`,
     depth: 1,
@@ -3899,7 +3899,7 @@ export function scopeFsGraphFromHere(path: string, isDir: boolean): void {
  *  editor tag pills, FileInfoBody's tag list, search overlay tag
  *  hits, TagInfoBody's Open-in-Graph button. */
 export function openGraphForTag(nodeId: string, _label: string): void {
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId: `tag:${nodeId}`,
     depth: 1,
@@ -3916,7 +3916,7 @@ export function openGraphForTag(nodeId: string, _label: string): void {
  *  pill, the editor mention click on a name with no contact file, and
  *  search mention hits. The `nodeId` is the `@@Name` graph node id. */
 export function openGraphForMention(nodeId: string, _label: string): void {
-  const tab = openGraphInActivePane({
+  openGraphInActivePane({
     mode: "semantic",
     scopeId: `mention:${nodeId}`,
     depth: 1,
@@ -3983,16 +3983,6 @@ export function openGraphFromLink(
 // open + inspector-open state lives here. One per window; the
 // inspector toggle is window-scoped now (was per-tab when the
 // browser was a tab kind) since there's only ever one instance.
-
-/// On viewports >= this width the browser inspector defaults open.
-/// Below it, the inspector starts closed so a phone-sized layout
-/// gets the full screen for the tree. The user can always toggle.
-const BROWSER_INSPECTOR_BREAKPOINT_PX = 768;
-
-function defaultInspectorOpen(): boolean {
-  if (typeof window === "undefined") return true;
-  return window.innerWidth >= BROWSER_INSPECTOR_BREAKPOINT_PX;
-}
 
 export function openBrowser(): BrowserTab {
   const tab = focusExistingBrowserTab() ?? openBrowserInActivePane();

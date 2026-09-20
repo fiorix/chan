@@ -18,7 +18,7 @@
     indentWithTab,
   } from "@codemirror/commands";
   import { markdown } from "@codemirror/lang-markdown";
-  import { currentPreferences, workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
+  import { currentPreferences, effectiveHybridSurfaceTheme } from "../state/store.svelte";
   import {
     createValueSync,
     findField,

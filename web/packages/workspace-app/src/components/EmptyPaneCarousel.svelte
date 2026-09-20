@@ -24,7 +24,7 @@
   // Slide 2 is an About widget (version, attributions, donation QR,
   // project links).
 
-  import { onDestroy, onMount } from "svelte";
+  import { onMount } from "svelte";
   import { api } from "../api/client";
   import { withTokenQuery } from "../api/transport";
   import type {
@@ -365,7 +365,6 @@
   const paused = $derived(
     hovering || focused || !cycling || !active || !autoRotate,
   );
-  let containerEl: HTMLDivElement | undefined = $state();
 
   /// Auto-rotate while neither hovered nor focused AND the user
   /// hasn't explicitly stopped the cycle. Reset the interval on
@@ -434,12 +433,6 @@
     return () => window.clearInterval(handle);
   });
 
-  onDestroy(() => {
-    // The $effect cleanup already clears the interval, but if the
-    // component is unmounted mid-tick we make sure nothing
-    // references a stale element.
-    containerEl = undefined;
-  });
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -447,7 +440,6 @@
 <div
   class="carousel"
   class:carousel-wide={slideIndex === 1}
-  bind:this={containerEl}
   role="region"
   aria-label="empty pane carousel"
   aria-roledescription="carousel"

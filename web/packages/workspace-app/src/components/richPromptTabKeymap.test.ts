@@ -24,7 +24,7 @@ vi.mock("../api/client", async (orig) => {
 });
 
 import RichPrompt from "./RichPrompt.svelte";
-import { showRichPromptForTab, richPrompt } from "../state/richPrompt.svelte";
+import { richPrompt } from "../state/richPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];

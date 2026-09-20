@@ -20,7 +20,6 @@
     FsGraphEdge,
     FsGraphNode,
     FsGraphResponse,
-    GraphView,
     GraphViewEdge,
     GraphViewNode,
     LanguageGraphResponse,
@@ -59,7 +58,6 @@
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
   import { type ScopeOption } from "../state/scope.svelte";
-  import ResizeHandle from "./ResizeHandle.svelte";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
@@ -568,14 +566,11 @@
   // older indexes may still contain them.
   /// `group` is a synthetic edge kind: cytoscape-only, never emitted
   /// by chan-workspace's graph index. It exists to fan `group` edges
-  /// from a synthetic hub node (id `SCOPE_HUB_ID`) to the files in a
+  /// from a synthetic hub node to the files in a
   /// multi-file `group` scope -- but no graph scope kind produces a
   /// group scope, so that synthesis is unreachable; the edge-kind +
   /// hub machinery is dead and awaits a follow-up cleanup.
   type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language" | "group";
-  /// Stable id for the synthetic scope hub node. Prefixed with `__`
-  /// so it can't collide with a real file path.
-  const SCOPE_HUB_ID = "__scope_hub__";
   type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
   type RenderedNode = Extract<
     GraphViewNode,

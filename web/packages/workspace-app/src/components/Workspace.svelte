@@ -26,7 +26,6 @@
   const effectiveId = $derived(nodeId ?? viewLayout.rootId);
   const node = $derived(viewLayout.nodes[effectiveId]);
 
-  let dividerEl: HTMLDivElement | undefined = $state();
 
   function startResize(e: MouseEvent, split: SplitNode): void {
     e.preventDefault();
@@ -89,7 +88,6 @@
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <div
         class="divider"
-        bind:this={dividerEl}
         role="separator"
         aria-orientation={split.direction === "row" ? "vertical" : "horizontal"}
         aria-valuenow={Math.round(split.ratio * 100)}

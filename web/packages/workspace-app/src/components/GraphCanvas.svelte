@@ -28,7 +28,6 @@
 
   import { onDestroy, onMount, tick } from "svelte";
   import {
-    forceCenter,
     forceCollide,
     forceLink,
     forceManyBody,
