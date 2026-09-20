@@ -34,6 +34,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
+import type { SyntaxNode } from "@lezer/common";
 import { type Extension, StateField } from "@codemirror/state";
 import {
   isExcalidrawImageSrc,
@@ -72,6 +73,63 @@ const USER_SCROLL_QUIET_MS = 900;
 /// dragstart.
 export const IMAGE_MOVE_MIME = "application/x-chan-image-move";
 
+/// The parts of an Image node every action reads: its four LinkMark
+/// ranges (`[`, `]`, `(`, `)`) and its URL slot. One walk, because five
+/// copies of this loop are why one stale position had five separate
+/// failure modes. `urlFrom` stays -1 when the slot is empty (`![alt]()`),
+/// which the LinkMark-based callers handle themselves.
+function imageNodeParts(node: SyntaxNode): {
+  linkMarks: { from: number; to: number }[];
+  urlFrom: number;
+  urlTo: number;
+} {
+  const linkMarks: { from: number; to: number }[] = [];
+  let urlFrom = -1;
+  let urlTo = -1;
+  const cursor = node.cursor();
+  if (cursor.firstChild()) {
+    do {
+      if (cursor.name === "LinkMark") {
+        linkMarks.push({ from: cursor.from, to: cursor.to });
+      } else if (cursor.name === "URL" && urlFrom < 0) {
+        urlFrom = cursor.from;
+        urlTo = cursor.to;
+      }
+    } while (cursor.nextSibling());
+  }
+  return { linkMarks, urlFrom, urlTo };
+}
+
+/// The Image node a widget's DOM stands for, resolved at the moment the
+/// action runs.
+///
+/// The live position comes from the widget element: CodeMirror maps it for
+/// us, so an edit anywhere above the image moves the answer with the
+/// document instead of leaving it behind. The position stamped when the
+/// widget was built is the fallback, for the block-above editing preview
+/// where the wrap sits at the line start and a walk from there climbs
+/// through Paragraph to Document without ever reaching the Image.
+function imageNodeFor(
+  view: EditorView,
+  wrap: HTMLElement | null,
+  stamp?: number,
+): SyntaxNode | null {
+  const tree = syntaxTree(view.state);
+  const candidates: number[] = [];
+  if (wrap?.isConnected) {
+    const live = view.posAtDOM(wrap);
+    if (live >= 0) candidates.push(live);
+  }
+  if (stamp !== undefined && stamp >= 0) candidates.push(stamp);
+  for (const pos of candidates) {
+    if (pos > view.state.doc.length) continue;
+    let node: SyntaxNode | null = tree.resolveInner(pos, 1);
+    while (node && node.name !== "Image") node = node.parent ?? null;
+    if (node?.name === "Image") return node;
+  }
+  return null;
+}
+
 /// Start an internal image-move drag from an image atom widget. Reads
 /// the live Image node range (positions drift as the doc changes, so
 /// we resolve from the stamped nodePos rather than trusting a cached
@@ -83,7 +141,7 @@ function beginImageDrag(
   nodePos: number,
   wrap: HTMLElement,
 ): void {
-  const range = imageNodeRange(view, nodePos);
+  const range = imageNodeRange(view, wrap, nodePos);
   if (!range || !e.dataTransfer) {
     // No resolvable source range -> let the browser do its default
     // (which for an <img> with a real src is a normal image drag); we
@@ -171,9 +229,10 @@ function imageEditEntered(
 /// the old pixel copy); web falls back to writeText.
 async function copyImageMarkdown(
   view: EditorView,
-  nodePos: number,
+  wrap: HTMLElement | null,
+  stamp?: number,
 ): Promise<void> {
-  const range = imageNodeRange(view, nodePos);
+  const range = imageNodeRange(view, wrap, stamp);
   if (!range) throw new Error("no image source range");
   await writeClipboardText(view.state.sliceDoc(range.from, range.to));
 }
@@ -186,11 +245,14 @@ export function selectedImageMarkdown(view: EditorView): string | null {
   const wrap = view.dom.querySelector<HTMLElement>(
     ".cm-md-image-wrap[data-selected]",
   );
-  const posAttr = wrap?.dataset.imagePos;
-  if (posAttr === undefined) return null;
-  const nodePos = Number(posAttr);
-  if (!Number.isFinite(nodePos)) return null;
-  const range = imageNodeRange(view, nodePos);
+  if (!wrap) return null;
+  const posAttr = wrap.dataset.imagePos;
+  const stamp = posAttr === undefined ? undefined : Number(posAttr);
+  const range = imageNodeRange(
+    view,
+    wrap,
+    stamp !== undefined && Number.isFinite(stamp) ? stamp : undefined,
+  );
   return range ? view.state.sliceDoc(range.from, range.to) : null;
 }
 
@@ -392,7 +454,7 @@ class ImageWidget extends WidgetType {
       let renderedSvg: string | null = null;
       let viewBtn: HTMLButtonElement | null = null;
       const resolved = resolveImageSrc(this.src, this.fromPath);
-      const revealSource = () => placeCaretInImageUrl(view, this.nodePos);
+      const revealSource = () => placeCaretInImageUrl(view, wrap, this.nodePos);
       // Copy: PNG rasterizes the rendered scene to a clipboard payload;
       // SVG copies the vector markup as text. Both re-render the light
       // face from a dark editor (View's discipline) and hide until a
@@ -467,7 +529,7 @@ class ImageWidget extends WidgetType {
         editBtn.addEventListener("mousedown", (e) => {
           e.preventDefault();
           e.stopPropagation();
-          placeCaretInImageUrl(view, this.nodePos);
+          placeCaretInImageUrl(view, wrap, this.nodePos);
         });
         actions.appendChild(editBtn);
       }
@@ -566,7 +628,7 @@ class ImageWidget extends WidgetType {
         if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
-        placeCaretInImageUrl(view, this.nodePos);
+        placeCaretInImageUrl(view, wrap, this.nodePos);
       });
       wrap.insertBefore(badge, wrap.firstChild);
     };
@@ -677,7 +739,7 @@ class ImageWidget extends WidgetType {
       editBtn.addEventListener("mousedown", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        placeCaretInImageUrl(view, this.nodePos);
+        placeCaretInImageUrl(view, wrap, this.nodePos);
       });
       actions.appendChild(editBtn);
     }
@@ -693,7 +755,7 @@ class ImageWidget extends WidgetType {
     copyBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      void copyImageMarkdown(view, this.nodePos).then(
+      void copyImageMarkdown(view, wrap, this.nodePos).then(
         () => {
           copyBtn.innerHTML = CHECK_ICON_SVG;
           setTimeout(() => {
@@ -853,14 +915,20 @@ function ensureDeselectListener(view: EditorView): void {
     ) {
       if (payload && !isExcalidrawImageSrc(payload.src)) {
         e.preventDefault();
-        void copyImageMarkdown(view, payload.nodePos);
+        void copyImageMarkdown(view, selected, payload.nodePos).catch(
+          () => {
+            // The copy surfaces its own failure on the button; from the
+            // keyboard there is no button, and an unhandled rejection is
+            // not a report.
+          },
+        );
       }
       return;
     }
     // Plain Enter - same as clicking the Edit button.
     if (!hasMod && !e.altKey && !e.shiftKey && e.key === "Enter") {
       e.preventDefault();
-      placeCaretInImageUrl(view, hintPos);
+      placeCaretInImageUrl(view, selected, hintPos);
       clearImageSelection(view);
       return;
     }
@@ -879,21 +947,16 @@ function ensureDeselectListener(view: EditorView): void {
   });
 }
 
-/// Outer source range of the Image node anchored near `hintPos`,
-/// or null when the syntax tree has moved on (rare; transient
-/// during edits). Shared by Delete + Enter handlers.
+/// Outer source range of the Image node a widget stands for, or null when
+/// the tree cannot answer (transient during edits). Shared by every action
+/// that reads or rewrites the image's source.
 function imageNodeRange(
   view: EditorView,
-  hintPos: number,
+  wrap: HTMLElement | null,
+  stamp?: number,
 ): { from: number; to: number } | null {
-  const tree = syntaxTree(view.state);
-  let node: import("@lezer/common").SyntaxNode | null = tree.resolveInner(
-    hintPos,
-    1,
-  );
-  while (node && node.name !== "Image") node = node.parent ?? null;
-  if (!node || node.name !== "Image") return null;
-  return { from: node.from, to: node.to };
+  const node = imageNodeFor(view, wrap, stamp);
+  return node ? { from: node.from, to: node.to } : null;
 }
 
 /// Every image src in the document, in document order. Backs the
@@ -904,46 +967,23 @@ export function collectDocImageSrcs(view: EditorView): string[] {
   syntaxTree(view.state).iterate({
     enter(node) {
       if (node.name !== "Image") return;
-      const cursor = node.node.cursor();
-      if (!cursor.firstChild()) return;
-      do {
-        if (cursor.name === "URL") {
-          const src = view.state.doc.sliceString(cursor.from, cursor.to);
-          if (!isExcalidrawImageSrc(src)) srcs.push(src);
-          break;
-        }
-      } while (cursor.nextSibling());
+      const { urlFrom, urlTo } = imageNodeParts(node.node);
+      if (urlFrom < 0) return;
+      const src = view.state.doc.sliceString(urlFrom, urlTo);
+      if (!isExcalidrawImageSrc(src)) srcs.push(src);
     },
   });
   return srcs;
 }
 
-function placeCaretInImageUrl(view: EditorView, hintPos: number): void {
-  // hintPos is the Image node's start as captured when the widget
-  // was constructed. Looking up via syntaxTree is more reliable than
-  // posAtDOM on the wrap - the wrap may sit at line.from when the
-  // widget renders as block-above (edit mode), where resolveInner
-  // walks up through Paragraph / Document and never reaches the
-  // Image node. Using the captured nodePos lands directly inside
-  // the Image.
-  const tree = syntaxTree(view.state);
-  let node: import("@lezer/common").SyntaxNode | null = tree.resolveInner(
-    hintPos,
-    1,
-  );
-  while (node && node.name !== "Image") node = node.parent ?? null;
-  if (!node || node.name !== "Image") return;
-  const cursor = node.cursor();
-  if (!cursor.firstChild()) return;
-  let urlFrom = -1;
-  let urlTo = -1;
-  do {
-    if (cursor.name === "URL") {
-      urlFrom = cursor.from;
-      urlTo = cursor.to;
-      break;
-    }
-  } while (cursor.nextSibling());
+function placeCaretInImageUrl(
+  view: EditorView,
+  wrap: HTMLElement | null,
+  stamp?: number,
+): void {
+  const node = imageNodeFor(view, wrap, stamp);
+  if (!node) return;
+  const { urlFrom, urlTo } = imageNodeParts(node);
   if (urlFrom < 0 || urlTo < 0) return;
   // Bias the caret to a position strictly inside the URL slot when
   // possible. Landing at urlTo (the boundary between URL and the
@@ -1008,26 +1048,9 @@ function commitImageWidth(
   // this is the write itself, so it asks the live predicate, which also
   // covers the surface that locks the state while leaving it editable.
   if (!isWidgetWritable(view)) return;
-  const wrapPos = view.posAtDOM(wrap);
-  if (wrapPos < 0) return;
-  // Walk the syntax tree from wrapPos out to the enclosing Image node
-  // (the wrap sits at the Image's source range, so resolveInner
-  // typically lands inside Image directly).
-  const tree = syntaxTree(view.state);
-  let node = tree.resolveInner(wrapPos, 1);
-  while (node && node.name !== "Image") node = node.parent ?? null!;
-  if (!node || node.name !== "Image") return;
-  const cursor = node.cursor();
-  if (!cursor.firstChild()) return;
-  let urlFrom = -1;
-  let urlTo = -1;
-  do {
-    if (cursor.name === "URL") {
-      urlFrom = cursor.from;
-      urlTo = cursor.to;
-      break;
-    }
-  } while (cursor.nextSibling());
+  const node = imageNodeFor(view, wrap);
+  if (!node) return;
+  const { urlFrom, urlTo } = imageNodeParts(node);
   if (urlFrom < 0) return;
   const oldSrc = view.state.doc.sliceString(urlFrom, urlTo);
   const newSrc = setImageWidth(oldSrc, width);
@@ -1085,10 +1108,15 @@ export function imageCaretRedirect(): Extension {
       (el as HTMLElement).removeAttribute("data-selected");
     }
     if (selectedPos !== null) {
-      const wrap = u.view.dom.querySelector(
-        `.cm-md-image-wrap[data-image-pos="${selectedPos}"]`,
-      ) as HTMLElement | null;
-      if (wrap) wrap.dataset.selected = "true";
+      // Match on the widget's LIVE position, not on the position stamped
+      // when it was built: an edit above the image moves the node and the
+      // stamp stays behind, and a selector over the stamp then finds
+      // nothing, which is the ring failing to appear at all.
+      for (const el of u.view.dom.querySelectorAll(".cm-md-image-wrap")) {
+        if (u.view.posAtDOM(el) !== selectedPos) continue;
+        (el as HTMLElement).dataset.selected = "true";
+        break;
+      }
     }
   });
 }
@@ -1175,19 +1203,7 @@ function scanImagesInline(view: EditorView, opts: ImageOptions): DecorationSet {
       const outerTo = node.to;
       // Read the alt text (between the first and second LinkMark) and
       // the URL (between `(` and `)`).
-      const cursor = node.node.cursor();
-      if (!cursor.firstChild()) return;
-      const linkMarks: Array<{ from: number; to: number }> = [];
-      let urlFrom = -1;
-      let urlTo = -1;
-      do {
-        if (cursor.name === "LinkMark") {
-          linkMarks.push({ from: cursor.from, to: cursor.to });
-        } else if (cursor.name === "URL") {
-          urlFrom = cursor.from;
-          urlTo = cursor.to;
-        }
-      } while (cursor.nextSibling());
+      const { linkMarks, urlFrom, urlTo } = imageNodeParts(node.node);
       if (linkMarks.length < 4 || urlFrom < 0) return;
       const altFrom = linkMarks[0]!.to;
       const altTo = linkMarks[1]!.from;
@@ -1266,19 +1282,7 @@ function scanImagesBlock(
       const outerFrom = node.from;
       const outerTo = node.to;
       if (!imageEditEntered(sel, outerFrom, outerTo)) return;
-      const cursor = node.node.cursor();
-      if (!cursor.firstChild()) return;
-      const linkMarks: Array<{ from: number; to: number }> = [];
-      let urlFrom = -1;
-      let urlTo = -1;
-      do {
-        if (cursor.name === "LinkMark") {
-          linkMarks.push({ from: cursor.from, to: cursor.to });
-        } else if (cursor.name === "URL") {
-          urlFrom = cursor.from;
-          urlTo = cursor.to;
-        }
-      } while (cursor.nextSibling());
+      const { linkMarks, urlFrom, urlTo } = imageNodeParts(node.node);
       if (linkMarks.length < 4 || urlFrom < 0) return;
       const altFrom = linkMarks[0]!.to;
       const altTo = linkMarks[1]!.from;
