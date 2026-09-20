@@ -15,9 +15,15 @@ import {
   commitPaneMode,
   enterPaneMode,
   layout,
+  makeFindState,
   reorderTab,
   serializeLayout,
+  type BrowserTab,
+  type DashboardTab,
+  type ExtensionTab,
   type FileTab,
+  type GraphTab,
+  type Tab,
   type LeafNode,
   type SerLeaf,
   type SerTab,
@@ -104,7 +110,91 @@ function loadedFileTab(): FileTab {
   };
 }
 
-function resetLayout(tabs: Array<FileTab | TerminalTab>): void {
+/// A graph tab carrying every optional field its kind allows.
+function loadedGraphTab(): GraphTab {
+  return {
+    kind: "graph",
+    id: "graph-loaded",
+    title: "workspace",
+    mode: "filesystem",
+    scopeId: "scope-1",
+    depth: 2,
+    expanded: { "": true, src: true },
+    filters: {
+      link: true,
+      tag: false,
+      mention: true,
+      language: false,
+      img: true,
+      folder: false,
+      markdown: true,
+      source: false,
+    },
+    inspectorOpen: true,
+    pendingSelectId: "node-9",
+    selectedNodeId: "node-3",
+    selectedNodeLabel: "src/main.rs",
+    inspectorWidth: 287,
+  };
+}
+
+/// A File Browser tab carrying every optional field its kind allows.
+function loadedBrowserTab(): BrowserTab {
+  return {
+    kind: "browser",
+    id: "browser-loaded",
+    title: "files",
+    inspectorOpen: true,
+    selected: "src/main.rs",
+    selectedPaths: ["src/main.rs", "src/lib.rs"],
+    showWorkspace: true,
+    expanded: ["src", "src/state"],
+    scroll: 412,
+    inspectorWidth: 265,
+  };
+}
+
+/// A dashboard tab carrying every optional field its kind allows. All three
+/// are optional and a clone that emits them conditionally loses them, so the
+/// fixture sets each to a value that is not the field's default.
+function loadedDashboardTab(): DashboardTab {
+  return {
+    kind: "dashboard",
+    id: "dashboard-loaded",
+    title: "dashboard",
+    carouselSlide: 2,
+    disabledSlots: [1],
+    autoRotate: false,
+  };
+}
+
+function loadedExtensionTab(): ExtensionTab {
+  return {
+    kind: "extension",
+    id: "extension-loaded",
+    title: "notes",
+    extensionId: "ext-1",
+  };
+}
+
+/// One fixture per tab kind, so a move is exercised on every branch of the
+/// per-kind copy block and not only on the two kinds a pane usually holds.
+const EVERY_KIND: Array<{ kind: string; make: () => Tab }> = [
+  { kind: "terminal", make: loadedTerminalTab },
+  { kind: "file", make: loadedFileTab },
+  { kind: "graph", make: loadedGraphTab },
+  { kind: "browser", make: loadedBrowserTab },
+  { kind: "dashboard", make: loadedDashboardTab },
+  { kind: "extension", make: loadedExtensionTab },
+];
+
+/// A second tab so a reorder has somewhere to go. Its kind does not matter to
+/// what these tests assert, and a dashboard is the cheapest to build.
+function neighbour(id: string): Tab {
+  return { kind: "dashboard", id, title: "neighbour" };
+}
+
+function resetLayout(tabs: Tab[]): void {
   const node: LeafNode = {
     kind: "leaf",
     id: PANE_ID,
@@ -116,8 +206,8 @@ function resetLayout(tabs: Array<FileTab | TerminalTab>): void {
   layout.activePaneId = PANE_ID;
 }
 
-function paneTabs(): Array<FileTab | TerminalTab> {
-  return (layout.nodes[PANE_ID] as LeafNode).tabs as Array<FileTab | TerminalTab>;
+function paneTabs(): Tab[] {
+  return (layout.nodes[PANE_ID] as LeafNode).tabs as Tab[];
 }
 
 /// Everything the clone is allowed to drop, by the item's own contract.
@@ -130,27 +220,40 @@ function withoutDeliberateDrops<T extends Record<string, unknown>>(tab: T): T {
 }
 
 describe("a reorder keeps every field it was not told to drop", () => {
-  test("terminal", () => {
-    const source = loadedTerminalTab();
-    resetLayout([source, { ...loadedFileTab(), id: "file-neighbour" }]);
+  for (const { kind, make } of EVERY_KIND) {
+    test(kind, () => {
+      const source = make();
+      resetLayout([source, neighbour("neighbour-tab")]);
+
+      reorderTab(PANE_ID, source.id, 1);
+
+      const moved = paneTabs().find((t) => t.id === source.id);
+      expect(moved).toBeDefined();
+      expect(withoutDeliberateDrops(moved as unknown as Record<string, unknown>)).toEqual(
+        withoutDeliberateDrops(source as unknown as Record<string, unknown>),
+      );
+    });
+  }
+
+  test("the drops the table names are the drops that happen", () => {
+    // withoutDeliberateDrops strips these from both sides everywhere else, so
+    // this is the only place the drop decision itself is under test: flipping
+    // one of the three to "carry" has to fail here and nowhere else.
+    const source: FileTab = {
+      ...loadedFileTab(),
+      find: makeFindState(),
+      caretCommand: { from: 3, to: 9 },
+      loadProgress: { loadedBytes: 10, totalBytes: 100 },
+    };
+    resetLayout([source, neighbour("neighbour-tab")]);
 
     reorderTab(PANE_ID, source.id, 1);
 
-    const moved = paneTabs().find((t) => t.id === source.id);
-    expect(moved).toBeDefined();
-    expect(withoutDeliberateDrops(moved as unknown as Record<string, unknown>)).toEqual(
-      withoutDeliberateDrops(source as unknown as Record<string, unknown>),
-    );
-  });
-
-  test("file", () => {
-    const source = loadedFileTab();
-    resetLayout([source, { ...loadedTerminalTab(), id: "term-neighbour" }]);
-
-    reorderTab(PANE_ID, source.id, 1);
-
-    const moved = paneTabs().find((t) => t.id === source.id);
-    expect(moved).toBeDefined();
+    const moved = paneTabs().find((t) => t.id === source.id) as FileTab;
+    expect(moved.find).toBeUndefined();
+    expect(moved.caretCommand).toBeUndefined();
+    expect(moved.loadProgress).toBeUndefined();
+    // Dropping three fields is not licence to drop a fourth.
     expect(withoutDeliberateDrops(moved as unknown as Record<string, unknown>)).toEqual(
       withoutDeliberateDrops(source as unknown as Record<string, unknown>),
     );
@@ -179,19 +282,21 @@ describe("a reorder keeps every field it was not told to drop", () => {
 });
 
 describe("a Hybrid Nav commit keeps every field it was not told to drop", () => {
-  test("terminal", () => {
-    const source = loadedTerminalTab();
-    resetLayout([source]);
+  for (const { kind, make } of EVERY_KIND) {
+    test(kind, () => {
+      const source = make();
+      resetLayout([source]);
 
-    enterPaneMode();
-    commitPaneMode();
+      enterPaneMode();
+      commitPaneMode();
 
-    const moved = paneTabs().find((t) => t.id === source.id);
-    expect(moved).toBeDefined();
-    expect(withoutDeliberateDrops(moved as unknown as Record<string, unknown>)).toEqual(
-      withoutDeliberateDrops(source as unknown as Record<string, unknown>),
-    );
-  });
+      const moved = paneTabs().find((t) => t.id === source.id);
+      expect(moved).toBeDefined();
+      expect(withoutDeliberateDrops(moved as unknown as Record<string, unknown>)).toEqual(
+        withoutDeliberateDrops(source as unknown as Record<string, unknown>),
+      );
+    });
+  }
 });
 
 // ---- the persisted session --------------------------------------------------
