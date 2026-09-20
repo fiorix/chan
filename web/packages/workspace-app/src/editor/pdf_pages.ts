@@ -27,7 +27,8 @@ import {
   type SlideDomTheme,
 } from "./slide_dom";
 import { buildDocDom, type DocDom } from "./doc_dom";
-import { PAGE_BREAK_RE, type SlideAspectRatio, type SlidesSpec } from "./slides";
+import { isPageBreakElement } from "./page_break";
+import { type SlideAspectRatio, type SlidesSpec } from "./slides";
 import { RASTER_SCALE, type PageBoxPx } from "./pdf_snapshot";
 
 /// A4 in PDF points.
@@ -76,7 +77,7 @@ export type DocBlockRect = {
   /// h1-h6: a cut never lands directly below a heading; the heading
   /// moves to the next page instead.
   heading: boolean;
-  /// hr.chan-page-break: forces a cut after this block.
+  /// A page-break marker: forces a cut after this block.
   pageBreak: boolean;
 };
 
@@ -147,8 +148,7 @@ export function measureDocBlocks(content: HTMLElement): DocBlockRect[] {
       top: rect.top - contentTop,
       bottom: rect.bottom - contentTop,
       heading: /^H[1-6]$/.test(child.tagName),
-      pageBreak:
-        child.tagName === "HR" && child.classList.contains("chan-page-break"),
+      pageBreak: isPageBreakElement(child),
     };
   });
 }
@@ -171,17 +171,6 @@ export function buildDocPageElements(
     if (content) content.style.marginTop = `-${window.startPx}px`;
     return page;
   });
-}
-
-/// Normalize @pagebreak shorthand lines to the page-break hr, which is
-/// what the rendered document exposes to the block measurer.
-export function normalizeDocPageBreaks(markdown: string): string {
-  return markdown
-    .split("\n")
-    .map((line) =>
-      PAGE_BREAK_RE.test(line) ? '<hr class="chan-page-break">' : line,
-    )
-    .join("\n");
 }
 
 /// Aspect-fit a slide of `aspectRatio` into a page box, centered.

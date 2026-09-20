@@ -7,16 +7,10 @@ import {
 } from "@codemirror/view";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { lineIntersect } from "../decorations/selection";
-
-export const PAGE_BREAK_MARKER = '<hr class="chan-page-break">';
+import { enclosingFence } from "./fence";
+import { PAGE_BREAK_MARKER, pageBreakLineFlags } from "../page_break";
 
 const TRIGGERS = ["@pagebreak", "@break"] as const;
-const PAGE_BREAK_LINE_RE =
-  /^\s*<hr\s+class=(["'])chan-page-break\1\s*\/?>\s*$/i;
-
-export function isPageBreakLine(text: string): boolean {
-  return PAGE_BREAK_LINE_RE.test(text);
-}
 
 function detectTrigger(view: EditorViewType): {
   from: number;
@@ -89,6 +83,9 @@ function trimInlineSpaceAroundTrigger(
 export function expandPageBreakMacro(view: EditorViewType): boolean {
   const hit = detectTrigger(view);
   if (!hit) return false;
+  // Inside a fenced code block the trigger is a code sample the author
+  // is typing out, so it stays literal, as it does in a written file.
+  if (enclosingFence(view.state, hit.from)) return false;
   const line = view.state.doc.lineAt(hit.from);
   const before = line.text.slice(0, hit.from - line.from);
   const after = line.text.slice(hit.to - line.from);
@@ -147,9 +144,15 @@ class PageBreakWidget extends WidgetType {
 
 function scanPageBreaks(state: EditorViewType["state"]): DecorationSet {
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
+  const lines = [];
   for (let lineNo = 1; lineNo <= state.doc.lines; lineNo++) {
-    const line = state.doc.line(lineNo);
-    if (!isPageBreakLine(line.text)) continue;
+    lines.push(state.doc.line(lineNo));
+  }
+  // The divider asks the same document-wide question every other surface
+  // asks, so a marker the author is showing inside a fence draws nothing.
+  const breaks = pageBreakLineFlags(lines.map((line) => line.text));
+  for (const [index, line] of lines.entries()) {
+    if (!breaks[index]) continue;
     if (lineIntersect(state, line.from, line.to, state.selection)) continue;
     decos.push({
       from: line.from,

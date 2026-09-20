@@ -15,7 +15,6 @@ import {
   DOC_MARGIN_PT,
   docPageGeometry,
   measureDocBlocks,
-  normalizeDocPageBreaks,
   paginateDocBlocks,
 } from "./pdf_pages";
 import { api } from "../api/client";
@@ -269,7 +268,7 @@ export async function exportMarkdownToPdf(
 
   const geometry = docPageGeometry();
   const doc = buildDocDom({
-    markdown: normalizeDocPageBreaks(opts.markdown),
+    markdown: opts.markdown,
     path: opts.path,
     theme: opts.theme,
     styleSource: opts.styleSource,

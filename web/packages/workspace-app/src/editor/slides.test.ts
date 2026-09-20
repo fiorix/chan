@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import {
   firstSlideHeadingCaret,
   groupHeadingsBySlides,
-  PAGE_BREAK_RE,
   parseSlidesSpec,
   slideIndexForLine,
   splitSlidePages,
@@ -117,7 +116,7 @@ chan:
 <hr class="chan-page-break">
 # Slide 2
 ### Detail
-@pagebreak
+<hr class="chan-page-break">
 # Slide 3
 `;
 
@@ -170,7 +169,7 @@ one
 
 two
 
-@pagebreak
+<hr class="chan-page-break">
 
 # Slide 3
 `;
@@ -254,13 +253,13 @@ chan:
       aspectRatio: "16:9",
       zoomFactor: 2,
     });
-    const pageBreakLines = seed
-      .split(/\r?\n/)
-      .filter((line) => PAGE_BREAK_RE.test(line));
-    expect(pageBreakLines).toEqual([]);
-    expect(splitSlidePages(`${seed}@pagebreak\n# Slide 2\n`)).toHaveLength(
-      2,
-    );
+    expect(splitSlidePages(seed)).toHaveLength(1);
+    // The seed's bullet tells the author to type the macro, and typing it
+    // writes the marker; the macro left literally in a file is text.
+    expect(
+      splitSlidePages(`${seed}<hr class="chan-page-break">\n# Slide 2\n`),
+    ).toHaveLength(2);
+    expect(splitSlidePages(`${seed}@pagebreak\n# Slide 2\n`)).toHaveLength(1);
     expect(splitSlidePages(seed)).toEqual([
       {
         number: 1,

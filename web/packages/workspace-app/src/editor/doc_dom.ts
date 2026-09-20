@@ -8,6 +8,7 @@
 // makes the block measurement that follows it meaningful.
 
 import { renderMarkdown } from "../api/markdown";
+import { markPageBreaks, PAGE_BREAK_SELECTOR } from "./page_break";
 import {
   editorTokens,
   prepareSlideImages,
@@ -121,6 +122,9 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
   // measured cut by the first block's margin.
   content.style.display = "flow-root";
   content.innerHTML = renderMarkdown(opts.markdown);
+  // The element test runs here, once, and the stylesheet and the block
+  // measurement below both read what it decided.
+  markPageBreaks(content);
   root.appendChild(content);
 
   // An embed cannot be painted into a page, and the snapshot audit refuses
@@ -241,7 +245,7 @@ export function docCss(): string {
   margin: 1em auto;
 }
 .${DOC_CONTAINER_CLASS} .chan-slide-media > img { margin: 1em 0; }
-.${DOC_CONTAINER_CLASS} hr.chan-page-break {
+.${DOC_CONTAINER_CLASS} ${PAGE_BREAK_SELECTOR} {
   border: 0;
   margin: 0;
 }

@@ -11,7 +11,6 @@ import {
   deckPageLayout,
   deckSlideLayoutBox,
   docPageGeometry,
-  normalizeDocPageBreaks,
   paginateDocBlocks,
   slideBoxFit,
   type DocBlockRect,
@@ -133,22 +132,6 @@ describe("paginateDocBlocks", () => {
       expect(w.endPx - w.startPx).toBeLessThanOrEqual(PAGE);
       if (i > 0) expect(w.startPx).toBe(windows[i - 1]!.endPx);
     }
-  });
-});
-
-describe("normalizeDocPageBreaks", () => {
-  test("rewrites @pagebreak lines and keeps break hrs verbatim", () => {
-    const out = normalizeDocPageBreaks(
-      'a\n@pagebreak\nb\n<hr class="chan-page-break">\nc @pagebreak c\n',
-    );
-    expect(out.split("\n")).toEqual([
-      "a",
-      '<hr class="chan-page-break">',
-      "b",
-      '<hr class="chan-page-break">',
-      "c @pagebreak c",
-      "",
-    ]);
   });
 });
 

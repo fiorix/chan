@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DOC_CONTAINER_CLASS, buildDocDom, docCss } from "./doc_dom";
+import { PAGE_BREAK_SELECTOR } from "./page_break";
 
 vi.mock("./mermaid_render", () => ({
   renderMermaid: vi.fn(async (_source: string, dark: boolean) => ({
@@ -109,8 +110,25 @@ describe("buildDocDom", () => {
       contentWidthPx: 669,
     });
     document.body.append(root);
-    expect(root.querySelector("hr.chan-page-break")).not.toBeNull();
-    expect(docCss()).toContain(`.${DOC_CONTAINER_CLASS} hr.chan-page-break`);
+    const hr = root.querySelector<HTMLElement>("hr.chan-page-break");
+    expect(hr).not.toBeNull();
+    // The rule selects the mark the composition applies, which is the
+    // only way to say "and no other attribute" to CSS.
+    expect(hr!.matches(PAGE_BREAK_SELECTOR)).toBe(true);
+    expect(docCss()).toContain(`.${DOC_CONTAINER_CLASS} ${PAGE_BREAK_SELECTOR}`);
+  });
+
+  test("leaves a near miss as the ordinary rule it is", () => {
+    const { root } = buildDocDom({
+      markdown: 'a\n\n<hr class="chan-page-break extra">\n\nb\n',
+      path: "doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+    document.body.append(root);
+    const hr = root.querySelector<HTMLElement>("hr");
+    expect(hr).not.toBeNull();
+    expect(hr!.matches(PAGE_BREAK_SELECTOR)).toBe(false);
   });
 
   test("keeps the live body override while copying the theme's em code ratio", () => {

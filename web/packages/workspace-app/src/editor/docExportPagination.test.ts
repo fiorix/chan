@@ -16,7 +16,6 @@ import { buildDocDom } from "./doc_dom";
 import {
   docPageGeometry,
   measureDocBlocks,
-  normalizeDocPageBreaks,
   paginateDocBlocks,
 } from "./pdf_pages";
 import { exportMarkdownToPdf } from "./pdf_export";
@@ -114,7 +113,7 @@ function deliverImagesLate(): { stop: () => void } {
 /// loaded: the reference the export has to match.
 function windowsAfterLoad(markdown: string): number[] {
   const dom = buildDocDom({
-    markdown: normalizeDocPageBreaks(markdown),
+    markdown,
     path: "notes/doc.md",
     theme: "light",
     contentWidthPx: 800,

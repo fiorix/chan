@@ -3,12 +3,8 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, test } from "vitest";
-import {
-  expandPageBreakMacro,
-  isPageBreakLine,
-  pageBreakDecorations,
-  PAGE_BREAK_MARKER,
-} from "./page_break";
+import { expandPageBreakMacro, pageBreakDecorations } from "./page_break";
+import { isPageBreakMarkerLine, PAGE_BREAK_MARKER } from "../page_break";
 
 let host: HTMLDivElement;
 let view: EditorView;
@@ -109,10 +105,10 @@ describe("expandPageBreakMacro", () => {
   });
 });
 
-describe("isPageBreakLine", () => {
+describe("isPageBreakMarkerLine", () => {
   test("matches the persisted marker", () => {
-    expect(isPageBreakLine(PAGE_BREAK_MARKER)).toBe(true);
-    expect(isPageBreakLine('<hr class="other">')).toBe(false);
+    expect(isPageBreakMarkerLine(PAGE_BREAK_MARKER)).toBe(true);
+    expect(isPageBreakMarkerLine('<hr class="other">')).toBe(false);
   });
 });
 

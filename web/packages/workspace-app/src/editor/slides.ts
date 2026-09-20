@@ -1,3 +1,5 @@
+import { pageBreakLineFlags } from "./page_break";
+
 export type SlideAspectRatio = "16:9" | "4:3";
 
 export type SlidesSpec = {
@@ -20,11 +22,6 @@ export type SlidePage = {
 const SUPPORTED_ASPECT_RATIOS = new Set<string>(["16:9", "4:3"]);
 const DEFAULT_SLIDE_ASPECT_RATIO: SlideAspectRatio = "16:9";
 const DEFAULT_SLIDE_ZOOM_FACTOR = 2;
-/// A source line that forces a page break: the literal page-break hr or
-/// the @pagebreak shorthand. Deck splitting and document PDF pagination
-/// share this definition.
-export const PAGE_BREAK_RE =
-  /^\s*(?:<hr\b(?=[^>]*\bclass=(["'])chan-page-break\1)[^>]*\/?>|@pagebreak)\s*$/i;
 
 export function parseSlidesSpec(source: string): SlidesSpec | null {
   const frontmatter = frontmatterBody(source);
@@ -104,13 +101,14 @@ export function groupHeadingsBySlides<T extends { line: number }>(
 export function splitSlidePages(source: string): SlidePage[] {
   const lines = source.split(/\r?\n/);
   const bodyStart = frontmatterEndLine(lines);
+  const breaks = pageBreakLineFlags(lines);
   const pages: SlidePage[] = [];
   let startLine = bodyStart;
   let pageLines: string[] = [];
 
   for (let i = bodyStart; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    if (PAGE_BREAK_RE.test(line)) {
+    if (breaks[i]) {
       pages.push(makeSlidePage(pages.length + 1, startLine, i - 1, pageLines));
       startLine = i + 1;
       pageLines = [];
@@ -220,11 +218,11 @@ function positiveNumber(value: number): number | null {
 }
 
 function slidePageBreakLines(source: string): number[] {
-  const lines = source.split(/\r?\n/);
+  const breaks = pageBreakLineFlags(source.split(/\r?\n/));
   const out: number[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    if (PAGE_BREAK_RE.test(lines[i] ?? "")) out.push(i);
+  for (let i = 0; i < breaks.length; i++) {
+    if (breaks[i]) out.push(i);
   }
 
   return out;

@@ -1,46 +1,61 @@
 // @vitest-environment jsdom
 //
-// One corpus, five surfaces, one answer per source line.
+// One corpus, four surfaces, one answer per source line.
 //
-// A page break is decided independently by the slides regex, the source
-// editor's divider, the deck split, the rendered DOM's class list, and the
-// document PDF path, and per-surface tests are what let those five drift
-// apart. Each case below runs one fixture through all five and asserts they
-// return the same verdict, so a fix is only a fix when every surface moves
-// together.
+// A page break is decided independently by the deck split, the source
+// editor's divider, the rendered document's marker and the document PDF
+// path, and per-surface tests are what let those four drift apart. Each
+// case below runs one fixture through all four and asserts they return the
+// same verdict, so a fix is only a fix when every surface moves together.
 //
-// The owner's ruling is the narrow one: `<hr class="chan-page-break">` is
-// the page break, anything else is a near miss that gets normalized on
-// write, and `@pagebreak` is an authoring macro that expands to the marker
-// rather than a break in its own right. Rows the ruling settles pin their
-// verdict; rows it leaves open assert agreement alone and are listed in the
-// task-back.
+// Each surface is asked at its own entry point, and asked about a whole
+// document rather than a line. A line cannot be asked on its own: the
+// corpus holds the canonical marker twice, once inside a fenced code block
+// and once outside it, with opposite verdicts, so any probe that sees only
+// the line's text has to give both rows the same answer and one of them
+// would be wrong whatever the code did.
+//
+// The owner's ruling is the narrow one: an `hr` whose only attribute is a
+// class of exactly `chan-page-break` is the page break, anything else is a
+// near miss left as the author wrote it, and `@pagebreak` is a typing
+// macro that writes the marker rather than a break in its own right. Rows
+// the ruling settles pin their verdict; a row it leaves open asserts
+// agreement alone and is listed in the task-back.
 //
 // jsdom lays nothing out, so the document PDF path gets stubbed block rects
 // and a page tall enough that only a forced break can cut. That is the
-// whole of what is faked: the normalization, the render, the measurement
-// and the pagination are the product's own.
+// whole of what is faked: the render, the measurement and the pagination
+// are the product's own.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { forceParsing } from "@codemirror/language";
 import { chanMarkdown } from "./markdown/grammar";
-import { PAGE_BREAK_RE, splitSlidePages } from "./slides";
-import { expandPageBreakMacro, isPageBreakLine } from "./commands/page_break";
-import { buildDocDom } from "./doc_dom";
+import { splitSlidePages } from "./slides";
 import {
-  measureDocBlocks,
-  normalizeDocPageBreaks,
-  paginateDocBlocks,
-} from "./pdf_pages";
+  expandPageBreakMacro,
+  pageBreakDecorations,
+} from "./commands/page_break";
+import { PAGE_BREAK_SELECTOR } from "./page_break";
+import { buildDocDom } from "./doc_dom";
+import { measureDocBlocks, paginateDocBlocks } from "./pdf_pages";
+import { exportMarkdownToPdf } from "./pdf_export";
+import type { PageSnapshot } from "./pdf_snapshot";
 
 const MARKER = '<hr class="chan-page-break">';
+// A valid 1x1 PNG so pdf-lib accepts the fake raster.
+const TINY_PNG = Uint8Array.from(
+  atob(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  ),
+  (c) => c.charCodeAt(0),
+);
 const BLOCK_HEIGHT_PX = 100;
 const TALL_PAGE_PX = 10_000;
 
 /// A corpus row: the body between "before" and "after", and the one line
-/// whose page-break-ness the per-line detectors are asked about.
+/// the row is about, which is where the editor's divider is looked for.
 type Row = {
   name: string;
   body: string[];
@@ -74,6 +89,7 @@ const ROWS: Row[] = [
     name: "an extra attribute",
     body: ['<hr class="chan-page-break" data-x="1">'],
     line: '<hr class="chan-page-break" data-x="1">',
+    expected: false,
   },
   {
     name: "single quotes and a self-closing slash",
@@ -105,6 +121,11 @@ let host: HTMLElement | undefined;
 
 function source(row: Row): string {
   return ["before", "", ...row.body, "", "after"].join("\n");
+}
+
+/// Where the row's line sits in the document `source` builds.
+function lineIndexOf(row: Row): number {
+  return 2 + row.body.indexOf(row.line);
 }
 
 /// Give every top-level block a height so the pagination has something to
@@ -148,29 +169,57 @@ function renderedDom(markdown: string): HTMLElement {
   return dom.content;
 }
 
-/// Does the document PDF path cut? Normalization, render, measurement and
+/// Does the document PDF path cut? The render, the measurement and the
 /// pagination are the product's; only the block rects are supplied.
 function documentPdfCuts(markdown: string): boolean {
-  const content = renderedDom(normalizeDocPageBreaks(markdown));
+  const content = renderedDom(markdown);
   stubBlockRects(content);
   const windows = paginateDocBlocks(measureDocBlocks(content), TALL_PAGE_PX);
   return windows.length > 1;
+}
+
+/// Does the source editor draw its divider on the row's line? Asked of a
+/// real view, because the divider is a block widget the decoration field
+/// emits, and the field reads the whole document.
+function editorDraws(markdown: string, lineIndex: number): boolean {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const view = new EditorView({
+    state: EditorState.create({
+      doc: markdown,
+      extensions: [pageBreakDecorations()],
+    }),
+    parent,
+  });
+  try {
+    const line = view.state.doc.line(lineIndex + 1);
+    let drawn = false;
+    view.state
+      .facet(EditorView.decorations)
+      .forEach((value) => {
+        if (typeof value === "function") return;
+        value.between(line.from, line.to, () => {
+          drawn = true;
+        });
+      });
+    return drawn;
+  } finally {
+    view.destroy();
+    parent.remove();
+  }
 }
 
 /// What each surface answers for one row.
 function verdicts(row: Row): Record<string, boolean> {
   const markdown = source(row);
   const domContent = renderedDom(markdown);
-  const domClass = Array.from(domContent.querySelectorAll("hr")).some((hr) =>
-    hr.classList.contains("chan-page-break"),
-  );
+  const domMarker = domContent.querySelector(PAGE_BREAK_SELECTOR) !== null;
   host?.remove();
   host = undefined;
   return {
-    slidesRegex: PAGE_BREAK_RE.test(row.line),
-    editorDivider: isPageBreakLine(row.line),
     deckCut: splitSlidePages(markdown).length > 1,
-    domClass,
+    editorDivider: editorDraws(markdown, lineIndexOf(row)),
+    domMarker,
     documentPdfCut: documentPdfCuts(markdown),
   };
 }
@@ -190,22 +239,36 @@ describe("every surface gives one source line the same answer", () => {
       return;
     }
     expect(answers).toEqual({
-      slidesRegex: row.expected,
-      editorDivider: row.expected,
       deckCut: row.expected,
-      domClass: row.expected,
+      editorDivider: row.expected,
+      domMarker: row.expected,
       documentPdfCut: row.expected,
     });
   });
 });
 
 describe("a fenced code block survives the export", () => {
-  test("the exported code sample still reads as the macro the author typed", () => {
+  // Asked of the export itself, not of a composition built beside it: the
+  // claim is that nothing between the author's file and the page rewrites
+  // a line the author is showing rather than writing.
+  test("the exported code sample still reads as the macro the author typed", async () => {
     const markdown = ["before", "", "```text", "@pagebreak", "```", "", "after"].join(
       "\n",
     );
-    const content = renderedDom(normalizeDocPageBreaks(markdown));
-    expect(content.querySelector("code")?.textContent).toContain("@pagebreak");
+    const pages: HTMLElement[] = [];
+    await exportMarkdownToPdf(
+      { path: "notes/doc.md", markdown, theme: "light" },
+      {
+        rasterize: async (root: HTMLElement): Promise<PageSnapshot> => {
+          pages.push(root);
+          return { png: TINY_PNG, widthPx: 2, heightPx: 2 };
+        },
+      },
+    );
+    expect(pages).toHaveLength(1);
+    const code = pages[0]!.querySelector("code");
+    expect(code?.textContent).toContain("@pagebreak");
+    expect(pages[0]!.querySelector(PAGE_BREAK_SELECTOR)).toBeNull();
   });
 });
 
