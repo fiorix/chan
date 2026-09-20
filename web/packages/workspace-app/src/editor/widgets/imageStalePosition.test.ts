@@ -17,7 +17,7 @@ import {
   selectedImageMarkdown,
 } from "./image";
 
-const writeClipboardText = vi.fn(async () => {});
+const writeClipboardText = vi.fn(async (_text: string) => {});
 vi.mock("../../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/desktop")>()),
   writeClipboardText: (text: string) => writeClipboardText(text),
