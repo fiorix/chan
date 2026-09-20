@@ -43,6 +43,7 @@
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
+import { authToken } from "../api/client";
 import { renderMarkdown } from "../api/markdown";
 import { isTauriDesktop, writeClipboardHtml } from "../api/desktop";
 import { isImagePath, parseImageSrc, resolveImageSrc } from "./extensions/image";
@@ -239,6 +240,17 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+/// Read an image the copy is inlining. The URL in the payload carries no
+/// bearer, so the request carries it as a header instead: the server reads
+/// `Authorization` when there is no `t=` query, and a header is not part of
+/// anything this module serializes. A `--no-token` serve has no bearer to
+/// send and authenticates nothing.
+function fetchImageBytes(url: string): Promise<Response> {
+  const token = authToken();
+  if (!token) return fetch(url);
+  return fetch(url, { headers: { authorization: `Bearer ${token}` } });
+}
+
 /// Build the self-contained HTML: the baseline body with each tagged
 /// workspace `<img>` upgraded from an absolute URL to a data: URI, up to
 /// the inline budget. Over-budget or failed-fetch images keep their
@@ -257,7 +269,7 @@ export async function buildInlinedHtml(
     const abs = img.getAttribute("src") ?? "";
     if (!abs || abs.startsWith("data:")) continue;
     try {
-      const resp = await fetch(abs);
+      const resp = await fetchImageBytes(abs);
       if (!resp.ok) continue;
       const blob = await resp.blob();
       if (blob.size > budget) continue;

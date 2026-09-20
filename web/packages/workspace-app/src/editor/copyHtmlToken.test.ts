@@ -131,6 +131,32 @@ describe("rich copy keeps the session bearer out of the clipboard", () => {
     view.destroy();
   });
 
+  test("the data: upgrade still authenticates and inlines the image", async () => {
+    // The stub answers like the server: a request carrying the bearer by
+    // query or by Authorization header gets the bytes, anything else gets
+    // 401. Stripping the query from the payload must not take the
+    // credential away from the fetch that reads the image, or nothing is
+    // ever inlined and an external paste shows a broken image.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const query = new URL(String(url), window.location.href).searchParams.get("t");
+        const header = String(
+          (init?.headers as Record<string, string> | undefined)?.authorization ?? "",
+        ).replace(/^Bearer /, "");
+        if (query !== TOKEN && header !== TOKEN) return { ok: false, status: 401 };
+        return {
+          ok: true,
+          blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
+        };
+      }),
+    );
+    const html = await buildInlinedHtml("![](./a.png)", "notes/foo.md", "/ws");
+    expect(html).toContain("data:image/png;base64,");
+    expect(html).not.toContain(TOKEN);
+    expect(html).not.toContain("/api/fs/notes/a.png");
+  });
+
   test("the desktop clipboard bridge receives the same tokenless payload", async () => {
     await writeDocSelectionToClipboard("![](./a.png#w=1)", ctx);
     expect(writeClipboardHtml).toHaveBeenCalledTimes(1);
