@@ -217,6 +217,7 @@ function wireActions() {
     runLoop();
   });
   els.disconnect.addEventListener('click', () => {
+    if (!stopped) return;
     if (invoke) invoke('request_close_window').catch(() => {});
   });
 }
