@@ -3234,12 +3234,13 @@ export function setWindowFocusColor(color: FocusColor): void {
 /// Locate a tab anywhere in the layout: the pane holding it, the side it sits
 /// on, the mutable array it lives in and its index.
 ///
-/// Every close resolves through this AFTER its last await. A close waits on a
-/// draft prompt, a close confirm and the terminal close sink, and the pane is
-/// free to change while it waits: the user can reorder it, drag the tab to the
-/// other side of a split or to another pane, a peer's tab can arrive, and a
-/// second close can land. A position captured before those awaits then points
-/// at whatever moved into the slot.
+/// `closeTabAsync` and `dropTabsById` resolve through this AFTER their last
+/// await. A close waits on a draft prompt, a close confirm and the terminal
+/// close sink, and the layout is free to change while it waits: the user can
+/// reorder a pane, drag the tab to the other side of a split or to another
+/// pane, a peer's layout can arrive, a Hybrid Nav commit can replace every
+/// node with a clone, and a second close can land. A pane object or an index
+/// captured before those awaits then belongs to a tree nobody is looking at.
 function locateTab(tabId: string): {
   paneId: string;
   pane: Pane;
@@ -3264,26 +3265,27 @@ function locateTab(tabId: string): {
   return null;
 }
 
-/// Drop `ids` from one side of a pane, keeping every tab that is not in the
-/// set so a tab that arrived while a prompt was open survives, and recording
-/// only what was actually removed. The reopen entry names the side the tab
-/// ended up on, not the one it was asked to close from.
-function dropTabsFromSide(
-  paneId: string,
-  p: Pane,
-  side: PaneSide,
-  ids: ReadonlySet<string>,
-): void {
-  const live = mutablePaneTabs(p, side);
-  const removed = live.filter((t) => ids.has(t.id));
-  if (removed.length === 0) return;
-  for (const tab of removed) rememberClosedTab(paneId, side, tab);
-  const next = live.filter((t) => !ids.has(t.id));
-  if (side === "b") p.bTabs = next;
-  else p.tabs = next;
-  const active = paneActiveTabId(p, side);
-  if (!next.some((t) => t.id === active)) {
-    setPaneActiveTabId(p, next[0]?.id ?? null, side);
+/// Remove `ids` from wherever each one sits now, and only from there.
+///
+/// This is `closeTabAsync`'s tail applied per id: resolve, remember the tab
+/// against the pane and side it ended on, splice it out and fix that side's
+/// active tab if it was the one removed. An id nobody holds any more was
+/// closed or discarded while the prompt was open, so it is skipped rather
+/// than chased. Everything not in the set is untouched, which is what leaves
+/// an arrival alone.
+function dropTabsById(ids: ReadonlySet<string>): void {
+  for (const id of ids) {
+    const found = locateTab(id);
+    if (!found) continue;
+    rememberClosedTab(found.paneId, found.side, found.tab);
+    found.tabs.splice(found.index, 1);
+    if (paneActiveTabId(found.pane, found.side) === id) {
+      setPaneActiveTabId(
+        found.pane,
+        found.tabs[Math.max(0, found.index - 1)]?.id ?? null,
+        found.side,
+      );
+    }
   }
 }
 
@@ -3295,7 +3297,32 @@ export function closeTab(
   return closeTabAsync(paneId, tabId, opts);
 }
 
+/// Tabs whose close is in flight.
+///
+/// A close awaits a draft prompt, a confirm and the terminal close sink before
+/// it removes anything, and a second close raised for the same tab inside that
+/// window would run the sink again. The WS close frame survives that, since
+/// `explicitCloseSession` is guarded by the session id the first call clears,
+/// but the Rich Prompt draft discard beside it is not: it would issue a second
+/// delete for a folder that is already going, fire and forget with no catch on
+/// either call. One close per tab at a time instead.
+const closingTabIds = new Set<string>();
+
 async function closeTabAsync(
+  paneId: string,
+  tabId: string,
+  opts?: CloseTabsOptions,
+): Promise<void> {
+  if (closingTabIds.has(tabId)) return;
+  closingTabIds.add(tabId);
+  try {
+    await closeTabOnce(paneId, tabId, opts);
+  } finally {
+    closingTabIds.delete(tabId);
+  }
+}
+
+async function closeTabOnce(
   paneId: string,
   tabId: string,
   opts?: CloseTabsOptions,
@@ -3574,14 +3601,12 @@ export async function closeAllTabs(opts?: CloseTabsOptions): Promise<void> {
     ];
   });
   if (!(await confirmCloseTabs(entries.map((entry) => entry.tab), opts))) return;
-  for (const entry of entries) rememberClosedTab(entry.paneId, entry.side, entry.tab);
+  dropTabsById(new Set(entries.map((entry) => entry.tab.id)));
+  // Only a leaf that really ended up empty goes back to its default side; one
+  // holding a tab that arrived during the prompt keeps what it is showing.
   for (const node of Object.values(layout.nodes)) {
     if (node.kind !== "leaf") continue;
-    node.tabs.length = 0;
-    node.activeTabId = null;
-    if (node.bTabs) node.bTabs.length = 0;
-    node.bActiveTabId = null;
-    node.side = "a";
+    if (!paneHasAnyTabs(node)) node.side = "a";
   }
 }
 
@@ -3599,13 +3624,11 @@ export async function closeOtherTabsInPane(
   const closeIds = new Set<string>();
   for (const tab of closing) {
     if (tab.kind === "terminal" && !(await runTerminalCloseSink(tab))) continue;
-    rememberClosedTab(paneId, side, tab);
     closeIds.add(tab.id);
   }
-  const next = tabs.filter((t) => t.id === keepTabId || !closeIds.has(t.id));
-  if (side === "b") p.bTabs = next;
-  else p.tabs = next;
-  setPaneActiveTabId(p, next.find((t) => t.id === keepTabId)?.id ?? next[0]?.id ?? null, side);
+  dropTabsById(closeIds);
+  const kept = locateTab(keepTabId);
+  if (kept) setPaneActiveTabId(kept.pane, keepTabId, kept.side);
 }
 
 export async function closeTabsInPane(
@@ -3617,20 +3640,17 @@ export async function closeTabsInPane(
   const closing = [...mutablePaneTabs(p, side)];
   if (!(await confirmCloseTabs(closing, opts))) return false;
   if (!(await runTerminalCloseSinks(closing))) return false;
-  // By id, on whichever side each tab ended up: the prompt above gives a tab
-  // time to cross the split, and gives a peer's tab time to arrive on a side
-  // nobody confirmed closing.
-  const closeIds = new Set(closing.map((t) => t.id));
-  dropTabsFromSide(paneId, p, side, closeIds);
-  dropTabsFromSide(paneId, p, oppositePaneSide(side), closeIds);
+  dropTabsById(new Set(closing.map((t) => t.id)));
   return true;
 }
 
-/// "Close pane" button. Two cases:
-///   - non-root: discard all tabs and collapse the pane (sibling takes
-///     the parent split's place).
-///   - root pane: there must always be at least one pane on screen, so
-///     just clear the tabs (returns to the empty "no file open" state).
+/// "Close pane" button. Closes the tabs the pane held when the button was
+/// pressed, wherever they are by the time the prompt resolves, and then:
+///   - non-root: collapses the pane if it ended up empty, and the sibling
+///     takes the parent split's place. A tab that arrived while the prompt
+///     was open keeps the pane on screen.
+///   - root pane: there must always be at least one pane on screen, so it
+///     stays and shows the empty "no file open" state.
 export async function closePane(
   paneId: string,
   opts?: CloseTabsOptions,
@@ -3639,13 +3659,13 @@ export async function closePane(
   const closing = [...paneTabs(p, "a"), ...paneTabs(p, "b")];
   if (!(await confirmCloseTabs(closing, opts))) return false;
   if (!(await runTerminalCloseSinks(closing))) return false;
-  const closeIds = new Set(closing.map((tab) => tab.id));
-  dropTabsFromSide(paneId, p, "a", closeIds);
-  dropTabsFromSide(paneId, p, "b", closeIds);
-  // A tab that arrived while the prompt was open keeps the pane alive, so the
-  // collapse is conditional on the pane actually being empty.
-  if (!paneHasAnyTabs(p)) {
-    p.side = "a";
+  dropTabsById(new Set(closing.map((tab) => tab.id)));
+  // Emptiness is read from the node the layout holds now, not from the object
+  // captured before the awaits. A tab that arrived while the prompt was open
+  // keeps the pane alive, so the collapse is conditional.
+  const live = layout.nodes[paneId];
+  if (live?.kind === "leaf" && !paneHasAnyTabs(live)) {
+    live.side = "a";
     if (paneId !== layout.rootId) {
       collapseEmptyPane(paneId);
     }
