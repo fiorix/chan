@@ -705,11 +705,6 @@
   // strikethrough is owned by the editor.
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (e.key === "Escape" && (paneMenuOpen || paneContextMenuOpen)) {
-      e.preventDefault();
-      closePaneMenus();
-      return;
-    }
     if (
       layout.activePaneId === pane.id &&
       e.ctrlKey &&

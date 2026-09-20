@@ -122,9 +122,24 @@
     if (target?.closest(".hamburger-menu, .hamburger-trigger")) return;
     open = false;
   }
+
+  /// An open menu owns Escape: it closes the menu and nothing else, and focus
+  /// goes back to the control that opened it.
+  ///
+  /// Capture, and stopping propagation, because the app's own Escape handler
+  /// is a document listener that would otherwise run first and pop whatever
+  /// overlay the menu is sitting on. A menu opened at the cursor has no
+  /// trigger to return to, so focus stays where it is.
+  function onWindowKeyCapture(e: KeyboardEvent): void {
+    if (!open || e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    open = false;
+    triggerEl?.focus();
+  }
 </script>
 
-<svelte:window onmousedown={onWindowMousedown} />
+<svelte:window onmousedown={onWindowMousedown} onkeydowncapture={onWindowKeyCapture} />
 
 {#if showTrigger}
   <button
