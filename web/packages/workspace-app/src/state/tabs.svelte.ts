@@ -5405,6 +5405,12 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       break;
     }
   }
+  // Everything below reads and writes the tab the layout holds NOW. The
+  // delegate above can await for seconds, and any move in that window
+  // replaces the tab object: the suppression gate would read a mirror
+  // nothing updates any more, and the CAS token would be stamped where
+  // the next save cannot find it.
+  const live = liveFileTabById(t.id) ?? t;
   // Connection-outage suppression: the session is degraded by a still-
   // retrying dead-server drop, so a classic PUT would hit the same
   // unreachable server and its `tab.error` would swap the editor for the
@@ -5412,26 +5418,26 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // Stay quiet; the edits live in the buffer (and editorBuffer) for the
   // reattach diff-push. A reachable-but-degraded session (flush timeout)
   // reads false here and PUTs normally.
-  if (isDocSavePaused(t)) return;
+  if (isDocSavePaused(live)) return;
   // Excalidraw scenes are JSON too: gate them like .json so a
   // source-mode typo can't write a corrupt scene the canvas then
   // refuses to restore.
-  if (isJson(t.path) || isExcalidraw(t.path)) {
-    const reason = validateJsonBuffer(t.content);
+  if (isJson(live.path) || isExcalidraw(live.path)) {
+    const reason = validateJsonBuffer(live.content);
     if (reason !== null) {
-      t.error = `JSON parse error: ${reason}`;
+      live.error = `JSON parse error: ${reason}`;
       return;
     }
   }
-  const path = t.path;
-  const sourceContent = t.content;
+  const path = live.path;
+  const sourceContent = live.content;
   const stripOnSave = editorToolsPrefs.stripTrailingWhitespaceOnSave;
   const content = stripOnSave
     ? stripTrailingWhitespaceText(sourceContent)
     : sourceContent;
-  const expectedMtimeNs = t.savedMtimeNs ?? null;
-  const expectedMtime = t.savedMtime;
-  const authorityVersion = t.authorityVersion ?? null;
+  const expectedMtimeNs = live.savedMtimeNs ?? null;
+  const expectedMtime = live.savedMtime;
+  const authorityVersion = live.authorityVersion ?? null;
   try {
     const r = await api.write(
       path,
@@ -5440,18 +5446,20 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       expectedMtime,
       authorityVersion,
     );
-    if (stripOnSave && content !== sourceContent && t.content === sourceContent) {
-      t.content = content;
+    // Resolved again: the write is the second await a move can land in.
+    const done = liveFileTabById(t.id) ?? live;
+    if (stripOnSave && content !== sourceContent && done.content === sourceContent) {
+      done.content = content;
     }
-    t.saved = content;
-    t.savedMtime = r.mtime ?? null;
-    t.savedMtimeNs = r.mtime_ns ?? null;
-    t.authorityVersion = r.authority_version ?? null;
-    t.diskConflicted = r.disk_conflicted ?? false;
-    t.error = null;
-    t.fileMissing = null;
-    mirrorToSiblings(path, content, t.id);
-    for (const hook of docFallbackSavedHooks) hook(t.id);
+    done.saved = content;
+    done.savedMtime = r.mtime ?? null;
+    done.savedMtimeNs = r.mtime_ns ?? null;
+    done.authorityVersion = r.authority_version ?? null;
+    done.diskConflicted = r.disk_conflicted ?? false;
+    done.error = null;
+    done.fileMissing = null;
+    mirrorToSiblings(path, content, done.id);
+    for (const hook of docFallbackSavedHooks) hook(done.id);
   } catch (e) {
     if (e instanceof ApiError && (e.status === 409 || e.status === 428)) {
       const data = e.data as {
@@ -5461,8 +5469,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
         disk_conflicted?: boolean;
       } | null;
       conflictDialog.open = true;
-      conflictDialog.tabId = t.id;
-      conflictDialog.path = t.path;
+      conflictDialog.tabId = live.id;
+      conflictDialog.path = live.path;
       conflictDialog.currentMtime = data?.current_mtime ?? null;
       conflictDialog.currentMtimeNs = data?.current_mtime_ns ?? null;
       conflictDialog.currentAuthorityVersion =

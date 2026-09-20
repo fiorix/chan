@@ -3686,6 +3686,34 @@ describe("autosave", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test("a save that lands after a reorder stamps the tab in the layout", async () => {
+    // `performSaveOnce` awaits the write, and a move in that window
+    // replaces the tab object. Stamping the result on the object the
+    // call was handed leaves the live tab looking unsaved with a stale
+    // CAS token, so its next save raises a conflict that is not one.
+    let land: (r: { mtime: number; mtime_ns: string }) => void = () => {};
+    vi.spyOn(api, "write").mockReturnValue(
+      new Promise<{ mtime: number; mtime_ns: string }>((resolve) => {
+        land = resolve;
+      }) as ReturnType<typeof api.write>,
+    );
+    const pane = resetLayout([
+      fileTab({ path: "notes/a.md", content: "body", saved: "old" }),
+      fileTab({ id: "file-2", path: "notes/b.md" }),
+    ]);
+    const target = activePane().tabs[0] as FileTab;
+
+    const saving = saveTab(target);
+    reorderTab(pane.id, "file-1", 1);
+    land({ mtime: 5, mtime_ns: "5000000000" });
+    await saving;
+
+    const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
+    expect(live).not.toBe(target);
+    expect(live.saved).toBe("body");
+    expect(live.savedMtimeNs).toBe("5000000000");
+  });
+
   test("strips trailing whitespace on save when the preference is enabled", async () => {
     editorToolsPrefs.stripTrailingWhitespaceOnSave = true;
     const tab = fileTab({
@@ -3696,6 +3724,10 @@ describe("autosave", () => {
       authorityVersion: 7,
     });
     resetLayout([tab]);
+    // The save path reads and writes the tab the layout holds, which is
+    // the object production hands it; a raw reference kept from before the
+    // insert sees none of it.
+    const live = activePane().tabs[0] as FileTab;
     const write = vi
       .spyOn(api, "write")
       .mockResolvedValue({
@@ -3705,7 +3737,7 @@ describe("autosave", () => {
         disk_conflicted: false,
       });
 
-    await saveTab(tab);
+    await saveTab(live);
 
     expect(write).toHaveBeenCalledWith(
       "notes/a.md",
@@ -3714,10 +3746,10 @@ describe("autosave", () => {
       1,
       7,
     );
-    expect(tab.content).toBe("a\n\tb\n");
-    expect(tab.saved).toBe("a\n\tb\n");
-    expect(tab.savedMtimeNs).toBe("2000000002");
-    expect(tab.authorityVersion).toBe(8);
+    expect(live.content).toBe("a\n\tb\n");
+    expect(live.saved).toBe("a\n\tb\n");
+    expect(live.savedMtimeNs).toBe("2000000002");
+    expect(live.authorityVersion).toBe(8);
   });
 
   test("serializes overlapping saves and keeps edits after an in-flight save dirty", async () => {
@@ -3729,6 +3761,7 @@ describe("autosave", () => {
       savedMtimeNs: "1000000001",
     });
     const pane = resetLayout([tab]);
+    const live = activePane().tabs[0] as FileTab;
     const calls: string[] = [];
     const tokens: Array<string | null | undefined> = [];
     const pending: Array<(value: { mtime: number; mtime_ns: string }) => void> = [];
@@ -3738,12 +3771,12 @@ describe("autosave", () => {
       return new Promise((resolve) => pending.push(resolve));
     });
 
-    const firstSave = saveTab(tab);
+    const firstSave = saveTab(live);
     await Promise.resolve();
     expect(calls).toEqual(["v1"]);
 
-    tab.content = "v2";
-    scheduleAutosave(pane.id, tab.id);
+    live.content = "v2";
+    scheduleAutosave(pane.id, live.id);
     await vi.advanceTimersByTimeAsync(800);
     expect(calls).toEqual(["v1"]);
 
@@ -3753,9 +3786,9 @@ describe("autosave", () => {
     pending.shift()!({ mtime: 3, mtime_ns: "3000000003" });
     await firstSave;
     expect(tokens).toEqual(["1000000001", "2000000002"]);
-    expect(tab.saved).toBe("v2");
-    expect(tab.savedMtime).toBe(3);
-    expect(tab.savedMtimeNs).toBe("3000000003");
+    expect(live.saved).toBe("v2");
+    expect(live.savedMtime).toBe(3);
+    expect(live.savedMtimeNs).toBe("3000000003");
   });
 });
 

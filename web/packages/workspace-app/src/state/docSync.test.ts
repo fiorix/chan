@@ -1379,6 +1379,36 @@ describe("a session follows its tab through a move", () => {
     cleanup();
   });
 
+  test("a degrade during the save's own flush reaches the moved tab's gate", async () => {
+    // `performSaveOnce` awaits the delegate for as long as the flush takes.
+    // A move in that window replaces the tab object, and the mirror the
+    // degrade writes lands on the new one, so a gate still reading the
+    // object the call was handed sees a frozen "attached" and skips the
+    // PUT the delegate just asked for.
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = fileTab();
+    const other = fileTab();
+    resetLayout([tab, other]);
+    const handed = liveTab(tab.id);
+    const { sock, view, cleanup } = await attached(handed, "hello");
+    type(view, "!");
+    await flushMicro();
+    await ackLastPush(sock, 0);
+
+    const saving = saveTab(handed);
+    await flushMicro();
+    reorderTab("pane-test", tab.id, 1);
+    expect(liveTab(tab.id)).not.toBe(handed);
+    // The flush fails, so the delegate degrades the session and falls
+    // through to the classic path.
+    sock.frame({ type: "flush", dirty: true, error: "write failed" });
+    await saving;
+    await flushMicro();
+
+    expect(write).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+
   test("a degraded session after a reorder does not suppress the classic save", async () => {
     // isDocSavePaused answers true for anything isDocAttached answers true
     // for, so a tab frozen at "attached" over a session that has stopped
