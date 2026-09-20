@@ -49,10 +49,14 @@ function imageSrcs(html: string): URL[] {
 }
 
 /// The payload carries no bearer: not as the `t` query the token plumbing
-/// appends, and not anywhere else in the markup (the markdown attribute and
-/// the desktop bridge's plain flavor included).
+/// appends to a network image src, and not anywhere else in the markup, the
+/// `data-chan-markdown` attribute included. Asserting on at least one
+/// network src keeps the check from passing over a payload that resolved no
+/// image at all.
 function expectTokenless(html: string): void {
-  for (const url of imageSrcs(html)) {
+  const urls = imageSrcs(html);
+  expect(urls.length).toBeGreaterThan(0);
+  for (const url of urls) {
     expect(url.searchParams.has("t")).toBe(false);
   }
   expect(html).not.toContain(TOKEN);
