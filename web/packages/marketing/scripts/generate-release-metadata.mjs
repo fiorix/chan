@@ -7,6 +7,8 @@ import { pathToFileURL } from "node:url";
 import {
   cliAssets,
   desktopAssets,
+  publicAssets,
+  updaterPayloads,
   windowsAssets,
 } from "./release-assets.mjs";
 import {
@@ -154,18 +156,23 @@ function gatewayDownloads(manifest) {
 // The Windows desktop download is derived from the manifest because retained
 // older releases may not carry it. The standalone Windows CLI zip is described
 // by cliTargets so its public download and self-upgrade identities cannot drift.
-function windowsDownloads(manifest) {
-  const candidates = [
+function windowsDownloadCandidates(version) {
+  return [
     {
       id: "desktop-windows-nsis",
       kind: "desktop",
       label: "Windows installer (x64)",
       platform: "windows-x86_64",
       format: "exe",
-      asset: `Chan_${manifest.version}_x64-setup.exe`,
+      asset: `Chan_${version}_x64-setup.exe`,
     },
   ];
-  return candidates.filter((download) => manifest.assets.has(download.asset));
+}
+
+function windowsDownloads(manifest) {
+  return windowsDownloadCandidates(manifest.version).filter((download) =>
+    manifest.assets.has(download.asset),
+  );
 }
 
 async function main() {
@@ -361,7 +368,7 @@ export function spelledAssetNames(version) {
   return [
     ...cliTargets.map((target) => target.asset),
     ...desktopDownloads(version).map((download) => download.asset),
-    `Chan_${version}_x64-setup.exe`,
+    ...windowsDownloadCandidates(version).map((download) => download.asset),
   ];
 }
 
@@ -379,7 +386,62 @@ export function assetNameDisagreement(spelled, declared) {
   };
 }
 
+/// The bindings a name comparison cannot see.
+///
+/// Two rows of a parallel table can swap their assets and leave both name
+/// lists identical, so a set difference passes. The result is a manifest that
+/// offers the aarch64 tarball for x86_64: `chan upgrade` downloads it, the
+/// sha256 matches because it is the true hash of the true file, every check
+/// downstream says yes, and the binary cannot exec. So each id is held to the
+/// asset it declares.
+///
+/// A CLI asset carries its own target triple and format in its name, which
+/// makes the binding checkable without a second list. A desktop platform whose
+/// public download IS its updater payload, which is both AppImages and the
+/// NSIS installer, is checked against `updaterPayloads` in release-assets.mjs,
+/// in both directions. The DMG is the one download with no second source, and
+/// it is also the one with nothing to swap with: any swap involving it breaks
+/// a payload binding above.
+export function assetBindingDisagreement(version) {
+  const wrong = [];
+  for (const target of cliTargets) {
+    const expected = `chan-${target.target}.${target.format}`;
+    if (target.asset !== expected) {
+      wrong.push(
+        `${target.id} offers ${target.asset} for ${target.target} as ${target.format}, which is ${expected}`,
+      );
+    }
+  }
+  const downloads = [
+    ...desktopDownloads(version),
+    ...windowsDownloadCandidates(version),
+  ];
+  const published = new Set(publicAssets(version));
+  const payloadFor = new Map(
+    updaterPayloads(version)
+      .filter((payload) => published.has(payload.asset))
+      .map((payload) => [payload.platform, payload.asset]),
+  );
+  for (const [platform, asset] of payloadFor) {
+    const download = downloads.find((entry) => entry.platform === platform);
+    if (!download) {
+      wrong.push(`no download is declared for ${platform}, whose updater payload is ${asset}`);
+    } else if (download.asset !== asset) {
+      wrong.push(
+        `${download.id} offers ${download.asset} for ${platform}, whose updater payload is ${asset}`,
+      );
+    }
+  }
+  return wrong;
+}
+
 function assertAssetNamesAgree(version) {
+  const bindings = assetBindingDisagreement(version);
+  if (bindings.length > 0) {
+    throw new Error(
+      `asset bindings are wrong for ${version}: ${bindings.join("; ")}`,
+    );
+  }
   const { missing, extra } = assetNameDisagreement(
     spelledAssetNames(version),
     declaredAssetNames(version),

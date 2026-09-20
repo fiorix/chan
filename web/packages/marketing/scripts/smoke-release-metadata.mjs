@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  assetBindingDisagreement,
   assetNameDisagreement,
   declaredAssetNames,
   spelledAssetNames,
@@ -58,6 +59,33 @@ async function main() {
     );
 
     console.log("smoked the generator's asset names against release-assets.mjs");
+  }
+
+  // A name comparison is a set difference, so two rows of a parallel table can
+  // swap their assets and pass it: both lists still hold the same names. That
+  // ships cli/latest.json with x86_64-unknown-linux-musl bound to the aarch64
+  // tarball, `chan upgrade` downloads it, the sha256 matches because it is the
+  // true hash of the true file, and the binary cannot exec.
+  {
+    const version = "1.2.3";
+    assert(
+      assetBindingDisagreement(version).length === 0,
+      `the generator's asset bindings are wrong: ${assetBindingDisagreement(version).join("; ")}`,
+    );
+
+    // The swap the name comparison cannot see, shown to leave it silent.
+    const swapped = spelledAssetNames(version).slice();
+    const x64 = swapped.indexOf("chan-x86_64-unknown-linux-musl.tar.gz");
+    const arm64 = swapped.indexOf("chan-aarch64-unknown-linux-musl.tar.gz");
+    assert(x64 >= 0 && arm64 >= 0, "the two musl tarballs are no longer spelled here");
+    [swapped[x64], swapped[arm64]] = [swapped[arm64], swapped[x64]];
+    const byName = assetNameDisagreement(swapped, declaredAssetNames(version));
+    assert(
+      byName.missing.length === 0 && byName.extra.length === 0,
+      "a swap must leave the NAME comparison silent; if it no longer does, this case has stopped testing what it says",
+    );
+
+    console.log("smoked the generator's target-to-asset bindings");
   }
 
   const out = await fs.mkdtemp(path.join(os.tmpdir(), "chan-release-metadata-"));
