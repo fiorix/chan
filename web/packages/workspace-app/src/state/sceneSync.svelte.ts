@@ -352,6 +352,12 @@ export class SceneSession {
   /// flushed. The force-reload prompt keys on this, because for an
   /// attached canvas `content === saved` only means the authority took
   /// the elements, never that they reached the file.
+  ///
+  /// It over-reports for a degraded session: the deltas the canvas still
+  /// holds are the bytes the classic PUT already wrote, so the prompt warns
+  /// about a tab that is fully on disk. That is the safe direction for a
+  /// prompt that guards a discard, and the alternative reads the save path
+  /// from here to learn which of the two wrote last.
   hasUnflushedState(): boolean {
     if (this.serverDirty || this.pushInFlight || this.queued !== null) return true;
     return this.binding?.hasPendingLocal() ?? false;
