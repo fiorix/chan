@@ -36,11 +36,18 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
-/// The payload a previous load left behind: two settled downloads carrying the
-/// ids that load's counter minted.
+/// The payload a previous load left behind: two settled downloads, read back
+/// from sessionStorage with their ids taken verbatim and never validated.
+///
+/// The first carries counter value 1, which is where the fresh load's counter
+/// starts. That is the boundary: a seed that only advances past ids ABOVE the
+/// counter leaves this one colliding, and a fixture whose lowest id is 2 or
+/// more cannot tell the two apart. The second is an id this window did not
+/// mint, which the seeder has to leave alone rather than read a counter out
+/// of.
 function seedPersistedTransfers(): string[] {
   const window_ = sessionWindowId();
-  const ids = [`xfer-${window_}-1`, `xfer-${window_}-2`];
+  const ids = [`xfer-${window_}-1`, "restored-from-somewhere-else"];
   window.sessionStorage.setItem(
     `chan.transfers:${window_}`,
     JSON.stringify({

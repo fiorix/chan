@@ -19,6 +19,7 @@ import {
   transfers,
   waitForTransferSlot,
 } from "./transfers.svelte";
+import { sessionWindowId } from "../api/client";
 import transfersSrc from "./transfers.svelte.ts?raw";
 import clientSrc from "../api/client.ts?raw";
 import storeSrc from "./store.svelte.ts?raw";
@@ -150,7 +151,16 @@ describe("transfer ids cannot collide across windows", () => {
     resetTransfers();
     const id = begin();
     expect(id).not.toMatch(/^xfer-\d+$/);
-    expect(transfersSrc).toMatch(/`xfer-\$\{sessionWindowId\(\)\}-\$\{nextId\+\+\}`/);
+    expect(id).toContain(sessionWindowId());
+
+    // The consequence that shape exists for: the same counter value minted by
+    // another window matches nothing here, so its rank never lands on our row.
+    applyTransferQueueFrame({
+      transfer_id: id.replace(sessionWindowId(), "other-window"),
+      state: "waiting",
+      position: 3,
+    });
+    expect(transfers.items[0]!.queue).toBeNull();
   });
 });
 

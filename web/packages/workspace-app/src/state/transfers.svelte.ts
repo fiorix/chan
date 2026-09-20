@@ -154,6 +154,27 @@ function transferId(): string {
   return `xfer-${sessionWindowId()}-${nextId++}`;
 }
 
+/// Advance the counter past every id the window already holds.
+///
+/// The counter is heap state and starts at 1 on every load, while restored
+/// records keep the ids the previous load minted. Without this the first
+/// transfer started after a reload takes an id a restored row still holds, and
+/// a duplicate id is not cosmetic here: it is the only key a record is matched
+/// on, so progress and completion land on the restored row, the live transfer
+/// never settles, the close guard counts it forever, and the bubble's keyed
+/// each throws on the repeated key.
+///
+/// Reads the id shape `transferId` above writes, which is why the two sit
+/// together. An id in any other shape is left alone rather than guessed at.
+function seedTransferIdCounter(items: readonly Transfer[]): void {
+  const prefix = `xfer-${sessionWindowId()}-`;
+  for (const t of items) {
+    if (!t.id.startsWith(prefix)) continue;
+    const minted = Number.parseInt(t.id.slice(prefix.length), 10);
+    if (Number.isSafeInteger(minted) && minted >= nextId) nextId = minted + 1;
+  }
+}
+
 function find(id: string): Transfer | undefined {
   return transfers.items.find((t) => t.id === id);
 }
@@ -449,6 +470,7 @@ export function restoreTransfers(
       queue: null,
     };
   });
+  seedTransferIdCounter(transfers.items);
   transfers.shown = parsed.shown === true;
   // After a reload every record is terminal/interrupted (count 0), but emit so
   // the server's per-socket count is correct from the first announce.
