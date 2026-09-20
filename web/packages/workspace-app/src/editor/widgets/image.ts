@@ -450,8 +450,7 @@ class ImageWidget extends WidgetType {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
-      clearImageSelection(view);
-      wrap.dataset.selected = "true";
+      selectImageWrap(view, wrap);
     });
     if (this.standalone) wrap.dataset.standalone = "true";
     if (this.editing) wrap.dataset.editing = "true";
@@ -755,11 +754,10 @@ class ImageWidget extends WidgetType {
         return;
       }
       // Selection ring: a single `data-selected` attribute on the
-      // wrap. A document-level mousedown listener (installed once
-      // below; see clearImageSelection) drops the ring when the
-      // user clicks outside any image wrap.
-      clearImageSelection(view);
-      wrap.dataset.selected = "true";
+      // wrap, and at most one across every open view (see
+      // selectImageWrap). A document-level mousedown listener drops it
+      // when the user clicks outside any image wrap.
+      selectImageWrap(view, wrap);
     });
     wrap.appendChild(img);
 
@@ -910,6 +908,25 @@ function clearImageSelection(view: EditorView): void {
   }
 }
 
+/// Every view the ring plugin is installed in.
+///
+/// The ring is exclusive across views, and it has to be: a key typed
+/// with the focus nowhere is answered by every view, so two lit rings
+/// would move two carets on one Enter and write the clipboard twice on
+/// one Cmd+C. The document-level click listener cannot enforce that on
+/// its own, because a press inside a widget stops propagating before it
+/// is reached. Lighting a ring is what clears the others.
+const ringViews = new Set<EditorView>();
+
+/// Light the ring on one wrap, and nowhere else.
+function selectImageWrap(view: EditorView, wrap: HTMLElement): void {
+  clearImageSelection(view);
+  for (const other of ringViews) {
+    if (other !== view) clearImageSelection(other);
+  }
+  wrap.dataset.selected = "true";
+}
+
 /// The document-level listeners the image ring needs, owned by the view
 /// that installs them.
 ///
@@ -930,8 +947,8 @@ const imageSelectionListeners = ViewPlugin.fromClass(
     constructor(readonly view: EditorView) {
       this.onMouseDown = (e: MouseEvent) => {
         // A press inside an image wrap (or on its hover overlay buttons)
-        // leaves the ring alone: the widget's own mousedown re-sets it on
-        // the wrap that was clicked.
+        // leaves the ring alone: the widget's own mousedown sets it on
+        // the wrap that was clicked, and stops there.
         if ((e.target as Element).closest?.(".cm-md-image-wrap")) return;
         clearImageSelection(view);
       };
@@ -1006,6 +1023,7 @@ const imageSelectionListeners = ViewPlugin.fromClass(
         // press would eat the character AND the image. The ring drives
         // Enter, Cmd+Enter and Cmd+C, and nothing that deletes.
       };
+      ringViews.add(view);
       document.addEventListener("mousedown", this.onMouseDown);
       document.addEventListener("keydown", this.onKeyDown);
     }
@@ -1017,7 +1035,9 @@ const imageSelectionListeners = ViewPlugin.fromClass(
     /// set by clicking the image, and that click does not put the caret
     /// in the document, so the keystroke that follows arrives with the
     /// focus still on the body or on no element at all. Dropping those
-    /// would kill Cmd+C for the ring it serves.
+    /// would kill Cmd+C for the ring it serves. Every mounted view
+    /// answers such a key, which is safe because `selectImageWrap`
+    /// leaves at most one ring lit across every view.
     ///
     /// Every other element owns its own keys: another pane's editor, and
     /// equally an input of the app's own chrome such as the find bar,
@@ -1033,6 +1053,7 @@ const imageSelectionListeners = ViewPlugin.fromClass(
     }
 
     destroy(): void {
+      ringViews.delete(this.view);
       document.removeEventListener("mousedown", this.onMouseDown);
       document.removeEventListener("keydown", this.onKeyDown);
     }
@@ -1206,7 +1227,7 @@ export function imageCaretRedirect(): Extension {
       // nothing, which is the ring failing to appear at all.
       for (const el of u.view.dom.querySelectorAll(".cm-md-image-wrap")) {
         if (u.view.posAtDOM(el) !== selectedPos) continue;
-        (el as HTMLElement).dataset.selected = "true";
+        selectImageWrap(u.view, el as HTMLElement);
         break;
       }
     }

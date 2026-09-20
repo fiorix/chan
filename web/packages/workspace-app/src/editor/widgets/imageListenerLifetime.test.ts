@@ -149,6 +149,34 @@ describe("the document listeners belong to their view", () => {
     expect(a.dom.querySelector(".cm-md-image-wrap[data-selected]")).toBeNull();
   });
 
+  test("clicking an image in another view clears this view's ring", () => {
+    const a = mount();
+    const b = mount();
+    const wrapA = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    const wrapB = b.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrapA.dataset.selected = "true";
+    wrapB.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(wrapB.dataset.selected).toBe("true");
+    expect(wrapA.dataset.selected).toBeUndefined();
+  });
+
+  test("with one ring lit, a key on the body acts on that view alone", () => {
+    const a = mount();
+    const b = mount();
+    const wrapA = a.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    const wrapB = b.dom.querySelector<HTMLElement>(".cm-md-image-wrap")!;
+    wrapA.dataset.selected = "true";
+    // The second click is what the user does; the ring it leaves is the
+    // only one, which is what makes answering a focusless key safe.
+    wrapB.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    const headA = a.state.selection.main.head;
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(a.state.selection.main.head).toBe(headA);
+    expect(b.state.selection.main.head).not.toBe(headA);
+  });
+
   test("a click in another view clears this view's ring", () => {
     const a = mount();
     const b = mount();
