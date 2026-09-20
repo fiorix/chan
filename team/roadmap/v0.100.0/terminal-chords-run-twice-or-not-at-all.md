@@ -26,7 +26,7 @@ Which surface owns Mod+F when a terminal has focus, and whether the native key b
 
 1. One Ctrl+D on an exited terminal closes that tab and no other, asserted through the realistic renderer mock, for both backends.
 2. For each chord the terminal claims, dispatching it once on the renderer's textarea and once on the component root with the renderer unfocused each produce exactly one action.
-3. Ctrl+Shift+D does not close an exited terminal.
+3. Ctrl+Shift+D does not close an exited terminal. Today it matches the close predicate and then runs through the same double dispatch as the unshifted chord, so it closes the exited terminal and its neighbour.
 4. Ctrl+D still reaches a live shell as EOF.
 5. The chord that opens terminal find, Cmd+F on macOS and Ctrl+Shift+F elsewhere, does so from a focused renderer.
 6. Ctrl+F, Ctrl+G and Ctrl+[ typed into a focused terminal reach the shell on every platform, the macOS desktop included.

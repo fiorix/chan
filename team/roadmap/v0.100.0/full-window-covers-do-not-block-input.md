@@ -25,6 +25,6 @@ What the screensaver lock is meant to be is an owner ruling that shapes the rest
 1. For each full-window cover, mounting it registers the block and unmounting clears it; a test enumerates the covers so a sixth cannot skip it.
 2. With any cover up, a synthetic Ctrl+D, Ctrl+Shift+T and a host `chan:command` event each change nothing: no tab closed, no terminal spawned. Backquote still passes.
 3. A preflight that gives up drops its cover and its block, and the window is usable.
-4. The lock command is absent from the command list of a standalone terminal and a control window, and present and working in a workspace window.
+4. The lock command, and the six other `app.screensaver.*` commands that call the same per-workspace routes (`enable`, `disable`, `test`, `setPin`, `theme.plain`, `theme.matrix`), are absent from the command list of a standalone terminal and a control window, and present and working in a workspace window.
 5. With the screensaver lock up, the desktop's close button still raises the Hide, Close or Cancel prompt; with the reconnect overlay up it still closes without one.
 6. With the screensaver lock up, focus cannot leave the PIN field, a native menu command changes nothing until the PIN is accepted, and the text that documents the lock says it locks this window's input and not the server.

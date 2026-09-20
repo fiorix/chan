@@ -4,7 +4,7 @@ Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's 
 
 ## What was seen
 
-`web/packages/workspace-app/src/components/HamburgerMenu.svelte`, the shared menu primitive, binds only `onmousedown` and has no key handling. With the search overlay open and its hamburger menu open, Escape falls through to the window handler and closes the whole Search panel instead of the menu, and the user's query goes with it. `Pane.svelte` carries its own Escape branch for the same menu, which is the duplicate a fix deletes.
+`web/packages/workspace-app/src/components/HamburgerMenu.svelte`, the shared menu primitive, binds only `onmousedown` and has no key handling. With the search overlay open and its hamburger menu open, Escape falls through to the window handler and closes the whole Search panel instead of the menu. The query survives, because `searchPanel.query` is lifted into the store and round-trips through the URL hash; what the user loses is the open panel and the results rendered in it, which the component rebuilds on the next open. `Pane.svelte` carries its own Escape branch for the same menu, which is the duplicate a fix deletes.
 
 ## Desired contract
 
