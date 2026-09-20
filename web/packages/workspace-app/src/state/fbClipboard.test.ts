@@ -124,6 +124,30 @@ describe("FB clipboard (FB2)", () => {
     expect(store.fbClipboard.mode).toBe("cut");
   });
 
+  test("pasting a cut into the directory it already sits in is not a collision", async () => {
+    // The server skips a move into a source's own parent and reports it in
+    // `skipped`; it is a no-op, not a name taken by something else. The drag
+    // gesture never reaches this because isInvalidDrop filters it, but a paste
+    // resolves a file selection to its parent, so cutting and pasting without
+    // moving the selection lands here.
+    store.tree.entries = [
+      { path: "notes", is_dir: true, size: 0, mtime: null },
+      { path: "notes/a.md", is_dir: false, size: 1, mtime: null },
+    ] as never;
+    store.tree.loadedDirs = { notes: true };
+    fsTransfer.mockResolvedValue({
+      moved: [],
+      skipped: ["notes/a.md"],
+      conflicts: [],
+    });
+    store.fbClipboardSet("cut", ["notes/a.md"]);
+
+    await store.fbClipboardPaste("notes");
+
+    expect(fsTransfer).toHaveBeenCalledWith("move", ["notes/a.md"], "notes");
+    expect(String(store.ui.status ?? "")).not.toContain("already exists");
+  });
+
   test("paste with an empty clipboard is a no-op (no transfer call)", async () => {
     const landed = await store.fbClipboardPaste("archive");
     expect(fsTransfer).not.toHaveBeenCalled();

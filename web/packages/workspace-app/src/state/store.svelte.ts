@@ -5389,7 +5389,13 @@ async function performTransferInto(
       ui.status = `${label}: cannot list '${destDir}': ${(e as Error).message}`;
       return [];
     }
+    // A source already sitting in the destination is a no-op the server skips,
+    // not a name taken by something else. The drop gesture never reaches this
+    // because `isInvalidDrop` filters it out, but a paste resolves a file
+    // selection to its own parent, so cutting and pasting without moving the
+    // selection arrives here and would otherwise collide with itself.
     const occupied = sources
+      .filter((source) => parentDir(source) !== destDir)
       .map((source) => transferLandingPath(source, destDir))
       .find((landing) => tree.entries.some((e) => e.path === landing));
     if (occupied) {
