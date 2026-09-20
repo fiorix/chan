@@ -10,6 +10,8 @@ Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised from the v0.99.
 
 The required-assets list names the artifacts the pipeline actually produces at every version shape it is asked about, or it says in one place, next to the transform, why a prerelease is spelled differently and that nothing consumes it.
 
+Owner ruling, 2026-09-20: the tilde. `requiredAssets` names the Debian form cargo-deb writes (`0.99.0~rc1-1`), which is what a `publish=false` dry run compares it against, and the comment beside the transform names the GitHub upload rewrite of `~` to `.`.
+
 ## Boundaries
 
 `web/packages/marketing/scripts/release-version.mjs` (`gatewayPackageVersion`), `web/packages/marketing/scripts/release-assets.mjs` (`requiredAssets`), and their tests. The release workflow and cargo-deb are not changed.

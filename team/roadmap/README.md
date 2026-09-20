@@ -45,7 +45,7 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 | item | state | next |
 | --- | --- | --- |
 | [the-copr-probe-window-is-shorter-than-its-builds][copr] | carried | measure |
-| [a-prerelease-deb-is-spelled-with-a-dot][deb] | accepted | decide |
+| [a-prerelease-deb-is-spelled-with-a-dot][deb] | accepted | build |
 | [frontend-gate-holes-let-broken-bundles-ship][gate] | accepted | build first |
 | [the-dl-pipeline-fails-open][dl] | accepted | build |
 | [browser-smoke-reports-results-it-did-not-measure][smoke] | accepted | build |

@@ -12,7 +12,7 @@ Next to it, `components/settings/ColorField.svelte` commits on every `input` eve
 
 A settings write that fails is visible on the field that failed, and the field shows the server's value again. A control commits once per user decision, not once per intermediate value.
 
-Whether the unused `SaveStatus` vocabulary becomes the way every settings write reports, or a generic notice is enough, is an owner ruling; the review recommends the first.
+Owner ruling, 2026-09-20: every settings write reports through the `SaveStatus` vocabulary (`"idle" | "saving" | "saved" | { error }`), as the review recommends. A generic notice is not the report. The type is declared twice today, in `components/HybridSurfaceConfigShell.svelte` and `components/settings/workspace/ExcludedDirsControl.svelte`, and gets one declaration.
 
 ## Boundaries
 
