@@ -3950,6 +3950,7 @@ function cloneLayoutState(src: LayoutState): LayoutState {
 export function enterPaneMode(): void {
   if (paneMode.active) return;
   paneMode.draft = cloneLayoutState(layout);
+  notePaneModeEntryBuffers();
   paneMode.active = true;
   paneMode.spawnIntent = null;
   paneMode.transactionMode = false;
@@ -3971,6 +3972,7 @@ export function enterPaneModeTransaction(grabPaneId: string | null): void {
   if (paneMode.stale) return;
   if (!paneMode.active) {
     paneMode.draft = cloneLayoutState(layout);
+    notePaneModeEntryBuffers();
     paneMode.active = true;
     paneMode.spawnIntent = null;
     paneMode.stale = false;
@@ -4026,22 +4028,60 @@ export function paneModeSetMouseSplit(
 /// transition once, to the attachments of that moment, so a lost flag is not
 /// resent: the banner never shows, the tab still reads attached so autosave
 /// stands down, and the server goes on accepting pushes it will not flush.
-/// The rest over-refuse rather than under-refuse: a stale token is a 409 and
-/// a stale `saved` reads falsely dirty.
+/// `doc`, `error` and `fileMissing` are facts about the tab and the path
+/// that the draft's clone cannot restore either.
 ///
 /// Everything else stays the draft's, `content` first of all: the editors
 /// stay mounted on the draft's tabs while the mode is up, so a remote edit
 /// applied then lives there and has to survive the commit.
-const PANE_MODE_AUTHORITY_FIELDS = [
-  "saved",
-  "savedMtime",
-  "savedMtimeNs",
-  "authorityVersion",
+const PANE_MODE_SESSION_FIELDS = [
   "diskConflicted",
   "doc",
   "error",
   "fileMissing",
 ] as const;
+
+/// The other half: the bytes the authority holds and the version that names
+/// them. These four and `content` are one tuple, "these bytes, at this
+/// version", and the carry splits it, keeping the draft's `content` and
+/// taking the live tab's version.
+///
+/// That split is sound only while the live tab's buffer is still the one the
+/// draft was cloned from. Then the live `saved` is bytes the draft's buffer
+/// descends from: a save made during the mode wrote the buffer both trees
+/// started with, so the draft's later edits belong on top of the version it
+/// returned.
+///
+/// A writer that replaces the live buffer breaks that. `loadTabContent` does
+/// it on the watcher's missing-file path, and `mirrorToSiblings` does it when
+/// another tab of the same path saves; each moves `content` and `saved`
+/// together to bytes the draft never held. Carrying the version alone would
+/// hand the draft's buffer a version the server accepts, and the next save
+/// would overwrite the other writer with nothing said. The commit leaves the
+/// entry-time version in place for those tabs instead, so that save is a 409
+/// and the conflict modal asks, with the banner saying so before it.
+const PANE_MODE_AUTHORITY_FIELDS = [
+  "saved",
+  "savedMtime",
+  "savedMtimeNs",
+  "authorityVersion",
+] as const;
+
+/// The live file tabs' buffers as they were when the mode was entered, keyed
+/// by tab id. The entry value is the same string the live tab holds, so a tab
+/// whose buffer never moves costs nothing extra, and a buffer that does move
+/// keeps its predecessor alive only until the commit reads it.
+const paneModeEntryBuffers = new Map<string, string>();
+
+function notePaneModeEntryBuffers(): void {
+  paneModeEntryBuffers.clear();
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind === "file") paneModeEntryBuffers.set(t.id, t.content);
+    }
+  }
+}
 
 /// Copy those fields from the tab the layout holds onto the tab that is
 /// about to replace it. Runs before the swap, while `layout` is still the
@@ -4062,9 +4102,20 @@ function carryLiveAuthorityState(next: LayoutState): void {
       if (t.kind !== "file") continue;
       const from = live.get(t.id);
       if (!from) continue;
-      for (const field of PANE_MODE_AUTHORITY_FIELDS) {
+      for (const field of PANE_MODE_SESSION_FIELDS) {
         (t as Record<string, unknown>)[field] = from[field];
       }
+      // No entry buffer means the id reached the live tree after the mode
+      // was entered, so nothing says the draft's buffer descends from what
+      // the authority holds now. Refuse the same way a moved buffer does.
+      const entryBuffer = paneModeEntryBuffers.get(t.id);
+      if (entryBuffer !== undefined && from.content === entryBuffer) {
+        for (const field of PANE_MODE_AUTHORITY_FIELDS) {
+          (t as Record<string, unknown>)[field] = from[field];
+        }
+        continue;
+      }
+      t.externalChange = true;
     }
   }
 }
@@ -4084,6 +4135,7 @@ export function commitPaneMode(): void {
   }
   const next = cloneLayoutState(paneMode.draft);
   carryLiveAuthorityState(next);
+  paneModeEntryBuffers.clear();
   layout.rootId = next.rootId;
   layout.nodes = next.nodes;
   layout.activePaneId = next.activePaneId;
@@ -4103,6 +4155,7 @@ export function commitPaneMode(): void {
 
 export function cancelPaneMode(): void {
   killStagedTerminalSessions();
+  paneModeEntryBuffers.clear();
   const pendingRemoteLayout = paneMode.pendingRemoteLayout;
   paneMode.active = false;
   paneMode.draft = null;
