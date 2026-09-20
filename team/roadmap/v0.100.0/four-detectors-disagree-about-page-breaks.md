@@ -1,6 +1,6 @@
 # Four detectors disagree about what a page break is
 
-Status: raised for v0.99.0 by the owner, from a finding in the v0.98.0 round. The behavior is measured against the live modules, not inferred from reading them.
+Status: carried to v0.100.0. Raised for v0.99.0 by the owner, from a finding in the v0.98.0 round; v0.99.0 was the review fix loop and did not touch it. The behavior is measured against the live modules, not inferred from reading them.
 
 ## What was seen
 

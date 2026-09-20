@@ -1,6 +1,6 @@
 # The COPR publication probe times out before COPR finishes
 
-Status: raised for v0.99.0, from the v0.98.0 release.
+Status: carried to v0.100.0. Raised for v0.99.0, from the v0.98.0 release; v0.99.0 changed neither the probe nor its window. One more measurement: on the v0.99.0 release both COPR jobs of `publish-downstream` finished green inside the window (run 35476612286), so the window is sometimes long enough and the item's question is how often.
 
 ## What was seen
 

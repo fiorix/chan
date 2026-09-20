@@ -1,6 +1,6 @@
 # Nothing pins the contract that an unavailable workspace still gets a window
 
-Status: raised for v0.99.0 by the owner, from a decision taken in the v0.98.0 round.
+Status: carried to v0.100.0. Raised for v0.99.0 by the owner, from a decision taken in the v0.98.0 round; v0.99.0 did not pin the contract. Read it against v0.99.0 before choosing a seam: `Unavailable` there also covers a root that was deleted or replaced, and chan-server's tests reach that state on Unix without a seam by replacing the root directory (`add_answers_a_replaced_root_with_the_row_the_list_reports` in `crates/chan-server/src/routes/library.rs`), which the section on why it is not already pinned predates.
 
 ## What was seen
 

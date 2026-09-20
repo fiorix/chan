@@ -21,19 +21,31 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.99.0
+### v0.100.0
 
 | item | state | next |
 | --- | --- | --- |
-| [four-detectors-disagree-about-page-breaks][pgbrk] | raised | decide reading |
-| [no-test-pins-the-unavailable-mint-contract][unav] | raised | choose seam |
-| [the-copr-probe-window-is-shorter-than-its-builds][copr] | raised | measure |
+| [one-on-route-still-answers-204][on204] | accepted | build |
+| [a-timed-out-mount-closes-a-tenant-it-did-not-open][tmo] | raised | decide |
+| [the-desktop-reads-any-409-as-live-terminals][d409] | raised | decide |
+| [shortcuts-ignore-the-keyboard-layout][kbd] | accepted | after review |
+| [four-detectors-disagree-about-page-breaks][pgbrk] | carried | decide |
+| [no-test-pins-the-unavailable-mint-contract][unav] | carried | choose seam |
+| [the-copr-probe-window-is-shorter-than-its-builds][copr] | carried | measure |
 
-[pgbrk]: v0.99.0/four-detectors-disagree-about-page-breaks.md
-[unav]: v0.99.0/no-test-pins-the-unavailable-mint-contract.md
-[copr]: v0.99.0/the-copr-probe-window-is-shorter-than-its-builds.md
+[on204]: v0.100.0/one-on-route-still-answers-204.md
+[tmo]: v0.100.0/a-timed-out-mount-closes-a-tenant-it-did-not-open.md
+[d409]: v0.100.0/the-desktop-reads-any-409-as-live-terminals.md
+[kbd]: v0.100.0/shortcuts-ignore-the-keyboard-layout.md
+[pgbrk]: v0.100.0/four-detectors-disagree-about-page-breaks.md
+[unav]: v0.100.0/no-test-pins-the-unavailable-mint-contract.md
+[copr]: v0.100.0/the-copr-probe-window-is-shorter-than-its-builds.md
 
 ## Completed
+
+### v0.99.0
+
+Shipped 2026-09-19; see [release-v0.99.0](../release/release-v0.99.0.md). No roadmap item closed and three carried to v0.100.0: the release was a thirty-cycle fix loop over a code review, run outside this roadmap, and its three raised items (the page-break detectors, the unavailable-mint contract, the COPR probe window) were not part of it. The release report and the changelog are the record of what shipped; items for that work may still be added to [`done/`](done/) from the round's archive.
 
 ### v0.98.0
 
