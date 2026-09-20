@@ -165,6 +165,7 @@
 
 <SettingField
   label="Scrollback"
+  pref="terminal.scrollback_mb"
   hint="Per-terminal scrollback budget. New terminals only; existing ones keep their scrollback until they restart."
 >
   <SliderField
@@ -181,6 +182,7 @@
 
 <SettingField
   label="TERM"
+  pref="terminal.default_term"
   hint="TERM environment variable for new terminals. Blank falls back to xterm-256color."
 >
   <TextField
@@ -194,6 +196,7 @@
 
 <SettingField
   label="MCP discovery"
+  pref="terminal.mcp_env"
   hint="Expose the chan MCP env vars (CHAN_MCP_*) to new terminals so agent CLIs can find the MCP server."
 >
   <PillToggle
@@ -206,6 +209,7 @@
 
 <SettingField
   label="Mouse capture"
+  pref="terminal.mouse_capture"
   hint="Let full-screen terminal apps capture the mouse. Turn off to keep click-drag text selection over them. New terminals only."
 >
   <PillToggle
@@ -218,6 +222,7 @@
 
 <SettingField
   label="Ghostty backend"
+  pref="terminal.ghostty"
   hint="Parse and render new terminals with Ghostty's WASM engine instead of xterm.js. On by default on Linux, where xterm.js falls back to a renderer that leaves a gap at every cell boundary and box drawing comes out dotted; off elsewhere, where xterm.js renders the grid correctly. Secret masking is xterm-only and does nothing here. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. New terminals only."
 >
   <PillToggle
@@ -230,6 +235,7 @@
 
 <SettingField
   label="Secret masking"
+  pref="terminal.secret_masking"
   hint="Masks secret-looking NAME=value values in xterm.js terminals only; under the ghostty backend (the Linux default) it does nothing. The buffer stays copyable. New terminals only. The terminal menu has an ephemeral per-tab toggle."
 >
   <PillToggle
@@ -245,6 +251,7 @@
 
 <SettingField
   label="Terminal font"
+  pref="terminal.font"
   hint="Font for new terminals. Source Code Pro ships with chan and renders identically on every OS; existing terminals keep their font until they restart."
 >
   <select
@@ -260,6 +267,7 @@
 
 <SettingField
   label="Terminal font size"
+  pref="terminal.font_size"
   hint="Font size for newly constructed terminal surfaces. Mounted renderers and their PTY geometry stay unchanged."
 >
   <NumberField
@@ -278,6 +286,7 @@
 
 <SettingField
   label="Custom terminal colours"
+  pref="terminal_colors"
   hint="Override terminal background, foreground, and cursor colours. The terminal's standard Inherit, Light, or Dark choice remains underneath."
 >
   <PillToggle
@@ -288,7 +297,7 @@
 </SettingField>
 
 {#if customTerminalColorsOn && customTerminalColors}
-  <SettingField label="ANSI contrast">
+  <SettingField label="ANSI contrast" pref="terminal_colors.custom">
     <PillRadio
       name="settings-terminal-contrast"
       ariaLabel="Terminal ANSI contrast"

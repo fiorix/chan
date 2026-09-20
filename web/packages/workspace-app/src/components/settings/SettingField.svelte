@@ -7,18 +7,28 @@
   // modifiers, the key/value grid, error lines) is styled once here
   // too, through the same :global descendant trick.
 
-  import type { Snippet } from "svelte";
+  import { getContext, type Snippet } from "svelte";
+  import { SAVE_STATUS, type SaveStatusLookup } from "./commit";
 
   let {
     label,
     hint,
     children,
+    pref,
   }: {
     label: string;
     /// Plain text, or a snippet when the hint carries markup (<code>).
     hint?: string | Snippet;
     children: Snippet;
+    /// The preferences key this field presents. Given it, the field
+    /// reports what happened to the last write of that key, which is
+    /// what makes a refusal visible where the user made the change.
+    pref?: string;
   } = $props();
+
+  const lookup = getContext<SaveStatusLookup | undefined>(SAVE_STATUS);
+  const status = $derived(pref && lookup ? lookup(pref) : "idle");
+  const failure = $derived(typeof status === "object" ? status.error : null);
 </script>
 
 <section class="field">
@@ -36,10 +46,27 @@
   </div>
   <div class="control">
     {@render children()}
+    {#if failure}
+      <p class="save-error" role="alert">Not saved: {failure}</p>
+    {:else if status === "saving"}
+      <p class="save-note">Saving...</p>
+    {:else if status === "saved"}
+      <p class="save-note">Saved</p>
+    {/if}
   </div>
 </section>
 
 <style>
+  .save-error {
+    margin: 4px 0 0;
+    color: var(--danger, #ef4444);
+    font-size: 12px;
+  }
+  .save-note {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
   .field {
     display: flex;
     flex-direction: column;

@@ -29,6 +29,7 @@
 
 <SettingField
   label="Side panes"
+  pref="browser_side_panes"
   hint="Show the file browser's left and right side panes. The browser's own stick buttons toggle the same fields."
 >
   <PillToggle
@@ -45,6 +46,7 @@
 
 <SettingField
   label="Attachments folder"
+  pref="attachments_dir"
   hint="Workspace-relative folder where pasted and uploaded images are saved."
 >
   <TextField

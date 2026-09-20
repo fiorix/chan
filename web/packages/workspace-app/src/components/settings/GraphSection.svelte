@@ -108,6 +108,7 @@
 
 <SettingField
   label="Custom graph colours"
+  pref="graph_colors"
   hint="Override graph node hues, per colour scheme. Applies to the graph surface only; every other surface keeps the theme palette. Clear a field to fall back to the default hue."
 >
   <PillToggle

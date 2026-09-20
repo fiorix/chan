@@ -18,6 +18,7 @@
 
 <SettingField
   label="Search indexing"
+  pref="search_aggression"
   hint="Resource profile for the search indexer. Aggressive indexes more eagerly at a higher cost."
 >
   <PillRadio

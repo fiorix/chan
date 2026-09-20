@@ -9,7 +9,8 @@
   // stays in sync.
 
   import { Maximize2, Minimize2, X } from "lucide-svelte";
-  import { tick } from "svelte";
+  import { setContext, tick } from "svelte";
+  import { SAVE_STATUS, type SaveStatus } from "./settings/commit";
   import type { Preferences, PreferencesPatch } from "../api/types";
   import { api } from "../api/client";
   import {
@@ -51,7 +52,14 @@
   // not stomped mid-round-trip.
   let editing = $state<Preferences | null>(null);
   let loadError = $state<string | null>(null);
+  /// How long a field says "Saved" before going quiet again.
+  const SAVED_NOTE_MS = 1500;
   let inflight = $state(0);
+  /// The last write's outcome per preferences key, read by the field
+  /// that presents that key (see SettingField's `pref`).
+  let saveStatus = $state<Record<string, SaveStatus>>({});
+  const savedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  setContext(SAVE_STATUS, (pref: string) => saveStatus[pref] ?? "idle");
   let loading = false;
   let lastServerSnap = "";
   let settingsEl: HTMLDivElement | undefined = $state();
@@ -76,7 +84,61 @@
     return p;
   }
 
-  function mutationPatch(
+  /// The preferences a mutation changes: which fields a write belongs to,
+/// and therefore which of them report it.
+///
+/// One level of nesting is named as well as the top-level key, because
+/// several fields share one object (every terminal control writes
+/// `terminal`), and a field that reports its neighbour's failure is
+/// worse than one that reports nothing. A field names whichever depth
+/// it presents.
+function changedKeys(before: Preferences, after: Preferences): string[] {
+  const keys: string[] = [];
+  for (const key of Object.keys(after)) {
+    const from = before[key as keyof Preferences];
+    const to = after[key as keyof Preferences];
+    if (JSON.stringify(from) === JSON.stringify(to)) continue;
+    keys.push(key);
+    if (!isPlainObject(from) || !isPlainObject(to)) continue;
+    const fromFields: Record<string, unknown> = from;
+    const toFields: Record<string, unknown> = to;
+    for (const sub of new Set([
+      ...Object.keys(fromFields),
+      ...Object.keys(toFields),
+    ])) {
+      if (JSON.stringify(fromFields[sub]) !== JSON.stringify(toFields[sub])) {
+        keys.push(`${key}.${sub}`);
+      }
+    }
+  }
+  return keys;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
+  for (const key of keys) {
+    const pending = savedTimers.get(key);
+    if (pending) {
+      clearTimeout(pending);
+      savedTimers.delete(key);
+    }
+    saveStatus = { ...saveStatus, [key]: status };
+    if (status !== "saved") continue;
+    // "Saved" is an acknowledgement, not a state to sit in.
+    savedTimers.set(
+      key,
+      setTimeout(() => {
+        savedTimers.delete(key);
+        saveStatus = { ...saveStatus, [key]: "idle" };
+      }, SAVED_NOTE_MS),
+    );
+  }
+}
+
+function mutationPatch(
     current: Preferences,
     mutate: (preferences: Preferences) => Preferences,
   ): PreferencesPatch | null {
@@ -175,14 +237,31 @@
   /// optimistic value mid-round-trip.
   const commit: CommitFn = (mutate, persist) => {
     if (!editing) return;
-    editing = normalize(mutate(clone(editing)));
+    const before = clone(editing);
+    const next = normalize(mutate(clone(editing)));
+    const keys = changedKeys(before, next);
+    editing = next;
     inflight++;
+    setSaveStatus(keys, "saving");
     const run = persist
       ? persist()
       : updateGlobalConfigSerial((prefs) => mutationPatch(prefs, mutate));
-    void Promise.resolve(run).finally(() => {
-      inflight--;
-    });
+    void Promise.resolve(run)
+      .then(() => {
+        setSaveStatus(keys, "saved");
+      })
+      .catch(async (error: unknown) => {
+        // The optimistic buffer is still showing the value the server
+        // refused, so say so on the field and put the server's value
+        // back. Without this the control reads as saved.
+        setSaveStatus(keys, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await reload();
+      })
+      .finally(() => {
+        inflight--;
+      });
   };
 
   // The rail is derived from the command registry's category set (see

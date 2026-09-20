@@ -58,20 +58,17 @@
           choice,
         ),
       }),
-      () => {
-        if (choice === "light" || choice === "dark") {
-          setHybridSurfaceTheme(kind, choice as SurfaceThemeChoice);
-        } else {
-          clearHybridSurfaceTheme(kind);
-        }
-        return Promise.resolve();
-      },
+      () =>
+        choice === "light" || choice === "dark"
+          ? setHybridSurfaceTheme(kind, choice as SurfaceThemeChoice)
+          : clearHybridSurfaceTheme(kind),
     );
   }
 </script>
 
 <SettingField
   label={LABELS[kind]}
+  pref="hybrid_surface_themes"
   hint="Pin this surface's body to Light or Dark independently of the app theme, or Inherit it."
 >
   <PillRadio

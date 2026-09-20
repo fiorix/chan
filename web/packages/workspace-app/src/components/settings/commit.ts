@@ -14,3 +14,12 @@ export type CommitFn = (
   mutate: (p: Preferences) => Preferences,
   persist?: () => Promise<unknown>,
 ) => void;
+
+/// Where the save statuses live for the fields of one settings surface.
+/// The surface owns the writes, so it owns the statuses; a field asks
+/// for its own by the preferences key it presents, and gets "idle" when
+/// nothing has been written to that key or when there is no surface
+/// above it (a control mounted on its own in a test).
+export const SAVE_STATUS = Symbol("settings-save-status");
+
+export type SaveStatusLookup = (pref: string) => SaveStatus;

@@ -23,7 +23,11 @@
   ] as const;
 </script>
 
-<SettingField label="Theme" hint="App-wide colour theme. System follows your OS setting.">
+<SettingField
+  label="Theme"
+  hint="App-wide colour theme. System follows your OS setting."
+  pref="theme"
+>
   <PillRadio
     name="settings-theme"
     ariaLabel="App theme"
@@ -32,16 +36,14 @@
     onselect={(v) =>
       commit(
         (p) => ({ ...p, theme: v as ThemeChoice }),
-        () => {
-          setThemeChoice(v as ThemeChoice);
-          return Promise.resolve();
-        },
+        () => setThemeChoice(v as ThemeChoice),
       )}
   />
 </SettingField>
 
 <SettingField
   label="Watcher bubbles"
+  pref="bubble_overlay_mode"
   hint="Show filesystem-watch notices inline, or collapse them to a count tray until expanded."
 >
   <PillRadio
@@ -56,6 +58,7 @@
 
 <SettingField
   label="Empty-pane carousel"
+  pref="empty_pane_carousel_cycling"
   hint="Auto-rotate the welcome carousel shown in an empty single pane."
 >
   <PillToggle

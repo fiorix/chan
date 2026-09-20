@@ -63,6 +63,7 @@
 <SettingField
   label="Editor theme"
   hint="Typography and chrome of the markdown editor only."
+  pref="editor_theme"
 >
   <PillRadio
     name="settings-editor-theme"
@@ -75,6 +76,7 @@
 
 <SettingField
   label="Line spacing"
+  pref="line_spacing"
   hint="Reading density for paragraphs and lists in the editor."
 >
   <PillRadio
@@ -88,6 +90,7 @@
 
 <SettingField
   label="Editor font size"
+  pref="editor_font_size"
   hint="Absolute body size for WYSIWYG, source, document, and slide surfaces. Leave empty to use the active theme."
 >
   <NumberField
@@ -111,6 +114,7 @@
 
 <SettingField
   label="Date format"
+  pref="date_format"
   hint="Default used by @today and pre-selected in the @date picker."
 >
   <select
@@ -126,6 +130,7 @@
 
 <SettingField
   label="Strip trailing whitespace"
+  pref="strip_trailing_whitespace_on_save"
   hint="Remove trailing spaces and tabs from each line on save. Applies to every editable text buffer."
 >
   <PillToggle
@@ -138,6 +143,7 @@
 
 <SettingField
   label="Editor page width"
+  pref="page_width_ratio"
   hint="Cap the editor text column as a share of the window width. 100% removes the cap."
 >
   <SliderField
