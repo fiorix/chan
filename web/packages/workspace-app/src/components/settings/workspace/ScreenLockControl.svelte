@@ -194,7 +194,7 @@
 
 <SettingField
   label="Screen lock"
-  hint="Auto-lock the workspace view after inactivity. Local-only PIN protection (Mod+L locks now)."
+  hint="Auto-lock this window after inactivity; Mod+L locks now. The lock blocks input to this window only; other windows and clients with the bearer token can still reach this workspace's sessions."
 >
   <div class="stack">
     <PillToggle
