@@ -165,6 +165,13 @@
   display: flex;
   gap: 10px;
 }
+/* The rule above is author-origin and outranks the user-agent
+   `[hidden] { display: none }`, so the `hidden` attribute connecting.js
+   toggles only reaches the row through this one. It is what keeps Retry
+   and Disconnect off a window that is still connecting normally. */
+.connecting-actions[hidden] {
+  display: none;
+}
 .connecting-btn {
   font: inherit;
   font-size: 13px;
