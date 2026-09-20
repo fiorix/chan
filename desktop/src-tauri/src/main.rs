@@ -2607,8 +2607,8 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::ActiveTerminals { active_terminals }) => {
             Ok(chan_server::SetWorkspaceOnOutcome::NeedsForce { active_terminals })
         }
-        // A devserver that answered has spoken for itself, local or not: pass
-        // its refusal on rather than let the leniency below absorb it.
+        // A 409 is the devserver declining this request, local or not: pass it
+        // on rather than let the leniency below absorb it into a success.
         Err(devserver::SetWorkspaceOnError::Refused { message }) => Err(message),
         // A LOCAL devserver registers its workspaces over the well-known
         // discovery socket, which is the source of truth; the HTTP toggle is
@@ -2618,9 +2618,10 @@ pub(crate) async fn set_devserver_workspace_on_impl(
         Err(devserver::SetWorkspaceOnError::Other { message }) => {
             if devserver_is_local(state, &id) {
                 tracing::warn!(devserver = %id, "local devserver workspace toggle failed (non-fatal): {message}");
-                // This arm matches the failures that are not an answer from
-                // the devserver, so there is no row to report: answer done
-                // without one rather than assert a state nobody observed.
+                // This arm matches every failure the toggle reports except a
+                // 409, whether or not the request reached the devserver, so
+                // there is no row to report: answer done without one rather
+                // than assert a state nobody observed.
                 Ok(chan_server::SetWorkspaceOnOutcome::Done { workspace: None })
             } else {
                 Err(message)
@@ -8402,6 +8403,75 @@ mod tests {
             panic!("a forced off that unmounted is Done");
         };
         assert!(workspace.is_none(), "an off carries no row");
+
+        server.abort();
+    }
+
+    /// The split between a refusal and a failure, which nothing else pins. A
+    /// local devserver's toggle is best-effort, so a failure it reports is
+    /// absorbed into a success and the route answers 204. A 409 is not a
+    /// failure of that kind: the devserver declined this request and said why,
+    /// so the sentence has to reach the caller. Folding the refusal arm into
+    /// the failure arm below leaves every other test green.
+    #[tokio::test]
+    async fn a_local_devserver_refusal_is_not_absorbed_into_a_success() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/api/devserver/workspaces/{*rest}",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    "workspace is open in another Chan process",
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        {
+            let cfg = config::Config {
+                devservers: vec![config::Devserver {
+                    id: "ds1".to_string(),
+                    url: format!("http://127.0.0.1:{}", addr.port()),
+                    // No connect script is what makes it local, and local is
+                    // what turns a reported failure into a success.
+                    script: String::new(),
+                    label: String::new(),
+                    token: String::new(),
+                    added_at: 0,
+                    auto_hide_control: false,
+                    gateway_owner: None,
+                    gateway_devserver_id: None,
+                }],
+                ..Default::default()
+            };
+            store.lock().unwrap().save(&cfg).unwrap();
+        }
+        let state = Arc::new(AppState::with_store(store));
+        state.devservers.set(
+            "ds1".to_string(),
+            devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: addr.port(),
+                token: "devserver-token".into(),
+                name: "test".into(),
+                gateway: None,
+            },
+        );
+        assert!(
+            devserver_is_local(&state, "ds1"),
+            "fixture: the leniency only applies to a local devserver"
+        );
+
+        let error =
+            set_devserver_workspace_on_impl(&state, "ds1".into(), "notes".into(), true, false)
+                .await
+                .expect_err("a refusal is not a success");
+        assert_eq!(error, "workspace is open in another Chan process");
 
         server.abort();
     }

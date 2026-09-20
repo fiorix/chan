@@ -300,9 +300,12 @@ const LIVE_TERMINALS: &str = "live_terminals";
 
 /// Why a devserver workspace on/off/forget failed, structured so a caller can
 /// tell a confirm-before-off (live terminals, offer to force) from a refusal
-/// the devserver explained, and both from a request that never got an answer.
-/// It stays inside the desktop: the bridge handlers in `main.rs` map it onto
-/// the outcome the launcher route answers with.
+/// the devserver explained, and both from everything else. The split is by
+/// answer shape, not by whether an answer arrived: a 409 is the devserver
+/// declining a request it understood, while every other status and every
+/// transport failure alike land in `Other`. It stays inside the desktop: the
+/// bridge handlers in `main.rs` map it onto the outcome the launcher route
+/// answers with.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind")]
 pub enum SetWorkspaceOnError {
@@ -310,12 +313,15 @@ pub enum SetWorkspaceOnError {
     /// terminals would be killed. The caller confirms, then retries with
     /// `force: true`.
     ActiveTerminals { active_terminals: usize },
-    /// The devserver refused and said why, in its own words, to be shown
-    /// unchanged. Distinct from [`Other`](Self::Other) because the request
-    /// reached the devserver and was answered, so no caller may downgrade it
-    /// to a success the way it may a failed transport.
+    /// A 409: the devserver declined the request and said why. The message is
+    /// its own words wherever it sent any, so it is shown unchanged. Distinct
+    /// from [`Other`](Self::Other) because a decline is an answer about this
+    /// request, which is what makes it the one failure no caller may absorb
+    /// into a success.
     Refused { message: String },
-    /// Any other failure (network, decode, non-409 status), as a plain message.
+    /// Any other failure (network, decode, any non-409 status), as a plain
+    /// message. Answered or not: a 500 from a reachable devserver lands here
+    /// beside a connection that never opened.
     Other { message: String },
 }
 
@@ -323,11 +329,18 @@ pub enum SetWorkspaceOnError {
 ///
 /// The server answers refusals in more than one shape and a route's set of
 /// them can grow, so the body decides: a JSON object carrying a numeric
-/// `active_terminals` is the confirm-before-off signal; a JSON object whose
-/// `error` is any other string carries that string as the message, which is
-/// the shape a server moving its refusals into an `{"error": ...}` envelope
-/// sends; anything else is its own message. Nothing here invents a count, so
-/// a body that carries none can never read as a measured zero.
+/// `active_terminals` is the confirm-before-off signal whatever its `error`
+/// says; a JSON object carrying no count but a non-empty string `error` uses
+/// that string as the message, which is the shape a server moving its
+/// refusals into an `{"error": ...}` envelope sends; anything else is its own
+/// message. Nothing here invents a count, so a body that carries none can
+/// never read as a measured zero.
+///
+/// The count decides over the reason because the count is the only field that
+/// can be acted on: it is what offers the force-retry. An envelope that keeps
+/// a sentence in `error` and the count beside it reads correctly this way and
+/// would otherwise lose the retry, and a body that carries a count and means
+/// something else by it has never existed.
 ///
 /// The launcher reads the same body with `refusalReason` and
 /// `liveTerminalsCount`, and this is deliberately one case wider than those
@@ -348,25 +361,28 @@ async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
         .and_then(|value| value.get("active_terminals"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|count| usize::try_from(count).ok());
-    // A named refusal that is not the terminal one is a message, even if the
-    // body also carries a count: the count is not what refused the request.
-    if let Some(message) = error {
-        if message != LIVE_TERMINALS {
-            return SetWorkspaceOnError::Refused {
-                message: message.to_string(),
-            };
-        }
-    }
     if let Some(active_terminals) = count {
         return SetWorkspaceOnError::ActiveTerminals { active_terminals };
     }
-    SetWorkspaceOnError::Refused {
-        message: match error {
-            Some(message) => message.to_string(),
-            None if body.trim().is_empty() => format!("devserver refused with HTTP {status}"),
-            None => body,
-        },
-    }
+    // Without a count there is nothing to act on, so the reason is the answer.
+    // An `error` holding only the discriminator names no reason either, and a
+    // blank one names nothing at all: both fall through to the status, because
+    // a banner reading `live_terminals` or reading empty is the failure this
+    // reader exists to remove.
+    let reason = error
+        .filter(|message| *message != LIVE_TERMINALS)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let body = body.trim();
+            if body.is_empty() || error.is_some() {
+                format!("devserver refused with HTTP {status}")
+            } else {
+                body.to_string()
+            }
+        });
+    SetWorkspaceOnError::Refused { message: reason }
 }
 
 impl SetWorkspaceOnError {
@@ -2216,9 +2232,11 @@ fn launcher_workspace_toggle_request(
 /// on mints a fresh tenant token; turning off clears it. Idempotent server-side.
 /// An unforced off is rejected with 409 + a live-terminal count when the tenant
 /// has open terminals -- surfaced as [`SetWorkspaceOnError::ActiveTerminals`] so
-/// the SPA can confirm-then-force; `force: true` overrides the guard. The gateway
-/// arm speaks the devserver's launcher routes instead (see
-/// [`launcher_workspace_toggle_request`]); its `/off` answers the same 409 body.
+/// the SPA can confirm-then-force; `force: true` overrides the guard. A 409 that
+/// is not that refusal surfaces its own message instead (see
+/// [`refusal_from_conflict`]). The gateway arm speaks the devserver's launcher
+/// routes instead (see [`launcher_workspace_toggle_request`]); its `/off`
+/// answers the same 409 body.
 ///
 /// A success carries the workspace's updated row, so the caller reads a degraded
 /// mount off the answer rather than re-listing for it: the direct arm from the
@@ -3560,78 +3578,87 @@ mod tests {
     }
 
     /// Every 409 a devserver can answer, read by its body rather than by its
-    /// status. Assertions avoid naming the variant that carries a message, so
-    /// this test says the same thing before and after the reader exists.
+    /// status, over both arms and both verbs.
     #[tokio::test]
     async fn a_conflict_is_read_by_its_body_not_its_status() {
         use axum::http::StatusCode;
 
-        async fn conflict(body: &str) -> SetWorkspaceOnError {
+        async fn refusal(body: &str, on: bool, gateway: bool) -> SetWorkspaceOnError {
             let server =
                 MockManagementServer::start(vec![mock_response(StatusCode::CONFLICT, body)]).await;
-            let error = set_workspace_on(&server.gateway_conn(), "/notes", true, false)
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            let error = set_workspace_on(&conn, "/notes", on, false)
                 .await
                 .expect_err("a 409 is a refusal");
             server.assert_responses_drained();
             error
         }
+        fn message(error: &SetWorkspaceOnError) -> &str {
+            match error {
+                SetWorkspaceOnError::Refused { message } => message,
+                other => panic!("expected a refusal carrying a message, got {other:?}"),
+            }
+        }
+        fn count(error: &SetWorkspaceOnError) -> usize {
+            match error {
+                SetWorkspaceOnError::ActiveTerminals { active_terminals } => *active_terminals,
+                other => panic!("expected a live-terminals refusal, got {other:?}"),
+            }
+        }
 
         // The launcher route's locked refusal is plain text. It must reach the
-        // user as itself, and must never be read as a terminal count.
-        let error = conflict("workspace is open in another Chan process").await;
-        assert!(
-            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
-            "a plain-text 409 is not a terminal count: {error:?}"
-        );
-        assert!(
-            format!("{error:?}").contains("workspace is open in another Chan process"),
-            "the devserver's own sentence survives: {error:?}"
-        );
+        // user as itself, over either arm, and must never read as a count.
+        let error = refusal("workspace is open in another Chan process", true, true).await;
+        assert_eq!(message(&error), "workspace is open in another Chan process");
+        let error = refusal("workspace is open in another Chan process", false, false).await;
+        assert_eq!(message(&error), "workspace is open in another Chan process");
 
-        // The live-terminals refusal keeps its confirm and its count.
-        let error = conflict(r#"{"error":"live_terminals","active_terminals":3}"#).await;
-        assert!(
-            matches!(
-                error,
-                SetWorkspaceOnError::ActiveTerminals {
-                    active_terminals: 3
-                }
-            ),
-            "the discriminated body still asks for confirmation: {error:?}"
-        );
-
-        // Any other refusal in the `{"error": ...}` envelope shows its string,
-        // so a server that later answers every refusal that way needs no
-        // change here.
-        let error = conflict(r#"{"error":"workspace is not registered"}"#).await;
-        assert!(
-            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
-            "an enveloped refusal is not a terminal count: {error:?}"
-        );
-        assert!(
-            format!("{error:?}").contains("workspace is not registered"),
-            "the envelope's reason is the message: {error:?}"
-        );
-
-        // A body that is neither must not invent a measurement.
-        let error = conflict(r#"{"unrelated":true}"#).await;
-        assert!(
-            !matches!(error, SetWorkspaceOnError::ActiveTerminals { .. }),
-            "an unreadable 409 never reports a count it did not measure: {error:?}"
-        );
+        // The live-terminals refusal keeps its confirm and its count. It is
+        // answered to an unforced off, which is the only verb that asks for it.
+        let error = refusal(r#"{"error":"live_terminals","active_terminals":3}"#, false, true).await;
+        assert_eq!(count(&error), 3);
 
         // A devserver released before the discriminator existed answers the
-        // count alone. It is still the live-terminals refusal, and the desktop
-        // reaches such a peer because the connect gate is the protocol number.
-        let error = conflict(r#"{"active_terminals":2}"#).await;
+        // count alone. The desktop reaches such a peer because the connect gate
+        // is the protocol number.
+        let error = refusal(r#"{"active_terminals":2}"#, false, true).await;
+        assert_eq!(count(&error), 2);
+
+        // A count decides whatever the reason says, so an envelope that carries
+        // a sentence and the count together still offers the force-retry.
+        let error = refusal(
+            r#"{"error":"the workspace still has live terminals","active_terminals":4}"#,
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(count(&error), 4);
+
+        // Any other reason in the `{"error": ...}` envelope shows its string.
+        let error = refusal(r#"{"error":"workspace is not registered"}"#, true, true).await;
+        assert_eq!(message(&error), "workspace is not registered");
+
+        // A body that is neither must not invent a measurement.
+        let error = refusal(r#"{"unrelated":true}"#, true, true).await;
+        assert_eq!(message(&error), r#"{"unrelated":true}"#);
+
+        // Nothing readable in the body falls back to the status: a blank
+        // banner, or one reading `live_terminals`, is what this reader removes.
+        for body in ["", "   ", r#"{"error":""}"#, r#"{"error":"   "}"#] {
+            let error = refusal(body, true, true).await;
+            assert!(
+                message(&error).contains("409"),
+                "an unreadable body names the status: {error:?}"
+            );
+        }
+        let error = refusal(r#"{"error":"live_terminals"}"#, false, true).await;
         assert!(
-            matches!(
-                error,
-                SetWorkspaceOnError::ActiveTerminals {
-                    active_terminals: 2
-                }
-            ),
-            "a pre-discriminator body still asks for confirmation: {error:?}"
+            message(&error).contains("409"),
+            "a countless discriminator is not a message: {error:?}"
         );
     }
 
