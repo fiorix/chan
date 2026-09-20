@@ -145,6 +145,54 @@ describe("inactive canvas tab hides via display:none (WKWebView island leak)", (
   });
 });
 
+describe("a read-only canvas tab", () => {
+  // The board is the one editor surface that ignored the tab's read-only
+  // state, so read mode and a file with no user-write bit both left it
+  // editable. Every change it produced was refused by the live session and
+  // could never be confirmed, which is what leaves a save waiting for a
+  // quiescence that cannot arrive.
+  function renderProps(): Record<string, unknown> {
+    const rendered = renderMock.mock.calls.at(-1)![0] as {
+      props: Record<string, unknown>;
+    };
+    return rendered.props;
+  }
+
+  test("renders the board in view mode", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(
+      mount(ExcalidrawCanvas, {
+        target,
+        props: { content: "", dark: false, readonly: true, onSceneChange: () => {} },
+      }),
+    );
+    await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
+    expect(renderProps().viewModeEnabled).toBe(true);
+  });
+
+  test("a writable tab keeps its board editable", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(
+      mount(ExcalidrawCanvas, {
+        target,
+        props: { content: "", dark: false, onSceneChange: () => {} },
+      }),
+    );
+    await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
+    expect(renderProps().viewModeEnabled).toBe(false);
+  });
+
+  test("FileEditorTab passes its read-only state into the canvas island", () => {
+    // Bounded to the element: an unbounded `[\s\S]*?` reaches the `readonly`
+    // on the source editor further down and passes either way.
+    const island = fileEditorSrc.match(/<ExcalidrawCanvas[\s\S]*?\/>/)?.[0] ?? "";
+    expect(island, "the canvas island is mounted here").toContain("ExcalidrawCanvas");
+    expect(island).toContain("readonly={readOnly}");
+  });
+});
+
 describe("excalidraw stays out of the eager bundle", () => {
   test("the wrapper dynamic-imports react-dom, react, and excalidraw", () => {
     expect(canvasSrc).toMatch(/import\("react-dom\/client"\)/);
