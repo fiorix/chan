@@ -16,6 +16,8 @@
       "@chan/web-shared/CommandDeck.svelte": ["../web-shared/src/components/CommandDeck.svelte"]
     },
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true

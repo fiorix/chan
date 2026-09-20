@@ -11,6 +11,8 @@
     "moduleDetection": "force",
     "moduleResolution": "bundler",
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true
