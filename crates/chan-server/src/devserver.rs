@@ -4452,7 +4452,10 @@ mod tests {
             .await
             .expect("the launcher's own mount");
         let token = hosted.handle.token.clone().unwrap_or_default();
-        assert!(state.host.is_root_mounted(ws.path()), "fixture: root mounted");
+        assert!(
+            state.host.is_root_mounted(ws.path()),
+            "fixture: root mounted"
+        );
 
         // A live terminal session in that tenant: what a forced close destroys.
         let command = if cfg!(windows) {
@@ -4880,9 +4883,15 @@ mod tests {
                 }
                 std::future::pending::<()>().await;
             }
-            let artifacts =
-                crate::build_app(library, workspace, config, desktop, unserve, control_identity)
-                    .await?;
+            let artifacts = crate::build_app(
+                library,
+                workspace,
+                config,
+                desktop,
+                unserve,
+                control_identity,
+            )
+            .await?;
             Ok(crate::into_tenant_artifacts(artifacts))
         }
 

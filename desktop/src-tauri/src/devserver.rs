@@ -3619,7 +3619,12 @@ mod tests {
 
         // The live-terminals refusal keeps its confirm and its count. It is
         // answered to an unforced off, which is the only verb that asks for it.
-        let error = refusal(r#"{"error":"live_terminals","active_terminals":3}"#, false, true).await;
+        let error = refusal(
+            r#"{"error":"live_terminals","active_terminals":3}"#,
+            false,
+            true,
+        )
+        .await;
         assert_eq!(count(&error), 3);
 
         // A devserver released before the discriminator existed answers the
