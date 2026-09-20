@@ -173,3 +173,16 @@ describe("the same preview after an edit in front of both images", () => {
     expect(view!.state.selection.main.head).toBe(secondUrlCaret());
   });
 });
+
+describe("one selection entering both images", () => {
+  test("Copy on the second preview still reads the second image", () => {
+    mount();
+    // A range over the whole line enters both images, so both render a
+    // preview. Their live positions are the same line start and the
+    // first image is what a walk from there reaches, for both of them;
+    // only the position each widget was built with tells them apart.
+    view!.dispatch({ selection: { anchor: 0, head: DOC.length } });
+    wrapFor("2.png").dataset.selected = "true";
+    expect(selectedImageMarkdown(view!)).toBe(SECOND);
+  });
+});
