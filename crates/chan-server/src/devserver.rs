@@ -4802,9 +4802,13 @@ mod tests {
     /// opened the workspace, dropped it and then answered the same registry
     /// error would leave nothing mounted either.
     ///
-    /// The flock is held independently for the duration, so touching the mount
-    /// path first cannot go unnoticed: it would contend, and the caller would
-    /// hear that instead of the registry.
+    /// Two things together make that visible, and neither does it alone. The
+    /// workspace flock is held independently for the whole request, so a
+    /// handler that reached the mount path would contend rather than quietly
+    /// succeed. But contention does not change the answer: the gate still
+    /// returns its own error afterwards, so the message cannot be the proof.
+    /// The proof is the lifecycle mark, which a begun mount leaves behind even
+    /// when it is abandoned and nothing stays mounted.
     #[tokio::test]
     async fn discovery_registration_without_a_window_registry_does_not_mount() {
         let _env = chan_home_env_read();
@@ -4835,8 +4839,8 @@ mod tests {
         )
         .await;
 
-        // The registry's refusal, not the lock's: reaching the mount first
-        // would answer the contended lock instead.
+        // The registry's own refusal. This says which gate answered, not that
+        // a mount was skipped: the assertion below is what shows that.
         match &response {
             crate::devserver_handoff::Response::Error { message } => assert!(
                 message.contains("window registry"),
