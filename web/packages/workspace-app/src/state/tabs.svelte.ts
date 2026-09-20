@@ -4013,6 +4013,62 @@ export function paneModeSetMouseSplit(
   paneMode.mouseSplit = target;
 }
 
+/// What a live session or a save owns on a file tab, as opposed to what the
+/// user and the editor own.
+///
+/// While Hybrid Nav is up the app renders the DRAFT, but a session resolves
+/// its tab through `layout` and a save resolves through `liveFileTabById`,
+/// so both write the live tree. The commit replaces that tree with the
+/// draft, which was cloned when the mode was entered, and without this carry
+/// every one of these reverts to its entry-time value.
+///
+/// `diskConflicted` is the one that is silent. The authority sends that
+/// transition once, to the attachments of that moment, so a lost flag is not
+/// resent: the banner never shows, the tab still reads attached so autosave
+/// stands down, and the server goes on accepting pushes it will not flush.
+/// The rest over-refuse rather than under-refuse: a stale token is a 409 and
+/// a stale `saved` reads falsely dirty.
+///
+/// Everything else stays the draft's, `content` first of all: the editors
+/// stay mounted on the draft's tabs while the mode is up, so a remote edit
+/// applied then lives there and has to survive the commit.
+const PANE_MODE_AUTHORITY_FIELDS = [
+  "saved",
+  "savedMtime",
+  "savedMtimeNs",
+  "authorityVersion",
+  "diskConflicted",
+  "doc",
+  "error",
+  "fileMissing",
+] as const;
+
+/// Copy those fields from the tab the layout holds onto the tab that is
+/// about to replace it. Runs before the swap, while `layout` is still the
+/// live tree; a tab the draft created has no live counterpart and is left
+/// alone.
+function carryLiveAuthorityState(next: LayoutState): void {
+  const live = new Map<string, FileTab>();
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind === "file") live.set(t.id, t);
+    }
+  }
+  if (live.size === 0) return;
+  for (const node of Object.values(next.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind !== "file") continue;
+      const from = live.get(t.id);
+      if (!from) continue;
+      for (const field of PANE_MODE_AUTHORITY_FIELDS) {
+        (t as Record<string, unknown>)[field] = from[field];
+      }
+    }
+  }
+}
+
 export function commitPaneMode(): void {
   if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
   // Apply any staged spawn intent into the draft before sealing so the
@@ -4027,6 +4083,7 @@ export function commitPaneMode(): void {
     else if (kind === "dashboard") paneModeOpenDashboard();
   }
   const next = cloneLayoutState(paneMode.draft);
+  carryLiveAuthorityState(next);
   layout.rootId = next.rootId;
   layout.nodes = next.nodes;
   layout.activePaneId = next.activePaneId;
@@ -5541,7 +5598,11 @@ export function scheduleAutosave(paneId: string, tabId: string): void {
     try {
       await performSave(t);
     } catch (e) {
-      t.error = `autosave failed: ${(e as Error).message}`;
+      // The save took a turn or more, so the object `t` is not necessarily
+      // the one the layout holds any more; a message written on the old one
+      // is never shown.
+      const live = liveFileTabById(tabId) ?? t;
+      live.error = `autosave failed: ${(e as Error).message}`;
     }
   }, AUTOSAVE_DEBOUNCE_MS);
   autosaveTimers.set(tabId, timer);

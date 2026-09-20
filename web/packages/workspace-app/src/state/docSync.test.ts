@@ -1379,6 +1379,25 @@ describe("a session follows its tab through a move", () => {
     cleanup();
   });
 
+  test("a conflict frame during Hybrid Nav reaches the committed tab", async () => {
+    // The session writes the conflict flag through the live tree, and the
+    // commit replaces that tree with the draft's entry-time clone. The
+    // server sends the transition once, so a flag lost here is not resent:
+    // the banner never shows, the tab still reads attached so autosave
+    // stands down, and the authority accepts pushes it will not flush.
+    const tab = fileTab();
+    resetLayout([tab]);
+    const { sock, cleanup } = await attached(tab);
+    expect(liveTab(tab.id).diskConflicted ?? false).toBe(false);
+
+    enterPaneMode();
+    sock.frame({ type: "conflict", active: true, disk_mtime_ns: MTIME });
+    commitPaneMode();
+
+    expect(liveTab(tab.id).diskConflicted).toBe(true);
+    cleanup();
+  });
+
   test("a degrade during the save's own flush reaches the moved tab's gate", async () => {
     // `performSaveOnce` awaits the delegate for as long as the flush takes.
     // A move in that window replaces the tab object, and the mirror the

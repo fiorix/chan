@@ -3708,6 +3708,74 @@ describe("autosave", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  test("the commit keeps what was written to the draft, not only the live tree", async () => {
+    // The other half of the carry. Editors stay mounted on the draft's tabs
+    // while the mode is up, so a remote edit applied then writes `content`
+    // there; carrying the live tree's fields wholesale would discard it.
+    vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2000000002" });
+    resetLayout([fileTab({ path: "notes/a.md", content: "body", saved: "body" })]);
+
+    enterPaneMode();
+    const draftTab = (paneMode.draft!.nodes["pane-test"] as LeafNode)
+      .tabs[0] as FileTab;
+    draftTab.content = "a peer typed this while the mode was up";
+    commitPaneMode();
+
+    const live = activePane().tabs[0] as FileTab;
+    expect(live.content).toBe("a peer typed this while the mode was up");
+  });
+
+  test("an autosave that fails mid-save reports on the tab in the layout", async () => {
+    vi.useFakeTimers();
+    let fail: (e: Error) => void = () => {};
+    vi.spyOn(api, "write").mockReturnValue(
+      new Promise<never>((_resolve, reject) => {
+        fail = reject;
+      }) as ReturnType<typeof api.write>,
+    );
+    const pane = resetLayout([
+      fileTab({ path: "notes/a.md", content: "body", saved: "old" }),
+      fileTab({ id: "file-2", path: "notes/b.md" }),
+    ]);
+
+    scheduleAutosave(pane.id, "file-1");
+    await vi.advanceTimersByTimeAsync(900);
+    // The move lands while the write is in flight, so the object the catch
+    // was handed is no longer the one the tab strip renders.
+    reorderTab(pane.id, "file-1", 1);
+    fail(new Error("disk full"));
+    await vi.advanceTimersByTimeAsync(10);
+
+    const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
+    expect(live.error).toContain("autosave failed");
+    vi.useRealTimers();
+  });
+
+  test("a save that lands during Hybrid Nav stamps the committed tab", async () => {
+    // The save writes the live tree, which is right while the draft is up,
+    // and the commit then throws that tree away. The next autosave sends
+    // the token the save replaced, so the server answers 409 and the user
+    // is asked to resolve a conflict with their own save.
+    let land: (r: { mtime: number; mtime_ns: string }) => void = () => {};
+    vi.spyOn(api, "write").mockReturnValue(
+      new Promise<{ mtime: number; mtime_ns: string }>((resolve) => {
+        land = resolve;
+      }) as ReturnType<typeof api.write>,
+    );
+    resetLayout([fileTab({ path: "notes/a.md", content: "body", saved: "old" })]);
+    const target = activePane().tabs[0] as FileTab;
+
+    const saving = saveTab(target);
+    enterPaneMode();
+    land({ mtime: 5, mtime_ns: "5000000000" });
+    await saving;
+    commitPaneMode();
+
+    const live = activePane().tabs.find((t) => t.id === "file-1") as FileTab;
+    expect(live.saved).toBe("body");
+    expect(live.savedMtimeNs).toBe("5000000000");
+  });
+
   test("a save that lands after a reorder stamps the tab in the layout", async () => {
     // `performSaveOnce` awaits the write, and a move in that window
     // replaces the tab object. Stamping the result on the object the
