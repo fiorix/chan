@@ -1415,6 +1415,12 @@ function tabForReopen(src: Tab): Tab {
   if (tab.kind === "file") {
     tab.doc = undefined;
     tab.externalChange = undefined;
+    // `openedEmpty` is a claim about what a load found on disk, and a
+    // reopened tab loads nothing: it replays the buffer the close kept.
+    // Carrying the marker would let the next close delete a file this tab
+    // never read, which after an auto-discard is a file something else
+    // recreated.
+    tab.openedEmpty = undefined;
   }
   return tab;
 }

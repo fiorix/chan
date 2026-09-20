@@ -842,6 +842,30 @@ describe("tab close confirmation", () => {
       await closeTab(pane.id, "file-1");
       expect(activePane().tabs).toHaveLength(0);
     });
+
+    test("a reopened tab carries no claim about what a load found", async () => {
+      const remove = vi.spyOn(api, "remove").mockResolvedValue(undefined);
+      const pane = resetLayout([
+        fileTab({ path: "notes/a.md", content: "", saved: "", openedEmpty: true }),
+      ]);
+      await closeTab(pane.id, "file-1");
+      expect(remove).toHaveBeenCalledWith("notes/a.md");
+      remove.mockClear();
+
+      // The reopen replays the closed buffer and loads nothing, so the
+      // reopened tab has read no disk of its own. Something else may have
+      // recreated the path in between, and closing this tab must not take
+      // that file with it.
+      expect(reopenClosedTab()).toBe(true);
+      const reopened = activePane().tabs[0];
+      expect(reopened?.kind).toBe("file");
+      if (reopened?.kind !== "file") return;
+      expect(reopened.openedEmpty).toBeUndefined();
+
+      await closeTab(activePane().id, reopened.id);
+      expect(remove).not.toHaveBeenCalled();
+      expect(activePane().tabs).toHaveLength(0);
+    });
   });
 
   test("reopens a closed File Browser tab with its expanded dirs + view state", async () => {
