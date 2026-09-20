@@ -6,6 +6,11 @@
   import Tokens from "./views/Tokens.svelte";
   import Devservers from "./views/Devservers.svelte";
   import { meStore } from "./state/me.svelte";
+  import {
+    dismissProfileNotice,
+    profileNotice,
+    showProfileNotice,
+  } from "./state/notice.svelte";
   import { takeDesktopAuthorized } from "./lib/desktopAuthorized";
 
   type Tab = "profile" | "tokens" | "workspaces";
@@ -37,14 +42,10 @@
     return t === "workspaces" && !sharesOn ? "profile" : t;
   }
 
-  // Raised when chan-desktop's loopback listener bounced the browser back
-  // here after a successful authorization.
-  let desktopAuthorized = $state(false);
-
   onMount(() => {
     const marker = takeDesktopAuthorized(location.href);
     if (marker.authorized) {
-      desktopAuthorized = true;
+      showProfileNotice("Signed in. You can return to chan-desktop.");
       // Strip before the first setTab: its replaceState preserves the
       // query, so the marker would otherwise outlive this page load.
       history.replaceState(null, "", marker.href);
@@ -56,6 +57,18 @@
 <svelte:window onhashchange={() => (tab = tabFromHash())} />
 
 <main class="shell">
+  {#if profileNotice.message}
+    <div
+      class="notice"
+      class:error={profileNotice.kind === "error"}
+      role={profileNotice.kind === "error" ? "alert" : "status"}
+    >
+      <span>{profileNotice.message}</span>
+      <button class="dismiss" onclick={dismissProfileNotice}>
+        Dismiss
+      </button>
+    </div>
+  {/if}
   {#if meStore.status === "idle" || meStore.status === "loading"}
     <div class="centered muted">Loading...</div>
   {:else if meStore.status === "error"}
@@ -70,14 +83,6 @@
     {@const sharesOn = !!meStore.me.flags?.share_workspaces}
     {@const activeTab = visibleTab(tab, sharesOn)}
     <Topbar me={meStore.me.user} onSignOut={() => meStore.logout()} />
-    {#if desktopAuthorized}
-      <div class="notice" role="status">
-        <span>Signed in. You can return to chan-desktop.</span>
-        <button class="dismiss" onclick={() => (desktopAuthorized = false)}>
-          Dismiss
-        </button>
-      </div>
-    {/if}
     <nav class="tabs">
       <button
         class:active={activeTab === "profile"}
