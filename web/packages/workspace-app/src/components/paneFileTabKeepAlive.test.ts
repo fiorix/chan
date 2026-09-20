@@ -13,11 +13,9 @@ import fileEditorTab from "./FileEditorTab.svelte?raw";
 // catch any regression back to render-only-the-active-file-tab.
 
 describe("file tabs survive tab switches (keep-alive)", () => {
-  test("file each-block renders all file tabs, keyed by tab id", () => {
-    expect(pane).toMatch(
-      /\{#each everyTab\.filter\(\(t\) => t\.kind === "file"\) as t \(t\.id\)\}\s+<FileEditorTab/,
-    );
-  });
+  // Where the mounting itself is asserted: paneKeepAliveMount.test.ts mounts two file tabs, switches between
+// them and compares the DOM nodes, which is the claim the each-block was
+// standing in for.
 
   test("file tabs no longer mount from the active-tab if-chain", () => {
     // The pre-fix branch mounted ONLY the active file tab
