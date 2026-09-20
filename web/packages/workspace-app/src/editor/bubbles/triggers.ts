@@ -28,6 +28,15 @@ import { isExcalidrawImageSrc } from "../extensions/image";
 import type { BubbleSpec } from "./types";
 import { windowCaps } from "../../state/windowCaps";
 
+/// Syntax nodes whose interior the text scans may not fire inside: the
+/// caret is in markup that already exists, and only the URL-slot branches
+/// know how to replace part of it.
+const NODE_BAIL = ["Image", "Link"] as const;
+
+/// A line that is only whitespace and `#` before the trigger is a heading
+/// marker being typed, not a tag.
+const HEADING_PREFIX_RE = /^[\s#]*$/;
+
 const SKIP_INSIDE = new Set<string>([
   "InlineCode",
   "FencedCode",
@@ -112,6 +121,13 @@ export function computeBubbleSpec(
       templateMode: "wrap",
     };
   }
+  // Inside markup the user has already written, the URL-slot branches
+  // above are the only ones that may open a bubble. The text scans below
+  // start their replacement at a `[[` or `![` that belongs to that markup,
+  // so a commit would replace the opener and the query and leave the rest
+  // of the node behind: one Enter inside an image's alt text rewrites the
+  // line as `![](picked)t](old.png)`.
+  if (caretInsideNode(state, pos, NODE_BAIL)) return null;
   const line = state.doc.lineAt(pos);
   const before = line.text.slice(0, pos - line.from);
   // Wiki: `[[query` (caret after the typed query, no `]` between).
@@ -177,6 +193,13 @@ export function computeBubbleSpec(
   // typing.
   const tag = matchAtTrigger(before, "#");
   if (tag !== null && windowCaps.workspace) {
+    // A heading marker is not a tag trigger. On a line whose text before
+    // the trigger is only whitespace and `#`, the user is typing `#`,
+    // `##`, `###`, and the Enter that ends that line would otherwise
+    // commit a tag over the marker. The test is the text before the
+    // trigger rather than the column, because for `##` the trigger is the
+    // second `#`.
+    if (HEADING_PREFIX_RE.test(line.text.slice(0, tag.start))) return null;
     return {
       kind: "tag",
       triggerStart: line.from + tag.start,
@@ -229,6 +252,26 @@ function matchAtTrigger(
   // Reconstruct the offset of the trigger char.
   const triggerOffset = m.index + (m[0].length - queryLen - triggerLen);
   return { start: triggerOffset, query: m[2]! };
+}
+
+/// Whether the caret sits inside one of `names`. Both bias directions are
+/// tried: a caret at a node boundary resolves to the node on one side
+/// only, and which side depends on where the boundary is.
+function caretInsideNode(
+  state: EditorState,
+  pos: number,
+  names: readonly string[],
+): boolean {
+  for (const side of [-1, 1] as const) {
+    let node: ReturnType<typeof syntaxTree>["topNode"] | null = syntaxTree(
+      state,
+    ).resolveInner(pos, side);
+    while (node) {
+      if (names.includes(node.name)) return true;
+      node = node.parent;
+    }
+  }
+  return false;
 }
 
 function caretInsideSkipRange(state: EditorState, pos: number): boolean {

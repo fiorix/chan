@@ -73,4 +73,12 @@ describe("a heading marker is not a tag trigger", () => {
     const doc = "see #topic";
     expect(specAt(doc, doc.length)).toMatchObject({ kind: "tag", query: "topic" });
   });
+
+  test("a tag at the start of a line opens no picker either", () => {
+    // A consequence of the rule, not a separate intent: the text before
+    // the trigger is the test, and for a line-initial tag there is none.
+    // The tag itself is unaffected, written and rendered as always; what
+    // it loses is the completion list while typing.
+    expect(specAt("#todo", 5)).toBeNull();
+  });
 });

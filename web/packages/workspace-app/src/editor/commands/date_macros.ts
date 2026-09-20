@@ -33,6 +33,7 @@ import {
   type DateFormatId,
 } from "../dateFormats";
 import { openDatePopover } from "../overlays/date_popover";
+import { enclosingFence } from "./fence";
 
 /// Resolve the active default format id. Preference field is a free
 /// string; if it doesn't match a known id we fall back to ISO so the
@@ -65,6 +66,11 @@ function detectTrigger(view: EditorView): {
   const sel = view.state.selection.main;
   if (!sel.empty) return null;
   const pos = sel.head;
+  // A fenced block is literal source: expanding here would rewrite the
+  // code sample the user is typing, which is what a document describing
+  // these macros does. The same predicate the format and list commands
+  // ask.
+  if (enclosingFence(view.state, pos)) return null;
   const line = view.state.doc.lineAt(pos);
   const before = line.text.slice(0, pos - line.from);
   for (const t of TRIGGERS) {
