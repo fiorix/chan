@@ -9,6 +9,10 @@
   // override store stays sparse. The draft and error are local and
   // reseed when `value` changes externally, so typing never fights a
   // buffer reseed.
+  //
+  // The swatch commits on `change`, not on `input`: a drag through the
+  // native picker reports every colour it passes over, and each commit
+  // here is a whole read-modify-write of the config.
 
   import { normalizeHexColor } from "../../state/paneColor";
 
@@ -72,7 +76,7 @@
     type="color"
     {value}
     aria-label={`${label} colour swatch`}
-    oninput={(event) => commit(event.currentTarget.value)}
+    onchange={(event) => commit(event.currentTarget.value)}
   />
   <input
     {id}
