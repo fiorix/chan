@@ -12,7 +12,7 @@ Nothing is known to break today; the cost is a second request and a success that
 
 ## Desired contract
 
-The connected-devserver turn-on answers 200 with the entry the devserver returned, so every turn-on verb in the product has one success shape and a caller never has to refetch to learn whether the workspace it turned on is healthy. Refusals keep their current status codes and bodies.
+The connected-devserver turn-on answers 200 with the workspace's launcher row, the `LauncherWorkspace` the list route already sends, and not with the `WorkspaceEntry` the devserver returned: that entry carries the per-workspace bearer in its `token` field, which must not reach the launcher's wire. So every turn-on verb in the product has one success shape and a caller never has to refetch to learn whether the workspace it turned on is healthy. Refusals keep their current status codes and bodies.
 
 ## Boundaries
 
@@ -22,7 +22,7 @@ Sequence this item before [the-desktop-reads-any-409-as-live-terminals](the-desk
 
 ## Acceptance
 
-1. A test drives the route against a connected devserver double and asserts 200 with the entry, for a healthy workspace and for one the devserver reports `unavailable`.
+1. A test drives the route against a connected devserver double and asserts 200 with the row, for a healthy workspace and for one the devserver reports `unavailable`.
 2. The refusals that exist today are pinned unchanged.
 3. The launcher shows a degraded connected-devserver workspace after turn-on without a second request being required for correctness.
-4. The route's doc comment says 200 with the entry, and so do the two design documents that enumerate these routes: the launcher-routes bullet in `crates/chan-server/design.md` and the route inventory in `web/packages/launcher/design.md`.
+4. The route's doc comment says 200 with the row and when an on still answers 204 (a success that carries no row: a local devserver whose toggle failed and was downgraded, or a remote one that answered 204 itself), and so do the two design documents that enumerate these routes: the launcher-routes bullet in `crates/chan-server/design.md` and the route inventory in `web/packages/launcher/design.md`.

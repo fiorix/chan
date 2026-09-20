@@ -55,6 +55,8 @@ Which set that definition admits was the open decision, to be made deliberately 
 
 Owner ruling, 2026-09-20: the narrow reading. `<hr class="chan-page-break">` is the page break, a near miss is normalized to it on write, and `@pagebreak` stays an authoring macro that expands to it. The paragraph in `crates/chan-shell/src/help.rs` that says a literal `@pagebreak` line still splits decks and PDF export moves with the code.
 
+Two refinements of that ruling, 2026-09-20. The marker is an `hr` whose only attribute is `class` with exactly the value `chan-page-break`, written once as one function: quote style, whitespace inside the tag and the self-closing slash are spelling HTML does not distinguish, so `<hr class='chan-page-break'/>` is the marker, while an extra class or any other attribute (`data-x="1"`) makes a near miss. And the owner ruled what happens to a near miss a user typed by hand: it is left alone and inert. chan never rewrites a line the user wrote, the near miss stays an ordinary `hr` and is a page break on no surface, which means the DOM side narrows as well (class-list membership and the `hr.chan-page-break` selector both answer yes to a multi-class element today), and "normalized on write" covers only what chan writes itself: the macro and the authoring command always write the marker.
+
 ## Boundaries
 
 `slides.ts`, `commands/page_break.ts`, `pdf_pages.ts`, and `doc_dom.ts`, plus their tests. `normalizeDocPageBreaks` already canonicalizes regex matches before document PDF measures the DOM, so it is the closest thing to a reconciliation point that exists today and is the natural place to look first.

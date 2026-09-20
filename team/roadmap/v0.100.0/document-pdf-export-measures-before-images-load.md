@@ -12,7 +12,7 @@ Status: accepted for v0.100.0 by the owner on 2026-09-20. Raised on the owner's 
 
 ## Desired contract
 
-The export measures a document only after every image in it has settled, loaded or failed, and never stalls the live preview waiting for one. An embed exports as a printable stand-in, a link with its title, and the snapshot audit stays as strict as it is. Images are inlined once per export.
+The export measures a document only after every image in it has settled, loaded or failed, and never stalls the live preview waiting for one. An embed exports as a printable stand-in, a link with its title, and the snapshot audit stays as strict as it is. Images are inlined once per export, on the composition side and before the pages are cloned, so every clone already carries `data:` URIs and `snapshotPage` in `pdf_snapshot.ts`, which this item uses and does not change, finds nothing to fetch.
 
 ## Boundaries
 

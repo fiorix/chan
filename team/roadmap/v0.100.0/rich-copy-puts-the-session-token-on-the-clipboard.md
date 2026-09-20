@@ -14,7 +14,7 @@ The same channel reaches more sinks than this one. `withTokenQuery` has about fo
 
 ## Desired contract
 
-A URL carrying the session token never leaves the app. Rich copy writes image URLs without the token, so an external consumer gets a 401 image and the `data:` upgrade stays the mechanism that makes an external paste render. The rule is written next to `withTokenQuery`: which sinks may receive a token-bearing URL, and that the clipboard, the drag payload and any exported document are not among them.
+A URL carrying the session token never leaves the app. Rich copy writes image URLs without the token, which means without the `t=` query parameter: `extract_token` in `crates/chan-server/src/auth.rs` reads that parameter before the `Authorization` header, so the query string alone is a full bearer and stripping it is the whole fix. On a tokened serve an external consumer then gets a plain-text 401 and a broken image, and the `data:` upgrade stays the mechanism that makes an external paste render. A `--no-token` serve has no gate by the operator's choice, and what the gateway itself answers was not read. The rule is written next to `withTokenQuery`: which sinks may receive a token-bearing URL, and that the clipboard, the drag payload and any exported document are not among them.
 
 ## Boundaries
 
