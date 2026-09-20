@@ -1421,6 +1421,10 @@ function tabForReopen(src: Tab): Tab {
     // never read, which after an auto-discard is a file something else
     // recreated.
     tab.openedEmpty = undefined;
+    // Same reason one line down: a reopen runs no load, so a tab closed
+    // mid-download would come back waiting on one nobody is running, with a
+    // spinner that never ends. The buffer it replays is whatever had arrived.
+    tab.loading = false;
   }
   return tab;
 }
@@ -2751,7 +2755,7 @@ async function reloadPromotedDraftTab(tab: FileTab, path: string): Promise<void>
   found.tab.fileMissing = null;
   found.tab.repoRoot = null;
   found.tab.fsWritable = true;
-  await loadTabContent(found.paneId, found.tab.id, path);
+  await loadTabContent(found.tab.id, path);
 }
 
 function closeRisk(t: Tab): "live-terminal" | null {
@@ -2810,7 +2814,6 @@ const tabLoadVersions = new Map<string, number>();
 const tabLoadControllers = new Map<string, AbortController>();
 
 async function loadTabContent(
-  paneId: string,
   tabId: string,
   path: string,
 ): Promise<void> {
@@ -2819,11 +2822,20 @@ async function loadTabContent(
   tabLoadControllers.get(tabId)?.abort();
   const controller = new AbortController();
   tabLoadControllers.set(tabId, controller);
+  // Resolve by id across the whole layout, the way the close path does. The
+  // load has to find its tab on every chunk, because a Svelte 5 mutation
+  // through the object it started with does not reach the array element; and
+  // a move to another pane, a move to the other side, and a Hybrid Nav commit
+  // all replace that element. Starting the search from the pane the load began
+  // in makes a cross-pane move look like a closed tab, which aborted the read
+  // and then left `loading` set through the same missing lookup. A tab that
+  // moved finishes its load where it now is.
+  //
+  // A tab id is unique across the layout, so there is nothing for a pane to
+  // disambiguate, which is why the load no longer takes one.
   const live = (): FileTab | undefined => {
     if (tabLoadVersions.get(tabId) !== loadVersion) return undefined;
-    const node = layout.nodes[paneId];
-    if (!node || node.kind !== "leaf") return undefined;
-    const found = findTabInPane(node, tabId);
+    const found = locateTab(tabId);
     return found?.tab.kind === "file" ? found.tab : undefined;
   };
   try {
@@ -3003,7 +3015,7 @@ export async function openInPane(
     p.side = side;
     layout.activePaneId = paneId;
     bumpTabFocusPulse();
-    await loadTabContent(paneId, pendingReopen.id, path);
+    await loadTabContent(pendingReopen.id, path);
     return;
   }
   const existing = tabs.find(
@@ -3077,7 +3089,7 @@ export async function openInPane(
   // ref on a focus pulse, and the prior terminal's xterm keeps DOM focus).
   // This is the `cs open {path}` path too (handleWindowCommand -> openInPane).
   bumpTabFocusPulse();
-  await loadTabContent(paneId, newTab.id, path);
+  await loadTabContent(newTab.id, path);
   maybeAutoOpenSlidesOutline(paneId, newTab.id);
   restoreSavedCaretAfterLoad(paneId, newTab.id, path, opts);
 }
@@ -5418,7 +5430,7 @@ export async function reloadConflictedTab(): Promise<void> {
     }
     return;
   }
-  await loadTabContent(found.paneId, found.tab.id, found.tab.path);
+  await loadTabContent(found.tab.id, found.tab.path);
 }
 
 /// Resolve a live-session conflict explicitly, or adopt the
@@ -7051,7 +7063,7 @@ export async function restoreLayout(
 
   // Load all tab contents in parallel; failures land in tab.error.
   await Promise.all(
-    tabsToLoad.map((t) => loadTabContent(t.paneId, t.tabId, t.path)),
+    tabsToLoad.map((t) => loadTabContent(t.tabId, t.path)),
   );
 }
 
@@ -7129,7 +7141,7 @@ export function reconcileLayout(remote: SerNode): ReconcileResult {
   }
   // Load content for created file tabs; failures land in tab.error.
   for (const t of ctx.toLoad) {
-    void loadTabContent(t.paneId, t.tabId, t.path);
+    void loadTabContent(t.tabId, t.path);
   }
   return ctx.diverged ? "diverged" : "applied";
 }
@@ -7697,7 +7709,7 @@ async function resolveMissingFileCheck(
   }
   // Clean buffer - full reload is safe. loadTabContent fires
   // markFileMissing on a genuine 404 in its catch branch.
-  await loadTabContent(found.paneId, tabId, path);
+  await loadTabContent(tabId, path);
   if (tab.fileMissing) {
     void runSuggestReopenLookup(tabId, path);
   }
@@ -7745,7 +7757,7 @@ export async function attemptInPlaceReopen(
   if (!found) return false;
   const path = found.tab.path;
   found.tab.loading = true;
-  await loadTabContent(found.paneId, tabId, path);
+  await loadTabContent(tabId, path);
   const after = findFileTabById(tabId);
   return after !== null && after.tab.fileMissing === null;
 }
@@ -7773,7 +7785,7 @@ export async function refreshTabFromDisk(tabId: string): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;
   if (found.tab.content !== found.tab.saved) return;
-  await loadTabContent(found.paneId, found.tab.id, found.tab.path);
+  await loadTabContent(found.tab.id, found.tab.path);
 }
 
 /// A watcher event reported an external (non-self) write to this open
@@ -7810,7 +7822,7 @@ export function applyFsWritable(tabId: string, writable: boolean): void {
 export async function reloadTabFromDisk(tabId: string): Promise<void> {
   const found = findFileTabById(tabId);
   if (!found) return;
-  await loadTabContent(found.paneId, found.tab.id, found.tab.path);
+  await loadTabContent(found.tab.id, found.tab.path);
 }
 
 /// Force-adopt the on-disk content for `tabId`, discarding whatever
@@ -7852,7 +7864,7 @@ export async function forceReloadFromDisk(tabId: string): Promise<void> {
       }
     }
   }
-  await loadTabContent(found.paneId, t.id, t.path);
+  await loadTabContent(t.id, t.path);
 }
 
 /// Resolve a retained session conflict in favor of the live authority:
