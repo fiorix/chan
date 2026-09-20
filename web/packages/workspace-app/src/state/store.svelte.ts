@@ -5319,22 +5319,26 @@ async function performMove(path: string, target: string): Promise<void> {
   }
 }
 
-/// How many conflicting paths a notice names before it starts counting. The
-/// list comes from the server and has no bound, while `ui.status` is one line,
-/// so the notice says how many there are, shows enough to start looking, and
-/// counts the rest. Three is what fits beside the count without pushing the
-/// scale off the end of the line.
-const NAMED_CONFLICTS = 3;
+/// How many paths a notice names before it starts counting. These lists come
+/// from the server and have no bound, while `ui.status` is one line, so a
+/// notice says how many there are, shows enough to start looking, and counts
+/// the rest. Three is what fits beside the count without pushing the scale off
+/// the end of the line.
+const NAMED_IN_NOTICE = 3;
 
-/// One sentence for the link rewrites a move could not apply, the same for one
-/// file and for many. The count leads because it is the scale of the problem;
-/// the paths follow because they are where to go and fix it.
+/// One sentence for a server-shaped list: the count leads because it is the
+/// scale, the first few paths follow because they are where to go and look.
+function boundedNotice(lead: string, items: string[]): string {
+  const shown = items.slice(0, NAMED_IN_NOTICE);
+  const rest = items.length - shown.length;
+  return `${lead}: ${shown.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
+}
+
+/// The link rewrites a move could not apply, the same for one file and many.
 function conflictSummary(conflicts: string[]): string {
-  const shown = conflicts.slice(0, NAMED_CONFLICTS);
-  const rest = conflicts.length - shown.length;
-  return (
-    `${conflicts.length} link conflict${conflicts.length === 1 ? "" : "s"}: ` +
-    `${shown.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`
+  return boundedNotice(
+    `${conflicts.length} link conflict${conflicts.length === 1 ? "" : "s"}`,
+    conflicts,
   );
 }
 
@@ -5382,6 +5386,11 @@ async function performTransferInto(
     ui.status = `${label}: ${draftsReason}`;
     return [];
   }
+  // Refusing here saves a round trip when the collision is already visible,
+  // and it is only that. `tree.entries` is a cache: `loadTreeDir` returns at
+  // once when a listing is loaded or in flight, so it can be stale or absent
+  // when this runs, and a listing read before the transfer could not speak for
+  // the moment of the transfer anyway. The response below is the authority.
   if (op === "move") {
     try {
       await loadTreeDir(destDir);
@@ -5425,7 +5434,41 @@ async function performTransferInto(
       for (const { tabId } of tabsForPath(to)) clearTabError(tabId);
     }
   }
-  ui.status = resp.conflicts.length > 0 ? conflictSummary(resp.conflicts) : null;
+  // What the server did that the caller did not ask for. `moved[].to` is the
+  // final destination after collision suffixing, so a `to` that is not the
+  // landing path requested is a name that was taken and resolved; the user
+  // asked for a move and got one under a different name, which they are told.
+  // A copy is left out of that on purpose: landing beside the original under a
+  // suffix is what a copy is for. `skipped` is a source the server did not
+  // move at all, a no-op into its own parent or a path that escaped the
+  // workspace, and the two are one field on the wire, so it is named rather
+  // than explained.
+  const notices: string[] = [];
+  if (op === "move") {
+    const resolved = resp.moved.filter(
+      ({ from, to }) => to !== transferLandingPath(from, destDir),
+    );
+    if (resolved.length > 0) {
+      notices.push(
+        boundedNotice(
+          `${resolved.length} name${resolved.length === 1 ? "" : "s"} already taken`,
+          resolved.map(
+            ({ from, to }) => `${transferLandingPath(from, destDir)} landed as ${to}`,
+          ),
+        ),
+      );
+    }
+  }
+  if (resp.skipped.length > 0) {
+    notices.push(
+      boundedNotice(
+        `${resp.skipped.length} not moved`,
+        resp.skipped,
+      ),
+    );
+  }
+  if (resp.conflicts.length > 0) notices.push(conflictSummary(resp.conflicts));
+  ui.status = notices.length > 0 ? notices.join("; ") : null;
   return resp.moved.map((m) => m.to);
 }
 

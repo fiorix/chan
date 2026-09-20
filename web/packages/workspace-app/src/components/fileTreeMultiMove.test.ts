@@ -24,7 +24,7 @@ const served = vi.hoisted(() => ({
   listings: {} as Record<string, unknown[]>,
   transfer: {
     moved: [] as Array<{ from: string; to: string }>,
-    rewritten: [] as string[],
+    skipped: [] as string[],
     conflicts: [] as string[],
   },
   calls: [] as Array<{ op: string; sources: string[]; destDir: string }>,
@@ -107,7 +107,7 @@ beforeEach(() => {
   setNotifyHandler((msg) => notices.push(msg));
   served.listings = {};
   served.calls = [];
-  served.transfer = { moved: [], rewritten: [], conflicts: [] };
+  served.transfer = { moved: [], skipped: [], conflicts: [] };
   ui.status = null;
   tree.entries = [
     { path: "a.md", is_dir: false, kind: "document", size: 1, mtime: null },
@@ -229,6 +229,40 @@ describe("a multi-row move", () => {
 
     expect(said()).toContain("5 link conflicts: c1.md, c2.md, c3.md, and 2 more");
     expect(said(), "the rest are counted, not printed").not.toContain("c4.md");
+  });
+
+  test("says so when the server resolved a name the check could not see", async () => {
+    // The check reads a cached listing, so it cannot promise there was no
+    // collision. `loadTreeDir` returns at once while a listing is in flight,
+    // which is one of the ways `tree.entries` can be missing the destination's
+    // contents when the check runs. The response is the authority: a `to` that
+    // is not the landing path asked for is a name the server resolved.
+    tree.loadingDirs = { dest: true };
+    served.transfer.moved = [
+      { from: "a.md", to: "dest/a copy.md" },
+      { from: "b.md", to: "dest/b.md" },
+    ];
+    const target = mountTree();
+    await settle();
+
+    dropOnDir(target, "dest", ["a.md", "b.md"]);
+    await settle();
+
+    expect(served.calls, "the transfer went out").toHaveLength(1);
+    expect(said(), "the name it asked for is named").toContain("dest/a.md");
+    expect(said(), "and where the file actually landed").toContain("dest/a copy.md");
+  });
+
+  test("says so when the server skipped a source", async () => {
+    served.transfer.moved = [{ from: "b.md", to: "dest/b.md" }];
+    served.transfer.skipped = ["a.md"];
+    const target = mountTree();
+    await settle();
+
+    dropOnDir(target, "dest", ["a.md", "b.md"]);
+    await settle();
+
+    expect(said(), "the source that did not move is named").toContain("a.md");
   });
 
   test("refuses an occupied name in a listed destination", async () => {
