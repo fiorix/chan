@@ -58,7 +58,10 @@ registerCommands([
     available: () => true,
     run: () => enterPaneMode(),
   },
-  reuse("app.screensaver.lock", "Lock screen now", "Global", "any", [
+  // The lock and the six `app.screensaver.*` rows beside it in global.ts call
+  // per-workspace routes and read state a workspace window loads, so a window
+  // without one can offer them but never run them.
+  reuse("app.screensaver.lock", "Lock screen now", "Global", "workspace", [
     "screensaver",
     "lock",
   ]),

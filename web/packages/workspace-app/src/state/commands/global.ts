@@ -185,7 +185,7 @@ registerCommands([
     id: "app.screensaver.enable",
     title: "Screen lock: on",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "lock", "privacy"],
     available: () => true,
     run: () =>
@@ -199,7 +199,7 @@ registerCommands([
     id: "app.screensaver.disable",
     title: "Screen lock: off",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "lock", "privacy"],
     available: () => true,
     run: () =>
@@ -213,7 +213,7 @@ registerCommands([
     id: "app.screensaver.test",
     title: "Screen lock: test",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "lock", "preview"],
     available: () => true,
     run: () => void testScreenLock(),
@@ -222,7 +222,7 @@ registerCommands([
     id: "app.screensaver.setPin",
     title: "Screen lock: set PIN",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "lock", "password", "passcode"],
     available: () => true,
     run: () => void setScreenLockPin(),
@@ -231,7 +231,7 @@ registerCommands([
     id: "app.screensaver.theme.plain",
     title: "Screen lock theme: default",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "plain"],
     available: () => true,
     run: () =>
@@ -245,7 +245,7 @@ registerCommands([
     id: "app.screensaver.theme.matrix",
     title: "Screen lock theme: matrix",
     category: "Global",
-    requirement: "any",
+    requirement: "workspace",
     keywords: ["screensaver", "matrix", "rain"],
     available: () => true,
     run: () =>

@@ -22,7 +22,6 @@ export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<string>([
   "app.pane.flip",
   "app.terminal.toggle",
   "app.terminal.broadcastToggle",
-  "app.screensaver.lock",
   "app.pane.next",
   "app.pane.prev",
   "app.pane.closeTabs",
