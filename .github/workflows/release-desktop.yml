@@ -246,6 +246,11 @@ jobs:
           # the "launcher bundle not built" fallback. Mirrors `make chan-desktop`
           # (its `web` target depends on `web-launcher`).
           (cd web && npm install && npm run build -w @chan/launcher && npm run build -w @chan/workspace-app)
+          # The Nix derivations assert the same two files (packaging/nix/*.nix):
+          # a silent npm failure above otherwise bakes an empty LauncherAssets
+          # into a signed installer and nothing turns red until a user opens it.
+          test -f web-launcher/dist/index.html
+          test -f web/dist/index.html
           # Build the console-subsystem `chan.exe` CLI (a real terminal program:
           # `chan devserver run` then BLOCKS and takes Ctrl-C, unlike the
           # GUI-subsystem chan-desktop.exe, which detaches when launched from

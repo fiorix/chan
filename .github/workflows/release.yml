@@ -1024,6 +1024,11 @@ jobs:
           # (WebAssets) and web-launcher/dist (LauncherAssets). Both must exist before
           # the Rust crates compile, else LauncherAssets bakes an empty dir.
           (cd web && npm install && npm run build -w @chan/launcher && npm run build -w @chan/workspace-app)
+          # The Nix derivations assert the same two files (packaging/nix/*.nix):
+          # a silent npm failure above otherwise bakes an empty LauncherAssets
+          # into a signed installer and nothing turns red until a user opens it.
+          test -f web-launcher/dist/index.html
+          test -f web/dist/index.html
           # Console-subsystem chan.exe CLI (a real terminal program): shipped standalone
           # as the Windows CLI zip AND embedded into the NSIS installer as a resource.
           cargo build --release -p chan
