@@ -90,7 +90,7 @@ Opened 2026-09-20 with seven items and refreshed the same day against `main` at 
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. Nothing here is accepted yet.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added nine the same day, with a ruling on each: one from an issue report and eight from a re-read of the development archive's backlog. One item is accepted: the write queue's idle signal, which the owner asked for, had built and measured, and accepted the same day with its build kept on a branch as the reference. Nothing else here is accepted yet.
 
 **Frontend review, phased from v0.100.0**
 
@@ -121,6 +121,21 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | item | state | next |
 | --- | --- | --- |
 | [refusals-answer-in-four-shapes][refus] | raised | decide |
+| [the-team-poke-names-a-path-it-does-not-anchor][poke] | raised | build |
+| [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | accepted | intake |
+
+**From the development archive's backlog**
+
+| item | state | next |
+| --- | --- | --- |
+| [the-chan-cli-crate-is-one-13k-line-file][clib] | raised | analyze |
+| [two-exact-pins-hold-back-web-upgrades][pins] | raised | measure |
+| [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | raised | measure |
+| [gateway-ci-misses-root-tunnel-crate-changes][gwci] | raised | build |
+| [the-web-bundles-still-build-on-node-20][nd22] | raised | build |
+| [the-launcher-build-hint-cannot-run][hint] | raised | build |
+| [the-site-carries-a-workspace-mock-nobody-ships][mock] | raised | build |
+| [an-unknown-window-kind-may-drop-every-window-row][wkind] | raised | repro |
 
 [on204]: v0.100.0/one-on-route-still-answers-204.md
 [d409]: v0.100.0/the-desktop-reads-any-409-as-live-terminals.md
@@ -175,6 +190,16 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [extp]: v0.101.0/a-service-spawned-extension-gets-a-bare-path.md
 [aurc]: v0.101.0/the-aur-check-could-ship-a-test-only-feature.md
 [refus]: v0.101.0/refusals-answer-in-four-shapes.md
+[poke]: v0.101.0/the-team-poke-names-a-path-it-does-not-anchor.md
+[rdrw]: v0.101.0/a-redrawing-tui-never-lets-the-write-queue-drain.md
+[clib]: v0.101.0/the-chan-cli-crate-is-one-13k-line-file.md
+[pins]: v0.101.0/two-exact-pins-hold-back-web-upgrades.md
+[tses]: v0.101.0/tower-sessions-lags-and-axum-has-a-dead-feature.md
+[gwci]: v0.101.0/gateway-ci-misses-root-tunnel-crate-changes.md
+[nd22]: v0.101.0/the-web-bundles-still-build-on-node-20.md
+[hint]: v0.101.0/the-launcher-build-hint-cannot-run.md
+[mock]: v0.101.0/the-site-carries-a-workspace-mock-nobody-ships.md
+[wkind]: v0.101.0/an-unknown-window-kind-may-drop-every-window-row.md
 
 ## Completed
 
