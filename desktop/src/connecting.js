@@ -193,6 +193,10 @@ function showGaveUp() {
   els.foot.textContent =
     `${displayUrl} hasn't responded after ${attempt} attempts. Retry, or disconnect to close this window.`;
   els.actions.hidden = false;
+  // The title and the foot sit outside the live region, so this row is
+  // what tells a screen reader the retrying stopped and there is
+  // something to do about it.
+  addRow('info', new Date(), `Gave up after ${attempt} attempts. Retry, or disconnect to close this window.`);
 }
 
 // Clear the gave-up state so the loop can resume from a clean header.
