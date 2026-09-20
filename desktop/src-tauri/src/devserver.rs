@@ -2215,12 +2215,17 @@ pub async fn set_workspace_on(
         if !on {
             return Ok(None);
         }
-        let entry = resp
-            .json::<chan_server::LauncherWorkspace>()
-            .await
-            .map_err(|e| {
-                SetWorkspaceOnError::other(format!("decoding gateway workspace on: {e}"))
-            })?;
+        // A 2xx carrying no readable row is a success without one, not a
+        // failure. A devserver whose launcher `/on` predates the row answer
+        // replies 204 with an empty body, and the desktop connects on the
+        // protocol number, so it reaches such a peer routinely; the mount
+        // happened either way, and the route answers its own row-less 204.
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let Ok(entry) = resp.json::<chan_server::LauncherWorkspace>().await else {
+            return Ok(None);
+        };
         let row = row_from_launcher(conn, entry)
             .await
             .map_err(SetWorkspaceOnError::other)?;
@@ -2253,9 +2258,16 @@ pub async fn set_workspace_on(
             resp.status()
         )));
     }
-    let entry = resp.json::<WorkspaceEntry>().await.map_err(|e| {
-        SetWorkspaceOnError::other(format!("decoding devserver workspace on/off: {e}"))
-    })?;
+    if !on {
+        // Every caller drops an off's row, so decoding one could only fail an
+        // unmount that already happened. The gateway arm above returns here
+        // for the same reason.
+        return Ok(None);
+    }
+    let entry = resp
+        .json::<WorkspaceEntry>()
+        .await
+        .map_err(|e| SetWorkspaceOnError::other(format!("decoding devserver workspace on: {e}")))?;
     let row = row_from_entry(conn, entry).map_err(SetWorkspaceOnError::other)?;
     Ok(Some(row))
 }
@@ -3474,6 +3486,44 @@ mod tests {
             "an off over a gateway answers no row"
         );
         server.assert_responses_drained();
+
+        // A devserver whose launcher `/on` predates the row answer replies 204.
+        // The mount happened, so that is a success carrying no row.
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::NO_CONTENT, "")]).await;
+        assert!(
+            set_workspace_on(&server.gateway_conn(), "/notes", true, false)
+                .await
+                .expect("gateway on against a devserver that answers 204")
+                .is_none(),
+            "a 204 turn-on is a success with no row, not a decode failure"
+        );
+        server.assert_responses_drained();
+
+        // Same for a 2xx whose body is not a row: the mount still happened.
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::OK, "not a row")]).await;
+        assert!(
+            set_workspace_on(&server.gateway_conn(), "/notes", true, false)
+                .await
+                .expect("gateway on with an unreadable body")
+                .is_none(),
+            "an unreadable turn-on body is a success with no row"
+        );
+        server.assert_responses_drained();
+
+        // The direct arm drops an off's body before decoding it, so a shape it
+        // cannot read never fails an unmount that happened.
+        let server =
+            MockManagementServer::start(vec![mock_response(StatusCode::OK, "not an entry")]).await;
+        assert!(
+            set_workspace_on(&server.raw_conn(), "/notes", false, false)
+                .await
+                .expect("direct off")
+                .is_none(),
+            "an off over the direct arm answers no row"
+        );
+        server.assert_responses_drained();
     }
 
     fn other_message(error: SetWorkspaceOnError) -> String {
@@ -4501,8 +4551,9 @@ mod tests {
         use axum::response::IntoResponse;
 
         // A proxy origin standing in for the devserver's launcher API: it records
-        // each toggle it receives and answers the launcher's own codes, 204 for
-        // on and a forced off, the shared live_terminals 409 for an unforced off.
+        // each toggle it receives and answers the launcher's own codes, 200 with
+        // the row for an on, 204 for a forced off, the shared live_terminals 409
+        // for an unforced off.
         type Seen = Arc<Mutex<Vec<(String, Option<String>, Bytes)>>>;
         fn record(seen: &Seen, path: String, headers: &HeaderMap, body: Bytes) {
             let csrf = headers
