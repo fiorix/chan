@@ -11,8 +11,7 @@
   import type { ExcludedDirsView } from "../../../api/types";
   import SettingField from "../SettingField.svelte";
   import ChipList from "../ChipList.svelte";
-
-  type SaveStatus = "idle" | "saving" | "saved" | { error: string };
+  import type { SaveStatus } from "../commit";
 
   let view = $state<ExcludedDirsView | null>(null);
   let additions = $state<string[]>([]);

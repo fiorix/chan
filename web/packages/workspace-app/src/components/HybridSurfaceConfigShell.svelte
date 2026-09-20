@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-
-  type SaveStatus = "idle" | "saving" | "saved" | { error: string };
+  import type { SaveStatus } from "./settings/commit";
 
   let {
     title,
