@@ -7,16 +7,28 @@
 // The renderer mock mirrors xterm.js: it listens on its helper textarea, calls
 // the custom key handler, and on a `false` return skips only its own encoding,
 // without preventing the default or stopping propagation. When the handler
-// does not claim the key, the mock encodes the ONE chord this file asserts on,
-// Ctrl+D, as the EOF byte and hands it to the data callback the way xterm
-// would. It is not a general xterm encoder and does not pretend to be.
+// does not claim the key, the mock encodes the control-byte family this file
+// asserts on, a letter as that letter's control code and `[` as Escape, and
+// hands it to the data callback the way xterm would. It encodes nothing else
+// and it is not a general xterm encoder. The one rule it does carry over is
+// upstream's guard that Ctrl must be the sole modifier, because a chord that
+// produces a byte and one that does not is the whole subject here.
 //
 // The Ctrl+D-on-an-exited-terminal half of the single-dispatch rule has its
 // own file; this one covers the chords around it.
 //
-// Terminal find is deliberately absent: which surface owns Mod+F in a focused
-// terminal is an open owner ruling, and an assertion either way would decide
-// it here.
+// Terminal find is here: the owner settled who owns Mod+F in a focused
+// terminal, and the chord carries Shift off macOS so a bare Ctrl+F stays the
+// shell's. What is NOT measured here is the `escapeTerminal` flag on that
+// registry entry. On the xterm backend the flag is inert, because a chord the
+// handler does not claim still bubbles to the component root and opens find,
+// and removing the flag leaves every case below green. Its one behavioural
+// consumer is the ghostty backend, which this fixture does not mount; the
+// decision it feeds is pinned in `state/chordEscapeRegistry.test.ts` instead.
+//
+// Writes complete synchronously unless a case asks otherwise, so the byte
+// assertions run outside the reattach replay window. `holdWrites` is how the
+// one case that is about that window opens it.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -33,6 +45,16 @@ import {
 const mounted: Array<Record<string, any>> = [];
 const sockets: TestWebSocket[] = [];
 const SELECTION = "selected terminal text";
+
+/// The renderer's write queue is what tells the app whether bytes coming back
+/// out of it are the user's or a reattach replay's answers to dead queries.
+/// A write that never completes holds the replay window open, which is the
+/// state one case below needs and every other case must not be in.
+let holdWrites = false;
+const heldWrites: Array<() => void> = [];
+/// The mounted mock, so a case can push bytes out of the renderer the way a
+/// running program's reply arrives, rather than only as a keystroke.
+let renderer: { dataHandler: ((data: string) => void) | null } | null = null;
 
 class TestResizeObserver {
   observe() {}
@@ -81,6 +103,7 @@ vi.mock("@xterm/xterm", () => ({
     }
 
     open(host: HTMLElement) {
+      renderer = this;
       const element = document.createElement("div");
       element.className = "xterm";
       const textarea = document.createElement("textarea");
@@ -92,13 +115,19 @@ vi.mock("@xterm/xterm", () => ({
         "keydown",
         (event: KeyboardEvent) => {
           if (this.customKeyEventHandler?.(event) === false) return;
-          // Upstream would run its own encoder here. The control-byte family
-          // is modelled, which is what this file asserts on: Ctrl and a letter
-          // is that letter's control code whether or not Shift is down, the
-          // way xterm encodes it, and Ctrl+[ is Escape. Shift matters here:
-          // it is what makes a chord the renderer should NOT have visible as
-          // a byte the shell received.
-          if (event.ctrlKey && !event.metaKey && !event.altKey) {
+          // Upstream would run its own encoder here. Only the control-byte
+          // family is modelled, which is what this file asserts on: a letter
+          // becomes that letter's control code and `[` becomes Escape. Both
+          // arms sit behind upstream's guard that Ctrl is the SOLE modifier
+          // (`evaluateKeyboardEvent`'s default case takes this branch only
+          // when shift, alt and meta are all absent), so a shifted chord
+          // produces no byte at all rather than the unshifted one's.
+          if (
+            event.ctrlKey &&
+            !event.shiftKey &&
+            !event.metaKey &&
+            !event.altKey
+          ) {
             if (/^Key[A-Z]$/.test(event.code)) {
               this.dataHandler?.(String.fromCharCode(event.code.charCodeAt(3) - 64));
             } else if (event.code === "BracketLeft") {
@@ -123,7 +152,13 @@ vi.mock("@xterm/xterm", () => ({
     }
 
     onResize() {}
-    write() {}
+    write(_data: unknown, callback?: () => void) {
+      // Upstream calls this back when the bytes have been parsed. Completing
+      // it is what closes the reattach replay window the mount opens.
+      if (!callback) return;
+      if (holdWrites) heldWrites.push(callback);
+      else callback();
+    }
     writeln() {}
     resize(cols: number, rows: number) {
       this.cols = cols;
@@ -189,6 +224,9 @@ afterEach(() => {
   sockets.splice(0);
   document.body.innerHTML = "";
   writeText.mockClear();
+  holdWrites = false;
+  heldWrites.splice(0);
+  renderer = null;
 });
 
 function terminalTab(): TerminalTabState {
@@ -380,9 +418,8 @@ describe("the chord that opens terminal find", () => {
     // the app competes for them; the macOS key bridge is where they were being
     // taken, and that arm is native.
     //
-    // Ctrl+[ encodes to a bare ESC, which the replay filter used to drop as a
-    // possible terminal reply, so it reached the shell only once a reattach
-    // had finished replaying.
+    // Ordinary input, outside any replay window: the renderer's writes have
+    // completed by the time these are pressed.
     const socket = await mountTerminal(false);
 
     textarea().dispatchEvent(key({ key: "g", code: "KeyG", ctrlKey: true }));
@@ -391,6 +428,30 @@ describe("the chord that opens terminal find", () => {
 
     expect(inputFrames(socket)).toContain("\x07");
     expect(inputFrames(socket)).toContain("\x1b");
+  });
+
+  test("Ctrl+[ reaches the shell during a reattach replay too", async () => {
+    // Ctrl+[ encodes to a bare ESC, and a reattach replay is the one window
+    // where the app second-guesses bytes coming out of the renderer: they may
+    // be xterm answering a query the replay re-triggered, with no live reader
+    // left. A lone ESC cannot be one of those answers, since every one of them
+    // carries an introducer and a terminator, so it is let through.
+    //
+    // This is about the replay filter and nothing else. The desktop key bridge
+    // claiming Ctrl+[ is a separate cause with a separate fix, and it is
+    // native.
+    holdWrites = true;
+    const socket = await mountTerminal(false);
+    expect(heldWrites.length, "the mount opened a replay window").toBeGreaterThan(0);
+
+    // The control that makes the carve-out mean something: with the window
+    // open, a device report IS dropped.
+    renderer?.dataHandler?.("\x1b[0n");
+    textarea().dispatchEvent(key({ key: "[", code: "BracketLeft", ctrlKey: true }));
+    await settle();
+
+    expect(inputFrames(socket)).toContain("\x1b");
+    expect(inputFrames(socket)).not.toContain("\x1b[0n");
   });
 });
 

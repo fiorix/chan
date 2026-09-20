@@ -6,6 +6,7 @@ import {
   chordFromEvent,
   shouldEscapeTerminal,
 } from "./shortcuts";
+import { isHostOwnedChord } from "../terminal/hostChord";
 
 // Chord-escape registry. Global chords that must reach the App keymap even
 // from a focused terminal (Command launcher, Settings, Search, New terminal,
@@ -245,6 +246,52 @@ describe("shouldEscapeTerminal lookup", () => {
   test("Ctrl+D (tab.close, not flagged) does NOT escape", () => {
     const e = new KeyboardEvent("keydown", { key: "d", ctrlKey: true });
     expect(shouldEscapeTerminal(e)).toBe(false);
+  });
+});
+
+describe("terminal find's escape flag decides who owns Cmd+F", () => {
+  // What the flag on `terminal.find` actually does, as opposed to what a
+  // renderer fixture can show. On the xterm backend it is inert: a chord the
+  // key handler declines still bubbles to the component root and opens find,
+  // so removing the flag changes no byte and no bar.
+  //
+  // Its consumer is the ghostty backend's host-chord gate, which asks whether
+  // chan claims a macOS Command chord before handing it to AppKit. That gate
+  // is these two functions, and it is what these cases measure. What they do
+  // not measure is the wiring: that the gate is installed on the ghostty
+  // backend, and the inverted handler contract beside it, are read from
+  // `TerminalTab.svelte` and have no test that mounts that backend.
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { userAgent: "Mac OS X" });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function cmdF(): KeyboardEvent {
+    return new KeyboardEvent("keydown", { key: "f", code: "KeyF", metaKey: true });
+  }
+
+  test("chan claims Cmd+F over a terminal, so the host does not get it", () => {
+    const e = cmdF();
+    const claimedByChan = shouldEscapeTerminal(e);
+
+    expect(claimedByChan, "the registry flag answers for this chord").toBe(true);
+    expect(isHostOwnedChord(e, { os: "mac", claimedByChan })).toBe(false);
+  });
+
+  test("an unclaimed Command chord still reaches the host", () => {
+    // The other side of the same gate, so the case above is not just "this
+    // function returns false".
+    const e = new KeyboardEvent("keydown", {
+      key: "h",
+      code: "KeyH",
+      metaKey: true,
+    });
+    const claimedByChan = shouldEscapeTerminal(e);
+
+    expect(claimedByChan).toBe(false);
+    expect(isHostOwnedChord(e, { os: "mac", claimedByChan })).toBe(true);
   });
 });
 
