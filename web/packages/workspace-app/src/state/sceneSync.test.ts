@@ -607,3 +607,72 @@ describe("the force-reload prompt can see unflushed scene state", () => {
     expect(isDocUnflushed(tab.id)).toBe(true);
   });
 });
+
+// ---- does the classic PUT rescue the element? -------------------------------
+//
+// The server is not a participant in the loss: a push is the only way an
+// element enters the authority, reattach is one-way, and while a session is
+// live the classic PUT is diverted into that same authority, applied and
+// flushed. So "lost from the file" turns entirely on whether the SPA sends the
+// element down either channel during the outage.
+//
+// The canvas mirrors every serialize into `tab.content` whether or not a
+// session is bound (the buffer half is pinned in ExcalidrawCanvas.test.ts), so
+// the element is in the buffer the classic PUT would carry. What decides the
+// case is whether that PUT fires, and these two arms are the two outages.
+
+/// The scene buffer the canvas would have written after an element was drawn.
+function sceneBufferWith(elementId: string): string {
+  return JSON.stringify({
+    type: "excalidraw",
+    version: 2,
+    source: "test",
+    elements: [elem(elementId, 2)],
+    appState: {},
+    files: {},
+  });
+}
+
+describe("the classic PUT during an outage", () => {
+  test("a still-retrying socket outage sends nothing at all", async () => {
+    vi.useFakeTimers();
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const { sock } = attached(tab);
+
+    // Past the reconnect grace: degraded, socket down, redial still running.
+    sock.drop();
+    vi.advanceTimersByTime(600);
+    lastSocket().drop();
+    vi.advanceTimersByTime(1200);
+    lastSocket().drop();
+    expect(tab.doc?.state).toBe("degraded");
+    expect(isDocSavePaused(tab)).toBe(true);
+
+    tab.content = sceneBufferWith("drawn-during-outage");
+    await saveTab(tab);
+    await flushMicro();
+
+    // Neither channel carried it: the push was dropped and the PUT is
+    // suppressed because it would hit the same unreachable server.
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test("a degraded session whose socket is up PUTs the element", async () => {
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const tab = sceneTab();
+    resetLayout([tab]);
+    const { session } = attached(tab);
+    session.degrade();
+    expect(isDocSavePaused(tab)).toBe(false);
+
+    tab.content = sceneBufferWith("drawn-during-outage");
+    await saveTab(tab);
+    await flushMicro();
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(String(write.mock.calls[0]![1])).toContain("drawn-during-outage");
+  });
+});
+

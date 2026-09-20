@@ -220,6 +220,7 @@ type SessionStub = {
 /// API, and wait for the bind effect to hand the binding back.
 async function mountBound(
   initial: WireElement[] = [],
+  onSceneChange: (json: string) => void = () => {},
 ): Promise<{ api: FakeApi; session: SessionStub; binding: SceneCanvasBinding }> {
   const target = document.createElement("div");
   document.body.append(target);
@@ -239,7 +240,7 @@ async function mountBound(
       props: {
         content: "",
         dark: false,
-        onSceneChange: () => {},
+        onSceneChange,
         session: session as unknown as SceneSession,
       },
     }),
@@ -378,6 +379,33 @@ describe("a dropped push is not recorded as sent", () => {
     binding.flushPendingLocal();
     expect(session.pushScene).toHaveBeenCalledTimes(2);
     expect(binding.hasPendingLocal()).toBe(false);
+  });
+});
+
+describe("the buffer the classic PUT would carry", () => {
+  // Whether the element is lost turns on what reaches the server, and the
+  // classic PUT writes `tab.content`. The serialize mirror runs whether or
+  // not a session is bound and whether or not the push was taken, so the
+  // element a dropped push never sent is still in the buffer.
+  test("a dropped push still mirrors the element into the tab buffer", async () => {
+    vi.useFakeTimers();
+    const onSceneChange = vi.fn();
+    const { api, session } = await mountBound([], onSceneChange);
+    session.pushScene.mockReturnValue(false);
+    const rendered = renderMock.mock.calls.at(-1)![0] as {
+      props: { onChange: () => void };
+    };
+
+    api.setElements([wireEl("drawn-during-outage", 3)]);
+    rendered.props.onChange();
+    vi.advanceTimersByTime(300);
+
+    expect(session.pushScene).toHaveBeenCalled();
+    expect(onSceneChange).toHaveBeenCalled();
+    expect(String(onSceneChange.mock.calls.at(-1)![0])).toContain(
+      "drawn-during-outage",
+    );
+    vi.useRealTimers();
   });
 });
 
