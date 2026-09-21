@@ -27,11 +27,12 @@ All host communication is `postMessage` between the iframe and its parent. Messa
 
 | Message                          | Direction | Meaning                            |
 |----------------------------------|-----------|------------------------------------|
-| `chan:extension-host-keymap:v1`  | host->ext | The shell chords Chan currently    |
-|                                  |           | claims, as physical-key            |
-|                                  |           | descriptors with modifier booleans |
-| `chan:extension-keydown:v1`      | ext->host | A matched chord relayed back;      |
-|                                  |           | honored only if it was advertised  |
+| `chan:extension-host-keymap:v2`  | host->ext | The shell chords Chan currently    |
+|                                  |           | claims, as key tokens with         |
+|                                  |           | modifier booleans                  |
+| `chan:extension-keydown:v2`      | ext->host | A matched keydown's raw fields;    |
+|                                  |           | Chan resolves them and honors the  |
+|                                  |           | keydown only if it was advertised  |
 | `chan:extension-ready:v1`        | ext->host | The iframe is ready; unblocks      |
 |                                  |           | queued singleton command delivery  |
 | `chan:extension-command:v1`      | host->ext | A declared command was invoked     |
@@ -43,6 +44,19 @@ All host communication is `postMessage` between the iframe and its parent. Messa
 |                                  |           | (`presentation` grant only)        |
 
 Keyboard events inside an iframe never bubble to the parent document, which is why the keymap relay exists: Chan advertises the chords its shell owns, the extension matches only those, calls `preventDefault()`, and posts the keydown back. An extension that skips the relay works fine but swallows shell shortcuts while focused.
+
+### The keyboard relay
+
+Each advertised chord is a `key` token with `ctrlKey`, `altKey`, `metaKey` and `shiftKey`. The token names what the active keyboard layout types, not where the key sits, so a relay resolves each keydown to a token the way Chan does:
+
+- An IME composition (`isComposing`, or a `key` of `Process`), a dead key, and AltGr character entry off macOS (`getModifierState("AltGraph")`) name no token and are never relayed. On macOS Option is Alt, even where the browser also reports it as AltGraph.
+- A top-row digit is its position: `Digit1` is `1` whatever it types, so the digit row still selects tabs on AZERTY.
+- A letter is the letter `key` reports, upper-cased, so Colemak T on `KeyF` is `T` and Caps Lock changes nothing.
+- One of the nine symbols `` ` [ ] , = - . ; / `` is itself. A US shifted glyph names Shift plus its base symbol: `?` is `/` with Shift, and so are `~ { } < + _ > :` for theirs.
+- With Option (Alt) held, a key that typed none of the above falls back to its physical position: `KeyG` is `G`, `BracketLeft` is `[`.
+- Any other key is its `key`, upper-cased when it is one character (`Enter`, `ArrowLeft`).
+
+A keydown matches an advertised chord when the token and all four modifiers are equal, or, when Shift is held and the token is one of the nine symbols typed by `key`, when the same chord without Shift is advertised: AZERTY types `.` with Shift, and that keydown still reaches Cmd+. unless Cmd+Shift+. is bound to a command of its own. Relay a match as `chan:extension-keydown:v2` with the event's raw `key`, `code`, the four modifier booleans, `repeat`, `isComposing` and `altGraph` (`getModifierState("AltGraph")`). Chan resolves those fields itself, checks the result against the chords it advertised, and ignores any token or command a message carries, so a relay that matches too much only costs itself keystrokes. The fixture's relay is a complete implementation.
 
 The two grants are deliberately narrow. `session-context` streams reactive participant snapshots with opaque IDs, display names, Chan roles, statuses, and the receiving window ID; the labels are informational, not authenticated identities. `presentation` lets the extension request promotion of its iframe wrapper into the browser top layer without reparenting, so the browsing context (and any WebGL or WASM state) survives entering and leaving full-surface mode; Chan supplies Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs, or a general host message bus.
 

@@ -1,32 +1,47 @@
 // Narrow host bridge for sandboxed extension iframes. Cross-document keyboard
 // events never bubble into Chan, so the extension relays only the shell chords
 // Chan tells it are currently claimed. The parent still validates the sending
-// frame before recreating the event on its own document.
+// frame, and reads the relayed keydown itself under the same keyboard contract
+// as every other matcher, before recreating the event on its own document.
 
+import { shiftedPunctuationBase, shortcutKey } from "@chan/web-shared/keyboard";
 import type { Command } from "./commands";
 import { overrideChordFor, resolvedKeymapEntries } from "./keymapOverrides.svelte";
 import { currentOS, SHORTCUTS, type OS } from "./shortcuts";
 
-export const EXTENSION_KEYMAP_MESSAGE = "chan:extension-host-keymap:v1";
-export const EXTENSION_KEYDOWN_MESSAGE = "chan:extension-keydown:v1";
+export const EXTENSION_KEYMAP_MESSAGE = "chan:extension-host-keymap:v2";
+export const EXTENSION_KEYDOWN_MESSAGE = "chan:extension-keydown:v2";
 export const EXTENSION_SESSION_CONTEXT_MESSAGE = "chan:extension-session-context:v1";
 export const EXTENSION_VIEW_STATE_MESSAGE = "chan:extension-view-state:v1";
 export const EXTENSION_PRESENTATION_REQUEST = "chan:extension-presentation:v1";
 
 export type ExtensionPresentationAction = "enter" | "exit" | "toggle";
 
+/// One chord the host claims while an extension has focus: the key token the
+/// shared keyboard contract names (`T`, `/`, `1`, `Enter`) and the exact
+/// modifiers. Letters and punctuation are the symbols the layout types; digits
+/// are top-row positions.
 export type ExtensionHostKey = {
-  code: string;
+  key: string;
   ctrlKey: boolean;
   altKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
 };
 
-export type ExtensionKeydownMessage = ExtensionHostKey & {
+/// A keydown an extension relays: its raw fields, which the host resolves on
+/// its own. No identity or command the extension computed is trusted.
+export type ExtensionKeydownMessage = {
   type: typeof EXTENSION_KEYDOWN_MESSAGE;
   key: string;
+  code: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
   repeat: boolean;
+  isComposing: boolean;
+  altGraph: boolean;
 };
 
 const SHELL_SHORTCUT_IDS = new Set(
@@ -58,12 +73,14 @@ export function isExtensionKeydownMessage(value: unknown): value is ExtensionKey
     typeof message.key === "string" &&
     message.key.length <= 32 &&
     typeof message.code === "string" &&
-    /^[A-Za-z0-9]+$/.test(message.code) &&
+    /^[A-Za-z0-9]{0,32}$/.test(message.code) &&
     typeof message.ctrlKey === "boolean" &&
     typeof message.altKey === "boolean" &&
     typeof message.metaKey === "boolean" &&
     typeof message.shiftKey === "boolean" &&
-    typeof message.repeat === "boolean"
+    typeof message.repeat === "boolean" &&
+    typeof message.isComposing === "boolean" &&
+    typeof message.altGraph === "boolean"
   );
 }
 
@@ -89,6 +106,8 @@ export function keyboardEventFromExtension(message: ExtensionKeydownMessage): Ke
     metaKey: message.metaKey,
     shiftKey: message.shiftKey,
     repeat: message.repeat,
+    isComposing: message.isComposing,
+    modifierAltGraph: message.altGraph,
     bubbles: true,
     cancelable: true,
   });
@@ -99,19 +118,18 @@ function hostKeysForChord(chord: string, os: OS): ExtensionHostKey[] {
   const rawKey = tokens.pop();
   if (!rawKey) return [];
   const modifiers = new Set(tokens);
-  let key = rawKey;
-  if (key === "?") {
-    key = "/";
-    modifiers.add("Shift");
-  }
-  const codes = key === "1..9"
-    ? Array.from({ length: 9 }, (_, index) => `Digit${index + 1}`)
-    : [codeForKey(key)];
-  if (codes.some((code) => code === null)) return [];
+  // A shifted glyph such as `?` names Shift plus its base symbol, the one
+  // spelling a relayed keydown resolves to.
+  const base = shiftedPunctuationBase(rawKey);
+  if (base) modifiers.add("Shift");
+  const keys =
+    rawKey === "1..9"
+      ? Array.from({ length: 9 }, (_, index) => String(index + 1))
+      : [base ?? rawKey];
 
   const modIsMeta = os === "mac";
-  return (codes as string[]).map((code) => ({
-    code,
+  return keys.map((key) => ({
+    key,
     ctrlKey: modifiers.has("Ctrl") || (modifiers.has("Mod") && !modIsMeta),
     altKey: modifiers.has("Alt"),
     metaKey: modifiers.has("Cmd") || (modifiers.has("Mod") && modIsMeta),
@@ -119,36 +137,34 @@ function hostKeysForChord(chord: string, os: OS): ExtensionHostKey[] {
   }));
 }
 
-function codeForKey(key: string): string | null {
-  if (/^[A-Z]$/.test(key)) return `Key${key}`;
-  if (/^[0-9]$/.test(key)) return `Digit${key}`;
-  const punctuation: Readonly<Record<string, string>> = {
-    "`": "Backquote",
-    "[": "BracketLeft",
-    "]": "BracketRight",
-    ",": "Comma",
-    "=": "Equal",
-    "-": "Minus",
-    ".": "Period",
-    ";": "Semicolon",
-    "/": "Slash",
-  };
-  return punctuation[key] ?? (/^[A-Za-z][A-Za-z0-9]+$/.test(key) ? key : null);
-}
-
 /// Stable identity of one host chord. Used to dedupe the advertised set and
 /// to allowlist relayed keydowns against it.
 export function hostKeyId(key: ExtensionHostKey): string {
-  return `${key.ctrlKey}:${key.altKey}:${key.metaKey}:${key.shiftKey}:${key.code}`;
+  return `${key.ctrlKey}:${key.altKey}:${key.metaKey}:${key.shiftKey}:${key.key}`;
 }
 
-/// A relayed keydown is honored only when its chord identity was advertised
-/// to the frame; the empty set (before the first keymap post) rejects all.
+/// The host chords a relayed keydown can stand for under Chan's own reading
+/// of its raw fields: the exact chord, and the chord without Shift when Shift
+/// only typed a punctuation symbol. Empty for a keydown that enters text (a
+/// composition, a dead key, AltGr), which no shortcut may claim.
+function relayedHostKeys(message: ExtensionKeydownMessage): ExtensionHostKey[] {
+  const id = shortcutKey(keyboardEventFromExtension(message));
+  if (!id) return [];
+  const { ctrlKey, altKey, metaKey } = message;
+  const exact = { key: id.key, ctrlKey, altKey, metaKey, shiftKey: message.shiftKey || id.shifted };
+  if (!(message.shiftKey && id.consumable)) return [exact];
+  return [exact, { ...exact, shiftKey: false }];
+}
+
+/// A relayed keydown is honored only when it resolves to a chord that was
+/// advertised to the frame; the empty set (before the first keymap post)
+/// rejects all. The recreated event is then matched like any local keydown,
+/// so the advertised set is a gate, not a dispatch table.
 export function isAdvertisedHostKey(
   advertisedKeys: ReadonlySet<string>,
-  key: ExtensionHostKey,
+  message: ExtensionKeydownMessage,
 ): boolean {
-  return advertisedKeys.has(hostKeyId(key));
+  return relayedHostKeys(message).some((key) => advertisedKeys.has(hostKeyId(key)));
 }
 
 function dedupeHostKeys(keys: ExtensionHostKey[]): ExtensionHostKey[] {
