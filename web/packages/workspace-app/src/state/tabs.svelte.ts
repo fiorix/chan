@@ -6841,7 +6841,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   terminalEnvTabName: "carry",
   terminalSessionId: "carry",
   title: "carry",
-  // Dropped on purpose, in four groups. The receiving window mints the tab's
+  // Dropped on purpose, in groups. The receiving window mints the tab's
   // identity, so a move can never collide with a tab already live there and
   // the timestamp says when this window built it.
   createdAt: "drop",
