@@ -189,15 +189,48 @@ impl EmbeddedServer {
                 tracing::warn!(error = %e, "embedded chan server stopped");
             }
         });
-        Ok(Self {
+        Ok(Self::assemble(
+            host,
+            extension_runtime,
+            addr,
+            shutdown_tx,
+            Some(window_ops_rx),
+            launcher_token,
+        ))
+    }
+
+    /// Assemble the server around a built host and start the lifecycle work
+    /// every embedded server owns however it was constructed.
+    ///
+    /// The root health probe starts here rather than in each constructor
+    /// because serving the launcher routes means owning their root health:
+    /// nothing in the request path re-checks a mounted root while the user is
+    /// idle, so a construction path that skipped the probe would report a gone
+    /// or replaced workspace as `running` until a redundant add or on, and one
+    /// degraded by a transient outage would stay degraded with minting refused.
+    /// A single owner is also what keeps that true, since a second construction
+    /// path is exactly where the probe would be forgotten. Its lifetime is the
+    /// server's: `shutdown_tx` is the channel `shutdown_all` fires, and the
+    /// probe returns on it.
+    fn assemble(
+        host: Arc<chan_server::WorkspaceHost>,
+        extension_runtime: chan_server::ExtensionRuntime,
+        addr: SocketAddr,
+        shutdown_tx: watch::Sender<bool>,
+        pending_window_ops: Option<mpsc::Receiver<DesktopWindowOp>>,
+        launcher_token: String,
+    ) -> Self {
+        let _root_health =
+            chan_server::spawn_root_health_probe(host.clone(), shutdown_tx.subscribe());
+        Self {
             host,
             extension_runtime,
             addr,
             shutdown_tx,
             terminal_url: tokio::sync::Mutex::new(None),
-            pending_window_ops: tokio::sync::Mutex::new(Some(window_ops_rx)),
+            pending_window_ops: tokio::sync::Mutex::new(pending_window_ops),
             launcher_token,
-        })
+        }
     }
 
     /// A host-only server for tests: a real `WorkspaceHost` over `library`,
@@ -212,15 +245,16 @@ impl EmbeddedServer {
         ));
         host.install_self();
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        Self {
+        // Through the same assembly the real constructor uses, so a test
+        // observes the production wiring instead of a copy made for it.
+        Self::assemble(
             host,
-            extension_runtime: chan_server::ExtensionRuntime::start().await,
-            addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            chan_server::ExtensionRuntime::start().await,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             shutdown_tx,
-            terminal_url: tokio::sync::Mutex::new(None),
-            pending_window_ops: tokio::sync::Mutex::new(None),
-            launcher_token: String::new(),
-        }
+            None,
+            String::new(),
+        )
     }
 
     /// The shared window-title map the desktop writes (on window build /
@@ -709,6 +743,91 @@ async fn serve_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Let the probe's next tick land, waiting on the host's own change
+    /// notification: the signal `reconcile_root_health` fires when it publishes
+    /// or clears a degraded row. That is an observation of the state change
+    /// rather than a spin until a status happens to look right, and it is the
+    /// pattern the library's own host tests use. The timeout is a safety guard
+    /// so a broken probe fails instead of hanging; it is not the
+    /// synchronization.
+    ///
+    /// The clock is paused, so the advance is what releases the ticker. The
+    /// probe then runs on the blocking pool, where the paused clock has no
+    /// authority, and exactly one advance is used so that a pass means the row
+    /// moved within one probe period rather than eventually.
+    #[cfg(unix)]
+    async fn probe_tick(embedded: &EmbeddedServer) {
+        let notify = embedded.host.library_change_notify();
+        let changed = notify.notified();
+        tokio::time::advance(chan_server::ROOT_HEALTH_PROBE_INTERVAL).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), changed)
+            .await
+            .expect("the probe published no root health change within one period");
+    }
+
+    /// The desktop's own library reports a replaced root as `unavailable`
+    /// without an add or an on, and clears it when the original directory is
+    /// back. Nothing here calls the probe: the embedded server drives it.
+    ///
+    /// Unix-only for the two reasons the library's own probe tests record.
+    /// Windows refuses to delete a tree while the tenant holds handles inside
+    /// it, so the scenario cannot be built, and `RootedFs::revalidate`'s
+    /// non-unix arm has no inode check, so a directory swapped in at the same
+    /// path is not a condition it can report.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn the_embedded_host_reports_a_replaced_root_without_an_operator_verb() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let parent = tempfile::tempdir().expect("workspace parent");
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).expect("workspace");
+        let library =
+            chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library.register_workspace(&root).expect("register");
+        let embedded = EmbeddedServer::for_tests(library).await;
+        embedded
+            .open_workspace(root.to_str().expect("utf-8 root"))
+            .await
+            .expect("mount");
+        assert_eq!(
+            embedded.host.workspace_status(&root).0,
+            chan_server::WorkspaceStatus::Running,
+            "the fixture did not publish a running tenant"
+        );
+
+        // Move the original aside rather than deleting it: `revalidate` adopts
+        // a root only when its inode matches the handle's, so a freshly created
+        // directory at this path can never clear the degraded row, and only the
+        // original coming back can.
+        let aside = parent.path().join("workspace-aside");
+        std::fs::rename(&root, &aside).expect("move the original root aside");
+        std::fs::create_dir(&root).expect("a different directory takes the path");
+
+        probe_tick(&embedded).await;
+        let (status, reason) = embedded.host.workspace_status(&root);
+        assert_eq!(status, chan_server::WorkspaceStatus::Unavailable);
+        // A status alone pins nothing: more than one writer can publish this
+        // row, so the assertion names the reason the probe writes.
+        let reason = reason.expect("a degraded row carries a reason");
+        assert!(
+            reason.contains(&root.display().to_string()),
+            "the reason must name the root: {reason}"
+        );
+
+        std::fs::remove_dir(&root).expect("remove the impostor");
+        std::fs::rename(&aside, &root).expect("put the original root back");
+        probe_tick(&embedded).await;
+        assert_eq!(
+            embedded.host.workspace_status(&root).0,
+            chan_server::WorkspaceStatus::Running,
+            "the original directory is back and the row is still degraded"
+        );
+        assert!(
+            embedded.host.is_root_mounted(&root),
+            "the probe unmounted the tenant"
+        );
+    }
 
     #[test]
     fn prefix_for_key_uses_workspace_window_prefix() {
