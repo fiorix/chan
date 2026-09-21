@@ -24,3 +24,11 @@ A keyed list's key is unique for every shape of data the server may legitimately
 2. The Computers deck renders when two machine rows share a `library_id`.
 3. A component made to throw during render inside a pane leaves the other panes, the tab strip and the command launcher working, and the failed surface says so.
 4. Each case is a mounted test.
+
+## Landed pane behavior and remaining limits
+
+The pane arm is accepted on `main` at `f17184a4f`. `Pane.svelte` places a boundary around the browser body and each of the five keep-alive tab kinds, inside an outer pane-body boundary. A render failure in one tab shows that tab's recovery card while its siblings remain mounted. The mounted containment tests exercise the surrounding app, including the browser-body failure, rather than treating an empty pane wrapper as a surviving editor.
+
+The per-tab boundaries do not catch a duplicate key raised while evaluating their enclosing tab list. That error reaches the outer pane-body boundary and unmounts the pane's bodies. Removing the cause does not reset that boundary: the user must choose Try again. The tab strip and its label computations sit outside both boundaries; failures there are outside the pane containment claim. These are explicit limits of acceptance 3, not a claim that every error anywhere in the pane is isolated to one tab. The inspector and launcher duplicate-data fixes have their own mounted cases.
+
+Graph instance identity and keying still lack mounted coverage: the graph suite retains source-pattern checks, and the mounted keep-alive suite excludes graph bodies because its canvas dependency cannot run in that harness. The deferred test-infrastructure work must establish a working graph mount and demonstrate that its regression checks fail for a remount or missing-key defect. No new graph runtime proof is claimed by this landing. Failure-card label evaluation, broadcast reach after a terminal body fails, and focus recovery after body destruction remain separate follow-up drafts; this item does not certify those behaviors.
