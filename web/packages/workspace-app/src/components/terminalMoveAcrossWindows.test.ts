@@ -8,8 +8,9 @@
 // builder, and every name is asserted here so a field cannot go missing in
 // silence.
 //
-// The target may also be an older build that sends no snapshot, which still
-// has to reattach the shell on the five fields the payload has always carried.
+// The sending window may also be an older build, whose payload carries no
+// snapshot. This window still has to reattach the shell from it, on the five
+// fields the payload has always carried.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";

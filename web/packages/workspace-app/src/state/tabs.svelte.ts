@@ -1421,9 +1421,9 @@ function tabForReopen(src: Tab): Tab {
     // never read, which after an auto-discard is a file something else
     // recreated.
     tab.openedEmpty = undefined;
-    // Same reason one line down: a reopen runs no load, so a tab closed
-    // mid-download would come back waiting on one nobody is running, with a
-    // spinner that never ends. The buffer it replays is whatever had arrived.
+    // A reopen replays a buffer and runs no load, and the close retired the
+    // one that was running, so nothing is downloading into this tab and
+    // nothing is going to. The content it carries is whatever had arrived.
     tab.loading = false;
   }
   return tab;
@@ -2813,6 +2813,25 @@ async function confirmCloseTabs(
 const tabLoadVersions = new Map<string, number>();
 const tabLoadControllers = new Map<string, AbortController>();
 
+/// End the load running for `tabId`, because its tab has left the layout.
+///
+/// Removal is the only thing that can decide this. The load itself finds out
+/// that its tab is gone on its next callback, which is whenever the server
+/// sends the next chunk and may be never, so a read parked mid-stream outlives
+/// the close: it holds a connection nobody is waiting for, and a reopen puts
+/// the same tab id back within reach of it. The completion then writes a
+/// download the user cancelled over whatever that id holds now.
+///
+/// Retiring the generation is what closes that second door, and it moves
+/// forward rather than being deleted: a later load for the same id counts up
+/// from here, so it can never land on the number a parked read is still
+/// carrying.
+function endTabLoad(tabId: string): void {
+  tabLoadControllers.get(tabId)?.abort();
+  tabLoadControllers.delete(tabId);
+  tabLoadVersions.set(tabId, (tabLoadVersions.get(tabId) ?? 0) + 1);
+}
+
 async function loadTabContent(
   tabId: string,
   path: string,
@@ -2822,17 +2841,19 @@ async function loadTabContent(
   tabLoadControllers.get(tabId)?.abort();
   const controller = new AbortController();
   tabLoadControllers.set(tabId, controller);
-  // Resolve by id across the whole layout, the way the close path does. The
-  // load has to find its tab on every chunk, because a Svelte 5 mutation
-  // through the object it started with does not reach the array element; and
-  // a move to another pane, a move to the other side, and a Hybrid Nav commit
-  // all replace that element. Starting the search from the pane the load began
-  // in makes a cross-pane move look like a closed tab, which aborted the read
-  // and then left `loading` set through the same missing lookup. A tab that
-  // moved finishes its load where it now is.
+  // Resolve by id across the whole layout, the way the close path does, so a
+  // tab finishes its load wherever it now is.
   //
-  // A tab id is unique across the layout, so there is nothing for a pane to
-  // disambiguate, which is why the load no longer takes one.
+  // Every touch has to re-resolve: a Svelte 5 mutation through the object the
+  // load started with does not reach the array element, and moving a tab to
+  // another pane, to the other side or through a Hybrid Nav commit each
+  // replaces that element. Only a pane holds a tab loosely enough to lose it,
+  // so a pane is the one thing this must not resolve through. A tab id is
+  // unique across the layout and has nothing for a pane to disambiguate.
+  //
+  // Absence here means the tab is gone for good, not merely elsewhere, and the
+  // generation guard is what makes that true: a removal retires it, so a read
+  // parked from before cannot resolve whatever holds that id next.
   const live = (): FileTab | undefined => {
     if (tabLoadVersions.get(tabId) !== loadVersion) return undefined;
     const found = locateTab(tabId);
@@ -3359,6 +3380,7 @@ function dropTabsById(ids: ReadonlySet<string>): void {
     const found = locateTab(id);
     if (!found) continue;
     rememberClosedTab(found.paneId, found.side, found.tab);
+    if (found.tab.kind === "file") endTabLoad(id);
     found.tabs.splice(found.index, 1);
     if (paneActiveTabId(found.pane, found.side) === id) {
       setPaneActiveTabId(
@@ -3454,7 +3476,12 @@ async function closeTabOnce(
   // Close releases the doc session NOW (no remount linger): any dirty
   // buffer was flushed through the save funnel above, and the immediate
   // detach asks the server for a prompt flush of anything residual.
-  if (now.tab.kind === "file") releaseDocSessionForTab(tabId, true);
+  if (now.tab.kind === "file") {
+    releaseDocSessionForTab(tabId, true);
+    // Past every prompt, so a close the user cancelled or a draft flow that
+    // refused has already returned above and left its load running.
+    endTabLoad(tabId);
+  }
   now.tabs.splice(now.index, 1);
   if (paneActiveTabId(now.pane, now.side) === tabId) {
     setPaneActiveTabId(
