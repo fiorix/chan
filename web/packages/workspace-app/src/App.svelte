@@ -147,7 +147,11 @@
     requestCloseWindow,
   } from "./api/desktop";
   import { activeTransferCount } from "./state/transfers.svelte";
-  import { chordFromEvent, currentOS } from "./state/shortcuts";
+  import {
+    currentOS,
+    resolvedEventKey,
+    resolveEventChord,
+  } from "./state/shortcuts";
   import {
     allCommands,
     commandContext,
@@ -570,8 +574,9 @@
   /// Mac note: bare-Alt chords are off-limits for letters/digits because
   /// Option is a dead-key for special characters (Alt+G prints `c`, etc.).
   /// All letter/digit chords use Cmd/Ctrl-based combos or Ctrl+Alt.
-  /// Alt+Shift+[/] is kept only because we match by `e.code` and
-  /// preventDefault suppresses the typed glyph before it reaches the editor.
+  /// Alt+Shift+[/] is kept only because an Option glyph resolves through
+  /// its physical position and preventDefault suppresses the typed glyph
+  /// before it reaches the editor.
   ///
   /// Browser-reserved chord notes:
   ///   Cmd+P (browser print) -> preventDefault wins in Chrome/Safari/Firefox.
@@ -630,9 +635,11 @@
     // built-in chords below. Only overrides match here (commandIdForChord
     // skips a chord equal to the command's own built-in, so the default
     // branch and this path never double-fire), and cmd.available re-applies
-    // the same window-mode + surface gate the launcher shows.
+    // the same window-mode + surface gate the launcher shows. The chord is
+    // the one the keystroke resolves to, the same winner the terminal escape
+    // registry reads.
     {
-      const overrideChord = chordFromEvent(e);
+      const overrideChord = resolveEventChord(e);
       const commands = allCommands();
       const overrideId = overrideChord
         ? commandIdForChord(overrideChord, commands)
@@ -656,6 +663,14 @@
         }
       }
     }
+    // The key and Shift the matcher resolved: the layout's symbol, with a
+    // Shift that only typed a punctuation symbol consumed when the unshifted
+    // chord is the claimed one. The punctuation branches below read these
+    // rather than `e.code` / `e.shiftKey`, so they and the terminal escape
+    // registry agree on every layout.
+    const pressed = resolvedEventKey(e);
+    const pressedKey = pressed?.key;
+    const pressedShift = pressed?.shiftKey ?? e.shiftKey;
     const os = currentOS();
     const commandLauncherChord =
       isTauriDesktop() && os === "mac"
@@ -671,13 +686,13 @@
         ? e.metaKey &&
           !e.ctrlKey &&
           !e.altKey &&
-          !e.shiftKey &&
-          e.code === "Comma"
+          !pressedShift &&
+          pressedKey === ","
         : e.ctrlKey &&
           !e.metaKey &&
           !e.altKey &&
-          !e.shiftKey &&
-          e.code === "Comma";
+          !pressedShift &&
+          pressedKey === ",";
     if (settingsChord && !builtInChordSuperseded("app.settings.open")) {
       e.preventDefault();
       openSettings();
@@ -700,7 +715,7 @@
     // pane flip stays on its explicit command or user-assigned chord.
     // Cmd+. is not browser-reserved on macOS (Safari + Chrome both let JS
     // intercept it), so the same chord works on the web SPA and desktop shell.
-    if (meta && !e.shiftKey && !e.altKey && e.code === "Period") {
+    if (meta && !pressedShift && !e.altKey && pressedKey === ".") {
       e.preventDefault();
       enterPaneMode();
       return;
@@ -709,8 +724,8 @@
       e.ctrlKey &&
       !e.metaKey &&
       !e.altKey &&
-      !e.shiftKey &&
-      e.code === "Backquote" &&
+      !pressedShift &&
+      pressedKey === "`" &&
       !builtInChordSuperseded("app.pane.flip")
     ) {
       e.preventDefault();
@@ -933,15 +948,15 @@
     }
     // Web-only pane nav: Cmd+[/] is browser back/forward so the web build
     // moves pane nav onto Alt+[/]. Desktop handles this via KEY_BRIDGE_JS
-    // with stopImmediatePropagation before this handler runs. Match by
-    // `e.code` to prevent Option-mangled glyphs; `!e.shiftKey` keeps
-    // Alt+Shift+[/] (tab nav) separate.
-    if (e.altKey && !e.shiftKey && !meta && e.code === "BracketLeft") {
+    // with stopImmediatePropagation before this handler runs. The resolved
+    // key reads an Option-mangled glyph through its physical position;
+    // unshifted keeps Alt+Shift+[/] (tab nav) separate.
+    if (e.altKey && !pressedShift && !meta && pressedKey === "[") {
       e.preventDefault();
       selectPrevPane();
       return;
     }
-    if (e.altKey && !e.shiftKey && !meta && e.code === "BracketRight") {
+    if (e.altKey && !pressedShift && !meta && pressedKey === "]") {
       e.preventDefault();
       selectNextPane();
       return;
@@ -962,17 +977,17 @@
         return;
       }
     }
-    if (e.altKey && e.shiftKey && !meta) {
-      // e.code is layout-and-modifier-independent, so this branch
-      // matches even though Option mangles e.key into `«` / `»` on
-      // a US Mac layout. preventDefault suppresses the typed
+    if (e.altKey && pressedShift && !meta) {
+      // The resolved key falls back to the physical position when Option
+      // mangles e.key into a glyph on a Mac, and reads `{` / `}` as
+      // Shift+[ / ] elsewhere. preventDefault suppresses the typed
       // character before it reaches the focused editor.
-      if (e.code === "BracketLeft") {
+      if (pressedKey === "[") {
         e.preventDefault();
         selectPrevTabInActivePane();
         return;
       }
-      if (e.code === "BracketRight") {
+      if (pressedKey === "]") {
         e.preventDefault();
         selectNextTabInActivePane();
         return;
@@ -982,8 +997,10 @@
     // comparison survives modifiers changing e.key to a glyph on
     // non-US layouts AND Option mangling it on Mac. metaKey
     // excluded so this is distinct from Cmd+1..9 (which the
-    // browser owns for tab switching).
-    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
+    // browser owns for tab switching). A refused keystroke (AltGr
+    // typing a character, which Windows reports as Ctrl+Alt) resolves
+    // to no key and never jumps.
+    if (pressed && e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey) {
       const m = e.code.match(/^Digit([1-9])$/);
       if (m) {
         e.preventDefault();
@@ -994,9 +1011,9 @@
     // Web split. Native uses Cmd+/ through KEY_BRIDGE_JS. On web, Ctrl+/ is
     // claimed by the terminal and editor comment-toggle, so this uses the
     // Ctrl+Alt fallback family and routes through the command guards.
-    if (e.ctrlKey && e.altKey && !e.metaKey && e.code === "Slash") {
+    if (e.ctrlKey && e.altKey && !e.metaKey && pressedKey === "/") {
       e.preventDefault();
-      runCommand(e.shiftKey ? "app.pane.splitDown" : "app.pane.splitRight", {});
+      runCommand(pressedShift ? "app.pane.splitDown" : "app.pane.splitRight", {});
       return;
     }
     // Window reload. macOS: Cmd+R. Linux/Windows: Ctrl+Shift+R, so plain

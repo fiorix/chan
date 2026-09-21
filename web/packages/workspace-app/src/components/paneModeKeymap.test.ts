@@ -234,10 +234,10 @@ describe("Track C pane shortcut wiring", () => {
   // Desktop-native keeps Cmd+[/] via KEY_BRIDGE_JS.
   test("Alt+[ and Alt+] dispatch previous/next pane on web", () => {
     expect(app).toMatch(
-      /e\.altKey && !e\.shiftKey && !meta && e\.code === "BracketLeft"[\s\S]*?selectPrevPane\(\);/,
+      /e\.altKey && !pressedShift && !meta && pressedKey === "\["[\s\S]*?selectPrevPane\(\);/,
     );
     expect(app).toMatch(
-      /e\.altKey && !e\.shiftKey && !meta && e\.code === "BracketRight"[\s\S]*?selectNextPane\(\);/,
+      /e\.altKey && !pressedShift && !meta && pressedKey === "\]"[\s\S]*?selectNextPane\(\);/,
     );
   });
 
@@ -263,7 +263,7 @@ describe("Track C pane shortcut wiring", () => {
     // the metaKey gate.
     const branch = sourceBetween(
       'if (meta && !e.altKey && !e.shiftKey && shortcutLetter(e) === "W") {',
-      'if (e.altKey && e.shiftKey && !meta) {',
+      'if (e.altKey && pressedShift && !meta) {',
     );
     expect(branch).not.toContain("ui.terminalControl");
     expect(branch).not.toContain("requestCloseWindow");
