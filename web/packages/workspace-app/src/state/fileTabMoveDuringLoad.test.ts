@@ -76,9 +76,8 @@ function resetLayout(): LeafNode {
 ///
 /// `park` chooses where it stops. `after-first-chunk` has content on the tab
 /// already, which is what the move cases want to see survive. `after-meta`
-/// stops before any chunk has been written, which is the timing acceptance 1
-/// names and the only point at which the reader has not yet had a chance to
-/// notice anything about its tab.
+/// stops before the first content chunk, the only point at which the reader
+/// has not yet had a chance to notice anything about its tab.
 function pausedRead(
   park: "after-meta" | "after-first-chunk" = "after-first-chunk",
   /// The two halves this read delivers. A second read in the same test needs
@@ -180,9 +179,10 @@ describe("a file tab that moves mid-load still finishes loading", () => {
   });
 
   test("moved to another pane before the first chunk", async () => {
-    // The timing acceptance 1 names. Nothing has been written to the tab yet,
-    // so the reader has had no occasion to notice anything about it, and the
-    // whole download still has to land in the pane the tab moved to.
+    // The move lands before the first content chunk, so nothing has been
+    // written to the tab yet and the reader has had no occasion to notice
+    // anything about it. The whole download still has to arrive in the pane
+    // the tab moved to.
     const { release } = pausedRead("after-meta");
     const { tabId, opened } = await startLoad("after-meta");
     const otherPaneId = splitPane(PANE_ID, "row");
