@@ -302,7 +302,47 @@ const WORKSPACE_MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
 /// remount underneath it. Cheap (one `lstat` per mounted root) and far below
 /// the human threshold for noticing a degraded row, while rare enough that a
 /// stalled mount's hung probe cannot pile up.
-const ROOT_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(15);
+pub const ROOT_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Drive [`WorkspaceHost::probe_mounted_roots`] on [`ROOT_HEALTH_PROBE_INTERVAL`]
+/// until `shutdown` fires, handing back the task so a caller can join it.
+///
+/// Every process that serves the launcher routes drives this, the devserver and
+/// chan-desktop's embedded host alike, because a mounted tenant has no other
+/// way to learn that its filesystem went away: nothing in the request path runs
+/// while the user is idle, so a dead mount reads `running` until someone tries
+/// to read through it, and a capability handle does not survive a remount, so a
+/// repaired mount stays broken with no way back. The probe publishes the
+/// degraded row and refreshes the handle in place when the root returns.
+///
+/// Two properties are why this is one function rather than a loop each embedder
+/// writes for itself. It runs on the blocking pool, because it stats real roots
+/// and a stalled network mount is exactly where that call hangs, so a hung probe
+/// must never occupy a runtime worker. And its ticks are serialized by awaiting
+/// each one before the next is scheduled, with `MissedTickBehavior::Delay`, so a
+/// slow probe delays the cadence instead of accumulating overlapping stats.
+pub fn spawn_root_health_probe(
+    host: Arc<WorkspaceHost>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(ROOT_HEALTH_PROBE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => return,
+            }
+            let host = host.clone();
+            if tokio::task::spawn_blocking(move || host.probe_mounted_roots())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    })
+}
 
 /// Absolute cold-start restore budget. Remaining desired-on rows become
 /// visible failures when it expires; the systemd unit grants ten minutes.
@@ -1854,36 +1894,11 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         cancel_host.cancel_all_reindex();
     });
 
-    // Root health probe. Nothing else in the devserver ever re-checks a
-    // MOUNTED workspace's filesystem, so a network mount that stalls or is
-    // remounted underneath a tenant went unnoticed until a request happened to
-    // fail -- and, because a capability handle cannot survive a remount, stayed
-    // broken until the process restarted. The probe reports the degraded state
-    // and refreshes the handle in place when the mount comes back.
-    //
-    // On the blocking pool: it stats real roots, and a stalled network mount is
-    // exactly where that call hangs. A hung probe must never occupy a runtime
-    // worker, and it must not accumulate either, so ticks are serialized by
-    // awaiting each one before scheduling the next.
-    let probe_host = host.clone();
-    let mut probe_rx = signal_tx.subscribe();
-    let probe_task = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(ROOT_HEALTH_PROBE_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                _ = probe_rx.changed() => return,
-            }
-            let host = probe_host.clone();
-            if tokio::task::spawn_blocking(move || host.probe_mounted_roots())
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
+    // Root health probe, on the cadence and the blocking-pool discipline that
+    // `spawn_root_health_probe` documents. The desktop's embedded host drives
+    // the same one, so a mounted root is watched wherever the launcher routes
+    // are served rather than only here.
+    let probe_task = spawn_root_health_probe(host.clone(), signal_tx.subscribe());
 
     state
         .startup
@@ -2796,6 +2811,20 @@ pub(crate) mod tunnel_test_support {
 
 #[cfg(test)]
 mod tests {
+    /// The cadence is a contract, not an implementation detail: the desktop's
+    /// embedded host drives the same probe, and callers that reason in terms of
+    /// the constant cannot notice it changing. The expected value here is
+    /// written out, so moving the cadence has to be a deliberate edit to this
+    /// assertion rather than something every caller silently adopts.
+    #[test]
+    fn the_root_health_probe_keeps_its_fifteen_second_cadence() {
+        assert_eq!(
+            super::ROOT_HEALTH_PROBE_INTERVAL,
+            std::time::Duration::from_secs(15),
+            "the root health probe cadence moved"
+        );
+    }
+
     use super::tunnel_test_support::{
         test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
     };
