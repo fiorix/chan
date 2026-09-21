@@ -1709,14 +1709,16 @@ const KEY_BRIDGE_JS: &str = r#"
   // BracketLeft). Letters and punctuation come from `key`; a US shifted
   // glyph (`{`, `?`, `+`) names Shift plus its base symbol, as the chord
   // grammar spells `?`. Top-row digits keep their position, so AZERTY's
-  // digit row still selects tabs. Option replaces a letter with a glyph or
-  // a dead key; only then does a letter fall back to its position. Null for
-  // a keydown that enters text instead: an IME composition, a dead key, or
-  // AltGr off macOS. Windows reports AltGr as Ctrl+Alt, so AltGr+W typing
-  // 'å' would otherwise close the window mid-word; macOS is exempt because
-  // there Option is Alt and an engine may flag it as AltGraph too. The
-  // workspace app's `shortcutKey` is the same contract, and both are run
-  // against one table of layout vectors.
+  // digit row still selects tabs. A letter or supported symbol the layout
+  // typed wins before the Option fallback: only when Option left neither,
+  // typing a glyph or a dead key instead, does a letter fall back to its
+  // position. Null for a keydown that enters text instead: an IME
+  // composition, a dead key the Option fallback cannot place, or AltGr off
+  // macOS. Windows reports AltGr as Ctrl+Alt, so AltGr+W typing 'å' would
+  // otherwise close the window mid-word; macOS is exempt because there
+  // Option is Alt and an engine may flag it as AltGraph too. The workspace
+  // app's `shortcutKey` is the same contract, and both are run against one
+  // table of layout vectors.
   const MAC = /Mac OS X|Macintosh/.test(navigator.userAgent);
   const SYMBOL_CODES = new Map([
     ['[', 'BracketLeft'], [']', 'BracketRight'], ['/', 'Slash'], ['=', 'Equal'], ['-', 'Minus'],
