@@ -122,3 +122,8 @@ toml = { workspace = true }
 # against the app's generated ACL context without a display server; the
 # runtime_capability pins ride it. Feature-only: pulls no extra crates.
 tauri = { workspace = true, features = ["test"] }
+# The root-health test runs on a paused tokio clock
+# (`#[tokio::test(start_paused = true)]`) so the probe's cadence elapses
+# instantly instead of holding the suite for a real period; `start_paused` and
+# `tokio::time::advance` live behind tokio's own `test-util` feature.
+tokio = { workspace = true, features = ["test-util"] }
