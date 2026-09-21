@@ -21,6 +21,7 @@ import "../state/commands/install";
 import { EXTENSION_KEYDOWN_MESSAGE } from "../state/extensionBridge";
 import { refreshExtensions } from "../state/extensions.svelte";
 import { assignOverride, hydrateOverrides } from "../state/keymapOverrides.svelte";
+import { paneModalGuard } from "../state/paneModalGuard.svelte";
 import { settingsPanel } from "../state/store.svelte";
 import {
   cancelPaneMode,
@@ -173,6 +174,7 @@ afterEach(() => {
   settingsPanel.open = false;
   if (paneMode.active) cancelPaneMode();
   hydrateOverrides(null);
+  paneModalGuard.openCount = 0;
   vi.restoreAllMocks();
 });
 
@@ -410,5 +412,156 @@ describe("a chord relayed from a focused extension frame", () => {
     expect(relay(frame.contentWindow, { ...COLEMAK_T, type: "chan:extension-keydown:v1" })).toBe(0);
     await settle();
     expect(terminalCount()).toBe(0);
+  });
+});
+
+describe("Settings, pane flip and pane navigation keep their guards", () => {
+  function pane(id = PANE_ID): LeafNode {
+    return layout.nodes[id] as LeafNode;
+  }
+
+  /// Three leaves side by side, the middle one active, so the previous and
+  /// the next pane are different panes.
+  function seedThreePanes(): void {
+    const leaf = (id: string): LeafNode => ({
+      kind: "leaf",
+      id,
+      tabs: [fileTab(`tab-${id}`, "two.md")],
+      activeTabId: `tab-${id}`,
+    });
+    layout.nodes = {
+      root: { id: "root", kind: "split", direction: "row", a: PANE_ID, b: "rest", ratio: 0.33 },
+      rest: { id: "rest", kind: "split", direction: "row", a: "middle", b: "right", ratio: 0.5 },
+      [PANE_ID]: pane(),
+      middle: leaf("middle"),
+      right: leaf("right"),
+    };
+    layout.rootId = "root";
+    layout.activePaneId = "middle";
+  }
+
+  test("Ctrl+, opens Settings on Linux and leaves the pane unflipped", async () => {
+    await mountApp();
+    const side = pane().side;
+    const event = press({ key: ",", code: "Comma", ctrlKey: true });
+    await settle();
+    expect(settingsPanel.open).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(pane().side).toBe(side);
+  });
+
+  test.each<[string, KeyboardEventInit]>([
+    ["Ctrl+Alt+,", { key: ",", code: "Comma", ctrlKey: true, altKey: true }],
+    ["Ctrl+Shift+, (typing <)", { key: "<", code: "Comma", ctrlKey: true, shiftKey: true }],
+    ["Meta+,", { key: ",", code: "Comma", metaKey: true }],
+  ])("%s does not open Settings on Linux", async (_name, init) => {
+    await mountApp();
+    press(init);
+    await settle();
+    expect(settingsPanel.open).toBe(false);
+  });
+
+  test("on macOS Cmd+, opens Settings and Ctrl+, does not", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)",
+    );
+    await mountApp();
+    press({ key: ",", code: "Comma", ctrlKey: true });
+    await settle();
+    expect(settingsPanel.open).toBe(false);
+    press({ key: ",", code: "Comma", metaKey: true });
+    await settle();
+    expect(settingsPanel.open).toBe(true);
+  });
+
+  test("a reassigned Settings chord takes Ctrl+, off Settings", async () => {
+    await mountApp();
+    // Both presses land while the assignment is in memory. Settings opens
+    // synchronously in the handler; awaiting would let the config write
+    // re-hydrate the override table (applyServerPreferences), and in this
+    // harness the re-hydrated table no longer holds the assignment.
+    assignOverride("app.settings.open", "Ctrl+Alt+J", "web");
+    press({ key: ",", code: "Comma", ctrlKey: true });
+    expect(settingsPanel.open).toBe(false);
+    press({ key: "j", code: "KeyJ", ctrlKey: true, altKey: true });
+    expect(settingsPanel.open).toBe(true);
+  });
+
+  test("Ctrl+` flips the active pane", async () => {
+    await mountApp();
+    const side = pane().side;
+    const event = press({ key: "`", code: "Backquote", ctrlKey: true });
+    await settle();
+    expect(pane().side).not.toBe(side);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  test.each<[string, KeyboardEventInit]>([
+    ["Ctrl+Alt+`", { key: "`", code: "Backquote", ctrlKey: true, altKey: true }],
+    ["Ctrl+Shift+` (typing ~)", { key: "~", code: "Backquote", ctrlKey: true, shiftKey: true }],
+    ["Ctrl+Meta+`", { key: "`", code: "Backquote", ctrlKey: true, metaKey: true }],
+  ])("%s does not flip the pane", async (_name, init) => {
+    await mountApp();
+    const side = pane().side;
+    press(init);
+    await settle();
+    expect(pane().side).toBe(side);
+  });
+
+  test("a reassigned flip chord takes Ctrl+` off the flip", async () => {
+    await mountApp();
+    assignOverride("app.pane.flip", "Ctrl+Alt+J", "web");
+    const side = pane().side;
+    press({ key: "`", code: "Backquote", ctrlKey: true });
+    await settle();
+    expect(pane().side).toBe(side);
+  });
+
+  test("with a modal over the pane, Ctrl+` is swallowed and flips nothing", async () => {
+    await mountApp();
+    paneModalGuard.openCount = 1;
+    const side = pane().side;
+    const event = press({ key: "`", code: "Backquote", ctrlKey: true });
+    await settle();
+    expect(pane().side).toBe(side);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  test("Alt+[ and Alt+] select the previous and next pane", async () => {
+    await mountApp();
+    seedThreePanes();
+    await settle();
+    press({ key: "[", code: "BracketLeft", altKey: true });
+    await settle();
+    expect(layout.activePaneId).toBe(PANE_ID);
+    layout.activePaneId = "middle";
+    press({ key: "]", code: "BracketRight", altKey: true });
+    await settle();
+    expect(layout.activePaneId).toBe("right");
+  });
+
+  test("Dvorak Alt+[ on Minus selects the previous pane", async () => {
+    await mountApp();
+    seedThreePanes();
+    await settle();
+    press({ key: "[", code: "Minus", altKey: true });
+    await settle();
+    expect(layout.activePaneId).toBe(PANE_ID);
+  });
+
+  test.each<[string, KeyboardEventInit]>([
+    [
+      "Alt+Shift+[ (tab navigation)",
+      { key: "{", code: "BracketLeft", altKey: true, shiftKey: true },
+    ],
+    ["Ctrl+Alt+[", { key: "[", code: "BracketLeft", ctrlKey: true, altKey: true }],
+    ["Meta+Alt+[", { key: "[", code: "BracketLeft", metaKey: true, altKey: true }],
+  ])("%s leaves the active pane alone", async (_name, init) => {
+    await mountApp();
+    seedThreePanes();
+    await settle();
+    press(init);
+    await settle();
+    expect(layout.activePaneId).toBe("middle");
   });
 });

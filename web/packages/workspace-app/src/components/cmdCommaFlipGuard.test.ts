@@ -43,13 +43,4 @@ describe("Flip-pane command modal/overlay guard", () => {
     const flips = src.match(/flipHybrid\(layout\.activePaneId\)/g) ?? [];
     expect(flips.length).toBeGreaterThanOrEqual(1);
   });
-
-  test("Ctrl+Backquote web chord dispatches app.pane.flip through the same guard", () => {
-    expect(appSource).toMatch(
-      /e\.ctrlKey &&\s*!e\.metaKey &&\s*!e\.altKey &&\s*!pressedShift &&\s*pressedKey === "`" &&\s*!builtInChordSuperseded\("app\.pane\.flip"\)/,
-    );
-    expect(src).toMatch(
-      /if \( e\.ctrlKey && !e\.metaKey && !e\.altKey && !pressedShift && pressedKey === "`" && !builtInChordSuperseded\("app\.pane\.flip"\) \) \{ e\.preventDefault\(\); if \(!paneChordBlocked\(\)\) flipHybrid\(layout\.activePaneId\); return; \}/,
-    );
-  });
 });

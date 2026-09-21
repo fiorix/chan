@@ -230,17 +230,6 @@ describe("Hybrid Nav kill-pane removed", () => {
 });
 
 describe("Track C pane shortcut wiring", () => {
-  // Web pane nav uses Alt+[/] because Cmd+[/] is browser back/forward.
-  // Desktop-native keeps Cmd+[/] via KEY_BRIDGE_JS.
-  test("Alt+[ and Alt+] dispatch previous/next pane on web", () => {
-    expect(app).toMatch(
-      /e\.altKey && !pressedShift && !meta && pressedKey === "\["[\s\S]*?selectPrevPane\(\);/,
-    );
-    expect(app).toMatch(
-      /e\.altKey && !pressedShift && !meta && pressedKey === "\]"[\s\S]*?selectNextPane\(\);/,
-    );
-  });
-
   test("close-all and kill-pane command ids route through transactional helpers", () => {
     expect(app).toMatch(
       /case "app\.pane\.closeTabs":[\s\S]*?closeTabsInActivePane\(\);/,
