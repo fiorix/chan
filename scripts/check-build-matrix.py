@@ -496,8 +496,49 @@ def check_workflow_contract() -> None:
             "packaging/freebsd/Makefile",
         )
 
+    for package, trigger_name, verify_name in (
+        ("chan", "copr-chan-trigger", "copr-chan-verify"),
+        ("chan-desktop", "copr-desktop-trigger", "copr-desktop-verify"),
+    ):
+        trigger = workflow_job(
+            downstream,
+            trigger_name,
+            ".github/workflows/publish-downstream.yml",
+        )
+        for needle in (
+            f"\n          PACKAGE: {package}\n",
+            "posted_at: ${{ steps.trigger.outputs.posted_at }}",
+            "webhook_present: ${{ steps.trigger.outputs.webhook_present }}",
+            "id: trigger",
+            'curl -sf -X POST "${WEBHOOK}${PACKAGE}/"',
+            "frozen from the tag push until the probe confirms both packages",
+        ):
+            require(
+                trigger,
+                needle,
+                f".github/workflows/publish-downstream.yml job {trigger_name}",
+            )
+
+        verify = workflow_job(
+            downstream,
+            verify_name,
+            ".github/workflows/publish-downstream.yml",
+        )
+        for needle in (
+            f"needs: {trigger_name}",
+            f"\n          PACKAGE: {package}\n",
+            f"POSTED_AT: ${{{{ needs.{trigger_name}.outputs.posted_at }}}}",
+            f"WEBHOOK_PRESENT: ${{{{ needs.{trigger_name}.outputs.webhook_present }}}}",
+            "CANONICAL: ${{ github.repository == 'fiorix/chan' }}",
+            "run: packaging/distros/copr/verify-copr-publication.sh",
+        ):
+            require(
+                verify,
+                needle,
+                f".github/workflows/publish-downstream.yml job {verify_name}",
+            )
+
     for needle in (
-        "copr:",
         "launchpad:",
         "aur-validate:",
         "cachix-build:",
