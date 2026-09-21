@@ -1,4 +1,4 @@
-import { shortcutLetter } from "@chan/web-shared/keyboard";
+import { shiftedPunctuationBase, shortcutKey } from "@chan/web-shared/keyboard";
 // Central registry of every user-visible keyboard shortcut.
 //
 // One source of truth for:
@@ -193,8 +193,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // (no browser chrome to fight). The web build uses Alt+[/]
   // because Cmd+[/] is browser back/forward. Tab nav mirrors
   // this split (web Alt+Shift+[/], native Cmd+Shift+[/]). The
-  // web handler matches by `e.code` and preventDefaults the
-  // Option-mangled glyph, same as the tab handler.
+  // web handler reads an Option-mangled glyph through its physical
+  // position and preventDefaults it, same as the tab handler.
   {
     id: "app.pane.prev",
     label: "Previous pane",
@@ -666,73 +666,87 @@ export function chordFor(id: string): string | null {
   return formatChord(chord, os);
 }
 
-/// Derive the platform-resolved chord from a raw `KeyboardEvent`.
-/// Used by `handleTerminalKeyEvent` to detect whether the incoming
-/// keystroke matches an `escapeTerminal` shortcut and should bubble
-/// out of xterm.
+/// Derive the exact chord a raw `KeyboardEvent` spells, with every held
+/// modifier. Shortcut capture stores this form, so an assignment says which
+/// modifiers the user pressed.
 ///
 /// Returns a chord string of the same shape the registry uses
 /// (e.g. `"Mod+P"`, `"Cmd+Alt+P"`, `"Ctrl+Alt+1"`). `Mod` is
 /// emitted for `metaKey` on macOS + `ctrlKey` on Linux/Windows;
 /// `Cmd` is emitted for `metaKey` regardless of platform when
-/// `ctrlKey` is also present-or-absent. Keys are normalised to
-/// the registry's casing (`P`, `Enter`, `[`, etc.).
+/// `ctrlKey` is also present-or-absent. The key is the layout's symbol
+/// as `shortcutKey` resolves it (`P`, `Enter`, `[`, etc.).
 ///
 /// `null` when the event carries no modifier OR the key isn't a
 /// recognisable shortcut surface (printable characters typed
 /// into the editor don't match anything in the registry).
 export function chordFromEvent(e: KeyboardEvent): string | null {
-  const parts: string[] = [];
+  return eventCandidates(e)[0]?.chord ?? null;
+}
+
+/// One chord a keydown can stand for, with the key and Shift it names.
+type EventCandidate = { chord: Chord; key: string; shiftKey: boolean };
+
+/// The chords a keydown can stand for, in precedence order: the exact
+/// chord, then, when Shift was held only to type a punctuation symbol, the
+/// same chord without Shift. Ctrl, Cmd and Alt are never dropped.
+function eventCandidates(e: KeyboardEvent): EventCandidate[] {
+  const id = shortcutKey(e);
+  if (!id) return [];
   const os = currentOS();
   // `Mod` semantics: Cmd on macOS, Ctrl elsewhere. Emit `Mod`
   // when the platform-canonical modifier fires; emit `Cmd` /
   // `Ctrl` separately when the *non-platform* form fires (the
   // Cmd+Alt+P web-Mac fallback always uses `Cmd+...`).
   const modIsMeta = os === "mac";
-  const hasPlatformMod = modIsMeta ? e.metaKey : e.ctrlKey;
-  const hasNonPlatformMeta = modIsMeta ? false : e.metaKey;
-  const hasNonPlatformCtrl = modIsMeta ? e.ctrlKey : false;
-  if (hasPlatformMod) parts.push("Mod");
-  if (hasNonPlatformMeta) parts.push("Cmd");
-  if (hasNonPlatformCtrl) parts.push("Ctrl");
-  if (e.altKey) parts.push("Alt");
-  if (e.shiftKey) parts.push("Shift");
-  const key = canonicalKey(e);
-  if (!key) return null;
-  parts.push(key);
-  if (parts.length <= 1) return null;
-  return parts.join("+");
+  const mods: string[] = [];
+  if (modIsMeta ? e.metaKey : e.ctrlKey) mods.push("Mod");
+  if (!modIsMeta && e.metaKey) mods.push("Cmd");
+  if (modIsMeta && e.ctrlKey) mods.push("Ctrl");
+  if (e.altKey) mods.push("Alt");
+  const candidates: EventCandidate[] = [];
+  const add = (shiftKey: boolean) => {
+    const parts = shiftKey ? [...mods, "Shift", id.key] : [...mods, id.key];
+    if (parts.length > 1) candidates.push({ chord: parts.join("+"), key: id.key, shiftKey });
+  };
+  add(e.shiftKey || id.shifted);
+  if (e.shiftKey && id.consumable) add(false);
+  return candidates;
 }
 
-/// Resolve letters through the same layout-aware matcher as App.svelte so
-/// terminal escape and global dispatch agree. Punctuation and digit chords
-/// retain their physical identity when Shift or Option changes the glyph.
-function canonicalKey(e: KeyboardEvent): string | null {
-  const k = e.key;
-  if (!k || k === "Shift" || k === "Alt" || k === "Control" || k === "Meta") {
-    return null;
-  }
-  const letter = shortcutLetter(e);
-  if (letter) return letter;
-  const digit = e.code.match(/^Digit([0-9])$/)?.[1];
-  if (digit) return digit;
-  const physicalPunctuation: Readonly<Record<string, string>> = {
-    Backquote: "`",
-    BracketLeft: "[",
-    BracketRight: "]",
-    Comma: ",",
-    Equal: "=",
-    Minus: "-",
-    Period: ".",
-    Semicolon: ";",
-    Slash: "/",
-  };
-  const punctuation = physicalPunctuation[e.code];
-  if (punctuation) return punctuation;
-  if (k.length === 1) return k.toUpperCase();
-  // Multi-char keys: registry uses the browser's `KeyboardEvent.key`
-  // names verbatim (`Enter`, `Tab`, `Escape`, `ArrowLeft`, ...).
-  return k;
+/// The candidate a keydown resolves to on this client: the first one a
+/// command claims (a user override or an active registry chord), else the
+/// exact chord. Dispatch, terminal escape and the terminal's own chords all
+/// read this, so a keystroke selects one winner everywhere and an explicitly
+/// shifted binding beats the Shift-consumed fallback.
+function resolveEventCandidate(e: KeyboardEvent): EventCandidate | null {
+  const candidates = eventCandidates(e);
+  return candidates.find((c) => chordClaimed(c.chord)) ?? candidates[0] ?? null;
+}
+
+/// The chord `e` resolves to on this client (see `resolveEventCandidate`),
+/// or null when it names no shortcut. The override dispatch reads this.
+export function resolveEventChord(e: KeyboardEvent): Chord | null {
+  return resolveEventCandidate(e)?.chord ?? null;
+}
+
+/// The key and effective Shift of the chord `e` resolves to. Raw-event
+/// handlers that branch on modifier flags read these instead of `e.code` and
+/// `e.shiftKey`, so a Shift that only typed the symbol counts exactly when
+/// the matcher consumes it.
+export function resolvedEventKey(
+  e: KeyboardEvent,
+): { key: string; shiftKey: boolean } | null {
+  const winner = resolveEventCandidate(e);
+  return winner ? { key: winner.key, shiftKey: winner.shiftKey } : null;
+}
+
+/// Every chord `e` can stand for, exact first. Shortcut capture reads them in
+/// this order to find the command the keystroke reaches today, because
+/// assigning the exact chord takes the keystroke from that command even when
+/// it was reached through the Shift-consumed fallback.
+export function eventChordCandidates(e: KeyboardEvent): Chord[] {
+  return eventCandidates(e).map((c) => c.chord);
 }
 
 /// Whether `e` carries the platform-resolved chord for `id`, user remaps
@@ -740,7 +754,7 @@ function canonicalKey(e: KeyboardEvent): string | null {
 /// and the chord the escape registry lets out of xterm are one resolution
 /// rather than two spellings that can drift apart.
 export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
-  const chord = chordFromEvent(e);
+  const chord = resolveEventChord(e);
   if (!chord) return false;
   const s = SHORTCUTS.find((x) => x.id === id);
   if (!s) return false;
@@ -766,18 +780,25 @@ export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
 /// `Mod+Alt+P` (event) === `Cmd+Alt+P` (registry web Mac
 /// fallback) on Mac.
 export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
-  const chord = chordFromEvent(e);
+  const chord = resolveEventChord(e);
   if (!chord) return false;
   if (overrideEscapeMatcher?.(chord)) return true;
-  return registryEscapeCommandId(chord) !== null;
+  return registryCommandId(chord, true) !== null;
 }
 
-function registryEscapeCommandId(chord: Chord): string | null {
+/// Whether a command on this client holds `chord`: a user override, or a
+/// registry chord no override has replaced.
+function chordClaimed(chord: Chord): boolean {
+  if (overrideEscapeMatcher?.(chord)) return true;
+  return registryCommandId(chord, false) !== null;
+}
+
+function registryCommandId(chord: Chord, escapingOnly: boolean): string | null {
   const eventTokens = canonicalChordTokens(chord);
   const platform = currentPlatform();
   const os = currentOS();
   for (const s of SHORTCUTS) {
-    if (!s.escapeTerminal) continue;
+    if (escapingOnly && !s.escapeTerminal) continue;
     const registryChord = osChord(s, platform, os);
     if (!registryChord) continue;
     const override = overrideResolver?.(s.id, platform, os);
@@ -804,12 +825,16 @@ function registryEscapeCommandId(chord: Chord): string | null {
 /// normalise platform Ctrl as `Mod`.
 function canonicalChordTokens(chord: string): Set<string> {
   const tokens = new Set(chord.split("+"));
-  // `?` already implies Shift in the human-facing chord grammar. Events use
-  // the physical Slash code plus shiftKey, so compare both as Shift+/.
-  if (tokens.has("?")) {
-    tokens.delete("?");
-    tokens.add("Shift");
-    tokens.add("/");
+  // `?` implies Shift in the human-facing chord grammar, and so does every
+  // other US shifted glyph; events already arrive folded, so compare stored
+  // chords the same way.
+  for (const token of [...tokens]) {
+    const base = shiftedPunctuationBase(token);
+    if (base) {
+      tokens.delete(token);
+      tokens.add("Shift");
+      tokens.add(base);
+    }
   }
   if (currentOS() === "mac" && tokens.has("Cmd")) {
     tokens.delete("Cmd");

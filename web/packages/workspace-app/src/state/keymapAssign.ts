@@ -5,7 +5,12 @@
 // persists its chords; the reactive store in keymapOverrides.svelte.ts
 // supplies the resolved-keymap entries and owns persistence.
 
-import { chordFromEvent, chordsEqual, type Chord } from "./shortcuts";
+import {
+  chordFromEvent,
+  chordsEqual,
+  eventChordCandidates,
+  type Chord,
+} from "./shortcuts";
 
 /// One command's resolved chord on the platform + OS the caller is
 /// assigning for: the user override if one exists, else the built-in.
@@ -24,16 +29,29 @@ export function captureChord(e: KeyboardEvent): Chord | null {
   return chordFromEvent(e);
 }
 
-/// Every entry whose chord matches `candidate`, excluding the command
-/// being assigned (rebinding a command to the chord it already has is
-/// not a conflict). Empty array means the candidate is free to assign.
-/// Chord matching is modifier-alias aware via `chordsEqual`.
+/// The chords a rebinding keydown competes for, in the matcher's order: the
+/// exact chord `captureChord` stores, then the Shift-consumed chord when
+/// Shift only typed the punctuation symbol on this layout.
+export function captureCandidates(e: KeyboardEvent): Chord[] {
+  return eventChordCandidates(e);
+}
+
+/// The entries holding the first of `candidates` that any entry holds,
+/// excluding the command being assigned (rebinding a command to the chord
+/// it already has is not a conflict). Given a keystroke's candidates this is
+/// the command the keystroke reaches today, so a chord that currently lands
+/// on another command through the Shift-consumed fallback is reported rather
+/// than silently taken; a single chord is checked on its own. Empty array
+/// means the chord is free to assign. Chord matching is modifier-alias aware
+/// via `chordsEqual`.
 export function keymapConflicts(
-  candidate: Chord,
+  candidates: Chord | readonly Chord[],
   entries: readonly KeymapEntry[],
   excludeId: string,
 ): KeymapEntry[] {
-  return entries.filter(
-    (entry) => entry.id !== excludeId && chordsEqual(entry.chord, candidate),
-  );
+  for (const candidate of typeof candidates === "string" ? [candidates] : candidates) {
+    const holders = entries.filter((entry) => chordsEqual(entry.chord, candidate));
+    if (holders.length > 0) return holders.filter((entry) => entry.id !== excludeId);
+  }
+  return [];
 }

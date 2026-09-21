@@ -9,6 +9,7 @@
   },
   "exports": {
     "./keyboard": "./src/keyboard.ts",
+    "./keyboard-vectors": "./src/keyboardVectors.ts",
     "./api": "./src/api.ts",
     "./initial": "./src/initial.ts",
     "./command-deck": "./src/command-deck/model.ts",

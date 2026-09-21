@@ -7,7 +7,7 @@ import app from "./App.svelte?raw";
 describe("Cmd+, opens Settings", () => {
   test("onWindowKey routes comma to app.settings.open", () => {
     expect(app).toMatch(
-      /const settingsChord =[\s\S]*?os === "mac"[\s\S]*?e\.metaKey[\s\S]*?e\.code === "Comma"[\s\S]*?: e\.ctrlKey[\s\S]*?e\.code === "Comma"[\s\S]*?builtInChordSuperseded\("app\.settings\.open"\)[\s\S]*?openSettings\(\);/,
+      /const settingsChord =[\s\S]*?os === "mac"[\s\S]*?e\.metaKey[\s\S]*?pressedKey === ","[\s\S]*?: e\.ctrlKey[\s\S]*?pressedKey === ","[\s\S]*?builtInChordSuperseded\("app\.settings\.open"\)[\s\S]*?openSettings\(\);/,
     );
   });
 
@@ -16,7 +16,7 @@ describe("Cmd+, opens Settings", () => {
       /const commandName = name === "app\.settings\.toggle" \? "app\.pane\.flip" : name;/,
     );
     expect(app).not.toMatch(
-      /"Comma"[\s\S]{1,200}flipHybrid\(layout\.activePaneId\)/,
+      /pressedKey === ","[\s\S]{1,200}flipHybrid\(layout\.activePaneId\)/,
     );
   });
 });

@@ -46,10 +46,10 @@ describe("Flip-pane command modal/overlay guard", () => {
 
   test("Ctrl+Backquote web chord dispatches app.pane.flip through the same guard", () => {
     expect(appSource).toMatch(
-      /e\.ctrlKey &&\s*!e\.metaKey &&\s*!e\.altKey &&\s*!e\.shiftKey &&\s*e\.code === "Backquote" &&\s*!builtInChordSuperseded\("app\.pane\.flip"\)/,
+      /e\.ctrlKey &&\s*!e\.metaKey &&\s*!e\.altKey &&\s*!pressedShift &&\s*pressedKey === "`" &&\s*!builtInChordSuperseded\("app\.pane\.flip"\)/,
     );
     expect(src).toMatch(
-      /if \( e\.ctrlKey && !e\.metaKey && !e\.altKey && !e\.shiftKey && e\.code === "Backquote" && !builtInChordSuperseded\("app\.pane\.flip"\) \) \{ e\.preventDefault\(\); if \(!paneChordBlocked\(\)\) flipHybrid\(layout\.activePaneId\); return; \}/,
+      /if \( e\.ctrlKey && !e\.metaKey && !e\.altKey && !pressedShift && pressedKey === "`" && !builtInChordSuperseded\("app\.pane\.flip"\) \) \{ e\.preventDefault\(\); if \(!paneChordBlocked\(\)\) flipHybrid\(layout\.activePaneId\); return; \}/,
     );
   });
 });

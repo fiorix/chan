@@ -19,7 +19,7 @@
   import { tick } from "svelte";
   import { X } from "lucide-svelte";
   import { SHORTCUTS } from "../state/shortcuts";
-  import { captureChord, keymapConflicts } from "../state/keymapAssign";
+  import { captureCandidates, captureChord, keymapConflicts } from "../state/keymapAssign";
   import { allCommands, type Command } from "../state/commands";
   import {
     assignOverride,
@@ -109,7 +109,7 @@
     const candidate = captureChord(e);
     if (!candidate) return; // modifier-only or bare key: keep composing
     const entries = resolvedKeymapEntriesForSlot(allCommands(), slot);
-    const conflicts = keymapConflicts(candidate, entries, cmd.id);
+    const conflicts = keymapConflicts(captureCandidates(e), entries, cmd.id);
     if (conflicts.length > 0) {
       const holderId = conflicts[0].id;
       conflictLabel = labelForId(holderId);
