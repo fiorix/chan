@@ -2772,36 +2772,6 @@ mod tests {
     }
 
     #[test]
-    fn key_bridge_lets_altgr_character_entry_through() {
-        // Windows delivers an AltGr keydown with ctrlKey and altKey both
-        // set, so on layouts where AltGr composes text (US-International
-        // AltGr+W types 'å') the alt-branch chords would swallow
-        // character entry, with Ctrl+Alt+W closing the window and
-        // discarding its session with no confirmation, and Linux reports
-        // Ctrl+AltGr+8 typing `[` as a Ctrl chord on Digit8. No bridge
-        // chord can be legitimately formed with AltGr, so the key lookup
-        // refuses it off macOS and the handler bails before any chord
-        // fires or any default is prevented. The layout vectors in
-        // web/packages/workspace-app run the script itself; this pins the
-        // shape they exercise.
-        assert!(
-            KEY_BRIDGE_JS.contains("if (!MAC && e.getModifierState('AltGraph')) return null;"),
-            "the key lookup must refuse AltGr off macOS",
-        );
-        let on_key = KEY_BRIDGE_JS
-            .split("function onKey(e) {")
-            .nth(1)
-            .expect("the keydown handler exists");
-        let bail = on_key
-            .find("if (!key) return;")
-            .expect("the handler bails on a refused key");
-        for chord in ["if (alt) {", "invokeIpc(e, ", "fire(e, "] {
-            let first = on_key.find(chord).expect("the handler dispatches chords");
-            assert!(bail < first, "the refused-key bail must precede {chord}");
-        }
-    }
-
-    #[test]
     fn key_bridge_releases_a_focused_terminals_chords() {
         // Ctrl+F, Ctrl+G and Ctrl+[ are 0x06, 0x07 and ESC to a shell, and
         // terminal find belongs to the terminal tab rather than to the page,
