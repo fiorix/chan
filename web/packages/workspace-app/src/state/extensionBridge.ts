@@ -145,8 +145,9 @@ export function hostKeyId(key: ExtensionHostKey): string {
 
 /// The host chords a relayed keydown can stand for under Chan's own reading
 /// of its raw fields: the exact chord, and the chord without Shift when Shift
-/// only typed a punctuation symbol. Empty for a keydown that enters text (a
-/// composition, a dead key, AltGr), which no shortcut may claim.
+/// only typed a punctuation symbol. Empty for a keydown no shortcut may claim:
+/// a lone modifier, a composition, a dead key outside the Option fallback, or
+/// AltGr character entry.
 function relayedHostKeys(message: ExtensionKeydownMessage): ExtensionHostKey[] {
   const id = shortcutKey(keyboardEventFromExtension(message));
   if (!id) return [];
