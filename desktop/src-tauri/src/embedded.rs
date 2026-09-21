@@ -209,9 +209,9 @@ impl EmbeddedServer {
     /// or replaced workspace as `running` until a redundant add or on, and one
     /// degraded by a transient outage would stay degraded with minting refused.
     /// A single owner is also what keeps that true, since a second construction
-    /// path is exactly where the probe would be forgotten. Its lifetime is the
-    /// server's: `shutdown_tx` is the channel `shutdown_all` fires, and the
-    /// probe returns on it.
+    /// path is exactly where the probe would be forgotten. It stops when the
+    /// server is dropped: `Drop` sends on `shutdown_tx` and the probe returns
+    /// on that signal.
     fn assemble(
         host: Arc<chan_server::WorkspaceHost>,
         extension_runtime: chan_server::ExtensionRuntime,
@@ -744,26 +744,36 @@ async fn serve_router(
 mod tests {
     use super::*;
 
-    /// Let the probe's next tick land, waiting on the host's own change
-    /// notification: the signal `reconcile_root_health` fires when it publishes
-    /// or clears a degraded row. That is an observation of the state change
-    /// rather than a spin until a status happens to look right, and it is the
-    /// pattern the library's own host tests use. The timeout is a safety guard
-    /// so a broken probe fails instead of hanging; it is not the
-    /// synchronization.
-    ///
-    /// The clock is paused, so the advance is what releases the ticker. The
-    /// probe then runs on the blocking pool, where the paused clock has no
-    /// authority, and exactly one advance is used so that a pass means the row
-    /// moved within one probe period rather than eventually.
+    /// One probe period, written out rather than read from the cadence
+    /// constant. A bound that takes its limit from the thing under test moves
+    /// with it, so a slower cadence would pass; this one has to fail.
     #[cfg(unix)]
-    async fn probe_tick(embedded: &EmbeddedServer) {
+    const ONE_PROBE_PERIOD: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Wait for the probe's next root health transition and return how much
+    /// virtual time it took to arrive.
+    ///
+    /// Completion is observed, not inferred: the wait is on the host's own
+    /// change notification, which `reconcile_root_health` fires when it
+    /// publishes or clears a degraded row. Nothing advances the clock by hand.
+    /// It is paused, so tokio moves it to the next pending timer, which is the
+    /// probe's own tick, and the elapsed time returned is when that tick
+    /// actually published.
+    ///
+    /// The timeout is a safety guard only, and it is deliberately ten periods
+    /// long. It has to outlast any late probe a regression could introduce, so
+    /// that such a probe still arrives and is rejected by the caller's elapsed
+    /// bound, where the failure names how late it was, rather than being cut
+    /// off here, where it could only report that nothing arrived.
+    #[cfg(unix)]
+    async fn next_transition(embedded: &EmbeddedServer) -> std::time::Duration {
         let notify = embedded.host.library_change_notify();
         let changed = notify.notified();
-        tokio::time::advance(chan_server::ROOT_HEALTH_PROBE_INTERVAL).await;
-        tokio::time::timeout(std::time::Duration::from_secs(3), changed)
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(ONE_PROBE_PERIOD * 10, changed)
             .await
-            .expect("the probe published no root health change within one period");
+            .expect("the probe published no root health transition at all");
+        start.elapsed()
     }
 
     /// The desktop's own library reports a replaced root as `unavailable`
@@ -804,7 +814,11 @@ mod tests {
         std::fs::rename(&root, &aside).expect("move the original root aside");
         std::fs::create_dir(&root).expect("a different directory takes the path");
 
-        probe_tick(&embedded).await;
+        let elapsed = next_transition(&embedded).await;
+        assert!(
+            elapsed <= ONE_PROBE_PERIOD,
+            "the replaced root was reported after {elapsed:?}, later than one probe period"
+        );
         let (status, reason) = embedded.host.workspace_status(&root);
         assert_eq!(status, chan_server::WorkspaceStatus::Unavailable);
         // A status alone pins nothing: more than one writer can publish this
@@ -817,7 +831,11 @@ mod tests {
 
         std::fs::remove_dir(&root).expect("remove the impostor");
         std::fs::rename(&aside, &root).expect("put the original root back");
-        probe_tick(&embedded).await;
+        let elapsed = next_transition(&embedded).await;
+        assert!(
+            elapsed <= ONE_PROBE_PERIOD,
+            "the restored root was reported after {elapsed:?}, later than one probe period"
+        );
         assert_eq!(
             embedded.host.workspace_status(&root).0,
             chan_server::WorkspaceStatus::Running,
