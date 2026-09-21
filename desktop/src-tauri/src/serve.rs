@@ -1703,6 +1703,38 @@ const KEY_BRIDGE_JS: &str = r#"
     const root = el.closest('.terminal-tab');
     return root !== null && root.classList.contains('active');
   }
+  // The key a chord names under the active layout, spelled as the code the
+  // switches below match, so a chord follows the symbol the user typed and
+  // not where the key sits (Colemak T has code KeyF, Dvorak / has code
+  // BracketLeft). Letters and punctuation come from `key`; a US shifted
+  // glyph (`{`, `?`, `+`) names Shift plus its base symbol, as the chord
+  // grammar spells `?`. Top-row digits keep their position, so AZERTY's
+  // digit row still selects tabs. Option replaces a letter with a glyph or
+  // a dead key; only then does a letter fall back to its position. Null for
+  // a keydown that enters text instead: an IME composition, a dead key, or
+  // AltGr off macOS. Windows reports AltGr as Ctrl+Alt, so AltGr+W typing
+  // 'å' would otherwise close the window mid-word; macOS is exempt because
+  // there Option is Alt and an engine may flag it as AltGraph too. The
+  // workspace app's `shortcutKey` is the same contract, and both are run
+  // against one table of layout vectors.
+  const MAC = /Mac OS X|Macintosh/.test(navigator.userAgent);
+  const SYMBOL_CODES = new Map([
+    ['[', 'BracketLeft'], [']', 'BracketRight'], ['/', 'Slash'], ['=', 'Equal'], ['-', 'Minus'],
+  ]);
+  const SHIFTED = new Map([['{', '['], ['}', ']'], ['?', '/'], ['+', '='], ['_', '-']]);
+  function chordKey(e) {
+    const k = e.key || '';
+    if (e.isComposing || k === 'Process') return null;
+    if (!MAC && e.getModifierState('AltGraph')) return null;
+    if (/^Digit[0-9]$/.test(e.code)) return { code: e.code, shifted: false };
+    if (/^[a-z]$/i.test(k)) return { code: 'Key' + k.toUpperCase(), shifted: false };
+    if (/^[0-9]$/.test(k)) return { code: 'Digit' + k, shifted: false };
+    const base = SHIFTED.get(k) || k;
+    if (SYMBOL_CODES.has(base)) return { code: SYMBOL_CODES.get(base), shifted: base !== k };
+    if (e.altKey && /^Key[A-Z]$/.test(e.code)) return { code: e.code, shifted: false };
+    if (k === 'Dead') return null;
+    return { code: '', shifted: false };
+  }
   // Chord policy: actions reachable through Hybrid Nav (Cmd+.) stay
   // unbound here so the native layer claims as little as possible.
   // The command-launcher chords (Cmd+K, Cmd+Shift+K, and the Ctrl+Alt
@@ -1726,23 +1758,12 @@ const KEY_BRIDGE_JS: &str = r#"
   function onKey(e) {
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
-    const shift = e.shiftKey;
+    const key = chordKey(e);
+    if (!key) return;
+    const code = key.code;
+    const shift = e.shiftKey || key.shifted;
     const alt = e.altKey;
-    // Letter shortcuts follow the active layout (Colemak T has code KeyF).
-    // Option glyphs have no base letter in the event, so retain that fallback.
-    const letter = /^[a-z]$/i.test(e.key) ? e.key.toUpperCase() : null;
-    const code = letter ? 'Key' + letter
-      : /^Key[A-Z]$/.test(e.code) && !alt ? '' : e.code;
     if (alt) {
-      // Windows delivers an AltGr keydown as ctrlKey+altKey, so on
-      // layouts where AltGr composes text (US-International AltGr+W
-      // types 'å') the chords below would swallow character entry and
-      // KeyW would close the window mid-word. No chord in this branch
-      // can be legitimately formed with AltGr, so bail without
-      // preventDefault and let the key reach the webview. Gated on
-      // ctrlKey so an engine that flags macOS Option as AltGraph
-      // cannot break Cmd+Opt+I.
-      if (e.ctrlKey && e.getModifierState('AltGraph')) return;
       // Cmd+Opt+I (macOS) / Ctrl+Alt+I (Linux/Windows) → DevTools.
       // Ctrl+Alt+Shift+T reopens the last closed tab on the Linux /
       // Windows desktop, where Ctrl+Shift+T is the New-terminal chord.
@@ -1768,9 +1789,10 @@ const KEY_BRIDGE_JS: &str = r#"
     }
     // Zoom chords route regardless of shift so
     // Cmd+= (US) and Cmd+Shift+= (= Cmd++) both fire zoom_in.
-    // NumpadAdd / NumpadSubtract similarly. Cmd+0 / Cmd+Numpad0
+    // NumpadAdd / NumpadSubtract similarly, matched by position so
+    // they zoom with Num Lock off as well. Cmd+0 / Cmd+Numpad0
     // reset to 100 %.
-    switch (code) {
+    switch (/^Numpad/.test(e.code) ? e.code : code) {
       case 'Equal':
       case 'NumpadAdd':
         invokeIpc(e, 'zoom_in');
@@ -2750,35 +2772,33 @@ mod tests {
     }
 
     #[test]
-    fn key_bridge_alt_branch_lets_altgr_character_entry_through() {
+    fn key_bridge_lets_altgr_character_entry_through() {
         // Windows delivers an AltGr keydown with ctrlKey and altKey both
         // set, so on layouts where AltGr composes text (US-International
         // AltGr+W types 'å') the alt-branch chords would swallow
         // character entry, with Ctrl+Alt+W closing the window and
-        // discarding its session with no confirmation. None of the
-        // alt-branch chords can be legitimately formed with AltGr, so
-        // the branch bails on AltGraph before any chord fires.
-        let alt_branch = KEY_BRIDGE_JS
-            .split("if (alt) {")
+        // discarding its session with no confirmation, and Linux reports
+        // Ctrl+AltGr+8 typing `[` as a Ctrl chord on Digit8. No bridge
+        // chord can be legitimately formed with AltGr, so the key lookup
+        // refuses it off macOS and the handler bails before any chord
+        // fires or any default is prevented. The layout vectors in
+        // web/packages/workspace-app run the script itself; this pins the
+        // shape they exercise.
+        assert!(
+            KEY_BRIDGE_JS.contains("if (!MAC && e.getModifierState('AltGraph')) return null;"),
+            "the key lookup must refuse AltGr off macOS",
+        );
+        let on_key = KEY_BRIDGE_JS
+            .split("function onKey(e) {")
             .nth(1)
-            .expect("alt branch exists")
-            .split("// Zoom chords")
-            .next()
-            .expect("alt branch ends before the zoom chords");
-        assert!(
-            alt_branch.contains("if (e.ctrlKey && e.getModifierState('AltGraph')) return;"),
-            "the alt branch must bail on AltGr without preventDefault",
-        );
-        let guard = alt_branch
-            .find("e.getModifierState('AltGraph')")
-            .expect("alt branch carries the AltGraph guard");
-        let first_chord = alt_branch
-            .find("code === 'KeyI'")
-            .expect("alt branch handles the DevTools chord");
-        assert!(
-            guard < first_chord,
-            "the AltGraph bail must precede every alt-branch chord",
-        );
+            .expect("the keydown handler exists");
+        let bail = on_key
+            .find("if (!key) return;")
+            .expect("the handler bails on a refused key");
+        for chord in ["if (alt) {", "invokeIpc(e, ", "fire(e, "] {
+            let first = on_key.find(chord).expect("the handler dispatches chords");
+            assert!(bail < first, "the refused-key bail must precede {chord}");
+        }
     }
 
     #[test]
