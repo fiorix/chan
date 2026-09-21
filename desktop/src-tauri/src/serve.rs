@@ -1685,6 +1685,24 @@ const KEY_BRIDGE_JS: &str = r#"
       console.error('[chan] IPC ' + cmd + ' failed:', err);
     });
   }
+  // True while the keyboard belongs to a terminal. This script shares the
+  // SPA's document, so the focused element answers that with no protocol
+  // between the two: both renderer backends mount inside `.terminal-host`,
+  // a child of the tab root, and the find bar and the Rich Prompt composer
+  // sit in the same subtree, which is exactly the region whose root keydown
+  // handler owns terminal find. `activeElement` is tested for null before
+  // `closest` is called, rather than reached through an optional chain,
+  // because `undefined !== null` reads a document with no focused element
+  // as a focused terminal and would release the chords below everywhere.
+  // The `active` class is required because every terminal tab stays
+  // mounted: a background one keeps its renderer and its DOM and is only
+  // hidden, so an ancestor test alone would hand a stale focus the keyboard.
+  function terminalHasFocus() {
+    const el = document.activeElement;
+    if (!el || typeof el.closest !== 'function') return false;
+    const root = el.closest('.terminal-tab');
+    return root !== null && root.classList.contains('active');
+  }
   // Chord policy: actions reachable through Hybrid Nav (Cmd+.) stay
   // unbound here so the native layer claims as little as possible.
   // The command-launcher chords (Cmd+K, Cmd+Shift+K, and the Ctrl+Alt
@@ -1701,6 +1719,10 @@ const KEY_BRIDGE_JS: &str = r#"
   // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords the
   // retired per-window menubars owned -- gated on !metaKey so macOS,
   // whose menubar still owns them, never double-fires.
+  // A focused terminal takes three of these back, because their Ctrl form
+  // encodes a byte the shell reads and terminal find belongs to the tab
+  // rather than to the page: Find in both modifier forms, and Find Next
+  // and Previous Pane under Ctrl alone.
   function onKey(e) {
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
@@ -1806,15 +1828,38 @@ const KEY_BRIDGE_JS: &str = r#"
             fire(e, 'app.tab.close');
           }
           return;
-        case 'KeyF': fire(e, 'app.find.open');        return;
-        case 'KeyG': fire(e, 'app.find.next');        return;
+        // Find. A focused terminal owns both forms, so the bridge releases
+        // them: Cmd+F reaches the tab root's keydown handler and opens the
+        // terminal's own find bar, and Ctrl+F reaches the shell as 0x06.
+        // Claiming either is what the SPA cannot undo, since app.find.open
+        // resolves against the active FILE tab and is dropped outright while
+        // a terminal is the active one. With focus anywhere else the chord
+        // still opens find for a file editor. Off-mac the terminal's find
+        // chord is Ctrl+Shift+F, which the shift branch never claims.
+        case 'KeyF':
+          if (terminalHasFocus()) return;
+          fire(e, 'app.find.open');
+          return;
+        // Find next. Ctrl+G is 0x07 to a focused shell, so the Ctrl form is
+        // released there; Cmd+G keeps its claim, which is find navigation
+        // for a file editor and is not a chord the shell reads.
+        case 'KeyG':
+          if (!e.metaKey && terminalHasFocus()) return;
+          fire(e, 'app.find.next');
+          return;
         // Cmd+I does NOT open Dashboard; it is reserved for the editor's
         // italic chord (bound in Wysiwyg.svelte's CM6 keymap). Dashboard
         // is reachable via the launcher + the Dashboard hamburger. With
         // no `KeyI` case here, Cmd+I falls through to the focused webview
         // (the editor toggles italic; otherwise inert). Cmd+Opt+I opens
         // DevTools (the alt branch above).
-        case 'BracketLeft':  fire(e, 'app.pane.prev'); return;
+
+        // Previous pane. Ctrl+[ is ESC to a focused shell, so the Ctrl form
+        // is released there; Cmd+[ stays pane navigation on macOS.
+        case 'BracketLeft':
+          if (!e.metaKey && terminalHasFocus()) return;
+          fire(e, 'app.pane.prev');
+          return;
         case 'BracketRight': fire(e, 'app.pane.next'); return;
         // Cmd+/ split right. Split
         // bottom is Cmd+Shift+/ (shift branch below). Cmd+\ is
@@ -2729,6 +2774,83 @@ mod tests {
         assert!(
             guard < first_chord,
             "the AltGraph bail must precede every alt-branch chord",
+        );
+    }
+
+    #[test]
+    fn key_bridge_releases_a_focused_terminals_chords() {
+        // Ctrl+F, Ctrl+G and Ctrl+[ are 0x06, 0x07 and ESC to a shell, and
+        // terminal find belongs to the terminal tab rather than to the page,
+        // so the bridge stops claiming them while a terminal holds the
+        // keyboard. It reads that from the focused element, which is the one
+        // fact the injected script and the SPA already share.
+        assert!(KEY_BRIDGE_JS.contains("function terminalHasFocus()"));
+        // A document with no focused element is not a focused terminal. An
+        // optional chain answers that backwards (`undefined !== null`), so
+        // the null test comes first and the chain form must not appear.
+        assert!(
+            !KEY_BRIDGE_JS.contains("document.activeElement?."),
+            "activeElement must not be reached through an optional chain",
+        );
+        let null_guard = KEY_BRIDGE_JS
+            .find("if (!el || typeof el.closest !== 'function') return false;")
+            .expect("the predicate rejects a document with no focused element");
+        let lookup = KEY_BRIDGE_JS
+            .find("el.closest('.terminal-tab')")
+            .expect("the predicate looks for a terminal tab ancestor");
+        assert!(
+            null_guard < lookup,
+            "the null test must precede the ancestor lookup",
+        );
+        // Every terminal tab stays mounted and a background one keeps its
+        // renderer, so the matched tab must also be the visible one.
+        assert!(KEY_BRIDGE_JS.contains("root.classList.contains('active')"));
+
+        // Find releases both modifier forms: Cmd+F so the tab root's own
+        // handler opens terminal find, Ctrl+F so the byte reaches the shell.
+        let find_open = KEY_BRIDGE_JS
+            .split("case 'KeyF':")
+            .nth(1)
+            .expect("the unshifted branch handles Find")
+            .split("case 'KeyG':")
+            .next()
+            .expect("Find ends at Find Next");
+        assert!(
+            find_open.contains("if (terminalHasFocus()) return;"),
+            "Find must release to a focused terminal in both modifier forms",
+        );
+        assert!(
+            !find_open.contains("e.metaKey"),
+            "Find must not keep its claim on the Cmd form over a terminal",
+        );
+
+        // Find Next and Previous Pane release only the Ctrl form: Cmd+G and
+        // Cmd+[ are not chords a shell reads, and macOS keeps them.
+        for (label, next) in [
+            ("case 'KeyG':", "case 'BracketLeft':"),
+            ("case 'BracketLeft':", "case 'BracketRight':"),
+        ] {
+            let arm = KEY_BRIDGE_JS
+                .split(label)
+                .nth(1)
+                .expect("the unshifted branch handles this chord")
+                .split(next)
+                .next()
+                .expect("the arm ends at the next case");
+            assert!(
+                arm.contains("if (!e.metaKey && terminalHasFocus()) return;"),
+                "{label} must release its Ctrl form to a focused terminal",
+            );
+        }
+
+        // The release set is exactly those three. Zoom, tab jump and Quit
+        // are claimed under Ctrl alone as well, and a focused terminal keeps
+        // none of them: releasing those would cost every Linux and Windows
+        // window its tab switching and zoom whenever a terminal has focus.
+        assert_eq!(
+            KEY_BRIDGE_JS.matches("terminalHasFocus()").count(),
+            4,
+            "one definition and three call sites; a fourth widens the release set",
         );
     }
 
