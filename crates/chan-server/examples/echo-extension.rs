@@ -155,9 +155,10 @@ const ECHO_HTML: &str = r##"<!doctype html>
       const MODIFIERS = new Set(["Shift", "Alt", "Control", "Meta", "AltGraph", "Unidentified"]);
       const mac = /Mac OS X|Macintosh/.test(navigator.userAgent);
 
-      // A keydown that enters text (an IME composition, a dead key, AltGr
-      // off macOS) names no chord. Option on macOS replaces the key with a
-      // glyph, so only then does the physical position decide.
+      // A lone modifier, an Unidentified key, an IME composition, a dead key
+      // outside the Option fallback and AltGr off macOS name no chord. Option
+      // on macOS replaces the key with a glyph or a dead key, so only then
+      // does the physical position decide.
       function shortcutKey(event) {
         const k = event.key;
         if (!k || MODIFIERS.has(k) || event.isComposing || k === "Process") return null;

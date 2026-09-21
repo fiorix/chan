@@ -49,7 +49,7 @@ Keyboard events inside an iframe never bubble to the parent document, which is w
 
 Each advertised chord is a `key` token with `ctrlKey`, `altKey`, `metaKey` and `shiftKey`. The token names what the active keyboard layout types, not where the key sits, so a relay resolves each keydown to a token the way Chan does:
 
-- An IME composition (`isComposing`, or a `key` of `Process`), a dead key, and AltGr character entry off macOS (`getModifierState("AltGraph")`) name no token and are never relayed. On macOS Option is Alt, even where the browser also reports it as AltGraph.
+- A lone modifier (`key` of `Shift`, `Control`, `Alt`, `Meta` or `AltGraph`), an `Unidentified` key, an IME composition (`isComposing`, or a `key` of `Process`), a dead key outside the Option fallback below, and AltGr character entry off macOS (`getModifierState("AltGraph")`) name no token and are never relayed. On macOS Option is Alt, even where the browser also reports it as AltGraph.
 - A top-row digit is its position: `Digit1` is `1` whatever it types, so the digit row still selects tabs on AZERTY.
 - A letter is the letter `key` reports, upper-cased, so Colemak T on `KeyF` is `T` and Caps Lock changes nothing.
 - One of the nine symbols `` ` [ ] , = - . ; / `` is itself. A US shifted glyph names Shift plus its base symbol: `?` is `/` with Shift, and so are `~ { } < + _ > :` for theirs.
