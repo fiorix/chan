@@ -136,26 +136,78 @@ const ECHO_HTML: &str = r##"<!doctype html>
       const output = document.querySelector("#echo-output");
       input.addEventListener("input", () => { output.textContent = input.value; });
 
+      // The keyboard relay. Chan advertises the shell chords it claims as
+      // key tokens: the letter or punctuation symbol the layout types, the
+      // top-row digit by position, or a named key such as Enter, each with
+      // its exact modifiers. This frame resolves a keydown the same way,
+      // relays a match with its raw fields, and Chan resolves and checks it
+      // again before acting on it.
+      const SHIFTED = new Map([
+        ["~", "`"], ["{", "["], ["}", "]"], ["<", ","], ["+", "="],
+        ["_", "-"], [">", "."], [":", ";"], ["?", "/"],
+      ]);
+      const PUNCTUATION = new Set(["`", "[", "]", ",", "=", "-", ".", ";", "/"]);
+      const POSITIONS = new Map([
+        ["Backquote", "`"], ["BracketLeft", "["], ["BracketRight", "]"],
+        ["Comma", ","], ["Equal", "="], ["Minus", "-"], ["Period", "."],
+        ["Semicolon", ";"], ["Slash", "/"],
+      ]);
+      const MODIFIERS = new Set(["Shift", "Alt", "Control", "Meta", "AltGraph", "Unidentified"]);
+      const mac = /Mac OS X|Macintosh/.test(navigator.userAgent);
+
+      // A keydown that enters text (an IME composition, a dead key, AltGr
+      // off macOS) names no chord. Option on macOS replaces the key with a
+      // glyph, so only then does the physical position decide.
+      function shortcutKey(event) {
+        const k = event.key;
+        if (!k || MODIFIERS.has(k) || event.isComposing || k === "Process") return null;
+        if (!mac && event.getModifierState("AltGraph")) return null;
+        const digit = /^Digit([0-9])$/.exec(event.code);
+        if (digit) return { key: digit[1], shifted: false, consumable: false };
+        if (/^[a-z]$/i.test(k)) return { key: k.toUpperCase(), shifted: false, consumable: false };
+        if (PUNCTUATION.has(k)) return { key: k, shifted: false, consumable: true };
+        if (SHIFTED.has(k)) return { key: SHIFTED.get(k), shifted: true, consumable: false };
+        if (event.altKey) {
+          const letter = /^Key([A-Z])$/.exec(event.code);
+          if (letter) return { key: letter[1], shifted: false, consumable: false };
+          if (POSITIONS.has(event.code)) {
+            return { key: POSITIONS.get(event.code), shifted: false, consumable: false };
+          }
+        }
+        if (k === "Dead") return null;
+        return { key: k.length === 1 ? k.toUpperCase() : k, shifted: false, consumable: false };
+      }
+
+      // The exact chord, or the same chord without a Shift that only typed
+      // a punctuation symbol.
+      function claimed(event) {
+        const id = shortcutKey(event);
+        if (!id) return false;
+        const matches = (key, shiftKey) =>
+          key?.key === id.key &&
+          key.ctrlKey === event.ctrlKey &&
+          key.altKey === event.altKey &&
+          key.metaKey === event.metaKey &&
+          key.shiftKey === shiftKey;
+        return hostKeys.some((key) =>
+          matches(key, event.shiftKey || id.shifted) ||
+          (event.shiftKey && id.consumable && matches(key, false))
+        );
+      }
+
       let hostKeys = [];
       window.addEventListener("message", (event) => {
         if (event.source !== window.parent) return;
-        if (event.data?.type !== "chan:extension-host-keymap:v1") return;
+        if (event.data?.type !== "chan:extension-host-keymap:v2") return;
         if (!Array.isArray(event.data.keys)) return;
         hostKeys = event.data.keys;
       });
       window.addEventListener("keydown", (event) => {
-        const claimed = hostKeys.some((key) =>
-          key?.code === event.code &&
-          key.ctrlKey === event.ctrlKey &&
-          key.altKey === event.altKey &&
-          key.metaKey === event.metaKey &&
-          key.shiftKey === event.shiftKey
-        );
-        if (!claimed) return;
+        if (!claimed(event)) return;
         event.preventDefault();
         event.stopPropagation();
         window.parent.postMessage({
-          type: "chan:extension-keydown:v1",
+          type: "chan:extension-keydown:v2",
           key: event.key,
           code: event.code,
           ctrlKey: event.ctrlKey,
@@ -163,6 +215,8 @@ const ECHO_HTML: &str = r##"<!doctype html>
           metaKey: event.metaKey,
           shiftKey: event.shiftKey,
           repeat: event.repeat,
+          isComposing: event.isComposing,
+          altGraph: event.getModifierState("AltGraph"),
         }, "*");
       }, true);
     </script>

@@ -14,9 +14,12 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
+import { api } from "../api/client";
 import type { MockWorkspaceData } from "../demo/data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import "../state/commands/install";
+import { EXTENSION_KEYDOWN_MESSAGE } from "../state/extensionBridge";
+import { refreshExtensions } from "../state/extensions.svelte";
 import { assignOverride, hydrateOverrides } from "../state/keymapOverrides.svelte";
 import { settingsPanel } from "../state/store.svelte";
 import {
@@ -321,5 +324,91 @@ describe("keystrokes that type text are refused", () => {
     press({ key: ",", code: "Comma", ctrlKey: true, isComposing: true });
     await settle();
     expect(settingsPanel.open).toBe(false);
+  });
+});
+
+describe("a chord relayed from a focused extension frame", () => {
+  /// Mount the app with an echo extension in the catalog and its tab active
+  /// in the pane, and return the tab's frame.
+  async function mountWithExtension(): Promise<HTMLIFrameElement> {
+    vi.spyOn(api, "extensions").mockResolvedValue([
+      { id: "echo", name: "Echo", entry_path: `/_chan/extensions/echo/${"a".repeat(64)}/` },
+    ]);
+    await mountApp();
+    await refreshExtensions();
+    const pane = layout.nodes[PANE_ID] as LeafNode;
+    pane.tabs.push({ kind: "extension", id: "echo-tab", title: "Echo", extensionId: "echo" });
+    pane.activeTabId = "echo-tab";
+    await settle();
+    const frame = document.querySelector<HTMLIFrameElement>(".extension-tab iframe");
+    // Without a frame every relay below would be dropped for its source,
+    // and the negative cases would pass for the wrong reason.
+    expect(frame?.contentWindow).toBeTruthy();
+    return frame!;
+  }
+
+  /// Post one relay message as the given window and return how many keydowns
+  /// Chan recreated on its document in response.
+  function relay(source: MessageEventSource | null, fields: Record<string, unknown>): number {
+    let recreated = 0;
+    const count = () => (recreated += 1);
+    document.addEventListener("keydown", count, true);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source,
+        data: {
+          type: EXTENSION_KEYDOWN_MESSAGE,
+          key: "",
+          code: "",
+          ctrlKey: false,
+          altKey: false,
+          metaKey: false,
+          shiftKey: false,
+          repeat: false,
+          isComposing: false,
+          altGraph: false,
+          ...fields,
+        },
+      }),
+    );
+    document.removeEventListener("keydown", count, true);
+    return recreated;
+  }
+
+  function terminalCount(): number {
+    return Object.values(layout.nodes)
+      .filter((node): node is LeafNode => node.kind === "leaf")
+      .flatMap((leaf) => leaf.tabs)
+      .filter((tab) => tab.kind === "terminal").length;
+  }
+
+  const COLEMAK_T = { key: "T", code: "KeyF", ctrlKey: true, shiftKey: true };
+
+  test("Colemak Ctrl+Shift+T opens exactly one terminal", async () => {
+    const frame = await mountWithExtension();
+    expect(relay(frame.contentWindow, COLEMAK_T)).toBe(1);
+    await settle();
+    expect(terminalCount()).toBe(1);
+  });
+
+  test("the G on KeyT is not advertised, so nothing is recreated", async () => {
+    const frame = await mountWithExtension();
+    expect(relay(frame.contentWindow, { ...COLEMAK_T, key: "G", code: "KeyT" })).toBe(0);
+    await settle();
+    expect(terminalCount()).toBe(0);
+  });
+
+  test("a relay from any other window is ignored", async () => {
+    await mountWithExtension();
+    expect(relay(window, COLEMAK_T)).toBe(0);
+    await settle();
+    expect(terminalCount()).toBe(0);
+  });
+
+  test("a v1 relay is ignored", async () => {
+    const frame = await mountWithExtension();
+    expect(relay(frame.contentWindow, { ...COLEMAK_T, type: "chan:extension-keydown:v1" })).toBe(0);
+    await settle();
+    expect(terminalCount()).toBe(0);
   });
 });
