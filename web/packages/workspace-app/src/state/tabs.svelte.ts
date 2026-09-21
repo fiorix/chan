@@ -6852,10 +6852,10 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   broadcastEnabled: "drop",
   broadcastTargetIds: "drop",
   // Server-owned: this window's attach prelude and its `session` frame are
-  // authoritative for all four and replace whatever the tab holds, including
-  // with nothing. Carrying the source window's reading would put a value on
-  // screen that this window never measured, for as long as it takes the first
-  // frame to arrive.
+  // authoritative for these fields and replace whatever the tab holds,
+  // including with nothing. Carrying the source window's reading would put a
+  // value on screen that this window never measured, for as long as it takes
+  // the first frame to arrive.
   queueDepth: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
