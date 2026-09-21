@@ -6806,8 +6806,9 @@ export function crossWindowTerminalSnapshot(t: TerminalTab): SerTab {
 
 /// Every field a `TerminalTab` declares, each marked carry or drop for a move
 /// to another window. The mapped type is the point: a field added to
-/// `TerminalTab` without a line here does not compile, so no field can be lost
-/// from a move by omission, which is how the nine below were lost before.
+/// `TerminalTab` without a line here does not compile, so every field's
+/// disposition is a decision someone wrote down rather than whatever the
+/// payload happened to include.
 ///
 /// The table is the decision; `crossWindowTerminalSnapshot` is the mechanism,
 /// and it carries a field exactly when the session payload does. The two are
@@ -6850,9 +6851,11 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // from the window the terminal just left.
   broadcastEnabled: "drop",
   broadcastTargetIds: "drop",
-  // Server-owned, and re-established by this window's attach prelude or its
-  // `session` frame within a frame of the drop. Carrying them would show the
-  // source window's reading until the first frame replaced it.
+  // Server-owned: this window's attach prelude and its `session` frame are
+  // authoritative for all four and replace whatever the tab holds, including
+  // with nothing. Carrying the source window's reading would put a value on
+  // screen that this window never measured, for as long as it takes the first
+  // frame to arrive.
   queueDepth: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
