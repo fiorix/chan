@@ -4404,7 +4404,7 @@ mod tests {
         let host = Arc::new(WorkspaceHost::new(
             lib,
             Arc::new(ParkOneRootBuilder {
-                park: blocker.path().to_path_buf(),
+                park: chan_workspace::paths::canonicalize_normalized(blocker.path()),
                 entered: Mutex::new(Some(entered_tx)),
             }),
         ));
@@ -4489,7 +4489,11 @@ mod tests {
                 )
                 .await;
         });
-        entered_rx.await.expect("the parked build holds the lock");
+        // A park that never fires must fail this test in seconds, not hang the job.
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap_or_else(|_| panic!("the parked build never entered: park did not match"))
+            .expect("the parked build holds the lock");
 
         // The devserver now attempts the mounted root and cannot get past its
         // first await, so the bound expires.
@@ -4559,8 +4563,8 @@ mod tests {
         let host = Arc::new(WorkspaceHost::new(
             lib,
             Arc::new(HandoffBuilder {
-                hold: ws.path().to_path_buf(),
-                block: blocker.path().to_path_buf(),
+                hold: chan_workspace::paths::canonicalize_normalized(ws.path()),
+                block: chan_workspace::paths::canonicalize_normalized(blocker.path()),
                 entered: Mutex::new(Some(entered_tx)),
                 release: Mutex::new(Some(release_rx)),
             }),
@@ -4610,7 +4614,11 @@ mod tests {
                 )
                 .await;
         });
-        entered_rx.await.expect("the launcher build holds the lock");
+        // A park that never fires must fail this test in seconds, not hang the job.
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap_or_else(|_| panic!("the launcher build never entered: hold did not match"))
+            .expect("the launcher build holds the lock");
 
         // A second root queues on the lock BEFORE the attempt, so that when the
         // launcher's build finishes the lock goes to a build that never ends.
@@ -5203,6 +5211,12 @@ mod tests {
     /// every other. The parked build holds the host's registration lock, which
     /// is what an attempt for an unrelated root then waits on, so a bound can
     /// be made to expire over a live tenant with no sleep.
+    ///
+    /// `park` holds the root in the registry's canonical form. The registry
+    /// stores canonical roots and `Workspace::root()` returns that stored form,
+    /// while a `TempDir` path is spelled as `TMPDIR` spells it: on macOS that is
+    /// `/var/folders/...` and `/var` is a symlink to `/private/var`, so a raw
+    /// temp path never equals the root the builder is handed.
     struct ParkOneRootBuilder {
         park: PathBuf,
         entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -5260,7 +5274,8 @@ mod tests {
     /// Parks two roots differently so a test can hand the host's registration
     /// lock from one waiter to the next in a chosen order: `hold` parks until
     /// the test releases it, announcing itself on `entered` first, and `block`
-    /// parks for good. Every other root builds normally.
+    /// parks for good. Every other root builds normally. `hold` and `block` are
+    /// canonical for the reason given on `ParkOneRootBuilder`.
     struct HandoffBuilder {
         hold: PathBuf,
         block: PathBuf,
