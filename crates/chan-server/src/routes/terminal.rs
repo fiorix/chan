@@ -3157,4 +3157,196 @@ mod tests {
             "mcp_env=false should not affect chan control env vars, got {out:?}"
         );
     }
+
+    type TerminalClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// One terminal socket seen the way the SPA sees it: `rendered` is every
+    /// terminal byte written to the screen, and `cursor` is the resume cursor
+    /// it keeps, the prelude `seq` plus the live bytes after `ready` (replay
+    /// bytes are history already inside `seq`, so they are not counted).
+    struct AttachedClient {
+        socket: TerminalClient,
+        rendered: Vec<u8>,
+        cursor: u64,
+        generation: u64,
+    }
+
+    impl AttachedClient {
+        async fn connect(address: std::net::SocketAddr, query: &str) -> Self {
+            use futures::StreamExt;
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+                "ws://{address}/api/terminal/ws?cols=80&rows=24&{query}"
+            ))
+            .await
+            .expect("connect terminal socket");
+            let mut rendered = Vec::new();
+            let mut session = None;
+            loop {
+                let message = tokio::time::timeout(PROBE_BUDGET, socket.next())
+                    .await
+                    .expect("attach prelude arrives")
+                    .expect("socket stays open through the prelude")
+                    .expect("prelude frame");
+                match message {
+                    tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                        rendered.extend_from_slice(&data);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        let frame: serde_json::Value =
+                            serde_json::from_str(&text).expect("json control frame");
+                        match frame["type"].as_str() {
+                            Some("session") => session = Some(frame),
+                            Some("ready") => break,
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let session = session.expect("a session frame precedes ready");
+            Self {
+                socket,
+                rendered,
+                cursor: session["seq"].as_u64().expect("seq"),
+                generation: session["generation"].as_u64().expect("generation"),
+            }
+        }
+
+        async fn read_live_until(&mut self, needle: &[u8]) {
+            use futures::StreamExt;
+            while !self
+                .rendered
+                .windows(needle.len())
+                .any(|window| window == needle)
+            {
+                let message = tokio::time::timeout(PROBE_BUDGET, self.socket.next())
+                    .await
+                    .expect("live output arrives")
+                    .expect("socket stays open")
+                    .expect("live frame");
+                if let tokio_tungstenite::tungstenite::Message::Binary(data) = message {
+                    self.rendered.extend_from_slice(&data);
+                    self.cursor += data.len() as u64;
+                }
+            }
+        }
+    }
+
+    fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
+    }
+
+    // End to end through `/api/terminal/ws`: output landing while a client
+    // attaches is rendered once, and the cursor that client resumes from after
+    // a disconnect replays exactly the bytes it has not seen, so the screen
+    // across both sockets is the session's output with nothing doubled or
+    // skipped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_after_an_attach_raced_by_output_loses_no_bytes() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let spawned = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn quiet terminal");
+        let id = spawned.id().to_owned();
+        drop(spawned);
+        assert!(state.terminal_sessions.inject_output(&id, b"__BEFORE__\n"));
+        {
+            let state = state.clone();
+            let raced_id = id.clone();
+            crate::terminal_sessions::arm_attach_seam(
+                &id,
+                crate::terminal_sessions::AttachSeam::AttachBeforeRingLock,
+                move || {
+                    state
+                        .terminal_sessions
+                        .inject_output(&raced_id, b"__RACED__\n");
+                },
+            );
+        }
+        let app = axum::Router::new()
+            .route("/api/terminal/ws", axum::routing::get(api_terminal_ws))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind terminal route");
+        let address = listener.local_addr().expect("terminal route address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve terminal route");
+        });
+
+        let mut first = AttachedClient::connect(address, &format!("session={id}&since=0")).await;
+        assert!(state.terminal_sessions.inject_output(&id, b"__LIVE__\n"));
+        first.read_live_until(b"__LIVE__\n").await;
+        let AttachedClient {
+            socket,
+            mut rendered,
+            cursor,
+            generation,
+        } = first;
+        drop(socket);
+
+        assert!(state
+            .terminal_sessions
+            .inject_output(&id, b"__WHILE_AWAY__\n"));
+        let second = AttachedClient::connect(
+            address,
+            &format!("session={id}&since={cursor}&generation={generation}"),
+        )
+        .await;
+        rendered.extend_from_slice(&second.rendered);
+
+        let full = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("session is live");
+        let ring = full.replay.concat();
+        let screen = String::from_utf8_lossy(&rendered);
+        for marker in [
+            &b"__BEFORE__\n"[..],
+            b"__RACED__\n",
+            b"__LIVE__\n",
+            b"__WHILE_AWAY__\n",
+        ] {
+            assert_eq!(
+                occurrences(&rendered, marker),
+                1,
+                "{} must be rendered exactly once across both sockets: {screen:?}",
+                String::from_utf8_lossy(marker).trim_end()
+            );
+        }
+        assert_eq!(
+            second.cursor as usize,
+            rendered.len(),
+            "the resumed cursor counts exactly the bytes rendered: {screen:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&rendered),
+            String::from_utf8_lossy(&ring[..rendered.len().min(ring.len())]),
+            "the screen is the session's output, nothing doubled or skipped"
+        );
+
+        drop(full);
+        drop(second);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
 }
