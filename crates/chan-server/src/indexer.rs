@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chan_workspace::{
-    ProgressCallback, ProgressEvent, ProgressStage, RecoveryAction, RecoveryOutcome,
-    SearchAggression, VcsKind, WatchEvent, WatchKind, Workspace, WorkspaceGeneration,
+    ProgressCallback, ProgressEvent, ProgressStage, RecoveryAction, RecoveryOutcome, RecoveryPass,
+    RecoveryStatus, SearchAggression, VcsKind, WatchEvent, WatchKind, Workspace,
+    WorkspaceGeneration,
 };
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
@@ -365,6 +366,45 @@ const REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
 /// whose action succeeds tries the refresh again.
 const MAX_REPORT_REFRESH_ATTEMPTS: usize = 2;
 
+/// A recovery pass this coordinator claimed and has not finished.
+///
+/// The coordinator task can be aborted at any await while it holds a pass
+/// (dropping an `Indexer` aborts it), and a blocking run it already spawned
+/// keeps going to completion regardless. Dropping an unfinished claim hands the
+/// pass back as a retry, so the workspace's single active slot is released and
+/// the next claimant over the workspace can make progress. The claim travels
+/// into the blocking run and back, so the slot is released only once that run
+/// has ended and two runs of one workspace's recovery never overlap.
+struct ClaimedPass {
+    workspace: Weak<Workspace>,
+    pass: Option<RecoveryPass>,
+}
+
+impl ClaimedPass {
+    fn finish(
+        mut self,
+        workspace: &Workspace,
+        outcome: RecoveryOutcome,
+    ) -> chan_workspace::Result<RecoveryStatus> {
+        let pass = self.pass.take().expect("a claimed pass is finished once");
+        workspace.finish_recovery(pass, outcome)
+    }
+}
+
+impl Drop for ClaimedPass {
+    fn drop(&mut self) {
+        let Some(pass) = self.pass.take() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        if let Err(error) = workspace.finish_recovery(pass, RecoveryOutcome::Retry) {
+            tracing::warn!(?error, "failed to requeue an abandoned recovery pass");
+        }
+    }
+}
+
 enum RecoveryPassResult {
     Complete,
     ActionFailed(chan_workspace::ChanError),
@@ -401,6 +441,8 @@ fn take_coordinator_retry_failure(root: &std::path::Path) -> bool {
 struct CoordinatorRefreshFailure {
     passes: usize,
     refreshes: usize,
+    /// When each pass, counted from 1, began running on the blocking pool.
+    started: Vec<Instant>,
     /// Passes, counted from 1, whose action fails instead of running.
     failed_actions: Vec<usize>,
     /// Request a reconcile once, from the coordinator, after `finish_recovery`
@@ -429,6 +471,7 @@ fn arm_coordinator_refresh_failure(
             CoordinatorRefreshFailure {
                 passes: 0,
                 refreshes: 0,
+                started: Vec::new(),
                 failed_actions: Vec::new(),
                 reconcile_after_owed_completion: false,
                 pass_tx,
@@ -487,6 +530,7 @@ fn record_coordinator_refresh_failure_pass(root: &std::path::Path) -> bool {
         return false;
     };
     probe.passes += 1;
+    probe.started.push(Instant::now());
     let _ = probe.pass_tx.send(probe.passes);
     probe.failed_actions.contains(&probe.passes)
 }
@@ -515,6 +559,69 @@ fn take_coordinator_refresh_failure(root: &std::path::Path) -> (usize, usize) {
         .unwrap_or_default()
 }
 
+/// When each probed pass began, removing nothing: the probe stays armed.
+#[cfg(test)]
+fn coordinator_pass_starts(root: &std::path::Path) -> Vec<Instant> {
+    COORDINATOR_REFRESH_FAILURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(root)
+        .map(|probe| probe.started.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+struct CoordinatorPassPause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static COORDINATOR_PASS_PAUSES: std::sync::OnceLock<
+    Mutex<HashMap<std::path::PathBuf, CoordinatorPassPause>>,
+> = std::sync::OnceLock::new();
+
+/// Hold the next coordinator pass over `root` on the blocking pool, after it
+/// is claimed and before its action runs, until the returned sender releases
+/// it (or is dropped). The receiver hears when the pass reaches the hold.
+#[cfg(test)]
+fn arm_coordinator_pass_pause(
+    root: std::path::PathBuf,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let previous = COORDINATOR_PASS_PAUSES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            root,
+            CoordinatorPassPause {
+                reached: reached_tx,
+                release: release_rx,
+            },
+        );
+    assert!(previous.is_none(), "coordinator pass pause already armed");
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+fn coordinator_pass_pause(root: &std::path::Path) {
+    let pause = COORDINATOR_PASS_PAUSES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(root);
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(());
+        let _ = pause.release.recv();
+    }
+}
+
 /// Coordinator task: drains recovery requests to the newest required
 /// workspace generation and keeps claiming and running passes until that
 /// generation is complete. It executes every action the workspace can park
@@ -533,6 +640,10 @@ fn spawn_coordinator(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut next_start_at = Instant::now();
+        // Set when a pass action fails: the requeued pass is not claimed again
+        // before this, so a persistent failure retries once per cooldown
+        // instead of back to back.
+        let mut retry_at: Option<Instant> = None;
         while let Some(mut required_generation) = rx.recv().await {
             let mut report_refresh_attempts = 0;
             required_generation = drain_required_generation(&mut rx, required_generation);
@@ -557,10 +668,22 @@ fn spawn_coordinator(
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
+                if let Some(at) = retry_at {
+                    let delay = at.saturating_duration_since(Instant::now());
+                    if !delay.is_zero() {
+                        drop(workspace_w);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                }
                 let Some(pass) = workspace_w.begin_recovery() else {
                     drop(workspace_w);
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
+                };
+                let claim = ClaimedPass {
+                    workspace: workspace.clone(),
+                    pass: Some(pass),
                 };
                 let full_rebuild = pass.action == RecoveryAction::FullRebuild;
                 drop(workspace_w);
@@ -593,56 +716,69 @@ fn spawn_coordinator(
                     };
                 }
                 let workspace_weak = Arc::downgrade(&workspace_for_pass);
-                let result = tokio::task::spawn_blocking(move || {
-                    let progress = StatusUpdater {
-                        status: status_w,
-                        forward: progress_w,
-                        workspace: workspace_weak,
-                        embed: Mutex::new(EmbedPhaseState::default()),
-                        bg_embed: bg_embed_w,
-                    };
-                    #[cfg(test)]
-                    if record_coordinator_refresh_failure_pass(workspace_for_pass.root()) {
-                        return RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Io(
-                            "injected coordinator action failure".to_string(),
-                        ));
-                    }
-                    #[cfg(test)]
-                    if take_coordinator_retry_failure(workspace_for_pass.root()) {
-                        return RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Io(
-                            "injected coordinator retry".to_string(),
-                        ));
-                    }
-                    // Every action the workspace can park is executed here.
-                    // Refusing one strands it: the coordinator is the only
-                    // claimant a served workspace has, so a refusal is
-                    // terminal for that pass rather than a deferral.
-                    let result = match pass.action {
-                        RecoveryAction::FullRebuild => workspace_for_pass
-                            .run_full_rebuild_pass(pass, Some(&cancel_w), &progress, aggression)
-                            .map(|_| ()),
-                        RecoveryAction::Reconcile => workspace_for_pass.reconcile().map(|_| ()),
-                        RecoveryAction::Replay => {
-                            workspace_for_pass.replay_pending_writes().map(|_| ())
+                let joined = tokio::task::spawn_blocking(move || {
+                    let run = move || {
+                        let progress = StatusUpdater {
+                            status: status_w,
+                            forward: progress_w,
+                            workspace: workspace_weak,
+                            embed: Mutex::new(EmbedPhaseState::default()),
+                            bg_embed: bg_embed_w,
+                        };
+                        #[cfg(test)]
+                        coordinator_pass_pause(workspace_for_pass.root());
+                        #[cfg(test)]
+                        if record_coordinator_refresh_failure_pass(workspace_for_pass.root()) {
+                            return RecoveryPassResult::ActionFailed(
+                                chan_workspace::ChanError::Io(
+                                    "injected coordinator action failure".to_string(),
+                                ),
+                            );
+                        }
+                        #[cfg(test)]
+                        if take_coordinator_retry_failure(workspace_for_pass.root()) {
+                            return RecoveryPassResult::ActionFailed(
+                                chan_workspace::ChanError::Io(
+                                    "injected coordinator retry".to_string(),
+                                ),
+                            );
+                        }
+                        // Every action the workspace can park is executed here.
+                        // Refusing one strands it: the coordinator is the only
+                        // claimant a served workspace has, so a refusal is
+                        // terminal for that pass rather than a deferral.
+                        let result = match pass.action {
+                            RecoveryAction::FullRebuild => workspace_for_pass
+                                .run_full_rebuild_pass(pass, Some(&cancel_w), &progress, aggression)
+                                .map(|_| ()),
+                            RecoveryAction::Reconcile => workspace_for_pass.reconcile().map(|_| ()),
+                            RecoveryAction::Replay => {
+                                workspace_for_pass.replay_pending_writes().map(|_| ())
+                            }
+                        };
+                        if let Err(error) = result {
+                            return RecoveryPassResult::ActionFailed(error);
+                        }
+                        #[cfg(test)]
+                        if fail_coordinator_report_refresh(workspace_for_pass.root()) {
+                            return RecoveryPassResult::ReportRefreshFailed(
+                                chan_workspace::ChanError::Io(
+                                    "injected persistent report refresh failure".to_string(),
+                                ),
+                            );
+                        }
+                        match workspace_for_pass.refresh_persisted_report_if_owed() {
+                            Ok(()) => RecoveryPassResult::Complete,
+                            Err(error) => RecoveryPassResult::ReportRefreshFailed(error),
                         }
                     };
-                    if let Err(error) = result {
-                        return RecoveryPassResult::ActionFailed(error);
-                    }
-                    #[cfg(test)]
-                    if fail_coordinator_report_refresh(workspace_for_pass.root()) {
-                        return RecoveryPassResult::ReportRefreshFailed(
-                            chan_workspace::ChanError::Io(
-                                "injected persistent report refresh failure".to_string(),
-                            ),
-                        );
-                    }
-                    match workspace_for_pass.refresh_persisted_report_if_owed() {
-                        Ok(()) => RecoveryPassResult::Complete,
-                        Err(error) => RecoveryPassResult::ReportRefreshFailed(error),
-                    }
+                    (run(), claim)
                 })
                 .await;
+                let (result, claim) = match joined {
+                    Ok((result, claim)) => (Ok(result), Some(claim)),
+                    Err(error) => (Err(error), None),
+                };
 
                 *shared.bg_embed.lock().unwrap() = None;
                 let outcome = match &result {
@@ -663,7 +799,13 @@ fn spawn_coordinator(
                 let Some(workspace_w) = workspace.upgrade() else {
                     return;
                 };
-                let recovery = match workspace_w.finish_recovery(pass, outcome) {
+                let finished = match claim {
+                    Some(claim) => claim.finish(&workspace_w, outcome),
+                    // The run panicked or never started, and dropping its
+                    // claim on the way out has already requeued the pass.
+                    None => Ok(workspace_w.recovery_status()),
+                };
+                let recovery = match finished {
                     Ok(recovery) => recovery,
                     Err(error) => {
                         *shared.status.lock().unwrap() = IndexStatus::Error {
@@ -675,6 +817,15 @@ fn spawn_coordinator(
                 if full_rebuild {
                     next_start_at = Instant::now() + cooldown;
                 }
+                retry_at = match &result {
+                    Ok(RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Cancelled)) => {
+                        None
+                    }
+                    Ok(RecoveryPassResult::ActionFailed(_)) | Err(_) => {
+                        Some(Instant::now() + cooldown)
+                    }
+                    Ok(_) => None,
+                };
                 #[cfg(test)]
                 if outcome == RecoveryOutcome::CompleteWithReportRefreshOwed
                     && take_reconcile_after_owed_completion(workspace_w.root())
@@ -2935,5 +3086,164 @@ mod tests {
             drain_required_generation(&mut rx, generation_1),
             generation_3
         );
+    }
+
+    // Dropping an `Indexer` aborts its coordinator while the pass it claimed
+    // is still running on the blocking pool. The pass must be handed back when
+    // that run ends, or the workspace's single active slot stays claimed and
+    // every later coordinator over the workspace waits on it forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_indexer_releases_the_pass_it_claimed() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        let (reached, release) = arm_coordinator_pass_pause(workspace.root().to_path_buf());
+        let (_first_events, events_rx) = broadcast::channel(64);
+        let first = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        let claimed = workspace.request_recovery(RecoveryAction::Reconcile);
+        tokio::task::spawn_blocking(move || reached.recv_timeout(CONVERGENCE_BUDGET))
+            .await
+            .unwrap()
+            .expect("the first coordinator never claimed the pass");
+        assert_eq!(
+            workspace
+                .recovery_status()
+                .active
+                .map(|pass| pass.generation),
+            Some(claimed),
+            "the first coordinator holds the pass mid-run"
+        );
+
+        drop(first);
+        let (_second_events, events_rx) = broadcast::channel(64);
+        let second = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        release.send(()).unwrap();
+        let later = workspace.request_recovery(RecoveryAction::Reconcile);
+
+        assert!(
+            await_ready(&workspace, later).await,
+            "the later coordinator never claimed and completed a pass; recovery={:?}",
+            workspace.recovery_status()
+        );
+        assert!(workspace.recovery_status().completed_generation >= claimed);
+        drop(second);
+    }
+
+    // A pass whose action keeps failing is requeued each time. The retries
+    // are spaced by the coordinator's cooldown rather than claimed back to
+    // back, and meanwhile the workspace publishes an `Error` index status and
+    // a `recovering` readiness.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_persistently_failing_reconcile_is_spaced_by_the_cooldown() {
+        let cooldown = Duration::from_millis(150);
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        let root = workspace.root().to_path_buf();
+        let (pass_tx, mut pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        for pass in 1..=4 {
+            fail_coordinator_action_on_pass(&root, pass);
+        }
+        let status = idle_status();
+        let shared = test_shared(status.clone());
+        let cancel = shared.cancel.clone();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            cooldown,
+        );
+        let required = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        tx.send(required).unwrap();
+
+        let mut published = None;
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let pass = pass_rx.recv().await.expect("probe stays armed");
+                if pass == 2 {
+                    published = Some((status.lock().unwrap().clone(), workspace.readiness()));
+                }
+                if pass >= 4 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the failing reconcile was not retried four times");
+        cancel.store(true, Ordering::Relaxed);
+        let starts = coordinator_pass_starts(&root);
+        take_coordinator_refresh_failure(&root);
+        drop(tx);
+        coordinator.await.unwrap();
+
+        let gaps: Vec<Duration> = starts[..4]
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]))
+            .collect();
+        assert!(
+            gaps.iter().all(|gap| *gap >= cooldown),
+            "failed passes were retried inside the {cooldown:?} cooldown: gaps {gaps:?}"
+        );
+        let (index_status, readiness) = published.expect("pass 2 was observed");
+        assert!(
+            matches!(index_status, IndexStatus::Error { .. }),
+            "a failing pass publishes an error status: {index_status:?}"
+        );
+        assert!(
+            !readiness.is_ready(),
+            "a failing pass keeps the workspace recovering: {readiness:?}"
+        );
+    }
+
+    // The spacing is for failed actions only. A reconcile does not ride the
+    // rebuild cooldown, and a failed report refresh keeps its bounded retry
+    // with no wait, so with an hour-long cooldown the owed open pass still
+    // settles after exactly two passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_retries_and_reconciles_are_not_held_by_the_cooldown() {
+        let (_cfg, _dir, _lib, workspace) = workspace_with_an_owed_open_pass();
+        let root = workspace.root().to_path_buf();
+        let required = workspace.recovery_status().generation;
+        let status = idle_status();
+        let shared = test_shared(status.clone());
+        let cancel = shared.cancel.clone();
+        let (pass_tx, mut pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared,
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_secs(3600),
+        );
+        tx.send(required).unwrap();
+
+        let exceeded = settle_or_exceed(&workspace, &status, &mut pass_rx, 2).await;
+        if exceeded.is_some() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let counts = take_coordinator_refresh_failure(&root);
+        assert!(
+            exceeded.is_none(),
+            "the refresh retry bound changed: (passes, refreshes) = {counts:?}"
+        );
+        assert_eq!(counts, (2, 2), "(passes, refreshes)");
+
+        drop(tx);
+        coordinator.await.unwrap();
     }
 }
