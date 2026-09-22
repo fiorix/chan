@@ -17,6 +17,7 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
+use chan_workspace::lock::ForeignHolder;
 use chan_workspace::{ChanError, Library, Workspace};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -73,9 +74,22 @@ pub enum WorkspaceStatus {
     Starting,
     /// Mounted and serving. The launcher shows ON, solid.
     Running,
-    /// Held by another live or indeterminate Chan writer. The launcher shows a
-    /// disabled locked control and leaves `on` false for this process.
+    /// Held by another Chan writer: the OS reported the writer lock contended
+    /// by a holder that is not this process and is not provably dead. The
+    /// holder's identity is not always known, because contention is observed
+    /// even when its record cannot be read. The launcher shows a disabled
+    /// locked control and leaves `on` false for this process.
     Locked,
+    /// Whether another Chan writer holds this workspace could not be
+    /// determined: the writer lock file could not be opened, as under file
+    /// descriptor exhaustion, or the lock could not be tested for a reason
+    /// other than contention. [`LauncherWorkspace::error`] carries the reason.
+    ///
+    /// Distinct from `Locked`, which asserts another process holds the lock,
+    /// and from `Stopped`, which asserts none does; the probe established
+    /// neither. A consumer must treat it as no more actionable than `Locked`
+    /// and must not present it as another process holding the workspace.
+    Unknown,
     /// Unmount requested / in flight. The launcher shows a spinner and locks
     /// power/remove controls until the close settles.
     Closing,
@@ -3179,9 +3193,11 @@ impl WorkspaceHost {
 
     /// The launcher row's live `(status, error)` for a workspace root. `running`
     /// when mounted unless a teardown state is active; else the transient
-    /// overlay's `starting`/`error`; else a foreign writer lock reports
-    /// `locked`; else `stopped`. The launcher drives its spinner and
-    /// toggle-disable off this, not an optimistic timer.
+    /// overlay's `starting`/`error`; else what the writer lock probe
+    /// established: `locked` for a foreign holder, `unknown` with the reason
+    /// when the probe could establish nothing, `stopped` when nothing holds
+    /// it. The launcher drives its spinner and toggle-disable off this, not an
+    /// optimistic timer.
     pub fn workspace_status(&self, root: &Path) -> (WorkspaceStatus, Option<String>) {
         let key = canonical_key(root);
         let state = self
@@ -3214,15 +3230,22 @@ impl WorkspaceHost {
             Some(MountState::Closing) | Some(MountState::Removing) => {
                 (WorkspaceStatus::Stopped, None)
             }
-            None if self.root_has_foreign_lock(root) => (WorkspaceStatus::Locked, None),
-            None => (WorkspaceStatus::Stopped, None),
+            None => match self.foreign_holder(root) {
+                ForeignHolder::Present => (WorkspaceStatus::Locked, None),
+                ForeignHolder::Unknown { reason } => (WorkspaceStatus::Unknown, Some(reason)),
+                ForeignHolder::Absent => (WorkspaceStatus::Stopped, None),
+            },
         }
     }
 
-    fn root_has_foreign_lock(&self, root: &Path) -> bool {
-        self.library.workspace_paths_for(root).is_some_and(|paths| {
-            chan_workspace::lock::is_locked_by_foreign_holder(&paths.lock, root)
-        })
+    /// What the writer lock says about a holder other than this process. A
+    /// root with no sidecar path has no lock to probe, which is the same as
+    /// nothing holding it.
+    fn foreign_holder(&self, root: &Path) -> ForeignHolder {
+        match self.library.workspace_paths_for(root) {
+            Some(paths) => chan_workspace::lock::probe_foreign_holder(&paths.lock, root),
+            None => ForeignHolder::Absent,
+        }
     }
 
     /// Drop a workspace root's transient lifecycle overlay and fire the watch
@@ -4388,6 +4411,56 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<WorkspaceStatus>(r#""locked""#).expect("deserialize"),
             WorkspaceStatus::Locked
+        );
+    }
+
+    #[test]
+    fn workspace_status_unknown_wire_tag_is_pinned() {
+        assert_eq!(
+            serde_json::to_string(&WorkspaceStatus::Unknown).expect("serialize"),
+            r#""unknown""#
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkspaceStatus>(r#""unknown""#).expect("deserialize"),
+            WorkspaceStatus::Unknown
+        );
+    }
+
+    /// A writer lock the probe cannot open is reported as `unknown` with the
+    /// probe's reason, never as `locked`: an unopenable lock file, as under
+    /// file descriptor exhaustion, establishes nothing about another holder.
+    /// The same root then reports `locked` once a real foreign holder takes
+    /// the lock, so the two states are pinned apart on one fixture and a
+    /// probe that answered `unknown` for everything would fail here. A
+    /// directory at the lock path makes the open fail deterministically,
+    /// including for root, which ignores permission bits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_workspace_status_reports_an_unprobeable_lock_as_unknown_not_locked() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
+        let paths = lib
+            .workspace_paths_for(root.path())
+            .expect("workspace paths");
+        let blocker = paths.lock.join("writer.lock");
+        std::fs::create_dir_all(&blocker).expect("block the lock file with a directory");
+
+        let (status, reason) = host.workspace_status(root.path());
+        assert_eq!(status, WorkspaceStatus::Unknown);
+        let reason = reason.expect("an unknown row carries the probe's reason");
+        assert!(
+            reason.contains("writer.lock"),
+            "the reason must name the lock file it could not open: {reason}"
+        );
+
+        std::fs::remove_dir(&blocker).expect("unblock the lock file");
+        let _foreign = hold_foreign_lock(&lib, root.path());
+        assert_eq!(
+            host.workspace_status(root.path()),
+            (WorkspaceStatus::Locked, None)
         );
     }
 

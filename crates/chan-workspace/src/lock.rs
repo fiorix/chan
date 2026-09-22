@@ -57,8 +57,8 @@ impl Drop for AdmissionLock {
 /// `chan ps` and `chan close` cannot identify a holder, [`WorkspaceLock`]'s
 /// steal path can never confirm a dead one, a second acquire in this process
 /// reports the cross-process `WorkspaceLocked` instead of
-/// `WorkspaceAlreadyOpen`, and [`is_locked_by_foreign_holder`] calls chan's own
-/// lock foreign. Unix flock never blocked reads, which is why the whole class
+/// `WorkspaceAlreadyOpen`, and [`probe_foreign_holder`] calls chan's own lock
+/// foreign. Unix flock never blocked reads, which is why the whole class
 /// only ever surfaced here. A plain sidecar carries no lock and reads on both
 /// platforms.
 ///
@@ -333,26 +333,72 @@ pub fn is_free(lock_dir: &Path) -> bool {
     }
 }
 
-/// Probe whether `lock_dir` is held by a live or indeterminate foreign writer.
+/// What a read-only probe of a workspace's writer lock could establish about a
+/// holder other than this process.
 ///
-/// This is a read-side status check for launchers and menus, not an acquire
-/// path. It mirrors the conservative side of [`WorkspaceLock::acquire`]: a free
-/// lock, this process's own holder, or a provably-dead holder stays actionable;
-/// a live, unknown, torn, or path-mismatched holder reports foreign-locked.
-pub fn is_locked_by_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> bool {
+/// A `bool` cannot carry the third answer, and the third answer is the one
+/// that matters under descriptor pressure: a lock file this process could not
+/// open says nothing about who, if anyone, holds it, and reporting that as held
+/// names another process that was never observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignHolder {
+    /// Nothing stands in the way: the lock is free, held by this process, or
+    /// held by a dead holder whose lock-body record makes a steal actionable.
+    Absent,
+    /// The OS reported the lock contended by a holder that is not this process
+    /// and is not provably dead. Contention is the observation, so this holds
+    /// even when the holder's record cannot be read; in that case it
+    /// establishes that the lock is held, not who holds it.
+    Present,
+    /// Nothing about a holder could be established: the lock file could not be
+    /// opened, or the lock could not be tested for a reason other than
+    /// contention. `reason` is a diagnostic, not evidence of a holder.
+    Unknown { reason: String },
+}
+
+/// Probe what `lock_dir`'s writer lock says about a holder other than this
+/// process.
+///
+/// A read-side status check for the launcher and the CLI, not an acquire path:
+/// it changes nothing about acquiring, stealing or [`is_free`]. It mirrors the
+/// conservative side of [`WorkspaceLock::acquire`]: a free lock, this process's
+/// own holder, or a holder a steal would displace is [`ForeignHolder::Absent`],
+/// and a live, torn or path-mismatched holder is [`ForeignHolder::Present`].
+/// What it will not do is turn a probe that established nothing into a holder;
+/// that is [`ForeignHolder::Unknown`].
+pub fn probe_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> ForeignHolder {
     let path = lock_dir.join(LOCK_FILE);
-    let Ok(file) = open_lock_file(&path) else {
-        return true;
-    };
-    match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => false,
+    match open_lock_file(&path) {
+        // The file stays open until classification returns, so a lock this
+        // probe did take is held only for the probe and released on drop.
+        Ok(file) => {
+            classify_lock_attempt(FileExt::try_lock_exclusive(&file), lock_dir, workspace_root)
+        }
+        Err(e) => ForeignHolder::Unknown {
+            reason: format!("could not open {}: {e}", path.display()),
+        },
+    }
+}
+
+/// Classify one attempt to take the writer lock. Split from the open so that
+/// every outcome, including a lock error that is not contention, can be
+/// exercised without contriving the operating-system condition behind it.
+fn classify_lock_attempt(
+    attempt: std::io::Result<()>,
+    lock_dir: &Path,
+    workspace_root: &Path,
+) -> ForeignHolder {
+    match attempt {
+        Ok(()) => ForeignHolder::Absent,
         Err(e) if is_contended(&e) => {
+            // Contention is the observation. A record that cannot be read
+            // leaves the holder's identity unknown, not whether one exists.
             let Some((record, source)) = read_record_for(lock_dir) else {
-                return true;
+                return ForeignHolder::Present;
             };
             let our_path = canonical_string(workspace_root);
             if record.path == our_path && record.pid == std::process::id() {
-                return false;
+                return ForeignHolder::Absent;
             }
             // "Actionable" here means an acquire would succeed by stealing,
             // so this mirrors the steal rule: only a body-sourced record
@@ -363,11 +409,13 @@ pub fn is_locked_by_foreign_holder(lock_dir: &Path, workspace_root: &Path) -> bo
                 && source == RecordSource::LockBody
                 && process_alive(record.pid) == ProcessLiveness::Dead
             {
-                return false;
+                return ForeignHolder::Absent;
             }
-            true
+            ForeignHolder::Present
         }
-        Err(_) => true,
+        Err(e) => ForeignHolder::Unknown {
+            reason: format!("could not test the lock in {}: {e}", lock_dir.display()),
+        },
     }
 }
 
@@ -719,12 +767,74 @@ mod tests {
     #[test]
     fn foreign_lock_probe_treats_free_and_own_locks_as_actionable() {
         let tmp = TempDir::new().unwrap();
-        assert!(!is_locked_by_foreign_holder(tmp.path(), &root(&tmp)));
+        let probe = || probe_foreign_holder(tmp.path(), &root(&tmp));
+        assert_eq!(probe(), ForeignHolder::Absent);
 
         let held = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
-        assert!(!is_locked_by_foreign_holder(tmp.path(), &root(&tmp)));
+        assert_eq!(probe(), ForeignHolder::Absent);
         drop(held);
-        assert!(!is_locked_by_foreign_holder(tmp.path(), &root(&tmp)));
+        assert_eq!(probe(), ForeignHolder::Absent);
+    }
+
+    /// A lock file the probe cannot open establishes nothing about a holder,
+    /// which is the descriptor-pressure case: reporting it as held would name
+    /// another process that was never observed. A directory at the lock path
+    /// makes the open fail deterministically, including for root, which
+    /// ignores permission bits. Unix-only because the fixture relies on the directory-open
+    /// error semantics of Unix filesystems.
+    #[cfg(unix)]
+    #[test]
+    fn foreign_lock_probe_reports_an_unopenable_lock_as_unknown() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(LOCK_FILE)).unwrap();
+        match probe_foreign_holder(tmp.path(), &root(&tmp)) {
+            ForeignHolder::Unknown { reason } => assert!(
+                reason.contains(LOCK_FILE),
+                "the reason must name the lock file it could not open: {reason}"
+            ),
+            other => panic!("an unopenable lock file must be Unknown, got {other:?}"),
+        }
+    }
+
+    /// Contention is itself an observation, so a held lock whose holder record
+    /// cannot be read is still held: it establishes that someone holds the
+    /// lock, not who. Both copies of the record are made unreadable, because
+    /// `read_record_for` falls back from the lock body to the sidecar, and the
+    /// sidecar here names this very process, which would read as our own
+    /// holder and prove nothing.
+    #[cfg(unix)]
+    #[test]
+    fn foreign_lock_probe_reports_contention_with_an_unreadable_record_as_present() {
+        let tmp = TempDir::new().unwrap();
+        let _held = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
+        fs::write(tmp.path().join(LOCK_FILE), b"not a record").unwrap();
+        fs::write(tmp.path().join(RECORD_FILE), b"not a record").unwrap();
+        assert!(
+            read_record_for(tmp.path()).is_none(),
+            "fixture: both records must be unreadable"
+        );
+        assert_eq!(
+            probe_foreign_holder(tmp.path(), &root(&tmp)),
+            ForeignHolder::Present
+        );
+    }
+
+    /// A lock error that is not contention establishes nothing about a holder.
+    /// Driven through the classifier with a constructed error, because no
+    /// portable filesystem condition produces one on demand; the classifier
+    /// is the production code that decides, not a model of it.
+    #[test]
+    fn foreign_lock_probe_reports_a_non_contention_lock_error_as_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !is_contended(&error),
+            "fixture: the error must not be contention"
+        );
+        match classify_lock_attempt(Err(error), tmp.path(), &root(&tmp)) {
+            ForeignHolder::Unknown { .. } => {}
+            other => panic!("a non-contention lock error must be Unknown, got {other:?}"),
+        }
     }
 
     // `is_contended` maps the Windows LockFileEx error
@@ -929,7 +1039,10 @@ mod tests {
             serde_json::to_vec(&foreign).unwrap(),
         )
         .unwrap();
-        assert!(is_locked_by_foreign_holder(tmp.path(), &root(&tmp)));
+        assert_eq!(
+            probe_foreign_holder(tmp.path(), &root(&tmp)),
+            ForeignHolder::Present
+        );
     }
 
     #[test]

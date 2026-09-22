@@ -7655,8 +7655,20 @@ async fn execute_workspace_search_with_dirs(
                 code: "workspace_open_failed",
                 message: "registered workspace has no sidecar path".into(),
             })?;
-    if chan_workspace::lock::is_locked_by_foreign_holder(&paths.lock, &known.root_path) {
-        return execute_live_workspace_search(known, &paths.lock, request, socket_dirs).await;
+    // A holder the probe observed is searched through its live server. When
+    // the probe established nothing, neither a live server nor a free local
+    // workspace is known, so refuse rather than query one or open the other.
+    match chan_workspace::lock::probe_foreign_holder(&paths.lock, &known.root_path) {
+        chan_workspace::lock::ForeignHolder::Present => {
+            return execute_live_workspace_search(known, &paths.lock, request, socket_dirs).await;
+        }
+        chan_workspace::lock::ForeignHolder::Unknown { reason } => {
+            return Err(WorkspaceExecutionFailure {
+                code: "workspace_lock_unknown",
+                message: format!("cannot determine workspace lock status: {reason}"),
+            });
+        }
+        chan_workspace::lock::ForeignHolder::Absent => {}
     }
     match lib.open_workspace(&known.root_path) {
         Ok(workspace) => {
@@ -8121,10 +8133,21 @@ async fn workspace_status_for(lib: &Library, root: &Path) -> Result<StatusOutput
                 .is_some_and(|key| key == workspace.metadata_key.as_str())
         })
         .context("registered workspace disappeared during status lookup")?;
-    if paths.lock.is_dir()
-        && chan_workspace::lock::is_locked_by_foreign_holder(&paths.lock, &known.root_path)
-    {
-        return Ok(served_workspace_status(&known, &paths.lock).await);
+    // A holder the probe observed is reported as served. When the probe
+    // established nothing, reporting `served` would claim a holder nobody saw,
+    // and opening locally could race one, so refuse instead.
+    if paths.lock.is_dir() {
+        match chan_workspace::lock::probe_foreign_holder(&paths.lock, &known.root_path) {
+            chan_workspace::lock::ForeignHolder::Present => {
+                return Ok(served_workspace_status(&known, &paths.lock).await);
+            }
+            chan_workspace::lock::ForeignHolder::Unknown { reason } => {
+                return Err(anyhow::anyhow!(
+                    "cannot determine workspace lock status: {reason}"
+                ));
+            }
+            chan_workspace::lock::ForeignHolder::Absent => {}
+        }
     }
     match lib.open_workspace(root) {
         Ok(workspace) => workspace_status_output(&workspace, Some(known.metadata_key)),
@@ -10535,6 +10558,62 @@ mod tests {
         assert_eq!(selected, Some(right));
         wrong_stub.abort();
         right_stub.abort();
+    }
+
+    /// A writer lock the probe could not open refuses the search with an
+    /// explicit inability to determine the lock status, rather than querying a
+    /// live server nobody observed or opening a workspace a holder might own.
+    /// A directory at the lock path makes the open fail deterministically.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_search_refuses_when_the_lock_status_is_unknown() {
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = Library::open_at(config.path().join("config.toml")).unwrap();
+        let known = lib.register_workspace(root.path()).unwrap();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        std::fs::create_dir_all(paths.lock.join("writer.lock")).unwrap();
+
+        let request = WorkspaceSearchRequest::default();
+        match execute_workspace_search_with_dirs(&lib, &known, &request, None).await {
+            Err(failure) => {
+                assert_eq!(failure.code, "workspace_lock_unknown");
+                assert!(
+                    failure
+                        .message
+                        .contains("cannot determine workspace lock status"),
+                    "{}",
+                    failure.message
+                );
+            }
+            Ok(_) => panic!("an unknown lock status must refuse the search"),
+        }
+    }
+
+    /// A writer lock the probe could not open refuses `chan workspace status`
+    /// instead of reporting the workspace as served, which would claim a
+    /// holder nobody observed. Pinned apart from the search path because the
+    /// two callers reach different fallbacks when the probe does establish
+    /// something.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_status_refuses_when_the_lock_status_is_unknown() {
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = Library::open_at(config.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        std::fs::create_dir_all(paths.lock.join("writer.lock")).unwrap();
+
+        match workspace_status_for(&lib, root.path()).await {
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("cannot determine workspace lock status"),
+                "{error}"
+            ),
+            Ok(_) => panic!("an unknown lock status must not report the workspace as served"),
+        }
     }
 
     #[cfg(unix)]
