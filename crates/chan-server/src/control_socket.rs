@@ -1568,11 +1568,19 @@ where
                     message: "terminal registry unavailable".into(),
                 };
             };
-            into_response(term_close(
-                registry,
-                tab_name.as_deref(),
-                tab_group.as_deref(),
-            ))
+            // The close waits for each child to be reaped, which is blocking
+            // work bounded by `CLOSE_EXIT_BOUND`.
+            let registry = Arc::clone(registry);
+            match tokio::task::spawn_blocking(move || {
+                term_close(&registry, tab_name.as_deref(), tab_group.as_deref())
+            })
+            .await
+            {
+                Ok(result) => into_response(result),
+                Err(error) => ControlResponse::Error {
+                    message: format!("terminal close failed: {error}"),
+                },
+            }
         }
         ControlRequest::TermScrollback { tab_name } => {
             let Some(registry) = terminal_registry else {
@@ -4562,6 +4570,10 @@ fn term_restart(
 /// `cs terminal close`. The explicit teardown partner to [`term_restart`]:
 /// kills the PTY and removes the registry entry so the tab name frees,
 /// instead of killing the pid out of band and leaving the entry to linger.
+///
+/// Success means each closed session's child process was reaped. A child
+/// still running after the bound is an error naming its pid, so the caller
+/// can end it rather than trust an acknowledgement that only queued the kill.
 fn term_close(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
@@ -4570,11 +4582,36 @@ fn term_close(
     if tab_name.is_none() && tab_group.is_none() {
         return Err("term close needs a tab name and/or group selector".into());
     }
-    let closed = registry.close_matching(tab_name, tab_group);
-    if closed == 0 {
+    let closed = registry.close_matching_and_wait(
+        tab_name,
+        tab_group,
+        crate::terminal_sessions::CLOSE_EXIT_BOUND,
+    );
+    if closed.is_empty() {
         return Err("no live terminal session matched".into());
     }
-    Ok(format!("closed {closed} terminal session(s)"))
+    let running: Vec<String> = closed
+        .iter()
+        .filter(|session| !session.ended)
+        .map(|session| {
+            let name = session.name.as_deref().unwrap_or("<unnamed>");
+            match session.pid {
+                Some(pid) => format!("{name} (pid {pid})"),
+                None => format!("{name} (pid unknown)"),
+            }
+        })
+        .collect();
+    if running.is_empty() {
+        return Ok(format!("closed {} terminal session(s)", closed.len()));
+    }
+    Err(format!(
+        "closed {} terminal session(s), but {} process(es) still running after {}s: {}; \
+         end each with `kill -KILL <pid>`",
+        closed.len(),
+        running.len(),
+        crate::terminal_sessions::CLOSE_EXIT_BOUND.as_secs(),
+        running.join(", ")
+    ))
 }
 
 /// Category 2: dump the full replay ring of the single live session whose
@@ -9883,5 +9920,180 @@ position = { row = 0, col = 1 }
         }
         task.await.expect("handler");
         assert!(fake.tunnels.is_empty());
+    }
+
+    /// Serve the terminal WebSocket route over `state` on a loopback port.
+    #[cfg(unix)]
+    async fn serve_terminal_route(state: Arc<crate::state::AppState>) -> std::net::SocketAddr {
+        let app = axum::Router::new()
+            .route(
+                "/api/terminal/ws",
+                axum::routing::get(crate::routes::api_terminal_ws),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind terminal route");
+        let address = listener.local_addr().expect("terminal route address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve terminal route");
+        });
+        address
+    }
+
+    /// Dial `/api/terminal/ws?<query>` the way the workspace app does and
+    /// return the first control frame the server answers with.
+    #[cfg(unix)]
+    async fn first_terminal_frame(address: std::net::SocketAddr, query: &str) -> Value {
+        use futures::StreamExt;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/terminal/ws?cols=80&rows=24&{query}"
+        ))
+        .await
+        .expect("connect terminal socket");
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(30), socket.next())
+                .await
+                .expect("a terminal frame arrives")
+                .expect("the socket answers before closing")
+                .expect("terminal frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                return serde_json::from_str(&text).expect("json control frame");
+            }
+        }
+    }
+
+    /// A registry holding one quiet named terminal in `window-close`, as a
+    /// window that saved it in its layout would reattach it, and a control
+    /// context driving that registry.
+    #[cfg(unix)]
+    fn closeable_terminal(name: &str) -> (Arc<crate::state::AppState>, ControlSocketCtx, String) {
+        let state = crate::state::test_support::make_test_state(false);
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::TerminalOnly);
+        assert!(ctx
+            .terminal_registry
+            .set(state.terminal_sessions.clone())
+            .is_ok());
+        let spawned = state
+            .terminal_sessions
+            .create(crate::terminal_sessions::CreateOptions {
+                size: portable_pty::PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some(name.to_string()),
+                tab_group: None,
+                window_id: Some("window-close".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn the terminal");
+        let id = spawned.id().to_owned();
+        (state, ctx, id)
+    }
+
+    #[cfg(unix)]
+    async fn cs_terminal_close(ctx: &ControlSocketCtx, name: &str) -> ControlResponse {
+        handle_request(
+            ControlRequest::TermClose {
+                tab_name: Some(name.to_string()),
+                tab_group: None,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    fn live_names(registry: &TerminalRegistry) -> Vec<String> {
+        registry
+            .session_summaries()
+            .into_iter()
+            .filter_map(|summary| summary.tab_name)
+            .collect()
+    }
+
+    // The window holding the tab is not attached when `cs terminal close`
+    // runs (it is reconnecting, reloading, or restoring its saved layout), so
+    // the `closed` event reaches no socket. When it reattaches with the tab's
+    // session id it must be told the tab was closed, not handed a fresh shell
+    // under the same name: that fresh shell keeps the tab on its pane side and
+    // puts the name back in the registry after the close reported success.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reattach_after_cs_terminal_close_is_told_the_tab_closed() {
+        let (state, ctx, id) = closeable_terminal("@@Closed");
+        match cs_terminal_close(&ctx, "@@Closed").await {
+            ControlResponse::Ok { message } => {
+                assert_eq!(message, "closed 1 terminal session(s)")
+            }
+            other => panic!("close failed: {other:?}"),
+        }
+        let address = serve_terminal_route(state.clone()).await;
+
+        let frame = first_terminal_frame(
+            address,
+            &format!("session={id}&since=0&tab_name=%40%40Closed&window_id=window-close"),
+        )
+        .await;
+        let names = live_names(&state.terminal_sessions);
+        state
+            .terminal_sessions
+            .close_matching(None, Some("default"));
+        assert_eq!(
+            (frame["type"].as_str(), frame["reason"].as_str()),
+            (Some("closed"), Some("explicit")),
+            "the reattach was not told the tab closed: {frame}"
+        );
+        assert!(
+            !names.iter().any(|name| name.starts_with("@@Closed")),
+            "the closed name came back in the registry: {names:?}"
+        );
+    }
+
+    // After a close that reported success, a `cs terminal new` for the same
+    // seat (the window opens a tab and dials a fresh spawn under the name)
+    // creates that terminal under exactly that name, even after the window
+    // tried to reattach the closed tab in between.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_new_after_cs_terminal_close_gets_the_seat_back() {
+        let (state, ctx, id) = closeable_terminal("@@Seat");
+        assert!(matches!(
+            cs_terminal_close(&ctx, "@@Seat").await,
+            ControlResponse::Ok { .. }
+        ));
+        let address = serve_terminal_route(state.clone()).await;
+        let _reattach = first_terminal_frame(
+            address,
+            &format!("session={id}&since=0&tab_name=%40%40Seat&window_id=window-close"),
+        )
+        .await;
+
+        let fresh = first_terminal_frame(
+            address,
+            "tab_name=%40%40Seat&window_id=window-close&command=sleep%20600",
+        )
+        .await;
+        let names = live_names(&state.terminal_sessions);
+        state
+            .terminal_sessions
+            .close_matching(None, Some("default"));
+        assert_eq!(
+            fresh["type"], "session",
+            "the new terminal did not start: {fresh}"
+        );
+        assert_eq!(
+            fresh["name"], "@@Seat",
+            "the new terminal lost its name to a resurrected one: {names:?}"
+        );
+        assert_eq!(names, vec!["@@Seat".to_string()]);
     }
 }

@@ -516,6 +516,9 @@ pub async fn api_create_terminal(
             format!("failed to start terminal: {e}"),
         )
             .into_response(),
+        Err(CreateError::Closed) => {
+            (StatusCode::GONE, "terminal session was closed").into_response()
+        }
     }
 }
 
@@ -573,6 +576,9 @@ pub async fn api_restart_terminal(
             format!("failed to restart terminal: {e}"),
         )
             .into_response(),
+        Err(CreateError::Closed) => {
+            (StatusCode::GONE, "terminal session was closed").into_response()
+        }
     }
 }
 
@@ -822,6 +828,19 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                 ServerFrame::Error {
                     message: format!("failed to start terminal: {e}"),
                     reason: None,
+                },
+            )
+            .await;
+            return;
+        }
+        // The tab this socket reattaches was closed while its window was not
+        // attached. Tell it so, as an attached socket would have heard, so the
+        // window drops the tab instead of reopening it on a fresh shell.
+        Err(CreateError::Closed) => {
+            let _ = send_frame(
+                &mut socket,
+                ServerFrame::Closed {
+                    reason: CloseReason::Explicit,
                 },
             )
             .await;

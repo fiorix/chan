@@ -811,8 +811,12 @@ SEE ALSO:
 pub(crate) const CS_TERMINAL_CLOSE: &str = r"Close (tear down) live terminal session(s) selected by name and/or
 group.
 
-Kills the PTY and removes the session from the registry, so its tab
-name frees for re-use. The teardown partner to `new` and `restart`,
+Kills the PTY, waits for its child process to be reaped, and removes
+the session from the registry, so its tab name frees for re-use. A
+window that holds the tab drops it, including one that was not
+attached when the close ran: its reattach is told the tab closed
+rather than given a fresh shell. The teardown partner to `new` and
+`restart`,
 and the clean alternative to killing the pid out of band, which
 leaves the entry lingering and holding its name. At least one of
 --tab-name / --tab-group is required; --tab-group tears down a
@@ -832,8 +836,22 @@ pub(crate) const CS_TERMINAL_CLOSE_AFTER: &str = r#"EXAMPLES:
 
 SIDE EFFECTS:
   Kills each matching PTY and drops its registry entry, taking its
-  scrollback ring and any pending queued writes with it. The ack
-  goes to stderr.
+  scrollback ring and any pending queued writes with it. The kill
+  is a hangup, as closing a terminal window sends: the terminal's
+  child gets SIGHUP and, if it is still running shortly after,
+  SIGKILL, and the close waits (up to 5s) for it to be reaped. The
+  ack goes to stderr and means every closed child is gone.
+
+EXIT STATUS:
+  Non-zero when nothing matched, or when a closed session's child
+  is still running after the wait. That error names each one as
+  "<name> (pid <pid>)"; end it with `kill -KILL <pid>`.
+
+  Only the terminal's own child is waited for. A process it started
+  that ignores SIGHUP or left the terminal (a `nohup` or `setsid`
+  job, a daemon) keeps running after a successful close, as it would
+  after closing any terminal window; find it with
+  `pgrep -f <command>` and end it with `kill <pid>`.
 
 CAUTIONS:
   Destructive and unconfirmed: there is no force flag and no undo.

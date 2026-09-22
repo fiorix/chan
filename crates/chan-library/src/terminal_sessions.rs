@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use portable_pty::{native_pty_system, Child, PtySize};
@@ -57,6 +57,23 @@ use redraw::redraw_wobble_size;
 use ring::RingBuffer;
 
 const BROADCAST_CAP: usize = 1024;
+
+/// Explicitly closed session ids remembered for reattach refusal. They live in
+/// memory only, so a server restart forgets them; the bound keeps a
+/// long-running server's memory flat while covering far more closes than a
+/// window's redial or reload spans.
+const CLOSED_SESSION_IDS_CAP: usize = 1024;
+
+/// How long `cs terminal close` waits for each closed session's child to be
+/// reaped before reporting it as still running. A fresh PTY child gets SIGHUP,
+/// a 200 ms grace and then SIGKILL; a child restored across a server restart
+/// gets one second after SIGHUP and SIGTERM before SIGKILL.
+pub const CLOSE_EXIT_BOUND: Duration = Duration::from_secs(5);
+
+/// Grace an imported child (one restored across a server restart, which this
+/// process cannot `wait` on) gets after SIGHUP and SIGTERM before SIGKILL.
+#[cfg(target_os = "linux")]
+const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 
 // `cs terminal write` serialization queue (the auto-deliver poke chain).
 // Each session has a bounded logical FIFO. When the agent is IDLE (its output
@@ -196,6 +213,14 @@ pub struct Registry {
     /// `terminal_backend_resolver` and absent for the same registries.
     terminal_profiles_resolver: Mutex<Option<TerminalProfilesResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Ids of sessions closed explicitly, most recent last, bounded by
+    /// [`CLOSED_SESSION_IDS_CAP`]. A window that was not attached when its
+    /// terminal was closed (reconnecting, reloading, restoring a saved layout)
+    /// still holds the tab and reattaches by this id; it must learn the tab is
+    /// gone instead of getting a fresh shell under the closed tab's name.
+    /// Written under the `sessions` lock in the same critical section as the
+    /// removal, so a reattach that misses the session always sees the id.
+    closed_ids: Mutex<VecDeque<String>>,
     /// Names settled for a create/restart whose PTY is still spawning. A
     /// reservation prevents another caller from receiving the same name
     /// without holding `sessions` across openpty/fork/exec.
@@ -768,6 +793,9 @@ pub enum CreateError {
     Capped,
     FdPressure(FdPressure),
     Spawn(anyhow::Error),
+    /// A reattach named a session that was explicitly closed. The caller is
+    /// told so rather than handed a fresh shell under that id's tab.
+    Closed,
 }
 
 impl std::fmt::Display for CreateError {
@@ -776,6 +804,7 @@ impl std::fmt::Display for CreateError {
             CreateError::Capped => f.write_str("terminal session cap reached"),
             CreateError::FdPressure(pressure) => write!(f, "{pressure}"),
             CreateError::Spawn(e) => write!(f, "{e}"),
+            CreateError::Closed => f.write_str("terminal session was closed"),
         }
     }
 }
@@ -950,6 +979,59 @@ fn fire_attach_seam(session_id: &str, seam: AttachSeam) {
     };
     if let Some(hook) = hook {
         hook();
+    }
+}
+
+/// One session `cs terminal close` tore down, and whether its child process
+/// was seen to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedSession {
+    pub name: Option<String>,
+    pub pid: Option<u32>,
+    /// The child was reaped (or, for a session restored across a server
+    /// restart, is gone) within the caller's bound.
+    pub ended: bool,
+}
+
+/// Records, once, whether a session's child process ended after its
+/// controller stopped, and lets a closer wait for that record.
+#[derive(Debug, Default)]
+struct ChildEnded {
+    ended: Mutex<Option<bool>>,
+    recorded: Condvar,
+}
+
+impl ChildEnded {
+    fn record(&self, ended: bool) {
+        let mut slot = self.ended.lock().expect("terminal child state poisoned");
+        if slot.is_none() {
+            *slot = Some(ended);
+            self.recorded.notify_all();
+        }
+    }
+
+    /// The recorded outcome, waiting up to `bound` for one. `None` means the
+    /// controller has not stopped yet.
+    fn wait(&self, bound: Duration) -> Option<bool> {
+        let slot = self.ended.lock().expect("terminal child state poisoned");
+        let (slot, _timeout) = self
+            .recorded
+            .wait_timeout_while(slot, bound, |slot| slot.is_none())
+            .expect("terminal child state poisoned");
+        *slot
+    }
+}
+
+/// Marks the child ended when the fresh-PTY controller returns. Every return
+/// path there follows a reap except one: `Kill` and a failed write go through
+/// `terminate_child`, and the exit branch saw `try_wait` report the status.
+/// The exception is a failed `try_wait`, after which the child cannot be
+/// observed any further; it is counted as ended rather than left pending.
+struct ChildEndedOnReturn(Arc<Session>);
+
+impl Drop for ChildEndedOnReturn {
+    fn drop(&mut self) {
+        self.0.ended.record(true);
     }
 }
 
@@ -1190,6 +1272,7 @@ impl Registry {
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
+            closed_ids: Mutex::new(VecDeque::new()),
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
@@ -1918,6 +2001,9 @@ impl Registry {
                 self.bind_session_layout(id, pane_id, side, tab_id);
                 return Ok(handle);
             }
+            if self.was_closed(id) {
+                return Err(CreateError::Closed);
+            }
         }
         let handle = self.create(opts)?;
         self.bind_session_layout(handle.id(), pane_id, side, tab_id);
@@ -2022,11 +2108,18 @@ impl Registry {
     }
 
     pub fn close(&self, id: &str, reason: CloseReason) -> bool {
-        let session = self
-            .sessions
-            .lock()
-            .expect("terminal registry poisoned")
-            .remove(id);
+        let session = {
+            let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let session = sessions.remove(id);
+            if session.is_some() && reason == CloseReason::Explicit {
+                let mut closed = self.closed_ids.lock().expect("terminal registry poisoned");
+                if closed.len() >= CLOSED_SESSION_IDS_CAP {
+                    closed.pop_front();
+                }
+                closed.push_back(id.to_string());
+            }
+            session
+        };
         if let Some(session) = session {
             session.close(reason);
             self.notify_roster_change();
@@ -2378,6 +2471,55 @@ impl Registry {
     /// PTY and removes the registry entry -- the explicit teardown that was
     /// missing (killing the pid out-of-band left the entry to linger and hold
     /// its tab name). Returns how many sessions were closed.
+    /// True when `id` names a session that was closed explicitly (bounded
+    /// memory; see `closed_ids`).
+    pub fn was_closed(&self, id: &str) -> bool {
+        self.closed_ids
+            .lock()
+            .expect("terminal registry poisoned")
+            .iter()
+            .any(|closed| closed == id)
+    }
+
+    /// Close the matching sessions like [`close_matching`](Self::close_matching),
+    /// then wait up to `bound` in total for each one's child process to be
+    /// reaped. The report says which children are still running, so a caller
+    /// never acknowledges a close whose process outlived it.
+    pub fn close_matching_and_wait(
+        &self,
+        tab_name: Option<&str>,
+        tab_group: Option<&str>,
+        bound: Duration,
+    ) -> Vec<ClosedSession> {
+        let sessions: Vec<Arc<Session>> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            sessions
+                .values()
+                .filter(|session| !session.closed.load(Ordering::Relaxed))
+                .filter(|session| {
+                    live_metadata_matches(&session.live_metadata(), tab_name, tab_group)
+                })
+                .cloned()
+                .collect()
+        };
+        let closed: Vec<Arc<Session>> = sessions
+            .into_iter()
+            .filter(|session| self.close(&session.id, CloseReason::Explicit))
+            .collect();
+        let deadline = std::time::Instant::now() + bound;
+        closed
+            .iter()
+            .map(|session| {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                ClosedSession {
+                    name: session.live_metadata().name,
+                    pid: session.child_pid,
+                    ended: session.ended.wait(remaining) == Some(true),
+                }
+            })
+            .collect()
+    }
+
     pub fn close_matching(&self, tab_name: Option<&str>, tab_group: Option<&str>) -> usize {
         let ids: Vec<String> = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -3200,6 +3342,9 @@ struct Session {
     /// scrape) can see the script died without subscribing to the event
     /// stream. Retained on the still-mapped session after a natural exit.
     exit: Mutex<Option<TerminalExit>>,
+    /// Whether the child process ended once the controller stopped; waited on
+    /// by `cs terminal close` so its acknowledgement means the process is gone.
+    ended: ChildEnded,
 }
 
 impl Session {
@@ -3456,6 +3601,7 @@ impl Session {
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
+            ended: ChildEnded::default(),
         });
 
         // A single-purpose / devserver CONTROL tenant echoes a banner naming
@@ -3497,109 +3643,115 @@ impl Session {
             let session = session.clone();
             std::thread::Builder::new()
                 .name("chan-terminal-controller".into())
-                .spawn(move || loop {
-                    while let Ok(cmd) = command_rx.try_recv() {
-                        match cmd {
-                            PtyCommand::Input(data) => {
-                                if let Err(e) = write_input_parts(
-                                    writer.as_mut(),
-                                    &[data],
-                                    Duration::ZERO,
-                                    std::thread::sleep,
-                                ) {
-                                    session.broadcast(SessionEvent::Error(format!(
-                                        "terminal write failed: {e}"
-                                    )));
+                .spawn(move || {
+                    let _ended = ChildEndedOnReturn(session.clone());
+                    loop {
+                        while let Ok(cmd) = command_rx.try_recv() {
+                            match cmd {
+                                PtyCommand::Input(data) => {
+                                    if let Err(e) = write_input_parts(
+                                        writer.as_mut(),
+                                        &[data],
+                                        Duration::ZERO,
+                                        std::thread::sleep,
+                                    ) {
+                                        session.broadcast(SessionEvent::Error(format!(
+                                            "terminal write failed: {e}"
+                                        )));
+                                        terminate_child(child.as_mut());
+                                        return;
+                                    }
+                                }
+                                PtyCommand::InputSequence { parts, gap } => {
+                                    if let Err(e) = write_input_parts(
+                                        writer.as_mut(),
+                                        &parts,
+                                        gap,
+                                        std::thread::sleep,
+                                    ) {
+                                        session.broadcast(SessionEvent::Error(format!(
+                                            "terminal write failed: {e}"
+                                        )));
+                                        terminate_child(child.as_mut());
+                                        return;
+                                    }
+                                }
+                                PtyCommand::Resize(size) => {
+                                    if let Err(e) = pair.master.resize(size) {
+                                        session.broadcast(SessionEvent::Error(format!(
+                                            "terminal resize failed: {e}"
+                                        )));
+                                    } else {
+                                        *session
+                                            .winsize
+                                            .lock()
+                                            .expect("terminal winsize poisoned") = size;
+                                        session.broadcast(SessionEvent::Resize(size));
+                                    }
+                                }
+                                PtyCommand::Redraw => {
+                                    let size =
+                                        *session.winsize.lock().expect("terminal winsize poisoned");
+                                    let result = force_redraw_with_wobble(
+                                        size,
+                                        REDRAW_WOBBLE_DELAY,
+                                        |size| pair.master.resize(size),
+                                    );
+                                    if let Err(e) = result {
+                                        session.broadcast(SessionEvent::Error(format!(
+                                            "terminal redraw resize failed: {e}"
+                                        )));
+                                    } else {
+                                        session.broadcast(SessionEvent::Resize(size));
+                                    }
+                                }
+                                PtyCommand::Kill => {
                                     terminate_child(child.as_mut());
                                     return;
                                 }
                             }
-                            PtyCommand::InputSequence { parts, gap } => {
-                                if let Err(e) = write_input_parts(
-                                    writer.as_mut(),
-                                    &parts,
-                                    gap,
-                                    std::thread::sleep,
-                                ) {
-                                    session.broadcast(SessionEvent::Error(format!(
-                                        "terminal write failed: {e}"
-                                    )));
-                                    terminate_child(child.as_mut());
-                                    return;
-                                }
+                        }
+
+                        // The controller owns the writer, so the DSR fallback rides
+                        // its existing 25 ms tick rather than contending for it.
+                        if let Some(answer) = session.take_due_dsr_answer() {
+                            if let Err(e) = write_input_parts(
+                                writer.as_mut(),
+                                &[answer.to_vec()],
+                                Duration::ZERO,
+                                std::thread::sleep,
+                            ) {
+                                session.broadcast(SessionEvent::Error(format!(
+                                    "terminal cursor-report answer failed: {e}"
+                                )));
                             }
-                            PtyCommand::Resize(size) => {
-                                if let Err(e) = pair.master.resize(size) {
-                                    session.broadcast(SessionEvent::Error(format!(
-                                        "terminal resize failed: {e}"
-                                    )));
-                                } else {
-                                    *session.winsize.lock().expect("terminal winsize poisoned") =
-                                        size;
-                                    session.broadcast(SessionEvent::Resize(size));
-                                }
-                            }
-                            PtyCommand::Redraw => {
-                                let size =
-                                    *session.winsize.lock().expect("terminal winsize poisoned");
-                                let result =
-                                    force_redraw_with_wobble(size, REDRAW_WOBBLE_DELAY, |size| {
-                                        pair.master.resize(size)
-                                    });
-                                if let Err(e) = result {
-                                    session.broadcast(SessionEvent::Error(format!(
-                                        "terminal redraw resize failed: {e}"
-                                    )));
-                                } else {
-                                    session.broadcast(SessionEvent::Resize(size));
-                                }
-                            }
-                            PtyCommand::Kill => {
-                                terminate_child(child.as_mut());
+                        }
+
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let exit = TerminalExit::from_status(&status);
+                                // The PTY is dead: its store entry leaves NOW, not
+                                // at the eventual reap, so a restart in between
+                                // never inherits a dead master.
+                                session.unpark_fdstore();
+                                // Record before broadcasting so a poller that reads
+                                // the registry right after the event still sees it.
+                                *session.exit.lock().expect("session exit poisoned") =
+                                    Some(exit.clone());
+                                *registry_last_exit
+                                    .lock()
+                                    .expect("terminal registry poisoned") = Some(exit.clone());
+                                session.broadcast(SessionEvent::Exit(exit));
                                 return;
                             }
-                        }
-                    }
-
-                    // The controller owns the writer, so the DSR fallback rides
-                    // its existing 25 ms tick rather than contending for it.
-                    if let Some(answer) = session.take_due_dsr_answer() {
-                        if let Err(e) = write_input_parts(
-                            writer.as_mut(),
-                            &[answer.to_vec()],
-                            Duration::ZERO,
-                            std::thread::sleep,
-                        ) {
-                            session.broadcast(SessionEvent::Error(format!(
-                                "terminal cursor-report answer failed: {e}"
-                            )));
-                        }
-                    }
-
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            let exit = TerminalExit::from_status(&status);
-                            // The PTY is dead: its store entry leaves NOW, not
-                            // at the eventual reap, so a restart in between
-                            // never inherits a dead master.
-                            session.unpark_fdstore();
-                            // Record before broadcasting so a poller that reads
-                            // the registry right after the event still sees it.
-                            *session.exit.lock().expect("session exit poisoned") =
-                                Some(exit.clone());
-                            *registry_last_exit
-                                .lock()
-                                .expect("terminal registry poisoned") = Some(exit.clone());
-                            session.broadcast(SessionEvent::Exit(exit));
-                            return;
-                        }
-                        Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                        Err(e) => {
-                            session.unpark_fdstore();
-                            session.broadcast(SessionEvent::Error(format!(
-                                "terminal wait failed: {e}"
-                            )));
-                            return;
+                            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                            Err(e) => {
+                                session.unpark_fdstore();
+                                session.broadcast(SessionEvent::Error(format!(
+                                    "terminal wait failed: {e}"
+                                )));
+                                return;
+                            }
                         }
                     }
                 })?;
@@ -3748,6 +3900,7 @@ impl Session {
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
+            ended: ChildEnded::default(),
         });
 
         {
@@ -3839,9 +3992,8 @@ impl Session {
                                 }
                             }
                             PtyCommand::Kill => {
-                                if let Some(pid) = session.child_pid {
-                                    signal_imported_child(pid);
-                                }
+                                let ended = session.child_pid.is_some_and(terminate_imported_child);
+                                session.ended.record(ended);
                                 return;
                             }
                         }
@@ -4741,16 +4893,37 @@ impl AsRawFd for RawMasterFd {
     }
 }
 
+/// End a child restored across a server restart and report whether it is
+/// gone. This process is not its parent, so it cannot `wait` on it: it hangs
+/// up and asks it to terminate, gives it [`IMPORTED_CHILD_EXIT_GRACE`], then
+/// kills it, and polls for the pid to disappear after each step.
 #[cfg(target_os = "linux")]
-fn signal_imported_child(pid: u32) {
+fn terminate_imported_child(pid: u32) -> bool {
     let Ok(raw_pid) = i32::try_from(pid) else {
-        return;
+        return false;
     };
     let Some(pid) = rustix::process::Pid::from_raw(raw_pid) else {
-        return;
+        return false;
+    };
+    let gone_within = |bound: Duration| {
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            if rustix::process::test_kill_process(pid).is_err() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     };
     let _ = rustix::process::kill_process(pid, rustix::process::Signal::HUP);
     let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    if gone_within(IMPORTED_CHILD_EXIT_GRACE) {
+        return true;
+    }
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    gone_within(Duration::from_millis(500))
 }
 
 enum PtyCommand {
@@ -5138,6 +5311,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
             exit: Mutex::new(None),
+            ended: ChildEnded::default(),
         });
         (session, command_rx)
     }
@@ -7447,6 +7621,111 @@ mod tests {
         // placement through its client frame.
         assert!(registry.update_session_layout(&id, None, Some(PaneSide::A), None));
         assert_eq!(registry.session_summaries()[0].side, Some(PaneSide::A));
+        registry.close_all(CloseReason::Shutdown);
+    }
+
+    // A close whose child is never confirmed ended (a wedged controller, or a
+    // restored child that would not die) is reported as still running with
+    // its pid, so `cs terminal close` cannot acknowledge it as closed.
+    #[test]
+    fn close_and_wait_reports_a_child_that_did_not_end() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (session, commands) =
+            test_agent_session(1024, "s-wedged", Some("@@Wedged"), None, None, &[]);
+        register_session(&registry, &session);
+
+        let closed =
+            registry.close_matching_and_wait(Some("@@Wedged"), None, Duration::from_millis(50));
+
+        assert!(matches!(commands.try_recv(), Ok(PtyCommand::Kill)));
+        assert_eq!(
+            closed,
+            vec![ClosedSession {
+                name: Some("@@Wedged".into()),
+                pid: None,
+                ended: false,
+            }]
+        );
+        assert_eq!(registry.len(), 0);
+    }
+
+    // The child of a closed session is reaped before the close returns, even
+    // one that ignores the hangup a terminal close sends.
+    #[cfg(unix)]
+    #[test]
+    fn close_and_wait_reaps_a_child_that_ignores_sighup() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let _handle = registry
+            .create(CreateOptions {
+                tab_name: Some("@@Stubborn".into()),
+                command: Some("trap '' HUP; exec sleep 600".into()),
+                ..opts_with_window("win-stubborn")
+            })
+            .unwrap();
+        let pid = registry.live_child_pids()[0];
+
+        let closed = registry.close_matching_and_wait(Some("@@Stubborn"), None, CLOSE_EXIT_BOUND);
+
+        assert_eq!(closed.len(), 1);
+        assert!(
+            closed[0].ended,
+            "the close did not see the child end: {closed:?}"
+        );
+        let pid = rustix::process::Pid::from_raw(pid as i32).expect("a child pid");
+        assert!(
+            rustix::process::test_kill_process(pid).is_err(),
+            "the child of a closed session is still in the process table"
+        );
+    }
+
+    // An explicit close is remembered, so a window reattaching the closed tab
+    // is refused instead of handed a fresh shell under the tab's name. Other
+    // close reasons keep the reconnect-creates-a-shell behaviour.
+    #[test]
+    fn a_reattach_to_an_explicitly_closed_session_is_refused() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let closed = registry
+            .create(CreateOptions {
+                tab_name: Some("@@Gone".into()),
+                ..opts_with_window("win-gone")
+            })
+            .unwrap();
+        let closed_id = closed.id().to_owned();
+        drop(closed);
+        let idle = registry
+            .create(CreateOptions {
+                tab_name: Some("@@Idle".into()),
+                ..opts_with_window("win-gone")
+            })
+            .unwrap();
+        let idle_id = idle.id().to_owned();
+        drop(idle);
+        assert!(registry.close(&closed_id, CloseReason::Explicit));
+        assert!(registry.close(&idle_id, CloseReason::Idle));
+
+        let reattach = registry.get_or_create(
+            Some(&closed_id),
+            Some(0),
+            CreateOptions {
+                tab_name: Some("@@Gone".into()),
+                ..opts_with_window("win-gone")
+            },
+        );
+        assert!(matches!(reattach, Err(CreateError::Closed)), "{reattach:?}");
+        assert_eq!(registry.len(), 0);
+
+        let reconnect = registry
+            .get_or_create(
+                Some(&idle_id),
+                Some(0),
+                CreateOptions {
+                    tab_name: Some("@@Idle".into()),
+                    ..opts_with_window("win-gone")
+                },
+            )
+            .expect("a session closed for idleness still reopens");
+        assert_ne!(reconnect.id(), idle_id);
+        drop(reconnect);
         registry.close_all(CloseReason::Shutdown);
     }
 
