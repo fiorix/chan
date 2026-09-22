@@ -74,6 +74,10 @@ The real top-level set:
 
 Each subcommand handler is orchestration only: it opens a `Library`, resolves a `Workspace` when needed, calls into the owning library, and prints text or `--json`. The handlers do not re-implement library invariants; they depend on them.
 
+### Lock probe refusal
+
+Workspace search and status distinguish an observed foreign writer from a lock whose state cannot be determined. An open failure or a lock-test failure other than contention refuses the command with a diagnostic instead of treating the workspace as free or claiming a live holder. Search returns `workspace_lock_unknown`; status reports `cannot determine workspace lock status`. A real holder keeps the live-server path, and a free workspace keeps the local-open path.
+
 ### Workspace status
 
 `chan workspace status PATH` looks up an existing registration without registering or refreshing it. An unregistered path fails with the `chan workspace add` hint. If the writer lock is held, including a holder that wins between lookup and open, status reports that holder and exits successfully. It reads the lock record for the pid and uses the same control-socket identity and devserver HTTP activity probes as `chan ps`. Each identity probe and each HTTP request, including its response body, has a two-second budget. An unreachable holder or activity endpoint leaves those details unknown. A free workspace is opened for the existing readiness and derived-state snapshots; missing metadata lock directories take this normal open path and are recreated.
