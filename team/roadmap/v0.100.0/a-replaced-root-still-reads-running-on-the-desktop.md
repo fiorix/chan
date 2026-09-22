@@ -20,3 +20,9 @@ Wherever the launcher routes are served, a mounted root's health is probed on th
 2. The same test shows the row returning to `running` once the original root is back, on Linux.
 3. The devserver path's behaviour and cadence are unchanged, pinned.
 4. The documents that describe where the probe runs say so.
+
+## What the third check pins
+
+The cadence is pinned: `the_root_health_probe_keeps_its_fifteen_second_cadence` asserts `ROOT_HEALTH_PROBE_INTERVAL` against a written-out fifteen seconds, so moving it is a deliberate edit to that assertion. The devserver's behaviour is unchanged by reading rather than by a test. The probe loop moved verbatim into `spawn_root_health_probe`, and the devserver still calls it at startup, but no test fails if that call is removed. The devserver wiring is therefore verified by reading and left unpinned; a devserver-level integration test that would pin it is outside this item.
+
+The desktop test names the root in the registry's canonical spelling when it checks the degraded row's reason, for the same macOS `/var` symlink reason recorded in the timed-out-mount item: the reason carries the canonical root, and a raw temp path matched it on macOS only as a substring.
