@@ -2612,6 +2612,66 @@ mod devserver_route_tests {
         );
     }
 
+    // A failed probe must remain distinct from an observed holder on the wire,
+    // where launcher clients obtain both the state and its diagnostic.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_list_distinguishes_unknown_from_foreign_locked_rows() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), crate::route_builder()));
+        let blocker = lib
+            .workspace_paths_for(root.path())
+            .unwrap()
+            .lock
+            .join("writer.lock");
+        std::fs::create_dir_all(&blocker).unwrap();
+        let router = launcher_router(host, None, None);
+
+        let (status, unknown) = request(&router, "GET", "/api/library/workspaces", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unknown[0]["status"], "unknown");
+        assert_eq!(unknown[0]["on"], false);
+        assert!(unknown[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("writer.lock"));
+
+        std::fs::remove_dir(&blocker).unwrap();
+        let _foreign = hold_foreign_lock(&lib, root.path());
+        let (status, locked) = request(&router, "GET", "/api/library/workspaces", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(locked[0]["status"], "locked");
+        assert_eq!(locked[0]["on"], false);
+        assert!(locked[0]["error"].is_null());
+        assert_eq!(unknown[0]["workspace_id"], locked[0]["workspace_id"]);
+    }
+
+    /// A row list with the fields a live writer-lock probe decides removed.
+    #[cfg(unix)]
+    fn without_live_fields(rows: &serde_json::Value) -> serde_json::Value {
+        let mut rows = rows.clone();
+        for row in rows.as_array_mut().expect("array of rows") {
+            let row = row.as_object_mut().expect("row object");
+            for field in ["status", "error", "on"] {
+                row.remove(field);
+            }
+        }
+        rows
+    }
+
+    /// With no devserver feed attached the route serves exactly the rows the
+    /// local builder builds, and the comparison rests on ONE snapshot of the
+    /// lock state rather than two.
+    ///
+    /// Each row's `status`, `error` and `on` come from a live writer-lock
+    /// probe, so two calls are two independent observations and can
+    /// legitimately differ: under file descriptor pressure one probe can fail
+    /// to open a lock file that the other opened. So every field a probe does
+    /// not decide is compared between the route and the builder, and the live
+    /// fields are asserted once, on the route's own snapshot.
     #[cfg(unix)]
     #[tokio::test]
     async fn scoped_local_rows_match_the_workspaces_route() {
@@ -2622,31 +2682,38 @@ mod devserver_route_tests {
         lib.register_workspace(root_a.path()).unwrap();
         lib.register_workspace(root_b.path()).unwrap();
         let host = Arc::new(WorkspaceHost::new(lib.clone(), crate::route_builder()));
-        // Hold a foreign lock on one root so the two builders must agree on a
-        // mixed-status list (`locked` + `stopped`), not a uniform one.
-        let _foreign = hold_foreign_lock(&lib, root_a.path());
+        // Hold a foreign lock on one root so the snapshot is a mixed-status
+        // list (`locked` + `stopped`), not a uniform one.
+        let foreign = hold_foreign_lock(&lib, root_a.path());
         let router = launcher_router(host.clone(), None, None);
 
-        // No devserver feed is attached, so the route returns local rows only,
-        // which must equal what `scoped_local_workspaces` builds.
         let (status, route_rows) = request(&router, "GET", "/api/library/workspaces", None).await;
         assert_eq!(status, StatusCode::OK);
+        // Release the holder between observations so comparing live status
+        // fields fails deterministically, even without descriptor pressure.
+        drop(foreign);
         let scoped_rows = serde_json::to_value(super::scoped_local_workspaces(&host)).unwrap();
-        assert_eq!(route_rows, scoped_rows);
 
-        // Guard the fixture actually exercises a mixed-status list.
+        // Everything a lock probe does not decide must agree exactly.
+        assert_eq!(
+            without_live_fields(&route_rows),
+            without_live_fields(&scoped_rows)
+        );
+
+        // The live observation, asserted once on one snapshot. The fixture
+        // must be a mixed-status list, or the comparison above could pass over
+        // two uniform ones. Each row's error is printed so that a failure
+        // names its cause, including a probe that could not open a lock file.
         let rows = route_rows.as_array().expect("array of rows");
         assert_eq!(rows.len(), 2);
-        let statuses: Vec<&str> = rows.iter().map(|r| r["status"].as_str().unwrap()).collect();
+        let observed: Vec<(&str, &serde_json::Value)> = rows
+            .iter()
+            .map(|r| (r["status"].as_str().unwrap(), &r["error"]))
+            .collect();
+        let statuses: Vec<&str> = observed.iter().map(|(s, _)| *s).collect();
         assert!(
-            statuses.contains(&"locked"),
-            "one row must be locked: {:?}",
-            statuses
-        );
-        assert!(
-            statuses.contains(&"stopped"),
-            "one row must be stopped: {:?}",
-            statuses
+            statuses.contains(&"locked") && statuses.contains(&"stopped"),
+            "the snapshot must hold one locked and one stopped row: {observed:?}"
         );
     }
 
