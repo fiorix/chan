@@ -304,6 +304,8 @@ pub enum StateError {
     ExpiredAdmissionLease,
     #[error("browser session expired before controller mutation")]
     ExpiredBrowserSession,
+    #[error("invalid session revocation")]
+    InvalidRevocation,
     #[error("authoritative proxy is reconnecting")]
     AuthorityTemporarilyUnavailable,
 }
@@ -1311,7 +1313,7 @@ impl ControllerState {
     ) -> Result<(Vec<Uuid>, Vec<Effect>, usize, bool), StateError> {
         revocation
             .validate()
-            .map_err(|_| StateError::AuthorityTemporarilyUnavailable)?;
+            .map_err(|_| StateError::InvalidRevocation)?;
         let sessions: Vec<_> = self
             .proxies
             .iter()
@@ -2982,7 +2984,10 @@ pub(super) mod tests {
         let now = Instant::now();
         let mut state = ControllerState::new(100);
         let (id, incarnation, _) = ready_one(
-            &mut state, "p1", vec![row("alice", "one", Uuid::new_v4())], now,
+            &mut state,
+            "p1",
+            vec![row("alice", "one", Uuid::new_v4())],
+            now,
         );
         let active_at = now + CONVERGENCE_WINDOW;
         state.disconnect(&id, incarnation, active_at).unwrap();
@@ -2991,15 +2996,31 @@ pub(super) mod tests {
         let usage = state.fleet_usage(None);
         state.reconciliation = Some(Reconciliation {
             kind: ReconciliationKind::Joining(SessionKey {
-                proxy_id: id.as_str().to_string(), incarnation,
+                proxy_id: id.as_str().to_string(),
+                incarnation,
             }),
             command_ids: HashSet::new(),
             failed: false,
         });
-        assert!(state.finish_reconciliation_if_complete(active_at).is_empty());
+        assert!(state
+            .finish_reconciliation_if_complete(active_at)
+            .is_empty());
         assert_eq!(state.tunnels.len(), 1);
         assert_eq!(state.orphan_total.rows, 1);
         assert_eq!(state.fleet_usage(None), usage);
+    }
+
+    #[test]
+    fn invalid_revocation_is_a_caller_error_without_side_effects() {
+        let mut state = ControllerState::new(100);
+        let result = state.begin_session_revocation(
+            SessionRevocation::Subject {
+                subject_user_id: Uuid::nil(),
+            },
+            Instant::now(),
+        );
+        assert!(matches!(result, Err(StateError::InvalidRevocation)));
+        assert!(state.session_revocations.is_empty());
     }
 
     #[test]
