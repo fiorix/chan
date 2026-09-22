@@ -824,9 +824,14 @@ mod tests {
         // A status alone pins nothing: more than one writer can publish this
         // row, so the assertion names the reason the probe writes.
         let reason = reason.expect("a degraded row carries a reason");
+        // The reason names the registry's canonical root, and the impostor now
+        // at this path canonicalizes to that same spelling (on macOS `/var` is
+        // a symlink to `/private/var`, so the raw temp path would not).
+        let registered = chan_workspace::paths::canonicalize_normalized(&root);
         assert!(
-            reason.contains(&root.display().to_string()),
-            "the reason must name the root: {reason}"
+            reason.contains(&registered.display().to_string()),
+            "the reason must name the root as the registry spells it ({}): {reason}",
+            registered.display()
         );
 
         std::fs::remove_dir(&root).expect("remove the impostor");
