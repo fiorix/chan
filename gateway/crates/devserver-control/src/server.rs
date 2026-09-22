@@ -595,12 +595,16 @@ where
                 // limits bound what it may publish.
                 if !snapshot_rows_fit(registration_ids.len(), chunk.len()) {
                     send_shutdown(writer, "snapshot row limit exceeded").await?;
-                    return Err(SessionError::SnapshotTooLarge);
+                    return Err(SessionError::SnapshotTooLarge(
+                        "snapshot row limit exceeded",
+                    ));
                 }
                 let chunk_bytes = serde_json::to_vec(&chunk).map_err(FrameError::Json)?.len();
                 if !snapshot_bytes_fit(*bytes, chunk_bytes) {
                     send_shutdown(writer, "snapshot byte limit exceeded").await?;
-                    return Err(SessionError::SnapshotTooLarge);
+                    return Err(SessionError::SnapshotTooLarge(
+                        "snapshot byte limit exceeded",
+                    ));
                 }
                 let mut chunk_ids = HashSet::with_capacity(chunk.len());
                 if chunk.iter().any(|row| {
@@ -633,7 +637,9 @@ where
                     MAX_BROWSER_SESSION_SNAPSHOT_ROWS,
                 ) {
                     send_shutdown(writer, "browser-session snapshot row limit exceeded").await?;
-                    return Err(SessionError::SnapshotTooLarge);
+                    return Err(SessionError::SnapshotTooLarge(
+                        "browser-session snapshot row limit exceeded",
+                    ));
                 }
                 let chunk_bytes = serde_json::to_vec(&chunk).map_err(FrameError::Json)?.len();
                 if !bounded_add(
@@ -642,7 +648,9 @@ where
                     MAX_BROWSER_SESSION_SNAPSHOT_BYTES,
                 ) {
                     send_shutdown(writer, "browser-session snapshot byte limit exceeded").await?;
-                    return Err(SessionError::SnapshotTooLarge);
+                    return Err(SessionError::SnapshotTooLarge(
+                        "browser-session snapshot byte limit exceeded",
+                    ));
                 }
                 let mut chunk_ids = HashSet::with_capacity(chunk.len());
                 if chunk.iter().any(|row| {
@@ -1117,8 +1125,8 @@ enum SessionError {
     Timeout(&'static str),
     #[error("control protocol error: {0}")]
     Protocol(String),
-    #[error("control snapshot exceeds the row limit")]
-    SnapshotTooLarge,
+    #[error("control {0}")]
+    SnapshotTooLarge(&'static str),
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
@@ -1794,6 +1802,21 @@ mod tests {
         }
         assert!(!limit.accept(now));
         assert!(limit.accept(now + CLIENT_FRAME_RATE_WINDOW));
+    }
+
+    #[test]
+    fn snapshot_size_diagnostic_preserves_the_limit_reason() {
+        for reason in [
+            "snapshot row limit exceeded",
+            "snapshot byte limit exceeded",
+            "browser-session snapshot row limit exceeded",
+            "browser-session snapshot byte limit exceeded",
+        ] {
+            assert_eq!(
+                SessionError::SnapshotTooLarge(reason).to_string(),
+                format!("control {reason}")
+            );
+        }
     }
 
     #[test]
