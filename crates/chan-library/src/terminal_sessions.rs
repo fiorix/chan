@@ -897,6 +897,62 @@ pub enum SessionEvent {
     },
 }
 
+/// A point in the attach/output interleaving where a test can run code while
+/// the other side is paused. Each point sits just outside a ring-lock critical
+/// section, where a concurrent attach or PTY read really can run, so a hook
+/// fired there reproduces a real schedule deterministically instead of by
+/// timing.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachSeam {
+    /// In `Session::attach`, just before it takes the ring lock.
+    AttachBeforeRingLock,
+    /// In `Session::attach`, just after it releases the ring lock.
+    AttachAfterRingLock,
+    /// In `Session::record_output`, just after it releases the ring lock.
+    OutputAfterRingLock,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+type AttachSeamHook = Box<dyn FnOnce() + Send>;
+
+/// Armed hooks, keyed by session id so tests running in parallel never fire
+/// each other's hooks. Global rather than per-session because a route-level
+/// test reaches the attach through the server's own task and cannot hold the
+/// `Session`.
+#[cfg(any(test, feature = "test-util"))]
+static ATTACH_SEAMS: Mutex<Vec<(String, AttachSeam, AttachSeamHook)>> = Mutex::new(Vec::new());
+
+/// Run `hook` once, the next time session `session_id` reaches `seam`, on the
+/// thread that reached it.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub fn arm_attach_seam(session_id: &str, seam: AttachSeam, hook: impl FnOnce() + Send + 'static) {
+    ATTACH_SEAMS.lock().expect("attach seams poisoned").push((
+        session_id.to_string(),
+        seam,
+        Box::new(hook),
+    ));
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn fire_attach_seam(session_id: &str, seam: AttachSeam) {
+    // Take the hook out before running it: a hook re-enters the session (an
+    // attach that records output, an output that attaches), which reaches
+    // another seam and must not find this lock held.
+    let hook = {
+        let mut seams = ATTACH_SEAMS.lock().expect("attach seams poisoned");
+        seams
+            .iter()
+            .position(|(id, point, _)| id == session_id && *point == seam)
+            .map(|index| seams.remove(index).2)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Debug)]
 pub struct AttachHandle {
     id: String,
@@ -1779,6 +1835,26 @@ impl Registry {
     #[cfg(any(test, feature = "test-util"))]
     pub fn attach(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
         self.attach_for_ws(id, since)
+    }
+
+    /// Feed `bytes` through a live session's output path as if its PTY had
+    /// read them, so a test can place output at an exact point of an attach.
+    /// Returns false when no live session has that id.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn inject_output(&self, id: &str, bytes: &[u8]) -> bool {
+        let session = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(id)
+            .cloned();
+        match session {
+            Some(session) if !session.closed.load(Ordering::Relaxed) => {
+                session.record_output(bytes);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn attach_for_ws(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
@@ -3792,17 +3868,26 @@ impl Session {
 
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
         self.attach_count.fetch_add(1, Ordering::Relaxed);
-        let rx = self.output_tx.subscribe();
-        let alt_screen = self.in_alt_screen.load(Ordering::Relaxed);
-        let (replay, missed_bytes) = if alt_screen {
-            (Vec::new(), 0)
-        } else {
-            self.ring
-                .lock()
-                .expect("terminal ring poisoned")
-                .snapshot_since(since)
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::AttachBeforeRingLock);
+        // Subscribe, snapshot and read the cursor under the ring lock that
+        // `record_output` holds across its push and broadcast. Every chunk is
+        // then either in the snapshot or still to come on `rx`, never both and
+        // never neither, and `seq` is exactly where the snapshot ends, so the
+        // client's cursor (`seq` plus the live bytes after it) stays true.
+        let (rx, alt_screen, replay, missed_bytes, seq) = {
+            let ring = self.ring.lock().expect("terminal ring poisoned");
+            let rx = self.output_tx.subscribe();
+            let alt_screen = self.in_alt_screen.load(Ordering::Relaxed);
+            let (replay, missed_bytes) = if alt_screen {
+                (Vec::new(), 0)
+            } else {
+                ring.snapshot_since(since)
+            };
+            (rx, alt_screen, replay, missed_bytes, ring.end_seq())
         };
-        let seq = self.seq.load(Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
         let mode_reassert = self.private_mode_prelude();
         AttachHandle {
@@ -4405,12 +4490,12 @@ impl Session {
         self.update_alt_screen(bytes);
         self.update_private_modes(bytes);
         self.note_dsr_query(bytes);
-        let end_seq = {
-            let mut ring = self.ring.lock().expect("terminal ring poisoned");
-            ring.push(bytes);
-            ring.end_seq()
-        };
-        self.seq.store(end_seq, Ordering::Relaxed);
+        // Push and broadcast under one ring lock, the lock `attach` subscribes
+        // and snapshots under, so an attaching client gets this chunk once: in
+        // its replay if it attaches after the push, on its receiver if before.
+        let mut ring = self.ring.lock().expect("terminal ring poisoned");
+        ring.push(bytes);
+        self.seq.store(ring.end_seq(), Ordering::Relaxed);
         if !self.focused.load(Ordering::Relaxed) {
             // PTYs emit cursor motion, SGR, OSC title changes, BEL,
             // and CR/LF redraw noise while idle. Only user-visible
@@ -4426,6 +4511,9 @@ impl Session {
             }
         }
         self.broadcast(SessionEvent::Output(bytes.to_vec()));
+        drop(ring);
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::OutputAfterRingLock);
     }
 
     fn broadcast(&self, event: SessionEvent) {
@@ -6458,6 +6546,141 @@ mod tests {
         let attached = session.attach(Some(0));
         assert!(!attached.replay.is_empty());
         assert!(String::from_utf8_lossy(&attached.replay.concat()).contains("back to shell"));
+    }
+
+    /// Everything an attach hands its client, in the order the route sends
+    /// it: the replay prelude, then each live output chunk already queued on
+    /// `rx`. Non-output events are not terminal bytes and are skipped.
+    fn delivered_bytes(attached: &mut AttachHandle) -> (Vec<u8>, Vec<u8>) {
+        let replay = attached.replay.concat();
+        let mut live = Vec::new();
+        while let Ok(event) = attached.rx.try_recv() {
+            if let SessionEvent::Output(data) = event {
+                live.extend_from_slice(&data);
+            }
+        }
+        (replay, live)
+    }
+
+    fn ring_end(session: &Session) -> u64 {
+        session
+            .ring
+            .lock()
+            .expect("terminal ring poisoned")
+            .end_seq()
+    }
+
+    // A PTY read that has pushed its chunk into the ring but not yet broadcast
+    // it, while a client attaches: the chunk must reach that client once,
+    // through the replay or through `rx`, never both.
+    #[test]
+    fn attach_between_an_outputs_push_and_broadcast_delivers_it_once() {
+        let id = "seam-output-after-ring-lock";
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        session.record_output(b"before\n");
+        let slot: Arc<Mutex<Option<AttachHandle>>> = Arc::default();
+        {
+            let session = session.clone();
+            let slot = slot.clone();
+            arm_attach_seam(id, AttachSeam::OutputAfterRingLock, move || {
+                *slot.lock().unwrap() = Some(session.attach(Some(0)));
+            });
+        }
+        session.record_output(b"raced\n");
+        let mut attached = slot.lock().unwrap().take().expect("the seam attached");
+        session.record_output(b"after\n");
+
+        let (replay, live) = delivered_bytes(&mut attached);
+        assert_eq!(
+            String::from_utf8_lossy(&[replay, live.clone()].concat()),
+            "before\nraced\nafter\n",
+            "each chunk reaches the attaching client exactly once"
+        );
+        assert_eq!(
+            attached.seq + live.len() as u64,
+            ring_end(&session),
+            "the client's resume cursor ends where the ring ends"
+        );
+    }
+
+    // A whole PTY read landing after the attach subscribed but before it
+    // snapshotted the ring: the chunk must not be both replayed and streamed.
+    #[test]
+    fn output_between_an_attachs_subscribe_and_snapshot_is_delivered_once() {
+        let id = "seam-attach-before-ring-lock";
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        session.record_output(b"before\n");
+        {
+            let session = session.clone();
+            arm_attach_seam(id, AttachSeam::AttachBeforeRingLock, move || {
+                session.record_output(b"raced\n");
+            });
+        }
+        let mut attached = session.clone().attach(Some(0));
+        session.record_output(b"after\n");
+
+        let (replay, live) = delivered_bytes(&mut attached);
+        assert_eq!(
+            String::from_utf8_lossy(&[replay, live.clone()].concat()),
+            "before\nraced\nafter\n",
+            "each chunk reaches the attaching client exactly once"
+        );
+        assert_eq!(attached.seq + live.len() as u64, ring_end(&session));
+    }
+
+    // Output landing after the attach's snapshot is streamed live, so the
+    // prelude `seq` must be the end of the snapshot, not a later ring end read
+    // outside the lock; otherwise the client counts that chunk twice in its
+    // resume cursor and a reconnect skips that many bytes.
+    #[test]
+    fn attach_reads_seq_under_the_snapshot_lock() {
+        let id = "seam-attach-after-ring-lock";
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        session.record_output(b"before\n");
+        {
+            let session = session.clone();
+            arm_attach_seam(id, AttachSeam::AttachAfterRingLock, move || {
+                session.record_output(b"raced\n");
+            });
+        }
+        let mut attached = session.clone().attach(Some(0));
+
+        let (replay, live) = delivered_bytes(&mut attached);
+        assert_eq!(replay, b"before\n");
+        assert_eq!(live, b"raced\n");
+        assert_eq!(
+            attached.seq,
+            replay.len() as u64,
+            "seq is the end of the snapshot the replay came from"
+        );
+        assert_eq!(attached.seq + live.len() as u64, ring_end(&session));
+    }
+
+    // An alternate-screen attach takes no replay (the program repaints on the
+    // redraw nudge), and its cursor is still the ring end at the snapshot, so
+    // output racing the attach streams live and is counted once.
+    #[test]
+    fn alt_screen_attach_takes_no_replay_and_resumes_from_the_snapshot_end() {
+        let id = "seam-alt-screen-attach";
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        session.record_output(b"before\n");
+        session.record_output(b"\x1b[?1049hframe one");
+        let end_at_attach = ring_end(&session);
+        {
+            let session = session.clone();
+            arm_attach_seam(id, AttachSeam::AttachAfterRingLock, move || {
+                session.record_output(b"frame two");
+            });
+        }
+        let mut attached = session.clone().attach(Some(0));
+
+        assert!(attached.alt_screen);
+        assert_eq!(attached.missed_bytes, 0);
+        let (replay, live) = delivered_bytes(&mut attached);
+        assert!(replay.is_empty(), "an alt-screen attach takes no replay");
+        assert_eq!(live, b"frame two");
+        assert_eq!(attached.seq, end_at_attach);
+        assert_eq!(attached.seq + live.len() as u64, ring_end(&session));
     }
 
     #[test]
