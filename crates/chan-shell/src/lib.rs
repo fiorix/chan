@@ -41,8 +41,8 @@ mod submit;
 
 #[cfg(feature = "client")]
 pub use cli::{
-    dispatch, parse_cs, render_workspace_search_markdown, run_cs, CsCli, ShellAction,
-    TerminalAction, WorkspaceSearchArgs,
+    dispatch, parse_cs, render_workspace_search_markdown, run_cs, CsCli, DumpSkillArgs,
+    ShellAction, TerminalAction, WorkspaceSearchArgs,
 };
 #[cfg(feature = "client")]
 pub use control::{

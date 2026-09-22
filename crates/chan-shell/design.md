@@ -23,6 +23,8 @@ Out of scope, owned by chan-server:
 
 ## 2. Architecture overview
 
+`cs dump-skill` is offline: it uses the embedding CLI's manual renderer, passed to `run_cs` and `dispatch` as a function pointer. Both `chan` and chan-desktop supply `chan::dump_skill`, keeping the manual with its owning crate without a reverse dependency from chan-shell. Its default output is an installable topic index; pages over 8 KiB yield an index of lossless numbered parts, and only `--full` bypasses the byte budget.
+
 A `cs` invocation is normally one synchronous line-framed round-trip. The client resolves the terminal environment, serializes a `ControlRequest`, writes it as a single JSON line, half-closes its write side, and reads back a single `ControlResponse` line, which it formats for the user. `cs terminal survey` and a requester-side `cs session handover` set `cancel_on_eof` and retain the write half until their response, making client EOF a cancellation signal while the server is parked; handover answers remain normal one-shot requests. `ControlRequest::Tunnel` (`cs tunnel`, the long-lived category) also does not half-close, but continues after its first response: that line is the acknowledgement (an `Ok` naming the resolved desktop bind authority) or a refusal, the server then holds the connection for the tunnel's lifetime, and a second `Error` line arrives only if the tunnel dies before the client does. The tunnel client's EOF (Ctrl-C, killed shell) is the teardown signal; `send_control_request_streaming` + `TunnelSession` carry this shape, and the response vocabulary is unchanged (`Ok`, `Error`, and the typed `Timeout` mapping to exit 124).
 
 ```mermaid

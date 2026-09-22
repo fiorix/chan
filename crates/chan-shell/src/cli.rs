@@ -43,8 +43,8 @@ Drive the current chan window from its terminal.
 `cs` is the chan binary under a second name, picked by argv[0], so `cs
 open x.md` and `chan shell open x.md` are the same command. Every action
 targets the window that spawned this terminal, discovered from the
-environment; run outside a chan terminal, each one errors clearly instead
-of guessing.
+environment, except the offline manual, `cs dump-skill`. Window actions
+run outside a chan terminal error clearly instead of guessing.
 
 Actions disambiguate on their first letters, iproute2 style, so `cs o`,
 `cs te l`, and `cs sea` resolve to open, terminal list, and search. The
@@ -59,7 +59,7 @@ Every chan-spawned terminal carries these. Read them; do not set them.
 
   CHAN                  1 inside any chan terminal. The detection flag.
   CHAN_CONTROL_SOCKET   the serving chan-server's control socket. Every
-                        `cs` command needs it.
+                        window command needs it; dump-skill is offline.
   CHAN_WINDOW_ID        the window to act on. Window-targeting commands
                         use it by default; tab openers and pane commands
                         can override it with --window.
@@ -121,7 +121,7 @@ You do not need MCP to be useful here. `cs search`, `cs open`, and the
 rest of this surface work with the descriptor absent.
 
 SEE ALSO:
-`chan dump-skill --topic overview` for the two modes, `--topic teams` for
+`cs dump-skill --topic overview` for the two modes, `--topic teams` for
 running a team, and `--topic graph` for the project graph.
 "#;
 
@@ -345,16 +345,40 @@ where
 /// `chan-desktop` calls when invoked through a `cs` name, so desktop users
 /// get the `cs` client without a `chan` binary on PATH. Parses through
 /// [`parse_cs`], the same parse the `chan` binary's cs path uses.
-pub async fn run_cs<I>(args: I) -> Result<()>
+/// The caller supplies the shared offline manual renderer.
+pub async fn run_cs<I>(args: I, dump_skill: fn(DumpSkillArgs) -> Result<()>) -> Result<()>
 where
     I: IntoIterator,
     I::Item: Into<std::ffi::OsString> + Clone,
 {
-    dispatch(parse_cs(args).action).await
+    dispatch(parse_cs(args).action, dump_skill).await
+}
+
+/// Shared selectors for the manual supplied by the embedding CLI.
+#[derive(Args, Debug, Default)]
+pub struct DumpSkillArgs {
+    /// Print the topic index without the installable frontmatter.
+    #[arg(long, conflicts_with = "topic")]
+    pub list: bool,
+    /// Read a topic; oversized pages list numbered parts.
+    #[arg(long, value_name = "SLUG")]
+    pub topic: Option<String>,
+    /// Read one numbered part of a topic, starting at 1.
+    #[arg(long, requires = "topic", value_parser = clap::value_parser!(u32).range(1..))]
+    pub part: Option<u32>,
+    /// Print the entire manual without the 8 KiB output limit.
+    #[arg(long, conflicts_with_all = ["list", "topic", "part"])]
+    pub full: bool,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ShellAction {
+    /// Print the agent skill index or a bounded manual topic
+    #[command(long_about = help::CS_DUMP_SKILL)]
+    DumpSkill {
+        #[command(flatten)]
+        args: DumpSkillArgs,
+    },
     /// Open a path, a directory, or a chan://graph link in this window
     #[command(long_about = help::CS_OPEN)]
     #[command(after_long_help = help::CS_OPEN_AFTER)]
@@ -1056,9 +1080,14 @@ pub enum TeamAction {
     },
 }
 
-/// Dispatch a `cs <action>` against the current window's chan-server.
-pub async fn dispatch(action: ShellAction) -> Result<()> {
+/// Dispatch a `cs <action>`; the embedding CLI supplies its offline manual
+/// renderer because chan-shell cannot depend on the CLI that embeds it.
+pub async fn dispatch(
+    action: ShellAction,
+    dump_skill: fn(DumpSkillArgs) -> Result<()>,
+) -> Result<()> {
     match action {
+        ShellAction::DumpSkill { args } => dump_skill(args),
         ShellAction::Open { path, destination } => {
             let env = destination.target_env()?;
             let placement = destination.destination();

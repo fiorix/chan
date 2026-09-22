@@ -154,7 +154,7 @@ CAVEATS:
   the window, not on this terminal.
 
 SEE ALSO:
-  cs upload, cs open, cs export; chan dump-skill --topic transfer.
+  cs upload, cs open, cs export; cs dump-skill --topic transfer.
 "#;
 
 /// `cs export` long help (manpage head).
@@ -351,6 +351,25 @@ SEE ALSO:
   cs open, cs search.
 "#;
 
+/// Offline manual discovery and installation.
+pub(crate) const CS_DUMP_SKILL: &str = r#"Print an installable index of chan's agent manual.
+
+Every topic has a command you can run to read it. A page larger than
+8 KiB lists numbered parts; --topic <SLUG> --part <N> reads one part.
+Only --full prints the entire manual without the size limit.
+The output matches chan dump-skill and needs no running server.
+
+EXAMPLES:
+Install the index for a local agent:
+  mkdir -p ~/.claude/skills/chan
+  cs dump-skill > ~/.claude/skills/chan/SKILL.md
+Read a topic, then a part if the topic lists parts:
+  cs dump-skill --topic serve
+  cs dump-skill --topic serve --part 1
+Save the complete manual to a file:
+  cs dump-skill --full > chan-manual.md
+"#;
+
 /// `cs open` long help (manpage head).
 pub(crate) const CS_OPEN: &str = r#"Open a path, directory, or chan://graph link in a window and side.
 
@@ -422,7 +441,7 @@ CAVEATS:
   file went to.
 
 SEE ALSO:
-  cs graph, cs search, cs terminal new, chan serve; chan dump-skill --topic
+  cs graph, cs search, cs terminal new, chan serve; cs dump-skill --topic
   open.
 "#;
 
@@ -546,7 +565,7 @@ CAVEATS:
   is empty" (exit 1) rather than falling back to another one.
 
 SEE ALSO:
-  cs copy, cs upload, cs download; chan dump-skill --topic clipboard.
+  cs copy, cs upload, cs download; cs dump-skill --topic clipboard.
 "#;
 
 /// `cs search` long help (manpage head).
@@ -784,7 +803,7 @@ CAVEATS:
 
 SEE ALSO:
   cs terminal survey (ask a human and block), cs terminal team (Team
-  Work), cs pane (the layout a tab lands in), cs window. chan dump-skill
+  Work), cs pane (the layout a tab lands in), cs window. cs dump-skill
   --topic cs-terminal-write.
 "#;
 
@@ -1361,7 +1380,7 @@ CAVEATS:
     the same dir.
 
 SEE ALSO:
-  cs terminal team new, cs terminal close --tab-group, chan dump-skill
+  cs terminal team new, cs terminal close --tab-group, cs dump-skill
   --topic teams.
 ";
 
@@ -1452,7 +1471,7 @@ CAVEATS:
     no chord of its own, no identity poke.
 
 SEE ALSO:
-  cs terminal team load, cs terminal write, cs terminal survey, chan
+  cs terminal team load, cs terminal write, cs terminal survey, cs
   dump-skill --topic teams.
 ";
 

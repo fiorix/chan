@@ -26,6 +26,9 @@ use anyhow::{bail, Result};
 use clap::{Command as ClapCommand, CommandFactory};
 
 use crate::Cli;
+use chan_shell::DumpSkillArgs;
+
+const OUTPUT_BUDGET: usize = 8 * 1024;
 
 /// Which clap tree a section renders from. The `cs` surface is its own
 /// parser rather than a subtree of `chan`, so the two roots stay separate
@@ -320,6 +323,7 @@ static UNDOCUMENTED: &[(Root, &[&str])] = &[
     // The command that prints this document. The lead and the closing
     // index already teach `--list` / `--topic`.
     (Root::Chan, &["dump-skill"]),
+    (Root::Cs, &["dump-skill"]),
     // Registry and index maintenance. An agent reaches workspace content
     // through `cs search`, and the registry through `chan serve` / `close`.
     (Root::Chan, &["workspace"]),
@@ -458,13 +462,15 @@ when_to_use: >-
 ---
 ";
 
-/// The only prose in this file. Everything after it is command help.
+/// The installed index explains how to retrieve the live command help.
 const SKILL_LEAD: &str = "\
 # Working in chan
 
-Each section below is the live `--help` of a real command, so it is never
-stale. Run `chan dump-skill --list` for the topic index and `chan
-dump-skill --topic <slug>` for one section.
+chan is an IDE in a single binary, with terminals and workspace tools.
+Fetch a topic with its command below; no server or terminal is required.
+`chan dump-skill` and `cs dump-skill` print the same manual. Topics over
+8 KiB list parts: fetch each with `--topic <slug> --part <number>`.
+Only `--full` prints the entire manual without a size limit.
 
 Start with `overview` for what chan is, `cs` for the environment contract
 and how to tell where you are running, and `open` for the workspace and
@@ -522,33 +528,20 @@ fn find_section(topic: &str) -> Option<&'static Section> {
 /// `chan dump-skill --list`: every topic, one per line, plus the aliases
 /// so an agent can guess a noun and still land somewhere.
 pub(crate) fn render_list() -> String {
-    let width = SPINE
-        .iter()
-        .map(|section| section.slug.len())
-        .max()
-        .unwrap_or(0);
     let mut out = String::new();
     for section in SPINE {
         out.push_str(&format!(
-            "{:width$}  {}\n",
-            section.slug,
-            section.title,
-            width = width
+            "- {}: {}. `cs dump-skill --topic {}`\n",
+            section.slug, section.title, section.slug
         ));
         if !section.aliases.is_empty() {
-            out.push_str(&format!(
-                "{:width$}  also: {}\n",
-                "",
-                section.aliases.join(", "),
-                width = width
-            ));
+            out.push_str(&format!("  Also: {}\n", section.aliases.join(", ")));
         }
     }
     out
 }
 
-/// `chan dump-skill --topic <slug>`: one section's help, raw. No
-/// frontmatter, because a fragment is not a skill file.
+/// One complete source page, before applying the invocation's size budget.
 pub(crate) fn render_topic(topic: &str) -> Result<String> {
     match find_section(topic) {
         Some(section) => render_command(section),
@@ -562,7 +555,7 @@ pub(crate) fn render_topic(topic: &str) -> Result<String> {
     }
 }
 
-/// The whole skill: frontmatter, lead, every section in spine order, and a
+/// The explicit `--full` skill: frontmatter, lead, every section in spine order, and a
 /// closing index that points back at `--topic`.
 pub(crate) fn render_skill() -> Result<String> {
     let mut out = String::new();
@@ -587,9 +580,241 @@ pub(crate) fn render_skill() -> Result<String> {
     Ok(out)
 }
 
+/// Parts carry no labels or wrappers so concatenation preserves the source
+/// help exactly, even when a line itself exceeds the byte budget.
+fn split_page(mut page: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    while page.len() > OUTPUT_BUDGET {
+        let mut end = OUTPUT_BUDGET;
+        while !page.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(newline) = page[..end].rfind('\n') {
+            end = newline + 1;
+        }
+        let (part, rest) = page.split_at(end);
+        parts.push(part);
+        page = rest;
+    }
+    parts.push(page);
+    parts
+}
+
+pub(crate) fn render_output(args: &DumpSkillArgs) -> Result<String> {
+    if args.full {
+        return render_skill();
+    }
+    let out = if let Some(topic) = args.topic.as_deref() {
+        let page = render_topic(topic)?;
+        let parts = split_page(&page);
+        if let Some(number) = args.part {
+            number
+                .checked_sub(1)
+                .and_then(|index| parts.get(index as usize))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "topic {topic} has {} part(s); requested part {number}",
+                        parts.len()
+                    )
+                })?
+                .to_string()
+        } else if parts.len() == 1 {
+            page
+        } else {
+            let mut index = format!(
+                "Topic {topic}: {} bytes, {} parts. Read in order:\n\n",
+                page.len(),
+                parts.len()
+            );
+            for (index_zero, part) in parts.iter().enumerate() {
+                index.push_str(&format!(
+                    "- Part {} ({} bytes): `cs dump-skill --topic {topic} --part {}`\n",
+                    index_zero + 1,
+                    part.len(),
+                    index_zero + 1
+                ));
+            }
+            index
+        }
+    } else if args.list {
+        render_list()
+    } else {
+        format!("{SKILL_FRONTMATTER}\n{SKILL_LEAD}\n{}", render_list())
+    };
+    anyhow::ensure!(
+        out.len() <= OUTPUT_BUDGET,
+        "skill output for {}{} is {} bytes, exceeding the {OUTPUT_BUDGET}-byte budget",
+        args.topic
+            .as_deref()
+            .unwrap_or(if args.list { "index" } else { "default" }),
+        args.part
+            .map(|part| format!(" part {part}"))
+            .unwrap_or_default(),
+        out.len()
+    );
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    fn output_from_command(command: &str) -> String {
+        let words: Vec<_> = command.split_whitespace().collect();
+        let args = if words[0] == "cs" {
+            let chan_shell::ShellAction::DumpSkill { args } =
+                chan_shell::CsCli::try_parse_from(words).unwrap().action
+            else {
+                panic!("not a manual command: {command}")
+            };
+            args
+        } else {
+            let crate::Command::DumpSkill { args } = Cli::try_parse_from(words).unwrap().command
+            else {
+                panic!("not a manual command: {command}")
+            };
+            args
+        };
+        let output = render_output(&args).unwrap_or_else(|err| panic!("{command}: {err}"));
+        assert!(
+            output.len() <= OUTPUT_BUDGET,
+            "{command}: {} bytes",
+            output.len()
+        );
+        output
+    }
+
+    fn indexed_commands(index: &str) -> Vec<&str> {
+        index
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .map(|line| line.split('`').nth(1).expect("indexed command"))
+            .collect()
+    }
+
+    #[test]
+    fn indexed_units_fit_budget_and_reassemble() {
+        let index = output_from_command("chan dump-skill");
+        assert_eq!(index, output_from_command("cs dump-skill"));
+        assert!(index.starts_with(SKILL_FRONTMATTER));
+        assert!(
+            !index.contains("Usage:"),
+            "installed index contains page bodies"
+        );
+        assert_eq!(
+            output_from_command("chan dump-skill --list"),
+            output_from_command("cs dump-skill --list")
+        );
+        let commands = indexed_commands(&index);
+        assert_eq!(commands.len(), SPINE.len());
+        for (section, command) in SPINE.iter().zip(commands) {
+            assert_eq!(command, format!("cs dump-skill --topic {}", section.slug));
+            for topic in std::iter::once(section.slug).chain(section.aliases.iter().copied()) {
+                let invocation = format!("cs dump-skill --topic {topic}");
+                let output = output_from_command(&invocation);
+                assert_eq!(
+                    output,
+                    output_from_command(&invocation.replacen("cs ", "chan ", 1))
+                );
+                let page = render_topic(topic).unwrap();
+                if page.len() <= OUTPUT_BUDGET {
+                    assert_eq!(output, page);
+                    assert_eq!(output_from_command(&format!("{invocation} --part 1")), page);
+                } else {
+                    let commands = indexed_commands(&output);
+                    assert!(commands.len() > 1, "{topic} needs parts");
+                    let mut joined = String::new();
+                    for command in commands {
+                        let part = output_from_command(command);
+                        assert!(!part.is_empty());
+                        assert_eq!(
+                            part,
+                            output_from_command(&command.replacen("cs ", "chan ", 1))
+                        );
+                        joined.push_str(&part);
+                    }
+                    assert_eq!(joined, page, "parts lose or repeat text in {topic}");
+                }
+            }
+        }
+        let full = render_output(&DumpSkillArgs {
+            full: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(full, render_skill().unwrap());
+        assert!(
+            full.len() > OUTPUT_BUDGET,
+            "full export is explicitly unbounded"
+        );
+    }
+
+    #[test]
+    fn parts_preserve_utf8_long_lines_and_exact_boundaries() {
+        for page in [
+            String::new(),
+            "x".repeat(OUTPUT_BUDGET),
+            "x".repeat(OUTPUT_BUDGET + 1),
+            format!("header\n{}\nend\n", "é界🦀".repeat(OUTPUT_BUDGET)),
+        ] {
+            let parts = split_page(&page);
+            assert_eq!(parts.concat(), page);
+            assert!(parts.iter().all(|part| part.len() <= OUTPUT_BUDGET));
+            assert!(page.is_empty() || parts.iter().all(|part| !part.is_empty()));
+            if page.len() <= OUTPUT_BUDGET {
+                assert_eq!(parts.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_part_selectors_are_refused() {
+        for flags in [
+            "--part 1",
+            "--topic serve --part 0",
+            "--topic serve --part -1",
+            "--full --topic serve",
+            "--full --list",
+            "--list --topic serve",
+        ] {
+            for root in ["chan", "cs"] {
+                let invocation = format!("{root} dump-skill {flags}");
+                let words = invocation.split_whitespace();
+                let refused = if root == "chan" {
+                    Cli::try_parse_from(words).is_err()
+                } else {
+                    chan_shell::CsCli::try_parse_from(words).is_err()
+                };
+                assert!(refused, "{invocation}");
+            }
+        }
+        for part in [0, u32::MAX] {
+            let err = render_output(&DumpSkillArgs {
+                topic: Some("serve".into()),
+                part: Some(part),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("requested part"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cs_manual_entrypoint_calls_embedding_renderer() {
+        fn renderer(args: DumpSkillArgs) -> Result<()> {
+            assert_eq!(args.topic.as_deref(), Some("serve"));
+            assert_eq!(args.part, Some(2));
+            anyhow::bail!("renderer reached")
+        }
+        let err = chan_shell::run_cs(
+            ["cs", "dump-skill", "--topic", "serve", "--part", "2"],
+            renderer,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "renderer reached");
+    }
 
     #[test]
     fn every_visible_argument_has_help() {

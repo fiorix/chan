@@ -4648,7 +4648,7 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("building cs runtime: {e}"))?;
-    rt.block_on(chan_shell::run_cs(std::env::args_os()))
+    rt.block_on(chan_shell::run_cs(std::env::args_os(), chan::dump_skill))
         .map_err(|e| format!("{e:#}"))?;
     Ok(true)
 }

@@ -344,7 +344,7 @@ See what is being served, then tear one down:
 Most installs put `cs` on your PATH. If yours did not, link it once:
   ln -s "$(command -v chan)" ~/.local/bin/cs
 
-Teach an agent the whole surface in one shot:
+Install the topic index so an agent can fetch the pages it needs:
   mkdir -p ~/.claude/skills/chan
   chan dump-skill > ~/.claude/skills/chan/SKILL.md
 
@@ -358,13 +358,18 @@ its apps.
 /// clap collapses a doc comment's paragraphs into one line, which would
 /// destroy the example block below.
 const DUMP_SKILL_LONG_ABOUT: &str = "\
-Print an agent-facing skill document, rendered from chan's own help text.
+Print an installable index of chan's agent manual.
 
 The output teaches an agent what chan is and how to drive it: the `cs`
 command surface, the command launcher and built-in apps, authoring
 documents with diagrams and slide decks, the project graph, teams of
 agents, and devservers. Every section is the live `--help` of a real
 command, so the skill cannot go stale against the binary printing it.
+The default index lists a command for every topic. --topic <SLUG> reads one;
+pages over 8 KiB list numbered parts to read with --part N. Each index,
+page or part fits in 8 KiB. --full explicitly prints the entire manual
+without that limit. cs dump-skill accepts the same selectors and prints
+the same bytes, without needing a terminal or running server.
 
 Writes nothing. The document goes to stdout; you decide where it lands.";
 
@@ -379,6 +384,10 @@ Install the skill for a local agent (the usual first run):
 See what topics exist, then read one:
   chan dump-skill --list
   chan dump-skill --topic teams
+  cs dump-skill --topic serve --part 1
+
+Save the complete manual without the output size limit:
+  chan dump-skill --full > chan-manual.md
 
 Hand a topic to another agent, or drop it into a team brief:
   chan dump-skill --topic graph | cs copy
@@ -527,13 +536,8 @@ enum Command {
     #[command(long_about = DUMP_SKILL_LONG_ABOUT)]
     #[command(after_long_help = DUMP_SKILL_AFTER_HELP)]
     DumpSkill {
-        /// Print the topic index instead of the skill.
-        #[arg(long, conflicts_with = "topic")]
-        list: bool,
-        /// Print one topic's manual page instead of the whole skill.
-        /// Takes a slug from `--list`.
-        #[arg(long, value_name = "SLUG", verbatim_doc_comment)]
-        topic: Option<String>,
+        #[command(flatten)]
+        args: chan_shell::DumpSkillArgs,
     },
     /// Upgrade chan in place
     ///
@@ -1804,9 +1808,9 @@ where
                 },
             },
         },
-        Command::Shell { action } => chan_shell::dispatch(action).await,
+        Command::Shell { action } => chan_shell::dispatch(action, dump_skill).await,
         Command::Completions { shell } => cmd_completions(shell),
-        Command::DumpSkill { list, topic } => cmd_dump_skill(list, topic.as_deref()),
+        Command::DumpSkill { args } => dump_skill(args),
         Command::Close { args, forget } => {
             cmd_close_cli(args.path, args.on, forget, personality).await
         }
@@ -1979,16 +1983,10 @@ fn cmd_list(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Render the skill (or one topic, or the index) to stdout. Pure output,
-/// like `cmd_completions`: no workspace, no registry, no side effects.
-fn cmd_dump_skill(list: bool, topic: Option<&str>) -> Result<()> {
-    let out = if list {
-        skill::render_list()
-    } else if let Some(topic) = topic {
-        skill::render_topic(topic)?
-    } else {
-        skill::render_skill()?
-    };
+/// Print the offline agent manual for either CLI personality. The desktop
+/// supplies this same renderer to chan-shell so both entrypoints agree.
+pub fn dump_skill(args: chan_shell::DumpSkillArgs) -> Result<()> {
+    let out = skill::render_output(&args)?;
     print!("{out}");
     Ok(())
 }
@@ -12389,7 +12387,12 @@ mod tests {
         assert!(matches!(cli.command, Command::Upgrade { check: true, .. }));
 
         let cli = Cli::try_parse_from(["chan", "du", "--list"]).unwrap();
-        assert!(matches!(cli.command, Command::DumpSkill { list: true, .. }));
+        assert!(matches!(
+            cli.command,
+            Command::DumpSkill {
+                args: chan_shell::DumpSkillArgs { list: true, .. }
+            }
+        ));
 
         let cli = Cli::try_parse_from(["chan", "de", "reg", "http://dev.example:8787"]).unwrap();
         assert!(matches!(
