@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  unactionable,
   workspaceCondition,
   type WorkspaceCondition,
   type WorkspaceStatus,
@@ -18,6 +19,7 @@ const EXPECTED: Record<WorkspaceStatus, WorkspaceCondition> = {
   removing: "busy",
   error: "failed",
   unavailable: "degraded",
+  unknown: "unknown",
 };
 
 describe("workspaceCondition", () => {
@@ -33,6 +35,19 @@ describe("workspaceCondition", () => {
     expect(workspaceCondition("unavailable")).toBe("degraded");
     expect(workspaceCondition("unavailable")).not.toBe(workspaceCondition("running"));
     expect(workspaceCondition("unavailable")).not.toBe(workspaceCondition("error"));
+  });
+
+  it("reads an unreadable lock as unknown, neither foreign nor idle", () => {
+    // The probe established neither that another process holds the mount nor
+    // that none does, so the row must not say either.
+    expect(workspaceCondition("unknown")).toBe("unknown");
+    expect(workspaceCondition("unknown")).not.toBe(workspaceCondition("locked"));
+    expect(workspaceCondition("unknown")).not.toBe(workspaceCondition("stopped"));
+  });
+
+  it("offers no lifecycle action on a foreign or an unknown lock alone", () => {
+    const refused = (Object.keys(EXPECTED) as WorkspaceStatus[]).filter(unactionable);
+    expect(refused.sort()).toEqual(["locked", "unknown"]);
   });
 
   it("keeps the busy set to the three transitional statuses", () => {

@@ -129,6 +129,7 @@ describe("Library: Local group", () => {
       "removing",
       "error",
       "unavailable",
+      "unknown",
     ] as const) {
       library.workspaces = library.workspaces.map(
         (w): WorkspaceEntry => (w.workspace_id === id ? { ...w, on: true, status } : w),
@@ -168,6 +169,27 @@ describe("Library: Local group", () => {
     expect(toggle.classList.contains("locked")).toBe(true);
     expect(toggle.querySelector("svg")).toBeTruthy();
     expect(toggle.title).toBe("Workspace is open in another Chan process");
+    expect(byAria("New window of notes")!.disabled).toBe(true);
+  });
+
+  it("renders status:unknown as a disabled control that names no other process", () => {
+    // The lock probe failed: the row offers nothing, shows the probe's reason,
+    // and must not claim another Chan process holds the workspace.
+    const reason = "lock file could not be opened: Too many open files";
+    mountList();
+    const id = library.workspaces.find((w) => w.devserver_id === null)!.workspace_id;
+    library.workspaces = library.workspaces.map(
+      (w): WorkspaceEntry =>
+        w.workspace_id === id ? { ...w, on: false, status: "unknown", error: reason } : w,
+    );
+    flushSync();
+    const toggle = byAria("Lock state of notes could not be read")!;
+    expect(toggle).toBeTruthy();
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.title).toBe("Could not read this workspace's lock state");
+    expect(toggle.title).not.toContain("another Chan process");
+    expect(byAria("notes is open in another Chan process")).toBeFalsy();
+    expect((target!.querySelector(".row-error") as HTMLElement).title).toBe(reason);
     expect(byAria("New window of notes")!.disabled).toBe(true);
   });
 

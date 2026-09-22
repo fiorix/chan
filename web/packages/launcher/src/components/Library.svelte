@@ -17,6 +17,7 @@
     Globe,
     House,
     LoaderCircle,
+    CircleHelp,
     Lock,
     Pencil,
     Plug,
@@ -56,7 +57,7 @@
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
-  import { workspaceCondition } from "../api/library";
+  import { unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
   // The whole tree, recomputed when any of the three feeds change (the two-array
@@ -132,8 +133,17 @@
     return workspaceCondition(ws.status) === "busy" || isPending(rowKey(ws));
   }
 
+  // No lifecycle action may touch the row: another Chan process holds the
+  // mount, or whether one does could not be read. The two share the disabled
+  // control and differ in wording (`lockUnknown`).
   function locked(ws: WorkspaceEntry): boolean {
-    return workspaceCondition(ws.status) === "foreign";
+    return unactionable(ws.status);
+  }
+
+  // The writer lock could not be read. The row must not claim another process
+  // holds the workspace, only that its lock state is unknown.
+  function lockUnknown(ws: WorkspaceEntry): boolean {
+    return workspaceCondition(ws.status) === "unknown";
   }
 
   // A mounted tenant whose root is not usable. The row keeps its controls (the
@@ -265,7 +275,15 @@
           class:degraded={degraded(ws)}
           title={degraded(ws) ? ws.error : undefined}
           aria-disabled="true">
-          {locked(ws) ? "Locked" : degraded(ws) ? "Degraded" : ws.on ? "On" : "Off"}
+          {lockUnknown(ws)
+            ? "Unknown"
+            : locked(ws)
+              ? "Locked"
+              : degraded(ws)
+                ? "Degraded"
+                : ws.on
+                  ? "On"
+                  : "Off"}
         </span>
       {:else}
         <button
@@ -288,21 +306,27 @@
           class:locked={locked(ws)}
           type="button"
           disabled={spinning(ws) || locked(ws)}
-          title={locked(ws)
-            ? "Workspace is open in another Chan process"
-            : spinning(ws)
+          title={lockUnknown(ws)
+            ? "Could not read this workspace's lock state"
+            : locked(ws)
+              ? "Workspace is open in another Chan process"
+              : spinning(ws)
               ? "Working…"
               : ws.on
                 ? "Turn off"
                 : "Turn on"}
-          aria-label={locked(ws)
-            ? `${displayName(ws)} is open in another Chan process`
-            : spinning(ws)
+          aria-label={lockUnknown(ws)
+            ? `Lock state of ${displayName(ws)} could not be read`
+            : locked(ws)
+              ? `${displayName(ws)} is open in another Chan process`
+              : spinning(ws)
               ? `Working on ${displayName(ws)}`
               : `${ws.on ? "Turn off" : "Turn on"} ${displayName(ws)}`}
           onclick={() => run(setWorkspacePower(ws, !ws.on))}>
           {#if spinning(ws)}
             <LoaderCircle class="spin" size={16} />
+          {:else if lockUnknown(ws)}
+            <CircleHelp size={16} />
           {:else if locked(ws)}
             <Lock size={16} />
           {:else}

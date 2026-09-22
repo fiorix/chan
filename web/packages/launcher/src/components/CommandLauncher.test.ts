@@ -212,6 +212,38 @@ describe("Computers command deck", () => {
     expect(target.querySelectorAll(".deck-scope")).toHaveLength(1);
   });
 
+  it("offers turn on and turn off only on workspaces this process may act on", async () => {
+    library.workspaces = [
+      { ...workspace, workspace_id: "ws-off", label: "Idle", prefix: "ws-off", on: false, status: "stopped" },
+      { ...workspace, workspace_id: "ws-held", label: "Held", prefix: "ws-held", on: false, status: "locked" },
+      {
+        ...workspace,
+        workspace_id: "ws-unread",
+        label: "Unread",
+        prefix: "ws-unread",
+        on: false,
+        status: "unknown",
+        error: "lock file could not be opened",
+      },
+      { ...workspace, workspace_id: "ws-up", label: "Up", prefix: "ws-up", on: true, status: "running" },
+      { ...workspace, workspace_id: "ws-held-on", label: "Held on", prefix: "ws-held-on", on: true, status: "locked" },
+      { ...workspace, workspace_id: "ws-unread-on", label: "Unread on", prefix: "ws-unread-on", on: true, status: "unknown" },
+    ];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Turn on").click();
+    await tick();
+    expect(titles()).toEqual(["Idle"]);
+
+    closeCommandLauncher();
+    clearCommandLauncherDraft("computers");
+    openCommandLauncher("computers");
+    flushSync();
+    result("Turn off").click();
+    await tick();
+    expect(titles()).toEqual(["Up"]);
+  });
+
   it("does not expose the Desktop theme command on a devserver", async () => {
     openCommandLauncher("computers");
     flushSync();

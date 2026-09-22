@@ -94,8 +94,26 @@ describe("workspace multi-select", () => {
     expect(selection.note).toBe("1 locked workspace skipped");
   });
 
+  it("bulk turn on skips a workspace whose lock state is unknown", async () => {
+    await addLocalWorkspace("/tmp/sel-unknown");
+    const unread = library.workspaces.find((w) => w.path === "/tmp/sel-unknown")!;
+    library.workspaces = library.workspaces.map((w) =>
+      w.workspace_id === unread.workspace_id
+        ? { ...w, on: false, status: "unknown", error: "lock file could not be opened" }
+        : w,
+    );
+    toggleSelected("workspace", unread.workspace_id);
+
+    await bulkSetOnAll(true);
+
+    const row = library.workspaces.find((w) => w.workspace_id === unread.workspace_id)!;
+    expect(row.status).toBe("unknown");
+    expect(row.on).toBe(false);
+    expect(selection.note).toBe("1 locked workspace skipped");
+  });
+
   // Total over the wire union: which status a bulk run refuses to act on is the
-  // classifier's `foreign` answer, so a status added to the wire needs an entry
+  // classifier's `foreign` or `unknown` answer, so a status added to the wire needs an entry
   // here. A degraded mount is not one of them -- it is up, and turning it off is
   // the one action that helps it.
   const SKIPPED_BY_BULK: Record<WorkspaceStatus, boolean> = {
@@ -107,9 +125,10 @@ describe("workspace multi-select", () => {
     removing: false,
     error: false,
     unavailable: false,
+    unknown: true,
   };
 
-  it("skips a bulk run over the foreign lock alone", async () => {
+  it("skips a bulk run over a foreign or unknown lock alone", async () => {
     for (const status of Object.keys(SKIPPED_BY_BULK) as WorkspaceStatus[]) {
       const skipped = SKIPPED_BY_BULK[status];
       const path = `/tmp/sel-bulk-${status}`;

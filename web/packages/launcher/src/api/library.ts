@@ -99,6 +99,8 @@ export interface WindowSet {
  * - `error`       mount failed (open error); see `WorkspaceEntry.error`
  * - `unavailable` mounted, but the directory under the root cannot be read;
  *   see `WorkspaceEntry.error`
+ * - `unknown`     the writer lock could not be read, so whether another process
+ *   holds the workspace is not known; see `WorkspaceEntry.error`
  */
 export type WorkspaceStatus =
   | "stopped"
@@ -108,7 +110,8 @@ export type WorkspaceStatus =
   | "closing"
   | "removing"
   | "error"
-  | "unavailable";
+  | "unavailable"
+  | "unknown";
 
 /**
  * How a lifecycle status reads on a control surface. The workspace rows, the
@@ -121,8 +124,17 @@ export type WorkspaceStatus =
  * - `foreign`  another Chan process holds the mount; this one cannot act
  * - `degraded` mounted, but its root is not usable, so only turning it off helps
  * - `failed`   a lifecycle operation failed and is worth retrying
+ * - `unknown`  nothing is known about the mount, so no action is offered; it is
+ *   not read as another process holding it
  */
-export type WorkspaceCondition = "idle" | "busy" | "ready" | "foreign" | "degraded" | "failed";
+export type WorkspaceCondition =
+  | "idle"
+  | "busy"
+  | "ready"
+  | "foreign"
+  | "degraded"
+  | "failed"
+  | "unknown";
 
 /** Classify a wire status. Total over the union: a status with no case here has
  * no return value, which the build refuses. */
@@ -142,7 +154,18 @@ export function workspaceCondition(status: WorkspaceStatus): WorkspaceCondition 
       return "degraded";
     case "error":
       return "failed";
+    case "unknown":
+      return "unknown";
   }
+}
+
+/** Whether no lifecycle action may be offered on a row with this status: another
+ * process holds the mount, or whether one does is not known. Eligibility asks
+ * this; wording asks `workspaceCondition`, since the two conditions read
+ * differently. */
+export function unactionable(status: WorkspaceStatus): boolean {
+  const condition = workspaceCondition(status);
+  return condition === "foreign" || condition === "unknown";
 }
 
 /**
@@ -163,11 +186,13 @@ export interface WorkspaceEntry {
   on: boolean;
   /** Live mount lifecycle. The spinner shows while transitional; `locked` disables
    * local control; `error` and `unavailable` render a row affordance carrying
-   * `error`. Drives the UI in place of `on`. */
+   * `error`; `unknown` disables local control and carries `error` too. Drives
+   * the UI in place of `on`. */
   status: WorkspaceStatus;
   /** Short human reason behind `status`: the open failure for `error`, what is
-   * wrong with the root for `unavailable`. Absent for every other status, so a
-   * row that carries one has a reason worth showing. */
+   * wrong with the root for `unavailable`, why the lock could not be read for
+   * `unknown`. Absent for every other status, so a row that carries one has a
+   * reason worth showing. */
   error?: string;
   /** The library serving this row: host-local id for local rows (`local` in the
    * desktop app, `lib-*` in the standalone devserver); the remote library id for

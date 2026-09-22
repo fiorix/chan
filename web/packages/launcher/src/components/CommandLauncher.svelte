@@ -29,7 +29,7 @@
     Unplug,
     X,
   } from "lucide-svelte";
-  import { workspaceCondition } from "../api/library";
+  import { unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { basename, LOCAL_LIBRARY_ID, windowRowLabel } from "../lib/windowLabel";
@@ -427,7 +427,7 @@
           .filter(
             (workspace) =>
               !workspace.on &&
-              workspaceCondition(workspace.status) !== "foreign" &&
+              !unactionable(workspace.status) &&
               !workspacePending(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
@@ -438,7 +438,7 @@
           .filter(
             (workspace) =>
               workspace.on &&
-              workspaceCondition(workspace.status) !== "foreign" &&
+              !unactionable(workspace.status) &&
               !workspacePending(workspace),
           )
           .map((workspace) => workspaceTarget(command, workspace));
