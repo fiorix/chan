@@ -2164,6 +2164,15 @@ impl ControllerState {
             };
         }
 
+        if let ReconciliationKind::Joining(joining) = &reconciliation.kind {
+            // A departed or resyncing join cannot replace retained authority.
+            if !self.proxies.get(&joining.proxy_id).is_some_and(|session| {
+                session.incarnation == joining.incarnation && session.generation.is_some()
+            }) {
+                return Vec::new();
+            }
+        }
+
         let (desired, losers) = match &reconciliation.kind {
             ReconciliationKind::Initial => {
                 let candidates: Vec<OwnedTunnel> = self
@@ -2966,6 +2975,31 @@ pub(super) mod tests {
             .unwrap();
         let effects = state.tick(now + CONVERGENCE_WINDOW, Utc::now());
         (id, incarnation, effects)
+    }
+
+    #[test]
+    fn departed_join_preserves_orphan_inventory_and_usage() {
+        let now = Instant::now();
+        let mut state = ControllerState::new(100);
+        let (id, incarnation, _) = ready_one(
+            &mut state, "p1", vec![row("alice", "one", Uuid::new_v4())], now,
+        );
+        let active_at = now + CONVERGENCE_WINDOW;
+        state.disconnect(&id, incarnation, active_at).unwrap();
+        assert_eq!(state.tunnels.len(), 1);
+        assert_eq!(state.orphan_total.rows, 1);
+        let usage = state.fleet_usage(None);
+        state.reconciliation = Some(Reconciliation {
+            kind: ReconciliationKind::Joining(SessionKey {
+                proxy_id: id.as_str().to_string(), incarnation,
+            }),
+            command_ids: HashSet::new(),
+            failed: false,
+        });
+        assert!(state.finish_reconciliation_if_complete(active_at).is_empty());
+        assert_eq!(state.tunnels.len(), 1);
+        assert_eq!(state.orphan_total.rows, 1);
+        assert_eq!(state.fleet_usage(None), usage);
     }
 
     #[test]
