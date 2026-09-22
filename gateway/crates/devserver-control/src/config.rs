@@ -51,6 +51,12 @@ pub enum AdminScope {
     Profile,
 }
 
+/// Validated, scope-separated controller credentials.
+///
+/// Raw strings cannot construct production credentials:
+/// ```compile_fail
+/// let credentials: devserver_control::AdminCredentials = String::new().into();
+/// ```
 #[derive(Clone)]
 pub struct AdminCredentials {
     operator: Vec<Vec<u8>>,
@@ -109,6 +115,7 @@ impl AdminCredentials {
     }
 }
 
+#[cfg(test)]
 impl From<String> for AdminCredentials {
     fn from(token: String) -> Self {
         Self {
