@@ -1650,7 +1650,7 @@ impl ControllerState {
     }
 
     /// Owner-wide admin kill. Pending admission claims for the immutable owner are
-    /// cancelled before any command is issued (fleet admission rule 7); a
+    /// cancelled before any command is issued; a
     /// late `TunnelUp` for a cancelled claim arrives without a matching
     /// claim and is killed by the unclaimed-row path. Authoritative rows
     /// group by current owning session, one command per proxy. Returns the

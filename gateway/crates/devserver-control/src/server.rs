@@ -897,11 +897,7 @@ where
                     .session_revocation_result(proxy_id.clone(), incarnation, command_id, revoked)
                     .await?;
             }
-            ClientFrame::Pong { nonce } => {
-                controller
-                    .pong(proxy_id.clone(), incarnation, nonce)
-                    .await?;
-            }
+            ClientFrame::Pong { .. } => unreachable!("Pong is handled before phase dispatch"),
             ClientFrame::SnapshotStart { .. }
             | ClientFrame::SnapshotChunk { .. }
             | ClientFrame::BrowserSessionSnapshotChunk { .. }
@@ -949,9 +945,7 @@ fn snapshot_chunk_is_exempt(phase: &Phase, frame: &ClientFrame) -> bool {
 }
 
 fn snapshot_rows_fit(current: usize, incoming: usize) -> bool {
-    current
-        .checked_add(incoming)
-        .is_some_and(|total| total <= MAX_SNAPSHOT_ROWS)
+    bounded_add(current, incoming, MAX_SNAPSHOT_ROWS)
 }
 
 fn snapshot_bytes_fit(current: usize, incoming: usize) -> bool {

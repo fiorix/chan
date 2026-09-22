@@ -36,11 +36,9 @@ impl ProxyCredentials {
     }
 
     pub(crate) fn authenticate(&self, proxy_id: &ProxyId, provided: &[u8]) -> bool {
-        self.0.get(proxy_id).is_some_and(|tokens| {
-            tokens.iter().fold(false, |matched, expected| {
-                matched | bool::from(expected.as_slice().ct_eq(provided))
-            })
-        })
+        self.0
+            .get(proxy_id)
+            .is_some_and(|tokens| matches_any(tokens, provided))
     }
 }
 
@@ -96,9 +94,7 @@ impl AdminCredentials {
             (AdminScope::Identity, &self.identity),
             (AdminScope::Profile, &self.profile),
         ] {
-            if tokens.iter().fold(false, |matched, expected| {
-                matched | bool::from(expected.as_slice().ct_eq(provided))
-            }) {
+            if matches_any(tokens, provided) {
                 return Some(scope);
             }
         }
@@ -126,10 +122,17 @@ impl From<String> for AdminCredentials {
     }
 }
 
+fn matches_any(tokens: &[Vec<u8>], provided: &[u8]) -> bool {
+    // Check every rotation candidate; only length inequality may short-circuit.
+    tokens.iter().fold(false, |matched, expected| {
+        matched | bool::from(expected.as_slice().ct_eq(provided))
+    })
+}
+
 fn parse_rotation(name: &str) -> anyhow::Result<Vec<Vec<u8>>> {
     let raw = required_secret(name)?;
     let tokens: Vec<_> = raw.split(';').collect();
-    if tokens.is_empty() || tokens.len() > 2 {
+    if tokens.len() > 2 {
         anyhow::bail!("{name} must contain one or two rotation credentials");
     }
     let mut unique = HashSet::new();
