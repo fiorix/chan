@@ -669,6 +669,8 @@ jobs:
     name: macOS validation
     needs: context
     runs-on: macos-latest
+    # About three times the slowest green run (31 min); a hang ends here, not at the 360-minute default.
+    timeout-minutes: 90
     env:
       RUSTFLAGS: -D warnings
     steps:
