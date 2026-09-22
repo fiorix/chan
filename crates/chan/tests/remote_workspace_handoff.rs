@@ -119,6 +119,59 @@ fn fake_desktop(req: Request) -> Response {
 }
 
 #[tokio::test]
+async fn forget_alias_preserves_requests_and_refused_registrations() {
+    use std::sync::{Arc, Mutex};
+    let sandbox = Sandbox::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().to_str().unwrap();
+    let (code, _, err) = sandbox.run(&["workspace", "add", path]).await;
+    assert_eq!(code, 0, "{err}");
+    let config = sandbox.chan_home.path().join("config.toml");
+    let before = std::fs::read(&config).unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let _listener = start_listener(sandbox.socket(), move |req| {
+        seen.lock()
+            .unwrap()
+            .push(serde_json::to_value(&req).unwrap());
+        async {
+            Response::CloseRefused {
+                error: "live_terminals".into(),
+                active_terminals: 2,
+            }
+        }
+    })
+    .unwrap();
+    for remote in [false, true] {
+        for verb in [
+            vec!["close", "--forget", path],
+            vec!["workspace", "forget", path],
+        ] {
+            let mut args = verb;
+            if remote {
+                args.extend(["--on", "lab"]);
+            }
+            let out = sandbox
+                .command(&args)
+                .env("CHAN_DESKTOP_HANDOFF", "1")
+                .output()
+                .await
+                .unwrap();
+            assert!(!out.status.success());
+            let err = String::from_utf8(out.stderr).unwrap();
+            assert!(err.contains("2 live terminal(s)"), "{err}");
+            assert_eq!(std::fs::read(&config).unwrap(), before);
+        }
+    }
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[2], requests[3]);
+    assert_eq!(requests[0]["remove"], true);
+    assert_eq!(requests[2]["target"], "lab");
+}
+
+#[tokio::test]
 async fn serve_close_and_forget_render_the_desktop_replies() {
     let sandbox = Sandbox::new();
     let _listener = start_listener(sandbox.socket(), |req| async move { fake_desktop(req) })

@@ -354,6 +354,8 @@ SEE ALSO:
 /// `cs open` long help (manpage head).
 pub(crate) const CS_OPEN: &str = r#"Open a path, directory, or chan://graph link in a window and side.
 
+`chan open` serves a workspace; `cs open` opens a file in a window.
+
 A directory -- or no argument at all, which means the terminal's current
 directory -- opens the File Browser there. A text file opens in the
 editor, on the surface its extension implies: .md / .txt land in the

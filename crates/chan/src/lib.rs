@@ -193,6 +193,8 @@ const KEYBINDINGS_TABLE: &str = "  App
 /// `chan serve` long help: what serving a workspace actually does.
 const SERVE_LONG_ABOUT: &str = r#"Register a directory as a chan workspace and serve it.
 
+`chan open` serves a workspace; `cs open` opens a file in a window.
+
 chan serve PATH creates the directory if it does not exist, registers it
 in the workspace registry, and serves it. Serving is load-bearing: a
 bare `chan workspace add` only registers, while serving mounts the
@@ -440,7 +442,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Serve a workspace (same as `chan workspace serve`)
-    #[command(long_about = SERVE_LONG_ABOUT)]
+    #[command(long_about = SERVE_LONG_ABOUT, visible_alias = "open")]
     #[command(after_long_help = &*SERVE_AFTER_HELP)]
     Serve {
         #[command(flatten)]
@@ -452,6 +454,9 @@ enum Command {
     Close {
         #[command(flatten)]
         args: CloseCliArgs,
+        /// Also drop registration and metadata (`chan workspace forget`).
+        #[arg(long)]
+        forget: bool,
     },
     /// Show which registered workspaces are served, and by what
     #[command(long_about = help::CHAN_PS)]
@@ -823,7 +828,7 @@ struct DevserverServeArgs {
 /// The `chan serve` / `chan workspace serve` argument set. One struct,
 /// flattened into both spellings, so the elevated form and the family
 /// form parse and behave identically by construction.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, PartialEq)]
 struct ServeCliArgs {
     /// A local workspace PATH. Required; a URL is refused with a
     /// pointer at `chan devserver register`.
@@ -1802,7 +1807,9 @@ where
         Command::Shell { action } => chan_shell::dispatch(action).await,
         Command::Completions { shell } => cmd_completions(shell),
         Command::DumpSkill { list, topic } => cmd_dump_skill(list, topic.as_deref()),
-        Command::Close { args } => cmd_close_cli(args.path, args.on, false, personality).await,
+        Command::Close { args, forget } => {
+            cmd_close_cli(args.path, args.on, forget, personality).await
+        }
         Command::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
         Command::Ps { json } => cmd_ps(json).await,
         Command::Devserver { action } => cmd_devserver_action(action, verbose).await,
@@ -9876,8 +9883,126 @@ mod tests {
             Cli::try_parse_from(["chan", "serve", ".", "--standalone", "--devserver"]).is_err()
         );
         assert!(Cli::try_parse_from(["chan", "serve", ".", "--desktop", "--devserver"]).is_err());
-        // The retired spelling is gone outright, not aliased.
-        assert!(Cli::try_parse_from(["chan", "open", "."]).is_err());
+    }
+
+    #[test]
+    fn open_alias_preserves_serve_arguments_and_help() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["--here"],
+            &["--host", "127.0.0.2"],
+            &["-4"],
+            &["-6"],
+            &["--port", "9000"],
+            &["--prefix", "/notes"],
+            &["--timeout", "5m"],
+            &["--no-token"],
+            &["--no-browser"],
+            &["--search-aggression", "conservative"],
+            &["--no-settings"],
+            &["--standalone"],
+            &["--desktop"],
+            &["--devserver"],
+            &["--devserver=9000"],
+            &["--on", "lab"],
+            &["-vv"],
+        ];
+        for flags in cases {
+            let parse = |verb| {
+                let cli = Cli::try_parse_from(
+                    ["chan", verb, "/srv/notes"]
+                        .into_iter()
+                        .chain(flags.iter().copied()),
+                )
+                .unwrap();
+                let Command::Serve { args } = cli.command else {
+                    panic!("not serve")
+                };
+                (cli.verbose, args)
+            };
+            assert_eq!(parse("open"), parse("serve"), "{flags:?}");
+        }
+        assert!(Cli::try_parse_from(["chan", "workspace", "open", "."]).is_err());
+        for argv in [
+            ["chan", "open", "--help"].as_slice(),
+            ["chan", "shell", "open", "--help"].as_slice(),
+        ] {
+            let help = Cli::try_parse_from(argv).unwrap_err().to_string();
+            assert!(
+                help.contains("chan open") && help.contains("cs open"),
+                "{help}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn open_alias_refuses_urls_like_serve() {
+        let mut errors = Vec::new();
+        for verb in ["serve", "open"] {
+            let Command::Serve { args } =
+                Cli::try_parse_from(["chan", verb, "https://example.test/notes"])
+                    .unwrap()
+                    .command
+            else {
+                panic!("not serve")
+            };
+            errors.push(
+                cmd_serve_cli(args, Personality::Standalone, false)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+            );
+        }
+        assert_eq!(errors[0], errors[1]);
+        assert!(errors[0].contains("is a URL; `chan serve` takes a workspace PATH"));
+    }
+
+    #[test]
+    fn top_level_prefixes_keep_their_commands() {
+        // Pin the original names independently of the live tree so a new
+        // command or alias cannot silently steal an existing abbreviation.
+        let names = [
+            "serve",
+            "close",
+            "ps",
+            "workspace",
+            "devserver",
+            "shell",
+            "config",
+            "completions",
+            "dump-skill",
+            "upgrade",
+            "help",
+            "__mcp",
+            "__mcp-proxy",
+            "__devserver-daemon",
+        ];
+        for name in names {
+            for end in 1..=name.len() {
+                let prefix = &name[..end];
+                if names.contains(&prefix)
+                    || names.iter().filter(|n| n.starts_with(prefix)).count() == 1
+                {
+                    let result = Cli::command()
+                        .ignore_errors(true)
+                        .try_get_matches_from(["chan", prefix]);
+                    let expected = if names.contains(&prefix) {
+                        prefix
+                    } else {
+                        name
+                    };
+                    if expected == "help" {
+                        assert_eq!(
+                            result.unwrap_err().kind(),
+                            clap::error::ErrorKind::DisplayHelp
+                        );
+                        continue;
+                    }
+                    let matches = result.unwrap();
+                    assert_eq!(matches.subcommand_name(), Some(expected), "prefix {prefix}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -9932,7 +10057,7 @@ mod tests {
     #[test]
     fn close_and_forget_take_on_in_both_spellings() {
         let top = Cli::try_parse_from(["chan", "close", "/srv/notes", "--on", "lab"]).unwrap();
-        let Command::Close { args } = top.command else {
+        let Command::Close { args, .. } = top.command else {
             panic!("expected close");
         };
         assert_eq!(args.path, PathBuf::from("/srv/notes"));

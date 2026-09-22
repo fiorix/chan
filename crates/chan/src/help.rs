@@ -22,6 +22,9 @@ with its metadata intact. When you are done with a workspace on this
 machine, `chan workspace forget` runs this same teardown and then also
 drops the registry entry and chan's metadata for it.
 
+`chan close --forget PATH` is the short spelling of `chan workspace
+forget PATH`, including --on and the live-terminal refusal.
+
 With --on TARGET the same verb reaches a workspace on a REGISTERED
 remote devserver through the desktop app: TARGET is the devserver's
 URL or launcher label as `chan devserver ls` shows it, PATH is the
@@ -70,6 +73,8 @@ workspace forget` to also drop it from the registry.
 
 /// `chan workspace forget` long help (manpage head).
 pub(crate) const CHAN_FORGET: &str = r#"Stop serving a workspace, then forget it from the registry.
+
+`chan close --forget PATH` is an alias, with the same --on reach.
 
 Runs the same teardown as `chan close` (best-effort, idempotent), then
 drops the workspace's registry entry in `~/.chan/config.toml` and the
