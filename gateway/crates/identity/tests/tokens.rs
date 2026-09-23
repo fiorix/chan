@@ -924,3 +924,32 @@ async fn a_stalled_profile_does_not_hold_the_admission_validate() {
 
     env.cleanup().await;
 }
+
+#[tokio::test]
+async fn failed_creation_audit_rolls_back_the_pat() {
+    let app = TestEnv::new().await;
+    let uid = app.insert_user().await;
+    sqlx::query("ALTER TABLE api_token_audit ADD CONSTRAINT reject_creation CHECK (action NOT LIKE 'created%')")
+        .execute(&app.pool).await.unwrap();
+    let result = app
+        .api_tokens_service()
+        .create(
+            NewToken {
+                user_id: uid,
+                label: "rollback",
+                expires_at: None,
+                scopes: &default_scopes(),
+                origin: TokenOrigin::Spa,
+            },
+            &RequestMeta::default(),
+        )
+        .await;
+    assert!(result.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens WHERE user_id = $1")
+        .bind(uid)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "an undelivered PAT must not remain valid");
+    app.cleanup().await;
+}

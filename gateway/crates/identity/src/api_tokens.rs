@@ -232,6 +232,7 @@ impl ApiTokenService {
         validate_scopes(new.scopes)?;
 
         let (secret, hash) = generate_token();
+        let mut tx = self.pool.begin().await?;
         let token = sqlx::query_as::<_, ApiToken>(
             "WITH locked_user AS MATERIALIZED ( \
                  SELECT id, blocked_at FROM users WHERE id = $1 FOR UPDATE \
@@ -259,14 +260,14 @@ impl ApiTokenService {
         .bind(new.scopes)
         .bind(self.policy_required)
         .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_db)?;
         let Some(token) = token else {
             let exists =
                 sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
                     .bind(new.user_id)
-                    .fetch_one(&self.pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .map_err(map_db)?;
             if !exists {
@@ -278,8 +279,16 @@ impl ApiTokenService {
             });
         };
 
-        self.write_audit(token.id, new.origin.audit_action(), meta)
-            .await?;
+        sqlx::query(
+            "INSERT INTO api_token_audit (token_id, action, ip, user_agent) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(token.id)
+        .bind(new.origin.audit_action())
+        .bind(meta.ip())
+        .bind(meta.user_agent())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
 
         Ok(CreatedToken { token, secret })
     }
