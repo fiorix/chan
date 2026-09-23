@@ -253,6 +253,15 @@ where
         }
         let mut body = vec![0u8; len];
         reader.read_exact(&mut body).await?;
+        // The service reads one message per line, and a framed body may be
+        // pretty-printed JSON. A raw CR or LF can only sit between JSON tokens
+        // (inside a string it must be escaped), so it becomes a space and the
+        // message stays byte-for-byte equivalent JSON on a single line.
+        for byte in &mut body {
+            if matches!(*byte, b'\r' | b'\n') {
+                *byte = b' ';
+            }
+        }
         writer.write_all(&body).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
@@ -1723,6 +1732,24 @@ mod tests {
 
         drop(client_write);
         server_task.abort();
+    }
+
+    // A pretty-printed framed body reaches the line-oriented service as one
+    // line, so the session is not torn down by a message split in pieces.
+    #[tokio::test]
+    async fn a_pretty_printed_frame_becomes_one_line() {
+        let body = b"{\r\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"ping\"\n}";
+        let mut framed = Vec::new();
+        write_content_length_frame(&mut framed, body).await.unwrap();
+        let mut lines = Vec::new();
+        content_length_to_lines(&framed[..], &mut lines)
+            .await
+            .unwrap();
+        assert_eq!(lines.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert_eq!(lines.last(), Some(&b'\n'));
+        let message: serde_json::Value =
+            serde_json::from_slice(&lines[..lines.len() - 1]).expect("one JSON message");
+        assert_eq!(message["method"], "ping");
     }
 
     async fn write_content_length_frame<W>(writer: &mut W, body: &[u8]) -> std::io::Result<()>
