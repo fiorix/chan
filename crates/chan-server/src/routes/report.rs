@@ -31,17 +31,15 @@
 //! All endpoints lazily trigger chan-workspace's initial report scan on
 //! first call; subsequent calls hit the warm in-memory index.
 
-use std::{convert::Infallible, sync::Arc};
+use std::sync::Arc;
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{CocomoSummary, ReportFileStats, ReportLanguageStats, ReportTotals};
-use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 use crate::error::{err_from, err_state};
 use crate::routes::blocking_response;
@@ -165,7 +163,8 @@ pub async fn api_report_file(
         Err(error) => return err_state(&error),
     };
     if query_flag(&p.stream) {
-        return stream_report_file_response(workspace, p.path).await;
+        return stream_report_file_response(state.bulk_transfer.stall_signal(), workspace, p.path)
+            .await;
     }
     blocking_response("report file", move || {
         let report = match workspace.report_for_files(std::slice::from_ref(&p.path)) {
@@ -181,21 +180,20 @@ pub async fn api_report_file(
 }
 
 async fn stream_report_file_response(
+    signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
 ) -> Response {
-    let (tx, mut rx) = mpsc::channel::<ReportFileStreamMessage>(8);
-    tokio::task::spawn_blocking(move || {
+    let mut bridge = crate::bulk_transfer::StreamBridge::spawn(signal, move |frames| {
         let result = stream_report_file_sync(&workspace, &path, |bytes| {
-            tx.blocking_send(ReportFileStreamMessage::Data(bytes))
-                .is_ok()
+            frames.send(ReportFileStreamMessage::Data(bytes))
         });
         if let Err(e) = result {
-            let _ = tx.blocking_send(ReportFileStreamMessage::Error(e));
+            frames.send(ReportFileStreamMessage::Error(e));
         }
     });
 
-    let first = match rx.recv().await {
+    let first = match bridge.first().await {
         Some(ReportFileStreamMessage::Data(bytes)) => bytes,
         Some(ReportFileStreamMessage::Error(e)) => return err_from(&e),
         None => {
@@ -206,17 +204,10 @@ async fn stream_report_file_response(
                 .into_response()
         }
     };
-    let rest = stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| {
-            let bytes = match message {
-                ReportFileStreamMessage::Data(bytes) => bytes,
-                ReportFileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
-            };
-            (Ok::<Bytes, Infallible>(bytes), rx)
-        })
+    let body = bridge.into_body(first, |message| match message {
+        ReportFileStreamMessage::Data(bytes) => bytes,
+        ReportFileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
     });
-    let body =
-        Body::from_stream(stream::once(async move { Ok::<Bytes, Infallible>(first) }).chain(rest));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
@@ -325,6 +316,40 @@ mod tests {
         let types = event_types(&lines);
         assert_eq!(types.first().map(String::as_str), Some("meta"));
         assert!(types.iter().any(|t| t == "report"), "got {types:?}");
+        assert_eq!(types.last().map(String::as_str), Some("done"));
+    }
+
+    /// The report stream is three frames at most, so it fits the channel
+    /// and an unread client never parks its producer. The pin is that it
+    /// keeps freeing its pool thread and completes under the shared bridge.
+    #[test]
+    fn unread_report_stream_frees_its_pool_thread_and_completes() {
+        let (_cfg, _root, workspace) = open_workspace();
+        workspace.write_text("CHANGELOG.md", "# Changes\n").unwrap();
+        let mut frames = 0;
+        stream_report_file_sync(&workspace, "CHANGELOG.md", |_| {
+            frames += 1;
+            true
+        })
+        .unwrap();
+        assert!(
+            frames <= crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            "the report stream fits the channel, got {frames} frames"
+        );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
+        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+            "report stream",
+            || stream_report_file_response(bulk.stall_signal(), workspace, "CHANGELOG.md".into()),
+        )
+        .expect("a stream that fits the channel completes without a stall");
+        let lines: Vec<Bytes> = body
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(Bytes::copy_from_slice)
+            .collect();
+        let types = event_types(&lines);
+        assert_eq!(types.first().map(String::as_str), Some("meta"));
         assert_eq!(types.last().map(String::as_str), Some("done"));
     }
 }
