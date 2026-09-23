@@ -1984,8 +1984,9 @@ impl Registry {
 
     /// Reattach to session `id` when it is live, re-homing it to the attaching
     /// window and placement, or else spawn a new one from `opts`. The `since`
-    /// cursor is honoured only when `client_generation` matches the live
-    /// session. `Err(Closed)` when `id` names an explicitly closed session.
+    /// cursor is honoured when no `client_generation` is sent or when it
+    /// matches the live session; a stale generation replays from the start.
+    /// `Err(Closed)` when `id` names an explicitly closed session.
     pub fn get_or_create_for_ws(
         &self,
         id: Option<&str>,
