@@ -82,3 +82,5 @@ An internal bearer authenticates the caller but does not make plaintext traffic 
 - Client pooling uses reqwest defaults.
 - Writes are not automatically retried by the shared clients; durable mutation retry belongs to profile's revocation outbox.
 - Consumers own their response mapping and operational retry policy.
+
+Controller HTTP failures retain the request path, status, and at most 512 bytes of response body in their diagnostics. The reader stops at that bound without buffering the remaining body.

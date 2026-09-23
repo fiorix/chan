@@ -172,8 +172,7 @@ impl DevserverControlClient {
         let res = self.http.post(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "devserver-control admin upstream error");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
+            return Err(upstream_error(res).await);
         }
         // The endpoint returns 200 with a JSON body; tolerate 204 to
         // leave room for a future "noop" optimisation.
@@ -197,8 +196,7 @@ impl DevserverControlClient {
         let res = self.http.get(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "devserver-control admin upstream error");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
+            return Err(upstream_error(res).await);
         }
         let tunnels: Vec<TunnelView> = res.json().await?;
         Ok(tunnels)
@@ -220,8 +218,7 @@ impl DevserverControlClient {
         let res = self.http.get(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "devserver-control admin upstream error");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
+            return Err(upstream_error(res).await);
         }
         let tunnels: Vec<TunnelView> = res.json().await?;
         Ok(tunnels)
@@ -267,8 +264,7 @@ impl DevserverControlClient {
         let res = self.http.post(url).bearer_auth(&self.token).send().await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "devserver-control tunnel drain failed");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
+            return Err(upstream_error(res).await);
         }
         let body: KillAllResponse = res.json().await?;
         Ok(body.tunnels_evicted)
@@ -289,11 +285,36 @@ impl DevserverControlClient {
             .await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "devserver-control session revoke failed");
-            return Err(DevserverControlError::Upstream(format!("{status}")));
+            return Err(upstream_error(res).await);
         }
         normalize_session_revocation(res.json().await?)
     }
+}
+
+/// Keep diagnostics useful without buffering an unbounded controller response.
+async fn upstream_error(mut response: reqwest::Response) -> DevserverControlError {
+    const BODY_PREFIX_LIMIT: usize = 512;
+    let status = response.status();
+    let path = response.url().path().to_owned();
+    let mut prefix = Vec::new();
+    while prefix.len() < BODY_PREFIX_LIMIT {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = BODY_PREFIX_LIMIT - prefix.len();
+                prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return DevserverControlError::Upstream(format!(
+                    "{path}: {status}; body read failed: {error}"
+                ));
+            }
+        }
+    }
+    DevserverControlError::Upstream(format!(
+        "{path}: {status}; {}",
+        String::from_utf8_lossy(&prefix)
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +330,39 @@ struct KillAllResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn controller_failure_names_operation_status_and_bounded_body() {
+        use axum::{http::StatusCode, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().fallback(|| async {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("authority unavailable {} tail-marker", "x".repeat(2048)),
+            )
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = DevserverControlClient::new(
+            format!("http://{address}").parse().unwrap(),
+            "test-token".into(),
+        )
+        .unwrap();
+        let error = client
+            .kill_owner_tunnels(Uuid::nil())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/tunnels/kill"), "{error}");
+        assert!(error.contains("503"), "{error}");
+        assert!(error.contains("authority unavailable"), "{error}");
+        assert!(!error.contains("tail-marker"));
+        assert!(error.len() < 700);
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn tunnel_view_pins_the_admin_wire_field_names() {
