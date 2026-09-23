@@ -191,10 +191,12 @@ impl Bm25Index {
     /// Queries that contain any tantivy operator (`+ - " * ? ~ :`)
     /// fall through to `QueryParser::parse_query` so power-user
     /// searches (phrases, fielded queries, fuzzy) keep their
-    /// semantics. Empty queries return no hits.
+    /// semantics. Empty queries and a zero `limit` return no hits.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>, Bm25Error> {
         let q = query.trim();
-        if q.is_empty() {
+        // Tantivy's `TopDocs::with_limit` asserts a limit of at least one,
+        // and this is public API, so a zero limit must answer here.
+        if q.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
         let searcher = self.reader.searcher();
@@ -844,6 +846,15 @@ mod tests {
         idx.commit().unwrap();
         assert!(idx.search("", 10).unwrap().is_empty());
         assert!(idx.search("   ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn zero_limit_returns_no_hits() {
+        let (_tmp, idx) = fresh();
+        idx.index_file("a.md", "# h\nfoo\n", &Chunking::Headings)
+            .unwrap();
+        idx.commit().unwrap();
+        assert!(idx.search("foo", 0).unwrap().is_empty());
     }
 
     #[test]
