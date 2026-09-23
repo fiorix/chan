@@ -40,6 +40,13 @@ struct LauncherAssets;
 const SPA_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-store");
 const ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
+/// Bundle files served under a stable name (the `public/` icons, favicons,
+/// `static/`): an upgrade can replace one at the same URL, so it is
+/// revalidated instead of cached for a year.
+const UNHASHED_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-cache");
+/// Where vite writes the content-hashed build output. Only names under it
+/// change whenever their bytes do, which is what makes `immutable` safe.
+const HASHED_ASSET_DIR: &str = "assets/";
 const HOST_VARY: HeaderValue = HeaderValue::from_static("Host");
 
 /// The launcher PWA manifest, served at `/manifest.webmanifest`. Static: the
@@ -108,6 +115,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, content_type_for(candidate))], body).into_response(),
             is_index,
+            candidate,
         );
     }
     // SPA fallback: route paths the frontend handles client-side.
@@ -123,6 +131,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
             true,
+            "index.html",
         );
     }
     // No bundle baked / on disk yet (fresh clone, npm not run).
@@ -217,6 +226,7 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
             )
                 .into_response(),
             true,
+            "manifest.webmanifest",
         );
     }
     if let Some(file) = LauncherAssets::get(candidate) {
@@ -228,6 +238,7 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, content_type_for(candidate))], body).into_response(),
             is_index,
+            candidate,
         );
     }
     // SPA fallback: client-side routes resolve to index.html.
@@ -236,6 +247,7 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
             true,
+            "index.html",
         );
     }
     (
@@ -245,14 +257,16 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
         .into_response()
 }
 
-fn with_static_cache_headers(mut response: Response, spa_shell: bool) -> Response {
+fn with_static_cache_headers(mut response: Response, spa_shell: bool, candidate: &str) -> Response {
     let headers = response.headers_mut();
     headers.insert(
         header::CACHE_CONTROL,
         if spa_shell {
             SPA_CACHE_CONTROL
-        } else {
+        } else if candidate.starts_with(HASHED_ASSET_DIR) {
             ASSET_CACHE_CONTROL
+        } else {
+            UNHASHED_CACHE_CONTROL
         },
     );
     headers.insert(header::VARY, HOST_VARY);
@@ -665,7 +679,7 @@ mod tests {
 
     #[test]
     fn static_cache_headers_do_not_store_spa_shell() {
-        let response = with_static_cache_headers("ok".into_response(), true);
+        let response = with_static_cache_headers("ok".into_response(), true, "index.html");
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL),
             Some(&SPA_CACHE_CONTROL)
@@ -675,12 +689,27 @@ mod tests {
 
     #[test]
     fn static_cache_headers_allow_immutable_assets() {
-        let response = with_static_cache_headers("ok".into_response(), false);
+        let response =
+            with_static_cache_headers("ok".into_response(), false, "assets/index-D3fa71b2.js");
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL),
             Some(&ASSET_CACHE_CONTROL)
         );
         assert_eq!(response.headers().get(header::VARY), Some(&HOST_VARY));
+    }
+
+    // A file served under a stable name can change on upgrade, so it must
+    // not be pinned in the browser cache for a year.
+    #[test]
+    fn static_cache_headers_revalidate_unhashed_files() {
+        for candidate in ["icon-192.png", "favicon.ico", "static/matrix/font.png"] {
+            let response = with_static_cache_headers("ok".into_response(), false, candidate);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&UNHASHED_CACHE_CONTROL),
+                "{candidate}"
+            );
+        }
     }
 
     #[test]
