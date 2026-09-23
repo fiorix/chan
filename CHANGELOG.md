@@ -32,6 +32,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Fixes from the Rust review's low findings.** A team brief can no longer end the agent bootstrap heredoc early. A launcher row never echoes a bearer token carried in a devserver URL, and `fetch-models` redacts proxy credentials in its log. A tunnel URL with a bracketed IPv6 loopback address is accepted, and a zero-length HTTP/2 data frame no longer ends a tunnel stream. Only hashed build assets are cached as immutable; other static files revalidate, so they pick up a new release. A replace upload is reported as a modification rather than a new file. `cs` refuses contradictory handover and stdin flags instead of choosing one. A participant rename drops control characters, a client's reported transfer count is capped, and a daemon removes its record before it releases its lock.
+
 - **`cs terminal close` no longer acknowledges a close that did not happen.** It waits for each closed session's shell to end and fails, naming each survivor and its pid, when one does not. A window reattaching to a closed terminal is told the tab closed instead of getting a fresh shell under the old name, and the next `cs terminal new` for that seat gets the name back.
 
 - **Terminal output is delivered once on attach.** A chunk written while a client attaches no longer arrives twice, and a reconnect after such a race loses no bytes.
