@@ -2983,29 +2983,53 @@ pub(super) mod tests {
     fn departed_join_preserves_orphan_inventory_and_usage() {
         let now = Instant::now();
         let mut state = ControllerState::new(100);
-        let (id, incarnation, _) = ready_one(
-            &mut state,
-            "p1",
-            vec![row("alice", "one", Uuid::new_v4())],
-            now,
-        );
+        let original = row("alice", "one", Uuid::new_v4());
+        let (p1, old, _) = ready_one(&mut state, "p1", vec![original.clone()], now);
         let active_at = now + CONVERGENCE_WINDOW;
-        state.disconnect(&id, incarnation, active_at).unwrap();
-        assert_eq!(state.tunnels.len(), 1);
+        let boot_id = state.proxies.get("p1").unwrap().boot_id;
+        let (p2, p2_incarnation) = begin(&mut state, "p2", active_at);
+        snapshot(
+            &mut state,
+            &p2,
+            p2_incarnation,
+            vec![row("bob", "two", Uuid::new_v4())],
+            active_at,
+        );
+        state.disconnect(&p1, old, active_at).unwrap();
+        assert!(state.is_ready());
         assert_eq!(state.orphan_total.rows, 1);
         let usage = state.fleet_usage(None);
-        state.reconciliation = Some(Reconciliation {
-            kind: ReconciliationKind::Joining(SessionKey {
-                proxy_id: id.as_str().to_string(),
-                incarnation,
-            }),
-            command_ids: HashSet::new(),
-            failed: false,
-        });
-        assert!(state
-            .finish_reconciliation_if_complete(active_at)
-            .is_empty());
-        assert_eq!(state.tunnels.len(), 1);
+        let (joining, _) = state.begin_session(
+            p1.clone(),
+            origin("p1"),
+            env!("CARGO_PKG_VERSION").into(),
+            boot_id,
+            active_at,
+            Utc::now(),
+        );
+        let duplicate = Uuid::new_v4();
+        let effects = snapshot(
+            &mut state,
+            &p1,
+            joining,
+            vec![original.clone(), row("bob", "two", duplicate)],
+            active_at,
+        );
+        let command = kill_command(&effects, "p1", duplicate);
+        assert!(state.commands.contains_key(&command));
+        let effects = state.disconnect(&p1, joining, active_at).unwrap();
+        assert!(state.reconciliation.is_none());
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Send {
+                frame: ServerFrame::FleetReady,
+                ..
+            }
+        )));
+        assert_eq!(state.tunnels.len(), 2);
+        assert!(state.tunnels.values().any(|owned| owned.row.registration_id
+            == original.registration_id
+            && owned.session.incarnation == old));
         assert_eq!(state.orphan_total.rows, 1);
         assert_eq!(state.fleet_usage(None), usage);
     }
