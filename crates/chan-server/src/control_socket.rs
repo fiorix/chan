@@ -2048,6 +2048,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             };
             spawn_and_poke_team(
                 registry,
+                workspace.root(),
                 dir,
                 &config,
                 tabs,
@@ -2107,6 +2108,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             }
             spawn_and_poke_team(
                 registry,
+                workspace.root(),
                 dir,
                 &config,
                 tabs,
@@ -2241,15 +2243,18 @@ fn resolve_team_group(registry: &TerminalRegistry, base: &str) -> String {
 
 /// Bring the team up via the terminal registry: resolve the group, spawn
 /// lead-first (full command + env + tab-name + group), and compute the
-/// per-agent identity pokes. The poke payload is built with the SAME
-/// `identity_prompt` + `apply_submit_chord` the `--script` form emits, so
-/// the direct `new` reproduces the script's bytes. Shell members (no agent)
+/// per-agent identity pokes. The poke is the same `IdentityPrompt` the
+/// `--script` form emits, rendered with `workspace_root` where the script
+/// splices `$PWD`, so a script run from the workspace root reproduces the
+/// direct `new`'s bytes; `workspace_root` is the `Workspace` root, the
+/// directory every member's PTY starts in. Shell members (no agent)
 /// spawn but get no poke. A member whose command fails to start is recorded
 /// in `failed` and does not abort the rest of the team (mirrors
 /// runTeamBootstrap's per-worker try/catch). This step is synchronous (the
 /// readiness wait + poke delivery happen in `spawn_and_poke_team`).
 fn spawn_team(
     registry: &TerminalRegistry,
+    workspace_root: &Path,
     dir: &str,
     config: &TeamConfig,
     tabs: bool,
@@ -2323,7 +2328,8 @@ fn spawn_team(
                 if let Some(agent) =
                     SubmitAgent::derive(&m.command, m.env.get("CHAN_AGENT").map(String::as_str))
                 {
-                    let writes = submit_writes(identity_prompt(config, dir, m), Some(agent));
+                    let writes =
+                        submit_writes(identity_prompt(config, workspace_root, dir, m), Some(agent));
                     pokes.push(TeamPoke {
                         member: m.handle.clone(),
                         // `opts.command` created this PTY with the member's
@@ -2355,6 +2361,7 @@ fn spawn_team(
 #[allow(clippy::too_many_arguments)]
 async fn spawn_and_poke_team(
     registry: &Arc<TerminalRegistry>,
+    workspace_root: &Path,
     dir: &str,
     config: &TeamConfig,
     tabs: bool,
@@ -2363,7 +2370,7 @@ async fn spawn_and_poke_team(
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
 ) -> ControlResponse {
-    let mut spawn = spawn_team(registry, dir, config, tabs, window_id);
+    let mut spawn = spawn_team(registry, workspace_root, dir, config, tabs, window_id);
     let mut surface_error = None;
 
     // Surface the spawned team in the window that owns it (each agent
@@ -8114,9 +8121,16 @@ is_lead = false
 
     #[test]
     fn spawn_team_brings_up_lead_first_and_pokes_only_agents() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let config = spawnable_config();
-        let spawn = spawn_team(&registry, "new-team-1", &config, false, Some("win-spawn"));
+        let spawn = spawn_team(
+            &registry,
+            root.path(),
+            "new-team-1",
+            &config,
+            false,
+            Some("win-spawn"),
+        );
 
         // Lead first, then roster order: @@Lead, @@Alice, @@Shell.
         assert_eq!(spawn.spawned, vec!["@@Lead", "@@Alice", "@@Shell"]);
@@ -8178,7 +8192,7 @@ is_lead = false
         // searches for the file instead finds nothing.
         let (root, registry) = empty_registry();
         let config = spawnable_config();
-        let spawn = spawn_team(&registry, "new-team-1", &config, false, None);
+        let spawn = spawn_team(&registry, root.path(), "new-team-1", &config, false, None);
 
         let root_text = root.path().to_string_lossy().into_owned();
         let bootstrap = root
@@ -8210,7 +8224,7 @@ is_lead = false
 
     #[test]
     fn spawn_team_opencode_lead_uses_one_bracketed_paste_write() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let mut config = spawnable_config();
         let lead = config
             .members
@@ -8219,7 +8233,7 @@ is_lead = false
             .expect("lead member");
         lead.env.insert("CHAN_AGENT".into(), "opencode".into());
 
-        let spawn = spawn_team(&registry, "new-team-1", &config, false, None);
+        let spawn = spawn_team(&registry, root.path(), "new-team-1", &config, false, None);
         let poke = spawn
             .pokes
             .iter()
@@ -8949,9 +8963,16 @@ is_lead = false
     fn spawn_team_mcp_env_toggle_reaches_member_pty_env() {
         use std::time::{Duration, Instant};
         for mcp_env in [true, false] {
-            let (_root, registry) = registry_with_mcp_socket();
+            let (root, registry) = registry_with_mcp_socket();
             let config = probe_team_config(mcp_env);
-            let spawn = spawn_team(&registry, "probe-team", &config, false, Some("win-probe"));
+            let spawn = spawn_team(
+                &registry,
+                root.path(),
+                "probe-team",
+                &config,
+                false,
+                Some("win-probe"),
+            );
             assert_eq!(spawn.spawned, vec!["@@Probe"], "probe member spawned");
 
             let deadline = Instant::now() + Duration::from_secs(6);
@@ -9061,11 +9082,12 @@ position = { row = 0, col = 1 }
 
     #[tokio::test]
     async fn spawn_and_poke_team_with_shell_members_skips_the_poke_wait() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         match spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9089,12 +9111,13 @@ position = { row = 0, col = 1 }
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_and_poke_team_waits_for_bracketed_paste_after_a_slow_start() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config = single_probe_agent("sleep 3.25; printf '<<READY>>\\033[?2004h'; sleep 1");
 
         let response = spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9135,12 +9158,13 @@ position = { row = 0, col = 1 }
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn spawn_and_poke_team_names_an_agent_that_never_becomes_ready() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config = single_probe_agent("sleep 60");
 
         let response = spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9170,12 +9194,13 @@ position = { row = 0, col = 1 }
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_and_poke_team_names_an_agent_that_exits_before_readiness() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config = single_probe_agent("exit 9");
 
         let response = spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9206,13 +9231,14 @@ position = { row = 0, col = 1 }
         // A windowed spawn pushes a `team_spawned` frame to that window
         // carrying the group + each member's tab name and live session id, so
         // the SPA can open a terminal tab attached to the session.
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, mut rx) = broadcast::channel::<String>(8);
         let (session_registry, _guard) = live_window("win-s1");
         spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9247,7 +9273,7 @@ position = { row = 0, col = 1 }
 
     #[tokio::test]
     async fn spawn_and_poke_team_reports_a_surface_enqueue_failure() {
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, rx) = broadcast::channel::<String>(8);
@@ -9256,6 +9282,7 @@ position = { row = 0, col = 1 }
 
         let response = spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9281,12 +9308,13 @@ position = { row = 0, col = 1 }
     async fn spawn_and_poke_team_windowless_does_not_surface() {
         // No window to surface into -> no `team_spawned` push (the SPA learns
         // the sessions on its next attach).
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, mut rx) = broadcast::channel::<String>(8);
         spawn_and_poke_team(
             &registry,
+            root.path(),
             "new-team-1",
             &config,
             false,
@@ -9642,7 +9670,7 @@ position = { row = 0, col = 1 }
         // registry; the push must carry the settled name so the surfaced tab
         // title matches the PTY's $CHAN_TAB_NAME (what `cs terminal write
         // --tab-name` resolves).
-        let (_root, registry) = empty_registry();
+        let (root, registry) = empty_registry();
         let registry = Arc::new(registry);
         let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
         let (events_tx, mut rx) = broadcast::channel::<String>(8);
@@ -9650,6 +9678,7 @@ position = { row = 0, col = 1 }
         for _ in 0..2 {
             spawn_and_poke_team(
                 &registry,
+                root.path(),
                 "new-team-1",
                 &config,
                 false,
