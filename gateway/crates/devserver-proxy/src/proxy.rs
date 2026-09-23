@@ -5,8 +5,8 @@
 //! devserver id, in the `{user}--{disc}` host form) are parsed out of
 //! the wildcard `Host` header by `http::dispatch` and handed in. A
 //! user can hold many live devservers; a disc host addresses one of
-//! them by id prefix, and a bare `{user}` host resolves through the
-//! gate credential's `drv` claim (the single-live-devserver case).
+//! them by id prefix, and a bare `{user}` host resolves through the opaque session
+//! record's devserver binding.
 //! The gate is per-DEVSERVER: the `{workspace}` path segment is
 //! tenant routing only, never a gate key. It is forwarded into the
 //! tunnel unchanged and the devserver routes the tenant internally.
@@ -36,7 +36,7 @@
 //!     none); anything else -> 404. Every response on either extension
 //!     shape carries the extension response policy so the frame can read
 //!     the true status
-//!   * request has a valid opaque `__Host-devserver_gate` cookie (aud + drv bound)
+//!   * request has a valid opaque `__Host-devserver_gate` cookie (audience and devserver bound)
 //!     -> pass through
 //!   * anything else (no cookie, expired, wrong aud, wrong devserver)
 //!     -> 404
@@ -46,7 +46,7 @@
 //! devserver, caller)`, so a validly-signed entry with the right aud and drv
 //! proves the caller is authorized, owner or accepted grantee. The aud
 //! claim (= the tenant host, `{owner}--{disc}.p1.proxy.chan.app`) is what enforces tenant isolation;
-//! comparing `sub` against the cached owner would lock out every grantee.
+//! requiring the caller to be the owner would lock out every grantee.
 //!
 //! 404 is preferred over 401 / 403 on the proxy path so an
 //! unauthenticated probe cannot distinguish "devserver does not exist"
@@ -79,7 +79,6 @@ use futures_util::{SinkExt, StreamExt};
 use gateway_common::devserver_gate;
 use http_body_util::Limited;
 use hyper_util::rt::TokioIo;
-use rand::RngCore;
 use subtle::ConstantTimeEq;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as TgCloseCode;
@@ -189,10 +188,10 @@ impl http_body::Body for DeadlineBody {
 /// the tenant host (`{user}--{disc}.p1.proxy.chan.app`); `Path=/`; HttpOnly; Secure; SameSite=Lax;
 /// Absolute proxy-local session lifetime. The `__Host-` prefix makes the
 /// browser enforce exactly that shape (Secure, no `Domain`, `Path=/`), so
-/// a parent-domain cookie of the same name can never shadow it (A11).
+/// a parent-domain cookie of the same name can never shadow it.
 const COOKIE_NAME: &str = "__Host-devserver_gate";
 const CSRF_COOKIE_NAME: &str = "__Host-devserver_csrf";
-/// Pre-A11 cookie names. The proxy never reads them, but upstream
+/// Parent-domain cookie names. The proxy never reads them, but upstream
 /// `Set-Cookie` on these names stays stripped: allowing a devserver to
 /// mint look-alike session cookies would only invite confusion.
 const LEGACY_COOKIE_NAME: &str = "devserver_gate";
@@ -407,28 +406,20 @@ async fn handle_gated(
                 // candidate whose credential verifies under (aud, drv) wins.
                 let mut resolved = None;
                 for (devserver_id, entry) in candidates {
-                    match resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud) {
-                        Gate::Reject => continue,
-                        gate => {
-                            resolved = Some((devserver_id, entry, gate));
-                            break;
-                        }
+                    if let Some(record) =
+                        resolve_gate(&state, &req, &devserver_id, entry.owner_id, &aud)
+                    {
+                        resolved = Some((devserver_id, entry, record));
+                        break;
                     }
                 }
-                let Some((devserver_id, entry, gate)) = resolved else {
+                let Some((devserver_id, entry, authorization)) = resolved else {
                     return not_found_response(req.headers());
                 };
-                let (caller, authorization) = match gate {
-                    Gate::Pass { record } => (
-                        GatewayCaller {
-                            sub: record.principal.subject_user_id,
-                            owner_user_id: record.principal.owner_user_id,
-                            client: record.client,
-                        },
-                        record,
-                    ),
-                    // The loop above filtered rejects; kept as the safe default.
-                    Gate::Reject => return not_found_response(req.headers()),
+                let caller = GatewayCaller {
+                    sub: authorization.principal.subject_user_id,
+                    owner_user_id: authorization.principal.owner_user_id,
+                    client: authorization.client,
                 };
                 if is_ws
                     && !websocket_origin_matches(req.headers(), &state.cfg.forwarded_proto, &aud)
@@ -875,22 +866,13 @@ struct GatewayCaller {
     client: gateway_assertion::ClientType,
 }
 
-/// Outcome of the auth-gate decision.
-enum Gate {
-    /// Forward the request under an existing gateway session.
-    Pass { record: SessionRecord },
-    /// Anything that should map to 404 on the proxy path: no token,
-    /// bad signature, expired, wrong aud, wrong devserver.
-    Reject,
-}
-
 fn resolve_gate(
     state: &AppState,
     req: &Request,
     devserver_id: &str,
     owner_user_id: Uuid,
     aud: &str,
-) -> Gate {
+) -> Option<SessionRecord> {
     // No entry token: any one valid session cookie admits. A browser
     // may send several `__Host-devserver_gate` cookies under unusual conditions
     // (stale cookie at a different path that got attached to this
@@ -902,11 +884,11 @@ fn resolve_gate(
                 && record.principal.devserver_id == devserver_id
                 && record.principal.owner_user_id == owner_user_id
             {
-                return Gate::Pass { record };
+                return Some(record);
             }
         }
     }
-    Gate::Reject
+    None
 }
 
 /// True when a request carries a `__Host-devserver_gate` session cookie. The
@@ -1230,8 +1212,8 @@ pub(crate) fn loggable_uri(uri: &Uri) -> String {
 }
 
 /// Every response leaving the extension capability namespace must be
-/// readable from the opaque-origin extension frame — the proxied reply
-/// and every gateway-generated error alike — or the frame's console
+/// readable from the opaque-origin extension frame, the proxied reply
+/// and every gateway-generated error alike, or the frame's console
 /// reports a CORS violation that masks the true status. Hop-by-hop
 /// headers are left alone so the WS 101 handshake survives untouched.
 fn apply_extension_capability_response_policy(response: &mut Response) {
@@ -1354,14 +1336,7 @@ fn issue_session_cookie(
 }
 
 fn random_csrf_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(&mut out, "{b:02x}");
-    }
-    out
+    crate::session_store::random_hex(32)
 }
 
 async fn proxy_http(
@@ -1941,8 +1916,6 @@ pub(crate) fn forwarded_headers(parts: &Parts, proto: &str) -> ForwardedHeaders 
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip().to_string());
 
-    let xff = peer_ip;
-
     let host = parts
         .headers
         .get(header::HOST)
@@ -1950,7 +1923,7 @@ pub(crate) fn forwarded_headers(parts: &Parts, proto: &str) -> ForwardedHeaders 
         .map(str::to_string);
 
     ForwardedHeaders {
-        xff,
+        xff: peer_ip,
         proto: proto.to_string(),
         host,
     }

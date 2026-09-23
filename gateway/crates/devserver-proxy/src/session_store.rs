@@ -36,23 +36,12 @@ const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionPrincipal {
     pub subject_user_id: Uuid,
     pub owner_user_id: Uuid,
     pub devserver_id: String,
     pub audience: String,
-}
-
-impl std::fmt::Debug for SessionPrincipal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionPrincipal")
-            .field("subject_user_id", &self.subject_user_id)
-            .field("owner_user_id", &self.owner_user_id)
-            .field("devserver_id", &self.devserver_id)
-            .field("audience", &self.audience)
-            .finish()
-    }
 }
 
 /// One opaque proxy session.
@@ -1020,7 +1009,7 @@ fn random_session_id() -> String {
     random_hex(SESSION_ID_BYTES)
 }
 
-fn random_hex(len: usize) -> String {
+pub(crate) fn random_hex(len: usize) -> String {
     let mut bytes = vec![0_u8; len];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     hex(&bytes)
