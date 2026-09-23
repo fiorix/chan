@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import type { WorkspaceInfo } from "../api/types";
 import { runTeamBootstrap } from "../state/teamOrchestrator.svelte";
 import {
   agentForMember,
@@ -14,6 +15,12 @@ import {
   type LeafNode,
   type TerminalTab,
 } from "../state/tabs.svelte";
+import { workspace } from "../state/workspace.svelte";
+
+// The orchestrator refuses to start a team whose workspace root it does not
+// know (the identity prompt names bootstrap.md by its absolute path), so the
+// root every test here runs under is seeded once.
+workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
 // Lead-first bootstrap chain. The Team Work Lead terminal already
 // exists (created at Cmd+P); the orchestrator runs against it.
@@ -122,6 +129,23 @@ afterEach(() => {
 });
 
 describe("runTeamBootstrap: lead-first flow", () => {
+  test("refuses to start a team before the workspace root is known", async () => {
+    // The identity prompt names bootstrap.md by its absolute path, and the
+    // refusal comes before step 1 so nothing is written or spawned.
+    resetLayoutWithLead(leadTerminalTab());
+    const { write, spawn } = mockApi();
+    workspace.info = null;
+    try {
+      await expect(
+        runTeamBootstrap(tabsConfig(), { leadTabId: "lead-tab", leadPaneId: "pane-test" }),
+      ).rejects.toThrow(/workspace root is not known/);
+    } finally {
+      workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
+    }
+    expect(write).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   test("writes the team config to the dialog's team dir", async () => {
     resetLayoutWithLead(leadTerminalTab());
     const { write } = mockApi();

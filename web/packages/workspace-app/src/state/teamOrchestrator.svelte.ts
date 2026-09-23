@@ -35,6 +35,7 @@ import {
 } from "./tabs.svelte";
 import type { TeamDialogConfig, TeamMemberDraft } from "./teamDialog.svelte";
 import { agentForMember, defaultTabGroupFromPath } from "./teamDialog.svelte";
+import { workspace } from "./workspace.svelte";
 
 /// Context the dialog hands the orchestrator: the EXISTING Team Work
 /// Lead terminal tab + the pane it lives in. The lead is never
@@ -229,20 +230,40 @@ function realEstateFromWire(
   return { kind: "split", grid, slots };
 }
 
+/// The workspace root as the prompt names it: trailing separators
+/// dropped, except that a bare filesystem root keeps its one.
+function promptRoot(root: string): string {
+  return root.replace(/[/\\]+$/, "") || root;
+}
+
+/// `{root}/{teamDir}/bootstrap.md` with one separator however the two
+/// are spelled: the same `/` join the rest of the SPA uses to show a
+/// workspace-relative path under `WorkspaceInfo.root`.
+function absoluteBootstrapPath(root: string, teamDir: string): string {
+  const anchor = promptRoot(root);
+  const joiner = /[/\\]$/.test(anchor) ? "" : "/";
+  const dir = teamDir.replace(/^\/+|\/+$/g, "");
+  return `${anchor}${joiner}${dir}/bootstrap.md`;
+}
+
 /// Build the `# Team work` identity prompt placed in the lead's
 /// embedded editor. `$CHAN_TAB_NAME` is intentionally NOT escaped:
 /// the lead's shell expands it to the env-var value when the agent
 /// reads the prompt. The team size, host handle, lead handle, and
-/// worker handles substitute in literally. The trailing line points
-/// every agent at the generated team bootstrap doc (`bootstrapPath`,
-/// e.g. `{teamDir}/bootstrap.md`) so they read the shared process
-/// before starting.
+/// worker handles substitute in literally. The trailing lines point
+/// every agent at the generated `bootstrap.md` by its absolute path
+/// under `root` (the workspace root, `WorkspaceInfo.root`) and name
+/// that root, because the document keeps workspace-relative paths (it
+/// is a persisted, shareable workspace file) and an agent given only
+/// `{teamDir}/bootstrap.md` has nothing to resolve it against; the
+/// team directory is commonly gitignored, so a search finds nothing.
 export function identityPrompt(
   size: number,
   hostHandle: string,
   leadHandle: string,
   workerHandles: string[],
-  bootstrapPath: string,
+  root: string,
+  teamDir: string,
 ): string {
   const bullets =
     workerHandles.length > 0
@@ -256,7 +277,8 @@ export function identityPrompt(
     `the rest of the team:\n` +
     bullets +
     `\n` +
-    `Read the team process at ${bootstrapPath} before you start.`
+    `Read the team process at ${absoluteBootstrapPath(root, teamDir)} before you start.\n` +
+    `Relative paths in that document resolve against ${promptRoot(root)}.`
   );
 }
 
@@ -367,6 +389,13 @@ export async function runTeamBootstrap(
   config: TeamDialogConfig,
   ctx: TeamBootstrapContext,
 ): Promise<void> {
+  // The identity prompt names bootstrap.md by its absolute path under the
+  // workspace root, so a root the store does not hold yet is refused here,
+  // before anything is written or spawned, rather than guessed at.
+  const root = workspace.info?.root;
+  if (!root) {
+    throw new Error("workspace root is not known yet; retry once the workspace has loaded");
+  }
   const wire = translateConfig(config);
 
   // 1. Save/update the team config inside the workspace at
@@ -422,16 +451,15 @@ export async function runTeamBootstrap(
 
   // 3 + 4. Place the identity prompt in the lead's embedded editor.
   //    `$CHAN_TAB_NAME` is each agent's identity (env var, step 3).
-  //    The prompt's trailing line points agents at the generated
-  //    `{teamDir}/bootstrap.md`; strip any trailing slash so the path
-  //    reads cleanly.
-  const bootstrapPath = `${config.teamDir.replace(/\/+$/, "")}/bootstrap.md`;
+  //    The prompt's trailing lines point agents at the generated
+  //    `bootstrap.md` by its absolute path under the workspace root.
   const prompt = identityPrompt(
     wire.members.length,
     wire.host_handle,
     leadEntry.handle,
     workerEntries.map((m) => m.handle),
-    bootstrapPath,
+    root,
+    config.teamDir,
   );
   // The lead is a NORMAL terminal now (no Team Work bubble). Auto-deliver its
   // identity prompt through the write queue - the same prompt-frame path every

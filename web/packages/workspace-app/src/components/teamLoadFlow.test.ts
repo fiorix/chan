@@ -5,6 +5,7 @@ import client from "../api/client.ts?raw";
 import dialog from "./TeamDialog.svelte?raw";
 import { api } from "../api/client";
 import type { TeamConfigWire } from "../api/client";
+import type { WorkspaceInfo } from "../api/types";
 import {
   runTeamBootstrap,
   translateConfig,
@@ -12,6 +13,12 @@ import {
 } from "../state/teamOrchestrator.svelte";
 import { resizeTeamMembers } from "../state/teamDialog.svelte";
 import { layout, type LeafNode, type TerminalTab } from "../state/tabs.svelte";
+import { workspace } from "../state/workspace.svelte";
+
+// The orchestrator refuses to start a team whose workspace root it does not
+// know (the identity prompt names bootstrap.md by its absolute path), so the
+// root every test here runs under is seeded once.
+workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
 // Dir-based New/Load config flow. Load reads an existing team's
 // config.toml back via readTeamConfig, prepopulates the

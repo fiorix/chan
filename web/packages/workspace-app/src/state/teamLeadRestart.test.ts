@@ -2,9 +2,16 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import type { WorkspaceInfo } from "../api/types";
 import { runTeamBootstrap } from "./teamOrchestrator.svelte";
 import type { TeamDialogConfig } from "./teamDialog.svelte";
 import { layout, type LeafNode, type TerminalTab } from "./tabs.svelte";
+import { workspace } from "./workspace.svelte";
+
+// The orchestrator refuses to start a team whose workspace root it does not
+// know (the identity prompt names bootstrap.md by its absolute path), so the
+// root every test here runs under is seeded once.
+workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
 // The lead launches FIRST by SPAWNING a fresh agent session into the
 // lead's pane and dropping the Cmd+P placeholder shell - the SAME
