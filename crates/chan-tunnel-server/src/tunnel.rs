@@ -17,7 +17,9 @@
 //! registers, that keepalive driver is bounded and holds nothing:
 //! `h2::server::Connection` has no idle timeout, so anything a
 //! refused peer can park on is something any peer that reaches the
-//! listener can exhaust.
+//! listener can exhaust. For an admitted tunnel the driver runs for
+//! the tunnel's life and then closes the connection under the same
+//! bound, since the peer is the only other party that could.
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -245,6 +247,7 @@ async fn handle_tunnel_conn(
         validated,
         user,
         devserver,
+        ended,
     } = tunnel;
     run_tunnel(
         yconn,
@@ -256,6 +259,10 @@ async fn handle_tunnel_conn(
         validated,
     )
     .await;
+    // The tunnel's stream is closed and nothing will be served on this
+    // connection again; the h2 driver must not wait for the peer to
+    // say so.
+    drop(ended);
     tracing::info!(%user, %devserver, "tunnel driver exited");
     Ok(())
 }
@@ -270,6 +277,10 @@ struct RegisteredTunnel {
     validated: Validated,
     user: Arc<str>,
     devserver: Arc<str>,
+    /// Dropped once the tunnel has ended, which tells the h2 driver to
+    /// close the connection. A sender rather than a value so that every
+    /// way the tunnel can end, a panic included, closes it.
+    ended: oneshot::Sender<()>,
 }
 
 /// Accept, validate, handshake and register one dial. `Ok(None)` is a
@@ -363,8 +374,14 @@ async fn register_tunnel(
     // a refusal: it flushes the refusal and closes the connection.
     // A refusal path added later ends the h2 driver without having
     // to remember to.
+    //
+    // `ended` is dropped when the admitted tunnel's driver returns. By
+    // then the tunnel's stream is closed and nothing else will wake the
+    // h2 driver, so without it a peer holding the TCP open would decide
+    // when the connection is released.
     let (admitted, outcome) = oneshot::channel();
-    tokio::spawn(drive_tunnel_conn(conn, outcome));
+    let (ended, ended_rx) = oneshot::channel();
+    tokio::spawn(drive_tunnel_conn(conn, outcome, ended_rx));
 
     // Validate the token BEFORE sending 200. Every authentication
     // failure returns the same 401 on the wire so a candidate token
@@ -510,17 +527,20 @@ async fn register_tunnel(
         validated,
         user,
         devserver,
+        ended,
     }))
 }
 
 /// The h2 frame driver of a dial that got past the pre-auth checks.
-/// For an admitted tunnel it runs for the tunnel's whole life, so it
-/// has no bound of its own. `outcome` resolves once: a value means the
-/// tunnel registered and this loop carries on; a dropped sender means
+/// `outcome` resolves once: a value means the tunnel registered and
+/// this loop carries on for the tunnel's life; a dropped sender means
 /// the handler refused and returned, and with nothing else owning the
 /// connection a peer holding the TCP open would keep this task and its
 /// socket alive, so the refusal is drained and the connection closed
-/// the way a pre-auth refusal is.
+/// the way a pre-auth refusal is. `ended` resolves when the admitted
+/// tunnel's driver has returned: its stream is closed by then, the same
+/// peer could otherwise hold the connection for its own lifetime, and
+/// so the connection is shut down under the refusal's bound.
 ///
 /// A correct client opens exactly one stream, so any further stream is
 /// answered 409, and above `MAX_DRAINER_REJECTIONS` the connection is
@@ -529,12 +549,19 @@ async fn register_tunnel(
 async fn drive_tunnel_conn(
     mut conn: h2::server::Connection<TcpStream, bytes::Bytes>,
     mut outcome: oneshot::Receiver<()>,
+    mut ended: oneshot::Receiver<()>,
 ) {
     let mut rejections: u32 = 0;
     let mut admitted = false;
     loop {
         let next = if admitted {
-            conn.accept().await
+            tokio::select! {
+                next = conn.accept() => next,
+                _ = &mut ended => {
+                    close_ended_conn(conn).await;
+                    return;
+                }
+            }
         } else {
             tokio::select! {
                 next = conn.accept() => next,
@@ -570,10 +597,24 @@ async fn drive_tunnel_conn(
     }
 }
 
+/// Close the connection of a tunnel that has ended. Its stream is
+/// closed by then (the tunnel driver closed yamux over it and dropping
+/// the stream handles queued its reset), so the GOAWAY tells the peer
+/// no further stream will be served, and h2 closes the connection on
+/// its own once the peer has answered the shutdown's PING. The drain
+/// bound is the refusal's: a peer that neither answers nor closes is
+/// cut the way a refused peer is, since nothing else would ever end
+/// the connection.
+async fn close_ended_conn(mut conn: h2::server::Connection<TcpStream, bytes::Bytes>) {
+    conn.graceful_shutdown();
+    drain_refused_conn(conn).await;
+}
+
 /// Flush a refused connection's final response and let the peer close,
 /// bounded by `REJECTION_DRAIN_TIMEOUT`. The in-flight permit is
 /// released before this runs: a refused peer gets the courtesy of a
-/// clean close, not a slot to sit in.
+/// clean close, not a slot to sit in. An ended tunnel's connection
+/// takes the same bounded exit.
 async fn drain_refused_conn<T, B>(mut conn: h2::server::Connection<T, B>)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
