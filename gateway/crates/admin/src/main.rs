@@ -1249,12 +1249,23 @@ impl AdminClient {
             return self.get_user(id).await;
         }
         if ident.contains('@') {
-            let mut hits = self
-                .list_users(Some(ident), None, None, 5, 0)
-                .await?
-                .into_iter()
-                .filter(|u| u.email.eq_ignore_ascii_case(ident))
-                .collect::<Vec<_>>();
+            let mut hits = Vec::new();
+            let mut offset = 0;
+            const PAGE_SIZE: i64 = 100;
+            loop {
+                let page = self
+                    .list_users(Some(ident), None, None, PAGE_SIZE, offset)
+                    .await?;
+                let count = page.len();
+                hits.extend(
+                    page.into_iter()
+                        .filter(|user| user.email.eq_ignore_ascii_case(ident)),
+                );
+                if hits.len() > 1 || count < PAGE_SIZE as usize {
+                    break;
+                }
+                offset += PAGE_SIZE;
+            }
             return match hits.len() {
                 1 => Ok(hits.remove(0)),
                 0 => Err(ClientError::NotFound.into()),
@@ -2789,6 +2800,50 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn email_resolution_finds_an_exact_match_beyond_the_first_page() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            for offset in [0, 100] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let byte = stream.read_u8().await.unwrap();
+                    request.push(byte);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(request.len() < 8192);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.contains(&format!("offset={offset}")), "{request}");
+                let count = if offset == 0 { 100 } else { 1 };
+                let rows = (0..count).map(|n| serde_json::json!({
+                    "id": if offset == 0 { Uuid::new_v4() } else { expected },
+                    "email": if offset == 0 { format!("prefix{n}target@example.com") } else { "target@example.com".into() },
+                    "display_name":null, "username":format!("user-{offset}-{n}"), "username_edits":0,
+                    "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
+                })).collect::<Vec<_>>();
+                let body = serde_json::to_string(&rows).unwrap();
+                let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = AdminClient::new(format!("http://{address}"), "test-token".into()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.resolve_user("target@example.com"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.id, expected);
+        server.await.unwrap();
+    }
     use clap::{CommandFactory, FromArgMatches};
 
     #[test]
