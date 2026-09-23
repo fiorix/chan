@@ -1291,7 +1291,8 @@ async fn transfer_route_admits_body_beyond_the_general_request_cap() {
         .send()
         .await
         .unwrap();
-    assert_ne!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(res.text().await.unwrap(), "payload too large");
     assert_eq!(captured.requests.lock().unwrap().len(), 1);
     app.cleanup().await;
 }

@@ -1447,7 +1447,12 @@ async fn proxy_http(
             return Ok(not_found_response(&HeaderMap::new()));
         }
         timed = tokio::time::timeout_at(deadline, send_fut) => match timed {
-            Ok(r) => r.map_err(|e| Error::Upstream(format!("send_request: {e}")))?,
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) if request_body_exceeds_limit(&error) => {
+                conn_abort.abort();
+                return Ok((StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response());
+            }
+            Ok(Err(error)) => return Err(Error::Upstream(format!("send_request: {error}"))),
             Err(_) => {
                 conn_abort.abort();
                 tracing::warn!("proxy_http exceeded authorization/request deadline before response headers");
@@ -1999,6 +2004,18 @@ fn apply_gateway_assertion(headers: &mut HeaderMap, assertion: HeaderValue) {
 // ---------------------------------------------------------------
 // 404 page
 // ---------------------------------------------------------------
+
+fn request_body_exceeds_limit(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
 
 fn not_found_response(headers: &HeaderMap) -> Response {
     if accepts_html(headers) {

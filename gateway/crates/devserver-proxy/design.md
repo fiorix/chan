@@ -191,3 +191,5 @@ The replay cache, opaque sessions, extension bindings, registry, and controller 
 - The public wildcard never exposes `/api/devserver/*` or an admin route.
 - Request paths remain segment-preserving; chan-server is the sole workspace tenant router.
 - Control loss cannot retain data-plane authority past its hard deadline, and controller disconnected-authority markers outlive proxy retention.
+
+An HTTP request body that exceeds its route byte cap returns 413 `payload too large`; upstream transport failures retain the 502 response.
