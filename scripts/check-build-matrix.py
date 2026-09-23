@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import re
 import sys
@@ -748,42 +749,81 @@ def path_dependency(spec: object, base: Path) -> Path | None:
     return None
 
 
+def gateway_member_dirs(gateway_dir: Path, workspace: dict) -> list[Path]:
+    """The directories gateway/Cargo.toml's `members` list names.
+
+    Cargo expands a glob member against the workspace manifest's directory
+    and keeps the matches that hold a Cargo.toml and that `exclude` does not
+    name; a literal member is taken as written, so a missing manifest fails
+    when the walk reads it.
+    """
+    excluded = {(gateway_dir / path).resolve() for path in workspace.get("exclude", [])}
+    dirs: list[Path] = []
+    for member in workspace["members"]:
+        if any(char in member for char in "*?["):
+            matches = sorted(glob.glob(member, root_dir=gateway_dir))
+            dirs.extend(
+                gateway_dir / match
+                for match in matches
+                if (gateway_dir / match / "Cargo.toml").is_file()
+                and (gateway_dir / match).resolve() not in excluded
+            )
+        else:
+            dirs.append(gateway_dir / member)
+    return [path.resolve() for path in dirs]
+
+
 def gateway_root_crates() -> dict[str, str]:
     """Every root workspace crate the gateway workspace compiles.
 
-    Repo-relative crate directory to the edge that reaches it. The seeds
-    are the path dependencies leaving gateway/ in gateway/Cargo.toml and in
-    every member manifest, dev-dependencies included since Gateway CI
-    compiles the members' tests, and the path targets leaving gateway/ in
-    gateway/Cargo.toml's [patch.<registry>] and [replace] tables, since
-    cargo builds a patched or replaced crate from that path in place of
-    the registry one. From each seed the walk follows the build tables: a
-    `workspace = true` edge resolves through the root
-    Cargo.toml's [workspace.dependencies], a direct `path` resolves beside
-    the manifest, and either lands on a root crate when it points inside
-    the repository. Breadth first, so a crate the gateway names directly
-    reports that edge rather than one further down the chain.
+    Repo-relative crate directory to the edge that reaches it. The walk
+    starts inside gateway/: gateway/Cargo.toml, every directory its
+    `members` list names or matches, and every crate under gateway/ one of
+    those reaches by path, since cargo makes such a crate an implicit
+    member and compiles it whether `members` lists it or not. Each of
+    those manifests is read with its dev-dependencies, since Gateway CI
+    compiles the members' tests, and resolves `workspace = true` through
+    gateway/Cargo.toml's [workspace.dependencies]. The seeds are the path
+    targets leaving gateway/ in those manifests, and in gateway/Cargo.toml's
+    [workspace.dependencies], [patch.<registry>] and [replace] tables,
+    since cargo builds a patched or replaced crate from that path in place
+    of the registry one. From each seed the walk follows the build tables:
+    a `workspace = true` edge resolves through the root Cargo.toml's
+    [workspace.dependencies], a direct `path` resolves beside the manifest,
+    and either lands on a root crate when it points inside the repository.
+    Breadth first, so a crate the gateway names directly reports that edge
+    rather than one further down the chain.
     """
-    gateway_dir = ROOT / "gateway"
+    gateway_dir = (ROOT / "gateway").resolve()
     workspace = manifest("gateway/Cargo.toml")
-    manifests = ["gateway/Cargo.toml"] + [
-        f"gateway/{member}/Cargo.toml" for member in workspace["workspace"]["members"]
-    ]
+    gateway_workspace = workspace.get("workspace", {}).get("dependencies", {})
+    internal = [gateway_dir] + gateway_member_dirs(gateway_dir, workspace["workspace"])
+    visited: set[Path] = set()
     pending: list[tuple[Path, str]] = []
-    for relative in manifests:
-        data = manifest(relative)
-        base = (ROOT / relative).parent
+    while internal:
+        crate_dir = internal.pop(0)
+        if crate_dir in visited:
+            continue
+        visited.add(crate_dir)
+        relative = f"{crate_dir.relative_to(ROOT).as_posix()}/Cargo.toml"
+        data = workspace if crate_dir == gateway_dir else manifest(relative)
         tables = [("dependency", table) for table in dependency_tables(data, dev=True)]
-        if relative == "gateway/Cargo.toml":
-            workspace_dependencies = data.get("workspace", {}).get("dependencies", {})
-            tables.append(("dependency", workspace_dependencies))
+        if crate_dir == gateway_dir:
+            tables.append(("dependency", gateway_workspace))
             for registry, table in data.get("patch", {}).items():
                 tables.append((f"patch.{registry}", table))
             tables.append(("replace", data.get("replace", {})))
         for kind, table in tables:
             for name, spec in table.items():
-                target = path_dependency(spec, base)
-                if target is not None and not target.is_relative_to(gateway_dir):
+                if isinstance(spec, dict) and spec.get("workspace") is True:
+                    target = path_dependency(gateway_workspace.get(name), gateway_dir)
+                else:
+                    target = path_dependency(spec, crate_dir)
+                if target is None:
+                    continue
+                if target.is_relative_to(gateway_dir):
+                    internal.append(target)
+                else:
                     pending.append((target, f"{relative} {kind} {name}"))
 
     root_workspace = manifest("Cargo.toml")["workspace"]["dependencies"]
