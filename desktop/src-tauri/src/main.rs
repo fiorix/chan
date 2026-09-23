@@ -7355,6 +7355,7 @@ mod tests {
             concat!("let others", "_remain"),
         );
         assert!(request_close.contains("close_devserver_control_terminal"));
+        assert!(!request_close.contains("devserver-control-closed"));
 
         // Only a status-0 exit counts as clean, and the post-token liveness
         // probe lets a clean (daemonizing) script return through while still
@@ -7407,6 +7408,7 @@ mod tests {
         );
         assert!(exit_watcher.contains("control_script_exit_is_clean"));
         assert!(!exit_watcher.contains("control_terminal_dead"));
+        assert!(!exit_watcher.contains("devserver-control-closed"));
         let connecting_pos = exit_watcher
             .find("devserver_connecting")
             .expect("watcher defers a clean exit while a connect is in flight");
@@ -8184,6 +8186,22 @@ mod tests {
         const MAIN_RS: &str = include_str!("main.rs");
         // The launcher menu item says what it does.
         assert!(MAIN_RS.contains("\"New Standalone Terminal\""));
+        // The per-window-kind menu machinery is gone: no workspace
+        // hamburger-mirror menu, no owned terminal/control shapes, and no
+        // label-encoded id namespaces to route them. concat! so the
+        // absence pins don't match this test's own source.
+        for gone in [
+            concat!("build_workspace", "_menu"),
+            concat!("WS_NEW_WINDOW_MENU_ID", "_PREFIX"),
+            concat!("WS_CLOSE_WINDOW_MENU_ID", "_PREFIX"),
+            concat!("WS_OPEN_IN_BROWSER_MENU_ID", "_PREFIX"),
+            concat!("WORKSPACE_CMD_MENU_ID", "_PREFIX"),
+            concat!("wsc", "md:"),
+            concat!("parse_workspace_cmd_menu", "_id"),
+            concat!("dispatch_to_workspace", "_window"),
+        ] {
+            assert!(!MAIN_RS.contains(gone), "{gone} must be gone");
+        }
     }
 
     #[test]
