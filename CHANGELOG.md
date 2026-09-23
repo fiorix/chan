@@ -60,6 +60,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Editor fixes.** A checkbox in a read-only document no longer writes to it. Editor triggers no longer fire inside an existing image, link or code block. Image actions keep working after an edit above the image. Document PDF export waits for its images before it paginates.
 
+- **Windows release builds keep signing.** The signing step trusts SSL.com's 2022 root, which SSL.com's signing service now uses and CodeSignTool's bundled Java does not ship, and the signing script checks the Authenticode signature it produced instead of trusting the tool's exit code, so an unsigned binary stops the build at the first file.
+
 - **Release and CI tooling fail closed.** The `/dl` release pipeline errors on a missing tag and requires a signature for every updater payload it can publish. The frontend gate covers everything that ships, and the e2e harnesses report only what they measured. The COPR publication probe waits 7,200 seconds, with trigger and verify as separate jobs, and the macOS CI jobs stop at 90 minutes instead of GitHub's six-hour default.
 
 ### Security
