@@ -33,8 +33,16 @@ use chrono::Utc;
 use crate::walk::Filter;
 
 /// Workspace-owned scope adapter used by both full and incremental reports.
+/// When set, it replaces the crate's own hidden, gitignore and exclude
+/// filtering entirely.
 pub trait ReportPathPolicy: Send + Sync {
+    /// An opaque value the caller compares for equality to tell a replaced
+    /// policy from the one an index was built under.
     fn generation(&self) -> u64;
+    /// Whether `rel` (POSIX, workspace-relative, no leading slash) is in
+    /// scope. `is_dir` is true for a directory entry during the scan walk,
+    /// where `false` prunes the whole subtree; incremental updates and
+    /// `load_jsonl` ask about files only and always pass `false`.
     fn includes(&self, rel: &str, is_dir: bool) -> bool;
 }
 
