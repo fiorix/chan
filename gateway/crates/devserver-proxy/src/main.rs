@@ -1,5 +1,8 @@
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
+
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 use chan_tunnel_server::{serve_tunnel_listener_with_admission, Validator};
 use devserver_proxy::{
@@ -123,33 +126,63 @@ async fn run() -> anyhow::Result<()> {
         result = &mut control_task => FirstExit::Control(result),
     };
     let _ = shutdown_tx.send(true);
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_DRAIN_TIMEOUT;
 
     match first {
         FirstExit::Signal => {
             tracing::info!("devserver-proxy-service received shutdown");
-            let (public, tunnel, control) = tokio::join!(public_task, tunnel_task, control_task);
-            task_completed("public listener", public)?;
-            task_completed("tunnel listener", tunnel)?;
-            task_completed("control supervisor", control)?;
+            let (public, tunnel, control) = tokio::join!(
+                drain_task(&mut public_task, "public listener", deadline),
+                drain_task(&mut tunnel_task, "tunnel listener", deadline),
+                drain_task(&mut control_task, "control supervisor", deadline),
+            );
+            public?;
+            tunnel?;
+            control?;
             Ok(())
         }
         FirstExit::Public(result) => {
-            let (tunnel, control) = tokio::join!(tunnel_task, control_task);
-            task_completed("tunnel listener during shutdown", tunnel)?;
-            task_completed("control supervisor during shutdown", control)?;
+            let (tunnel, control) = tokio::join!(
+                drain_task(&mut tunnel_task, "tunnel listener", deadline),
+                drain_task(&mut control_task, "control supervisor", deadline)
+            );
+            tunnel?;
+            control?;
             Err(unexpected_exit("public listener", result))
         }
         FirstExit::Tunnel(result) => {
-            let (public, control) = tokio::join!(public_task, control_task);
-            task_completed("public listener during shutdown", public)?;
-            task_completed("control supervisor during shutdown", control)?;
+            let (public, control) = tokio::join!(
+                drain_task(&mut public_task, "public listener", deadline),
+                drain_task(&mut control_task, "control supervisor", deadline)
+            );
+            public?;
+            control?;
             Err(unexpected_exit("tunnel listener", result))
         }
         FirstExit::Control(result) => {
-            let (public, tunnel) = tokio::join!(public_task, tunnel_task);
-            task_completed("public listener during shutdown", public)?;
-            task_completed("tunnel listener during shutdown", tunnel)?;
+            let (public, tunnel) = tokio::join!(
+                drain_task(&mut public_task, "public listener", deadline),
+                drain_task(&mut tunnel_task, "tunnel listener", deadline)
+            );
+            public?;
+            tunnel?;
             Err(unexpected_exit("control supervisor", result))
+        }
+    }
+}
+
+async fn drain_task<E: std::fmt::Display>(
+    task: &mut tokio::task::JoinHandle<Result<(), E>>,
+    name: &str,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    match tokio::time::timeout_at(deadline, &mut *task).await {
+        Ok(result) => task_completed(name, result),
+        Err(_) => {
+            tracing::warn!(name, "shutdown drain deadline reached; aborting task");
+            task.abort();
+            let _ = task.await;
+            Ok(())
         }
     }
 }
@@ -191,5 +224,41 @@ where
         Ok(Ok(())) => anyhow::anyhow!("{name} exited unexpectedly"),
         Ok(Err(error)) => anyhow::anyhow!("{name} failed: {error}"),
         Err(error) => anyhow::anyhow!("{name} task failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_a_stalled_task_within_the_drain_budget() {
+        let mut task = tokio::spawn(std::future::pending::<std::io::Result<()>>());
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(
+            SHUTDOWN_DRAIN_TIMEOUT * 2,
+            drain_task(
+                &mut task,
+                "stalled listener",
+                started + SHUTDOWN_DRAIN_TIMEOUT,
+            ),
+        )
+        .await
+        .expect("shutdown must finish within its budget")
+        .unwrap();
+        assert!(task.is_finished());
+        assert_eq!(started.elapsed(), SHUTDOWN_DRAIN_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_listener_failures() {
+        let mut task = tokio::spawn(async { Err(std::io::Error::other("listener failed")) });
+        let result = drain_task(
+            &mut task,
+            "listener",
+            tokio::time::Instant::now() + SHUTDOWN_DRAIN_TIMEOUT,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("listener failed"));
     }
 }

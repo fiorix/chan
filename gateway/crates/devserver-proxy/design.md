@@ -63,6 +63,8 @@ flowchart TD
     C -->|yes| P[authorize operation; sign request assertion; forward full path]
 ```
 
+The listeners and control supervisor share a 30-second shutdown drain deadline. Tasks still pending at the deadline are aborted so long transfers cannot hold process shutdown indefinitely.
+
 ## Tunnel registration and admission
 
 The tunnel listener runs `ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, the signed positive `max_connected_devservers`, and the per-tunnel assertion authority. The proxy verifies the admission lease locally under `DEVSERVER_ADMISSION_VERIFYING_KEYS` twice: before it asks devserver-control to admit the registration, and again before it publishes the registration's row. devserver-proxy sends the raw PAT only to identity's validate endpoint; it never sends the PAT to devserver-control or retains it as a proxy-wide credential. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory.
