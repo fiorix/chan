@@ -45,6 +45,7 @@
     browserSelection,
     browserSidePanes,
     closeOverlay,
+    closeEmptiedWindow,
     applyLocalTheme,
     discardWindowSession,
     fileOps,
@@ -1158,8 +1159,7 @@
         // must survive in the target window). (Restored-empty windows survive a
         // RESTART via the persisted record + the native-close bury, not by
         // blocking this explicit close.)
-        discardWindowSession({ reap: !consumeLastCloseWasMoveOut() });
-        void requestCloseWindow();
+        void closeEmptiedWindow({ movedOut: consumeLastCloseWasMoveOut() });
         return true;
       }
       return false;
@@ -1198,8 +1198,7 @@
     // on (re-bound to the target), and the source's synchronous DELETE could
     // otherwise beat the target's re-attach and kill it.
     if (isTauriDesktop()) {
-      discardWindowSession({ reap: !consumeLastCloseWasMoveOut() });
-      void requestCloseWindow();
+      void closeEmptiedWindow({ movedOut: consumeLastCloseWasMoveOut() });
     }
   });
   onMount(() => document.addEventListener("keydown", onWindowKey));

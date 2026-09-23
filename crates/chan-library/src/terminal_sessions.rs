@@ -258,6 +258,14 @@ pub struct Registry {
     /// disk. It tracks marks for THIS process's lifetime -- sessions never
     /// outlive the process (PTYs die with it), so it needs no startup seed.
     persisted_windows: Mutex<HashSet<String>>,
+    /// Sessions a window handed to another window by a cross-window move,
+    /// keyed by session id with the window that moved them out. The source
+    /// window's discard can reach the registry before the target's attach
+    /// rebinds the session, so [`forget_window`](Self::forget_window) spares
+    /// these. An entry ends when the target attaches or the source's discard
+    /// consumes it; a target that never attaches leaves the session to the
+    /// orphan reap, since its window is no longer persisted.
+    moved_out: Mutex<HashMap<String, String>>,
     /// Optional hook fired when [`reap_exited`](Self::reap_exited) reaps a
     /// session that owns a window: the host installs it (on the SHARED terminal
     /// tenant only) to drop the standalone terminal's window-feed row when its
@@ -1283,6 +1291,7 @@ impl Registry {
             roster_notify: Arc::new(Notify::new()),
             default_command: Mutex::new(None),
             persisted_windows: Mutex::new(HashSet::new()),
+            moved_out: Mutex::new(HashMap::new()),
             window_reaper: Mutex::new(None),
             blob_reaper: Mutex::new(None),
             #[cfg(target_os = "linux")]
@@ -2053,6 +2062,12 @@ impl Registry {
         let Some(session) = session else {
             return;
         };
+        // The window it moved to now holds it; the source's discard no longer
+        // needs to spare it.
+        self.moved_out
+            .lock()
+            .expect("terminal registry poisoned")
+            .remove(id);
         #[cfg(target_os = "linux")]
         let previous = session.window_id();
         session.set_window_id(window_id.clone());
@@ -2224,9 +2239,38 @@ impl Registry {
     /// busy detached session the idle pruner deliberately keeps alive, and so
     /// is the discard half of "discard ⇒ reap; persist ⇒ keep". Returns how
     /// many sessions were reaped. Called on a `DELETE /api/session?w=<window_id>`.
+    ///
+    /// A session the window moved out (see
+    /// [`unpersist_window`](Self::unpersist_window)) is spared: it belongs to
+    /// the window it was dropped on, whose attach may not have rebound it yet.
     pub fn forget_window(&self, window_id: &str) -> usize {
-        self.unpersist_window(window_id);
-        self.close_for_window(window_id, CloseReason::Explicit)
+        self.persisted_windows
+            .lock()
+            .expect("terminal registry poisoned")
+            .remove(window_id);
+        let spared: HashSet<String> = {
+            let mut moved_out = self.moved_out.lock().expect("terminal registry poisoned");
+            let spared = moved_out
+                .iter()
+                .filter(|(_, from)| from.as_str() == window_id)
+                .map(|(id, _)| id.clone())
+                .collect::<HashSet<_>>();
+            moved_out.retain(|_, from| from.as_str() != window_id);
+            spared
+        };
+        let ids: Vec<String> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            sessions
+                .iter()
+                .filter(|(id, session)| {
+                    session.window_id().as_deref() == Some(window_id) && !spared.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        ids.into_iter()
+            .filter(|id| self.close(id, CloseReason::Explicit))
+            .count()
     }
 
     /// Drop `window_id` from the persisted set WITHOUT reaping its sessions.
@@ -2236,11 +2280,29 @@ impl Registry {
     /// rebinds it to the target. A move-out DELETE
     /// (`?w=W&moved=1`) routes here; a real discard (`?w=W`) routes through
     /// [`forget_window`](Self::forget_window) and reaps.
+    ///
+    /// Every session still bound to the window at this point is one the move
+    /// carried away, since a window sends this only once it holds no tab, so
+    /// each is recorded as moved out and the window's later discard (the
+    /// desktop host closing the emptied window) does not reap it before the
+    /// target attaches.
     pub fn unpersist_window(&self, window_id: &str) {
         self.persisted_windows
             .lock()
             .expect("terminal registry poisoned")
             .remove(window_id);
+        let bound: Vec<String> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            sessions
+                .iter()
+                .filter(|(_, session)| session.window_id().as_deref() == Some(window_id))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut moved_out = self.moved_out.lock().expect("terminal registry poisoned");
+        for id in bound {
+            moved_out.insert(id, window_id.to_string());
+        }
     }
 
     /// Snapshot of every live session, for `cs term list`. The control

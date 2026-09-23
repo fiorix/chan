@@ -117,6 +117,7 @@ import {
 import {
   isTauriDesktop,
   openReverseTunnel,
+  requestCloseWindow,
   runDesktopDownload,
   runDesktopUpload,
 } from "../api/desktop";
@@ -3425,18 +3426,40 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 /// (`&moved=1`) so the server does NOT reap -- the moved PTY lives on, re-bound
 /// to the target window. Without this the source's synchronous DELETE can beat
 /// the target's async re-attach and kill the just-moved terminal.
-export function discardWindowSession(opts?: { reap?: boolean }): void {
+///
+/// The returned promise settles when the DELETE does, successfully or not;
+/// `closeEmptiedWindow` waits on it after a move-out.
+export function discardWindowSession(opts?: { reap?: boolean }): Promise<void> {
   discardWindowSessionLocal();
   // sessionPath() always carries `?w=`, so `&moved=1` is always a valid append.
   const url = withTokenQuery(sessionPath()) + (opts?.reap === false ? "&moved=1" : "");
   try {
-    void chanFetch(url, {
+    return chanFetch(url, {
       method: "DELETE",
       keepalive: true,
-    }).catch(() => {});
+    }).then(
+      () => {},
+      () => {},
+    );
   } catch {
     /* page is going away; nothing useful we can do */
+    return Promise.resolve();
   }
+}
+
+/// Discard and close this desktop window now that it holds no tab.
+///
+/// The host's close discards the window and reaps every terminal session still
+/// bound to it. After a cross-window move the moved session is bound here
+/// until the target window's attach rebinds it, so the close must not reach
+/// the host before the move-out DELETE has told the server which sessions
+/// moved out; racing it killed the shell the user had just dropped elsewhere.
+/// A DELETE that fails still lets the window close, because a window never
+/// sits empty. A plain discard has nothing to protect and closes at once.
+export async function closeEmptiedWindow(opts: { movedOut: boolean }): Promise<void> {
+  const discarded = discardWindowSession({ reap: !opts.movedOut });
+  if (opts.movedOut) await discarded;
+  await requestCloseWindow();
 }
 
 /// Local half of a window discard: stop this window from persisting or
