@@ -30,7 +30,6 @@ use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State}
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures::{stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -39,7 +38,7 @@ use chan_workspace::{
     WorkspaceGeneration,
 };
 
-use crate::bulk_transfer::{BulkCancel, BulkOutcome};
+use crate::bulk_transfer::{BulkCancel, BulkOutcome, StreamBridge};
 use crate::error::{err, err_from};
 use crate::routes::run_blocking;
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
@@ -416,6 +415,7 @@ fn standalone_binary_plan_sync(
 /// `?stream=1` answers NDJSON frames, and everything else streams raw
 /// bytes with the active-content protections.
 pub(crate) async fn standalone_read_file(
+    signal: BulkCancel,
     files: Arc<StandaloneFilesState>,
     path: String,
     stream: bool,
@@ -426,7 +426,7 @@ pub(crate) async fn standalone_read_file(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     if stream {
-        return standalone_stream_read_response(files.fs.clone(), path).await;
+        return standalone_stream_read_response(signal, files.fs.clone(), path).await;
     }
     let fs = files.fs.clone();
     let read_path = path.clone();
@@ -521,22 +521,24 @@ where
     }
 }
 
-async fn standalone_stream_read_response(fs: Arc<MiniWorkspace>, path: String) -> Response {
-    let (tx, mut rx) = mpsc::channel::<FileStreamMessage>(8);
-    let read_path = path.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = standalone_stream_read_sync(&fs, &read_path, |bytes| {
-            tx.blocking_send(FileStreamMessage::Data(bytes)).is_ok()
+async fn standalone_stream_read_response(
+    signal: BulkCancel,
+    fs: Arc<MiniWorkspace>,
+    path: String,
+) -> Response {
+    let mut bridge = StreamBridge::spawn(signal, move |frames| {
+        let result = standalone_stream_read_sync(&fs, &path, |bytes| {
+            frames.send(FileStreamMessage::Data(bytes))
         });
         if let Err(e) = result {
-            let _ = tx.blocking_send(FileStreamMessage::Error(e));
+            frames.send(FileStreamMessage::Error(e));
         }
     });
 
     // A failure before the first frame becomes a plain HTTP error; a later
     // failure rides the stream as an `error` frame so a truncated logical
     // file can never look complete.
-    let first = match rx.recv().await {
+    let first = match bridge.first().await {
         Some(FileStreamMessage::Data(bytes)) => bytes,
         Some(FileStreamMessage::Error(e)) => return standalone_err(&e),
         None => {
@@ -546,17 +548,10 @@ async fn standalone_stream_read_response(fs: Arc<MiniWorkspace>, path: String) -
             )
         }
     };
-    let rest = stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| {
-            let bytes = match message {
-                FileStreamMessage::Data(bytes) => bytes,
-                FileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
-            };
-            (Ok::<Bytes, Infallible>(bytes), rx)
-        })
+    let body = bridge.into_body(first, |message| match message {
+        FileStreamMessage::Data(bytes) => bytes,
+        FileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
     });
-    let body =
-        Body::from_stream(stream::once(async move { Ok::<Bytes, Infallible>(first) }).chain(rest));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
@@ -1788,9 +1783,27 @@ mod tests {
             )
             .unwrap(),
         );
+        let mut frames = 0;
+        super::standalone_stream_read_sync(&fs, "home/user/big.md", |_| {
+            frames += 1;
+            true
+        })
+        .unwrap();
+        assert!(
+            frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            "the producer must outrun the channel, got {frames} frames"
+        );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
             "standalone text stream",
-            || super::standalone_stream_read_response(fs, "home/user/big.md".into()),
+            || {
+                super::standalone_stream_read_response(
+                    bulk.stall_signal(),
+                    fs,
+                    "home/user/big.md".into(),
+                )
+            },
         );
         assert!(
             body.is_err(),

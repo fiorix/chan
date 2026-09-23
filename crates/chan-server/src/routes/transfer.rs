@@ -502,6 +502,7 @@ pub async fn api_terminal_read_file(
     if !query_flag(&query.download) {
         if let Some(files) = state.standalone_files.clone() {
             return crate::routes::standalone_fs::standalone_read_file(
+                state.bulk_transfer.stall_signal(),
                 files,
                 path,
                 query_flag(&query.stream),

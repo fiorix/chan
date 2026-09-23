@@ -22,7 +22,9 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use tokio::sync::{oneshot, watch};
+use axum::body::{Body, Bytes};
+use futures::{stream, StreamExt};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Bulk jobs executing at once, and therefore the worker-thread count.
 pub const ACTIVE_CAPACITY: usize = 2;
@@ -309,6 +311,15 @@ impl BulkTransferTenant {
         self
     }
 
+    /// A cancellation signal carrying this tenant's stall bound, for work
+    /// that streams through a bounded channel from the blocking pool rather
+    /// than the lane: the same no-progress policy, without an admission. A
+    /// [`StreamBridge`] learns its bound only this way, so no bridge can hold
+    /// a bound of its own.
+    pub(crate) fn stall_signal(&self) -> BulkCancel {
+        BulkCancel(Arc::new(AtomicBool::new(false)), self.stall_timeout)
+    }
+
     /// Submit bulk work. One call consumes one admission whether or not the
     /// job runs, so a refusal happens before any large body is read.
     pub fn submit<T, F>(&self, job: F) -> Result<BulkJob<T>, BulkFull>
@@ -459,6 +470,96 @@ impl BulkTracker {
     /// cannot make an observer emit a frame per promotion.
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.shared.changes.subscribe()
+    }
+}
+
+/// Frames a bridge producer may queue ahead of its reader. Small on purpose:
+/// the channel is backpressure, not a buffer, and the stall bound counts from
+/// the last frame the reader took.
+pub(crate) const BRIDGE_CAPACITY: usize = 8;
+
+/// A blocking producer bridged onto a response body through a bounded
+/// channel, with the transfer stall bound on every send.
+///
+/// Editor-size text reads, report rows and graph views run on the blocking
+/// pool rather than the lane: each is a handful of frames, and admitting them
+/// would spend transfer slots on the interactive work the lane exists to
+/// protect. What they share with a bulk send is the failure: a client that
+/// stops reading fills the channel, and an unbounded send then parks the pool
+/// thread for as long as the connection stays open. A send here gives up
+/// after the bound, the producer returns, and the body ends as an error
+/// rather than as a stream that looks complete.
+pub(crate) struct StreamBridge<T> {
+    rx: mpsc::Receiver<T>,
+    signal: BulkCancel,
+}
+
+/// The producer's end of a [`StreamBridge`].
+pub(crate) struct BridgeSender<T> {
+    tx: mpsc::Sender<T>,
+    signal: BulkCancel,
+}
+
+impl<T> BridgeSender<T> {
+    /// Queue a frame, waiting for room within the bound. `false` once the
+    /// reader is gone or the bound elapsed; the producer stops at the first
+    /// `false`, and after a stall every later send refuses at once.
+    pub(crate) fn send(&self, frame: T) -> bool {
+        self.signal.send(&self.tx, frame).is_ok()
+    }
+}
+
+impl<T: Send + 'static> StreamBridge<T> {
+    /// Start `produce` on the blocking pool under the bound `signal` carries.
+    pub(crate) fn spawn(
+        signal: BulkCancel,
+        produce: impl FnOnce(&BridgeSender<T>) + Send + 'static,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(BRIDGE_CAPACITY);
+        let sender = BridgeSender {
+            tx,
+            signal: signal.clone(),
+        };
+        tokio::task::spawn_blocking(move || produce(&sender));
+        Self { rx, signal }
+    }
+
+    /// The first frame, which decides the response status. `None` when the
+    /// producer returned without one.
+    pub(crate) async fn first(&mut self) -> Option<T> {
+        self.rx.recv().await
+    }
+
+    /// The body: `first`, then every later frame through `render`. When the
+    /// bound stopped the producer, the body ends with an error instead of an
+    /// end of stream, so a client that resumes reading cannot take the frames
+    /// it got for a complete response.
+    pub(crate) fn into_body(
+        self,
+        first: Bytes,
+        mut render: impl FnMut(T) -> Bytes + Send + 'static,
+    ) -> Body {
+        let Self { rx, signal } = self;
+        let rest = stream::unfold((rx, signal, false), |(mut rx, signal, ended)| async move {
+            if ended {
+                return None;
+            }
+            match rx.recv().await {
+                Some(frame) => Some((Ok(frame), (rx, signal, false))),
+                None if signal.is_cancelled() => Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "stream stalled without channel progress",
+                    )),
+                    (rx, signal, true),
+                )),
+                None => None,
+            }
+        })
+        .map(move |frame| frame.map(&mut render));
+        Body::from_stream(
+            stream::once(async move { Ok::<Bytes, std::io::Error>(first) }).chain(rest),
+        )
     }
 }
 
@@ -796,6 +897,21 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// A bridge holds no bound of its own: a signal minted from a tenant
+    /// carries the bound that tenant captured from the server config, so a
+    /// `[transfer].stall_timeout_secs` edit reaches the text, report and
+    /// graph streams exactly as it reaches bulk sends.
+    #[test]
+    fn a_stall_signal_carries_its_tenant_bound() {
+        let lane = BulkTransferLane::new();
+        let configured = lane.tenant().with_stall_timeout(Duration::from_secs(42));
+        assert_eq!(configured.stall_signal().1, Duration::from_secs(42));
+        assert_eq!(
+            lane.tenant().stall_signal().1,
+            crate::config::TransferConfig::default().stall_timeout()
+        );
+    }
 
     #[test]
     fn channel_wake_retains_notification_before_parking() {
