@@ -2,17 +2,36 @@ name: Gateway CI
 
 # The gateway (gateway/) is a separate nested Cargo workspace:
 # Postgres-backed, server-side only (linux amd64/arm64), and NOT a
-# member of the root chan workspace. The main ci.yml therefore never
-# builds or tests it. This gate runs the gateway's own fmt + clippy +
-# rustdoc + tests (against a Postgres service) plus the SPA type-check,
-# scoped to changes under gateway/. ci.yml carries the mirror-image
-# paths-ignore so the two gates do not both run on a given change.
+# member of the root chan workspace. ci.yml's Linux job runs the whole
+# pre-push gate, gateway fmt, clippy, rustdoc, database-free tests,
+# build and profile SPA checks included, but only this workflow runs
+# the gateway's Postgres-backed integration tests (against a Postgres
+# service) and builds the gateway containers.
+#
+# The path filter is the gateway's build input set, not gateway/ alone.
+# gateway/Cargo.toml consumes crates/chan-tunnel-{client,proto,server}
+# from the root workspace by path, and those crates take their version
+# and their dependency pins from the root Cargo.toml through
+# `workspace = true`, so a change to any of them changes what this
+# workspace compiles and what its integration tests exercise.
+# scripts/check-build-matrix.py derives that closure from the manifests
+# and fails when a crate it reaches is missing from either list below,
+# which is why the two lists are identical. The rest are the shared
+# inputs: the Makefile recipes, the toolchain pin, the web lock and the
+# profile SPA the identity binary embeds, and the gateway Docker files.
+# ci.yml ignores gateway/** and nothing else, so a gateway-only change
+# runs this gate alone and a change under crates/chan-tunnel-* runs
+# both, each for its own workspace.
 
 on:
   push:
     branches: [main]
     paths:
       - 'gateway/**'
+      - 'crates/chan-tunnel-client/**'
+      - 'crates/chan-tunnel-proto/**'
+      - 'crates/chan-tunnel-server/**'
+      - 'Cargo.toml'
       - 'Makefile'
       - 'rust-toolchain.toml'
       - 'web/package-lock.json'
@@ -25,6 +44,10 @@ on:
   pull_request:
     paths:
       - 'gateway/**'
+      - 'crates/chan-tunnel-client/**'
+      - 'crates/chan-tunnel-proto/**'
+      - 'crates/chan-tunnel-server/**'
+      - 'Cargo.toml'
       - 'Makefile'
       - 'rust-toolchain.toml'
       - 'web/package-lock.json'
