@@ -1548,8 +1548,11 @@ sleep 3"
         write_executable(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
         let script_path = scratch.path().join("team.sh");
         std::fs::write(&script_path, &script).unwrap();
-        // Somewhere that is not the workspace root.
-        let run_dir = scratch.path().join("elsewhere");
+        // Somewhere that is not the workspace root, spelled with a space, a
+        // single quote and a `$` in one component: an unquoted expansion of
+        // the directory splits at the space, and a script that re-parsed it
+        // would end a quote at the `'` or expand `$ws`.
+        let run_dir = scratch.path().join("it's a $ws dir");
         std::fs::create_dir(&run_dir).unwrap();
 
         let path = match std::env::var_os("PATH") {
