@@ -2540,7 +2540,9 @@ impl WorkspaceHost {
     /// `root` by canonical form (the same join [`assemble_window_records`](
     /// Self::assemble_window_records) uses), discarding each via
     /// [`discard_window`](Self::discard_window) so its tenant state is reaped too.
-    /// Returns the count discarded; a no-op with no registry or no match. Fires
+    /// Returns the count discarded; a no-op with no registry or no match. A
+    /// failed match is an error: the records are still on disk, so the
+    /// removal must not report them purged. Fires
     /// only on explicit forget (via
     /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
     /// keeps the records and filters them from the live feed, and host shutdown
@@ -2548,15 +2550,15 @@ impl WorkspaceHost {
     /// restart. `target` is the canonical key the removal already holds.
     /// Matching a record canonicalizes the path it stores, so the match runs
     /// off the runtime thread; the discards canonicalize nothing and stay on it.
-    async fn discard_workspace_windows(&self, target: &Path) -> usize {
+    async fn discard_workspace_windows(&self, target: &Path) -> Result<usize, Error> {
         let Some(registry) = self.window_registry() else {
-            return 0;
+            return Ok(0);
         };
         let registry = Arc::clone(registry);
         let target = target.to_path_buf();
         #[cfg(test)]
         let probe = self.removal_hop_probe.lock().unwrap().clone();
-        let ids = match self
+        let ids = self
             .off_runtime(move || {
                 #[cfg(test)]
                 if let Some(probe) = probe {
@@ -2564,18 +2566,11 @@ impl WorkspaceHost {
                 }
                 workspace_window_ids(&registry, &target)
             })
-            .await
-        {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::warn!(%error, "workspace window match task failed");
-                Vec::new()
-            }
-        };
+            .await?;
         for id in &ids {
             let _ = self.discard_window(id);
         }
-        ids.len()
+        Ok(ids.len())
     }
 
     /// Reap all state a discarded `window_id` owns across mounted tenants, so a
@@ -2991,7 +2986,10 @@ impl WorkspaceHost {
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(&target).await;
+        if let Err(error) = self.discard_workspace_windows(&target).await {
+            removing.error = Some(error.to_string());
+            return Err(error);
+        }
         // The hop runs to its end even when the caller is dropped during it,
         // so it clears the row itself: no await separates the unregister from
         // the last of its bookkeeping.
