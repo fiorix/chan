@@ -8170,6 +8170,45 @@ is_lead = false
     }
 
     #[test]
+    fn spawn_team_pokes_name_the_absolute_bootstrap_path_and_its_root() {
+        // Members start in the registry's workspace root (a team spawn passes
+        // `cwd: None`) and `bootstrap.md` keeps workspace-relative paths, so
+        // the poke has to say where that file is and what its paths resolve
+        // against. A team directory is commonly gitignored, so an agent that
+        // searches for the file instead finds nothing.
+        let (root, registry) = empty_registry();
+        let config = spawnable_config();
+        let spawn = spawn_team(&registry, "new-team-1", &config, false, None);
+
+        let root_text = root.path().to_string_lossy().into_owned();
+        let bootstrap = root
+            .path()
+            .join("new-team-1")
+            .join("bootstrap.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            spawn.pokes.len(),
+            2,
+            "lead and worker pokes: {:?}",
+            spawn.pokes
+        );
+        for poke in &spawn.pokes {
+            let text = poke.writes.concat();
+            assert!(
+                text.contains(&format!("Read the team process at {bootstrap},")),
+                "{} poke names the absolute bootstrap.md: {text:?}",
+                poke.member
+            );
+            assert!(
+                text.contains(&format!("resolve against {root_text}.")),
+                "{} poke names the root its relative paths resolve against: {text:?}",
+                poke.member
+            );
+        }
+    }
+
+    #[test]
     fn spawn_team_opencode_lead_uses_one_bracketed_paste_write() {
         let (_root, registry) = empty_registry();
         let mut config = spawnable_config();

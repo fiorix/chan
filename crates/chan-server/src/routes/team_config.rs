@@ -1365,6 +1365,115 @@ sleep 3"
     }
 
     #[test]
+    fn script_header_does_not_ask_for_the_workspace_root() {
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        let header: Vec<&str> = script
+            .lines()
+            .take_while(|line| line.starts_with('#'))
+            .collect();
+        assert!(header.len() > 2, "comment header before set -e: {script}");
+        assert!(
+            !header.iter().any(|line| line.contains("workspace root")),
+            "the header anchors on $PWD instead of asking for the workspace root: {header:?}"
+        );
+    }
+
+    /// Write `body` at `path` and mark it executable: the `cs` recorder and
+    /// the no-op `sleep` that stand on the script test's PATH.
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Runs the script under bash with a POSIX PATH, so unix only.
+    #[cfg(unix)]
+    #[test]
+    fn script_run_from_another_directory_pokes_the_path_it_wrote() {
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        let scratch = tempfile::TempDir::new().unwrap();
+        // `cs` records every call it receives; `sleep` is a no-op so the
+        // script's readiness wait costs the test nothing.
+        let bin = scratch.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let calls_log = scratch.path().join("cs-calls.log");
+        write_executable(
+            &bin.join("cs"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n",
+                sh_squote(&calls_log.to_string_lossy())
+            ),
+        );
+        write_executable(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
+        let script_path = scratch.path().join("team.sh");
+        std::fs::write(&script_path, &script).unwrap();
+        // Somewhere that is not the workspace root.
+        let run_dir = scratch.path().join("elsewhere");
+        std::fs::create_dir(&run_dir).unwrap();
+
+        let path = match std::env::var_os("PATH") {
+            Some(inherited) => format!("{}:{}", bin.display(), inherited.to_string_lossy()),
+            None => bin.display().to_string(),
+        };
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&run_dir)
+            .env("PATH", path)
+            .output()
+            .expect("run the script under bash");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "script failed: {stdout}{stderr}");
+
+        // The tree landed under the directory the script ran from.
+        let team_dir = run_dir.join("new-team-1");
+        for entry in ["tasks", "journals", "followups"] {
+            assert!(
+                team_dir.join(entry).is_dir(),
+                "{entry}/ under the run directory"
+            );
+        }
+        assert!(
+            team_dir.join("config.toml").is_file(),
+            "config.toml written"
+        );
+        assert!(
+            team_dir.join("bootstrap.md").is_file(),
+            "bootstrap.md written"
+        );
+
+        // bash sets $PWD from getcwd when the inherited value names another
+        // directory, so the pokes carry the physical spelling.
+        let physical = std::fs::canonicalize(&run_dir).unwrap();
+        let bootstrap = physical.join("new-team-1").join("bootstrap.md");
+        let calls = std::fs::read_to_string(&calls_log).unwrap();
+        assert!(
+            calls.contains(&format!(
+                "Read the team process at {},",
+                bootstrap.display()
+            )),
+            "the pokes name the absolute bootstrap.md the script wrote: {calls}"
+        );
+        assert!(
+            calls.contains(&format!("resolve against {}.", physical.display())),
+            "the pokes name the directory the tree is under: {calls}"
+        );
+        assert_eq!(
+            calls.matches("Read the team process at").count(),
+            2,
+            "one poke per agent: {calls}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "team directory: {}",
+                physical.join("new-team-1").display()
+            )),
+            "the script prints the resolved directory before writing: {stdout}"
+        );
+    }
+
+    #[test]
     fn identity_prompt_addresses_the_member_and_points_at_bootstrap() {
         let config = sample_config();
         let lead_prompt = identity_prompt(&config, "new-team-1", &config.members[0]);
