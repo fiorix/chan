@@ -726,8 +726,9 @@ fn next_ordinal(
             .map(|w| w.ordinal)
             .max()
             .unwrap_or(0)
-            .checked_add(1)
-            .expect("a realistic workspace window count fits in u32"),
+            // The ordinals come from the persisted store, so a damaged one
+            // can hold any value; an ordinal only orders and titles windows.
+            .saturating_add(1),
     }
 }
 
@@ -775,6 +776,22 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = WindowRegistry::open(dir.path().join("windows.json"));
         (reg, dir)
+    }
+
+    // A stored workspace ordinal at the top of the range (a damaged or
+    // hand-edited store) still mints the next window instead of panicking.
+    #[test]
+    fn a_maximal_stored_ordinal_still_mints_a_workspace_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        WindowRegistry::open(path.clone()).create(WindowKind::Workspace, Some("/w".into()));
+        let mut rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&path).expect("store")).expect("rows");
+        rows[0]["ordinal"] = json!(u32::MAX);
+        std::fs::write(&path, serde_json::to_vec(&rows).expect("encode")).expect("write");
+
+        let next = WindowRegistry::open(path).create(WindowKind::Workspace, Some("/w".into()));
+        assert_eq!(next.ordinal, u32::MAX);
     }
 
     // --- wire byte pins -----------------------------------------------------
