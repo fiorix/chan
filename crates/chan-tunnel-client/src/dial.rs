@@ -72,11 +72,12 @@ pub async fn dial_with_tls(
     tls: Option<&Arc<RustlsClientConfig>>,
 ) -> Result<(Registration, YamuxConnection<Compat<H2Duplex>>), ClientError> {
     validate_tunnel_url(cfg)?;
-    let host = cfg
-        .tunnel_url
-        .host_str()
-        .ok_or_else(|| ClientError::InvalidUrl("missing host".into()))?
-        .to_string();
+    let host = unbracketed_host(
+        cfg.tunnel_url
+            .host_str()
+            .ok_or_else(|| ClientError::InvalidUrl("missing host".into()))?,
+    )
+    .to_string();
     let port = cfg.tunnel_url.port_or_known_default().ok_or_else(|| {
         ClientError::InvalidUrl(format!("cannot infer port from {}", cfg.tunnel_url))
     })?;
@@ -207,7 +208,17 @@ fn normalize_tunnel_url(url: &Url) -> Url {
     out
 }
 
+/// A URL host as a socket address or server name wants it: `Url::host_str`
+/// spells an IPv6 literal with brackets (`[::1]`), which neither an `IpAddr`
+/// parse, a TCP connect nor a TLS server name accepts.
+fn unbracketed_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 fn is_loopback_host(host: &str) -> bool {
+    let host = unbracketed_host(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -249,9 +260,11 @@ async fn open_tcp(host: &str, port: u16, proxy: Option<&Url>) -> Result<TcpStrea
             proxy.scheme()
         )));
     }
-    let proxy_host = proxy
-        .host_str()
-        .ok_or_else(|| ClientError::InvalidUrl("proxy URL missing host".into()))?;
+    let proxy_host = unbracketed_host(
+        proxy
+            .host_str()
+            .ok_or_else(|| ClientError::InvalidUrl("proxy URL missing host".into()))?,
+    );
     let proxy_port = proxy
         .port_or_known_default()
         .ok_or_else(|| ClientError::InvalidUrl("cannot infer proxy port".into()))?;
@@ -271,7 +284,12 @@ async fn open_tcp(host: &str, port: u16, proxy: Option<&Url>) -> Result<TcpStrea
             "credentials are refused because the cleartext HTTP proxy peer is not loopback".into(),
         ));
     }
-    let target = format!("{host}:{port}");
+    // The CONNECT authority needs the brackets back on an IPv6 literal.
+    let target = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
     let mut req =
         format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n");
     // Userinfo is per RFC 3986. `Url::username` is percent-encoded;
@@ -613,6 +631,15 @@ mod tests {
         let normalized = normalize_tunnel_url(&with_query);
         assert_eq!(normalized.path(), "/v1/tunnel");
         assert_eq!(normalized.query(), Some("retry=1"));
+    }
+
+    // `http://[::1]:port` is a loopback URL; the brackets are URL syntax.
+    #[test]
+    fn a_bracketed_ipv6_loopback_is_loopback() {
+        assert!(is_loopback_host("[::1]"));
+        assert!(!is_loopback_host("[2001:db8::1]"));
+        assert_eq!(unbracketed_host("[::1]"), "::1");
+        assert_eq!(unbracketed_host("example.com"), "example.com");
     }
 
     #[test]
