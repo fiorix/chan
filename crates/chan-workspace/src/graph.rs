@@ -1004,16 +1004,17 @@ impl GraphView {
         Ok(out)
     }
 
-    /// Drop a file from the graph entirely. Edges with `rel` as
-    /// either endpoint go too; no dangling references.
+    /// Drop a file from the graph: its node, its headings, its text
+    /// stamp and the edges it owns. Inbound edges stay, as they do in
+    /// `forget_under`: they describe the linking file's body, which
+    /// still carries the link, so `backlinks(rel)` keeps naming the
+    /// notes that point at a removed, renamed or excluded path, and the
+    /// links are in place when the path returns.
     pub fn forget_file(&self, rel: &str) -> Result<()> {
         tracing::debug!(rel, "graph::forget_file");
         let conn = self.writer.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM edges WHERE src = ? OR dst = ?",
-            params![rel, rel],
-        )?;
+        tx.execute("DELETE FROM edges WHERE src = ?", params![rel])?;
         tx.execute("DELETE FROM headings WHERE rel_path = ?", params![rel])?;
         tx.execute("DELETE FROM nodes WHERE rel_path = ?", params![rel])?;
         tx.execute("DELETE FROM text_files WHERE rel_path = ?", params![rel])?;
