@@ -177,12 +177,13 @@ Admin reads and SSE watches are served from republished `watch` snapshots rather
 
 ## Error model
 
-`StateError` is session-scoped. Only `NotReady` and `AuthorityTemporarilyUnavailable` reach HTTP; the rest reject the offending frame and close or resync the control session. A lease that fails verification is not among them: it costs its one tunnel (see Session lifecycle).
+`StateError` is session-scoped. Only `NotReady`, `AuthorityTemporarilyUnavailable` and `InvalidRevocation` reach HTTP; the rest reject the offending frame and close or resync the control session. A lease that fails verification is not among them: it costs its one tunnel (see Session lifecycle).
 
 | Variant                           | Surface | Effect                                     |
 |-----------------------------------|---------|--------------------------------------------|
 | `NotReady`                        | admin   | 503 on reads, watches, kills               |
 | `AuthorityTemporarilyUnavailable` | admin   | 503 while an authoritative proxy reconnects |
+| `InvalidRevocation`               | admin   | 503; the route 404s invalid input first    |
 | `StaleSession`                    | session | frame rejected; superseded session         |
 | `ProxyNotJoining`                 | session | snapshot on a non-joining session          |
 | `DuplicateProxyId`                | session | second live connection for a proxy id      |

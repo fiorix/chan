@@ -114,6 +114,8 @@ PAT minting uses the same policy projection. The insert locks the canonical user
 
 SPA and operator PAT expiry arithmetic is checked: a positive lifetime accepted by the request schema whose expiry cannot be represented as a duration or UTC instant returns 400 `invalid expires_in`. A JSON integer outside the field's type fails extraction with 422. There is no lifetime cap on these routes; absent or non-positive `expires_in` (and absent or zero operator `expires_days`) means no expiry. Desktop authorize retains its separate 90-day clamp.
 
+PAT creation commits the credential hash and creation audit together. An audit insertion failure rolls back the PAT, so a failed mint cannot leave an undelivered active credential.
+
 ### OAuth-session and product control plane
 
 Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent.
@@ -225,6 +227,8 @@ identity reads the per-user resolved flag map from profile (`GET /v1/users/{id}/
 
 Profile errors on either call degrade-soft: identity falls back to an empty flag map, which is the safe default (every flag off = no sign-in, no UI features). Tracing log captures the failure so the operator can see why callers were getting denied.
 
+Feature flag lookup failures keep login denied and profile flags empty, and emit warnings. Login denial audits distinguish an unavailable flag lookup from an explicit policy denial.
+
 ### Claim sweep on OAuth callback
 
 After `upsert_by_identity`, identity calls `POST /v1/users/{id}/grants/claim` with the user's primary email plus the freshly-observed provider email (deduped). Pending grants whose `grantee_email` matches any of those addresses are assigned to `{id}` and stamped `accepted_at = now()`. Best-effort: a failure logs and continues so an unhealthy profile call does not block sign-in. Previous providers' emails are not resent; they were swept on their own callbacks.
@@ -233,11 +237,17 @@ After `upsert_by_identity`, identity calls `POST /v1/users/{id}/grants/claim` wi
 
 OAuth-style consent flow at `/desktop/authorize` (entry, validates the query and stashes it in the session), `/desktop/authorize/consent` (server-rendered HTML consent page, CSRF nonce), and `POST /desktop/authorize/confirm` (allow / deny). The desktop is an RFC 8252 loopback client: it binds an ephemeral `127.0.0.1` listener and passes `redirect_uri=http://127.0.0.1:<port>/auth/callback` plus a PKCE `code_challenge` (`code_challenge_method=S256`). On allow, a PAT is minted with `TokenOrigin::Desktop`, and confirm answers 200 with a handoff page that navigates the browser to `http://127.0.0.1:<port>/auth/callback?code=...&state=...` via a zero-delay meta refresh plus a manual fallback link; a 3xx answering the form POST would put the hop under the page's `form-action` CSP in Chrome, so the handoff never rides a form redirect chain. The `code` in the query is a single-use server-minted redemption code, NOT the PAT secret: the desktop exchanges it at `POST /desktop/authorize/redeem` with `{code, code_verifier}`, and the store returns the PAT only when `SHA256(code_verifier)` matches the stored challenge (constant-time). The PAT secret never rides the browser. Deny and blocked-on-confirm answer the same handoff shape with a stable `error=` reason; the GET-path denies (blocked at entry or at the consent render, `oauth_denied` / `account_blocked` in the OAuth callback) still 303 straight to the loopback target with the `error=` query. Both server-rendered pages share the `pages` module's shell (SPA palette, inline CSS) under one strict CSP (`default-src 'none'` + `img-src 'self'`, `style-src 'unsafe-inline'`, `form-action 'self'`, `frame-ancestors 'none'`). The `redirect_uri` is validated as a loopback URI by `validate_loopback_redirect_uri` (parsed-enum `127.0.0.1`/`[::1]` host equality, `http` scheme, exact `/auth/callback` path, `port > 0`, no query/fragment/userinfo) rather than an exact literal; `expires_in` is required and clamped to 90 days; and scopes are checked against a strict allowlist (`tunnel`, `desktop.connect`, `desktop.account`, the last of which must be the sole scope). PKCE binds the redemption but does NOT close the login-CSRF residual that the argv-leaked challenge enables on a shared multi-user host; the consent copy therefore presents the requester as an unverifiable local app, and the `desktop_authorize` module doc carries the full hardening posture. Unauthenticated entries bounce through the SPA sign-in; the OAuth callback resumes the flow at the consent page.
 
+Desktop redemption delivers the PAT once even when its audit write fails. The one-time code remains consumed and the audit failure is logged without the code or secret; audit availability cannot strand the already-minted credential.
+
 ### Desktop devserver entry
 
 `POST /desktop/v1/devserver/entry` (Bearer PAT carrying `desktop.connect` or `desktop.account`) is how chan-desktop opens a devserver through the gateway. The body optionally carries `{owner_user_id, owner, devserver_id}` to target an explicit devserver (its owner's, or one shared with the caller); absent, the caller's own live list resolves as in the share landings (single live, else first accessible). It runs the same `devserver_access` check and returns `{owner_user_id, username, devserver_id, proxy_origin, entry_exchange_url, entry_credential, expires_at}`; `username` is the devserver OWNER, while the two URLs are pinned to the exact tenant origin built from the controller row's node base (the same `{owner}--{disc}.{proxy}.<proxy-apex>` construction as the share landings). The fresh 30s credential, minted with `client: "desktop"`, is returned in JSON and chan-desktop exchanges it in a POST body; it never appears in a navigation URL. The client type records which route minted the credential, not which program presents it: a credential minted for a PAT carrying either desktop scope is a `desktop` one. A controller row whose node base fails the proxy-namespace check is a 502 upstream error, never a mint. An explicit target that is not live 404s with reason `devserver_offline`; a target the caller cannot access 404s with reason `access_denied`.
 
 Failures keep HTTP 404 but the body is a superset of the plain `{"error": msg}` shape: `{"error": "not found", "reason": <token>, "username": <caller>, "label": <owned label>}` with `label` present only for `devserver_offline`. The reason tokens are a stable desktop-facing contract (like the `desktop_authorize` `?error=` reasons): `no_devserver` (nothing registered), `devserver_offline` (registered, no live tunnel; `label` is the first owned row's), `access_denied` (`devserver_access` refused). Classification is best-effort: a profile failure on the owned-devserver lookup degrades to the plain 404 body. This narration is safe because the surface is self-scoped (a PAT-authenticated caller asking about their own account); the cross-user share-landing 404s stay uniform on purpose.
+
+Explicit foreign desktop entry selections are authorized before any live-tunnel lookup. Full identifiers use the profile access check; prefixes must select exactly one distinct granted devserver and then pass that check. An absent or revoked grant returns the same `access_denied` response whether the devserver is online or offline.
+
+Desktop entry validates the normalized navigation path with the shared entry signer validator. Invalid paths return 400 before signing, including backslashes, controls, invalid URI syntax, and paths longer than 2048 bytes. A `://` later in the path or query is accepted, because a path that starts with a single `/` has no scheme or authority and its redirect stays on the tenant origin.
 
 ### Account delete
 
@@ -278,6 +288,8 @@ Additional username guards:
 - `rustrict` filter blocks profanity / leet-speak heuristically. False positives surface as 400; users can unblock specific handles via the `RUSTRICT_ALLOWLIST` env var (comma-separated, case-insensitive).
 
 A rename kills the caller's live tunnels (`kill_owner_tunnels`) before profile persists the new handle: identity matches controller rows to the current username (`t.user == user.username`) and the tenant host label embeds it (`{owner}--{disc}.`), so registrations under the old name would fail the owner check and mint origins that no longer resolve to the caller.
+
+Username changes preflight the edit limit and known name collisions before cutting tunnels. Profile still enforces both atomically when updating; a concurrent rename can race this preflight, so the authority cut remains before persistence.
 
 ### Session contract
 
@@ -359,15 +371,3 @@ The origin strings stay coupled to DNS, the per-node wildcard TLS certificates, 
 - Magic-link sign-in
 - Device flow (RFC 8628) for browserless clients: chan-desktop's `/desktop/authorize` flow still rides the user's browser
 - Transparent browser-only renewal for share-link sessions; chan-desktop refreshes its opaque session proactively from the PAT before expiry
-
-Explicit foreign desktop entry selections are authorized before any live-tunnel lookup. Full identifiers use the profile access check; prefixes must select exactly one distinct granted devserver and then pass that check. An absent or revoked grant returns the same `access_denied` response whether the devserver is online or offline.
-
-Username changes preflight the edit limit and known name collisions before cutting tunnels. Profile still enforces both atomically when updating; a concurrent rename can race this preflight, so the authority cut remains before persistence.
-
-PAT creation commits the credential hash and creation audit together. An audit insertion failure rolls back the PAT, so a failed mint cannot leave an undelivered active credential.
-
-Desktop redemption delivers the PAT once even when its audit write fails. The one-time code remains consumed and the audit failure is logged without the code or secret; audit availability cannot strand the already-minted credential.
-
-Feature flag lookup failures keep login denied and profile flags empty, and emit warnings. Login denial audits distinguish an unavailable flag lookup from an explicit policy denial.
-
-Desktop entry validates the normalized navigation path with the shared entry signer validator. Invalid paths return 400 before signing, including backslashes, controls, invalid URI syntax, and paths longer than 2048 bytes. A `://` later in the path or query is accepted, because a path that starts with a single `/` has no scheme or authority and its redirect stays on the tenant origin.
