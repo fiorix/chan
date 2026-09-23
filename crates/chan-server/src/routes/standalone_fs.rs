@@ -1766,6 +1766,38 @@ mod tests {
         .unwrap();
     }
 
+    /// A client that stops reading a text stream must not park the pool
+    /// thread its producer runs on for as long as it holds the connection.
+    /// The file is sixteen chunks, so the producer outruns the channel and
+    /// waits on the reader; with the response unpolled that wait is the
+    /// stall the transfer bound exists for.
+    #[test]
+    fn unread_standalone_text_stream_frees_its_pool_thread() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("home/user")).unwrap();
+        std::fs::write(
+            root.path().join("home/user/big.md"),
+            "x".repeat(chan_workspace::TEXT_READ_CHUNK_SIZE * 16),
+        )
+        .unwrap();
+        let fs = std::sync::Arc::new(
+            chan_workspace::MiniWorkspace::open(
+                root.path(),
+                &root.path().join("home/user"),
+                10 * 1024 * 1024,
+            )
+            .unwrap(),
+        );
+        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+            "standalone text stream",
+            || super::standalone_stream_read_response(fs, "home/user/big.md".into()),
+        );
+        assert!(
+            body.is_err(),
+            "an abandoned stream must fail its body rather than end short"
+        );
+    }
+
     #[tokio::test]
     async fn upload_app_files_creates_replaces_and_conflicts() {
         let fx = files_fixture();
