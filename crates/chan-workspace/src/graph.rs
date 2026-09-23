@@ -1291,8 +1291,8 @@ impl GraphView {
         tx.execute("DELETE FROM text_files", [])?;
         {
             let mut ins_node = tx.prepare_cached(
-                "INSERT OR REPLACE INTO nodes(rel_path, kind, mtime, title, basename, emails, size) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO nodes(rel_path, kind, mtime, title, basename, emails, size, aliases) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )?;
             let mut ins_edge = tx.prepare_cached(
                 "INSERT OR IGNORE INTO edges(src, dst, kind, anchor) VALUES (?, ?, ?, ?)",
@@ -1313,6 +1313,7 @@ impl GraphView {
                     basename,
                     fg.emails,
                     fg.size,
+                    fg.aliases,
                 ])?;
                 for e in fg.edges {
                     ins_edge.execute(params![
@@ -2038,10 +2039,19 @@ mod tests {
                 edges: &[],
                 headings: &[],
                 emails: None,
-                aliases: None,
+                aliases: Some("bee bumble"),
             },
         ];
         g.replace_all(&entries).unwrap();
+        // The rebuild keeps every node column the incremental writers keep,
+        // aliases included, so @@alias resolution survives it.
+        assert_eq!(
+            count(
+                &g,
+                "SELECT COUNT(*) FROM nodes WHERE rel_path='b.md' AND aliases='bee bumble'"
+            ),
+            1
+        );
         // Old entry is gone, new ones present.
         assert_eq!(count(&g, "SELECT COUNT(*) FROM nodes"), 2);
         assert_eq!(
