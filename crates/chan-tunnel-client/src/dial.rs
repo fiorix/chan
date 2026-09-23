@@ -239,12 +239,6 @@ pub(crate) fn validate_tunnel_url(cfg: &ClientConfig) -> Result<(), ClientError>
     }
 }
 
-/// Open the TCP leg: a direct connect, or an HTTP/1.1 CONNECT through
-/// `proxy` with the proxy URL's userinfo (allowed only to an explicit
-/// loopback IP whose peer is loopback) sent as a Basic auth header. The
-/// CONNECT exchange is bounded by
-/// the parent `dial_timeout` (each leg here is non-blocking apart
-/// from one short read for the response status line + headers).
 /// Run an h2 client connection to completion in the background, logging how
 /// it ended.
 fn spawn_h2_driver<T>(conn: h2::client::Connection<T>)
@@ -258,6 +252,12 @@ where
     });
 }
 
+/// Open the TCP leg: a direct connect, or an HTTP/1.1 CONNECT through
+/// `proxy` with the proxy URL's userinfo (allowed only to an explicit
+/// loopback IP whose peer is loopback) sent as a Basic auth header. The
+/// CONNECT exchange is bounded by the parent `dial_timeout` (each leg here
+/// is non-blocking apart from one short read for the response status line +
+/// headers).
 async fn open_tcp(host: &str, port: u16, proxy: Option<&Url>) -> Result<TcpStream, ClientError> {
     let Some(proxy) = proxy else {
         return Ok(TcpStream::connect((host, port)).await?);
