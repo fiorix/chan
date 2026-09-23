@@ -361,19 +361,30 @@ pub struct WindowRegistry {
 
 impl WindowRegistry {
     /// Open the registry at `store_path`, loading any persisted window set plus
-    /// the sibling first-open state. An absent or unreadable store degrades to
-    /// an empty set / default state rather than refusing to start (the windows
-    /// reappear as clients re-create them).
+    /// the sibling first-open state. An absent store starts empty rather than
+    /// refusing to start (the windows reappear as clients re-create them). The
+    /// set is read row by row, so a row this build cannot read (a `kind` or
+    /// `origin` tag it does not know, a damaged row) costs that row alone and
+    /// is logged. A store that is not a JSON array at all, or a state file that
+    /// does not parse, starts from the empty set or the default state, logged.
     pub fn open(store_path: PathBuf) -> Self {
-        let windows = match std::fs::read(&store_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
+        let windows = read_store(&store_path)
+            .map(|bytes| read_window_rows(&store_path, &bytes))
+            .unwrap_or_default();
         let state_path = state_path_for(&store_path);
-        let state = match std::fs::read(&state_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => LibraryState::default(),
-        };
+        let state = read_store(&state_path)
+            .and_then(|bytes| match serde_json::from_slice(&bytes) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::warn!(
+                        store = %state_path.display(),
+                        %error,
+                        "unreadable library state; starting from the default"
+                    );
+                    None
+                }
+            })
+            .unwrap_or_default();
         Self {
             store_path,
             state_path,
@@ -747,6 +758,62 @@ fn local_workspace_icon(path: &Path) -> &'static str {
     }
 }
 
+/// Read a store file. An absent file is every library's first run and stays
+/// silent; any other failure is logged, since the registry starts without the
+/// file and its next save replaces whatever is there.
+fn read_store(path: &Path) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(
+                store = %path.display(),
+                %error,
+                "unreadable store; starting without it"
+            );
+            None
+        }
+    }
+}
+
+/// Read the persisted window set one row at a time, so a row this build cannot
+/// read (a `kind` or `origin` tag it does not know, a damaged row) costs that
+/// row alone rather than the whole set. Each such row is logged once with the
+/// store path and its `window_id`, or its index when even that is unreadable.
+/// A store that is not a JSON array holds no row this build can keep.
+fn read_window_rows(store_path: &Path, bytes: &[u8]) -> Vec<PersistedWindow> {
+    let rows: Vec<serde_json::Value> = match serde_json::from_slice(bytes) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                store = %store_path.display(),
+                %error,
+                "unreadable window store; starting with no windows"
+            );
+            return Vec::new();
+        }
+    };
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, value)| match PersistedWindow::deserialize(value) {
+            Ok(row) => Some(row),
+            Err(error) => {
+                let row = match value.get("window_id").and_then(serde_json::Value::as_str) {
+                    Some(id) => format!("window_id {id}"),
+                    None => format!("index {index}"),
+                };
+                tracing::warn!(
+                    store = %store_path.display(),
+                    %row,
+                    %error,
+                    "unreadable window row is hidden from the window set"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 /// The sibling state-store path for a window store: `<dir>/<stem>-state.json`
 /// next to `<dir>/<stem>.json`. Co-locating the first-open marker with the
 /// window set keeps both in the one library directory.
@@ -767,6 +834,45 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = WindowRegistry::open(dir.path().join("windows.json"));
         (reg, dir)
+    }
+
+    /// Run `f` with every `tracing` event on this thread collected as one line
+    /// (`LEVEL field=value ... message=...`), so a test pins what the registry
+    /// logs without a subscriber crate in the dependency graph.
+    fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Line(String);
+                impl tracing::field::Visit for Line {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write as _;
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+                let mut line = Line(event.metadata().level().to_string());
+                event.record(&mut line);
+                self.0.lock().unwrap().push(line.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let out = tracing::subscriber::with_default(Capture(Arc::clone(&lines)), f);
+        let lines = lines.lock().unwrap().clone();
+        (out, lines)
     }
 
     // A stored workspace ordinal at the top of the range (a damaged or
@@ -1512,34 +1618,148 @@ mod tests {
         (path, readable, unknown)
     }
 
-    /// The store is read as one `Vec<PersistedWindow>`, so a row with a `kind`
-    /// tag this build does not know fails the whole parse: the registry opens
-    /// empty, the readable row beside it is gone from the window set, and the
-    /// next save writes the file without either row.
+    /// The store is read row by row, so a row whose `kind` this build does not
+    /// know costs that row alone: the readable row beside it is in the window
+    /// set, and the loss is logged once with the store path and the row's id.
     #[test]
-    fn an_unreadable_row_empties_the_registry() {
+    fn an_unreadable_row_costs_only_that_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (path, _readable, _unknown) = store_with_an_unknown_kind(dir.path());
 
-        let reg = WindowRegistry::open(path.clone());
-        assert!(
-            reg.snapshot().is_empty(),
-            "one unreadable row drops the readable row beside it: {:?}",
-            reg.snapshot()
-        );
-
-        let minted = reg.create(WindowKind::Terminal, None);
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_slice(&std::fs::read(&path).expect("store")).expect("rows");
-        let ids: Vec<&str> = rows
-            .iter()
-            .filter_map(|row| row["window_id"].as_str())
-            .collect();
+        let (reg, logs) = capture_logs(|| WindowRegistry::open(path.clone()));
+        let ids: Vec<String> = reg.snapshot().into_iter().map(|w| w.window_id).collect();
         assert_eq!(
             ids,
-            vec![minted.window_id.as_str()],
-            "the save replaced the file with the set this build holds"
+            vec!["w-readable".to_string()],
+            "the readable row survives its neighbour"
         );
+        assert!(!reg.is_empty());
+        assert_eq!(logs.len(), 1, "one warning per unreadable row: {logs:?}");
+        let line = &logs[0];
+        assert!(line.starts_with("WARN"), "logged at warn: {line}");
+        assert!(
+            line.contains(&format!("store={}", path.display())),
+            "names the store: {line}"
+        );
+        assert!(
+            line.contains("row=window_id w-unknown"),
+            "names the row: {line}"
+        );
+        assert!(line.contains("panel"), "carries the parse error: {line}");
+    }
+
+    /// The other closed tag, `origin`, and a row that is not even an object
+    /// are each costed alone; the log names a row by its id when the raw value
+    /// carries one, else by its index in the array.
+    #[test]
+    fn an_unreadable_row_is_named_by_id_or_by_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        let rows = json!([
+            {
+                "window_id": "w-readable",
+                "kind": "terminal",
+                "title": "⌂ Terminal Window 1",
+                "ordinal": 1,
+            },
+            {
+                "window_id": "w-tablet",
+                "kind": "terminal",
+                "title": "⌂ Terminal Window 2",
+                "ordinal": 2,
+                "origin": "tablet",
+            },
+            7,
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&rows).expect("encode")).expect("write store");
+
+        let (reg, logs) = capture_logs(|| WindowRegistry::open(path.clone()));
+        let ids: Vec<String> = reg.snapshot().into_iter().map(|w| w.window_id).collect();
+        assert_eq!(ids, vec!["w-readable".to_string()]);
+        assert_eq!(logs.len(), 2, "one warning per unreadable row: {logs:?}");
+        assert!(
+            logs[0].contains("row=window_id w-tablet"),
+            "named by id: {}",
+            logs[0]
+        );
+        assert!(
+            logs[0].contains("tablet"),
+            "carries the parse error: {}",
+            logs[0]
+        );
+        assert!(
+            logs[1].contains("row=index 2"),
+            "named by index: {}",
+            logs[1]
+        );
+    }
+
+    /// A store that is not a JSON array holds no row this build can keep: the
+    /// registry starts empty and says so.
+    #[test]
+    fn a_store_that_is_not_an_array_starts_empty_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        std::fs::write(&path, b"{\"windows\": []}").expect("write store");
+
+        let (reg, logs) = capture_logs(|| WindowRegistry::open(path.clone()));
+        assert!(reg.is_empty());
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert!(logs[0].starts_with("WARN"), "{}", logs[0]);
+        assert!(
+            logs[0].contains(&format!("store={}", path.display())),
+            "names the store: {}",
+            logs[0]
+        );
+        assert!(logs[0].contains("unreadable window store"), "{}", logs[0]);
+    }
+
+    /// A store that cannot be read at all (a directory in its place) starts the
+    /// registry empty and says so. An absent store stays silent: that is every
+    /// library's first run.
+    #[test]
+    fn a_store_that_cannot_be_read_starts_empty_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        std::fs::create_dir(&path).expect("a directory in the store's place");
+
+        let (reg, logs) = capture_logs(|| WindowRegistry::open(path.clone()));
+        assert!(reg.is_empty());
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert!(logs[0].starts_with("WARN"), "{}", logs[0]);
+        assert!(
+            logs[0].contains(&format!("store={}", path.display())),
+            "names the store: {}",
+            logs[0]
+        );
+        assert!(logs[0].contains("unreadable store"), "{}", logs[0]);
+
+        let (_reg, logs) = capture_logs(|| WindowRegistry::open(dir.path().join("absent.json")));
+        assert!(
+            logs.is_empty(),
+            "an absent store is the first run: {logs:?}"
+        );
+    }
+
+    /// A first-open state file that does not parse falls back to the default
+    /// state and says so.
+    #[test]
+    fn an_unreadable_state_file_falls_back_to_the_default_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("windows.json");
+        let state = dir.path().join("windows-state.json");
+        std::fs::write(&state, b"[1, 2]").expect("write state");
+
+        let (reg, logs) = capture_logs(|| WindowRegistry::open(store));
+        assert!(!reg.first_open_done());
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert!(logs[0].starts_with("WARN"), "{}", logs[0]);
+        assert!(
+            logs[0].contains(&format!("store={}", state.display())),
+            "names the state file: {}",
+            logs[0]
+        );
+        assert!(logs[0].contains("unreadable library state"), "{}", logs[0]);
     }
 
     #[test]
