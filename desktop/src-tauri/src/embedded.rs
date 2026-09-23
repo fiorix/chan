@@ -97,18 +97,20 @@ impl EmbeddedServer {
         // `UnserveMode::Unsupported` and `chan close` fails. Parity with the
         // devserver path's `host.install_self()`.
         host.install_self();
-        // Install the local library's window registry so the window feed has
-        // data (~/.chan/windows.json, library id "local").
+        // The local library's stores: the window registry
+        // (~/.chan/windows.json, library id "local") feeds the window list, and
+        // the workspace on/off overlay (~/.chan/workspaces.json) lets the boot
+        // path re-serve what was on -- the same store the devserver uses.
         chan_server::install_local_window_registry(&host);
-        // Install the local library's workspace on/off overlay
-        // (~/.chan/workspaces.json), so the boot path re-serves what was on and
-        // toggles persist their on/off -- the same store the devserver uses.
         chan_server::install_local_workspace_overlay(&host);
-        // Install the launcher's devserver registry over the desktop config so
-        // the `/api/library/devservers` CRUD persists to the SAME config the
-        // desktop reads (the shared store handle) -- mirror of the workspace
-        // overlay above. The headless devserver / plain `chan serve` install
-        // none (empty list, 404 mutation).
+        // Every launcher store below is installed over the one shared desktop
+        // `ConfigStore`, so the launcher's `/api/library/*` CRUD and the
+        // desktop's own reads agree: devservers, gateways, the local pane
+        // colour, the launcher theme, and the collapsed machines (which
+        // survive a desktop restart; the per-launch loopback origin keeps
+        // localStorage from doing that). The headless devserver and plain
+        // `chan serve` install no devserver or gateway registry (empty list,
+        // 404 mutation).
         host.install_devserver_registry(Arc::new(DevserverConfigRegistry::new(
             Arc::clone(&config_store),
             devserver_remove_hook,
@@ -117,31 +119,17 @@ impl EmbeddedServer {
             devserver_feed,
             Arc::clone(&gateway_manager),
         )));
-        // Install the launcher's gateway registry over the SAME shared config,
-        // so the `/api/library/gateways` CRUD persists beside the devserver
-        // rows. Headless surfaces install none (empty list, 404 mutation).
         host.install_gateway_registry(Arc::new(GatewayConfigRegistry::new(
             Arc::clone(&config_store),
             gateway_remove_hook,
             gateway_manager,
         )));
-        // Install the local-library pane-highlight colour store over the
-        // SAME shared desktop config the devserver registry uses, so the host reads
-        // the local colour when minting local windows and the launcher's
-        // local-colour route writes it.
         host.install_local_color_store(Arc::new(crate::config::LocalColorConfig::new(Arc::clone(
             &config_store,
         ))));
-        // Install the launcher-theme store over the SAME shared config, so a
-        // local standalone terminal window reads + watches the launcher's
-        // light/dark choice and the launcher's local-theme route writes it.
         host.install_local_theme_store(Arc::new(crate::config::LocalThemeConfig::new(Arc::clone(
             &config_store,
         ))));
-        // Install the collapsed-machines store over the SAME shared config, so
-        // the launcher reconciles its per-machine collapse against it on boot and
-        // the collapse toggle writes it (surviving a desktop restart, which the
-        // per-launch loopback origin makes localStorage alone unable to do).
         host.install_collapsed_machines_store(Arc::new(
             crate::config::CollapsedMachinesConfig::new(config_store),
         ));
@@ -287,8 +275,8 @@ impl EmbeddedServer {
     ///
     /// Keyed on the `?w=` window id (NOT the native window label: they diverge
     /// for watcher-opened windows, where the label is `{library_id}::{window_id}`
-    /// -- serve.rs:750). Resolve the serving tenant's prefix from the live window
-    /// records here. Local library only: a remote/devserver window's
+    /// -- see `window_watcher::native_label`). Resolve the serving tenant's
+    /// prefix from the live window records here. Local library only: a remote/devserver window's
     /// transfers live on that server, so it's absent from these records and reads
     /// `false` -- correct, it's not ours to guard.
     pub fn window_has_active_transfer(&self, window_id: &str) -> bool {
@@ -616,8 +604,8 @@ impl EmbeddedServer {
     }
 
     /// Mint a BROWSER-affinity window: the watcher never opens a native twin for
-    /// it (the origin filter, D4), so the record exists purely for a browser tab
-    /// that holds its own `window_id`. Backs the Window menu's "Open in Browser".
+    /// it (it skips non-native origins), so the record exists purely for a
+    /// browser tab that holds its own `window_id`. Backs the Window menu's "Open in Browser".
     pub fn mint_browser_window(
         &self,
         kind: chan_server::WindowKind,
