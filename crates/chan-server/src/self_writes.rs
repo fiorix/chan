@@ -154,7 +154,9 @@ impl SelfWrites {
         self.reserve(rel)
     }
 
-    fn reserve(&self, rel: &str) -> SelfWriteReservation {
+    /// Reserve a suppression window for a write the caller is about to make,
+    /// to be [`cancel`](Self::cancel)led if the write does not happen.
+    pub(crate) fn reserve(&self, rel: &str) -> SelfWriteReservation {
         self.reserve_at(rel, Instant::now())
     }
 

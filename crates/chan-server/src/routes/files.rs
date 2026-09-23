@@ -2264,13 +2264,21 @@ pub async fn api_create_file(
     let path = body.path.clone();
     // Record the self-write before the blocking create so the
     // watcher's echo is suppressed without racing the await; see
-    // api_write_file for the full rationale.
-    state.self_writes.note(&path);
+    // api_write_file for the full rationale. A create that fails wrote
+    // nothing, so its reservation is withdrawn: left in place it would hide
+    // a real external change to the same path for the whole window.
+    let reservation = state.self_writes.reserve(&path);
     let result = run_blocking("create file", move || create_file_sync(&workspace, body)).await;
     match result {
         Ok(Ok(())) => StatusCode::CREATED.into_response(),
-        Ok(Err(e)) => err_from(&e),
-        Err(failed) => failed.into_response(),
+        Ok(Err(e)) => {
+            state.self_writes.cancel(reservation);
+            err_from(&e)
+        }
+        Err(failed) => {
+            state.self_writes.cancel(reservation);
+            failed.into_response()
+        }
     }
 }
 
@@ -5309,6 +5317,48 @@ mod write_tests {
         });
     }
 
+    // A refused create, delete or move wrote nothing, so it must not leave a
+    // self-write window that would hide a real external change to the path.
+    #[test]
+    fn a_failed_create_delete_or_move_leaves_no_self_write_window() {
+        one_blocking_thread_runtime().block_on(async {
+            let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+            std::fs::write(root.path().join("taken.md"), "x").unwrap();
+
+            let response = api_create_file(
+                State(state.clone()),
+                Json(CreateBody {
+                    path: "taken.md".to_string(),
+                    is_dir: false,
+                    content: Some("y".to_string()),
+                }),
+            )
+            .await;
+            assert!(!response.status().is_success());
+            assert!(!state.self_writes.should_suppress("taken.md"), "create");
+
+            let response =
+                api_delete_file(State(state.clone()), AxumPath("missing.md".to_string())).await;
+            assert!(!response.status().is_success());
+            assert!(!state.self_writes.should_suppress("missing.md"), "delete");
+
+            let response = api_move(
+                State(state.clone()),
+                Json(MoveBody {
+                    from: "absent.md".to_string(),
+                    to: "elsewhere.md".to_string(),
+                }),
+            )
+            .await;
+            assert!(!response.status().is_success());
+            assert!(!state.self_writes.should_suppress("absent.md"), "move from");
+            assert!(
+                !state.self_writes.should_suppress("elsewhere.md"),
+                "move to"
+            );
+        });
+    }
+
     #[test]
     fn api_create_file_runs_off_runtime_thread() {
         one_blocking_thread_runtime().block_on(async {
@@ -5469,12 +5519,19 @@ pub async fn api_delete_file(
     // watcher's Removed event is suppressed without racing the await
     // (see api_write_file - noting after the await leaks a phantom
     // external-edit/removal event).
-    state.self_writes.note(&path);
+    // A remove that fails deleted nothing, so its reservation is withdrawn.
+    let reservation = state.self_writes.reserve(&path);
     let path_for_remove = path.clone();
     match run_blocking("delete file", move || workspace.remove(&path_for_remove)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Err(e)) => err_from(&e),
-        Err(failed) => failed.into_response(),
+        Ok(Err(e)) => {
+            state.self_writes.cancel(reservation);
+            err_from(&e)
+        }
+        Err(failed) => {
+            state.self_writes.cancel(reservation);
+            failed.into_response()
+        }
     }
 }
 
@@ -5503,8 +5560,12 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     // returns, so neither half of any pair fires a phantom external-
     // edit prompt (noting after the await raced the watcher; see
     // api_write_file).
-    state.self_writes.note(&body.from);
-    state.self_writes.note(&body.to);
+    // A failed rename moved nothing, so both endpoint reservations are
+    // withdrawn on error.
+    let reservations = [
+        state.self_writes.reserve(&body.from),
+        state.self_writes.reserve(&body.to),
+    ];
     let self_writes = Arc::clone(&state.self_writes);
     let outcome = match run_blocking("move", move || {
         let outcome = workspace.rename_with_link_rewrite(&from, &to)?;
@@ -5516,8 +5577,18 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     .await
     {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => return err_from(&e),
-        Err(failed) => return failed.into_response(),
+        Ok(Err(e)) => {
+            for reservation in reservations {
+                state.self_writes.cancel(reservation);
+            }
+            return err_from(&e);
+        }
+        Err(failed) => {
+            for reservation in reservations {
+                state.self_writes.cancel(reservation);
+            }
+            return failed.into_response();
+        }
     };
     Json(MoveResponse {
         renamed: outcome.renamed,
