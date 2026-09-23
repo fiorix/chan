@@ -1232,17 +1232,9 @@ async fn terminal_cwd_payload_blocking<C>(
 where
     C: FnOnce() -> Option<PathBuf> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let cwd = cwd_probe();
-        terminal_cwd_payload(workspace.as_deref(), cwd)
-    })
-    .await
-    .unwrap_or((None, None))
+    terminal_cwd_payload_blocking_with_hook(workspace, cwd_probe, || {}).await
 }
 
-/// [`terminal_cwd_payload_blocking`] with a hook run between the probe and the
-/// mapping, so a test can act inside that window.
-#[cfg(test)]
 async fn terminal_cwd_payload_blocking_with_hook<C, H>(
     workspace: Option<Arc<chan_workspace::Workspace>>,
     cwd_probe: C,
