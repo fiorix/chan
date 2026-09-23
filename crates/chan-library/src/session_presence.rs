@@ -532,11 +532,17 @@ impl SessionRegistry {
     }
 
     /// Set a participant's explicit display-name override (the `cs session
-    /// self --name` target): trimmed, capped at [`NAME_CAP`] chars, and never
-    /// empty (an empty or whitespace-only name is rejected; clearing goes
-    /// through [`Self::reset_name`]). Returns the stored name.
+    /// self --name` target): control characters dropped, trimmed, capped at
+    /// [`NAME_CAP`] chars, and never empty (an empty or whitespace-only name is
+    /// rejected; clearing goes through [`Self::reset_name`]). Returns the
+    /// stored name.
+    ///
+    /// Control characters are dropped because the name is shown to the other
+    /// participants, including in `cs session list` on their terminals, where
+    /// an escape sequence would be interpreted rather than displayed.
     pub fn rename(&self, window_id: &str, name: &str) -> Result<String, RenameError> {
-        let trimmed = name.trim();
+        let printable: String = name.chars().filter(|c| !c.is_control()).collect();
+        let trimmed = printable.trim();
         if trimmed.is_empty() {
             return Err(RenameError::Empty);
         }
@@ -1079,6 +1085,13 @@ mod tests {
         let long = "x".repeat(NAME_CAP + 10);
         let stored = reg.rename("w-a", &long).expect("accepted");
         assert_eq!(stored.chars().count(), NAME_CAP);
+        // Control characters never reach the stored name, and a name made of
+        // nothing else is empty.
+        assert_eq!(
+            reg.rename("w-a", "a\x1b]0;title\x07b\r\n"),
+            Ok("a]0;titleb".to_string())
+        );
+        assert_eq!(reg.rename("w-a", "\x1b\x07"), Err(RenameError::Empty));
         // Unknown window does not match.
         assert_eq!(reg.rename("w-nope", "x"), Err(RenameError::NotAParticipant));
         assert_eq!(reg.reset_name("w-nope"), Err(RenameError::NotAParticipant));
