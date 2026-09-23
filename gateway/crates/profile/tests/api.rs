@@ -2639,6 +2639,33 @@ async fn sweep_preserves_shared_rows_and_marks_live_ones() {
 }
 
 #[tokio::test]
+async fn sweep_evaluates_the_longest_accepted_retention_but_not_an_unbounded_one() {
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let row = ds("a");
+    seed_devserver(&app, &owner, &row).await;
+    backdate_devserver(&app, &row, 40.0, Some(30.0)).await;
+
+    let stats = profile::sweeper::sweep_once(&app.pool, &[], profile::sweeper::MAX_RETENTION)
+        .await
+        .expect("the longest accepted retention is in timestamp range");
+    assert_eq!(stats.deleted, 0);
+    assert_eq!(devserver_ids(&app).await, vec![row.clone()]);
+
+    // Past the bound the query itself fails: the largest whole-minute
+    // duration a u64 holds is far outside the interval and timestamp range,
+    // which is why config rejects it at startup instead of here every tick.
+    let beyond = std::time::Duration::from_secs(u64::MAX / 60 * 60);
+    let error = profile::sweeper::sweep_once(&app.pool, &[], beyond)
+        .await
+        .expect_err("a retention past the bound fails the sweep")
+        .to_string();
+    assert!(error.contains("out of range"), "{error}");
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn sweep_spares_young_rows_whether_marked_or_never_seen() {
     let app = TestApp::new().await;
     let owner = mk_user(&app, "owner@x.com").await;

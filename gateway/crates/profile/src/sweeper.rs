@@ -42,6 +42,13 @@ use gateway_common::devserver_control_client::DevserverControlClient;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 
+/// The longest retention the delete query can evaluate. The query subtracts
+/// the retention from `now()`, and a PostgreSQL timestamp cannot precede
+/// 4714-11-24 BC, which lies this many seconds before the Unix epoch; a
+/// longer retention makes every sweep fail with "timestamp out of range",
+/// while this one stays in range for every `now()` after 1970.
+pub const MAX_RETENTION: Duration = Duration::from_secs(210_866_803_200);
+
 /// What one sweep did: live rows stamped and stale, unshared rows deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SweepStats {

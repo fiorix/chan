@@ -58,6 +58,7 @@ fn parse_retention_minutes(raw: Option<&str>) -> anyhow::Result<Option<std::time
     })?;
     let seconds = minutes
         .checked_mul(60)
+        .filter(|seconds| *seconds <= crate::sweeper::MAX_RETENTION.as_secs())
         .context("DEVSERVER_RETENTION_MINUTES is out of range")?;
     Ok((seconds > 0).then(|| std::time::Duration::from_secs(seconds)))
 }
@@ -134,14 +135,20 @@ mod tests {
     }
 
     #[test]
-    fn retention_rejects_overflow_and_accepts_the_largest_duration() {
-        let max_minutes = u64::MAX / 60;
+    fn retention_rejects_what_the_sweep_cannot_evaluate_and_accepts_the_largest_duration() {
+        let max_minutes = crate::sweeper::MAX_RETENTION.as_secs() / 60;
+        assert_eq!(max_minutes * 60, crate::sweeper::MAX_RETENTION.as_secs());
         assert_eq!(
             parse_retention_minutes(Some(&max_minutes.to_string())).unwrap(),
-            Some(std::time::Duration::from_secs(max_minutes * 60))
+            Some(crate::sweeper::MAX_RETENTION)
         );
-        assert!(parse_retention_minutes(Some(&(max_minutes + 1).to_string())).is_err());
-        assert!(parse_retention_minutes(Some(&u64::MAX.to_string())).is_err());
+        for rejected in [max_minutes + 1, u64::MAX / 60, u64::MAX / 60 + 1, u64::MAX] {
+            let error = parse_retention_minutes(Some(&rejected.to_string())).unwrap_err();
+            assert!(
+                error.to_string().contains("out of range"),
+                "{rejected}: {error}"
+            );
+        }
     }
 
     #[test]
