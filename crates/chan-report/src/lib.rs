@@ -290,15 +290,20 @@ impl Index {
     /// Build a `Report` covering the requested scope. Pure
     /// projection; does not mutate state.
     pub fn snapshot(&self, scope: &Scope, cocomo_params: &CocomoParams) -> Report {
+        // A prefix is a directory spelled the way `dir_report` accepts one:
+        // `src`, `/src` and `src/` name the same subtree, and `/` the root.
+        let prefix = match scope {
+            Scope::Prefix(p) => Some(normalize_dir(p)),
+            _ => None,
+        };
         let files: Vec<FileStats> = match scope {
             Scope::All => self.files.values().cloned().collect(),
-            Scope::Prefix(p) if p.is_empty() => self.files.values().cloned().collect(),
-            Scope::Prefix(p) => {
-                let needle = if p.ends_with('/') {
-                    p.clone()
-                } else {
-                    format!("{}/", p)
-                };
+            Scope::Prefix(_) if prefix.as_deref() == Some("") => {
+                self.files.values().cloned().collect()
+            }
+            Scope::Prefix(_) => {
+                let p = prefix.as_deref().expect("a prefix scope has a prefix");
+                let needle = format!("{p}/");
                 self.files
                     .iter()
                     .filter(|(k, _)| *k == p || k.starts_with(&needle))
@@ -637,6 +642,36 @@ mod tests {
             1,
             "the JSONL round trip must carry the scan's skip count"
         );
+    }
+
+    // Every spelling `dir_report` accepts for a directory selects the same
+    // files as a snapshot prefix, and a bare `/` is the whole index.
+    #[test]
+    fn a_prefix_scope_accepts_the_directory_spellings_dir_report_does() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "fn b() {}\n").unwrap();
+        let opts = ReportOptions::new(dir.path());
+        let index = Index::scan(&opts).unwrap();
+        let paths = |scope: Scope| {
+            let mut paths: Vec<String> = index
+                .snapshot(&scope, &opts.cocomo)
+                .files
+                .into_iter()
+                .map(|file| file.path)
+                .collect();
+            paths.sort();
+            paths
+        };
+        for spelling in ["src", "/src", "src/", "/src/"] {
+            assert_eq!(
+                paths(Scope::Prefix(spelling.into())),
+                vec!["src/b.rs"],
+                "{spelling}"
+            );
+        }
+        assert_eq!(paths(Scope::Prefix("/".into())), paths(Scope::All));
     }
 
     #[test]
