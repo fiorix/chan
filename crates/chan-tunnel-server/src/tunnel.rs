@@ -90,7 +90,9 @@ impl RegistrationAdmission for LocalAdmission {
 /// 404 / 401 on the floor; and `h2::server::Connection` has no idle
 /// timeout of its own, so a peer that takes its refusal and then
 /// holds the TCP open must not be able to park the task forever.
-const REJECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The tunnel driver's yamux close takes the same bound, for the same
+/// reason: it is a write the peer's flow-control window can hold.
+pub(crate) const REJECTION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How many "stream beyond the first" rejections the drainer task
 /// will tolerate before tearing down the whole h2 connection with
@@ -279,7 +281,9 @@ struct RegisteredTunnel {
     devserver: Arc<str>,
     /// Dropped once the tunnel has ended, which tells the h2 driver to
     /// close the connection. A sender rather than a value so that every
-    /// way the tunnel can end, a panic included, closes it.
+    /// way the tunnel can end, a panic included, closes it. The tunnel
+    /// driver returns even against a peer that grants no h2 window,
+    /// because its yamux close is bounded by `REJECTION_DRAIN_TIMEOUT`.
     ended: oneshot::Sender<()>,
 }
 

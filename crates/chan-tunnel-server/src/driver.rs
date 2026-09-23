@@ -18,6 +18,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use yamux::Connection as YamuxConnection;
 
 use crate::registry::{OpenRequest, Registry, TunnelHandle};
+use crate::tunnel::REJECTION_DRAIN_TIMEOUT;
 use crate::{Validated, Validator};
 
 #[cfg(not(test))]
@@ -152,8 +153,24 @@ pub(crate) async fn run_tunnel<S>(
     }
 
     // Best-effort yamux close. Errors here only affect the peer's
-    // log; we're done either way.
-    let _ = futures::future::poll_fn(|cx| Pin::new(&mut conn).poll_close(cx)).await;
+    // log; we're done either way. The close writes a GoAway down the
+    // tunnel's h2 stream, which waits on the peer's flow-control window,
+    // and yamux's closing state has no timer of its own: a peer that
+    // stops granting window would otherwise hold this task, and the h2
+    // connection the handler releases once it returns, for as long as
+    // it liked. The bound is the one a refused dial's drain gets.
+    let closed = tokio::time::timeout(
+        REJECTION_DRAIN_TIMEOUT,
+        futures::future::poll_fn(|cx| Pin::new(&mut conn).poll_close(cx)),
+    )
+    .await;
+    if closed.is_err() {
+        tracing::warn!(
+            registration_id = %handle.registration_id,
+            timeout = ?REJECTION_DRAIN_TIMEOUT,
+            "yamux close did not finish; dropping the tunnel connection",
+        );
+    }
 
     // Tell any open() callers still waiting that we're gone.
     while let Some(reply) = pending.pop_front() {
