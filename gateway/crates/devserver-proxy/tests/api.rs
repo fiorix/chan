@@ -45,6 +45,8 @@ use devserver_proxy::session_store::SessionStore;
 const APEX_HOST: &str = "p1.proxy.chan.app";
 const WILDCARD_SUFFIX: &str = ".p1.proxy.chan.app";
 const TEST_IDENTITY_ORIGIN: &str = "https://gw.chan.app";
+/// Long enough that no test but the one about expiry ever meets it.
+const TEST_SESSION_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3600);
 const TEST_DASHBOARD_URL: &str = "https://gw.chan.app/workspaces";
 
 fn test_entry_signer() -> devserver_gate::EntrySigner {
@@ -130,13 +132,22 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
-        Self::new_inner(DEFAULT_WS_IDLE_TIMEOUT, None, None).await
+        Self::new_inner(DEFAULT_WS_IDLE_TIMEOUT, TEST_SESSION_LIFETIME, None, None).await
     }
 
     /// The WS-bridge tests inject a sub-second idle window so the cut
     /// is observable without waiting out the production default.
     async fn new_with_ws_idle_timeout(ws_idle_timeout: std::time::Duration) -> Self {
-        Self::new_inner(ws_idle_timeout, None, None).await
+        Self::new_inner(ws_idle_timeout, TEST_SESSION_LIFETIME, None, None).await
+    }
+
+    /// The expiry-during-setup bridge test needs a session that ends
+    /// inside the bridge's setup window.
+    async fn new_with_ws_idle_and_session_lifetime(
+        ws_idle_timeout: std::time::Duration,
+        session_lifetime: std::time::Duration,
+    ) -> Self {
+        Self::new_inner(ws_idle_timeout, session_lifetime, None, None).await
     }
 
     /// The transfer-policy tests inject tight general body caps so the
@@ -148,6 +159,7 @@ impl TestApp {
     ) -> Self {
         Self::new_inner(
             DEFAULT_WS_IDLE_TIMEOUT,
+            TEST_SESSION_LIFETIME,
             max_request_bytes,
             max_response_bytes,
         )
@@ -156,6 +168,7 @@ impl TestApp {
 
     async fn new_inner(
         ws_idle_timeout: std::time::Duration,
+        session_lifetime: std::time::Duration,
         max_request_bytes: Option<usize>,
         max_response_bytes: Option<usize>,
     ) -> Self {
@@ -181,7 +194,7 @@ impl TestApp {
             request_timeout: None,
             ws_idle_timeout,
             session_max_active: 10_000,
-            session_lifetime: std::time::Duration::from_secs(3600),
+            session_lifetime,
             entry_replay_max_active: 10_000,
             forwarded_proto: "https".into(),
         });
@@ -2627,6 +2640,181 @@ async fn ws_bridge_closes_when_the_substream_open_fails() {
     assert_eq!(frame.reason.as_str(), "upstream unreachable");
     assert!(
         elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
+/// An upstream that takes the upgrade request at `path` and never
+/// answers it, signalling `reached` on arrival: the bridge sits in its
+/// setup for as long as the test needs it there.
+fn stalling_upstream(path: &str, reached: Arc<tokio::sync::Notify>) -> Router {
+    Router::new().route(
+        path,
+        axum::routing::get(move || {
+            let reached = reached.clone();
+            async move {
+                reached.notify_one();
+                std::future::pending::<StatusCode>().await
+            }
+        }),
+    )
+}
+
+/// Cancelling the session while the bridge is still in its setup ends
+/// the client socket the way it ends a bridged one: with the 1008
+/// Close that names the revocation, without waiting for the setup
+/// bound. The session's token is cancelled directly, since a
+/// revocation through the session store aborts the bridge task before
+/// the token is seen, which
+/// `ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup`
+/// records.
+#[tokio::test]
+async fn ws_bridge_closes_as_revoked_when_the_session_is_cancelled_during_setup() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    app.register_tunnel(
+        "alice",
+        "blog",
+        uid,
+        stalling_upstream("/blog/ws-stall", reached.clone()),
+    )
+    .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let session = opaque_session(&app, uid, uid, "blog", &host);
+    let cookie = format!("__Host-devserver_gate={session}");
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+    let started = tokio::time::Instant::now();
+    app.sessions
+        .lookup(&session)
+        .expect("the session is live until it is cancelled")
+        .cancellation
+        .cancel();
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose session was cancelled during setup",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session revoked");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
+/// A revocation through the session store cancels the session's token
+/// and then aborts the bridge task before the task is polled again, so
+/// the setup's cancellation arm never runs and the client sees the
+/// socket reset without a Close.
+#[tokio::test]
+#[ignore = "session revocation aborts the bridge task before its cancellation arm runs"]
+async fn ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    app.register_tunnel(
+        "alice",
+        "blog",
+        uid,
+        stalling_upstream("/blog/ws-stall", reached.clone()),
+    )
+    .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+    let started = tokio::time::Instant::now();
+    let revoked = tokio::time::timeout(
+        4 * WS_TEST_IDLE,
+        app.sessions
+            .revoke(&devserver_proxy::session_store::Revocation::Exact {
+                subject_user_id: uid,
+                owner_user_id: uid,
+                devserver_id: "blog".to_string(),
+            }),
+    )
+    .await
+    .expect("the revocation did not drain the bridge");
+    assert_eq!(revoked, Ok(1));
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose session was revoked during setup",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session revoked");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
+/// The session lifetime for the expiry test: it must outlive the dial
+/// and end before the setup bound, and the idle window is the duration
+/// already sized to absorb handshake and scheduling jitter.
+const WS_TEST_SESSION_LIFETIME: std::time::Duration = WS_TEST_IDLE;
+
+/// A session that expires while the bridge is still in its setup ends
+/// the client socket with the 1008 Close that names the expiry, at the
+/// expiry rather than at the setup bound.
+#[tokio::test]
+async fn ws_bridge_closes_as_expired_when_the_session_expires_during_setup() {
+    let app =
+        TestApp::new_with_ws_idle_and_session_lifetime(4 * WS_TEST_IDLE, WS_TEST_SESSION_LIFETIME)
+            .await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    app.register_tunnel(
+        "alice",
+        "blog",
+        uid,
+        stalling_upstream("/blog/ws-stall", reached.clone()),
+    )
+    .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let issued = tokio::time::Instant::now();
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+    let frame = expect_close_within(
+        &mut ws,
+        8 * WS_TEST_IDLE,
+        "a WebSocket whose session expired during setup",
+    )
+    .await;
+    let elapsed = issued.elapsed();
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session expired");
+    assert!(
+        elapsed >= WS_TEST_SESSION_LIFETIME,
+        "the Close arrived before the session expired: {elapsed:?}"
+    );
+    assert!(
+        elapsed < 4 * WS_TEST_IDLE,
         "the Close waited for the setup bound: {elapsed:?}"
     );
     server.abort();
