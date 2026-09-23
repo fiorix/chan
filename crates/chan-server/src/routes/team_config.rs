@@ -737,8 +737,9 @@ fn render_roster(config: &TeamConfig) -> String {
     const H_COMMAND: &str = "command";
     const H_AGENT: &str = "agent";
     const H_ROLE: &str = "role";
+    type Row = (String, String, String, &'static str);
 
-    let rows: Vec<(String, String, String, &'static str)> = config
+    let rows: Vec<Row> = config
         .members
         .iter()
         .map(|m| {
@@ -748,30 +749,16 @@ fn render_roster(config: &TeamConfig) -> String {
         })
         .collect();
 
-    let w_handle = rows
-        .iter()
-        .map(|(h, _, _, _)| h.len())
-        .chain(std::iter::once(H_HANDLE.len()))
-        .max()
-        .unwrap_or(H_HANDLE.len());
-    let w_command = rows
-        .iter()
-        .map(|(_, c, _, _)| c.len())
-        .chain(std::iter::once(H_COMMAND.len()))
-        .max()
-        .unwrap_or(H_COMMAND.len());
-    let w_agent = rows
-        .iter()
-        .map(|(_, _, a, _)| a.len())
-        .chain(std::iter::once(H_AGENT.len()))
-        .max()
-        .unwrap_or(H_AGENT.len());
-    let w_role = rows
-        .iter()
-        .map(|(_, _, _, r)| r.len())
-        .chain(std::iter::once(H_ROLE.len()))
-        .max()
-        .unwrap_or(H_ROLE.len());
+    // A column is as wide as its widest cell or its header.
+    let col_width = |cell: for<'a> fn(&'a Row) -> &'a str, header: &str| {
+        rows.iter()
+            .map(|row| cell(row).len())
+            .fold(header.len(), usize::max)
+    };
+    let w_handle = col_width(|(h, _, _, _)| h.as_str(), H_HANDLE);
+    let w_command = col_width(|(_, c, _, _)| c.as_str(), H_COMMAND);
+    let w_agent = col_width(|(_, _, a, _)| a.as_str(), H_AGENT);
+    let w_role = col_width(|(_, _, _, r)| *r, H_ROLE);
 
     let border = format!(
         "+{}+{}+{}+{}+\n",
