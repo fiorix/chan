@@ -11,44 +11,7 @@
 //
 // The top-level surface carries the process-lifecycle and app-level
 // commands; the workspace registry and per-workspace content operations
-// are grouped under `chan workspace`:
-//
-//   chan workspace add <path>       register a directory as a chan
-//                                   workspace in ~/.chan/config.toml
-//   chan workspace ls [--json]      list registered workspaces,
-//                                   most-recent first. --json emits
-//                                   a stable machine-readable shape.
-//   chan workspace forget <path>        drop a workspace from the registry
-//                                   (filesystem contents untouched)
-//   chan workspace index <path>     rebuild the search index + graph
-//   chan workspace search <path> <query>
-//                                   query the BM25 index
-//   chan workspace graph <path>     inspect semantic or filesystem graph edges
-//   chan workspace status [path]    report workspace/index/graph health,
-//                                   and recovery readiness (ready/recovering)
-//   chan workspace metadata export PATH ARCHIVE.tar.zst
-//                                   export a workspace's chan metadata
-//   chan workspace contacts import csv FILE --into DIR
-//                                   import a Google Contacts CSV as one
-//                                   markdown note per contact under DIR
-//   chan serve {PATH} [-4|-6] [--host H --port N]
-//                                   register + serve a workspace. Defaults
-//                                   to 127.0.0.1 (loopback only); -6 picks
-//                                   ::1 instead. The embedded web editor
-//                                   talks to this. With chan-desktop running
-//                                   it hands the workspace to a native window.
-//   chan close {PATH}               tear down a workspace's server.
-//   chan workspace forget {PATH}    tear down, then forget it from the
-//                                   registry (files untouched).
-//   chan workspace serve|close|forget {PATH} --on {TARGET}
-//                                   the same three verbs against a workspace
-//                                   on a registered remote devserver (URL or
-//                                   launcher label, resolved by the desktop).
-//   chan devserver register {URL} [--name --script]
-//                                   register a devserver (scheme://host) with
-//                                   the desktop launcher.
-//   chan config get [KEY]           print a preference value
-//   chan config set KEY=VALUE       update a preference
+// are grouped under `chan workspace`. `chan --help` is the command list.
 //
 // Anything that touches the registry / workspace contents goes through
 // `chan_workspace::Library` and `chan_workspace::Workspace` so the library's
@@ -606,13 +569,6 @@ enum Command {
     },
 }
 
-/// Subcommands for `chan workspace`. Groups the workspace-registry
-/// operations (add / ls / rm) with the per-workspace content
-/// operations (index / reports / search / graph / status / metadata /
-/// contacts) under one verb, so the top-level surface carries only the
-/// process-lifecycle and app-level commands (open, close, devserver,
-/// config, ...). Mirrors the `IndexAction` / `ReportsAction`
-/// sub-enum pattern.
 /// Subcommands for `chan devserver`. One noun, two faces, told apart by
 /// their argument shape. The server-side verbs (run / start / stop /
 /// restart / status / join / rotate-token) manage the devserver process on
@@ -1051,6 +1007,13 @@ impl WorkspaceGraphArgs {
     }
 }
 
+/// Subcommands for `chan workspace`. Groups the workspace-registry
+/// operations (add / ls / forget) with the per-workspace content
+/// operations (index / reports / search / graph / status / metadata /
+/// contacts) under one verb, so the top-level surface carries only the
+/// process-lifecycle and app-level commands (serve, close, devserver,
+/// config, ...). Mirrors the `IndexAction` / `ReportsAction`
+/// sub-enum pattern.
 #[derive(Subcommand, Debug)]
 enum WorkspaceAction {
     /// Register a directory as a chan workspace
@@ -1290,8 +1253,8 @@ enum MetadataAction {
 /// Subcommands for `chan workspace index`. Subcommand-driven (rather than a
 /// flat `chan workspace index <path>`) so the surface
 /// covers rebuild, model download, semantic-search toggle, and
-/// state inspection. Older scripts' flat `chan workspace index <path>` is now
-/// `chan workspace index rebuild <path>`.
+/// state inspection. The flat `chan workspace index <path>` form is not
+/// accepted; use `chan workspace index rebuild <path>`.
 ///
 /// Symmetric naming matches the `chan workspace reports
 /// enable/disable` parallel pair so scripted callers can pattern-
@@ -2035,8 +1998,8 @@ struct PsRow {
     /// What the workspace is DOING, for a workspace served by a devserver
     /// this credential can reach. `null` everywhere else -- a standalone or
     /// desktop serve persists no address/token pair `chan ps` may read, and
-    /// inventing one would be the new authority the item forbids. Rendered
-    /// as `-`, never as `0`.
+    /// inventing one would create a new credential authority. Rendered as
+    /// `-`, never as `0`.
     activity: Option<PsActivity>,
 }
 
@@ -2063,8 +2026,8 @@ struct PsActivity {
     /// `None` when the tenant carries no indexer AT ALL -- `/api/health`
     /// reports `indexer: null` on the workspace-less terminal tenant and
     /// during the storage-reset swap window, and that absence is a fact worth
-    /// showing rather than flattening. Renders `-`, following the v0.85.0
-    /// `cs terminal list` ruling that an unreported value is not a zero.
+    /// showing rather than flattening. Renders `-`: an unreported value is not
+    /// a zero, the same rule `cs terminal list` follows.
     indexer: Option<PsIndexer>,
 }
 
@@ -2072,8 +2035,7 @@ struct PsActivity {
 ///
 /// Deliberately a client-side mirror of the server's `IndexerHealth` rather
 /// than that type itself: chan-server declares `mod indexer` privately, so the
-/// type is unreachable from this crate, and making it reachable would mean
-/// editing a file this lane does not own. Every field is optional so a payload
+/// type is unreachable from this crate. Every field is optional so a payload
 /// that stops carrying one renders `-` instead of failing the whole row.
 #[derive(Serialize, Deserialize)]
 struct PsIndexer {
@@ -2133,15 +2095,12 @@ fn ps_state_column(served: bool, mount: Option<WorkspaceStatus>) -> &'static str
 /// The `chan ps` BY column: the resolved serving kind, or `-` when the
 /// workspace is served but its kind could not be probed (the STATE column
 /// already distinguishes served vs free).
-fn ps_by_column(_served: bool, kind: Option<ServedBy>) -> &'static str {
-    match kind {
-        Some(k) => k.label(),
-        None => "-",
-    }
+fn ps_by_column(kind: Option<ServedBy>) -> &'static str {
+    kind.map_or("-", ServedBy::label)
 }
 
 /// Every activity column renders this when the value is not reported, never
-/// `0` and never blank. Following the v0.85.0 `cs terminal list` ruling: a
+/// `0` and never blank, the same rule `cs terminal list` follows: a
 /// queue depth of zero and an unknown queue depth are different facts, and
 /// showing the second as the first is how an operator concludes "nothing
 /// queued" about a workspace nobody asked.
@@ -2249,10 +2208,7 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
     let Some(token) = chan_server::persisted_devserver_token() else {
         return out;
     };
-    let Some(addr) = running_systemd_devserver_addr().or_else(|| {
-        chan_server::persisted_devserver_port()
-            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
-    }) else {
+    let Some(addr) = local_devserver_dial_addr() else {
         return out;
     };
     let client = reqwest::Client::new();
@@ -2387,7 +2343,7 @@ async fn cmd_ps(json: bool) -> Result<()> {
     );
     for r in &rows {
         let state = ps_state_column(r.served, r.activity.as_ref().map(|a| a.mount));
-        let by = ps_by_column(r.served, r.served_by);
+        let by = ps_by_column(r.served_by);
         let pid = r
             .pid
             .map_or_else(|| PS_ABSENT.to_string(), |p| p.to_string());
@@ -4768,6 +4724,15 @@ fn resolve_devserver_addr(
     SocketAddr::new(ip, port)
 }
 
+/// Where to dial this machine's devserver: the running systemd unit's
+/// address, else the persisted port on the default bind.
+fn local_devserver_dial_addr() -> Option<SocketAddr> {
+    running_systemd_devserver_addr().or_else(|| {
+        chan_server::persisted_devserver_port()
+            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
+    })
+}
+
 /// The address the RUNNING systemd devserver serves its management API on,
 /// for the verbs that dial it (the `stop` / `--force` terminal drain,
 /// `join`'s health watch) and the bind= report lines. Unit-persisted `--bind`/`--port`
@@ -4973,11 +4938,6 @@ const DEVSERVER_SYSTEMD_UNIT: &str = "chan-devserver.service";
 /// eight-minute startup restore before the devserver emits `READY=1`.
 const DEVSERVER_SYSTEMD_START_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Supervise the devserver under a systemd user service: ensure linger,
-/// create + start the unit (or re-attach to a running one), then stream its
-/// journal until the unit stops. The controlling terminal sees the
-/// devserver's output and notices when it dies, and a unit that cannot
-/// start exits non-zero loudly so a watching desktop catches it.
 /// What a `--service` watchdog polls to decide the backing server is still up.
 /// One probe per backend, so [`run_health_watchdog`] is shared by the
 /// self-managed `chan` daemon, systemd, and launchd.
@@ -5611,10 +5571,7 @@ async fn cmd_rotate_devserver_token() -> Result<()> {
              found (~/.chan/devserver/config.json); start a devserver first"
         );
     };
-    let dial = running_systemd_devserver_addr().or_else(|| {
-        chan_server::persisted_devserver_port()
-            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
-    });
+    let dial = local_devserver_dial_addr();
     if let Some(addr) = dial {
         let url = format!("http://{addr}/api/devserver/rotate-token");
         let client = reqwest::Client::new();
@@ -7013,7 +6970,7 @@ fn cmd_index(action: IndexAction) -> Result<()> {
         IndexAction::Rebuild { path, path_flag } => {
             // Either form works. Both supplied → the
             // flag wins; users have to be explicit anyway and the
-            // flag is the canonical shape going forward. Neither
+            // flag is the canonical shape. Neither
             // supplied → clean error, not a clap-default panic.
             let resolved = path_flag.or(path).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -7046,12 +7003,11 @@ fn cmd_index_rebuild(path: PathBuf) -> Result<()> {
     // file) when redirected so logs stay readable.
     use std::io::{IsTerminal, Write};
     let tty = std::io::stderr().is_terminal();
-    // chan-workspace 0.7 reshaped progress: a single `ProgressEvent` with
-    // a `stage` enum (IndexFile / EmbedBatch / GraphRebuild / ...),
-    // current/total counters, and an optional label. We surface the
-    // two stages the reindex CLI cared about; everything else folds
-    // into a generic "still working" line so nothing escapes the user
-    // silently on large workspaces.
+    // Progress arrives as one `ProgressEvent` per stage (IndexFile /
+    // EmbedBatch / GraphRebuild / ...) with current/total counters and an
+    // optional label. IndexFile and EmbedBatch get counters; every other
+    // stage folds into a generic "still working" line so nothing is silent
+    // on large workspaces.
     let callback = chan_workspace::progress::progress_fn(move |p| {
         let line = match p.stage {
             chan_workspace::progress::ProgressStage::IndexFile => format!(
@@ -7446,18 +7402,18 @@ async fn cmd_mcp_proxy(socket: PathBuf) -> Result<()> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MultiWorkspaceSearchOutput {
-    pub results: Vec<WorkspaceSearchResult>,
-    pub errors: Vec<WorkspaceExecutionError>,
+struct MultiWorkspaceSearchOutput {
+    results: Vec<WorkspaceSearchResult>,
+    errors: Vec<WorkspaceExecutionError>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct WorkspaceExecutionError {
-    pub workspace: String,
+struct WorkspaceExecutionError {
+    workspace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata_key: Option<String>,
-    pub code: &'static str,
-    pub message: String,
+    metadata_key: Option<String>,
+    code: &'static str,
+    message: String,
 }
 
 #[derive(Debug)]
@@ -8217,7 +8173,7 @@ async fn cmd_status(path: Option<PathBuf>, json: bool) -> Result<()> {
         if let Some(reason) = &out.mount_error {
             println!("reason: {reason}");
         }
-        println!("by: {}", ps_by_column(true, out.served_by));
+        println!("by: {}", ps_by_column(out.served_by));
         println!(
             "pid: {}",
             out.pid
@@ -9700,7 +9656,7 @@ mod tests {
     #[test]
     fn route_multiple_targets_rejected() {
         // The resolver guards mutual exclusion even though clap rejects it
-        // first (see `open_target_flags_are_mutually_exclusive`).
+        // first (see `serve_target_flags_are_mutually_exclusive`).
         let two = OpenFlags {
             standalone: true,
             desktop: true,
@@ -10873,14 +10829,13 @@ mod tests {
 
     #[test]
     fn ps_by_column_never_emits_bare_served() {
-        // Served-but-unprobed and free both render `-` (STATE carries the
-        // served/free distinction).
-        assert_eq!(ps_by_column(true, None), "-");
-        assert_eq!(ps_by_column(false, None), "-");
+        // An unprobed kind renders `-` (STATE carries the served/free
+        // distinction).
+        assert_eq!(ps_by_column(None), "-");
         // A resolved kind renders its label.
-        assert_eq!(ps_by_column(true, Some(ServedBy::Devserver)), "devserver");
-        assert_eq!(ps_by_column(true, Some(ServedBy::Standalone)), "standalone");
-        assert_eq!(ps_by_column(true, Some(ServedBy::Desktop)), "desktop");
+        assert_eq!(ps_by_column(Some(ServedBy::Devserver)), "devserver");
+        assert_eq!(ps_by_column(Some(ServedBy::Standalone)), "standalone");
+        assert_eq!(ps_by_column(Some(ServedBy::Desktop)), "desktop");
     }
 
     #[test]
@@ -10909,9 +10864,9 @@ mod tests {
         );
     }
 
-    /// The payload is the one recorded from the owner's live devserver in
-    /// `gitignore-write-strands-the-workspace-in-recovering`: generation 14,
-    /// completed 12, reconcile owed, nothing active. Parsing the real evidence
+    /// The payload is one recorded from a live devserver whose workspace was
+    /// stranded in recovery: generation 14, completed 12, reconcile owed,
+    /// nothing active. Parsing the real evidence
     /// rather than a hand-built value is deliberate -- it pins the wire shape
     /// this command reads, so a server-side rename fails here instead of
     /// quietly rendering `-` forever.
@@ -12381,9 +12336,9 @@ mod tests {
     }
 
     #[test]
-    fn workspace_group_uses_ls_and_rm() {
+    fn workspace_group_uses_ls_and_forget() {
         // The registry verbs live under `chan workspace`, spelled `ls`
-        // and `forget` (rm is gone with the grammar move).
+        // and `forget`; `rm` is not a spelling.
         let cli = Cli::try_parse_from(["chan", "workspace", "ls", "--json"]).unwrap();
         match cli.command {
             Command::Workspace {
