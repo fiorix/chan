@@ -216,8 +216,22 @@ def check_make_contract() -> None:
     )
     # release.yml builds the gateway through this recipe alone, so a stale
     # gateway/Cargo.lock re-resolves inside a release build unless the recipe
-    # itself refuses it.
+    # itself refuses it. pre-push runs the clippy, rustdoc and test recipes
+    # before gateway-build, and an unlocked one rewrites the stale lock on
+    # disk, which the locked build then accepts, so every cargo line that
+    # resolves the gateway workspace carries the flag.
     require_target(makefile, "gateway-build", ("$(CARGO) build --locked",))
+    require_target(makefile, "gateway-lint", ("$(CARGO) clippy --locked",))
+    require_target(makefile, "gateway-doc", ("$(CARGO) doc --locked",))
+    require_target(
+        makefile,
+        "gateway-test",
+        (
+            "$(CARGO) test --locked --workspace --lib",
+            "$(CARGO) test --locked -p devserver-proxy",
+            "$(CARGO) test --locked --workspace --bins",
+        ),
+    )
 
 
 def check_desktop_contract() -> None:
