@@ -328,6 +328,16 @@ struct LibraryState {
     first_open_done: bool,
 }
 
+/// A persisted row this build cannot read, held as the JSON value the file
+/// carried so every save writes it back rather than replacing the file with a
+/// set that omits it. It never reaches the window set, the feed, or any
+/// consumer; `window_id` is read out of the raw value only so the mint treats
+/// that id as taken.
+struct UnreadableRow {
+    window_id: Option<String>,
+    raw: serde_json::Value,
+}
+
 /// The library's window registry: the durable window set, the mint, and the
 /// change broadcaster. Library-level (one per library; a workspace window and a
 /// terminal window both live here), persisted to `store_path`. Cheap to share
@@ -339,6 +349,10 @@ pub struct WindowRegistry {
     /// in the same library directory.
     state_path: PathBuf,
     windows: Mutex<Vec<PersistedWindow>>,
+    /// Rows this build could not read, in their on-disk order. Fixed for the
+    /// registry's life: nothing edits or lists them, and every save writes
+    /// them back after the durable rows.
+    unreadable: Vec<UnreadableRow>,
     // Allocated while holding the data lock; saves may acquire their lock in
     // a different order, but only newer snapshots may reach disk.
     next_save: AtomicU64,
@@ -364,11 +378,14 @@ impl WindowRegistry {
     /// the sibling first-open state. An absent store starts empty rather than
     /// refusing to start (the windows reappear as clients re-create them). The
     /// set is read row by row, so a row this build cannot read (a `kind` or
-    /// `origin` tag it does not know, a damaged row) costs that row alone and
-    /// is logged. A store that is not a JSON array at all, or a state file that
-    /// does not parse, starts from the empty set or the default state, logged.
+    /// `origin` tag it does not know, a damaged row) costs that row alone: it
+    /// is logged, held outside the window set, and written back by every save,
+    /// so this build never replaces rows another build wrote with a set that
+    /// omits them. A store that is not a JSON array at all, or a state file
+    /// that does not parse, starts from the empty set or the default state,
+    /// logged.
     pub fn open(store_path: PathBuf) -> Self {
-        let windows = read_store(&store_path)
+        let (windows, unreadable) = read_store(&store_path)
             .map(|bytes| read_window_rows(&store_path, &bytes))
             .unwrap_or_default();
         let state_path = state_path_for(&store_path);
@@ -389,6 +406,7 @@ impl WindowRegistry {
             store_path,
             state_path,
             windows: Mutex::new(windows),
+            unreadable,
             next_save: AtomicU64::new(0),
             latest_save: Mutex::new(0),
             #[cfg(test)]
@@ -430,7 +448,10 @@ impl WindowRegistry {
 
     /// Whether the durable window set is currently empty. The open path mints
     /// the first-open terminal only on an empty registry, so a library that
-    /// already has persisted windows never gets an extra one.
+    /// already has persisted windows never gets an extra one. Rows this build
+    /// cannot read do not count: it can neither show them nor mint against
+    /// them, and the first-open marker is what stops a re-mint in a library
+    /// another build has already opened.
     pub fn is_empty(&self) -> bool {
         self.lock().is_empty()
     }
@@ -454,7 +475,7 @@ impl WindowRegistry {
     ) -> PersistedWindow {
         let (row, snapshot) = {
             let mut windows = self.lock();
-            let window_id = mint_id(&windows);
+            let window_id = mint_id(&windows, &self.unreadable);
             let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
             let title = compose_title(kind, ordinal, workspace_path.as_deref());
             let row = PersistedWindow {
@@ -604,7 +625,8 @@ impl WindowRegistry {
 
     /// Snapshot the durable window set, ordered for stable display: terminals
     /// before workspaces, then by `(workspace_path, ordinal, window_id)`. The
-    /// route layer maps each row through [`PersistedWindow::to_record`].
+    /// route layer maps each row through [`PersistedWindow::to_record`]. Rows
+    /// this build cannot read are never in it (see [`Self::open`]).
     pub fn snapshot(&self) -> Vec<PersistedWindow> {
         let mut windows = self.lock().clone();
         windows.sort_by(|a, b| {
@@ -644,9 +666,16 @@ impl WindowRegistry {
         *latest_save = *generation;
         // Control rows are transient/per-connection (in-memory only): never write
         // them, so a desktop crash can't strand a stale control window on the
-        // next boot. Every other row is written.
+        // next boot. Every other row is written, and so is every row this build
+        // could not read, so the file never loses what another build wrote.
         let durable: Vec<&PersistedWindow> = windows.iter().filter(|w| !w.control).collect();
-        let result = save_atomic(&self.store_path, &durable);
+        let result = save_atomic(
+            &self.store_path,
+            &StoredRows {
+                durable: &durable,
+                unreadable: &self.unreadable,
+            },
+        );
         #[cfg(test)]
         let result = result.and_then(|()| {
             if self.fail_after_save.swap(false, Ordering::Relaxed) {
@@ -676,6 +705,30 @@ impl WindowRegistry {
     }
 }
 
+/// The on-disk array: this build's durable rows, then the rows it could not
+/// read, each written back as the JSON value the file carried. Row order on
+/// disk is not a contract (`WindowRegistry::snapshot` sorts for display), so
+/// the unreadable rows keep their own relative order at the tail rather than
+/// the indexes they were read at.
+struct StoredRows<'a> {
+    durable: &'a [&'a PersistedWindow],
+    unreadable: &'a [UnreadableRow],
+}
+
+impl Serialize for StoredRows<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq as _;
+        let mut seq = serializer.serialize_seq(Some(self.durable.len() + self.unreadable.len()))?;
+        for row in self.durable {
+            seq.serialize_element(row)?;
+        }
+        for row in self.unreadable {
+            seq.serialize_element(&row.raw)?;
+        }
+        seq.end()
+    }
+}
+
 /// Terminals sort before workspaces in the display order.
 fn kind_order(kind: WindowKind) -> u8 {
     match kind {
@@ -684,10 +737,20 @@ fn kind_order(kind: WindowKind) -> u8 {
     }
 }
 
+/// Whether `id` names a row in the set, readable or not. The mint re-rolls
+/// against both so a build that can read the unreadable rows never finds two
+/// rows under one id.
+fn id_is_taken(windows: &[PersistedWindow], unreadable: &[UnreadableRow], id: &str) -> bool {
+    windows.iter().any(|w| w.window_id == id)
+        || unreadable
+            .iter()
+            .any(|row| row.window_id.as_deref() == Some(id))
+}
+
 /// Mint a fresh `w-<16 hex>` id (8 random bytes), re-rolling against the current
 /// set so the per-library id is unique structurally, not reliant on entropy
 /// width. The opaque id never carries meaning; clients treat it as a black box.
-fn mint_id(windows: &[PersistedWindow]) -> String {
+fn mint_id(windows: &[PersistedWindow], unreadable: &[UnreadableRow]) -> String {
     use std::fmt::Write as _;
     loop {
         let mut bytes = [0u8; 8];
@@ -697,7 +760,7 @@ fn mint_id(windows: &[PersistedWindow]) -> String {
         for b in bytes {
             let _ = write!(id, "{b:02x}");
         }
-        if !windows.iter().any(|w| w.window_id == id) {
+        if !id_is_taken(windows, unreadable, &id) {
             return id;
         }
     }
@@ -779,9 +842,10 @@ fn read_store(path: &Path) -> Option<Vec<u8>> {
 /// Read the persisted window set one row at a time, so a row this build cannot
 /// read (a `kind` or `origin` tag it does not know, a damaged row) costs that
 /// row alone rather than the whole set. Each such row is logged once with the
-/// store path and its `window_id`, or its index when even that is unreadable.
-/// A store that is not a JSON array holds no row this build can keep.
-fn read_window_rows(store_path: &Path, bytes: &[u8]) -> Vec<PersistedWindow> {
+/// store path and its `window_id`, or its index when even that is unreadable,
+/// and returned beside the readable rows so a save can write it back. A store
+/// that is not a JSON array holds no row this build can keep.
+fn read_window_rows(store_path: &Path, bytes: &[u8]) -> (Vec<PersistedWindow>, Vec<UnreadableRow>) {
     let rows: Vec<serde_json::Value> = match serde_json::from_slice(bytes) {
         Ok(rows) => rows,
         Err(error) => {
@@ -790,15 +854,20 @@ fn read_window_rows(store_path: &Path, bytes: &[u8]) -> Vec<PersistedWindow> {
                 %error,
                 "unreadable window store; starting with no windows"
             );
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     };
-    rows.iter()
-        .enumerate()
-        .filter_map(|(index, value)| match PersistedWindow::deserialize(value) {
-            Ok(row) => Some(row),
+    let mut windows = Vec::with_capacity(rows.len());
+    let mut unreadable = Vec::new();
+    for (index, value) in rows.into_iter().enumerate() {
+        match PersistedWindow::deserialize(&value) {
+            Ok(row) => windows.push(row),
             Err(error) => {
-                let row = match value.get("window_id").and_then(serde_json::Value::as_str) {
+                let window_id = value
+                    .get("window_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                let row = match &window_id {
                     Some(id) => format!("window_id {id}"),
                     None => format!("index {index}"),
                 };
@@ -806,12 +875,16 @@ fn read_window_rows(store_path: &Path, bytes: &[u8]) -> Vec<PersistedWindow> {
                     store = %store_path.display(),
                     %row,
                     %error,
-                    "unreadable window row is hidden from the window set"
+                    "unreadable window row is kept on disk and hidden from the window set"
                 );
-                None
+                unreadable.push(UnreadableRow {
+                    window_id,
+                    raw: value,
+                });
             }
-        })
-        .collect()
+        }
+    }
+    (windows, unreadable)
 }
 
 /// The sibling state-store path for a window store: `<dir>/<stem>-state.json`
@@ -1760,6 +1833,64 @@ mod tests {
             logs[0]
         );
         assert!(logs[0].contains("unreadable library state"), "{}", logs[0]);
+    }
+
+    /// A row this build cannot read is written back by every save, so the
+    /// build that wrote it finds it on its next open, while this build's
+    /// listing never carries it.
+    #[test]
+    fn a_save_writes_an_unreadable_row_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, readable, unknown) = store_with_an_unknown_kind(dir.path());
+        let rows_on_disk = |path: &Path| -> Vec<serde_json::Value> {
+            serde_json::from_slice(&std::fs::read(path).expect("store")).expect("rows")
+        };
+
+        let reg = WindowRegistry::open(path.clone());
+        let minted = reg.create(WindowKind::Terminal, None);
+        assert_eq!(
+            rows_on_disk(&path),
+            vec![
+                readable,
+                serde_json::to_value(&minted).expect("row"),
+                unknown.clone()
+            ],
+            "a mint writes the unreadable row back beside the rows it can read"
+        );
+        assert!(reg.remove("w-readable"));
+        assert_eq!(
+            rows_on_disk(&path),
+            vec![serde_json::to_value(&minted).expect("row"), unknown],
+            "a removal keeps the unreadable row too"
+        );
+
+        let reopened = WindowRegistry::open(path);
+        let ids: Vec<String> = reopened
+            .snapshot()
+            .into_iter()
+            .map(|w| w.window_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![minted.window_id],
+            "the listing never carries the unreadable row"
+        );
+    }
+
+    /// The mint never re-uses the id of a row this build cannot read, so a
+    /// build that can read it never finds two rows under one id.
+    #[test]
+    fn the_mint_treats_an_unreadable_rows_id_as_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, _readable, _unknown) = store_with_an_unknown_kind(dir.path());
+        let reg = WindowRegistry::open(path);
+        let windows = reg.lock();
+        assert!(id_is_taken(&windows, &reg.unreadable, "w-readable"));
+        assert!(
+            id_is_taken(&windows, &reg.unreadable, "w-unknown"),
+            "an unreadable row's id is reserved"
+        );
+        assert!(!id_is_taken(&windows, &reg.unreadable, "w-free"));
     }
 
     #[test]
