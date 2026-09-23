@@ -394,4 +394,12 @@ describe("identityPrompt", () => {
     expect(out).toContain("Read the team process at /t/bootstrap.md before you start.");
     expect(out).toContain("Relative paths in that document resolve against /.");
   });
+
+  test("names the team dir as the server trims it before writing", () => {
+    // The dialog sends the team dir as typed and the server trims it before
+    // it creates the directory, so a pasted `berries ` lands in `berries/`;
+    // the poke has to name that directory, not one that does not exist.
+    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "/ws", "berries ");
+    expect(out).toContain("Read the team process at /ws/berries/bootstrap.md before you start.");
+  });
 });
