@@ -70,8 +70,9 @@ mod window_bus;
 
 pub use config::ServerConfig;
 // Desktop window-ops, window presence, and the title map live in chan-library.
-// Re-export the modules so internal `crate::…::` paths resolve unchanged, and
-// the public types so chan-desktop keeps reaching them via `chan_server::`.
+// chan-desktop depends on chan-server and not on chan-library, so the public
+// types are reachable here; the modules are re-exported crate-wide so the
+// route layer names them through `crate::`.
 pub use chan_library::desktop_window_ops::{
     DesktopBridge, DesktopWindowOp, DesktopWindowSender, NewWindowKind, SetWorkspaceOnOutcome,
     NO_DESKTOP,
@@ -184,8 +185,8 @@ fn redacted_request_span(request: &axum::http::Request<axum::body::Body>) -> tra
 
 // `ServeConfig` / `ServeHandle` / `sanitize_prefix` live in chan-library (the
 // host lifecycle + tenant builder take them). Re-exported so the route layer,
-// the devserver, and the `chan` binary keep naming them via `crate::` /
-// `chan_server::` unchanged.
+// the devserver, and the `chan` binary name them through `crate::` /
+// `chan_server::` without depending on chan-library.
 //
 // `allocate_workspace_prefix` is re-exported for the same reason: chan-desktop
 // depends on chan-server but not on chan-library, and it needs the one
@@ -209,7 +210,7 @@ fn should_open_browser(open_browser: bool) -> bool {
     !matches!(std::env::var("BROWSER"), Ok(v) if v.is_empty())
 }
 
-/// Bundle returned by `build_app`: the prefixed axum app plus the
+/// Bundle returned by [`build_tenant_app`]: the prefixed axum app plus the
 /// pieces `serve()` needs out-of-band (token for the launch URL,
 /// last_activity for the idle watcher). The watch handle and
 /// indexer live inside the router's state, so dropping the router
@@ -260,7 +261,7 @@ struct AppArtifacts {
     shutdown_tx: Arc<watch::Sender<bool>>,
 }
 
-/// Fan one `ProgressEvent` out to several sinks. Used by `build_app`
+/// Fan one `ProgressEvent` out to several sinks. Used by [`build_tenant_app`]
 /// to tee the indexer's progress to both the WebSocket broadcast (the
 /// web UI's indexer pill) and stderr (so a foreground `chan serve` on
 /// a large tree isn't silent).
@@ -1015,10 +1016,11 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
 }
 
 /// Whether this host platform can serve the standalone Files application:
-/// POSIX with a canonical, UTF-8 `$HOME` directory. The same gate
-/// construction applies; every server-side mint path re-validates against
-/// the actually-constructed state where a tenant is mounted.
-pub fn standalone_files_supported() -> bool {
+/// POSIX with a canonical, UTF-8 `$HOME` directory. Construction is the real
+/// gate: `construct_standalone_files` calls this and can still fail after it,
+/// and every mint path reads the constructed state, so a `true` here is not a
+/// promise.
+fn standalone_files_supported() -> bool {
     #[cfg(not(unix))]
     {
         return false;
@@ -1120,7 +1122,8 @@ impl crate::standalone_watch::WatchScopeResolver for MiniScopeResolver {
     }
 }
 
-/// Slim sibling of [`router`] for a workspace-less terminal tenant.
+/// Slim sibling of [`router_with_extensions`] for a workspace-less terminal
+/// tenant.
 ///
 /// Mounts ONLY the routes a terminal-only SPA needs: the terminal PTY
 /// surface (ws + CRUD + restart), the per-window session blob, the
@@ -1128,7 +1131,8 @@ impl crate::standalone_watch::WatchScopeResolver for MiniScopeResolver {
 /// fallback. No file / graph / index / drafts / contacts / inspector /
 /// settings route is present (they all require a live workspace), so a stray
 /// workspace-content request 404s. Auth + serve_static are layered identically to
-/// [`router`] so `/api/*` stays tokened -- a PTY is shell access.
+/// [`router_with_extensions`] so `/api/*` stays tokened -- a PTY is shell
+/// access.
 fn terminal_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/terminal/ws", get(api_terminal_ws))
@@ -1388,17 +1392,17 @@ pub fn install_launcher_root_fallback(
 /// client the gateway did not state.
 #[derive(Clone)]
 pub(crate) struct TunnelOrigin {
-    pub caller: chan_tunnel_proto::gateway_assertion::Claims,
+    pub(crate) caller: chan_tunnel_proto::gateway_assertion::Claims,
 }
 
 impl TunnelOrigin {
-    pub fn owner(&self) -> bool {
+    pub(crate) fn owner(&self) -> bool {
         self.caller.is_owner()
     }
 
     /// The owner, on a session minted for the desktop app. A client the
     /// gateway did not state is never the desktop.
-    pub fn owner_desktop(&self) -> bool {
+    pub(crate) fn owner_desktop(&self) -> bool {
         self.caller.is_owner_desktop()
     }
 }
@@ -1656,7 +1660,7 @@ pub async fn serve(
     // (when --timeout is set) and SIGINT/SIGTERM. axum's
     // with_graceful_shutdown awaits a `changed()` on it, then stops
     // accepting new connections and drains in-flight ones. The
-    // channel itself was created inside build_app so AppState (for
+    // channel itself is created inside build_tenant_app so AppState (for
     // ws_pump and other long-lived handlers) shares the same signal.
     let signal_tx = artifacts.shutdown_tx.clone();
 
@@ -1685,7 +1689,7 @@ pub async fn serve(
     let serve_result = graceful_serve(listener, app, signal_tx).await;
     artifacts.tasks.shutdown().await;
     extension_runtime.shutdown().await;
-    serve_result.map_err(Error::Io)?;
+    serve_result?;
     Ok(())
 }
 
@@ -1964,9 +1968,6 @@ fn router_with_extensions(
         ))
         .with_state(state)
 }
-
-// `sanitize_prefix` + `ServeHandle::launch_url` tests live in chan-library
-// (`serve_config`) alongside the moved types.
 
 #[cfg(test)]
 mod bulk_transfer_construction_tests {
