@@ -6098,8 +6098,9 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 });
             };
         // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
-        // window in addition to reopening a hidden one. The local library's own
-        // window set is the source of truth. A
+        // window in addition to reopening a hidden one. The embedded library's
+        // assembled window records are the source of truth: the local rows
+        // plus each connected devserver's rows merged in from its feed. A
         // row counts as open when its native webview is alive AND visible: a
         // buried window's webview is alive but hidden, so it shows under Hidden,
         // not here. Appended first, the open windows head the dynamic tail.
