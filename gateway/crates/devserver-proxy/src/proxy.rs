@@ -628,8 +628,7 @@ fn bind_extension_link(
         return not_found_response(req.headers());
     }
     for (devserver_id, entry) in candidates {
-        let Gate::Pass { record } = resolve_gate(state, req, &devserver_id, entry.owner_id, aud)
-        else {
+        let Some(record) = resolve_gate(state, req, &devserver_id, entry.owner_id, aud) else {
             continue;
         };
         let target = ExtensionTarget {
