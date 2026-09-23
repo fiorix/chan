@@ -503,7 +503,9 @@ pub struct WorkspaceHost {
     /// Transient lifecycle overlay keyed by canonical workspace root. The
     /// `workspaces` map is the running source of truth; this records in-flight
     /// operations, retryable failures and root health that it cannot express.
-    mount_state: Mutex<HashMap<PathBuf, MountState>>,
+    /// Shared with the removal's unregister hop, which clears its row on the
+    /// pool so the clear cannot be separated from the unregister.
+    mount_state: Arc<Mutex<HashMap<PathBuf, MountState>>>,
 }
 
 /// The transient lifecycle of a workspace root that the `workspaces` map (the
@@ -669,21 +671,52 @@ struct WorkspaceRemoveGuard<'a> {
     host: &'a WorkspaceHost,
     key: PathBuf,
     error: Option<String>,
+    /// Set by the unregister hop, under the mount-state lock, once the
+    /// workspace is unregistered and its row cleared.
+    unregistered: Arc<std::sync::atomic::AtomicBool>,
     armed: bool,
+}
+
+impl WorkspaceRemoveGuard<'_> {
+    fn new(host: &WorkspaceHost, key: PathBuf) -> WorkspaceRemoveGuard<'_> {
+        WorkspaceRemoveGuard {
+            host,
+            key,
+            error: None,
+            unregistered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            armed: true,
+        }
+    }
 }
 
 impl Drop for WorkspaceRemoveGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let reason = self.error.take().unwrap_or_else(|| {
-                if std::thread::panicking() {
-                    "workspace removal panicked; retry".into()
-                } else {
-                    "workspace removal cancelled; retry".into()
-                }
-            });
-            self.host.mark_mount_error_by_key(&self.key, reason);
+        if !self.armed {
+            return;
         }
+        let reason = self.error.take().unwrap_or_else(|| {
+            if std::thread::panicking() {
+                "workspace removal panicked; retry".into()
+            } else {
+                "workspace removal cancelled; retry".into()
+            }
+        });
+        {
+            let mut state = self
+                .host
+                .mount_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // A caller dropped during the unregister hop leaves the hop
+            // running. Once it has unregistered the workspace and cleared the
+            // row, an error row would name a workspace the launcher can no
+            // longer list or retry, so the removal stands as completed.
+            if self.unregistered.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            state.insert(self.key.clone(), MountState::Error(reason));
+        }
+        self.host.notify_window_change();
     }
 }
 
@@ -748,7 +781,7 @@ impl WorkspaceHost {
             local_theme_notify: Arc::new(Notify::new()),
             root_fallback: OnceLock::new(),
             tunnels: chan_revtunnel::server::TunnelRegistry::new(),
-            mount_state: Mutex::new(HashMap::new()),
+            mount_state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2801,9 +2834,10 @@ impl WorkspaceHost {
     /// writes beside it touch the disk too; on a slow or cloud-synced root
     /// they must stall a pool thread, never the runtime worker every tenant
     /// shares, the way `Library::open_workspace` runs for a mount. The
-    /// closure takes no host guard, and the caller holds only the
-    /// asynchronous registration mutex across the hop, so it adds no edge to
-    /// the lock order.
+    /// caller holds only the asynchronous registration mutex across the hop.
+    /// A closure takes no host guard, except the removal's unregister, which
+    /// takes the mount-state mutex alone after the registry call returns, so
+    /// no hop adds an edge to the lock order.
     async fn off_runtime<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,
@@ -2912,8 +2946,9 @@ impl WorkspaceHost {
         }
     }
 
-    /// Remove the workspace at `root`: unmount it if mounted, UNREGISTER it from
-    /// the host library, then forget it from the on/off overlay. The
+    /// Remove the workspace at `root`: unmount it if mounted, forget it from the
+    /// on/off overlay and purge its window records, then UNREGISTER it from the
+    /// host library. The
     /// over-the-control-socket equivalent of the launcher's `DELETE
     /// /api/library/workspaces/{id}` (`handle_remove_workspace`), so `chan close
     /// --remove` / `chan workspace forget` of a workspace this host serves removes
@@ -2941,16 +2976,32 @@ impl WorkspaceHost {
             WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
         }
 
-        let mut removing = WorkspaceRemoveGuard {
-            host: self,
-            key: target.clone(),
-            error: None,
-            armed: true,
-        };
+        let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
         self.mark_mount_removing_by_key(&target);
+        // The bookkeeping keyed by the workspace runs before the unregister,
+        // so a caller that gives up at any await leaves either a registered
+        // workspace with a retryable row or a finished removal. Both steps are
+        // idempotent, so a retry repeats them harmlessly.
+        //
+        // Forget the on/off state so a devserver restart doesn't re-mount it.
+        if let Some(overlay) = self.workspace_overlay() {
+            overlay.forget(&target.to_string_lossy());
+        }
+        // FORGET is the ONLY path that purges the window records: the workspace is
+        // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
+        // and leaves the records -- filtered from the live feed until ON restores
+        // them.) A no-op when the workspace had no windows.
+        self.discard_workspace_windows(&target).await;
+        // The hop runs to its end even when the caller is dropped during it,
+        // so it clears the row itself: no await separates the unregister from
+        // the last of its bookkeeping.
         let removed = {
             let library = self.library.clone();
             let root = root.to_path_buf();
+            let key = target.clone();
+            let mount_state = Arc::clone(&self.mount_state);
+            let changed = Arc::clone(&self.library_change_notify);
+            let unregistered = Arc::clone(&removing.unregistered);
             #[cfg(test)]
             let probe = self.removal_hop_probe.lock().unwrap().clone();
             match self
@@ -2959,7 +3010,14 @@ impl WorkspaceHost {
                     if let Some(probe) = probe {
                         probe(RemovalHop::Unregister);
                     }
-                    library.unregister_workspace(&root)
+                    let removed = library.unregister_workspace(&root)?;
+                    {
+                        let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
+                        state.remove(&key);
+                        unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    changed.notify_waiters();
+                    Ok::<_, ChanError>(removed)
                 })
                 .await
             {
@@ -2975,17 +3033,6 @@ impl WorkspaceHost {
                 }
             }
         };
-        // Forget the on/off state so a devserver restart doesn't re-mount it.
-        if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget(&target.to_string_lossy());
-        }
-        // FORGET is the ONLY path that purges the window records: the workspace is
-        // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
-        // and leaves the records -- filtered from the live feed until ON restores
-        // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(&target).await;
-        self.clear_mount_state_by_key(&target);
-        self.notify_window_change();
         removing.armed = false;
         if removed {
             Ok(WorkspaceLifecycleOutcome::Completed)
@@ -5177,12 +5224,7 @@ mod tests {
                 let notify = host.library_change_notify();
                 let changed = notify.notified();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _removing = WorkspaceRemoveGuard {
-                        host: &host,
-                        key: canonical_key(root.path()),
-                        error: None,
-                        armed: true,
-                    };
+                    let _removing = WorkspaceRemoveGuard::new(&host, canonical_key(root.path()));
                     if panicking {
                         panic!("injected removal panic");
                     }
