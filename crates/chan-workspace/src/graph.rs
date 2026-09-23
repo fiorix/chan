@@ -607,6 +607,33 @@ impl GraphView {
             )?;
             tx.commit()?;
         }
+        if v < 8 {
+            // v8: `no_index_entry` on nodes and text_files. A row records
+            // the stat its content was seen at; this flag records that the
+            // content puts nothing in the search index (no chunks, or bytes
+            // that do not decode as UTF-8), so reconcile can tell that from
+            // an index entry that went missing without reading the file on
+            // every pass. Rows from before the column, like the rows a full
+            // rebuild writes, default to unset and are read once when the
+            // index lacks them.
+            //
+            // Same idempotent-ALTER pattern as v5 / v6: a crash before
+            // commit leaves user_version = 7 with the ALTERs safe to re-run
+            // on the next open.
+            let tx = conn.unchecked_transaction()?;
+            if !Self::column_exists(&tx, "nodes", "no_index_entry")? {
+                tx.execute_batch(
+                    "ALTER TABLE nodes ADD COLUMN no_index_entry INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            if !Self::column_exists(&tx, "text_files", "no_index_entry")? {
+                tx.execute_batch(
+                    "ALTER TABLE text_files ADD COLUMN no_index_entry INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+            tx.execute_batch("PRAGMA user_version = 8;")?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -919,7 +946,10 @@ impl GraphView {
     }
 
     /// Stamp a non-Markdown text file without making it a graph document.
-    /// Inbound edges belong to their source notes and remain intact.
+    /// Inbound edges belong to their source notes and remain intact. The
+    /// replaced row starts with `no_index_entry` unset, like a document row
+    /// written by `replace_file`: what the index holds for the new content
+    /// is known only once it is indexed.
     pub(crate) fn stamp_text_file(
         &self,
         rel: &str,
@@ -937,6 +967,41 @@ impl GraphView {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Record that the content behind `rel`'s row, document or text stamp,
+    /// puts nothing in the search index: it chunks to nothing, or its bytes
+    /// do not decode. Reconcile then knows the missing index entry is not
+    /// damage and does not read the file again at that stat.
+    pub(crate) fn mark_no_index_entry(&self, rel: &str) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE nodes SET no_index_entry = 1 WHERE rel_path = ?",
+            params![rel],
+        )?;
+        tx.execute(
+            "UPDATE text_files SET no_index_entry = 1 WHERE rel_path = ?",
+            params![rel],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Paths whose row carries the `mark_no_index_entry` mark, sorted.
+    pub(crate) fn paths_without_index_entry(&self) -> Result<Vec<String>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT rel_path FROM nodes WHERE no_index_entry = 1 \
+             UNION ALL SELECT rel_path FROM text_files WHERE no_index_entry = 1 \
+             ORDER BY rel_path",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Drop a file from the graph entirely. Edges with `rel` as
@@ -1723,7 +1788,7 @@ mod tests {
             .unwrap();
         }
         let g = GraphView::open(&db).unwrap();
-        assert_eq!(count(&g, "PRAGMA user_version"), 7);
+        assert_eq!(count(&g, "PRAGMA user_version"), 8);
         assert_eq!(g.files().unwrap(), ["source.md"]);
         assert_eq!(g.backlinks("notes.txt").unwrap().len(), 1);
         assert_eq!(count(&g, "SELECT COUNT(*) FROM text_files"), 0);
@@ -1742,11 +1807,61 @@ mod tests {
     }
 
     #[test]
+    fn migration_v8_adds_the_no_index_entry_mark_unset() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("graph.sqlite");
+        {
+            let g = GraphView::open(&db).unwrap();
+            let conn = g.writer.lock().unwrap();
+            conn.execute_batch(
+                "ALTER TABLE nodes DROP COLUMN no_index_entry;
+                ALTER TABLE text_files DROP COLUMN no_index_entry;
+                INSERT INTO nodes(rel_path, kind, mtime, size) VALUES ('source.md', 'file', 1, 20);
+                INSERT INTO text_files(rel_path, mtime, size) VALUES ('notes.txt', 2, 10);
+                PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+        let g = GraphView::open(&db).unwrap();
+        assert_eq!(count(&g, "PRAGMA user_version"), 8);
+        // Rows from before the column are treated like the rows a full
+        // rebuild writes: unmarked, so reconcile reads each once when the
+        // index lacks it.
+        assert!(g.paths_without_index_entry().unwrap().is_empty());
+        assert_eq!(g.files_with_stat().unwrap().len(), 2);
+
+        g.mark_no_index_entry("source.md").unwrap();
+        g.mark_no_index_entry("notes.txt").unwrap();
+        assert_eq!(
+            g.paths_without_index_entry().unwrap(),
+            ["notes.txt", "source.md"]
+        );
+
+        // A rewritten row's content is not known to be empty until it is
+        // indexed, so both writers leave the mark unset.
+        g.stamp_text_file("notes.txt", Some(3), Some(11)).unwrap();
+        assert_eq!(g.paths_without_index_entry().unwrap(), ["source.md"]);
+        g.replace_file(FileRecord {
+            rel: "source.md",
+            title: None,
+            mtime: Some(4),
+            size: Some(21),
+            node_kind: NodeKind::File,
+            outgoing: &[],
+            headings: &[],
+            emails: None,
+            aliases: None,
+        })
+        .unwrap();
+        assert!(g.paths_without_index_entry().unwrap().is_empty());
+    }
+
+    #[test]
     fn open_creates_schema() {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("graph.sqlite");
         let g = GraphView::open(&db).unwrap();
-        assert_eq!(count(&g, "PRAGMA user_version"), 7);
+        assert_eq!(count(&g, "PRAGMA user_version"), 8);
     }
 
     #[test]
@@ -2516,7 +2631,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
     }
 
     #[test]
@@ -2581,7 +2696,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
     }
 
     /// Stages a few files into the staging tables, verifies the

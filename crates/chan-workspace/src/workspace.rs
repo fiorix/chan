@@ -321,8 +321,10 @@ pub struct ReconcileReport {
     pub unchanged: usize,
     /// Files the pass could not read, so they appear in neither
     /// `upserted` nor `unchanged` and the counts do not add up to the
-    /// walk. A `.md` that is not valid UTF-8, a file the process
+    /// walk. A file that is not valid UTF-8, a file the process
     /// cannot open, or one removed between the walk and the index.
+    /// A `.txt` that does not decode is listed by the pass that
+    /// records it and counted as unchanged by later passes.
     /// Sorted by path; each one is also logged at warn with the
     /// underlying error.
     pub failed: Vec<String>,
@@ -3404,9 +3406,11 @@ impl Workspace {
     /// unreadable note leaves every file after it in the walk
     /// unindexed and re-parks the pass, and the driver then re-walks
     /// the whole tree and fails again with no cooldown. A failed read
-    /// also degrades this file's journal entry to a forget, so a file
-    /// that can never be read stops seeding a failing Replay pass on
-    /// every open.
+    /// also settles this file's journal entry: a non-Markdown text file
+    /// whose bytes do not decode is recorded as seen at its stat, and
+    /// any other failure degrades the entry to a forget, so a file that
+    /// can never be read stops seeding a failing Replay pass on every
+    /// open and a reconcile does not read it again on every pass.
     fn index_file_serial_or_source_error(&self, rel: &str) -> Result<Option<ChanError>> {
         if !fs_ops::is_indexable_text(rel) {
             return Ok(None);
@@ -3440,11 +3444,17 @@ impl Workspace {
             Err(error) => {
                 // The journal entry says "index this rel", and that
                 // can never succeed while the file reads back as
-                // garbage or not at all. Degrade it to a forget so
-                // graph and index agree the file is not indexed, and
-                // so the entry stops seeding a Replay pass that dies
-                // here on every open.
-                self.forget_file_serial(rel)?;
+                // garbage or not at all. Text that does not decode is
+                // recorded as seen, which is what keeps reconcile from
+                // reading it again on every pass. Anything else
+                // degrades to a forget so graph and index agree the
+                // file is not indexed, and so the entry stops seeding
+                // a Replay pass that dies here on every open.
+                let recorded = !fs_ops::is_markdown_file(rel)
+                    && self.record_undecodable_text_serial(rel, stat.as_ref())?;
+                if !recorded {
+                    self.forget_file_serial(rel)?;
+                }
                 return Ok(Some(error));
             }
         };
@@ -3453,6 +3463,36 @@ impl Workspace {
             self.journal_clear_one(rel)?;
         }
         result.map(|()| None)
+    }
+
+    /// Record a non-Markdown text file whose bytes do not decode as
+    /// UTF-8: a stat row at `stat`, marked as putting nothing in the
+    /// index, with any entry a decodable earlier version left in the
+    /// index dropped and the journal entry cleared. Reconcile then
+    /// treats the file as seen until it changes on disk. Returns false,
+    /// having recorded nothing, when the bytes cannot be read or do
+    /// decode: a file the process cannot open keeps the forget path,
+    /// because a chmod that fixes it does not change its stat.
+    ///
+    /// `read_text` folds the decode failure into an untyped I/O error,
+    /// so the bytes are read once more to tell the two apart. That
+    /// costs one extra bounded read on the pass that records the file.
+    fn record_undecodable_text_serial(&self, rel: &str, stat: Option<&FileStat>) -> Result<bool> {
+        let decodes = match self.read(rel) {
+            Ok(bytes) => std::str::from_utf8(&bytes).is_ok(),
+            Err(_) => return Ok(false),
+        };
+        if decodes {
+            return Ok(false);
+        }
+        let mtime = stat.and_then(|s| s.mtime);
+        let size = stat.map(|s| size_to_i64(s.size));
+        let graph = self.graph()?;
+        graph.stamp_text_file(rel, mtime, size)?;
+        graph.mark_no_index_entry(rel)?;
+        self.index()?.forget(rel)?;
+        self.journal_clear_one(rel)?;
+        Ok(true)
     }
 
     fn index_file_inner(&self, rel: &str, stat: Option<FileStat>, content: &str) -> Result<()> {
@@ -3501,7 +3541,13 @@ impl Workspace {
         let index = self.index()?;
         let guard_epoch = index.vectors_epoch();
         let include_vectors = self.semantic_enabled().unwrap_or(false);
-        index.index_one(rel, content, include_vectors, guard_epoch)?;
+        let chunks = index.index_one(rel, content, include_vectors, guard_epoch)?;
+        if chunks == 0 {
+            // The graph row says "seen at this stat" and nothing more.
+            // Without the mark, reconcile would read the file on every
+            // pass to learn that the index holds nothing for it.
+            self.graph()?.mark_no_index_entry(rel)?;
+        }
         Ok(())
     }
 
@@ -3777,20 +3823,26 @@ impl Workspace {
     ///     back to mtime-only; the first `index_file` after upgrade
     ///     backfills the size column.
     ///   - File on disk + matching `(mtime, size)` tuple -> skip, except
-    ///     a text file missing from the index is read to check whether the
-    ///     active chunker would emit entries within the incremental size ceiling.
-    ///     If so, `index_file` repairs it. Empty, whitespace-only and
-    ///     frontmatter-only text stays skipped.
+    ///     a text file missing from the index whose row does not say the
+    ///     index has nothing for it is read to check whether the active
+    ///     chunker would emit entries within the incremental size ceiling.
+    ///     If so, `index_file` repairs it; if not, the row is marked and
+    ///     no later pass reads the file at that stat. Empty,
+    ///     whitespace-only and frontmatter-only text stays skipped.
     ///     A failed repair probe is left for a later pass.
     ///   - Graph document, text stamp or index-only path missed by the walk ->
     ///     `forget_file` only if current policy excludes it or capability-relative
     ///     metadata confirms NotFound. Other outcomes retain the derived data.
-    ///   - File on disk that needs indexing but cannot be read (not valid UTF-8,
-    ///     unreadable, or removed between the walk and the read) ->
-    ///     dropped from both backends, logged at warn, and listed in
-    ///     `ReconcileReport::failed`. The pass carries on, the way
-    ///     `rebuild_graph` already does for the same failures; a
-    ///     failure of the graph or the index itself still aborts it.
+    ///   - File on disk that needs indexing but cannot be read -> logged at
+    ///     warn and listed in `ReconcileReport::failed`. A non-Markdown text
+    ///     file whose bytes do not decode is recorded as seen at its stat
+    ///     with nothing in the index, so later passes count it unchanged
+    ///     until it changes on disk. A Markdown file, or a file that cannot
+    ///     be opened or was removed between the walk and the read, is
+    ///     dropped from both backends and tried again on the next pass.
+    ///     The pass carries on, the way `rebuild_graph` already does for
+    ///     the same failures; a failure of the graph or the index itself
+    ///     still aborts it.
     ///
     /// Each emitted op runs through the journal-bracketed public
     /// API, so a crash during reconcile leaves a recoverable
@@ -3822,6 +3874,15 @@ impl Workspace {
         let index = self.index()?;
         let indexed_paths: std::collections::HashSet<String> =
             index.known_paths()?.into_iter().collect();
+        // Rows whose content puts nothing in the index at the stamped
+        // stat: no chunks, or bytes that do not decode. The repair probe
+        // below skips them, so a file the index legitimately lacks is
+        // read once, not on every pass.
+        let nothing_indexed: std::collections::HashSet<String> = self
+            .graph()?
+            .paths_without_index_entry()?
+            .into_iter()
+            .collect();
         let chunking = index.config().chunking;
         // Index-only paths include orphaned text entries without a stat row.
         let known_paths: std::collections::HashSet<String> = graph_snapshot
@@ -3878,17 +3939,23 @@ impl Workspace {
             if !needs_index
                 && !fs_ops::is_markdown_file(rel)
                 && !indexed_paths.contains(rel)
+                && !nothing_indexed.contains(rel)
                 && disk_size.is_none_or(|size| (1..=size_to_i64(TEXT_WRITE_LIMIT)).contains(&size))
             {
-                // A rebuild can stamp text before its index read fails. A matching
-                // stamp then needs repair unless the content legitimately has no
-                // chunks. Respect the incremental indexer's existing size ceiling.
+                // A rebuild stamps text before the search build reads it, and
+                // that read can fail, so a matching stamp with no index entry
+                // is read once: content with chunks is indexed again, content
+                // without is marked so no later pass reads it. Respect the
+                // incremental indexer's existing size ceiling.
                 #[cfg(test)]
                 derived_state_read_probe(self, rel);
                 match self.read_text(rel) {
                     Ok(content) => {
                         needs_index =
                             !crate::index::chunking::chunk(&content, &chunking).is_empty();
+                        if !needs_index {
+                            self.graph()?.mark_no_index_entry(rel)?;
+                        }
                     }
                     Err(error) => {
                         tracing::debug!(
