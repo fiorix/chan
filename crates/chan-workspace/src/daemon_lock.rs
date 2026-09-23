@@ -150,13 +150,28 @@ impl DaemonLock {
     }
 }
 
+// Test-only hook run between `DaemonLock::drop`'s two release steps, where a
+// contender in another process could act.
+#[cfg(test)]
+thread_local! {
+    static RELEASE_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl Drop for DaemonLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-        // Clean exit: drop the pidfile so the next acquire fast-paths. The lock
-        // anchor file is left in place (an empty flock target the next acquire
-        // reuses), matching WorkspaceLock leaving its file.
+        // Clean exit: drop the pidfile so the next acquire fast-paths, and do
+        // it while the lock is still held. Released first, a contender could
+        // take the lock and write its own record before this removal, which
+        // would then delete the new daemon's record. The lock anchor file is
+        // left in place (an empty flock target the next acquire reuses),
+        // matching WorkspaceLock leaving its file.
         let _ = std::fs::remove_file(&self.record_path);
+        #[cfg(test)]
+        if let Some(hook) = RELEASE_SEAM.with(|seam| seam.borrow_mut().take()) {
+            hook();
+        }
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -318,6 +333,46 @@ mod tests {
             tmp.path().join("daemon.lock"),
             tmp.path().join("daemon.json"),
         )
+    }
+
+    // A contender that tries the lock while a daemon is releasing it either
+    // wins and keeps the record it wrote, or is refused and finds none: the
+    // release never deletes a record written by the next daemon.
+    #[test]
+    fn release_never_deletes_the_next_daemons_record() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, record) = paths(&tmp);
+        let guard = match DaemonLock::acquire(&lock, &record, "127.0.0.1:8787", false).unwrap() {
+            DaemonAcquire::Daemon(g) => g,
+            DaemonAcquire::Running(_) => panic!("a free lock must be acquired"),
+        };
+        let contender = std::rc::Rc::new(std::cell::RefCell::new(None));
+        {
+            let contender = contender.clone();
+            let (lock, record) = (lock.clone(), record.clone());
+            RELEASE_SEAM.with(|seam| {
+                *seam.borrow_mut() = Some(Box::new(move || {
+                    *contender.borrow_mut() =
+                        Some(DaemonLock::acquire(&lock, &record, "127.0.0.1:9999", false));
+                }));
+            });
+        }
+
+        drop(guard);
+
+        let outcome = contender.borrow_mut().take().expect("the seam ran");
+        match outcome {
+            Ok(DaemonAcquire::Daemon(next)) => {
+                let written = read_daemon_record(&record);
+                assert_eq!(
+                    written.map(|r| r.addr),
+                    Some("127.0.0.1:9999".to_string()),
+                    "the old daemon's release deleted the new daemon's record"
+                );
+                drop(next);
+            }
+            _ => assert!(read_daemon_record(&record).is_none()),
+        }
     }
 
     #[test]
