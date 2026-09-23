@@ -1234,6 +1234,73 @@ mod tests {
             .expect("PONG");
     }
 
+    /// Ending an admitted tunnel (here by eviction) closes its stream,
+    /// and the h2 driver that carried it has nothing left to drive: it
+    /// must release the connection rather than poll it until the peer
+    /// closes, since a peer that holds the TCP open would otherwise keep
+    /// the task and its socket for as long as it liked.
+    #[tokio::test]
+    async fn an_ended_tunnel_releases_the_held_connection() {
+        let registry = Registry::new();
+        let mut held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::Admit)),
+            Arc::new(AllowAllAdmission),
+            registry.clone(),
+        )
+        .await;
+        assert_eq!(held.status, StatusCode::OK);
+        let tunnel = held.tunnel.take().expect("an admitted dial gets its 200");
+        // The peer keeps every handle it holds and never polls its yamux
+        // connection: nothing on its side ends the stream or the TCP.
+        let (_registration, _yamux) = tokio::time::timeout(
+            Duration::from_secs(5),
+            chan_tunnel_client::handshake(&client_config(), tunnel),
+        )
+        .await
+        .expect("no HelloAck")
+        .expect("admitted handshake");
+        let mut registered = false;
+        for _ in 0..100 {
+            if registry.get("alice", "ds-1").is_some() {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(registered, "the admitted tunnel never registered");
+
+        assert!(
+            registry.evict("alice", "ds-1"),
+            "the eviction found no tunnel to end",
+        );
+        let ended_at = tokio::time::Instant::now();
+        let handler = tokio::time::timeout(Duration::from_secs(5), &mut held.serving)
+            .await
+            .expect("the handler did not return after the eviction")
+            .expect("handler task");
+        assert!(
+            handler.is_ok(),
+            "the handler reported an error: {handler:?}"
+        );
+        let closed = tokio::time::timeout(CLOSE_WINDOW, &mut held.connection)
+            .await
+            .is_ok();
+        if !closed {
+            let pong =
+                tokio::time::timeout(Duration::from_secs(2), held.ping_pong.ping(Ping::opaque()))
+                    .await;
+            panic!(
+                "the tunnel ended, and {CLOSE_WINDOW:?} later the server still holds its \
+                 connection open (PING answered: {})",
+                matches!(pong, Ok(Ok(_))),
+            );
+        }
+        println!(
+            "the server released the ended tunnel's connection {:?} after the eviction",
+            ended_at.elapsed()
+        );
+    }
+
     /// `accept(2)` fails for reasons that say nothing about the listening
     /// socket: a peer that reset before it was accepted, or a process
     /// out of descriptors under exactly the flood this listener exists to
