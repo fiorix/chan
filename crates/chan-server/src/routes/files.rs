@@ -4815,6 +4815,38 @@ mod write_tests {
         }
     }
 
+    /// The workspace text stream has the standalone stream's shape: a
+    /// blocking producer, an eight-slot channel, a client that may stop
+    /// reading. Sixteen chunks outrun the channel; with the response
+    /// unpolled the producer must give up within the stall bound.
+    #[test]
+    fn unread_workspace_text_stream_frees_its_pool_thread() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(
+            root.path().join("big.md"),
+            "x".repeat(chan_workspace::TEXT_READ_CHUNK_SIZE * 16),
+        )
+        .unwrap();
+        let mut frames = 0;
+        stream_read_file_sync(&workspace, "big.md", |_| {
+            frames += 1;
+            true
+        })
+        .unwrap();
+        assert!(
+            frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            "the producer must outrun the channel, got {frames} frames"
+        );
+        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+            "workspace text stream",
+            || stream_read_file_response(workspace, "big.md".into()),
+        );
+        assert!(
+            body.is_err(),
+            "an abandoned stream must fail its body rather than end short"
+        );
+    }
+
     #[test]
     fn send_reader_into_forwards_a_read_error_instead_of_ending_the_stream() {
         // The shrink path at the seam: the error must arrive as an item, not
