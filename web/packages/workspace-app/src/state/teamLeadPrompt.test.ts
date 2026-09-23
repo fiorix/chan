@@ -13,7 +13,8 @@ describe("identity prompt content", () => {
     "@@Neo",
     "@@Lead",
     ["@@Worker1", "@@Worker2"],
-    "new-team-1/bootstrap.md",
+    "/ws",
+    "new-team-1",
   );
 
   test("opens with the Team work header", () => {
@@ -35,9 +36,20 @@ describe("identity prompt content", () => {
     expect(prompt).not.toContain("\\$CHAN_TAB_NAME");
   });
 
-  test("points the lead at the bootstrap doc", () => {
+  test("points the lead at the bootstrap doc by its absolute path", () => {
+    // bootstrap.md keeps workspace-relative paths (it is a persisted,
+    // shareable workspace file), so the poke has to say where it is and
+    // what those paths resolve against; a bare `new-team-1/bootstrap.md`
+    // gives an agent nothing to anchor on, and the team directory is
+    // commonly gitignored so a search for it finds nothing.
     expect(prompt).toContain(
-      "Read the team process at new-team-1/bootstrap.md",
+      "Read the team process at /ws/new-team-1/bootstrap.md before you start.",
+    );
+  });
+
+  test("names the root the document's relative paths resolve against", () => {
+    expect(prompt).toContain(
+      "Relative paths in that document resolve against /ws.",
     );
   });
 });

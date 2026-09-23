@@ -347,13 +347,14 @@ describe("translateConfig <-> wireToDialog round-trips real estate", () => {
 });
 
 describe("identityPrompt", () => {
-  test("renders the # Team work prompt with size / host / lead + worker bullets + bootstrap line", () => {
+  test("renders the # Team work prompt with size / host / lead + worker bullets + bootstrap lines", () => {
     const out = identityPrompt(
       3,
       "@@Neo",
       "@@Lead",
       ["@@Worker1", "@@Worker2"],
-      "new-team-1/bootstrap.md",
+      "/ws",
+      "new-team-1",
     );
     expect(out).toBe(
       "# Team work\n" +
@@ -362,18 +363,35 @@ describe("identityPrompt", () => {
         "the rest of the team:\n" +
         "- @@Worker1\n" +
         "- @@Worker2\n" +
-        "Read the team process at new-team-1/bootstrap.md before you start.",
+        "Read the team process at /ws/new-team-1/bootstrap.md before you start.\n" +
+        "Relative paths in that document resolve against /ws.",
     );
   });
 
   test("does NOT escape $CHAN_TAB_NAME (agents read it as a live env-var)", () => {
-    const out = identityPrompt(2, "@@Neo", "@@Lead", ["@@Worker1"], "t/bootstrap.md");
+    const out = identityPrompt(2, "@@Neo", "@@Lead", ["@@Worker1"], "/ws", "t");
     expect(out).toContain("$CHAN_TAB_NAME");
     expect(out).not.toContain("\\$CHAN_TAB_NAME");
   });
 
   test("solo lead (no workers) renders a placeholder bullet", () => {
-    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "t/bootstrap.md");
+    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "/ws", "t");
     expect(out).toContain("- (no other agents)");
+  });
+
+  test("joins the root and the team dir with one separator", () => {
+    // A root or team dir spelled with trailing slashes still joins cleanly,
+    // and the root the prompt names is the trimmed spelling.
+    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "/ws/", "teams/alpha/");
+    expect(out).toContain(
+      "Read the team process at /ws/teams/alpha/bootstrap.md before you start.",
+    );
+    expect(out).toContain("Relative paths in that document resolve against /ws.");
+  });
+
+  test("a bare filesystem root keeps its one separator", () => {
+    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "/", "t");
+    expect(out).toContain("Read the team process at /t/bootstrap.md before you start.");
+    expect(out).toContain("Relative paths in that document resolve against /.");
   });
 });
