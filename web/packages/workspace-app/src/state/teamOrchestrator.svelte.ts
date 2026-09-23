@@ -238,11 +238,13 @@ function promptRoot(root: string): string {
 
 /// `{root}/{teamDir}/bootstrap.md` with one separator however the two
 /// are spelled: the same `/` join the rest of the SPA uses to show a
-/// workspace-relative path under `WorkspaceInfo.root`.
+/// workspace-relative path under `WorkspaceInfo.root`. The team dir is
+/// trimmed first because the server trims it before it creates the
+/// directory, and the poke has to name the directory that exists.
 function absoluteBootstrapPath(root: string, teamDir: string): string {
   const anchor = promptRoot(root);
   const joiner = /[/\\]$/.test(anchor) ? "" : "/";
-  const dir = teamDir.replace(/^\/+|\/+$/g, "");
+  const dir = teamDir.trim().replace(/^\/+|\/+$/g, "");
   return `${anchor}${joiner}${dir}/bootstrap.md`;
 }
 
