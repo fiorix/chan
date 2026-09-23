@@ -572,7 +572,9 @@ fn build_schema() -> Schema {
     let mut sb = SchemaBuilder::default();
     // STRING (single-token, exact-match) is what we need for delete-
     // by-path. INDEXED gives us the term lookup; STORED so we can
-    // return it in hits; FAST in case we want to facet by file later.
+    // return it in hits. FAST, and INDEXED on start_line and depth,
+    // are part of the on-disk schema; dropping them waits for a
+    // format-version bump.
     sb.add_text_field("path", STRING | STORED | FAST);
     sb.add_text_field("chunk_id", STRING | STORED);
     sb.add_text_field("heading", TEXT | STORED);
@@ -762,8 +764,7 @@ mod tests {
     fn mention_query_matches_handle_word() {
         // BM25 strips the leading @@, so a query typed as "@@Alice"
         // must still find the note mentioning @@Alice (indexed as the
-        // bare term "alice"). Before the subtoken split this returned
-        // nothing because the regex carried the literal @@.
+        // bare term "alice").
         let (_tmp, idx) = fresh();
         idx.index_file(
             "team/roster.md",
