@@ -73,3 +73,20 @@ try {
 } finally {
   Pop-Location
 }
+
+# CodeSignTool logs a failed sign (a TLS handshake it cannot complete, for
+# one) and still exits 0, so its exit code does not say whether the file was
+# signed. Read the signature back for every PE input instead.
+$extension = [System.IO.Path]::GetExtension($resolvedInput).ToLowerInvariant()
+if ($extension -in @(".exe", ".dll", ".msi")) {
+  $signature = Get-AuthenticodeSignature -LiteralPath $resolvedInput
+  if ($signature.Status -ne "Valid") {
+    throw "CodeSignTool exited 0 but $resolvedInput is not signed: Authenticode status $($signature.Status)"
+  }
+  Write-Host "Authenticode signature verified: $resolvedInput ($($signature.Status), $($signature.SignerCertificate.Subject))"
+} else {
+  # tauri's NSIS bundler also passes its nst*.tmp uninstaller stub through
+  # the signCommand; CodeSignTool refuses it as "Unsupported file format" and
+  # there is no Authenticode signature to read back.
+  Write-Host "Authenticode check skipped for '$extension' input (not a PE file CodeSignTool signs): $resolvedInput"
+}
