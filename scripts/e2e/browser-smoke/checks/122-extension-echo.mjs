@@ -155,9 +155,10 @@ export default {
       if (echoed !== "hello extensions") throw new Error(`unexpected echo output: ${echoed}`);
 
       // Cross-origin browsing-context key events do not bubble to Chan. The
-      // v1 bridge must preserve shell shortcuts while the extension input owns
-      // focus, including a browser-reserved chord that must be prevented in
-      // the child before relaying.
+      // v2 relay must preserve shell shortcuts while the extension input owns
+      // focus: the child matches the chords Chan advertised by key token,
+      // prevents a match (including a browser-reserved chord) and relays its
+      // raw fields, and Chan resolves and dispatches the event itself.
       await frame.click("#echo-input");
       await pressChord(page, ["Control", "Alt"], "KeyK");
       await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { visible: true, timeout: 10_000 });
