@@ -858,9 +858,10 @@ def check_gateway_trigger_contract() -> None:
     so a change to any of them that its filter does not select reaches
     neither. Both event filters must select every file of every crate in
     that closure and the root Cargo.toml; a few file paths stand in for a
-    directory, since a filter is a pattern list. The two filters are one
-    list on purpose, and everything ci.yml ignores must be selected here, so
-    that no change escapes both gates.
+    directory, since a filter is a pattern list, and build.rs is one of
+    them so a list that selects only a crate's manifest and src/ fails.
+    The two filters are one list on purpose, and everything ci.yml ignores
+    must be selected here, so that no change escapes both gates.
     """
     path = ".github/workflows/gateway-ci.yml"
     triggers = workflow_triggers(read(path), path)
@@ -885,7 +886,7 @@ def check_gateway_trigger_contract() -> None:
         )
     }
     for crate_dir, edge in sorted(crates.items()):
-        for sample in ("Cargo.toml", "src/lib.rs", "src/deep/nested.rs"):
+        for sample in ("Cargo.toml", "build.rs", "src/lib.rs", "src/deep/nested.rs"):
             samples[f"{crate_dir}/{sample}"] = f"{crate_dir} is reached from {edge}"
     for event, patterns in lists.items():
         for sample, reason in samples.items():
