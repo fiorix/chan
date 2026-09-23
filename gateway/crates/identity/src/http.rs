@@ -1423,7 +1423,7 @@ async fn devservers_incoming(
 /// Shape-only validator; profile re-checks. 1-64 chars, lowercase
 /// ascii alnum + `[._-]`, with `.` / `..` / leading-dot rejected to
 /// match the canonical rule in profile-service. Share landings use it
-/// for the owner handle path segment.
+/// for the workspace/tenant path segment.
 fn is_workspace_name_shape(s: &str) -> bool {
     let len = s.len();
     if !(1..=64).contains(&len) {

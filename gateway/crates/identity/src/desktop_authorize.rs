@@ -86,9 +86,9 @@
 //!     depth and proves the user passed through the rendered consent
 //!     page rather than POSTing directly.
 //!   * The audit row for the resulting PAT is `created_via_desktop`
-//!     (not `created`), and each redemption writes a `desktop.redeem`
-//!     row, so operators and users can tell the desktop flow apart
-//!     from SPA mints and see when the code was cashed in.
+//!     (not `created`). Redemption attempts a `desktop.redeem` audit;
+//!     audit failure warns without stranding the consumed code. These
+//!     actions distinguish desktop credential creation and delivery.
 //!   * The redeem route has no session auth: the credential is
 //!     possession of the one-time code AND knowledge of the verifier
 //!     whose S256 hash keys the stored challenge (TLS assumed). This
