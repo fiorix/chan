@@ -2267,6 +2267,76 @@ mod tests {
         assert_eq!(types.last().map(String::as_str), Some("done"));
     }
 
+    /// The graph stream batches nodes 128 to a frame, so a workspace whose
+    /// graph holds more than a thousand nodes outruns the channel; with the
+    /// response unpolled the producer must give up within the stall bound.
+    #[test]
+    fn unread_graph_stream_frees_its_pool_thread() {
+        let (_cfg, root, workspace) = open_workspace();
+        let tags: Vec<String> = (0..1200).map(|i| format!("#t{i}")).collect();
+        put(
+            root.path(),
+            "notes/tags.md",
+            format!("# Tags\n\n{}\n", tags.join(" ")).as_bytes(),
+        );
+        workspace.index_file("notes/tags.md").unwrap();
+        let params = || GraphParams {
+            scope: GraphScope::Workspace,
+            path: String::new(),
+            depth: 2,
+        };
+        let mut frames = 0;
+        stream_graph_sync(workspace.clone(), params(), |_| {
+            frames += 1;
+            true
+        })
+        .unwrap();
+        assert!(
+            frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            "the producer must outrun the channel, got {frames} frames"
+        );
+        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+            "graph stream",
+            || stream_graph_response(workspace, params()),
+        );
+        assert!(
+            body.is_err(),
+            "an abandoned stream must fail its body rather than end short"
+        );
+    }
+
+    /// The backlinks stream sends one frame per linking note, so a dozen
+    /// notes pointing at one target outrun the channel.
+    #[test]
+    fn unread_backlinks_stream_frees_its_pool_thread() {
+        let (_cfg, root, workspace) = open_workspace();
+        put(root.path(), "notes/target.md", b"# Target\n");
+        workspace.index_file("notes/target.md").unwrap();
+        for i in 0..12 {
+            let path = format!("notes/from-{i}.md");
+            put(root.path(), &path, b"[[notes/target.md]]\n");
+            workspace.index_file(&path).unwrap();
+        }
+        let mut frames = 0;
+        stream_backlinks_sync(&workspace, "notes/target.md", |_| {
+            frames += 1;
+            true
+        })
+        .unwrap();
+        assert!(
+            frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            "the producer must outrun the channel, got {frames} frames"
+        );
+        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+            "backlinks stream",
+            || stream_backlinks_response(workspace, "notes/target.md".into()),
+        );
+        assert!(
+            body.is_err(),
+            "an abandoned stream must fail its body rather than end short"
+        );
+    }
+
     #[test]
     fn workspace_disk_files_includes_non_markdown_targets() {
         // The link resolver in `api_graph` walks the workspace once via
