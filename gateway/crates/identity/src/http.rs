@@ -1862,10 +1862,9 @@ async fn desktop_devserver_entry(
         .api_tokens
         .validate(token, &request_meta(&headers))
         .await?;
-    // Either desktop scope opens the entry mint: legacy per-devserver
-    // PATs carry desktop.connect, account-mode PATs desktop.account.
-    // Authorization for the TARGET stays per-devserver either way
-    // (the profile devserver_access check below).
+    // Either desktop.connect or desktop.account opens the entry mint.
+    // The profile access check authorizes the selected devserver for
+    // the caller regardless of the PAT's scope.
     if !validated
         .scopes
         .iter()

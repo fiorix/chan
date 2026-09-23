@@ -156,8 +156,7 @@ const KEY_DESKTOP_CSRF: &str = "desktop_authorize_csrf";
 /// the scheme `http`, and the port free; only the path is fixed here.
 const LOOPBACK_CALLBACK_PATH: &str = "/auth/callback";
 
-/// 90 days. Matches what the spec example sends (30d) with headroom
-/// for future longer-lived desktop sessions. The clamp prevents a
+/// Ninety-day ceiling on desktop credentials. The clamp prevents a
 /// hostile or buggy desktop build from issuing year-long credentials.
 const MAX_EXPIRES_IN_SECS: i64 = 90 * 86_400;
 
@@ -432,10 +431,8 @@ fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
     if scopes.iter().any(|s| s == DESKTOP_ACCOUNT_SCOPE) && scopes.len() > 1 {
         return Err(Error::BadRequest("invalid scopes".into()));
     }
-    // Clamp instead of reject: the spec note says "Cap expires_in to
-    // whatever your policy max is. Don't trust the client." Clamping
-    // keeps an over-eager desktop build working at the policy ceiling
-    // instead of failing outright.
+    // Clamping keeps an over-eager desktop build working at the policy
+    // ceiling instead of failing outright.
     let expires_in_secs = match q.expires_in {
         Some(n) if n > 0 => n.min(MAX_EXPIRES_IN_SECS),
         _ => return Err(Error::BadRequest("invalid expires_in".into())),

@@ -42,8 +42,7 @@ pub type DevserverControlResult<T> = Result<T, DevserverControlError>;
 /// deliberate (this crate stays independent of the controller's
 /// internal types so it can be pulled by identity and profile without
 /// a circular dep). `proxy_id` and `proxy_base_url` identify the
-/// proxy node that holds the registration; consumers that predate the
-/// distributed fleet ignore them.
+/// proxy node that holds the registration and anchors its tenant origin.
 #[derive(Clone, Deserialize)]
 pub struct TunnelView {
     pub registration_id: Uuid,
