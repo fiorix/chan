@@ -96,6 +96,12 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-site-carries-a-workspace-mock-nobody-ships][mock] | raised | build |
 | [an-unknown-window-kind-may-drop-every-window-row][wkind] | raised | repro |
 
+**Raised during v0.101.0**
+
+| item | state | next |
+| --- | --- | --- |
+| [a-revocation-aborts-the-bridge-before-its-close][revab] | raised | decide |
+
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.101.0/frontend-comments-narrate-history.md
@@ -147,6 +153,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [gmnt]: v0.101.0/graph-bodies-have-no-mounted-test.md
 [nsis]: v0.101.0/the-nsis-uninstaller-stub-ships-unsigned.md
 [cprb]: v0.101.0/signing-has-no-early-credential-probe.md
+[revab]: v0.101.0/a-revocation-aborts-the-bridge-before-its-close.md
 
 ## Completed
 
