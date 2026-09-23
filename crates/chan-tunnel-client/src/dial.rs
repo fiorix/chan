@@ -106,7 +106,7 @@ pub async fn dial_with_tls(
 
     // Drive h2 frames in the background; the connection future has
     // a different type per branch (rustls TlsStream vs raw TcpStream),
-    // so spawn inside each arm and only return the SendRequest.
+    // so each arm spawns its own driver and returns only the SendRequest.
     let mut send_req = if scheme == "https" {
         let tls_config = tls
             .ok_or_else(|| ClientError::Tls("https:// dial called without a TLS config".into()))?
@@ -122,22 +122,14 @@ pub async fn dial_with_tls(
             .handshake(tls)
             .await
             .map_err(|e| ClientError::Handshake(format!("h2 handshake: {e}")))?;
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                tracing::debug!(error = %e, "h2 client conn ended");
-            }
-        });
+        spawn_h2_driver(conn);
         s
     } else {
         let (s, conn) = tunnel_h2_client_builder()
             .handshake(tcp)
             .await
             .map_err(|e| ClientError::Handshake(format!("h2c handshake: {e}")))?;
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                tracing::debug!(error = %e, "h2 client conn ended");
-            }
-        });
+        spawn_h2_driver(conn);
         s
     };
 
@@ -247,9 +239,25 @@ pub(crate) fn validate_tunnel_url(cfg: &ClientConfig) -> Result<(), ClientError>
     }
 }
 
-/// sent as a Basic auth header. The CONNECT exchange is bounded by
+/// Open the TCP leg: a direct connect, or an HTTP/1.1 CONNECT through
+/// `proxy` with the proxy URL's userinfo (allowed only to an explicit
+/// loopback IP whose peer is loopback) sent as a Basic auth header. The
+/// CONNECT exchange is bounded by
 /// the parent `dial_timeout` (each leg here is non-blocking apart
 /// from one short read for the response status line + headers).
+/// Run an h2 client connection to completion in the background, logging how
+/// it ended.
+fn spawn_h2_driver<T>(conn: h2::client::Connection<T>)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::debug!(error = %e, "h2 client conn ended");
+        }
+    });
+}
+
 async fn open_tcp(host: &str, port: u16, proxy: Option<&Url>) -> Result<TcpStream, ClientError> {
     let Some(proxy) = proxy else {
         return Ok(TcpStream::connect((host, port)).await?);
@@ -357,6 +365,8 @@ async fn open_tcp(host: &str, port: u16, proxy: Option<&Url>) -> Result<TcpStrea
     Ok(tcp)
 }
 
+/// The TLS client config for `https://` tunnel dials: the platform's native
+/// CA roots with ALPN `h2`. Fails when no native root certificate loads.
 pub fn build_tls_config() -> Result<RustlsClientConfig, ClientError> {
     // rustls 0.23 expects the default crypto provider to be
     // installed once per process. Re-install attempts are no-ops
