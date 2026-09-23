@@ -20,6 +20,8 @@ The round opened on 2026-09-20 with a roadmap of 40 items: the frontend review's
 
 - **A terminal chunk reaches an attaching client exactly once.** Recording output and attaching now take the ring under one lock, so a chunk that races an attach can no longer arrive in both the snapshot and the live stream, and the sequence number a client resumes from is the true end of what it was sent. A reconnect after a raced attach loses no bytes.
 
+- **A terminal moved out of a desktop window survives the emptied window's close.** The owner's Mac test of rc2 found it: drag the only tab of one window onto another, and the source window closes while the dropped terminal tab vanishes. The emptied window's close reached the host, which reaps every session still bound to that window, before the destination's attach had rebound the moved session. Now the server records the sessions a window still holds when it reports its move-out, the host's close spares them, and the emptied window waits for the move-out acknowledgement before it asks to close. `a_move_out_keeps_the_moved_session_through_the_source_windows_discard` (chan-library) is red on the base and green on the fix. The three `store.test.ts` cases under "closing a desktop window that emptied" pin the await-then-close order, the discard path that closes at once, and a failed move-out that still closes. Review: `dev/v0100-team/reviews/review-tab-move-fix.md`. Landed at `LANDING-SHA`.
+
 - **A dropped indexer releases the recovery pass it claimed.** A coordinator that goes away mid-pass requeues its claim, so the next coordinator over that workspace can make progress, and a recovery action that keeps failing waits a cooldown between attempts instead of retrying back to back.
 
 - **`cs terminal close` means the tab and its child are gone.** A close waits, within a shared five-second deadline, for every closed session's child to end, and fails naming each survivor with its pid instead of acknowledging a close that did not happen. A window reattaching to a closed session is told the tab closed rather than handed a fresh shell under the old name, and the next `cs terminal new` for that seat gets its name back.
@@ -180,6 +182,10 @@ The `7b927cf35` row is one gate over two stacked items: lock samples' eight new 
 - **Noticed during landings.** Two `Cargo.toml` `test-util` comments do not name the attach seam. The fd-store handoff reads the sequence and the ring tail under separate locks on the restart path. A chan-library test wraps a real-filesystem sequence in a five-second wall-clock bound that a slow Windows runner can expire. `desktop/design.md` does not mention the root health probe the embedded host now drives. A requeued recovery pass can wake a dropped indexer's leftover driver. The launcher's bulk-skip note calls an `unknown` row "locked". The ledger names where each should go.
 
 - **Windows signing leftovers.** The NSIS `nst*.tmp` stub that tauri passes through the sign command is refused by CodeSignTool as an unsupported format and stays unsigned, as it was in v0.99.0; `sign.ps1` logs the skip. A credential probe right after the CodeSignTool install was not added, because the tool documents no command for it.
+
+- **The tab-move spare is per window, carried to v0.101.0.** A detached session that was still bound to the source window when the move happened, and that the close used to reap, now lives until the orphan idle timeout. The precise fix carries the moved session's id on the move-out request.
+
+- **The emptied window's wait is unbounded, carried to v0.101.0.** It waits for the move-out acknowledgement without a bound, so a hung local request holds an empty window open until the request fails. The user can still close it, and that close reaps.
 
 - **Other repositories.** mobile-chat and Doom state the Chan version the v2 relay needs only in their READMEs, and their next releases should follow this one.
 

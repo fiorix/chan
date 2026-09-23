@@ -39,6 +39,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`cs terminal close` no longer acknowledges a close that did not happen.** It waits for each closed session's shell to end and fails, naming each survivor and its pid, when one does not. A window reattaching to a closed terminal is told the tab closed instead of getting a fresh shell under the old name, and the next `cs terminal new` for that seat gets the name back.
 
 - **Terminal output is delivered once on attach.** A chunk written while a client attaches no longer arrives twice, and a reconnect after such a race loses no bytes.
+- **A terminal tab moved out of a desktop window keeps its shell.** Dragging the only terminal tab of one window onto another now lands it in the destination with its shell still running. Before, closing the emptied window could kill the session before the destination attached, so the tab vanished.
 
 - **The desktop notices a replaced workspace root.** A mounted workspace whose directory is gone or replaced reads unavailable on the desktop within fifteen seconds, without an add or an on, and returns to running when the original directory is back.
 
