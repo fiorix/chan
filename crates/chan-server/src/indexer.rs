@@ -11,10 +11,10 @@
 //      `Workspace::index_file` / `Workspace::forget_file` calls.
 //
 // Status is exposed through a `Mutex<IndexStatus>` snapshot the
-// `/api/index/status` endpoint reads. We deliberately don't push
-// status over the WS in v1: polling the status endpoint every few
-// seconds while the user is on the Settings panel is simpler and
-// the payload is tiny.
+// `/api/index/status` endpoint reads for pollers, and every progress
+// tick also rides the `/ws` progress broadcast
+// (`bus::make_progress_broadcast`), so an open window follows it
+// without polling.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -961,28 +961,12 @@ fn spawn_watcher_loop(
                     })
                     .await;
                     match result {
-                        Ok(Ok(ApplyOutcome::Indexed)) => {
-                            if let Some(workspace) = workspace_w.upgrade() {
-                                set_idle(&workspace, &shared_w)
-                            } else {
-                                return;
-                            }
-                        }
-                        Ok(Ok(ApplyOutcome::Forgotten)) => {
-                            if let Some(workspace) = workspace_w.upgrade() {
-                                set_idle(&workspace, &shared_w)
-                            } else {
-                                return;
-                            }
-                        }
-                        Ok(Ok(ApplyOutcome::SkippedSpecial))
-                        | Ok(Ok(ApplyOutcome::SkippedMissing)) => {
-                            // Symlinks/FIFOs/sockets/devices and "the
-                            // file was gone by the time we looked"
-                            // are not index health signals. Drop
-                            // back to Idle so the dashboard does
-                            // not flash "search is broken" on a
-                            // legitimate watcher event.
+                        // Every outcome drops back to Idle. Symlinks/FIFOs/
+                        // sockets/devices and "the file was gone by the
+                        // time we looked" are not index health signals,
+                        // so the dashboard does not flash "search is
+                        // broken" on a legitimate watcher event.
+                        Ok(Ok(_)) => {
                             if let Some(workspace) = workspace_w.upgrade() {
                                 set_idle(&workspace, &shared_w);
                             } else {
@@ -1452,27 +1436,18 @@ impl ProgressCallback for StatusUpdater {
                 // Read live stats so the chip shows the growing index. If
                 // the workspace is gone (reset/shutdown) fall back to a
                 // zeroed Idle rather than dropping the embedding signal.
-                let idle = match self.workspace.upgrade() {
-                    Some(ws) => match ws.index_stats() {
-                        Ok(st) => IndexStatus::Idle {
-                            indexed_docs: st.indexed_docs,
-                            indexed_vectors: st.indexed_vectors,
-                            model: st.model,
-                            embedding,
-                        },
-                        Err(_) => IndexStatus::Idle {
-                            indexed_docs: 0,
-                            indexed_vectors: 0,
-                            model: chan_workspace::DEFAULT_MODEL.to_owned(),
-                            embedding,
-                        },
-                    },
-                    None => IndexStatus::Idle {
-                        indexed_docs: 0,
-                        indexed_vectors: 0,
-                        model: chan_workspace::DEFAULT_MODEL.to_owned(),
+                let stats = self
+                    .workspace
+                    .upgrade()
+                    .and_then(|ws| ws.index_stats().ok());
+                let idle = match stats {
+                    Some(st) => IndexStatus::Idle {
+                        indexed_docs: st.indexed_docs,
+                        indexed_vectors: st.indexed_vectors,
+                        model: st.model,
                         embedding,
                     },
+                    None => idle_unknown(embedding),
                 };
                 if let Ok(mut s) = self.status.lock() {
                     *s = idle;
@@ -1489,8 +1464,8 @@ impl ProgressCallback for StatusUpdater {
     }
 }
 
-/// Bug 9 clear-path helper for the coordinator: move the status out of
-/// `Building` when a rebuild resolves, whether or not the workspace `Weak`
+/// Move the status out of `Building` when a rebuild resolves, for the
+/// coordinator, whether or not the workspace `Weak`
 /// still upgrades. With a live workspace this reads fresh stats via
 /// `set_idle`. If the workspace was dropped (reset/shutdown swapped the
 /// cell), there is nothing to query, but we still must not leave the
@@ -1502,14 +1477,19 @@ fn reconcile_idle(workspace: &Weak<Workspace>, shared: &IndexerShared) {
         Some(workspace) => set_idle(&workspace, shared),
         None => {
             if let Ok(mut s) = shared.status.lock() {
-                *s = IndexStatus::Idle {
-                    indexed_docs: 0,
-                    indexed_vectors: 0,
-                    model: chan_workspace::DEFAULT_MODEL.to_owned(),
-                    embedding: None,
-                };
+                *s = idle_unknown(None);
             }
         }
+    }
+}
+
+/// An `Idle` status with zeroed counts, for when the index cannot be read.
+fn idle_unknown(embedding: Option<EmbedProgress>) -> IndexStatus {
+    IndexStatus::Idle {
+        indexed_docs: 0,
+        indexed_vectors: 0,
+        model: chan_workspace::DEFAULT_MODEL.to_owned(),
+        embedding,
     }
 }
 
@@ -2617,7 +2597,7 @@ mod tests {
 
     #[test]
     fn embed_batch_flips_to_idle_background_embedding() {
-        // Option A: BM25 is committed before the embed flush (facade.rs),
+        // The embed phase runs after BM25 is committed (facade.rs),
         // so the first EmbedBatch flips the status from Building to
         // Idle{embedding:Some}. preflight maps Idle -> ready, so the
         // overlay unlocks while the slow embed pass finishes in the
@@ -2715,7 +2695,7 @@ mod tests {
 
     #[test]
     fn reconcile_idle_clears_pill_when_workspace_is_gone() {
-        // Bug 9 clear path: a rebuild that resolves after the workspace
+        // A rebuild that resolves after the workspace
         // cell was swapped out (reset/shutdown) must still leave the
         // status out of `Building`, or the pill is stuck forever.
         let status = Arc::new(Mutex::new(IndexStatus::Building {
