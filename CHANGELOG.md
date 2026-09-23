@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Shortcuts follow the keyboard layout.** Letter and punctuation shortcuts match the character the active layout types, not the key's position, across the workspace, the launcher, the desktop app, terminal escape and shortcut overrides: on Colemak Cmd+T opens a terminal, and on Dvorak the comma opens Settings. Top-row digits and numpad zoom stay positional. Thanks to Laurie Clark-Michalek for the letter handling this builds on.
+
+- **Extension keyboard relay v2.** Extensions relay the shortcuts Chan advertises by key token and send the raw keydown fields, and Chan resolves the event itself. The v1 keyboard messages are removed, so an extension needs the v2 relay to keep Chan's shortcuts working while it has focus; the mobile-chat and Doom extensions speak v2 in their next releases.
+
+- **A workspace whose lock state cannot be read says so.** The launcher shows it as its own state, names no other process, shows the reason, and offers no action on it; `chan workspace status` and `chan workspace search` refuse it with a named error instead of guessing.
+
 - **Every turn-on answers 200 with the workspace's row.** Turning a workspace on through a connected devserver now answers with the same launcher row the other turn-on routes send, instead of 204. The row never carries the workspace's bearer token.
 
 - **A move onto an occupied name is refused.** Renaming, dragging one or several rows, and cut and paste all refuse a move whose destination exists, and name the occupied path. The "Overwrite existing file?" prompt is gone, because it offered something the server refuses.
