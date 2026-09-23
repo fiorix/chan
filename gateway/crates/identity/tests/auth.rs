@@ -2904,3 +2904,48 @@ async fn known_rename_conflicts_preserve_live_tunnels() {
         app.cleanup().await;
     }
 }
+
+#[tokio::test]
+async fn logout_audit_failure_is_logged_without_blocking_logout() {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing::instrument::WithSubscriber;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    happy_login(&app, &mut c, fake_user_id(), "octo@example.com").await;
+    Mock::given(method("POST"))
+        .and(path("/v1/auth-audit"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&app.profile)
+        .await;
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let (status, _, _, _) = c
+        .send(Method::POST, "/api/logout", None)
+        .with_subscriber(subscriber)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(captured.contains("logout audit failed"), "{captured}");
+    assert_eq!(
+        c.send(Method::GET, "/api/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    app.cleanup().await;
+}

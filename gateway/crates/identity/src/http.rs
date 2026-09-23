@@ -985,11 +985,14 @@ async fn logout(
     if let Some(uid) = uid {
         let ip = client_ip(&headers);
         let ua = user_agent(&headers);
-        let _ = state
+        if let Err(error) = state
             .cfg
             .profile_client
             .write_auth_audit(uid, "logout", ip.as_deref(), ua.as_deref(), None)
-            .await;
+            .await
+        {
+            tracing::warn!(?error, user_id = %uid, "logout audit failed");
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
