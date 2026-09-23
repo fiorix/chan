@@ -1576,11 +1576,20 @@ fn safe_upstream_set_cookie(value: &HeaderValue) -> bool {
 /// waits for a slot while the tunnel is at its substream budget) and the
 /// upstream WebSocket handshake, since no frame moves either way until
 /// both are done. The client already has its 101 by then, so a setup that
-/// outlasts the window, fails, or meets revocation or expiry, ends the
+/// outlasts the window, fails, or meets cancellation or expiry, ends the
 /// client socket with a Close: 1011 "upstream timed out", 1011 with the
 /// reason [`BridgeSetupError::close_reason`] gives, or the same 1008 the
 /// pump sends. A socket that ended with no Close would read as a network
 /// drop in a browser, which could not tell it from a refusal.
+///
+/// A revocation through the session store is the exception, in the setup
+/// and in the pump alike: it cancels the session's token and then aborts
+/// the session's operations, this bridge's task among them, so the task is
+/// normally gone before it can send its 1008 "session revoked" and the
+/// browser sees the socket reset with no Close. The 1008 arms send when the
+/// token is cancelled without that abort, or when the multi-thread runtime
+/// happens to poll the task on another worker between the cancel and the
+/// abort.
 ///
 /// Each direction owns its source stream and destination sink. The policy
 /// monitor resets the shared idle deadline from either source and requests a
