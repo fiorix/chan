@@ -1486,6 +1486,62 @@ mod tests {
         assert!(reopened.first_open_done(), "marker survives reopen");
     }
 
+    // --- rows this build cannot read -----------------------------------------
+
+    /// Write a store holding one row every build reads beside one row whose
+    /// `kind` tag no build knows, and return the path with both rows as written.
+    fn store_with_an_unknown_kind(dir: &Path) -> (PathBuf, serde_json::Value, serde_json::Value) {
+        let path = dir.join("windows.json");
+        let readable = json!({
+            "window_id": "w-readable",
+            "kind": "terminal",
+            "title": "⌂ Terminal Window 1",
+            "ordinal": 1,
+        });
+        let unknown = json!({
+            "window_id": "w-unknown",
+            "kind": "panel",
+            "title": "Panel Window 1",
+            "ordinal": 1,
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!([readable, unknown])).expect("encode"),
+        )
+        .expect("write store");
+        (path, readable, unknown)
+    }
+
+    /// The store is read as one `Vec<PersistedWindow>`, so a row with a `kind`
+    /// tag this build does not know fails the whole parse: the registry opens
+    /// empty, the readable row beside it is gone from the window set, and the
+    /// next save writes the file without either row.
+    #[test]
+    fn an_unreadable_row_empties_the_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, _readable, _unknown) = store_with_an_unknown_kind(dir.path());
+
+        let reg = WindowRegistry::open(path.clone());
+        assert!(
+            reg.snapshot().is_empty(),
+            "one unreadable row drops the readable row beside it: {:?}",
+            reg.snapshot()
+        );
+
+        let minted = reg.create(WindowKind::Terminal, None);
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&path).expect("store")).expect("rows");
+        let ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row["window_id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![minted.window_id.as_str()],
+            "the save replaced the file with the set this build holds"
+        );
+    }
+
     #[test]
     fn snapshot_orders_terminals_before_workspaces() {
         let (reg, _d) = registry();
