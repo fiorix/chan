@@ -1,6 +1,6 @@
 {
   "name": "@chan/workspace-app",
-  "version": "0.99.0",
+  "version": "0.100.0-rc3",
   "private": true,
   "type": "module",
   "exports": {
