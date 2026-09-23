@@ -1,6 +1,8 @@
 // Workspace: a registered directory exposed as a sandboxed filesystem
-// plus search and graph. All user-path I/O routes through the cap-std
-// `RootedFs` core and the editable-text gate. Per-workspace metadata (index, graph,
+// plus search and graph. Reads and writes of user paths route through the
+// cap-std `RootedFs` core and the editable-text gate; tree listings walk
+// paths from the root, resolving prefixes through
+// `fs_ops::resolve_safe_strict`. Per-workspace metadata (index, graph,
 // sessions, tokens, trash, report) lives outside the user's notes
 // tree under ~/.chan/workspaces/<metadata_key>/.
 
