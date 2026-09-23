@@ -6626,6 +6626,34 @@ mod tests {
         );
     }
 
+    /// A note linking to a `.txt` whose bytes do not decode keeps that
+    /// backlink across reconcile passes, and the `.txt` keeps its
+    /// recorded row: stamped at its stat and marked as putting nothing
+    /// in the index.
+    #[test]
+    fn reconcile_keeps_backlinks_to_an_undecodable_txt() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::write(root.path().join("bad.txt"), [0xffu8, 0xfe, 0xfd]).unwrap();
+        workspace
+            .write_text("note.md", "# note\n[bad](bad.txt)\n")
+            .unwrap();
+        let graph = workspace.graph().unwrap();
+        for pass in 1..=2 {
+            let report = workspace.reconcile().unwrap();
+            let backlinks = graph.backlinks("bad.txt").unwrap();
+            assert_eq!(
+                backlinks.iter().map(|e| e.src.as_str()).collect::<Vec<_>>(),
+                ["note.md"],
+                "pass {pass}: backlinks to bad.txt: {backlinks:?}; {report:?}"
+            );
+            assert_eq!(
+                graph.paths_without_index_entry().unwrap(),
+                ["bad.txt"],
+                "pass {pass}: bad.txt has no recorded row; {report:?}"
+            );
+        }
+    }
+
     #[test]
     fn forget_file_keeps_inbound_markdown_links() {
         let (_cfg, _root, workspace) = fixture();
