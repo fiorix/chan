@@ -6698,6 +6698,78 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_repairs_markdown_with_node_but_no_index_entry() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text("notes.md", "# notes\nrepairmdtoken\n")
+            .unwrap();
+        workspace.index_file("notes.md").unwrap();
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert_eq!(
+            workspace.search("repairmdtoken", &opts).unwrap().hits.len(),
+            1
+        );
+        workspace.index().unwrap().forget("notes.md").unwrap();
+        assert!(workspace
+            .search("repairmdtoken", &opts)
+            .unwrap()
+            .hits
+            .is_empty());
+        assert_eq!(workspace.graph().unwrap().files().unwrap(), ["notes.md"]);
+
+        let report = workspace.reconcile().unwrap();
+        let hits = workspace.search("repairmdtoken", &opts).unwrap().hits;
+        assert_eq!(
+            hits.len(),
+            1,
+            "markdown file with a node and no index entry was not repaired: {report:?}"
+        );
+        assert_eq!(hits[0].path, "notes.md");
+        assert_eq!(report.upserted, ["notes.md"]);
+
+        arm_derived_state_read_probe(workspace.root().to_path_buf());
+        let second = workspace.reconcile().unwrap();
+        let reads = take_derived_state_reads(workspace.root());
+        assert!(second.upserted.is_empty(), "{second:?}");
+        assert!(reads.is_empty(), "repaired file read again: {reads:?}");
+    }
+
+    #[test]
+    fn reconcile_does_not_reread_markdown_without_chunks() {
+        let (_cfg, _root, workspace) = fixture();
+        for (rel, text) in [
+            ("blank.md", "\n\n"),
+            ("frontmatter.md", "---\ntitle: Metadata only\n---\n"),
+        ] {
+            workspace.write_text(rel, text).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+        assert!(workspace.index().unwrap().known_paths().unwrap().is_empty());
+        assert_eq!(workspace.graph().unwrap().files().unwrap().len(), 2);
+        for pass in 0..2 {
+            arm_derived_state_read_probe(workspace.root().to_path_buf());
+            let report = workspace.reconcile().unwrap();
+            let reads = take_derived_state_reads(workspace.root());
+            assert!(report.upserted.is_empty(), "{report:?}");
+            assert!(report.forgotten.is_empty(), "{report:?}");
+            assert!(report.failed.is_empty(), "{report:?}");
+            assert_eq!(report.unchanged, 2);
+            // The rebuild writes a document row without settling what the
+            // index holds for it, so the first pass may read each file once
+            // to learn that its content has no chunks. Later passes must not.
+            if pass == 1 {
+                assert!(
+                    reads.is_empty(),
+                    "second pass re-read chunkless markdown: {reads:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reconcile_is_noop_when_disk_matches_graph() {
         // Steady state after a clean reindex: every file on disk
         // has a graph row with matching mtime. Reconcile must
