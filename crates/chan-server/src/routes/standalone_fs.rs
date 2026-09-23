@@ -38,7 +38,7 @@ use chan_workspace::{
     WorkspaceGeneration,
 };
 
-use crate::bulk_transfer::{BulkCancel, BulkOutcome, StreamBridge};
+use crate::bulk_transfer::{BulkCancel, BulkOutcome};
 use crate::error::{err, err_from};
 use crate::routes::run_blocking;
 use crate::self_writes::{check_write_preconditions, WritePreconditionError, WritePreconditions};
@@ -526,7 +526,7 @@ async fn standalone_stream_read_response(
     fs: Arc<MiniWorkspace>,
     path: String,
 ) -> Response {
-    let mut bridge = StreamBridge::spawn(signal, move |frames| {
+    let mut bridge = crate::stream_bridge::StreamBridge::spawn(signal, move |frames| {
         let result = standalone_stream_read_sync(&fs, &path, |bytes| {
             frames.send(FileStreamMessage::Data(bytes))
         });
@@ -1790,12 +1790,12 @@ mod tests {
         })
         .unwrap();
         assert!(
-            frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
+            frames > crate::stream_bridge::BRIDGE_CAPACITY + 1,
             "the producer must outrun the channel, got {frames} frames"
         );
         let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
         let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
-        let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
+        let body = crate::stream_bridge::test_support::assert_unread_stream_frees_its_pool_thread(
             "standalone text stream",
             || {
                 super::standalone_stream_read_response(

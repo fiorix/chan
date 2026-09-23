@@ -61,6 +61,7 @@ mod standalone_watch;
 mod state;
 mod static_assets;
 mod store;
+mod stream_bridge;
 mod submit_config;
 mod survey;
 mod terminal_blob;
