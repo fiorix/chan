@@ -1,6 +1,6 @@
 # A refusal answers in one of four shapes, and only one of them is the convention
 
-Status: raised for v0.101.0 on the owner's instruction of 2026-09-20. Asked whether the locked 409 of [the-desktop-reads-any-409-as-live-terminals](../v0.100.0/the-desktop-reads-any-409-as-live-terminals.md) should become JSON, the owner ruled that it stays plain text in v0.100.0 and that the uniform answer is this version's, with v0.100.0 preparing the reading side. A source sweep of non-test code against `main` at `c03431432`; nothing was run. The counts are the sweep's and approximate. Re-read by hand afterwards: the module doc and `err_from` in `error.rs`, the locked arm of `handle_workspace_on`, the launcher's `refusalReason`, the workspace app's `isWorkspaceRootMissingError`, and the desktop's `ActiveTerminalsRejection`.
+Status: raised for v0.101.0 on the owner's instruction of 2026-09-20. Asked whether the locked 409 of [the-desktop-reads-any-409-as-live-terminals](../done/the-desktop-reads-any-409-as-live-terminals.md) should become JSON, the owner ruled that it stays plain text in v0.100.0 and that the uniform answer is this version's, with v0.100.0 preparing the reading side. A source sweep of non-test code against `main` at `c03431432`; nothing was run. The counts are the sweep's and approximate. Re-read by hand afterwards: the module doc and `err_from` in `error.rs`, the locked arm of `handle_workspace_on`, the launcher's `refusalReason`, the workspace app's `isWorkspaceRootMissingError`, and the desktop's `ActiveTerminalsRejection`.
 
 ## What was seen
 

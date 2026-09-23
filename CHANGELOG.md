@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.100.0] - 2026-09-23
+
+v0.100.0 makes the frontend say what happened where it happened (failed loads, rejected settings writes and failed revokes show on the surface that failed, closes and moves keep the right tab and its state, and edits made during an outage survive), makes shortcuts follow the keyboard layout, gives `cs terminal close`, terminal attach and a replaced workspace root their true meaning, brings back `chan open`, and fixes the Rust and gateway reviews' low findings it triaged.
 
 ### Added
 
@@ -62,6 +64,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Editor fixes.** A checkbox in a read-only document no longer writes to it. Editor triggers no longer fire inside an existing image, link or code block. Image actions keep working after an edit above the image. Document PDF export waits for its images before it paginates.
 
 - **Windows release builds keep signing.** The signing step trusts SSL.com's 2022 root, which SSL.com's signing service now uses and CodeSignTool's bundled Java does not ship, and the signing script checks the Authenticode signature it produced instead of trusting the tool's exit code, so an unsigned binary stops the build at the first file.
+
+- **Release candidates check their gateway packages under the name they are built with.** The release asset list names a prerelease gateway deb the way cargo-deb writes it, with a tilde (`0.100.0~rc3-1`), so a release candidate's dry run finds all 25 assets instead of reporting its ten gateway packages missing. The published-release readers keep the dot GitHub's upload turns the tilde into, and at a GA version the two spellings agree.
 
 - **Release and CI tooling fail closed.** The `/dl` release pipeline errors on a missing tag and requires a signature for every updater payload it can publish. The frontend gate covers everything that ships, and the e2e harnesses report only what they measured. The COPR publication probe waits 7,200 seconds, with trigger and verify as separate jobs, and the macOS CI jobs stop at 90 minutes instead of GitHub's six-hour default.
 

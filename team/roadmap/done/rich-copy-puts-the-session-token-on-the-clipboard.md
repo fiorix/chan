@@ -1,0 +1,28 @@
+# Rich copy puts the session bearer token on the clipboard
+
+Status: shipped in [v0.100.0](../../release/release-v0.100.0.md): Rich copy writes image URLs without the `t=` bearer, so the session token never leaves the app on the clipboard.
+
+## What was seen
+
+On a token-protected server, which is the default, copying a WYSIWYG selection that contains a workspace image sets a `text/html` clipboard flavor whose `<img src>` is `http://host:port/api/fs/notes/a.png?t=<bearer>`. Pasting into a mail client, a chat or a document ships the live session bearer into that message.
+
+The path is `renderBody` in `web/packages/workspace-app/src/editor/copy_html.ts` calling `toAbsoluteUrl(resolveImageSrc(...))`; `resolveImageSrc` goes through `withTokenQuery` in `api/client.ts`, and `api/transport.ts` appends `?t=`. `toAbsoluteUrl` keeps the query, the markup is serialized and set as `text/html`, and the same payload is handed to the desktop clipboard bridge. The asynchronous upgrade to `data:` URIs only replaces the sources it fetches inside its 20 MiB budget, so a failed fetch, an over-budget image or a rejected upgrade leaves the tokenized URL in the final payload.
+
+Everywhere else the app treats that token as sensitive: `transport.ts` deletes `t` from the address bar on load. The consequence is highest for a window served through the tunnel, where the pasted URL is a working credential from anywhere.
+
+The same channel reaches more sinks than this one. `withTokenQuery` has about fourteen production call sites behind two wrappers (video sources, embeds, download URLs), and nothing states which sinks a token-bearing URL may reach. The File Browser's drag-out is not one of them: it carries paths. The drag that may carry a tokened URL is the editor's native image drag in `editor/widgets/image.ts`, where the browser's own drag data takes the element's `src`; that was read and not observed, it is a separate contract, and it is outside this item.
+
+## Desired contract
+
+A URL carrying the session token never leaves the app. Rich copy writes image URLs without the token, which means without the `t=` query parameter: `extract_token` in `crates/chan-server/src/auth.rs` reads that parameter before the `Authorization` header, so the query string alone is a full bearer and stripping it is the whole fix. On a tokened serve an external consumer then gets a plain-text 401 and a broken image, and the `data:` upgrade stays the mechanism that makes an external paste render. A `--no-token` serve has no gate by the operator's choice, and what the gateway itself answers was not read. The rule is written next to `withTokenQuery`: which sinks may receive a token-bearing URL, and that the clipboard, the drag payload and any exported document are not among them.
+
+## Boundaries
+
+`web/packages/workspace-app/src/editor/copy_html.ts` (`toAbsoluteUrl`, and the module comment that says "tokenized" while `copy_html.test.ts` says "tokenless"), `copy_html.test.ts`, and the doc comment on `withTokenQuery` in `api/client.ts`. Auditing the other sinks is part of this item; changing how media is authorized is not. The chan-to-chan paste path is unaffected, because `uploadForeignRefs` in `paste_html.ts` already refuses any source that is not a `data:` URI.
+
+## Acceptance
+
+1. A test runs rich copy with a token present and asserts no `t=` parameter in the `text/html` payload, in the baseline and after a failed, over-budget and rejected upgrade.
+2. The desktop clipboard bridge receives the same tokenless payload.
+3. Each remaining `withTokenQuery` sink is listed in the item's evidence with a verdict: stays in the app, or leaves it and is fixed here.
+4. The rule sits on `withTokenQuery`, and the module comment and the test name agree.

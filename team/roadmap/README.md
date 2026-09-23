@@ -21,75 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.100.0
-
-Opened 2026-09-20 with seven items and refreshed the same day against `main` at `d3de0180b`, when the frontend review and the v0.99.0 follow-ups were evaluated into it. The owner accepted all 36 as the scope of this version on 2026-09-20 and added two the same day, the two CLI spellings and the `dump-skill` index, sequenced last in their lane and moving to v0.101.0 if it runs late. Two more came out of the round itself, both found by the shell lane beside the tab-reorder fix and accepted by the owner the same day with the same exit: a terminal that loses its tab state when it moves to another window, and a file tab that shows loading for good after a move mid-load. That makes 40; `carried` marks the three that came over from v0.99.0. Grouped by the lane that owns the files.
-
-**Server, desktop and library**
-
-| item | state | next |
-| --- | --- | --- |
-| [one-on-route-still-answers-204][on204] | accepted | build |
-| [the-desktop-reads-any-409-as-live-terminals][d409] | accepted | after on204 |
-| [a-timed-out-mount-closes-a-tenant-it-did-not-open][tmo] | accepted | build |
-| [no-test-pins-the-unavailable-mint-contract][unav] | carried | build |
-| [a-replaced-root-still-reads-running-on-the-desktop][rrt] | accepted | build |
-| [a-terminal-chunk-arrives-twice-on-attach][chunk] | accepted | repro |
-| [a-dropped-indexer-strands-the-recovery-slot][idx] | accepted | repro |
-| [two-live-samples-of-one-lock-disagree][lock2] | accepted | build |
-| [cs-terminal-close-acks-a-close-that-did-not-happen][csc] | accepted | repro |
-| [the-rust-review-lows-were-never-triaged][lows] | accepted | fold along |
-| [chan-open-is-gone-and-forget-is-a-second-verb][alias] | accepted | last |
-| [dump-skill-prints-more-than-an-agent-can-read][skill] | accepted | last |
-
-**Packaging, release and gate**
-
-| item | state | next |
-| --- | --- | --- |
-| [the-copr-probe-window-is-shorter-than-its-builds][copr] | carried | measure |
-| [a-prerelease-deb-is-spelled-with-a-dot][deb] | accepted | build |
-| [frontend-gate-holes-let-broken-bundles-ship][gate] | accepted | build first |
-| [the-dl-pipeline-fails-open][dl] | accepted | build |
-| [browser-smoke-reports-results-it-did-not-measure][smoke] | accepted | build |
-
-**Editor**
-
-| item | state | next |
-| --- | --- | --- |
-| [rich-copy-puts-the-session-token-on-the-clipboard][tok] | accepted | build |
-| [a-checkbox-click-writes-a-read-only-document][ro] | accepted | build |
-| [bubble-triggers-fire-inside-existing-syntax][trig] | accepted | build |
-| [image-actions-die-after-an-edit-above-the-image][img] | accepted | build |
-| [document-pdf-export-measures-before-images-load][pdf] | accepted | build |
-| [four-detectors-disagree-about-page-breaks][pgbrk] | carried | build |
-
-**App shell, state and terminal**
-
-| item | state | next |
-| --- | --- | --- |
-| [a-close-after-a-prompt-can-remove-the-wrong-tab][close] | accepted | build |
-| [a-tab-reorder-drops-live-tab-state][clone] | accepted | build |
-| [a-restored-transfer-id-collides-with-a-new-one][xfer] | accepted | build |
-| [a-canvas-edit-made-during-an-outage-can-be-lost][scene] | accepted | build |
-| [terminal-chords-run-twice-or-not-at-all][chord] | accepted | build |
-| [full-window-covers-do-not-block-input][cover] | accepted | build |
-| [escape-closes-the-overlay-under-an-open-menu][esc] | accepted | build |
-| [a-terminal-moved-to-another-window-loses-its-tab-state][xwin] | accepted | late |
-| [a-file-tab-moved-mid-load-shows-loading-for-good][midload] | accepted | late |
-| [shortcuts-ignore-the-keyboard-layout][kbd] | accepted | last |
-
-**Feature surfaces, launcher and identity**
-
-| item | state | next |
-| --- | --- | --- |
-| [a-move-onto-an-occupied-name-behaves-two-ways][move] | accepted | decide |
-| [a-duplicate-list-key-kills-its-panel][dupkey] | accepted | build |
-| [a-failed-load-is-retried-forever][retry] | accepted | build |
-| [a-rejected-settings-write-looks-saved][set] | accepted | build |
-| [rich-prompt-submit-throws-on-plain-http][uuid] | accepted | build |
-| [a-failed-revoke-looks-like-a-revoke][revoke] | accepted | build |
-| [the-connecting-window-offers-retry-before-it-tried][con] | accepted | build |
-
 ### v0.101.0
 
 Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item is accepted: the write queue's idle signal, which the owner asked for, had built and measured, and accepted the same day with its build kept on a branch as the reference. Nothing else here is accepted yet.
@@ -165,46 +96,6 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-site-carries-a-workspace-mock-nobody-ships][mock] | raised | build |
 | [an-unknown-window-kind-may-drop-every-window-row][wkind] | raised | repro |
 
-[on204]: v0.100.0/one-on-route-still-answers-204.md
-[d409]: v0.100.0/the-desktop-reads-any-409-as-live-terminals.md
-[tmo]: v0.100.0/a-timed-out-mount-closes-a-tenant-it-did-not-open.md
-[unav]: v0.100.0/no-test-pins-the-unavailable-mint-contract.md
-[rrt]: v0.100.0/a-replaced-root-still-reads-running-on-the-desktop.md
-[chunk]: v0.100.0/a-terminal-chunk-arrives-twice-on-attach.md
-[idx]: v0.100.0/a-dropped-indexer-strands-the-recovery-slot.md
-[lock2]: v0.100.0/two-live-samples-of-one-lock-disagree.md
-[csc]: v0.100.0/cs-terminal-close-acks-a-close-that-did-not-happen.md
-[lows]: v0.100.0/the-rust-review-lows-were-never-triaged.md
-[alias]: v0.100.0/chan-open-is-gone-and-forget-is-a-second-verb.md
-[skill]: v0.100.0/dump-skill-prints-more-than-an-agent-can-read.md
-[copr]: v0.100.0/the-copr-probe-window-is-shorter-than-its-builds.md
-[deb]: v0.100.0/a-prerelease-deb-is-spelled-with-a-dot.md
-[gate]: v0.100.0/frontend-gate-holes-let-broken-bundles-ship.md
-[dl]: v0.100.0/the-dl-pipeline-fails-open.md
-[smoke]: v0.100.0/browser-smoke-reports-results-it-did-not-measure.md
-[tok]: v0.100.0/rich-copy-puts-the-session-token-on-the-clipboard.md
-[ro]: v0.100.0/a-checkbox-click-writes-a-read-only-document.md
-[trig]: v0.100.0/bubble-triggers-fire-inside-existing-syntax.md
-[img]: v0.100.0/image-actions-die-after-an-edit-above-the-image.md
-[pdf]: v0.100.0/document-pdf-export-measures-before-images-load.md
-[pgbrk]: v0.100.0/four-detectors-disagree-about-page-breaks.md
-[close]: v0.100.0/a-close-after-a-prompt-can-remove-the-wrong-tab.md
-[clone]: v0.100.0/a-tab-reorder-drops-live-tab-state.md
-[xwin]: v0.100.0/a-terminal-moved-to-another-window-loses-its-tab-state.md
-[midload]: v0.100.0/a-file-tab-moved-mid-load-shows-loading-for-good.md
-[xfer]: v0.100.0/a-restored-transfer-id-collides-with-a-new-one.md
-[scene]: v0.100.0/a-canvas-edit-made-during-an-outage-can-be-lost.md
-[chord]: v0.100.0/terminal-chords-run-twice-or-not-at-all.md
-[cover]: v0.100.0/full-window-covers-do-not-block-input.md
-[esc]: v0.100.0/escape-closes-the-overlay-under-an-open-menu.md
-[kbd]: v0.100.0/shortcuts-ignore-the-keyboard-layout.md
-[move]: v0.100.0/a-move-onto-an-occupied-name-behaves-two-ways.md
-[dupkey]: v0.100.0/a-duplicate-list-key-kills-its-panel.md
-[retry]: v0.100.0/a-failed-load-is-retried-forever.md
-[set]: v0.100.0/a-rejected-settings-write-looks-saved.md
-[uuid]: v0.100.0/rich-prompt-submit-throws-on-plain-http.md
-[revoke]: v0.100.0/a-failed-revoke-looks-like-a-revoke.md
-[con]: v0.100.0/the-connecting-window-offers-retry-before-it-tried.md
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.101.0/frontend-comments-narrate-history.md
@@ -258,6 +149,51 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [cprb]: v0.101.0/signing-has-no-early-credential-probe.md
 
 ## Completed
+
+### v0.100.0
+
+Shipped 2026-09-23; see [release-v0.100.0](../release/release-v0.100.0.md). All forty items closed in [`done/`](done/), and the carry-overs this round raised are under v0.101.0:
+
+- [a-canvas-edit-made-during-an-outage-can-be-lost](done/a-canvas-edit-made-during-an-outage-can-be-lost.md) - a canvas change counts as sent only when it was sent, every session kind registers all five contract members, and a degraded session has exactly one writer.
+- [a-checkbox-click-writes-a-read-only-document](done/a-checkbox-click-writes-a-read-only-document.md) - one predicate decides whether a widget may write, checking the read-only state and the editable facet, so a checkbox cannot write to a read-only document.
+- [a-close-after-a-prompt-can-remove-the-wrong-tab](done/a-close-after-a-prompt-can-remove-the-wrong-tab.md) - a close identifies its tab by id after the last await and is a no-op if the tab is gone, so a prompt can no longer make it remove a neighbour.
+- [a-dropped-indexer-strands-the-recovery-slot](done/a-dropped-indexer-strands-the-recovery-slot.md) - a coordinator that goes away mid-pass requeues its recovery claim, and a recovery action that keeps failing waits a cooldown between attempts.
+- [a-duplicate-list-key-kills-its-panel](done/a-duplicate-list-key-kills-its-panel.md) - list keys are unique for every shape the server may send, and a render throw in a pane, an inspector section or the launcher's deck is contained with a retry.
+- [a-failed-load-is-retried-forever](done/a-failed-load-is-retried-forever.md) - a failed load shows where the content would have been and is not retried until something that could make it succeed changes.
+- [a-failed-revoke-looks-like-a-revoke](done/a-failed-revoke-looks-like-a-revoke.md) - a failed revoke says so next to what was not revoked, the token and grant lists stay current, and revocation is confirmed through the app's own modal.
+- [a-file-tab-moved-mid-load-shows-loading-for-good](done/a-file-tab-moved-mid-load-shows-loading-for-good.md) - a load that stops leaves no tab claiming to be loading, and a tab that moved mid-load finishes or restarts its load where it now is.
+- [a-move-onto-an-occupied-name-behaves-two-ways](done/a-move-onto-an-occupied-name-behaves-two-ways.md) - every move gesture refuses a collision and names the occupied path, and the overwrite confirm the server never honoured is gone.
+- [a-prerelease-deb-is-spelled-with-a-dot](done/a-prerelease-deb-is-spelled-with-a-dot.md) - `requiredAssets` names the Debian form cargo-deb writes, and the rc2 and rc3 dry runs' downloaded artifacts matched it 25 of 25 with the gateway debs spelled with a tilde.
+- [a-rejected-settings-write-looks-saved](done/a-rejected-settings-write-looks-saved.md) - a rejected settings write shows on its field, which returns to the server's value, and every settings write reports through one `SaveStatus` vocabulary.
+- [a-replaced-root-still-reads-running-on-the-desktop](done/a-replaced-root-still-reads-running-on-the-desktop.md) - the root health probe is one function both embedders start, so the desktop reads a gone or replaced root as `unavailable` within one probe period and clears it when the directory returns.
+- [a-restored-transfer-id-collides-with-a-new-one](done/a-restored-transfer-id-collides-with-a-new-one.md) - transfer ids are unique among every record the window holds, restored or new.
+- [a-tab-reorder-drops-live-tab-state](done/a-tab-reorder-drops-live-tab-state.md) - cloning a tab keeps every field unless the code names it as a deliberate drop, with a test that fails when a new field is undecided.
+- [a-terminal-chunk-arrives-twice-on-attach](done/a-terminal-chunk-arrives-twice-on-attach.md) - recording output and attaching take the ring under one lock, so a chunk that races an attach arrives once and a reconnect resumes from the true end of what was sent.
+- [a-terminal-moved-to-another-window-loses-its-tab-state](done/a-terminal-moved-to-another-window-loses-its-tab-state.md) - a terminal moved to another window arrives with the state a reload would restore, and a payload from an older build still reattaches the shell.
+- [a-timed-out-mount-closes-a-tenant-it-did-not-open](done/a-timed-out-mount-closes-a-tenant-it-did-not-open.md) - a devserver mount attempt whose bound expires compensates only for what it may have created, so a tenant something else mounted keeps its sessions and its row.
+- [browser-smoke-reports-results-it-did-not-measure](done/browser-smoke-reports-results-it-did-not-measure.md) - the e2e harnesses fail or skip for a named reason when they cannot evaluate a check, record measured values, and always end with a verdict file.
+- [bubble-triggers-fire-inside-existing-syntax](done/bubble-triggers-fire-inside-existing-syntax.md) - editor triggers stay out of existing images, links, heading markers and fenced code blocks.
+- [chan-open-is-gone-and-forget-is-a-second-verb](done/chan-open-is-gone-and-forget-is-a-second-verb.md) - `chan open` is a spelling of `chan serve` and `chan close --forget` a spelling of `chan workspace forget`, with the same arguments, refusals and reach.
+- [cs-terminal-close-acks-a-close-that-did-not-happen](done/cs-terminal-close-acks-a-close-that-did-not-happen.md) - `cs terminal close` waits within a shared deadline for every closed session's child to end and fails naming each survivor instead of acknowledging a close that did not happen.
+- [document-pdf-export-measures-before-images-load](done/document-pdf-export-measures-before-images-load.md) - document PDF export measures only after every image has loaded or failed, inlines images once per export, and exports an embed as a printable link.
+- [dump-skill-prints-more-than-an-agent-can-read](done/dump-skill-prints-more-than-an-agent-can-read.md) - `chan dump-skill` prints an index by default, topic pages split into indexed parts under an 8 KiB budget, and `--full` is the explicit unbounded export.
+- [escape-closes-the-overlay-under-an-open-menu](done/escape-closes-the-overlay-under-an-open-menu.md) - the first Escape closes an open menu and nothing else, and focus returns to the control that opened it.
+- [four-detectors-disagree-about-page-breaks](done/four-detectors-disagree-about-page-breaks.md) - `<hr class="chan-page-break">` is the one page break every surface detects, with near misses normalized on write and `@pagebreak` kept as an authoring macro.
+- [frontend-gate-holes-let-broken-bundles-ship](done/frontend-gate-holes-let-broken-bundles-ship.md) - everything that ships or renders a verdict runs under a `make ci-*` target, and a release job that builds a bundle by hand asserts the bundle exists before compiling it in.
+- [full-window-covers-do-not-block-input](done/full-window-covers-do-not-block-input.md) - every full-window cover blocks keyboard chords, the Ctrl+D capture and host commands through one registration, and the screensaver lock is a real boundary for its window.
+- [image-actions-die-after-an-edit-above-the-image](done/image-actions-die-after-an-edit-above-the-image.md) - an image action resolves its source range from the live syntax tree when it runs, and its document listeners leave with their view.
+- [no-test-pins-the-unavailable-mint-contract](done/no-test-pins-the-unavailable-mint-contract.md) - a test now pins that a registration for a mounted but degraded workspace mounts, mints one window and succeeds, with the degraded state on the window and the launcher row.
+- [one-on-route-still-answers-204](done/one-on-route-still-answers-204.md) - every turn-on verb answers 200 with the workspace's launcher row, the connected-devserver route included, and refusals keep their codes and bodies.
+- [rich-copy-puts-the-session-token-on-the-clipboard](done/rich-copy-puts-the-session-token-on-the-clipboard.md) - rich copy writes image URLs without the `t=` bearer, so the session token never leaves the app on the clipboard.
+- [rich-prompt-submit-throws-on-plain-http](done/rich-prompt-submit-throws-on-plain-http.md) - ids are minted through one helper that works in every context chan is served in, so Rich Prompt submits on a devserver reached over plain http.
+- [shortcuts-ignore-the-keyboard-layout](done/shortcuts-ignore-the-keyboard-layout.md) - letter and punctuation shortcuts follow the active keyboard layout on every surface, and the extension keyboard relay moved to v2 across chan, mobile-chat and Doom; the macOS Colemak, Dvorak and Option checks are pending for the contributor.
+- [terminal-chords-run-twice-or-not-at-all](done/terminal-chords-run-twice-or-not-at-all.md) - each chord the terminal claims produces exactly one action through one rule all four dispatch points consult.
+- [the-connecting-window-offers-retry-before-it-tried](done/the-connecting-window-offers-retry-before-it-tried.md) - the connecting window offers Retry only after the connection has failed or timed out, and announces state changes rather than the clock.
+- [the-copr-probe-window-is-shorter-than-its-builds](done/the-copr-probe-window-is-shorter-than-its-builds.md) - the COPR publication probe waits 7,200 seconds, sized from the measured worst normal release, with trigger and verify as separate jobs.
+- [the-desktop-reads-any-409-as-live-terminals](done/the-desktop-reads-any-409-as-live-terminals.md) - the desktop recognizes a live-terminals refusal by its `live_terminals` discriminator and shows any other 409 with its own message.
+- [the-dl-pipeline-fails-open](done/the-dl-pipeline-fails-open.md) - the `/dl` pipeline errors on a missing tag, spells asset names once, and requires a signature for every updater payload it can publish.
+- [the-rust-review-lows-were-never-triaged](done/the-rust-review-lows-were-never-triaged.md) - every one of the 116 defect-shaped Rust review lows ends in a disposition with a re-checked line, 21 of them fixed in this round, 11 refuted and the rest carried with a stated reason.
+- [two-live-samples-of-one-lock-disagree](done/two-live-samples-of-one-lock-disagree.md) - the foreign-holder lock probe is three-state, so a transient open failure reads as `unknown` with its reason instead of another process holding the lock.
 
 ### v0.99.0
 
