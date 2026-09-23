@@ -1256,10 +1256,13 @@ impl AdminClient {
                     .list_users(Some(ident), None, None, PAGE_SIZE, offset)
                     .await?;
                 let count = page.len();
-                hits.extend(
-                    page.into_iter()
-                        .filter(|user| user.email.eq_ignore_ascii_case(ident)),
-                );
+                for user in page {
+                    if user.email.eq_ignore_ascii_case(ident)
+                        && !hits.iter().any(|existing: &User| existing.id == user.id)
+                    {
+                        hits.push(user);
+                    }
+                }
                 if hits.len() > 1 || count < PAGE_SIZE as usize {
                     break;
                 }
@@ -2802,6 +2805,15 @@ mod tests {
 
     #[tokio::test]
     async fn email_resolution_finds_an_exact_match_beyond_the_first_page() {
+        assert_paginated_email_resolution(false).await;
+    }
+
+    #[tokio::test]
+    async fn email_resolution_deduplicates_overlapping_pages() {
+        assert_paginated_email_resolution(true).await;
+    }
+
+    async fn assert_paginated_email_resolution(repeat_exact: bool) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2822,8 +2834,8 @@ mod tests {
                 assert!(request.contains(&format!("offset={offset}")), "{request}");
                 let count = if offset == 0 { 100 } else { 1 };
                 let rows = (0..count).map(|n| serde_json::json!({
-                    "id": if offset == 0 { Uuid::new_v4() } else { expected },
-                    "email": if offset == 0 { format!("prefix{n}target@example.com") } else { "target@example.com".into() },
+                    "id": if offset == 0 && !(repeat_exact && n == 99) { Uuid::new_v4() } else { expected },
+                    "email": if offset == 0 && !(repeat_exact && n == 99) { format!("prefix{n}target@example.com") } else { "target@example.com".into() },
                     "display_name":null, "username":format!("user-{offset}-{n}"), "username_edits":0,
                     "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
                 })).collect::<Vec<_>>();

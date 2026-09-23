@@ -3318,3 +3318,36 @@ async fn unicode_email_claim_and_admin_filter_use_database_case_folding() {
     assert_eq!(body[0]["id"], user);
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn admin_user_pages_have_a_unique_order_for_tied_timestamps() {
+    let app = TestApp::new().await;
+    for n in 1..=4 {
+        sqlx::query("INSERT INTO users (id, email, username, created_at) VALUES ($1, $2, $3, '2026-01-01T00:00:00Z')")
+            .bind(Uuid::from_u128(n)).bind(format!("tie{n}@example.com"))
+            .bind(format!("tie-{n}")).execute(&app.pool).await.unwrap();
+    }
+    let mut ids = Vec::new();
+    for offset in [0, 2] {
+        let (status, body) = app
+            .admin(
+                Method::GET,
+                &format!("/v1/admin/users?limit=2&offset={offset}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        ids.extend(
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned()),
+        );
+    }
+    let expected = (1..=4)
+        .rev()
+        .map(|n| Uuid::from_u128(n).to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected);
+    app.cleanup().await;
+}

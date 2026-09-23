@@ -779,7 +779,7 @@ async fn admin_list_users(
            AND ($3::bool IS NULL \
                 OR ($3 = true  AND blocked_at IS NOT NULL) \
                 OR ($3 = false AND blocked_at IS NULL)) \
-         ORDER BY created_at DESC \
+         ORDER BY created_at DESC, id DESC \
          LIMIT $4 OFFSET $5",
     ))
     .bind(email)

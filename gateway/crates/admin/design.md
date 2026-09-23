@@ -100,3 +100,5 @@ Network failures (`reqwest::Error`) reach `exit_code_for` as plain `anyhow::Erro
 - Inline editor for `user update --email` (the CLI takes a flag, no `$EDITOR` round trip)
 
 Email resolution scans every substring-result page before declaring an exact email absent; matches beyond the first page remain addressable by email.
+
+Profile user pages sort by creation time and immutable user id. Email resolution deduplicates repeated ids across pages, including overlaps caused by concurrent insertion. Offset pagination is not a transaction snapshot; concurrent deletions can still shift later rows.
