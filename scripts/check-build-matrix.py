@@ -722,24 +722,6 @@ def filter_selects(patterns: list[str], path: str) -> bool:
     return selected
 
 
-def workflow_runs(
-    triggers: dict[str, dict[str, list[str]]], event: str, changed: list[str]
-) -> bool:
-    """Whether EVENT runs for the CHANGED file paths.
-
-    `paths` runs the workflow when it selects at least one changed file,
-    `paths-ignore` when at least one changed file escapes it, and an event
-    with neither runs on every change.
-    """
-    filters = triggers[event]
-    if "paths" in filters:
-        return any(filter_selects(filters["paths"], path) for path in changed)
-    if "paths-ignore" in filters:
-        ignored = filters["paths-ignore"]
-        return not all(filter_selects(ignored, path) for path in changed)
-    return True
-
-
 def manifest(relative: str) -> dict:
     return tomllib.loads(read(relative))
 
