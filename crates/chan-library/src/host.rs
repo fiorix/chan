@@ -47,6 +47,17 @@ const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25)
 #[cfg(test)]
 type WorkspaceOpenProbe = Box<dyn FnMut(&mut chan_workspace::Result<Arc<Workspace>>) + Send>;
 
+/// The blocking hops a removal makes, named so a test can hold or fail one.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalHop {
+    WindowMatch,
+    Unregister,
+}
+
+#[cfg(test)]
+type RemovalHopProbe = Arc<dyn Fn(RemovalHop) + Send + Sync>;
+
 /// One workspace mounted into a [`WorkspaceHost`].
 #[derive(Debug, Clone)]
 pub struct HostedWorkspace {
@@ -341,6 +352,8 @@ pub struct WorkspaceHost {
     open_release_budget: std::time::Duration,
     #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
+    #[cfg(test)]
+    removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Desktop integration shared by every tenant this host mounts: the
     /// window-ops channel and the title map. `DesktopBridge::default()`
@@ -711,6 +724,8 @@ impl WorkspaceHost {
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            removal_hop_probe: std::sync::Mutex::new(None),
             builder,
             self_weak: OnceLock::new(),
             window_registry: OnceLock::new(),
@@ -2506,8 +2521,16 @@ impl WorkspaceHost {
         };
         let registry = Arc::clone(registry);
         let target = target.to_path_buf();
+        #[cfg(test)]
+        let probe = self.removal_hop_probe.lock().unwrap().clone();
         let ids = match self
-            .off_runtime(move || workspace_window_ids(&registry, &target))
+            .off_runtime(move || {
+                #[cfg(test)]
+                if let Some(probe) = probe {
+                    probe(RemovalHop::WindowMatch);
+                }
+                workspace_window_ids(&registry, &target)
+            })
             .await
         {
             Ok(ids) => ids,
@@ -2928,8 +2951,16 @@ impl WorkspaceHost {
         let removed = {
             let library = self.library.clone();
             let root = root.to_path_buf();
+            #[cfg(test)]
+            let probe = self.removal_hop_probe.lock().unwrap().clone();
             match self
-                .off_runtime(move || library.unregister_workspace(&root))
+                .off_runtime(move || {
+                    #[cfg(test)]
+                    if let Some(probe) = probe {
+                        probe(RemovalHop::Unregister);
+                    }
+                    library.unregister_workspace(&root)
+                })
                 .await
             {
                 Ok(Ok(removed)) => removed,
@@ -4023,6 +4054,122 @@ mod tests {
             host.library().workspace_paths_for(root.path()).is_none(),
             "removal did not unregister the aliased root"
         );
+    }
+
+    /// Drop a removal while its `held` hop is parked on the blocking pool,
+    /// let the hop finish, and check the removal ended in one of the two
+    /// states it may end in. A hop cannot be cancelled, so the pool thread
+    /// goes on after the caller is gone. The runtime has one blocking thread,
+    /// so a task queued behind the held hop runs only once that hop returns.
+    fn abandon_removal_at(held: RemovalHop) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            library.register_workspace(root.path()).expect("register");
+            let key = canonical_key(root.path());
+            let overlay_key = key.to_string_lossy().into_owned();
+            let host = WorkspaceHost::new(library, fake_builder());
+            let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+            overlay.set(&overlay_key, true);
+            host.install_workspace_overlay(Arc::clone(&overlay));
+            let store = tempfile::tempdir().expect("store dir");
+            let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+            registry.create(
+                WindowKind::Workspace,
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+            host.install_window_registry(registry.clone(), "local".into());
+
+            let (entered_tx, entered) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let entered_tx = Mutex::new(entered_tx);
+            let released = Mutex::new(released);
+            *host.removal_hop_probe.lock().unwrap() = Some(Arc::new(move |hop| {
+                if hop == held {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    let _ = released
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5));
+                }
+            }));
+            {
+                let removal = host.remove_workspace_for_root(root.path(), false);
+                tokio::pin!(removal);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    tokio::select! {
+                        outcome = &mut removal => {
+                            panic!("the removal finished while {held:?} was held: {outcome:?}")
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                    if entered.try_recv().is_ok() {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "the removal never reached the {held:?} hop"
+                    );
+                }
+            }
+            *host.removal_hop_probe.lock().unwrap() = None;
+            release.send(()).expect("release the held hop");
+            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+                .await
+                .expect("the held hop kept its pool thread")
+                .expect("pool probe");
+
+            if host.library().workspace_paths_for(root.path()).is_some() {
+                assert!(
+                    matches!(
+                        host.mount_state.lock().unwrap().get(&key),
+                        Some(MountState::Error(reason))
+                            if reason == "workspace removal cancelled; retry"
+                    ),
+                    "abandoned at {held:?}: the workspace stayed registered without a retryable row"
+                );
+                assert!(
+                    host.remove_workspace_for_root(root.path(), false)
+                        .await
+                        .expect("retry")
+                        .completed(),
+                    "abandoned at {held:?}: the retry did not complete"
+                );
+                assert!(
+                    host.library().workspace_paths_for(root.path()).is_none(),
+                    "abandoned at {held:?}: the retry did not unregister the workspace"
+                );
+            }
+            assert!(
+                !overlay.entries().iter().any(|row| row.path == overlay_key),
+                "abandoned at {held:?}: the workspace was unregistered but its overlay entry survived"
+            );
+            assert!(
+                registry.snapshot().is_empty(),
+                "abandoned at {held:?}: the workspace was unregistered but its window records survived"
+            );
+            assert!(
+                !host.mount_state.lock().unwrap().contains_key(&key),
+                "abandoned at {held:?}: the workspace was unregistered but kept a mount-state row"
+            );
+        });
+    }
+
+    #[test]
+    fn a_removal_abandoned_at_the_window_match_ends_retryable_or_removed() {
+        abandon_removal_at(RemovalHop::WindowMatch);
+    }
+
+    #[test]
+    fn a_removal_abandoned_at_the_unregister_ends_retryable_or_removed() {
+        abandon_removal_at(RemovalHop::Unregister);
     }
 
     #[test]
