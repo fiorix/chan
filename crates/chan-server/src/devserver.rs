@@ -209,8 +209,9 @@ fn serialize_persisted_config(cfg: &PersistedConfig) -> std::io::Result<Vec<u8>>
 /// The session store for the shared standalone-terminal tenant:
 /// `~/.chan/devserver/terminals/`. Each terminal window's per-window pane/tab
 /// layout blob is keyed by its `?w=<window_id>` here, so the layout survives a
-/// devserver restart (with fresh PTYs). `None` when there is no home dir (the
-/// tenant then falls back to the in-memory `ephemeral_sessions`).
+/// devserver restart (with fresh PTYs). Always `Some`: the tenant builder takes
+/// an optional store and falls back to in-memory `ephemeral_sessions` without
+/// one.
 fn devserver_terminals_dir() -> Option<PathBuf> {
     Some(devserver_state_dir().join("terminals"))
 }
@@ -225,9 +226,8 @@ fn devserver_state_dir() -> PathBuf {
     chan_workspace::paths::config_dir().join("devserver")
 }
 
-fn devserver_config_path() -> std::io::Result<PathBuf> {
-    // `config_dir` is infallible, so this never errors.
-    Ok(devserver_state_dir().join("config.json"))
+fn devserver_config_path() -> PathBuf {
+    devserver_state_dir().join("config.json")
 }
 
 /// Machine-readable marker the desktop control terminal scrapes from the
@@ -259,7 +259,7 @@ fn unix_now_secs() -> u64 {
 /// prints the [`DEVSERVER_TOKEN_MARKER`] from this, since a journal-follow
 /// does not re-emit the running unit's original start line.
 pub fn persisted_devserver_token() -> Option<String> {
-    let store = DevserverStore::at(devserver_config_path().ok()?);
+    let store = DevserverStore::at(devserver_config_path());
     let token = store.load().devserver_token;
     (!token.is_empty()).then_some(token)
 }
@@ -271,7 +271,7 @@ pub fn persisted_devserver_token() -> Option<String> {
 /// fallback; a devserver somehow still running elsewhere keeps accepting
 /// its in-memory token until it restarts, which the caller must say.
 pub fn rotate_persisted_devserver_token() -> std::io::Result<Option<String>> {
-    let store = DevserverStore::at(devserver_config_path()?);
+    let store = DevserverStore::at(devserver_config_path());
     let mut cfg = store.load();
     if cfg.devserver_token.is_empty() {
         return Ok(None);
@@ -289,7 +289,7 @@ pub fn rotate_persisted_devserver_token() -> std::io::Result<Option<String>> {
 /// binds an OS-assigned port); the record is written before the readiness
 /// notify, so an active unit has already persisted it.
 pub fn persisted_devserver_port() -> Option<u16> {
-    let store = DevserverStore::at(devserver_config_path().ok()?);
+    let store = DevserverStore::at(devserver_config_path());
     let port = store.load().port;
     (port != 0).then_some(port)
 }
@@ -1363,16 +1363,7 @@ impl DevserverState {
             if let Some(entry) = by_root.get(&ws.root_path) {
                 entries.push(entry.clone());
             } else if let Ok(prefix) = allocate_workspace_prefix(&ws.root_path) {
-                let (status, error) = self.host.workspace_status(&ws.root_path);
-                entries.push(WorkspaceEntry {
-                    prefix,
-                    path: ws.root_path.to_string_lossy().into_owned(),
-                    label: workspace_label(&ws.root_path),
-                    on: false,
-                    status,
-                    error,
-                    token: String::new(),
-                });
+                entries.push(self.off_row(prefix, &ws.root_path));
             }
         }
         // Defensive: a served workspace whose root left the library (forgotten
@@ -1406,16 +1397,22 @@ impl DevserverState {
     /// (stable prefix, no token), for idempotent off-toggles and reporting.
     fn library_off_entry(&self, prefix: &str) -> Option<WorkspaceEntry> {
         let root = self.library_root_for_prefix(prefix)?;
-        let (status, error) = self.host.workspace_status(&root);
-        Some(WorkspaceEntry {
-            prefix: prefix.to_string(),
+        Some(self.off_row(prefix.to_string(), &root))
+    }
+
+    /// The `on:false` row for a library workspace at `root` served under
+    /// `prefix`, with the host's status for that root and no token.
+    fn off_row(&self, prefix: String, root: &Path) -> WorkspaceEntry {
+        let (status, error) = self.host.workspace_status(root);
+        WorkspaceEntry {
+            prefix,
             path: root.to_string_lossy().into_owned(),
-            label: workspace_label(&root),
+            label: workspace_label(root),
             on: false,
             status,
             error,
             token: String::new(),
-        })
+        }
     }
 
     /// Build the wire [`WorkspaceEntry`] for a registered workspace record: an
@@ -1431,10 +1428,9 @@ impl DevserverState {
             MountPhase::Failed(_) if mounted => self.host.workspace_status(&record.root),
             MountPhase::Failed(reason) => (WorkspaceStatus::Error, Some(reason.clone())),
             // A mounted tenant is `running` UNLESS the health probe has found
-            // its filesystem unreachable. Short-circuiting to `running` here is
-            // what let a row sit green in the launcher over a dead mount while
-            // every read through it failed, so the degraded overlay is
-            // consulted before that conclusion. Only that one state overrides:
+            // its filesystem unreachable, so the degraded overlay is consulted
+            // first: a dead mount must not show green in the launcher while
+            // every read through it fails. Only that one state overrides:
             // every other overlay value on a mounted row stays `running`.
             MountPhase::Mounted if mounted => match self.host.workspace_status(&record.root) {
                 (WorkspaceStatus::Unavailable, reason) => (WorkspaceStatus::Unavailable, reason),
@@ -1534,7 +1530,7 @@ impl DevserverState {
 
 #[must_use = "the startup restore task must be joined before shutdown completes"]
 struct WorkspaceRestore {
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl WorkspaceRestore {
@@ -1544,24 +1540,17 @@ impl WorkspaceRestore {
         shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         Self {
-            task: Some(tokio::spawn(restore_prepared_workspaces(
-                state,
-                attempts,
-                shutdown_rx,
-            ))),
+            task: tokio::spawn(restore_prepared_workspaces(state, attempts, shutdown_rx)),
         }
     }
 
-    async fn join(mut self) -> Result<(), tokio::task::JoinError> {
-        self.task
-            .take()
-            .expect("restore owner always contains its task")
-            .await
+    async fn join(self) -> Result<(), tokio::task::JoinError> {
+        self.task.await
     }
 
     #[cfg(test)]
     fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
-        Self { task: Some(task) }
+        Self { task }
     }
 }
 
@@ -1726,8 +1715,7 @@ fn resolve_boot_token(persisted: &mut PersistedConfig, now: u64) -> BootToken {
 pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow::Result<()> {
     let fdstore_restore = fdstore::StartupRestore::take();
 
-    let store =
-        DevserverStore::at(devserver_config_path().context("resolving devserver config path")?);
+    let store = DevserverStore::at(devserver_config_path());
     let mut persisted = store.load();
     if resolve_boot_token(&mut persisted, unix_now_secs()) == BootToken::RotatedByAge {
         eprintln!(
@@ -1755,9 +1743,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // Install the persisted window registry beside the devserver config, so the
     // window feed has data. The window-record
     // assembly reads it; `library_id` stamps each row.
-    let windows_store = devserver_config_path()
-        .context("resolving devserver windows store path")?
-        .with_file_name("windows.json");
+    let windows_store = devserver_config_path().with_file_name("windows.json");
     host.install_window_registry(
         Arc::new(WindowRegistry::open(windows_store)),
         library_id.clone(),
@@ -1780,16 +1766,12 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // Install the library-owned workspace on/off overlay beside the window
     // registry, so the restore below re-mounts what was on. Same shape + store
     // the desktop-local library uses (`~/.chan/workspaces.json`).
-    let overlay_store = devserver_config_path()
-        .context("resolving devserver workspace overlay path")?
-        .with_file_name("workspaces.json");
+    let overlay_store = devserver_config_path().with_file_name("workspaces.json");
     host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(overlay_store)));
     // The devserver's own pane-highlight colour, persisted beside the registry +
     // overlay: each devserver "sticks" to its colour, the launcher's local-color
     // route serves it, and the desktop caches it for the pane-highlight inject.
-    let color_store = devserver_config_path()
-        .context("resolving devserver local-color path")?
-        .with_file_name("color.json");
+    let color_store = devserver_config_path().with_file_name("color.json");
     host.install_local_color_store(Arc::new(FileLocalColor::open(color_store)));
     match start_registry_reload_watcher(host.clone(), host.library().config_path()) {
         Ok(watcher) => {
@@ -2184,7 +2166,7 @@ fn build_devserver_app(
         ))
         .with_state(state.clone());
     // Serve the web-launcher SPA at the library root `/` plus the `/api/library/*`
-    // data surface (windows; workspaces next) as the host's root fallback --
+    // data surface (windows and workspaces) as the host's root fallback --
     // without it the root 404s, since `host_dispatch` only matches
     // workspace-tenant prefixes. The `/api/library/windows*` routes live in
     // the shared launcher bundle so the desktop loopback gets them too.
@@ -2244,17 +2226,19 @@ async fn gate_tenant_during_startup(
     }
 }
 
-/// Middleware that stamps every request entering the tunnel-only app clone with
-/// [`crate::TunnelOrigin`], carrying the verified gateway caller. A request with
-/// a missing or unverifiable assertion, or one whose verified subject names no
-/// user, is refused with 401 here. A local loopback request never passes
-/// through this layer, so it never carries the marker.
+/// Verification material derived from the tunnel token for the assertion
+/// middleware.
 #[derive(Clone)]
 struct TunnelAssertion {
     key: chan_tunnel_proto::gateway_assertion::AssertionKey,
     devserver_id: String,
 }
 
+/// Middleware that stamps every request entering the tunnel-only app clone with
+/// [`crate::TunnelOrigin`], carrying the verified gateway caller. A request with
+/// a missing or unverifiable assertion, or one whose verified subject names no
+/// user, is refused with 401 here. A local loopback request never passes
+/// through this layer, so it never carries the marker.
 async fn mark_tunnel_origin(
     State(assertion): State<TunnelAssertion>,
     mut req: HttpRequest<Body>,
@@ -2481,9 +2465,6 @@ async fn handle_info(State(state): State<Arc<DevserverState>>) -> Json<Devserver
         library_id: state.library_id.clone(),
         os,
         pretty_name,
-        // The shared terminal tenant is mounted at boot, so its constructed
-        // state answers; a devserver whose mount raced this probe reports
-        // the platform predicate the same construction applies.
     })
 }
 
