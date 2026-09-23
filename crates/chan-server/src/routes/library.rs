@@ -931,8 +931,9 @@ async fn handle_library_command_launch(
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
 ) -> Response {
-    // Held to the end of the handler, so the resolved capability outlives the
-    // launch URL built from it.
+    // Resolving the capability is the gate: an unknown or dead one is refused
+    // here. The launch URL is built from the path's window id and its record,
+    // not from the resolved value.
     let _capability = match resolve_command_capability(&state, &capability) {
         Ok(capability) => capability,
         Err(error) => return error.into_response(),
