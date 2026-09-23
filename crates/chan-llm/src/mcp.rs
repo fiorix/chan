@@ -74,7 +74,7 @@ enum MediaKind {
 /// chan-workspace's Image class. The comparison lowercases;
 /// `image.PNG` and `image.png` both match. Does not touch the
 /// filesystem.
-pub fn supported_image_mime(rel: &str) -> Option<&'static str> {
+fn supported_image_mime(rel: &str) -> Option<&'static str> {
     let dot = rel.rfind('.')?;
     let ext = &rel[dot + 1..];
     if ext.is_empty() {
@@ -140,10 +140,9 @@ impl Server {
         }
     }
 
-    /// Override the per-response `read_media` byte cap. Mirrors the
-    /// caller that doesn't care about the cap keeps the default;
-    /// chan-server and the standalone binary can set it from their
-    /// own configuration surfaces.
+    /// Override the per-response `read_media` byte cap. A caller that keeps
+    /// the default gets [`DEFAULT_MCP_MEDIA_MAX_BYTES`]; the standalone
+    /// binary's `--max-media-bytes` is the one caller that sets it.
     pub fn with_max_media_bytes(mut self, n: u64) -> Self {
         self.max_media_bytes = n;
         self
@@ -732,15 +731,11 @@ fn percent_encode_path(path: &str) -> String {
 /// (sizes, mtimes, limits).
 fn mcp_safe_message(err: &LlmError) -> String {
     match err {
-        LlmError::WriteConflict { current_mtime_ns } => {
-            format!("write conflict: file changed on disk (current mtime ns: {current_mtime_ns:?})")
-        }
-        LlmError::WriteTooLarge { kind, size, limit } => {
-            format!("write too large: {size} bytes exceeds {limit} byte cap for {kind}")
-        }
-        LlmError::ListingTooLarge { observed, limit } => {
-            format!("listing too large: {observed} entries (cap {limit})")
-        }
+        // These variants carry only numbers and a kind name, so their own
+        // Display is already safe to forward.
+        LlmError::WriteConflict { .. }
+        | LlmError::WriteTooLarge { .. }
+        | LlmError::ListingTooLarge { .. } => err.to_string(),
         LlmError::PathRefused(_) => {
             // The chan-workspace Display may carry an absolute path
             // (SpecialFile.path, SymlinkEscape); flatten to the
