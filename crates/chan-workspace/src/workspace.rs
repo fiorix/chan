@@ -3823,12 +3823,13 @@ impl Workspace {
     ///     back to mtime-only; the first `index_file` after upgrade
     ///     backfills the size column.
     ///   - File on disk + matching `(mtime, size)` tuple -> skip, except
-    ///     a text file missing from the index whose row does not say the
-    ///     index has nothing for it is read to check whether the active
-    ///     chunker would emit entries within the incremental size ceiling.
-    ///     If so, `index_file` repairs it; if not, the row is marked and
-    ///     no later pass reads the file at that stat. Empty,
-    ///     whitespace-only and frontmatter-only text stays skipped.
+    ///     a file missing from the index whose row does not say the
+    ///     index has nothing for it is read, Markdown or text, to check
+    ///     whether the active chunker would emit entries within the
+    ///     incremental size ceiling. If so, `index_file` repairs it; if
+    ///     not, the row is marked and no later pass reads the file at
+    ///     that stat. Empty, whitespace-only and frontmatter-only
+    ///     content stays skipped.
     ///     A failed repair probe is left for a later pass.
     ///   - Graph document, text stamp or index-only path missed by the walk ->
     ///     `forget_file` only if current policy excludes it or capability-relative
@@ -3937,16 +3938,16 @@ impl Workspace {
                 }
             };
             if !needs_index
-                && !fs_ops::is_markdown_file(rel)
                 && !indexed_paths.contains(rel)
                 && !nothing_indexed.contains(rel)
                 && disk_size.is_none_or(|size| (1..=size_to_i64(TEXT_WRITE_LIMIT)).contains(&size))
             {
-                // A rebuild stamps text before the search build reads it, and
-                // that read can fail, so a matching stamp with no index entry
-                // is read once: content with chunks is indexed again, content
-                // without is marked so no later pass reads it. Respect the
-                // incremental indexer's existing size ceiling.
+                // A rebuild writes a file's row before the search build reads
+                // it, and that read can fail, so a matching row with no index
+                // entry is read once, whatever the file's kind: content with
+                // chunks is indexed again, content without is marked so no
+                // later pass reads it. Respect the incremental indexer's
+                // existing size ceiling.
                 #[cfg(test)]
                 derived_state_read_probe(self, rel);
                 match self.read_text(rel) {
