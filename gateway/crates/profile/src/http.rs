@@ -462,13 +462,7 @@ async fn create_identity(
     }
     // Ensure the parent user exists. Without this, FK-violation surfaces as a
     // generic 500 instead of a clean 404 for the by-id route.
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !exists {
-        return Err(Error::NotFound);
-    }
+    require_user(&state.pool, user_id).await?;
 
     let identity = sqlx::query_as::<_, Identity>(
         "INSERT INTO identities (user_id, provider, provider_subject, email) \
@@ -1148,13 +1142,7 @@ async fn admin_user_audit(
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuthAudit>>> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !exists {
-        return Err(Error::NotFound);
-    }
+    require_user(&state.pool, id).await?;
     let rows = sqlx::query_as::<_, AuthAudit>(
         "SELECT id, user_id, ts, action, ip, user_agent, note \
          FROM auth_audit WHERE user_id = $1 ORDER BY ts DESC LIMIT $2",
@@ -1170,13 +1158,7 @@ async fn admin_user_tokens(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<AdminToken>>> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !exists {
-        return Err(Error::NotFound);
-    }
+    require_user(&state.pool, id).await?;
     let rows = sqlx::query_as::<_, AdminToken>(
         "SELECT id, user_id, label, expires_at, created_at, revoked_at, last_used_at \
          FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC",
@@ -1665,13 +1647,7 @@ async fn claim_grants(
     Path(user_id): Path<Uuid>,
     Json(body): Json<ClaimGrantsRequest>,
 ) -> Result<Json<ClaimGrantsResponse>> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !exists {
-        return Err(Error::NotFound);
-    }
+    require_user(&state.pool, user_id).await?;
     let normalized: Vec<String> = body
         .emails
         .iter()
@@ -1720,14 +1696,8 @@ fn valid_flag_key(s: &str) -> bool {
 async fn get_user_flags(
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
-) -> Result<Json<serde_json::Map<String, serde_json::Value>>> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !exists {
-        return Err(Error::NotFound);
-    }
+) -> Result<Json<std::collections::BTreeMap<String, bool>>> {
+    require_user(&state.pool, user_id).await?;
     let rows: Vec<(String, bool)> = sqlx::query_as(
         "SELECT f.key, COALESCE(o.enabled, f.default_enabled) AS enabled \
          FROM feature_flags f \
@@ -1738,11 +1708,7 @@ async fn get_user_flags(
     .bind(user_id)
     .fetch_all(&state.pool)
     .await?;
-    let mut map = serde_json::Map::new();
-    for (k, v) in rows {
-        map.insert(k, serde_json::Value::Bool(v));
-    }
-    Ok(Json(map))
+    Ok(Json(rows.into_iter().collect()))
 }
 
 async fn admin_list_flags(State(state): State<AppState>) -> Result<Json<Vec<FeatureFlagSummary>>> {
@@ -1927,6 +1893,18 @@ async fn admin_token_audit(
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
+}
+
+async fn require_user(pool: &PgPool, id: Uuid) -> Result<()> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(Error::NotFound)
+    }
 }
 
 #[cfg(test)]
