@@ -81,6 +81,7 @@ use http_body_util::Limited;
 use hyper_util::rt::TokioIo;
 use subtle::ConstantTimeEq;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::ProtocolError as TgProtocolError;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as TgCloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TgCloseFrame;
 use tokio_tungstenite::tungstenite::Error as TgError;
@@ -1636,8 +1637,9 @@ fn upstream_bridge_close(stop: BridgeStop) -> TgMessage {
 /// Why a bridge's setup failed, which picks the Close reason the client
 /// gets. An open that fails means the tunnel is gone, so a browser may
 /// retry once it is back; a handshake the devserver answered with
-/// anything but a 101 is this path refused, and a retry of it is not
-/// going to help.
+/// anything but a 101, or with a response the WebSocket handshake
+/// rejects, is this path refused, and a retry of it is not going to
+/// help.
 #[derive(Debug, thiserror::Error)]
 enum BridgeSetupError {
     #[error("substream open: {0}")]
@@ -1651,9 +1653,21 @@ impl BridgeSetupError {
     /// registered bad-gateway close code, is one tungstenite refuses on
     /// receipt and reports as a 1002 protocol violation, so the reason
     /// is what tells the cases apart.
+    ///
+    /// `Protocol` and `HttpFormat` mean the devserver answered and the
+    /// answer was not a WebSocket upgrade (a 101 missing its `Upgrade`
+    /// or `Connection`, a wrong `Sec-WebSocket-Accept`, a head that does
+    /// not parse), except `HandshakeIncomplete`, which is the substream
+    /// ending before any answer arrived. That one, and every transport
+    /// error, is an upstream the bridge could not reach.
     fn close_reason(&self) -> &'static str {
         match self {
-            Self::Handshake(TgError::Http(_)) => "upstream refused",
+            Self::Handshake(TgError::Protocol(TgProtocolError::HandshakeIncomplete)) => {
+                "upstream unreachable"
+            }
+            Self::Handshake(TgError::Http(_) | TgError::Protocol(_) | TgError::HttpFormat(_)) => {
+                "upstream refused"
+            }
             Self::Open(_) | Self::Handshake(_) => "upstream unreachable",
         }
     }
