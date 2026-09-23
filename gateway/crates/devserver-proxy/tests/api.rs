@@ -2515,6 +2515,124 @@ async fn ws_bridge_closes_when_the_upstream_handshake_outlasts_its_bound() {
     app.cleanup().await;
 }
 
+/// A devserver that answers the upgrade with a status rather than a
+/// 101 has refused the bridge: the tunnel is fine, this path is not.
+/// Register `upstream`, dial `path` through the proxy, and return the
+/// Close the client got with how long after the dial it arrived.
+async fn close_from_refusing_upstream(
+    upstream: Router,
+    path: &str,
+) -> (
+    tokio_tungstenite::tungstenite::protocol::CloseFrame,
+    std::time::Duration,
+) {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel("alice", "blog", uid, upstream).await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let started = tokio::time::Instant::now();
+    let mut ws = ws_connect(addr, &host, path, &cookie).await;
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose upstream refused the handshake",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    server.abort();
+    app.cleanup().await;
+    (frame, elapsed)
+}
+
+/// The proxy has already sent its 101 when the devserver answers the
+/// upgrade with a 403, so the refusal can only reach the browser as a
+/// Close frame: one that names the refusal, sent as soon as the answer
+/// arrives rather than at the setup bound, since a socket that ends
+/// with no Close reads as a network drop.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_upstream_answers_403() {
+    let upstream = Router::new().route(
+        "/blog/ws-forbidden",
+        axum::routing::get(|| async { StatusCode::FORBIDDEN }),
+    );
+    let (frame, elapsed) = close_from_refusing_upstream(upstream, "/blog/ws-forbidden").await;
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream refused");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+}
+
+/// A path the devserver does not serve answers the upgrade with a 404;
+/// the same Close names it.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_upstream_answers_404() {
+    let (frame, elapsed) = close_from_refusing_upstream(Router::new(), "/blog/ws-missing").await;
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream refused");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+}
+
+/// A tunnel that ends while the bridge waits on its substream budget
+/// fails the open once the budget frees: the tunnel is gone, and the
+/// Close must say so rather than leave the browser with a drop.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_substream_open_fails() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel("alice", "blog", uid, ws_upstream_router())
+        .await;
+    let handle = app
+        .registry
+        .get("alice", "blog")
+        .expect("registered tunnel")
+        .handle;
+    let mut held = Vec::with_capacity(MAX_TUNNEL_SUBSTREAMS);
+    for _ in 0..MAX_TUNNEL_SUBSTREAMS {
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(5), handle.open())
+            .await
+            .expect("an open within the budget is immediate")
+            .expect("substream open");
+        held.push(stream);
+    }
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let mut ws = ws_connect(addr, &host, "/blog/ws-echo", &cookie).await;
+    // The bridge is parked on the budget. End the tunnel under it, then
+    // hand the budget back so its open proceeds against a tunnel that
+    // is gone.
+    assert!(
+        app.registry.tunnels().evict("alice", "blog"),
+        "the eviction found no tunnel to end",
+    );
+    let started = tokio::time::Instant::now();
+    drop(held);
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose substream open failed",
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream unreachable");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
 // ---------------------------------------------------------------
 // Extension lane
 // ---------------------------------------------------------------
