@@ -1943,11 +1943,16 @@ async fn desktop_devserver_entry(
                 .profile_client
                 .list_incoming_shares(validated.user_id)
                 .await?;
-            let mut matching = shares.into_iter().filter(|share| {
-                share.owner_user_id == owner_id && share.devserver_id.starts_with(selected)
-            });
+            let ids = shares
+                .into_iter()
+                .filter(|share| {
+                    share.owner_user_id == owner_id && share.devserver_id.starts_with(selected)
+                })
+                .map(|share| share.devserver_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut matching = ids.into_iter();
             match (matching.next(), matching.next()) {
-                (Some(share), None) => Some(share.devserver_id),
+                (Some(id), None) => Some(id),
                 _ => None,
             }
         };

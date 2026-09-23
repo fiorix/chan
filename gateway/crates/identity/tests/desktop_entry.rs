@@ -1028,3 +1028,65 @@ async fn entry_foreign_prefix_resolves_against_granted_devservers() {
     assert_eq!(claims.owner_user_id, owner_uid);
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn foreign_prefix_ambiguity_counts_devservers_instead_of_grants() {
+    for different_id in [false, true] {
+        let app = TestApp::new().await;
+        let uid = app.insert_user().await;
+        let pat = app.desktop_pat(uid).await;
+        let owner_uid = Uuid::new_v4();
+        let owner = "owner-handle";
+        let dsid = "1".repeat(64);
+        mock_user_by_username(&app, owner_uid, owner).await;
+        mock_tunnels(&app, owner_uid, owner, &[&dsid]).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/users/{owner_uid}/devservers/{dsid}/access"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access":true})))
+            .mount(&app.profile)
+            .await;
+        let shares = [
+            dsid.clone(),
+            if different_id {
+                format!("{}2", "1".repeat(63))
+            } else {
+                dsid.clone()
+            },
+        ]
+        .into_iter()
+        .map(|id| {
+            json!({"grant_id":Uuid::new_v4(), "owner_user_id":owner_uid,
+                "owner_username":owner, "devserver_id":id, "label":"shared",
+                "accepted_at":chrono::Utc::now().to_rfc3339()})
+        })
+        .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/users/{uid}/grants/incoming")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(shares))
+            .mount(&app.profile)
+            .await;
+        let (status, body) = post_entry_body(
+            &app,
+            &pat,
+            json!({"owner_user_id":owner_uid, "devserver_id": &dsid[..12]}),
+        )
+        .await;
+        if different_id {
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["reason"], "access_denied");
+            assert!(!app
+                .profile
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path().starts_with("/admin/v1/owners/")));
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["devserver_id"], dsid);
+        }
+        app.cleanup().await;
+    }
+}
