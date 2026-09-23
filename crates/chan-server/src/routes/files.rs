@@ -1364,9 +1364,9 @@ pub async fn api_read_file(
         .map(str::to_string);
     if query_flag(&query.download) {
         // Plan and stream ride one admission on the transfer lane. Planning
-        // opens a file or walks a tree, so leaving it on the ambient pool is
-        // what made bulk transfer draw from the pool serving editor saves and
-        // terminal spawns. The tree is still pre-flighted readable inside the
+        // opens a file or walks a tree, so it belongs on the lane rather than
+        // the ambient pool that serves editor saves and terminal spawns. The
+        // tree is still pre-flighted readable inside the
         // plan, and the tar streams on the fly, so a cancel stages nothing.
         return stream_planned_workspace_download_tracked(
             &state.bulk_transfer,
@@ -5517,8 +5517,8 @@ pub async fn api_delete_file(
     };
     // Register the self-write before the blocking remove so the
     // watcher's Removed event is suppressed without racing the await
-    // (see api_write_file - noting after the await leaks a phantom
-    // external-edit/removal event).
+    // (see api_write_file: a note taken after the await would let the
+    // watcher report a phantom external removal).
     // A remove that fails deleted nothing, so its reservation is withdrawn.
     let reservation = state.self_writes.reserve(&path);
     let path_for_remove = path.clone();
@@ -5558,8 +5558,8 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     // rename (paths known up front) and the rewritten sources inside
     // the task as the rewrite reports them - all BEFORE the await
     // returns, so neither half of any pair fires a phantom external-
-    // edit prompt (noting after the await raced the watcher; see
-    // api_write_file).
+    // edit prompt (a note taken after the await would race the watcher;
+    // see api_write_file).
     // A failed rename moved nothing, so both endpoint reservations are
     // withdrawn on error.
     let reservations = [
@@ -5663,7 +5663,7 @@ pub async fn api_fs_transfer(
     };
     let dest_dir = body.dest_dir.trim_end_matches('/').to_string();
     let op = body.op;
-    let sources = body.sources.clone();
+    let sources = body.sources;
     let self_writes = Arc::clone(&state.self_writes);
 
     // A copy moves bytes and is admitted to the transfer lane. A move is not,
