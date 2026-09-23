@@ -19,7 +19,12 @@ class ContractError(RuntimeError):
 
 
 def read(relative: str) -> str:
-    return (ROOT / relative).read_text(encoding="utf-8")
+    """The text of RELATIVE, or a contract failure that names the file."""
+    try:
+        return (ROOT / relative).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        reason = error.strerror if isinstance(error, OSError) else str(error)
+        raise ContractError(f"{relative}: cannot read: {reason}") from error
 
 
 def require(haystack: str, needle: str, where: str) -> None:
@@ -724,7 +729,11 @@ def filter_selects(patterns: list[str], path: str) -> bool:
 
 
 def manifest(relative: str) -> dict:
-    return tomllib.loads(read(relative))
+    """RELATIVE parsed as TOML, or a contract failure that names the file."""
+    try:
+        return tomllib.loads(read(relative))
+    except tomllib.TOMLDecodeError as error:
+        raise ContractError(f"{relative}: not valid TOML: {error}") from error
 
 
 def dependency_tables(data: dict, dev: bool) -> list[dict]:
@@ -1017,7 +1026,7 @@ def main() -> int:
         check_gateway_trigger_contract()
         check_docker_contract()
         check_nix_contract()
-    except (ContractError, KeyError, json.JSONDecodeError) as error:
+    except (ContractError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
         return 1
 
