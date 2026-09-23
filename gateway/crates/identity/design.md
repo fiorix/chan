@@ -361,3 +361,5 @@ The origin strings stay coupled to DNS, the per-node wildcard TLS certificates, 
 - Transparent browser-only renewal for share-link sessions; chan-desktop refreshes its opaque session proactively from the PAT before expiry
 
 Explicit foreign desktop entry selections are authorized before any live-tunnel lookup. Full identifiers use the profile access check; prefixes must select exactly one incoming grant and then pass that check. An absent or revoked grant returns the same `access_denied` response whether the devserver is online or offline.
+
+Username changes preflight the edit limit and known name collisions before cutting tunnels. Profile still enforces both atomically when updating; a concurrent rename can race this preflight, so the authority cut remains before persistence.

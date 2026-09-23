@@ -2836,3 +2836,43 @@ async fn me_includes_flags_map() {
     assert_eq!(body["flags"]["share_workspaces"], true);
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn known_rename_conflicts_preserve_live_tunnels() {
+    for exhausted in [false, true] {
+        let app = TestApp::new().await;
+        let mut c = Client::new(&app);
+        let uid = fake_user_id();
+        happy_login(&app, &mut c, uid, "octo@example.com").await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut user = json!({"id": uid, "email": "octo@example.com", "display_name": null,
+            "username": "old-handle", "username_edits": if exhausted { gateway_common::validators::MAX_USERNAME_EDITS } else { 0 },
+            "created_at": now, "updated_at": now});
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/users/{uid}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&user))
+            .mount(&app.profile)
+            .await;
+        user["id"] = json!(Uuid::new_v4());
+        user["username"] = json!("new-handle");
+        Mock::given(method("GET"))
+            .and(path("/v1/users/by-username"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(user))
+            .mount(&app.profile)
+            .await;
+        let (status, _, _, _) = c
+            .send(
+                Method::PATCH,
+                "/api/me/username",
+                Some(json!({"username":"new-handle"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "exhausted={exhausted}");
+        let requests = app.profile.received_requests().await.unwrap();
+        assert!(!requests
+            .iter()
+            .any(|r| r.url.path().starts_with("/admin/v1/")));
+        assert!(!requests.iter().any(|r| r.method == "PATCH"));
+        app.cleanup().await;
+    }
+}

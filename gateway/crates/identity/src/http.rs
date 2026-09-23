@@ -1096,6 +1096,20 @@ async fn update_username(
     }
 
     if candidate != user.username {
+        // Reject known conflicts before cutting live authority. Profile's
+        // atomic update remains the final arbiter of concurrent renames.
+        if user.username_edits >= MAX_USERNAME_EDITS {
+            return Err(Error::Conflict("rename limit reached".into()));
+        }
+        if state
+            .cfg
+            .profile_client
+            .find_user_by_username(&candidate)
+            .await?
+            .is_some_and(|owner| owner.id != uid)
+        {
+            return Err(Error::Conflict("username taken".into()));
+        }
         state.cfg.workspace_admin.kill_owner_tunnels(uid).await?;
     }
 
