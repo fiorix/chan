@@ -531,6 +531,20 @@ pub(crate) fn lead_first_order(config: &TeamConfig) -> Vec<&Member> {
 /// so the bootstrap text is never regenerated client-side. The spawn order
 /// mirrors `teamOrchestrator.svelte.ts runTeamBootstrap` (lead first).
 /// ASCII only, no em dashes.
+/// A quoted-heredoc terminator that no line of `body` equals. The bodies carry
+/// user text (the brief, member commands), and a line equal to the terminator
+/// would end the heredoc early and run everything after it as shell.
+fn heredoc_delimiter(base: &str, body: &str) -> String {
+    let taken = |candidate: &str| body.lines().any(|line| line == candidate);
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2u64..)
+        .map(|n| format!("{base}_{n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("a body has finitely many lines")
+}
+
 pub(crate) fn generate_bootstrap_script(
     team_dir: &str,
     config: &TeamConfig,
@@ -566,26 +580,28 @@ pub(crate) fn generate_bootstrap_script(
     ));
 
     out.push_str("# 2. config.toml (the validated team config).\n");
+    let config_eof = heredoc_delimiter("CHAN_TEAM_CONFIG_EOF", &config_toml);
     out.push_str(&format!(
-        "cat <<'CHAN_TEAM_CONFIG_EOF' > {}/config.toml\n",
+        "cat <<'{config_eof}' > {}/config.toml\n",
         sh_squote(dir)
     ));
     out.push_str(&config_toml);
     if !config_toml.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("CHAN_TEAM_CONFIG_EOF\n\n");
+    out.push_str(&format!("{config_eof}\n\n"));
 
     out.push_str("# 3. bootstrap.md (server-generated team process doc).\n");
+    let bootstrap_eof = heredoc_delimiter("CHAN_TEAM_BOOTSTRAP_EOF", &bootstrap_md);
     out.push_str(&format!(
-        "cat <<'CHAN_TEAM_BOOTSTRAP_EOF' > {}/bootstrap.md\n",
+        "cat <<'{bootstrap_eof}' > {}/bootstrap.md\n",
         sh_squote(dir)
     ));
     out.push_str(&bootstrap_md);
     if !bootstrap_md.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("CHAN_TEAM_BOOTSTRAP_EOF\n\n");
+    out.push_str(&format!("{bootstrap_eof}\n\n"));
 
     // Spawn order: lead first, then the rest in roster order, mirroring
     // runTeamBootstrap (the lead's pane is never momentarily empty in the
@@ -1235,9 +1251,45 @@ mod tests {
         );
     }
 
+    // A brief line equal to the bootstrap terminator must stay inside the
+    // heredoc: otherwise every line after it runs as shell when the operator
+    // pastes the script.
+    #[test]
+    fn a_brief_cannot_end_the_bootstrap_heredoc() {
+        let brief = "Plan\nCHAN_TEAM_BOOTSTRAP_EOF\ntouch pwned\n";
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), Some(brief));
+        let lines: Vec<&str> = script.lines().collect();
+        let open = lines
+            .iter()
+            .position(|line| line.ends_with("/bootstrap.md") && line.starts_with("cat <<'"))
+            .expect("bootstrap heredoc");
+        let terminator = lines[open]
+            .strip_prefix("cat <<'")
+            .and_then(|rest| rest.split('\'').next())
+            .expect("quoted terminator");
+        let close = open
+            + 1
+            + lines[open + 1..]
+                .iter()
+                .position(|line| *line == terminator)
+                .expect("heredoc closes");
+        let injected = lines
+            .iter()
+            .position(|line| *line == "touch pwned")
+            .expect("brief text is in the script");
+        assert!(
+            open < injected && injected < close,
+            "`touch pwned` escaped the heredoc ({terminator}): {script}"
+        );
+    }
+
     #[test]
     fn script_writes_tree_config_bootstrap_and_spawns_lead_first() {
         let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        assert!(
+            script.contains("cat <<'CHAN_TEAM_BOOTSTRAP_EOF'"),
+            "a body without the terminator keeps the plain one"
+        );
         assert!(script.starts_with("#!/usr/bin/env bash"), "shebang");
         assert!(script.contains("set -euo pipefail"), "fail-fast");
         // The dir tree.
