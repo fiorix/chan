@@ -775,12 +775,12 @@ async fn admin_list_users(
 ) -> Result<Json<Vec<User>>> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0).max(0);
-    let email = q.email.as_deref().map(|s| s.to_ascii_lowercase());
+    let email = q.email.as_deref();
     let username = q.username.as_deref().map(|s| s.to_ascii_lowercase());
 
     let rows = sqlx::query_as::<_, User>(&format!(
         "SELECT {USER_COLS} FROM users \
-         WHERE ($1::text IS NULL OR position($1 in lower(email)) > 0) \
+         WHERE ($1::text IS NULL OR position(lower($1) in lower(email)) > 0) \
            AND ($2::text IS NULL OR lower(username) = $2) \
            AND ($3::bool IS NULL \
                 OR ($3 = true  AND blocked_at IS NOT NULL) \
@@ -1675,7 +1675,7 @@ async fn claim_grants(
     let normalized: Vec<String> = body
         .emails
         .iter()
-        .map(|e| e.trim().to_ascii_lowercase())
+        .map(|e| e.trim().to_owned())
         .filter(|e| !e.is_empty())
         .collect();
     if normalized.is_empty() {
@@ -1685,7 +1685,7 @@ async fn claim_grants(
         "UPDATE devserver_grants \
          SET grantee_user_id = $1, accepted_at = now() \
          WHERE grantee_user_id IS NULL \
-           AND lower(grantee_email) = ANY($2)",
+           AND lower(grantee_email) = ANY(SELECT lower(email) FROM unnest($2::text[]) AS emails(email))",
     )
     .bind(user_id)
     .bind(&normalized)

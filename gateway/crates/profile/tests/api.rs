@@ -3282,3 +3282,35 @@ async fn owner_access_does_not_depend_on_a_registry_row() {
     }
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn unicode_email_claim_and_admin_filter_use_database_case_folding() {
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let dsid = ds("a");
+    let (status, _) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers/{dsid}/grants"),
+            Some(json!({"grantee_email":"émile@x.com"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let user = mk_user(&app, "émile@x.com").await;
+    let (status, body) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{user}/grants/claim"),
+            Some(json!({"emails":[" ÉMILE@X.COM "]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["claimed"], 1);
+    let (status, body) = app
+        .admin(Method::GET, "/v1/admin/users?email=%C3%89MILE", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["id"], user);
+    app.cleanup().await;
+}
