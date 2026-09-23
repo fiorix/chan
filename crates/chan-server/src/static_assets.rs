@@ -316,37 +316,30 @@ pub fn inject_chan_meta(
     if prefix.is_empty() && !settings_disabled && !files && !drafts && webgl_renderer.is_none() {
         return html.to_vec();
     }
-    let needle = b"<head>";
-    let Some(pos) = html.windows(needle.len()).position(|w| w == needle) else {
-        return html.to_vec();
-    };
-    let mut insert = String::new();
-    if !prefix.is_empty() {
-        // Prefix is canonical (`/seg[/seg...]` with `[A-Za-z0-9-]+`
-        // segments) so it cannot contain HTML-attribute-special bytes.
-        insert.push_str(&format!("<meta name=\"chan-prefix\" content=\"{prefix}\">"));
-    }
-    if settings_disabled {
-        insert.push_str("<meta name=\"chan-settings-disabled\" content=\"1\">");
-    }
-    if files {
-        insert.push_str("<meta name=\"chan-files\" content=\"1\">");
-    }
-    if drafts {
-        insert.push_str("<meta name=\"chan-drafts\" content=\"1\">");
-    }
-    if let Some(enabled) = webgl_renderer {
-        insert.push_str(&format!(
-            "<meta name=\"chan-webgl-renderer\" content=\"{}\">",
-            u8::from(enabled)
-        ));
-    }
-    let mut out = Vec::with_capacity(html.len() + insert.len());
-    let after_head = pos + needle.len();
-    out.extend_from_slice(&html[..after_head]);
-    out.extend_from_slice(insert.as_bytes());
-    out.extend_from_slice(&html[after_head..]);
-    out
+    splice_after_head(html, || {
+        let mut insert = String::new();
+        if !prefix.is_empty() {
+            // Prefix is canonical (`/seg[/seg...]` with `[A-Za-z0-9-]+`
+            // segments) so it cannot contain HTML-attribute-special bytes.
+            insert.push_str(&format!("<meta name=\"chan-prefix\" content=\"{prefix}\">"));
+        }
+        if settings_disabled {
+            insert.push_str("<meta name=\"chan-settings-disabled\" content=\"1\">");
+        }
+        if files {
+            insert.push_str("<meta name=\"chan-files\" content=\"1\">");
+        }
+        if drafts {
+            insert.push_str("<meta name=\"chan-drafts\" content=\"1\">");
+        }
+        if let Some(enabled) = webgl_renderer {
+            insert.push_str(&format!(
+                "<meta name=\"chan-webgl-renderer\" content=\"{}\">",
+                u8::from(enabled)
+            ));
+        }
+        insert
+    })
 }
 
 /// Inject the launcher's runtime hints right after the opening `<head>`:
@@ -364,21 +357,30 @@ pub fn inject_chan_meta(
 ///
 /// No-op when `<head>` is absent (returns the original bytes).
 fn inject_launcher_meta(html: &[u8], surface: LauncherSurface) -> Vec<u8> {
+    splice_after_head(html, || {
+        let (os, _pretty_name) = crate::devserver::detect_os();
+        let mut insert = format!("<meta name=\"chan-launcher-host-os\" content=\"{os}\">");
+        insert.push_str(&format!(
+            "<meta name=\"chan-launcher-surface\" content=\"{}\">",
+            surface.meta_value()
+        ));
+        // The PWA manifest link, on every launcher surface (the coherent install
+        // targets are the fixed-port devserver loopback and the https gateway; the
+        // ephemeral-port desktop loopback simply won't install coherently, which is
+        // harmless). Root-absolute href: the launcher is always at the origin root.
+        insert.push_str("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
+        insert
+    })
+}
+
+/// Splice the markup `insert` builds right after the opening `<head>`, or
+/// return the page unchanged when there is no `<head>` (without building it).
+fn splice_after_head(html: &[u8], insert: impl FnOnce() -> String) -> Vec<u8> {
     let needle = b"<head>";
     let Some(pos) = html.windows(needle.len()).position(|w| w == needle) else {
         return html.to_vec();
     };
-    let (os, _pretty_name) = crate::devserver::detect_os();
-    let mut insert = format!("<meta name=\"chan-launcher-host-os\" content=\"{os}\">");
-    insert.push_str(&format!(
-        "<meta name=\"chan-launcher-surface\" content=\"{}\">",
-        surface.meta_value()
-    ));
-    // The PWA manifest link, on every launcher surface (the coherent install
-    // targets are the fixed-port devserver loopback and the https gateway; the
-    // ephemeral-port desktop loopback simply won't install coherently, which is
-    // harmless). Root-absolute href: the launcher is always at the origin root.
-    insert.push_str("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
+    let insert = insert();
     let after_head = pos + needle.len();
     let mut out = Vec::with_capacity(html.len() + insert.len());
     out.extend_from_slice(&html[..after_head]);
