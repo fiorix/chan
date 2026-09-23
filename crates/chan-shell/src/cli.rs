@@ -1,8 +1,7 @@
 //! The `cs` client surface: the clap subcommand tree (`ShellAction` /
 //! `TerminalAction`) and the dispatch that turns each action into a
-//! control-socket round-trip. Lifted verbatim out of the `chan` binary so
-//! `chan-desktop` can drive the same `cs` commands without the `chan`
-//! binary on PATH.
+//! control-socket round-trip. Shared by `chan` and `chan-desktop`, so the
+//! desktop drives the same `cs` commands without a `chan` binary on PATH.
 //!
 //! RISK: the clap derive here is wire-load-bearing. Every flag name,
 //! `infer_subcommands`, and arg shape is part of the `cs` contract; a
@@ -223,6 +222,8 @@ pub struct WorkspaceSearchArgs {
 }
 
 impl WorkspaceSearchArgs {
+    /// Parse the flags into a wire request, refusing one with no QUERY, no
+    /// `--from` and no non-content `--domain` (nothing to search or browse).
     pub fn to_request(&self) -> Result<WorkspaceSearchRequest> {
         let query = self.query.join(" ").trim().to_string();
         let query = (!query.is_empty()).then_some(query);
@@ -1508,6 +1509,9 @@ async fn cmd_shell_search(request: WorkspaceSearchRequest, json: bool, pretty: b
     Ok(())
 }
 
+/// Render a workspace search result as Markdown: a recovery notice when the
+/// workspace is recovering, then the content, entity, graph, warning and error
+/// sections that have entries.
 pub fn render_workspace_search_markdown(result: &WorkspaceSearchResult) -> String {
     let mut out = String::new();
     if matches!(result.readiness, WorkspaceReadiness::Recovering { .. }) {
@@ -2688,7 +2692,7 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
                     "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     str_field(s, "name"),
                     // Immutable PTY-incarnation provenance. Always keep the
-                    // column; a legacy fd-store import renders unknown as `-`.
+                    // column; a null `spawn_name` renders as `-`.
                     str_field(s, "spawn_name"),
                     // The server-derived submit agent ("-" for a shell
                     // session), so a poker never has to guess the target.
