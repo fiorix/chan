@@ -140,7 +140,7 @@ jobs:
           # runner's trust store, and that JDK's cacerts predates SSL.com TLS RSA
           # Root CA 2022, the root cs.ssl.com chains to since 2026-09-22. Without
           # the import every sign call fails its TLS handshake and the tool still
-          # exits 0 (dev/v0100-team/evidence/lead/rc1-release-35821827608/signing-diagnosis.md).
+          # exits 0.
           $rootPem = Join-Path $env:GITHUB_WORKSPACE "chan/desktop/src-tauri/scripts/windows/ssl-com-tls-rsa-root-ca-2022.pem"
           $rootAlias = "sslcom-tls-rsa-root-ca-2022"
           $rootFingerprint = "8FAF7D2E2CB4709BB8E0B33666BF75A5DD45B5DE480F8EA8D4BFE6BEBC17F2ED"
