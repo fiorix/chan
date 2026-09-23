@@ -4219,6 +4219,63 @@ mod tests {
         abandon_removal_at(RemovalHop::Unregister);
     }
 
+    /// The window match is the removal's last chance to find the records it
+    /// must purge. If that hop fails, the records are still on disk, so the
+    /// removal must fail and keep the workspace registered for a retry.
+    #[tokio::test]
+    async fn a_failed_window_match_fails_the_removal_and_keeps_it_retryable() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            library.register_workspace(root.path()).expect("register");
+            let host = WorkspaceHost::new(library, fake_builder());
+            let store = tempfile::tempdir().expect("store dir");
+            let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+            registry.create(
+                WindowKind::Workspace,
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+            host.install_window_registry(registry.clone(), "local".into());
+            *host.removal_hop_probe.lock().unwrap() = Some(Arc::new(|hop| {
+                if hop == RemovalHop::WindowMatch {
+                    panic!("injected window match failure");
+                }
+            }));
+
+            let error = match host.remove_workspace_for_root(root.path(), false).await {
+                Err(error) => error,
+                Ok(outcome) => panic!(
+                    "a failed window match let the removal report {outcome:?} with its window records on disk"
+                ),
+            };
+            assert_eq!(
+                host.workspace_status(root.path()),
+                (WorkspaceStatus::Error, Some(error.to_string()))
+            );
+            assert!(
+                host.library().workspace_paths_for(root.path()).is_some(),
+                "a failed window match unregistered the workspace"
+            );
+            assert_eq!(
+                registry.snapshot().len(),
+                1,
+                "a failed window match discarded window records"
+            );
+
+            *host.removal_hop_probe.lock().unwrap() = None;
+            assert!(host
+                .remove_workspace_for_root(root.path(), false)
+                .await
+                .expect("retry")
+                .completed());
+            assert!(registry.snapshot().is_empty());
+            assert!(host.library().workspace_paths_for(root.path()).is_none());
+        })
+        .await
+        .expect("bounded");
+    }
+
     #[test]
     fn canonical_key_strips_verbatim_prefix() {
         // A caller path resolved WITH the Windows `\\?\` verbatim prefix and a
