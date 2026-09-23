@@ -920,3 +920,111 @@ async fn entry_node_base_outside_the_namespace_is_upstream_error() {
         app.cleanup().await;
     }
 }
+
+#[tokio::test]
+async fn foreign_entry_denial_is_independent_of_liveness_and_selector_length() {
+    for live in [false, true] {
+        for full_id in [false, true] {
+            let app = TestApp::new().await;
+            let uid = app.insert_user().await;
+            let pat = app.desktop_pat(uid).await;
+            let owner_uid = Uuid::new_v4();
+            let dsid = "2".repeat(64);
+            mock_user_by_username(&app, owner_uid, "owner-handle").await;
+            let live_ids = if live { vec![dsid.as_str()] } else { vec![] };
+            mock_tunnels(&app, owner_uid, "owner-handle", &live_ids).await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1/users/{owner_uid}/devservers/{dsid}/access"
+                )))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&app.profile)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/users/{uid}/grants/incoming")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+                .mount(&app.profile)
+                .await;
+            let selector = if full_id { dsid.as_str() } else { &dsid[..12] };
+            let (status, body) = post_entry_body(
+                &app,
+                &pat,
+                json!({
+                    "owner_user_id": owner_uid, "devserver_id": selector,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                body["reason"], "access_denied",
+                "live={live}, full_id={full_id}"
+            );
+            assert_eq!(body["username"], "owner-handle");
+            assert!(body.get("label").is_none());
+            assert!(!app
+                .profile
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().starts_with("/admin/v1/owners/")));
+            app.cleanup().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn entry_foreign_prefix_resolves_against_granted_devservers() {
+    let app = TestApp::new().await;
+    let uid = app.insert_user().await;
+    let pat = app.desktop_pat(uid).await;
+
+    // The devserver belongs to another user who shared it with the
+    // caller; the entry body carries the recorded selection.
+    let owner_uid = Uuid::new_v4();
+    let owner = "owner-handle";
+    let dsid = "1".repeat(64);
+    mock_user_by_username(&app, owner_uid, owner).await;
+    mock_tunnels(&app, owner_uid, owner, &[&dsid]).await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/users/{owner_uid}/devservers/{dsid}/access"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+        .mount(&app.profile)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{uid}/grants/incoming")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "grant_id": Uuid::new_v4(), "owner_user_id":owner_uid,
+            "owner_username":owner, "devserver_id":dsid, "label":"shared",
+            "accepted_at":chrono::Utc::now().to_rfc3339()
+        }])))
+        .mount(&app.profile)
+        .await;
+    let (s, body) = post_entry_body(
+        &app,
+        &pat,
+        json!({
+            "owner": owner,
+            "owner_user_id": owner_uid,
+            "devserver_id": &dsid[..12]
+        }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {body}");
+    assert_eq!(body["username"], owner, "response names the OWNER");
+    assert_eq!(body["devserver_id"], dsid);
+    let origin = format!("https://{}", disc_host(owner, &dsid));
+    assert_eq!(body["proxy_origin"], origin);
+    let claims = decode_entry_credential(
+        body["entry_credential"].as_str().unwrap(),
+        owner,
+        &dsid,
+        owner_uid,
+    );
+    assert_eq!(claims.sub, uid, "sub is the caller, not the owner");
+    assert_eq!(claims.owner_user_id, owner_uid);
+    app.cleanup().await;
+}

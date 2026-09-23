@@ -1895,7 +1895,7 @@ async fn desktop_devserver_entry(
     } else {
         (validated.user_id, validated.username.clone())
     };
-    let selector = match body.devserver_id.as_deref() {
+    let mut selector = match body.devserver_id.as_deref() {
         None => None,
         Some(raw) => {
             Some(
@@ -1907,6 +1907,47 @@ async fn desktop_devserver_entry(
             )
         }
     };
+
+    if owner_id != validated.user_id {
+        // Authorize a foreign selection before consulting its live directory.
+        // Prefixes resolve against grants, so even ambiguity reveals no liveness.
+        let selected = selector
+            .as_deref()
+            .expect("explicit foreign target has a selector");
+        let target_id = if is_devserver_id_shape(selected) {
+            Some(selected.to_owned())
+        } else {
+            let shares = state
+                .cfg
+                .profile_client
+                .list_incoming_shares(validated.user_id)
+                .await?;
+            let mut matching = shares.into_iter().filter(|share| {
+                share.owner_user_id == owner_id && share.devserver_id.starts_with(selected)
+            });
+            match (matching.next(), matching.next()) {
+                (Some(share), None) => Some(share.devserver_id),
+                _ => None,
+            }
+        };
+        let allowed = match target_id.as_deref() {
+            Some(id) => state
+                .cfg
+                .profile_client
+                .devserver_access(owner_id, id, validated.user_id)
+                .await?
+                .is_some_and(|access| access.access),
+            None => false,
+        };
+        if !allowed {
+            return Err(Error::DesktopEntryNotFound {
+                reason: ENTRY_REASON_ACCESS_DENIED,
+                username: owner_username,
+                label: None,
+            });
+        }
+        selector = target_id;
+    }
 
     let target = resolve_entry_target(
         &state,
