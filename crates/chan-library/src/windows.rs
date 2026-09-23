@@ -315,10 +315,12 @@ impl PersistedWindow {
 
 /// Per-library state that lives beside the window set but is NOT a window: the
 /// first-open marker. Kept in a sibling `*-state.json` rather than a field on
-/// the window-set store so the window store stays a pure `Vec<PersistedWindow>`
-/// (its serde shape is the persisted contract, pinned by
-/// `persisted_window_pins_field_names`) and so this internal lifecycle flag can
-/// never leak into the window feed. Field names are the persisted contract.
+/// the window-set store so the window store stays one JSON array of window
+/// rows (the readable ones are `PersistedWindow`, whose serde shape is the
+/// persisted contract pinned by `persisted_window_pins_field_names`; the rows
+/// this build cannot read it keeps opaque and writes back at the array's tail)
+/// and so this internal lifecycle flag can never leak into the window feed.
+/// Field names are the persisted contract.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LibraryState {
     /// The library has already minted its one first-open terminal. Once set, an
@@ -450,8 +452,9 @@ impl WindowRegistry {
     /// the first-open terminal only on an empty registry, so a library that
     /// already has persisted windows never gets an extra one. Rows this build
     /// cannot read do not count: it can neither show them nor mint against
-    /// them, and the first-open marker is what stops a re-mint in a library
-    /// another build has already opened.
+    /// them. A set first-open marker stops the mint in a library another build
+    /// has already opened; an unmarked library holding only rows this build
+    /// cannot read opens as empty and mints one.
     pub fn is_empty(&self) -> bool {
         self.lock().is_empty()
     }
