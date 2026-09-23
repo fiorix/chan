@@ -289,9 +289,9 @@ enum TunnelCmd {
         #[arg(long)]
         user: Option<String>,
     },
-    /// Force a tunnel offline by (user, workspace). The chan devserver
-    /// peer is free to reconnect.
-    Kill { user: String, workspace: String },
+    /// Force a tunnel offline by user and full devserver id. The peer
+    /// is free to reconnect.
+    Kill { user: String, devserver_id: String },
     /// Live snapshot stream (SSE). Re-renders the table every
     /// second until Ctrl-C.
     Watch {
@@ -1241,9 +1241,8 @@ impl AdminClient {
             .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
     }
 
-    /// Resolve `<ident>` -> User. Order: uuid, email substring (must
-    /// match exactly one row), username exact match. The list
-    /// endpoint enforces case-insensitivity for both fields.
+    /// Resolve `<ident>` by UUID, exact email, or exact username.
+    /// Email lookup scans substring-result pages and requires one exact match.
     async fn resolve_user(&self, ident: &str) -> anyhow::Result<User> {
         if let Ok(id) = Uuid::parse_str(ident) {
             return self.get_user(id).await;
@@ -1936,11 +1935,11 @@ impl WorkspaceClient {
         }
     }
 
-    async fn kill(&self, owner_user_id: Uuid, workspace: &str) -> anyhow::Result<()> {
+    async fn kill(&self, owner_user_id: Uuid, devserver_id: &str) -> anyhow::Result<()> {
         let path = format!(
             "/admin/v1/tunnels/{}/{}/kill",
             owner_user_id,
-            urlencoding::encode_path(workspace),
+            urlencoding::encode_path(devserver_id),
         );
         let res = self
             .http
@@ -1956,8 +1955,8 @@ impl WorkspaceClient {
         }
     }
 
-    /// SSE stream of `event: snapshot` frames. Yields parsed
-    /// `Vec<TunnelView>` per event; ignores malformed events.
+    /// Raw SSE response carrying `event: snapshot` frames. The caller
+    /// parses tunnel snapshots and ignores malformed events.
     async fn watch(&self) -> anyhow::Result<reqwest::Response> {
         let res = self
             .http
@@ -2128,10 +2127,10 @@ async fn tunnel_cmd(
             }
             render_tunnels(&tunnels, json);
         }
-        TunnelCmd::Kill { user, workspace } => {
+        TunnelCmd::Kill { user, devserver_id } => {
             let owner = profile.resolve_user(&user).await?;
-            c.kill(owner.id, &workspace).await?;
-            eprintln!("killed {user}/{workspace}");
+            c.kill(owner.id, &devserver_id).await?;
+            eprintln!("killed {user}/{devserver_id}");
         }
         TunnelCmd::Watch { user } => {
             let res = c.watch().await?;
