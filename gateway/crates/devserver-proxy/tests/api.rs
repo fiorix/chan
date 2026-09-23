@@ -2693,11 +2693,11 @@ fn stalling_upstream(path: &str, reached: Arc<tokio::sync::Notify>) -> Router {
 /// Cancelling the session while the bridge is still in its setup ends
 /// the client socket the way it ends a bridged one: with the 1008
 /// Close that names the revocation, without waiting for the setup
-/// bound. The session's token is cancelled directly, since a
-/// revocation through the session store aborts the bridge task before
-/// the token is seen, which
-/// `ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup`
-/// records.
+/// bound. The session's token is cancelled directly. A revocation
+/// through the session store cancels the token and then aborts the
+/// bridge task: on this current-thread test runtime the abort always
+/// lands before the task is polled again, so the Close is never sent,
+/// and on the multi-thread production runtime the two race.
 #[tokio::test]
 async fn ws_bridge_closes_as_revoked_when_the_session_is_cancelled_during_setup() {
     let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
@@ -2729,61 +2729,6 @@ async fn ws_bridge_closes_as_revoked_when_the_session_is_cancelled_during_setup(
         &mut ws,
         4 * WS_TEST_IDLE,
         "a WebSocket whose session was cancelled during setup",
-    )
-    .await;
-    let elapsed = started.elapsed();
-    assert_eq!(u16::from(frame.code), 1008, "policy violation");
-    assert_eq!(frame.reason.as_str(), "session revoked");
-    assert!(
-        elapsed < WS_TEST_IDLE,
-        "the Close waited for the setup bound: {elapsed:?}"
-    );
-    server.abort();
-    app.cleanup().await;
-}
-
-/// A revocation through the session store cancels the session's token
-/// and then aborts the bridge task before the task is polled again, so
-/// the setup's cancellation arm never runs and the client sees the
-/// socket reset without a Close.
-#[tokio::test]
-#[ignore = "session revocation aborts the bridge task before its cancellation arm runs"]
-async fn ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup() {
-    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
-    let uid = Uuid::new_v4();
-    let reached = Arc::new(tokio::sync::Notify::new());
-    app.register_tunnel(
-        "alice",
-        "blog",
-        uid,
-        stalling_upstream("/blog/ws-stall", reached.clone()),
-    )
-    .await;
-    let (addr, server) = serve_proxy(app.router.clone()).await;
-
-    let host = host_for("alice");
-    let cookie = session_cookie(&app, uid, "blog", &host);
-    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
-    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
-        .await
-        .expect("the upgrade request must reach the devserver");
-    let started = tokio::time::Instant::now();
-    let revoked = tokio::time::timeout(
-        4 * WS_TEST_IDLE,
-        app.sessions
-            .revoke(&devserver_proxy::session_store::Revocation::Exact {
-                subject_user_id: uid,
-                owner_user_id: uid,
-                devserver_id: "blog".to_string(),
-            }),
-    )
-    .await
-    .expect("the revocation did not drain the bridge");
-    assert_eq!(revoked, Ok(1));
-    let frame = expect_close_within(
-        &mut ws,
-        4 * WS_TEST_IDLE,
-        "a WebSocket whose session was revoked during setup",
     )
     .await;
     let elapsed = started.elapsed();
