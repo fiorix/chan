@@ -395,6 +395,14 @@ describe("identityPrompt", () => {
     expect(out).toContain("Relative paths in that document resolve against /.");
   });
 
+  test("a Windows drive root keeps its one separator", () => {
+    // `C:` alone names the drive's current directory, not its root, so the
+    // anchor the prompt names has to stay `C:\`.
+    const out = identityPrompt(1, "@@Neo", "@@Lead", [], "C:\\", "new-team-1");
+    expect(out).toContain("Read the team process at C:\\new-team-1/bootstrap.md before you start.");
+    expect(out).toContain("Relative paths in that document resolve against C:\\.");
+  });
+
   test("names the team dir as the server trims it before writing", () => {
     // The dialog sends the team dir as typed and the server trims it before
     // it creates the directory, so a pasted `berries ` lands in `berries/`;
