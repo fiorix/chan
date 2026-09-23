@@ -365,3 +365,5 @@ Explicit foreign desktop entry selections are authorized before any live-tunnel 
 Username changes preflight the edit limit and known name collisions before cutting tunnels. Profile still enforces both atomically when updating; a concurrent rename can race this preflight, so the authority cut remains before persistence.
 
 PAT creation commits the credential hash and creation audit together. An audit insertion failure rolls back the PAT, so a failed mint cannot leave an undelivered active credential.
+
+Desktop redemption delivers the PAT once even when its audit write fails. The one-time code remains consumed and the audit failure is logged without the code or secret; audit availability cannot strand the already-minted credential.

@@ -1025,3 +1025,38 @@ async fn state_with_specials_round_trips_through_the_loopback_url() {
     assert_eq!(query.get("state").map(String::as_str), Some(hostile_state));
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn redemption_audit_failure_still_delivers_the_pat_once() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "octo@example.com").await;
+    happy_login(&app, &mut c, uid, "octo@example.com").await;
+    mock_get_user(&app, uid, "octo@example.com", false).await;
+    assert_eq!(c.get(AUTH_URI).await.status, StatusCode::SEE_OTHER);
+    let consent = c.get("/desktop/authorize/consent").await;
+    let csrf = extract_csrf(consent.body_str());
+    let handoff = c
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(handoff.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url(handoff.body_str()));
+    let code = query.get("code").unwrap();
+    sqlx::query("ALTER TABLE api_token_audit ADD CONSTRAINT reject_redeem CHECK (action <> 'desktop.redeem')")
+        .execute(&app.pool).await.unwrap();
+    let body = json!({"code":code, "code_verifier":PKCE_VERIFIER});
+    let response = c.post_json("/desktop/authorize/redeem", &body).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let redeemed: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    let secret = redeemed["secret"].as_str().unwrap();
+    assert!(app.api_tokens.validate_no_audit(secret).await.is_ok());
+    assert_eq!(
+        c.post_json("/desktop/authorize/redeem", &body).await.status,
+        StatusCode::GONE
+    );
+    app.cleanup().await;
+}

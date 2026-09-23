@@ -657,10 +657,13 @@ pub async fn redeem(
             "unknown, expired, or already-redeemed code".into(),
         ));
     };
-    state
+    if let Err(error) = state
         .api_tokens
         .write_audit(payload.id, ACTION_DESKTOP_REDEEM, &request_meta(&headers))
-        .await?;
+        .await
+    {
+        tracing::warn!(?error, token_id = %payload.id, "desktop redemption audit failed");
+    }
     Ok(Json(payload))
 }
 
