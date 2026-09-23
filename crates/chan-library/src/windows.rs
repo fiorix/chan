@@ -426,8 +426,8 @@ impl WindowRegistry {
 
     /// Mint and persist a new NATIVE window of `kind` (with `workspace_path` for
     /// a workspace window). The library owns the id, the ordinal, and the title;
-    /// returns the durable row. Fires the change notification. The desktop and
-    /// CLI mint through here; a browser mint uses [`Self::create_with_origin`].
+    /// returns the durable row. Fires the change notification. A convenience
+    /// wrapper over [`Self::create_with_origin`] for a native mint.
     pub fn create(&self, kind: WindowKind, workspace_path: Option<String>) -> PersistedWindow {
         self.create_with_origin(kind, workspace_path, WindowOrigin::Native)
     }
@@ -549,27 +549,11 @@ impl WindowRegistry {
     /// row stays in-memory via `Self::save_best_effort`) + fires the change
     /// notification only when the value actually changed.
     pub fn set_hidden(&self, window_id: &str, hidden: bool) -> bool {
-        let (matched, changed, snapshot) = {
-            let mut windows = self.lock();
-            let mut matched = false;
-            let mut changed = false;
-            for w in windows.iter_mut() {
-                if w.window_id == window_id {
-                    matched = true;
-                    if w.hidden != hidden {
-                        w.hidden = hidden;
-                        changed = true;
-                    }
-                    break;
-                }
-            }
-            (matched, changed, self.save_snapshot(&windows))
-        };
-        if changed {
-            self.save_best_effort(&snapshot);
-            self.notify.notify_waiters();
-        }
-        matched
+        self.update_row(window_id, |w| {
+            let changed = w.hidden != hidden;
+            w.hidden = hidden;
+            changed
+        })
     }
 
     /// Set `window_id`'s user caption. The route layer excludes generated
@@ -577,19 +561,26 @@ impl WindowRegistry {
     /// and the watch notification. Returns whether a row matched. Setting the
     /// existing value is an idempotent match and does not rewrite the store.
     pub fn set_label(&self, window_id: &str, label: String) -> bool {
+        self.update_row(window_id, |w| {
+            if w.label == label {
+                return false;
+            }
+            w.label = label;
+            true
+        })
+    }
+
+    /// Apply `edit` to row `window_id` and return whether a row matched.
+    /// Persists and fires the change notification only when `edit` reports a
+    /// change.
+    fn update_row(&self, window_id: &str, edit: impl FnOnce(&mut PersistedWindow) -> bool) -> bool {
         let (matched, changed, snapshot) = {
             let mut windows = self.lock();
             let mut matched = false;
             let mut changed = false;
-            for w in windows.iter_mut() {
-                if w.window_id == window_id {
-                    matched = true;
-                    if w.label != label {
-                        w.label = label;
-                        changed = true;
-                    }
-                    break;
-                }
+            if let Some(w) = windows.iter_mut().find(|w| w.window_id == window_id) {
+                matched = true;
+                changed = edit(w);
             }
             (matched, changed, self.save_snapshot(&windows))
         };
@@ -1037,9 +1028,8 @@ mod tests {
 
     #[test]
     fn control_record_via_to_record_is_terminal_first_and_control_flagged() {
-        // The control record is now produced by `to_record` on a control row, not
-        // a bespoke constructor. A hidden=true control row also
-        // surfaces `hidden` on the wire.
+        // A control row assembles through `to_record`: terminal kind, ordinal
+        // 0, control flagged, and `hidden` on the wire.
         let row = PersistedWindow {
             window_id: "control-terminal-ds1".into(),
             kind: WindowKind::Terminal,
