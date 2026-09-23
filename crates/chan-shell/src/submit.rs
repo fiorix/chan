@@ -451,10 +451,12 @@ fn is_word_byte(b: u8) -> bool {
 }
 
 /// Decode the backslash escapes a config/env override string may carry so a
-/// template can express control bytes as plain text: `\e` (ESC), `\xHH` (a
-/// hex byte, intended for ASCII/control), `\r`, `\n`, `\t`, `\0`, `\\`. An
-/// unrecognized escape keeps both the backslash and the following char, so a
-/// literal `\d` survives rather than being silently dropped.
+/// template can express control bytes as plain text: `\e` (ESC), `\xHH` (an
+/// ASCII or control byte, `\x00` to `\x7f`), `\r`, `\n`, `\t`, `\0`, `\\`.
+/// An unrecognized escape keeps both the backslash and the following chars, so
+/// a literal `\d` survives rather than being silently dropped. `\x80` and
+/// above are kept literally too: the template is text, so such a byte could
+/// only be delivered as a two-byte UTF-8 sequence, not the byte it names.
 fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -476,7 +478,7 @@ fn unescape(s: &str) -> String {
                 match (h1, h2) {
                     (Some(a), Some(b)) => {
                         let hex: String = [a, b].iter().collect();
-                        if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        if let Ok(byte @ 0..=0x7f) = u8::from_str_radix(&hex, 16) {
                             out.push(byte as char);
                         } else {
                             out.push('\\');
@@ -967,6 +969,9 @@ mod tests {
         assert_eq!(unescape("\\\\"), "\\");
         // unknown escape keeps both chars
         assert_eq!(unescape("\\d"), "\\d");
+        // A byte above ASCII cannot be delivered as itself, so it stays text.
+        assert_eq!(unescape("\\x9b"), "\\x9b");
+        assert_eq!(unescape("\\x7f"), "\x7f");
     }
 
     // ValueEnum parsing only exists with the `client` feature (the
