@@ -923,7 +923,7 @@ pub async fn api_standalone_post_attachment(
     let task_files = files.clone();
     let result = run_blocking("attachment write", move || {
         let fs = &task_files.fs;
-        let build_name = |suffix: Option<u32>| -> String {
+        let build_name = |suffix: Option<u64>| -> String {
             let base = match suffix {
                 None => stem_or_default.clone(),
                 Some(n) => format!("{stem_or_default}-{n}"),
@@ -940,18 +940,10 @@ pub async fn api_standalone_post_attachment(
         // unique timestamp fallback rather than spinning forever.
         while fs.stat(&rel).is_ok() {
             if attempt > 1000 {
-                let ts = now_unix_secs();
-                rel = join_rel(&dir, &{
-                    let base = format!("{stem_or_default}-{ts}");
-                    if ext.is_empty() {
-                        base
-                    } else {
-                        format!("{base}.{ext}")
-                    }
-                });
+                rel = join_rel(&dir, &build_name(Some(now_unix_secs())));
                 break;
             }
-            rel = join_rel(&dir, &build_name(Some(attempt)));
+            rel = join_rel(&dir, &build_name(Some(u64::from(attempt))));
             attempt += 1;
         }
 
