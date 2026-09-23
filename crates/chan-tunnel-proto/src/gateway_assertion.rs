@@ -275,7 +275,14 @@ pub fn verify(
     if claims.exp <= now {
         return Err(AssertionError::Expired);
     }
-    if claims.exp <= claims.iat || claims.exp - claims.iat > ASSERTION_LIFETIME_SECS {
+    // Checked: `iat` and `exp` are the signer's numbers, and a span too wide
+    // for an i64 is as invalid as one over the lifetime cap.
+    if claims.exp <= claims.iat
+        || claims
+            .exp
+            .checked_sub(claims.iat)
+            .is_none_or(|lifetime| lifetime > ASSERTION_LIFETIME_SECS)
+    {
         return Err(AssertionError::InvalidLifetime);
     }
     Ok(claims)
@@ -414,6 +421,21 @@ mod tests {
         assert!(got.is_owner());
         assert_eq!(got.client, ClientType::Desktop);
         assert!(got.is_owner_desktop());
+    }
+
+    // A signed span wider than an i64 (an `iat` near the minimum) is an
+    // invalid lifetime, not an overflow that wraps under the cap.
+    #[test]
+    fn an_unrepresentable_lifetime_is_invalid() {
+        let key = derive_assertion_key("chan_pat_secret");
+        let mut wide = claims("owner", "owner", "a.dev", "drv", ClientType::Desktop);
+        wide.iat = i64::MIN + 1;
+        wide.exp = i64::MAX;
+        let token = sign(&key, &wide).unwrap();
+        assert!(matches!(
+            verify(&key, &token, "a.dev", "drv", "owner"),
+            Err(AssertionError::InvalidLifetime)
+        ));
     }
 
     /// Sign an arbitrary claims payload the way `sign` does, so a test can
