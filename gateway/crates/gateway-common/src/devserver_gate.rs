@@ -297,6 +297,11 @@ pub fn decode_entry(
     Ok(claims)
 }
 
+/// Accept only an origin-form path, because the proxy sends it back as the
+/// same-origin `Location` after entry exchange. A `://` inside the path or
+/// query (`/x?next=https://a.example/`) is accepted on purpose: the path must
+/// start with a single `/`, so it parses with no scheme or authority and the
+/// redirect cannot leave the tenant origin.
 pub fn validate_entry_next_path(path: &str) -> DevserverGateResult<()> {
     if path.is_empty()
         || path.len() > 2048
@@ -592,5 +597,6 @@ mod tests {
             assert!(validate_entry_next_path(bad).is_err(), "accepted {bad:?}");
         }
         assert!(validate_entry_next_path("/notes/index.html?mode=edit").is_ok());
+        assert!(validate_entry_next_path("/x?next=https://a.example/").is_ok());
     }
 }

@@ -370,4 +370,4 @@ Desktop redemption delivers the PAT once even when its audit write fails. The on
 
 Feature flag lookup failures keep login denied and profile flags empty, and emit warnings. Login denial audits distinguish an unavailable flag lookup from an explicit policy denial.
 
-Desktop entry validates the normalized navigation path with the shared entry signer validator. Invalid paths return 400 before signing, including backslashes, controls, invalid URI syntax, and paths longer than 2048 bytes.
+Desktop entry validates the normalized navigation path with the shared entry signer validator. Invalid paths return 400 before signing, including backslashes, controls, invalid URI syntax, and paths longer than 2048 bytes. A `://` later in the path or query is accepted, because a path that starts with a single `/` has no scheme or authority and its redirect stays on the tenant origin.
