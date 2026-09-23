@@ -102,6 +102,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | --- | --- | --- |
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | raised | decide |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | raised | decide |
+| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -156,6 +157,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [cprb]: v0.101.0/signing-has-no-early-credential-probe.md
 [revab]: v0.101.0/a-revocation-aborts-the-bridge-before-its-close.md
 [lfetch]: v0.101.0/a-late-fetch-after-teardown-reds-the-web-check.md
+[wfeed]: v0.101.0/the-desktop-decodes-a-window-feed-all-or-nothing.md
 
 ## Completed
 
