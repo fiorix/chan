@@ -126,6 +126,31 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | raised | build |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | accepted | intake |
 | [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
+| [the-test-util-comments-omit-the-attach-seam][tutil] | raised | decide |
+| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | raised | decide |
+| [a-mount-retry-test-races-a-wall-clock][mwclk] | raised | decide |
+| [desktop-design-omits-the-root-health-probe][dhp] | raised | decide |
+| [a-dropped-indexers-driver-eats-recovery][drvr] | raised | decide |
+| [the-bulk-skip-note-calls-unknown-locked][bskip] | raised | decide |
+| [mcp-write-errors-follow-an-unpinned-display][mcpd] | raised | decide |
+| [a-joining-snapshot-fails-during-reconcile][join] | raised | decide |
+| [profile-workers-have-no-shutdown-owner][pwork] | raised | decide |
+| [the-email-fold-merges-distinct-characters][fold] | raised | decide |
+| [the-move-out-spare-covers-the-whole-window][spare] | raised | decide |
+| [an-emptied-window-waits-without-a-bound][ewait] | raised | decide |
+| [the-chan-home-fallback-trusts-var-tmp][vtmp] | raised | decide |
+| [three-inputs-have-no-size-cap][caps] | raised | decide |
+| [content-search-truncation-ignores-its-window][trunc] | raised | decide |
+| [move-and-create-can-replace-a-new-file][clob] | raised | decide |
+| [the-graph-indexer-drops-renames-and-lingers][gidx] | raised | decide |
+| [the-side-effect-and-error-lows-are-unread][unread] | raised | decide |
+| [the-launcher-says-off-beside-running][offrn] | raised | decide |
+| [devserver-root-probe-wiring-has-no-test][rprob] | raised | decide |
+| [page-break-scan-and-renderer-still-differ][pgres] | raised | decide |
+| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | raised | decide |
+| [graph-bodies-have-no-mounted-test][gmnt] | raised | decide |
+| [the-nsis-uninstaller-stub-ships-unsigned][nsis] | raised | decide |
+| [signing-has-no-early-credential-probe][cprb] | raised | decide |
 
 **From the development archive's backlog**
 
@@ -206,6 +231,31 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [hint]: v0.101.0/the-launcher-build-hint-cannot-run.md
 [mock]: v0.101.0/the-site-carries-a-workspace-mock-nobody-ships.md
 [wkind]: v0.101.0/an-unknown-window-kind-may-drop-every-window-row.md
+[tutil]: v0.101.0/the-test-util-comments-omit-the-attach-seam.md
+[fdsq]: v0.101.0/the-fdstore-manifest-splits-seq-and-tail.md
+[mwclk]: v0.101.0/a-mount-retry-test-races-a-wall-clock.md
+[dhp]: v0.101.0/desktop-design-omits-the-root-health-probe.md
+[drvr]: v0.101.0/a-dropped-indexers-driver-eats-recovery.md
+[bskip]: v0.101.0/the-bulk-skip-note-calls-unknown-locked.md
+[mcpd]: v0.101.0/mcp-write-errors-follow-an-unpinned-display.md
+[join]: v0.101.0/a-joining-snapshot-fails-during-reconcile.md
+[pwork]: v0.101.0/profile-workers-have-no-shutdown-owner.md
+[fold]: v0.101.0/the-email-fold-merges-distinct-characters.md
+[spare]: v0.101.0/the-move-out-spare-covers-the-whole-window.md
+[ewait]: v0.101.0/an-emptied-window-waits-without-a-bound.md
+[vtmp]: v0.101.0/the-chan-home-fallback-trusts-var-tmp.md
+[caps]: v0.101.0/three-inputs-have-no-size-cap.md
+[trunc]: v0.101.0/content-search-truncation-ignores-its-window.md
+[clob]: v0.101.0/move-and-create-can-replace-a-new-file.md
+[gidx]: v0.101.0/the-graph-indexer-drops-renames-and-lingers.md
+[unread]: v0.101.0/the-side-effect-and-error-lows-are-unread.md
+[offrn]: v0.101.0/the-launcher-says-off-beside-running.md
+[rprob]: v0.101.0/devserver-root-probe-wiring-has-no-test.md
+[pgres]: v0.101.0/page-break-scan-and-renderer-still-differ.md
+[tkey]: v0.101.0/a-tab-list-duplicate-key-escapes-its-boundary.md
+[gmnt]: v0.101.0/graph-bodies-have-no-mounted-test.md
+[nsis]: v0.101.0/the-nsis-uninstaller-stub-ships-unsigned.md
+[cprb]: v0.101.0/signing-has-no-early-credential-probe.md
 
 ## Completed
 
