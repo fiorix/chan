@@ -102,8 +102,8 @@ pub struct AppState {
     /// available for Tokio listener registration.
     embedded: OnceLock<embedded::EmbeddedServer>,
     /// The local window watcher's desktop-local view state,
-    /// shared so the close handlers can bury/unbury through the watcher rather
-    /// than the legacy hide path. Set once when the watcher spawns.
+    /// shared so the close handlers bury and unbury through the watcher. Set
+    /// once when the watcher spawns.
     local_watcher_view: OnceLock<Arc<window_watcher::WatcherViewState>>,
     /// Per-live-window zoom level. Tracks the
     /// current zoom for every open webview keyed by window label so
@@ -387,6 +387,19 @@ impl AppState {
         self.embedded.get()
     }
 
+    /// The persisted devserver registry, built from the same shared handles
+    /// the embedded library's registry uses for its HTTP surface.
+    pub(crate) fn devserver_registry(&self) -> config::DevserverConfigRegistry {
+        config::DevserverConfigRegistry::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.devserver_remove_hook),
+            Arc::clone(&self.devservers),
+            Arc::clone(&self.devserver_connecting),
+            Arc::clone(&self.devserver_feed),
+            Arc::clone(&self.gateway_manager),
+        )
+    }
+
     /// The window watcher's view state, once the watcher has
     /// spawned. Close handlers bury/unbury local windows through it.
     pub(crate) fn local_watcher_view(&self) -> Option<&Arc<window_watcher::WatcherViewState>> {
@@ -499,7 +512,7 @@ impl AppState {
         buried.push(BuriedWindow {
             label: label.to_string(),
             title: title.to_string(),
-            buried_at: config::current_millis(),
+            buried_at: config::now_millis(),
         });
     }
 
@@ -1125,7 +1138,7 @@ fn register_workspace_path(library: &chan_workspace::Library, path: &str) -> Res
 /// shutdown. Best-effort: a no-op when the embedded host / overlay is
 /// unavailable, never fatal to the toggle or the exit.
 fn persist_workspaces(state: &AppState) {
-    let Some(embedded) = state.embedded.get() else {
+    let Some(embedded) = state.embedded() else {
         return;
     };
     let Some(overlay) = embedded.workspace_overlay() else {
@@ -1171,8 +1184,7 @@ fn devserver_url_token(raw: &str) -> Option<String> {
 /// record cannot: the titlebar's base is built from the live connection's
 /// display name (`DevserverConn::name`), which the record does not carry here.
 /// Rather than render a plausible-but-different title, fall back to the
-/// library-composed `title` and append the caption to it -- the pre-existing
-/// behaviour for these rows, plus the caption this is here to surface.
+/// library-composed `title` and append the caption to it.
 fn record_menu_title(record: &chan_server::WindowRecord) -> String {
     if record.library_id == "local" {
         return serve::watched_window_title(record, None);
@@ -1199,7 +1211,7 @@ async fn reap_devserver_control_terminal(app: &tauri::AppHandle, state: &AppStat
         rebuild_window_menu(app);
     }
     state.control_terminal_runs.lock().unwrap().remove(id);
-    if let Some(embedded) = state.embedded.get() {
+    if let Some(embedded) = state.embedded() {
         embedded.reap_control_window(&label).await;
     }
 }
@@ -1220,15 +1232,15 @@ fn remove_devserver_windows(app: &tauri::AppHandle, state: &AppState, id: &str) 
     // Drop it from the launcher feed and re-push so its windows + workspaces
     // leave the launcher (the watcher/poll already stopped on cancel).
     state.devserver_feed.forget(id);
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(app, state);
 }
 
 /// Error marker for native access that requires an explicit trust grant.
 const NATIVE_TRUST_REQUIRED: &str = "native_trust_required";
 
+/// The roster row for a gateway devserver, refused when the roster no longer
+/// lists it or when a shared row has no persisted native-trust record for its
+/// exact owner and devserver. An owned row never needs trust.
 fn require_rostered_native_policy(
     state: &AppState,
     gateway_id: &str,
@@ -1251,6 +1263,9 @@ fn require_rostered_native_policy(
     Ok(row)
 }
 
+/// [`require_rostered_native_policy`], refused as well when the devserver's
+/// native-policy generation moved past `expected_generation`, so a connect
+/// that raced a trust grant or revoke stops at its next recheck.
 fn require_rostered_native_policy_generation(
     state: &AppState,
     id: &str,
@@ -1265,13 +1280,18 @@ fn require_rostered_native_policy_generation(
     require_rostered_native_policy(state, gateway_id, owner, devserver_id)
 }
 
-fn signal_devserver_policy_change(app: &tauri::AppHandle, state: &AppState) {
+/// Re-push the launcher feed and tell the native windows the serve set
+/// changed, the pair every devserver state change ends with.
+fn refresh_launcher(app: &tauri::AppHandle, state: &AppState) {
     if let Some(embedded) = state.embedded() {
         embedded.signal_library_change();
     }
     let _ = app.emit(serve::SERVES_CHANGED, ());
 }
 
+/// Persist native trust for a shared gateway devserver and bump its policy
+/// generation so an in-flight connect rechecks. An owned devserver is refused:
+/// it never needs trust.
 async fn grant_devserver_native_trust(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -1297,10 +1317,13 @@ async fn grant_devserver_native_trust(
         true,
     )?;
     state.bump_native_policy_generation(id);
-    signal_devserver_policy_change(app, state);
+    refresh_launcher(app, state);
     Ok(())
 }
 
+/// Withdraw native trust from a shared gateway devserver, bump its policy
+/// generation, and tear down its live connection, which was admitted under the
+/// trust being withdrawn.
 async fn revoke_devserver_native_trust(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -1327,7 +1350,7 @@ async fn revoke_devserver_native_trust(
     )?;
     state.bump_native_policy_generation(id);
     teardown_devserver_connection(app, state, id).await;
-    signal_devserver_policy_change(app, state);
+    refresh_launcher(app, state);
     Ok(())
 }
 
@@ -1398,10 +1421,7 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
     // responding") is the launcher's call, keyed on the devserver's now-`false`
     // connected status; this event only drives the flash.
     let _ = app.emit(DEVSERVER_CONTROL_ATTENTION_EVENT, id.to_string());
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(app, state);
 }
 
 /// The user explicitly closed the control terminal window. This is different
@@ -1427,9 +1447,9 @@ async fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppSta
 /// registry, routed by the native label's library. Called at the bury
 /// (`hidden=true`) and unbury (`hidden=false`) chokepoints -- BOTH the native
 /// red-dot close AND the SPA SHOW/HIDE toggle (bridge `/hide`+`/open`) funnel
-/// through them -- so a connect MIRRORS the persisted layout (HIDE-PERSIST
-/// Option A). The in-memory `buried` set stays the transient local view; this
-/// makes the visibility durable + server-shared.
+/// through them -- so a connect MIRRORS the persisted layout. The in-memory
+/// `buried` set stays the transient local view; this makes the visibility
+/// durable + server-shared.
 fn persist_window_hidden(state: &AppState, label: &str, hidden: bool) {
     // Control terminal: its registry row's `window_id` IS the full label
     // (`control_terminal_label`), minted into the LOCAL embedded library.
@@ -1528,6 +1548,12 @@ impl From<String> for ConnectDevserverError {
     }
 }
 
+impl From<&str> for ConnectDevserverError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.to_string())
+    }
+}
+
 /// Poll a control terminal's output until the connect script's devserver
 /// prints its `token=` line, or the budget runs out. The script may take a
 /// moment, or prompt for credentials in the terminal, so the wait is
@@ -1538,8 +1564,8 @@ async fn scrape_control_terminal_token(
     control_label: &str,
     prefix: &str,
 ) -> Result<String, ConnectDevserverError> {
-    let Some(embedded) = state.embedded.get() else {
-        return Err("embedded local server is unavailable".to_string().into());
+    let Some(embedded) = state.embedded() else {
+        return Err("embedded local server is unavailable".into());
     };
     const MAX_ATTEMPTS: usize = 40;
     const BACKOFF: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -1586,13 +1612,12 @@ async fn scrape_control_terminal_token(
         }
         tokio::time::sleep(BACKOFF).await;
     }
-    Err(
-        "the devserver did not print its token in the control terminal in time"
-            .to_string()
-            .into(),
-    )
+    Err("the devserver did not print its token in the control terminal in time".into())
 }
 
+/// Whether the recorded control-terminal run for `id` is still the
+/// script-based run this connect attempt started (same generation and
+/// prefix), so a replaced attempt stops instead of wiring a stale terminal.
 fn control_run_is_current(state: &AppState, id: &str, generation: u64, prefix: &str) -> bool {
     state
         .control_terminal_runs
@@ -1613,6 +1638,9 @@ fn control_script_exit_is_clean(exit: &chan_server::TerminalExit) -> bool {
     matches!(exit, chan_server::TerminalExit::Code { code: 0 })
 }
 
+/// Refuse to continue a connect whose control run was replaced or whose
+/// connect script exited unclean; a clean exit is a daemonizing script
+/// returning, not a death.
 fn ensure_control_run_live(
     state: &AppState,
     id: &str,
@@ -1620,13 +1648,10 @@ fn ensure_control_run_live(
     prefix: &str,
 ) -> Result<(), ConnectDevserverError> {
     if !control_run_is_current(state, id, generation, prefix) {
-        return Err("the devserver connect attempt was replaced"
-            .to_string()
-            .into());
+        return Err("the devserver connect attempt was replaced".into());
     }
     if let Some(exit) = state
-        .embedded
-        .get()
+        .embedded()
         .and_then(|e| e.control_terminal_exit(prefix))
     {
         // A clean return is not a death: a daemonizing connect script exits 0
@@ -1694,8 +1719,7 @@ fn spawn_control_terminal_exit_watcher(
                 return;
             }
             let exited = state
-                .embedded
-                .get()
+                .embedded()
                 .and_then(|e| e.control_terminal_exit(&prefix));
             let Some(exit) = exited else {
                 tokio::time::sleep(POLL).await;
@@ -1736,10 +1760,7 @@ fn spawn_control_terminal_exit_watcher(
                         "control script exited cleanly within the connect grace; reaping the control terminal"
                     );
                     reap_devserver_control_terminal(&app, &state, &id).await;
-                    if let Some(embedded) = state.embedded() {
-                        embedded.signal_library_change();
-                    }
-                    let _ = app.emit(serve::SERVES_CHANGED, ());
+                    refresh_launcher(&app, &state);
                     return;
                 }
                 tracing::info!(
@@ -1817,10 +1838,7 @@ async fn connect_devserver_impl(
             return Ok(());
         }
     }
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(&app, &state);
     let result =
         match connect_devserver_impl_inner(app.clone(), Arc::clone(&state), id.clone()).await {
             Ok(()) => Ok(()),
@@ -1871,13 +1889,11 @@ async fn connect_devserver_impl(
             }
         };
     state.devserver_connecting.lock().unwrap().remove(&id);
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(&app, &state);
     result
 }
 
+/// Split the gateway proxy origin into the host and port the tunnel dials.
 fn origin_host_port(origin: &str) -> Result<(String, u16), ConnectDevserverError> {
     let parsed =
         url::Url::parse(origin).map_err(|e| format!("invalid gateway proxy origin: {e}"))?;
@@ -1892,6 +1908,8 @@ fn origin_host_port(origin: &str) -> Result<(String, u16), ConnectDevserverError
     Ok((host, port))
 }
 
+/// The name shown for a gateway: its configured label, else the gateway URL's
+/// host, else the proxy origin's host, else the raw gateway URL.
 fn gateway_display_name(configured_label: &str, gateway_url: &str, proxy_origin: &str) -> String {
     if !configured_label.is_empty() {
         return configured_label.to_string();
@@ -2017,17 +2035,11 @@ async fn rostered_conn<R: tauri::Runtime>(
 ) -> Result<devserver::DevserverConn, ConnectDevserverError> {
     let row = require_rostered_native_policy(state, gateway_id, owner, devserver_id)?;
     let Some(discovery) = state.gateway_manager.discovery(gateway_id) else {
-        return Err(
-            "connect the gateway first - its roster supplies this devserver"
-                .to_string()
-                .into(),
-        );
+        return Err("connect the gateway first - its roster supplies this devserver".into());
     };
     let row_label = row.label;
     let Some(pat) = auth::load_gateway_pat(&discovery.identity_origin)? else {
-        return Err("the gateway sign-in is missing - reconnect the gateway"
-            .to_string()
-            .into());
+        return Err("the gateway sign-in is missing - reconnect the gateway".into());
     };
     let gateway = match devserver::gateway_conn(
         &discovery,
@@ -2052,11 +2064,7 @@ async fn rostered_conn<R: tauri::Runtime>(
                 gateway::CascadeReason::Unauthorized,
             )
             .await;
-            return Err(
-                "the gateway sign-in is no longer valid - reconnect the gateway"
-                    .to_string()
-                    .into(),
-            );
+            return Err("the gateway sign-in is no longer valid - reconnect the gateway".into());
         }
         // The row holds no live tunnel right now (the gateway checks
         // liveness before authorization, so a dark SHARED row answers this
@@ -2116,14 +2124,19 @@ async fn connect_rostered_devserver(
     let policy_lock = state.native_policy_lock(&id);
     let _policy_guard = policy_lock.lock().await;
     let policy_generation = state.native_policy_generation(&id);
-    require_rostered_native_policy_generation(
-        &state,
-        &id,
-        &gateway_id,
-        &owner,
-        &devserver_id,
-        policy_generation,
-    )?;
+    // Every seam below rechecks the same roster row and policy generation, so
+    // a trust revoke that lands mid-connect stops it at the next seam.
+    let recheck = || {
+        require_rostered_native_policy_generation(
+            &state,
+            &id,
+            &gateway_id,
+            &owner,
+            &devserver_id,
+            policy_generation,
+        )
+    };
+    recheck()?;
     let conn = rostered_conn(&app, &state, &id, &gateway_id, &owner, &devserver_id).await?;
 
     let proxy_origin = conn
@@ -2134,28 +2147,14 @@ async fn connect_rostered_devserver(
         .clone();
     crate::runtime_capability::mint_exact_origin_grant(&app, &proxy_origin)
         .map_err(|e| format!("granting native access for this devserver failed: {e}"))?;
-    require_rostered_native_policy_generation(
-        &state,
-        &id,
-        &gateway_id,
-        &owner,
-        &devserver_id,
-        policy_generation,
-    )?;
+    recheck()?;
     devserver::install_gateway_webview_session(&app, &conn, None)
         .map_err(|e| format!("installing gateway WebView session: {e}"))?;
 
     let rows = devserver::fetch_workspaces(&conn)
         .await
         .map_err(|e| format!("authenticating gateway devserver proxy: {e}"))?;
-    require_rostered_native_policy_generation(
-        &state,
-        &id,
-        &gateway_id,
-        &owner,
-        &devserver_id,
-        policy_generation,
-    )?;
+    recheck()?;
     state.devservers.set(id.clone(), conn.clone());
 
     seed_devserver_color(
@@ -2185,14 +2184,7 @@ async fn connect_rostered_devserver(
         }
     }
 
-    if let Err(e) = require_rostered_native_policy_generation(
-        &state,
-        &id,
-        &gateway_id,
-        &owner,
-        &devserver_id,
-        policy_generation,
-    ) {
+    if let Err(e) = recheck() {
         state.devservers.remove(&id);
         return Err(e.into());
     }
@@ -2203,14 +2195,7 @@ async fn connect_rostered_devserver(
         conn.clone(),
     )
     .await?;
-    if let Err(e) = require_rostered_native_policy_generation(
-        &state,
-        &id,
-        &gateway_id,
-        &owner,
-        &devserver_id,
-        policy_generation,
-    ) {
+    if let Err(e) = recheck() {
         state.devservers.remove(&id);
         let _ = cancel.send(DevserverWatcherStop::CloseWindows);
         return Err(e.into());
@@ -2223,13 +2208,14 @@ async fn connect_rostered_devserver(
         (cancel, snapshot, view),
         Some(rows),
     );
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(&app, &state);
     Ok(())
 }
 
+/// Connect a devserver by id: a rostered gateway id goes through the gateway
+/// manager; a configured row runs its connect script in a control terminal
+/// when it has one, acquires the token, waits for the devserver, seeds the
+/// feeds and starts the watchers.
 async fn connect_devserver_impl_inner(
     app: tauri::AppHandle,
     state: Arc<AppState>,
@@ -2487,10 +2473,7 @@ async fn connect_devserver_impl_inner(
     // trigger this, but on RECONNECT the feed can be empty for a beat -- the cached
     // library_id (`library_id_of`) lets `windows()` emit the control record, and
     // this signal makes the launcher pick it up without waiting for a later window.
-    if let Some(embedded) = state.embedded() {
-        embedded.signal_library_change();
-    }
-    let _ = app.emit(serve::SERVES_CHANGED, ());
+    refresh_launcher(&app, &state);
     Ok(())
 }
 
@@ -2672,14 +2655,7 @@ fn list_devservers_from_handoff(
     state: &Arc<AppState>,
 ) -> Vec<chan_server::handoff::DevserverSummary> {
     use chan_server::DevserverRegistry;
-    let registry = config::DevserverConfigRegistry::new(
-        Arc::clone(&state.store),
-        Arc::clone(&state.devserver_remove_hook),
-        Arc::clone(&state.devservers),
-        Arc::clone(&state.devserver_connecting),
-        Arc::clone(&state.devserver_feed),
-        Arc::clone(&state.gateway_manager),
-    );
+    let registry = state.devserver_registry();
     registry
         .list()
         .into_iter()
@@ -2718,14 +2694,7 @@ fn forget_devserver_from_handoff(
              first, or pass --force to disconnect and forget in one step."
         ));
     }
-    let registry = config::DevserverConfigRegistry::new(
-        Arc::clone(&state.store),
-        Arc::clone(&state.devserver_remove_hook),
-        Arc::clone(&state.devservers),
-        Arc::clone(&state.devserver_connecting),
-        Arc::clone(&state.devserver_feed),
-        Arc::clone(&state.gateway_manager),
-    );
+    let registry = state.devserver_registry();
     // `remove` fires the remove hook, which reaps any live connection and
     // windows; `Ok(false)` means the row vanished in a race, which is the
     // goal state either way.
@@ -2834,18 +2803,11 @@ fn register_devserver_from_handoff(
     script: Option<String>,
 ) -> Result<(), String> {
     use chan_server::{DevserverInput, DevserverRegistry};
-    // The handoff carries a URL; the registry's `add` now takes host+port (the
-    // devserver model switched back to Host+Port), so parse it apart here.
+    // The handoff carries a URL and the registry's `add` takes host and port,
+    // so parse it apart here.
     let (host, port) = devserver::parse_devserver_url(&url)?;
     let token = devserver_url_token(&url);
-    let registry = config::DevserverConfigRegistry::new(
-        Arc::clone(&state.store),
-        Arc::clone(&state.devserver_remove_hook),
-        Arc::clone(&state.devservers),
-        Arc::clone(&state.devserver_connecting),
-        Arc::clone(&state.devserver_feed),
-        Arc::clone(&state.gateway_manager),
-    );
+    let registry = state.devserver_registry();
     // The bearer rides the write-only `token` field; the stored URL never
     // carries it, so listings and the launcher header show the endpoint only.
     let entry = registry.add(DevserverInput {
@@ -2946,7 +2908,7 @@ fn open_workspace_from_handoff(
     // Not running: register (creating the dir for a fresh path)
     // through the shared Library, then mount + spawn the window. Off
     // the listener task so the CLI gets a prompt response.
-    let Some(embedded) = state.embedded.get() else {
+    let Some(embedded) = state.embedded() else {
         return Err("embedded local server is unavailable".to_string());
     };
     let library = embedded.library().clone();
@@ -3005,16 +2967,12 @@ async fn close_workspace_from_handoff(
     path: PathBuf,
     remove: bool,
 ) -> Result<chan_server::WorkspaceLifecycleOutcome, String> {
-    if state.embedded.get().is_none() {
+    let Some(embedded) = state.embedded() else {
         // No embedded host to tear down through: let the CLI fall back to the
         // control-socket path (Error → not HandedOff).
         return Err("embedded local server is unavailable".to_string());
-    }
+    };
     let key = canonical_key(&path);
-    let embedded = state
-        .embedded
-        .get()
-        .expect("embedded availability checked above");
     let outcome = if remove {
         embedded
             .remove_workspace_root(Path::new(&key), false)
@@ -3989,6 +3947,8 @@ fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The devserver library id of a watcher-opened devserver window label
+/// (`lib-<id>::<window_id>`); `None` for a local or non-watcher label.
 fn devserver_library_id_from_window_label(label: &str) -> Option<&str> {
     label
         .split_once("::")
@@ -3996,6 +3956,8 @@ fn devserver_library_id_from_window_label(label: &str) -> Option<&str> {
         .filter(|library_id| library_id.starts_with("lib-"))
 }
 
+/// The devserver owning a watcher-opened devserver window, resolved through
+/// the feed's library id map.
 fn devserver_id_for_window_label(feed: &DevserverFeed, label: &str) -> Option<String> {
     let library_id = devserver_library_id_from_window_label(label)?;
     feed.devserver_id_for_library(library_id)
@@ -4023,6 +3985,9 @@ fn reload_window(
         .map_err(|e| format!("reloading window: {e}"))
 }
 
+/// Reload a devserver window by navigating it to a freshly resolved URL for
+/// its feed record (a gateway window needs a new entry mint and WebView
+/// session). `Ok(false)` leaves the reload to the in-page `location.reload()`.
 fn reload_devserver_window_from_feed(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -5069,7 +5034,7 @@ fn main() {
                     // Install the connected-devserver feed source so the
                     // launcher merges remote windows + workspaces. Done after the
                     // host is up; connections (which populate it) only start later.
-                    if let Some(embedded) = state_for_setup.embedded.get() {
+                    if let Some(embedded) = state_for_setup.embedded() {
                         // Clone the concrete Arc; the call coerces it to
                         // `Arc<dyn DevserverFeedSource>` (unsizing at the arg).
                         let feed = Arc::clone(&state_for_setup.devserver_feed);
@@ -5144,8 +5109,7 @@ fn main() {
                     // turns lifecycle requests into Tauri window actions.
                     // The task lives until the channel closes at exit.
                     if let Some(rx) = state_for_setup
-                        .embedded
-                        .get()
+                        .embedded()
                         .and_then(|e| e.take_window_ops_rx())
                     {
                         let app_for_ops = app.handle().clone();
@@ -5180,8 +5144,8 @@ fn main() {
             // wiring here.
 
             // The launcher window loads the embedded loopback's root `/`, where
-            // the same web-launcher SPA is served as on every other surface
-            // (replacing the former native `main.js` launcher). Its `?t=` token
+            // the same web-launcher SPA is served as on every other surface. Its
+            // `?t=` token
             // authorizes the launcher's `/api/library/*` calls. Built here rather
             // than declared statically because the loopback address is dynamic and
             // is only known after the embedded server starts above.
@@ -5189,7 +5153,7 @@ fn main() {
             // Closing it via the red traffic light or Cmd+W hides, not destroys:
             // hidden serve children keep the process alive, and reopening via Dock
             // click or the Window > Computers menu item is instant.
-            if let Some(embedded) = state_for_setup.embedded.get() {
+            if let Some(embedded) = state_for_setup.embedded() {
                 let launcher_url =
                     format!("http://{}/?t={}", embedded.addr(), embedded.launcher_token());
                 match launcher_url.parse::<tauri::Url>() {
@@ -5288,7 +5252,7 @@ fn main() {
                 }
             }
 
-            // CLI-to-desktop handoff listener (ratified Option B). Binds the
+            // CLI-to-desktop handoff listener. Binds the
             // well-known per-user endpoint (a UDS on unix, a named pipe on
             // Windows) so a `chan serve <workspace>` in a terminal hands the
             // workspace to this desktop window instead of failing on the
@@ -5746,8 +5710,9 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             .accelerator("CmdOrCtrl+Shift+N")
             .build(app)?;
         // Open the FOCUSED workspace window's contents in the system browser: mints a
-        // browser-affinity record for the same workspace (chan-desktop skips it, D4)
-        // so the browser tab holds its own window_id, then opens the composed URL.
+        // browser-affinity record for the same workspace (the desktop watcher opens
+        // no native window for it) so the browser tab holds its own window_id, then
+        // opens the composed URL.
         let open_in_browser =
             MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
         // File ▸ New Terminal, Cmd+T. ALWAYS enabled (no dynamic
@@ -5832,7 +5797,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         //
         // The predefined QUIT is replaced the same way: it exits through
         // a flow `ExitRequested` + `prevent_exit` cannot reliably stop,
-        // so the v0.31.0 quit-confirmation dialog never appeared. Our
+        // so a quit confirmation hooked there never shows. Our
         // custom item keeps Cmd+Q but routes through `request_quit`,
         // which asks BEFORE any exit is requested. Appended (not
         // prepended) so Quit stays at the App menu's bottom.
@@ -6133,9 +6098,8 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle) {
                 });
             };
         // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
-        // window in addition to reopening a hidden one. The library's own
-        // window set is the source of truth (local rows now; each connected
-        // devserver's rows once its feed merges in via `DevserverFeedSource`). A
+        // window in addition to reopening a hidden one. The local library's own
+        // window set is the source of truth. A
         // row counts as open when its native webview is alive AND visible: a
         // buried window's webview is alive but hidden, so it shows under Hidden,
         // not here. Appended first, the open windows head the dynamic tail.
@@ -6317,10 +6281,10 @@ pub fn unbury_window(app: &tauri::AppHandle, label: &str) -> bool {
         }
         None => false,
     };
-    // The control terminal's launcher dot now reflects PTY-alive (resolved at read
-    // time from its chan-library control tenant), uniform with all windows -- no
-    // desktop-side shown/hidden flip; shown/hidden returns uniformly through the
-    // server-persisted hidden path.
+    // The control terminal's launcher dot reflects PTY-alive (resolved at read
+    // time from its chan-library control tenant), uniform with all windows, so
+    // there is no desktop-side shown/hidden flip here: shown/hidden returns
+    // through the server-persisted hidden path.
     if removed {
         rebuild_window_menu(app);
     }
@@ -6380,18 +6344,6 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Open a new window of the workspace that owns the currently
-/// focused window (the Cmd/Ctrl+Shift+N "New Window" semantics).
-///
-/// A watcher-opened window's composite label resolves its library record. The
-/// library mints a sibling record of the focused window's kind, and its watcher
-/// opens the native window.
-///
-/// With the launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
-/// terminal window instead -- the launcher is a singleton, never
-/// multiplied. The "Computers" picker stays reachable via the
-/// `win-main` menu item, which is also the fallback surface when a
-/// focused window's backing connection can't be resolved.
 /// Open the FOCUSED workspace window's contents in the system browser. Mints a
 /// browser-affinity record for the same workspace (chan-desktop's watcher skips
 /// non-native records, so no native twin opens), composes its loopback URL with
@@ -6410,8 +6362,9 @@ fn open_focused_window_in_browser(app: &tauri::AppHandle) -> Result<(), String> 
 }
 
 /// Open the workspace shown by the window `label` in the system browser:
-/// mints a browser-affinity record for the same workspace (chan-desktop
-/// skips it, D4) so the browser tab holds its own window_id, then opens
+/// mints a browser-affinity record for the same workspace (the desktop
+/// watcher opens no native window for it) so the browser tab holds its own
+/// window_id, then opens
 /// the composed URL. No-op for a window without a workspace record
 /// (standalone terminals).
 fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
@@ -6441,6 +6394,18 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
         .map_err(|e| format!("opening the browser window URL: {e}"))
 }
 
+/// Open a new window of the workspace that owns the currently
+/// focused window (the Cmd/Ctrl+Shift+N "New Window" semantics).
+///
+/// A watcher-opened window's composite label resolves its library record. The
+/// library mints a sibling record of the focused window's kind, and its watcher
+/// opens the native window.
+///
+/// With the launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
+/// terminal window instead -- the launcher is a singleton, never
+/// multiplied. The "Computers" picker stays reachable via the
+/// `win-main` menu item, which is also the fallback surface when a
+/// focused window's backing connection can't be resolved.
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
         .webview_windows()
@@ -6611,10 +6576,9 @@ async fn discard_devserver_window_by_id(
     Ok(true)
 }
 
-/// OS window title for the singleton launcher. Launchers are never
-/// multiplied anymore (Cmd/Ctrl+Shift+N on the launcher opens a
-/// standalone terminal window instead), so there is no `Window N`
-/// suffix to disambiguate.
+/// OS window title for the singleton launcher. There is one launcher
+/// (Cmd/Ctrl+Shift+N on the launcher opens a standalone terminal window
+/// instead), so there is no `Window N` suffix to disambiguate.
 const LAUNCHER_WINDOW_TITLE: &str = "Chan Desktop";
 const LAUNCHER_DEFAULT_WIDTH: f64 = 420.0;
 const LAUNCHER_DEFAULT_HEIGHT: f64 = 720.0;
@@ -6728,8 +6692,8 @@ fn begin_normal_shutdown(
 ///
 /// The confirmation lives HERE, before any exit is requested, because
 /// the macOS predefined Quit item exits through a flow
-/// `RunEvent::ExitRequested` + `prevent_exit` cannot reliably stop
-/// (the v0.31.0 dialog never appeared). The custom chan-quit menu item
+/// `RunEvent::ExitRequested` + `prevent_exit` cannot reliably stop, so a
+/// confirmation hooked there never shows. The custom chan-quit menu item
 /// (Cmd/Ctrl+Q) routes here on every platform; on Quit the
 /// `quit_confirmed` flag lets the resulting `ExitRequested` pass.
 fn request_quit(app: &tauri::AppHandle) {
@@ -7390,7 +7354,6 @@ mod tests {
             concat!("let others", "_remain"),
         );
         assert!(request_close.contains("close_devserver_control_terminal"));
-        assert!(!request_close.contains("devserver-control-closed"));
 
         // Only a status-0 exit counts as clean, and the post-token liveness
         // probe lets a clean (daemonizing) script return through while still
@@ -7443,7 +7406,6 @@ mod tests {
         );
         assert!(exit_watcher.contains("control_script_exit_is_clean"));
         assert!(!exit_watcher.contains("control_terminal_dead"));
-        assert!(!exit_watcher.contains("devserver-control-closed"));
         let connecting_pos = exit_watcher
             .find("devserver_connecting")
             .expect("watcher defers a clean exit while a connect is in flight");
@@ -8221,22 +8183,6 @@ mod tests {
         const MAIN_RS: &str = include_str!("main.rs");
         // The launcher menu item says what it does.
         assert!(MAIN_RS.contains("\"New Standalone Terminal\""));
-        // The per-window-kind menu machinery is gone: no workspace
-        // hamburger-mirror menu, no owned terminal/control shapes, and no
-        // label-encoded id namespaces to route them. concat! so the
-        // absence pins don't match this test's own source.
-        for gone in [
-            concat!("build_workspace", "_menu"),
-            concat!("WS_NEW_WINDOW_MENU_ID", "_PREFIX"),
-            concat!("WS_CLOSE_WINDOW_MENU_ID", "_PREFIX"),
-            concat!("WS_OPEN_IN_BROWSER_MENU_ID", "_PREFIX"),
-            concat!("WORKSPACE_CMD_MENU_ID", "_PREFIX"),
-            concat!("wsc", "md:"),
-            concat!("parse_workspace_cmd_menu", "_id"),
-            concat!("dispatch_to_workspace", "_window"),
-        ] {
-            assert!(!MAIN_RS.contains(gone), "{gone} must be gone");
-        }
     }
 
     #[test]
