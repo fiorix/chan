@@ -3840,6 +3840,90 @@ mod tests {
         });
     }
 
+    /// Closing and removing by root canonicalize the caller's path, look the
+    /// registry up and unregister it, and each of those touches the
+    /// filesystem. None may run on a runtime worker: a slow or cloud-synced
+    /// root would stall every tenant that worker serves. The probe on this
+    /// thread sees every canonicalization the runtime thread performs, and
+    /// the paths go in through an alias only canonicalization resolves, so
+    /// the unmount, the purge and the unregister prove the key was computed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_and_removing_by_root_canonicalize_off_the_runtime_thread() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir(root.path().join("sub")).expect("alias hop");
+        let alias = root.path().join("sub").join("..");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library.register_workspace(root.path()).expect("register");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let store = tempfile::tempdir().expect("store dir");
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        registry.create(
+            WindowKind::Workspace,
+            Some(root.path().to_string_lossy().into_owned()),
+        );
+        host.install_window_registry(registry.clone(), "local".into());
+        host.open_registered_workspace(root.path(), serve_config("/workspace"))
+            .await
+            .expect("mount");
+
+        let on_runtime = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        CANONICAL_KEY_PROBE.with(|probe| {
+            let on_runtime = std::rc::Rc::clone(&on_runtime);
+            *probe.borrow_mut() = Some(Box::new(move || on_runtime.set(on_runtime.get() + 1)));
+        });
+        struct ResetProbe;
+        impl Drop for ResetProbe {
+            fn drop(&mut self) {
+                CANONICAL_KEY_PROBE.with(|probe| *probe.borrow_mut() = None);
+            }
+        }
+        let _reset = ResetProbe;
+
+        assert_eq!(
+            host.close_workspace_for_root(&alias, false)
+                .await
+                .expect("close"),
+            WorkspaceLifecycleOutcome::Completed
+        );
+        assert_eq!(
+            on_runtime.get(),
+            0,
+            "close canonicalized the workspace key on the runtime thread"
+        );
+        assert!(
+            host.mounted_prefix_for_root(root.path()).is_none(),
+            "close did not unmount the aliased root"
+        );
+
+        // A second mount, so removal has a tenant to unmount as well. The
+        // mount path's own bookkeeping is not under test here.
+        host.open_registered_workspace(root.path(), serve_config("/workspace"))
+            .await
+            .expect("remount");
+        on_runtime.set(0);
+
+        assert_eq!(
+            host.remove_workspace_for_root(&alias, false)
+                .await
+                .expect("remove"),
+            WorkspaceLifecycleOutcome::Completed
+        );
+        assert_eq!(
+            on_runtime.get(),
+            0,
+            "remove canonicalized the workspace key on the runtime thread"
+        );
+        assert!(
+            registry.snapshot().is_empty(),
+            "removal did not purge the aliased root's window records"
+        );
+        assert!(
+            host.library().workspace_paths_for(root.path()).is_none(),
+            "removal did not unregister the aliased root"
+        );
+    }
+
     #[test]
     fn canonical_key_strips_verbatim_prefix() {
         // A caller path resolved WITH the Windows `\\?\` verbatim prefix and a
