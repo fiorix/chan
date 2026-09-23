@@ -3640,9 +3640,15 @@ impl Workspace {
     /// graph delete succeeds and the search delete fails, queries
     /// surface a "ghost" search hit pointing at a missing file; the
     /// caller then asks `Workspace::read` and gets `NotFound`, which is
-    /// recoverable. The reverse ordering (search-then-graph) would
-    /// leave backlinks pointing at a missing file, a silently broken
-    /// state the editor cannot self-heal.
+    /// recoverable. The reverse ordering (search-then-graph) would,
+    /// on a failure or crash between the two steps, leave the
+    /// forgotten file's own node and outgoing edges in the graph: the
+    /// graph would still list the file and its links would still
+    /// show as backlinks on the files it points to, with no search
+    /// hit to show anything is wrong until the journal replays the
+    /// forget. Inbound edges from other files are not part of this:
+    /// the graph keeps them on a forget because they describe the
+    /// bodies of the files that hold the links.
     pub fn forget_file(&self, rel: &str) -> Result<()> {
         let _serial = self.write_serial.lock().unwrap();
         self.forget_file_serial(rel)
@@ -3735,11 +3741,14 @@ impl Workspace {
     ///     If it no longer exists, degrade to `forget_file`,
     ///     since the original mutation's intent (index this rel)
     ///     no longer makes sense against a missing file.
-    ///   - `Index` over a file that exists but cannot be read
-    ///     (not valid UTF-8, unreadable): degrade to `forget_file`
-    ///     too, log at warn, and carry on. The intent cannot be
-    ///     honoured and never will be, so failing the pass here
-    ///     would only re-park it and fail again on the next open.
+    ///   - `Index` over a file that exists but cannot be read:
+    ///     log at warn and carry on. A non-Markdown text file whose
+    ///     bytes do not decode is recorded as seen at its stat with
+    ///     nothing in the index; a Markdown file that does not decode
+    ///     and a file that cannot be opened degrade to `forget_file`.
+    ///     The intent cannot be honoured and never will be, so
+    ///     failing the pass here would only re-park it and fail
+    ///     again on the next open.
     ///   - `Forget`: re-run `forget_file`. Idempotent against
     ///     already-cleaned backends.
     ///
@@ -3769,13 +3778,14 @@ impl Workspace {
                     if self.exists(&rel) {
                         if let Some(error) = self.index_file_serial_or_source_error(&rel)? {
                             // Resolved rather than replayed: the
-                            // entry has been degraded to a forget, so
-                            // a file that can never be read stops
-                            // failing this pass on every open.
+                            // entry has been settled by recording
+                            // undecodable non-Markdown text or by a
+                            // forget, so a file that can never be read
+                            // stops failing this pass on every open.
                             tracing::warn!(
                                 rel = %rel,
                                 ?error,
-                                "replay: file could not be read; dropped from graph and index",
+                                "replay: file could not be read; recorded if non-Markdown text that does not decode, otherwise forgotten",
                             );
                             continue;
                         }
@@ -3978,7 +3988,7 @@ impl Workspace {
                         tracing::warn!(
                             rel = %rel,
                             ?error,
-                            "reconcile: file could not be read; dropped from graph and index",
+                            "reconcile: file could not be read; recorded if non-Markdown text that does not decode, otherwise forgotten",
                         );
                         failed.push(rel.clone());
                     }
