@@ -505,8 +505,6 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
     format!("control-terminal-{devserver_id}")
 }
 
-/// `cs window open`: focus a live window or un-hide a buried one. Errors when
-/// the id names nothing the desktop can act on.
 /// Resolve the id an open/hide op carries to a native window label. The
 /// launcher's window affordance sends a BARE library-minted `window_id`
 /// (e.g. `w-1a2b`), but a watched window's native label is the composite
@@ -565,6 +563,8 @@ fn resolve_label_from(id: &str, candidates: &[String]) -> String {
     }
 }
 
+/// `cs window open`: focus a live window or un-hide a buried one. Errors when
+/// the id names nothing the desktop can act on.
 pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> {
     let label = resolve_window_label(app, label);
     let label = label.as_str();
@@ -573,11 +573,9 @@ pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> 
     // closed it -- `local::` locally, `lib-` via the devserver view), so there
     // is NO webview to `show()`. `unbury_window` flips the right view and the
     // reconcile reopens it at its `window_id`. This must run even when there is no
-    // live webview, so it precedes the `get_webview_window` check below. The
-    // dot-show of a buried devserver STANDALONE terminal is `lib-<hex>::…` with a
-    // destroyed webview -- without the `lib-` arm it missed this AND the
-    // `get_webview_window` check and resolved as a local label, reopening nothing.
-    // The Window menu worked because it calls `unbury_window` directly.
+    // live webview, so it precedes the `get_webview_window` check below; a
+    // buried devserver STANDALONE terminal (`lib-<hex>::…`, destroyed webview)
+    // reaches its watcher only through the `lib-` arm.
     if label.starts_with("local::") || label.starts_with("lib-") {
         crate::unbury_window(app, label);
         return Ok(());
@@ -590,6 +588,14 @@ pub fn open_window_by_label(app: &AppHandle, label: &str) -> Result<(), String> 
         return Ok(());
     }
     Err(format!("window {label} isn't open"))
+}
+
+/// The live window's OS title, else its label (a window whose webview is gone
+/// or whose title cannot be read).
+fn window_title_or_label(app: &AppHandle, label: &str) -> String {
+    app.get_webview_window(label)
+        .and_then(|w| w.title().ok())
+        .unwrap_or_else(|| label.to_string())
 }
 
 /// True when the webview is still showing the bundled connecting/retry
@@ -1232,10 +1238,7 @@ pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &st
         // Capture OS geometry while the window is still alive -- the watcher
         // reconcile destroys the native window on bury.
         capture_window_geometry(app, label);
-        let title = app
-            .get_webview_window(label)
-            .and_then(|w| w.title().ok())
-            .unwrap_or_else(|| label.to_string());
+        let title = window_title_or_label(app, label);
         if let Some(view) = state.local_watcher_view() {
             view.bury(label);
         }
@@ -1255,10 +1258,7 @@ pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &st
         // Capture OS geometry before the devserver reconcile closes the webview
         // on bury (a devserver window restoring its own size).
         capture_window_geometry(app, label);
-        let title = app
-            .get_webview_window(label)
-            .and_then(|w| w.title().ok())
-            .unwrap_or_else(|| label.to_string());
+        let title = window_title_or_label(app, label);
         let library_id = label.split("::").next().unwrap_or(label);
         if let Some(ds_id) = state.devserver_feed.devserver_id_for_library(library_id) {
             if let Some(view) = state.devserver_watcher_views.lock().unwrap().get(&ds_id) {
@@ -1310,10 +1310,7 @@ pub(crate) fn bury_window_now(app: &AppHandle, state: &Arc<AppState>, label: &st
 /// mutations are safe); on macOS `native_dialog::confirm` defers the modal to a
 /// later main-loop turn so this close handler stays non-blocking.
 fn prompt_transfer_close(app: &AppHandle, state: &Arc<AppState>, label: &str) {
-    let title = app
-        .get_webview_window(label)
-        .and_then(|w| w.title().ok())
-        .unwrap_or_else(|| label.to_string());
+    let title = window_title_or_label(app, label);
     let app_cb = app.clone();
     let state_cb = Arc::clone(state);
     let label_cb = label.to_string();
@@ -1359,10 +1356,7 @@ fn prompt_transfer_close(app: &AppHandle, state: &Arc<AppState>, label: &str) {
 /// macOS `native_dialog::confirm` defers the modal so this handler stays
 /// non-blocking.
 fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label: &str) {
-    let title = app
-        .get_webview_window(label)
-        .and_then(|w| w.title().ok())
-        .unwrap_or_else(|| label.to_string());
+    let title = window_title_or_label(app, label);
     let app_cb = app.clone();
     let state_cb = Arc::clone(state);
     let label_cb = label.to_string();
@@ -1650,8 +1644,7 @@ pub fn close_window_by_label(app: &AppHandle, label: &str) {
 /// fallbacks (Alt+Shift, Ctrl+Alt) keep working independently.
 ///
 /// Off macOS these windows carry no menubar (only the launcher has one),
-/// so the bridge also owns the chords the retired per-window menubars
-/// claimed -- New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), routed over
+/// so the bridge also owns the chords a menubar would own -- New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), routed over
 /// IPC like reload/zoom because the SPA command bus is dead on the
 /// connecting screen. The launcher itself never loads this script (it
 /// gets LAUNCHER_RELOAD_BRIDGE_JS), so its native menu chords can never
@@ -1672,8 +1665,8 @@ const KEY_BRIDGE_JS: &str = r#"
   // absent (e.g. a devserver window where the bridge did not survive the
   // connecting -> external navigation), do NOT preventDefault -- let the event
   // bubble to the SPA's own handler (Cmd+R -> location.reload()) so the chord
-  // degrades to a working fallback instead of dying. Swallowing first then
-  // finding no bridge killed Cmd+R/devtools/zoom outright (no IPC, no fallback).
+  // degrades to a working fallback instead of dying: swallowing it with no
+  // bridge would leave Cmd+R/devtools/zoom with neither IPC nor a fallback.
   function invokeIpc(e, cmd, args) {
     const tauri = window.__TAURI__;
     if (!(tauri && tauri.core && typeof tauri.core.invoke === 'function')) {
@@ -1750,8 +1743,8 @@ const KEY_BRIDGE_JS: &str = r#"
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
   // context-aware helpers in App.svelte. Off-mac the bridge additionally
-  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords the
-  // retired per-window menubars owned -- gated on !metaKey so macOS,
+  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q) -- the chords a
+  // menubar would own; off-mac these windows have none -- gated on !metaKey so macOS,
   // whose menubar still owns them, never double-fires.
   // A focused terminal takes three of these back, because their Ctrl form
   // encodes a byte the shell reads and terminal find belongs to the tab
@@ -1904,8 +1897,8 @@ const KEY_BRIDGE_JS: &str = r#"
       }
     } else {
       switch (code) {
-        // New Window on Linux/Windows: Ctrl+Shift+N -- another chord the
-        // retired per-window menubars owned. The IPC routes by the
+        // New Window on Linux/Windows: Ctrl+Shift+N -- another chord a
+        // menubar would own. The IPC routes by the
         // INVOKING window's label (another window of its connection, a
         // standalone terminal from a control window), which is
         // focus-proof and works on the connecting screen, where the SPA
@@ -1944,8 +1937,8 @@ const KEY_BRIDGE_JS: &str = r#"
           if (e.metaKey) fire(e, 'app.tab.reopenClosed');
           // A control terminal is a singleton (no tabs; the SPA blocks
           // app.terminal.toggle there), so off-mac its New-terminal chord
-          // spawns a standalone terminal window -- the claim its retired
-          // per-window menubar held. The kind rides the init script
+          // spawns a standalone terminal window, the chord a menubar would
+          // own. The kind rides the init script
           // (window.__CHAN_WINDOW_KIND__).
           else if (!e.metaKey && window.__CHAN_WINDOW_KIND__ === 'control') invokeIpc(e, 'open_new_window');
           else fire(e, 'app.terminal.toggle');
