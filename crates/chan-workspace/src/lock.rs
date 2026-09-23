@@ -52,15 +52,11 @@ impl Drop for AdmissionLock {
 ///
 /// Windows needs the split. `LockFileEx` takes a MANDATORY byte-range lock, so
 /// while a holder owns [`LOCK_FILE`] every other handle -- in any process, and
-/// even in the holder's own -- is refused the read. That turned every record
-/// read on Windows into `None`, silently, and the damage is not cosmetic:
-/// `chan ps` and `chan close` cannot identify a holder, [`WorkspaceLock`]'s
-/// steal path can never confirm a dead one, a second acquire in this process
-/// reports the cross-process `WorkspaceLocked` instead of
-/// `WorkspaceAlreadyOpen`, and [`probe_foreign_holder`] calls chan's own lock
-/// foreign. Unix flock never blocked reads, which is why the whole class
-/// only ever surfaced here. A plain sidecar carries no lock and reads on both
-/// platforms.
+/// even in the holder's own -- is refused the read, so a record kept only in
+/// the lock body cannot identify a holder there (for `chan ps`, `chan close`,
+/// the steal path's dead-holder check, or telling this process's own lock from
+/// a foreign one). Unix flock never blocks reads. A plain sidecar carries no
+/// lock and reads on both platforms.
 ///
 /// The sidecar is a fallback, not the authority: reads prefer the lock body
 /// (see [`read_record_for`]), the holder removes the sidecar on release, and
@@ -435,7 +431,7 @@ pub(crate) fn open_lock_file(path: &Path) -> Result<File> {
         const FILE_SHARE_DELETE: u32 = 0x4;
         opts.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
-    opts.open(path).map_err(ChanError::from)
+    Ok(opts.open(path)?)
 }
 
 /// Publish the holder record to both places: the unlocked [`RECORD_FILE`] that
@@ -464,10 +460,10 @@ fn write_record(file: &File, lock_dir: &Path, workspace_root: &Path) -> Result<(
 }
 
 fn write_record_body(mut file: &File, json: &[u8]) -> Result<()> {
-    file.set_len(0).map_err(ChanError::from)?;
-    file.seek(SeekFrom::Start(0)).map_err(ChanError::from)?;
-    file.write_all(json).map_err(ChanError::from)?;
-    file.flush().map_err(ChanError::from)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(json)?;
+    file.flush()?;
     Ok(())
 }
 
@@ -582,10 +578,9 @@ pub(crate) fn is_contended(e: &std::io::Error) -> bool {
     }
     #[cfg(windows)]
     {
-        const ERROR_SHARING_VIOLATION: i32 = 32;
-        const ERROR_LOCK_VIOLATION: i32 = 33;
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
         if matches!(
-            e.raw_os_error(),
+            e.raw_os_error().map(|code| code as u32),
             Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
         ) {
             return true;
