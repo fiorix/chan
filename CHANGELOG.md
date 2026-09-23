@@ -4,6 +4,58 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`chan open` and `chan close --forget`.** `chan open PATH` is another spelling of `chan serve PATH`, with the same arguments and behaviour, and it refuses a URL exactly as `serve` does. `chan close --forget PATH` is another spelling of `chan workspace forget PATH`, including its live-terminal refusal and `--on TARGET`. Both appear in `--help`, and every existing command prefix still resolves.
+
+- **An agent-sized manual.** `chan dump-skill` prints an index by default: what chan is, then every topic with its purpose and the exact command that prints it. `--topic` prints one topic, split into numbered parts read with `--part` when it is longer than an 8 KiB budget, `--list` names the topics, and `--full` still prints the whole manual. `cs dump-skill` speaks the same topics, so no single call prints more than an agent can read.
+
+### Changed
+
+- **Every turn-on answers 200 with the workspace's row.** Turning a workspace on through a connected devserver now answers with the same launcher row the other turn-on routes send, instead of 204. The row never carries the workspace's bearer token.
+
+- **A move onto an occupied name is refused.** Renaming, dragging one or several rows, and cut and paste all refuse a move whose destination exists, and name the occupied path. The "Overwrite existing file?" prompt is gone, because it offered something the server refuses.
+
+- **The screensaver lock is a real boundary.** While the lock is up, the window's host-bridge commands and native menu items are gated and focus stays in the PIN field; every full-window cover blocks app input for as long as it is shown.
+
+- **A page break is one marker everywhere.** `<hr class="chan-page-break">` is the page break for the editor's divider, decks, present mode and both PDF exports; a near miss is normalized to it on write, and `@pagebreak` still expands to it.
+
+- **Settings writes report where they happen.** A settings control commits once per decision, and a write the server rejects shows its error on the field and restores the server's value.
+
+### Fixed
+
+- **`cs terminal close` no longer acknowledges a close that did not happen.** It waits for each closed session's shell to end and fails, naming each survivor and its pid, when one does not. A window reattaching to a closed terminal is told the tab closed instead of getting a fresh shell under the old name, and the next `cs terminal new` for that seat gets the name back.
+
+- **Terminal output is delivered once on attach.** A chunk written while a client attaches no longer arrives twice, and a reconnect after such a race loses no bytes.
+
+- **The desktop notices a replaced workspace root.** A mounted workspace whose directory is gone or replaced reads unavailable on the desktop within fifteen seconds, without an add or an on, and returns to running when the original directory is back.
+
+- **A timed-out devserver mount no longer closes a workspace it did not open.** A tenant someone else mounted keeps its terminals and its running row when a devserver's own attempt on that root times out.
+
+- **The desktop reads turn-on refusals correctly.** Only a live-terminals refusal raises the live-terminals confirm; any other refusal shows its own message.
+
+- **The indexer recovers when its coordinator goes away.** A recovery pass claimed by an indexer that stops is released for the next one, and a recovery action that keeps failing waits between attempts instead of spinning.
+
+- **Tabs keep their identity and their state.** A close issued after a prompt closes the tab it was asked to close, not its neighbour. A tab reordered in its pane, a terminal moved to another window and a file tab moved while it loads all keep their state, and no tab shows "loading" for a load nobody is running.
+
+- **Canvas edits made during an outage are not lost**, and a restored transfer no longer shares an id with a new one.
+
+- **Keyboard handling is consistent.** Terminal chords run exactly once whether or not the terminal has focus, and an open menu takes the first Escape instead of the overlay under it.
+
+- **Failures say so.** A load that fails shows the failure and is not retried until something could make it succeed. A failed revoke says it failed next to the item and keeps the list current, and a render error in one pane, inspector section or launcher deck is contained to that surface with a retry. The connecting window offers Retry only after a connection attempt has failed or timed out.
+
+- **Rich Prompt submits on a devserver reached over plain http.**
+
+- **Editor fixes.** A checkbox in a read-only document no longer writes to it. Editor triggers no longer fire inside an existing image, link or code block. Image actions keep working after an edit above the image. Document PDF export waits for its images before it paginates.
+
+- **Release and CI tooling fail closed.** The `/dl` release pipeline errors on a missing tag and requires a signature for every updater payload it can publish. The frontend gate covers everything that ships, and the e2e harnesses report only what they measured. The COPR publication probe waits 7,200 seconds, with trigger and verify as separate jobs, and the macOS CI jobs stop at 90 minutes instead of GitHub's six-hour default.
+
+### Security
+
+- **Rich copy no longer puts the session token on the clipboard.** Copied image URLs are written without the `t=` token parameter, which on its own authenticated as the session.
+
 ## [v0.99.0] - 2026-09-19
 
 v0.99.0 makes a devserver grant all-or-nothing and ties extension links to the session that opened them, keeps reverse tunnels on the owner's own desktop app, and carries a long correctness pass over the workspace, the gateway fleet and the desktop: file operations that could lose data are refused or rolled back, a stalled mount or a stalled transfer no longer wedges the rest of the system, and one bad lease, one refused tunnel or one damaged cache file costs one thing instead of a whole node.
