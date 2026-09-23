@@ -1533,15 +1533,17 @@ sleep 3"
     fn script_run_from_another_directory_pokes_the_path_it_wrote() {
         let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
         let scratch = tempfile::TempDir::new().unwrap();
-        // `cs` records every call it receives; `sleep` is a no-op so the
-        // script's readiness wait costs the test nothing.
+        // `cs` records each argument of every call on its own line, so a
+        // poke that word splitting broke into several arguments does not
+        // join back into the one it should have been; `sleep` is a no-op
+        // so the script's readiness wait costs the test nothing.
         let bin = scratch.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let calls_log = scratch.path().join("cs-calls.log");
         write_executable(
             &bin.join("cs"),
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n",
                 sh_squote(&calls_log.to_string_lossy())
             ),
         );
