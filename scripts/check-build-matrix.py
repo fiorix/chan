@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -613,6 +614,267 @@ def check_workflow_contract() -> None:
         )
 
 
+def workflow_triggers(workflow: str, path: str) -> dict[str, dict[str, list[str]]]:
+    """The `paths` and `paths-ignore` pattern lists under each `on:` event.
+
+    Line-based like workflow_job, since the checker has no YAML parser: the
+    block is the lines after a bare `on:` up to the next unindented key, an
+    event is a two-space key in it, a filter is a four-space `paths:` or
+    `paths-ignore:` under that event, and its patterns are the six-space
+    `- ` items after it, quoted or bare. A filter with no pattern is an
+    error rather than an empty list, because GitHub reads an empty `paths`
+    as selecting nothing, which never runs the workflow.
+    """
+    lines = workflow.splitlines()
+    start = next((index for index, line in enumerate(lines) if line == "on:"), None)
+    if start is None:
+        raise ContractError(f"{path}: missing the on: block")
+
+    triggers: dict[str, dict[str, list[str]]] = {}
+    event = None
+    filter_name = None
+    for line in lines[start + 1 :]:
+        if line.strip() == "" or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        event_match = re.match(r"^  ([A-Za-z_]+):", line)
+        if event_match:
+            event = event_match.group(1)
+            triggers.setdefault(event, {})
+            filter_name = None
+            continue
+        filter_match = re.match(r"^    (paths|paths-ignore):\s*$", line)
+        if filter_match and event is not None:
+            filter_name = filter_match.group(1)
+            triggers[event][filter_name] = []
+            continue
+        item = re.match(r"""^      - (?:'([^']*)'|"([^"]*)"|(\S+))\s*$""", line)
+        if item and filter_name is not None:
+            pattern = next(group for group in item.groups() if group is not None)
+            triggers[event][filter_name].append(pattern)
+            continue
+        filter_name = None
+
+    for event_name, filters in triggers.items():
+        for name, patterns in filters.items():
+            if not patterns:
+                raise ContractError(f"{path}: on.{event_name}.{name} lists no pattern")
+    return triggers
+
+
+def filter_pattern(pattern: str) -> re.Pattern[str]:
+    """The regex GitHub's filter pattern cheat sheet describes for PATTERN.
+
+    `**` matches anything, `*` anything but a slash, `?` and `+` quantify
+    the character before them, `[...]` is a character class, every other
+    character is literal, and a pattern is anchored at the repository root.
+    A `**` standing alone between separators matches zero or more whole
+    directories, which is how `docs/**/*.md` reaches `docs/hello.md`.
+    """
+    regex = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if pattern.startswith("**", index):
+            before = index == 0 or pattern[index - 1] == "/"
+            after = pattern[index + 2 : index + 3] == "/"
+            if before and after:
+                regex.append("(?:.*/)?")
+                index += 3
+            else:
+                regex.append(".*")
+                index += 2
+            continue
+        if char == "*":
+            regex.append("[^/]*")
+        elif char in "?+":
+            regex.append(char)
+        elif char == "[":
+            end = pattern.find("]", index)
+            if end == -1:
+                raise ContractError(f"filter pattern {pattern!r}: unclosed [")
+            regex.append(pattern[index : end + 1])
+            index = end + 1
+            continue
+        else:
+            regex.append(re.escape(char))
+        index += 1
+    return re.compile("^" + "".join(regex) + "$")
+
+
+def filter_selects(patterns: list[str], path: str) -> bool:
+    """Whether the ordered filter PATTERNS select PATH.
+
+    Patterns apply in order: a matching `!` pattern after a positive match
+    drops the path, a matching positive pattern after that picks it up
+    again, and a path no pattern mentions is not selected.
+    """
+    selected = False
+    for pattern in patterns:
+        negate = pattern.startswith("!")
+        if filter_pattern(pattern[1:] if negate else pattern).match(path):
+            selected = not negate
+    return selected
+
+
+def workflow_runs(
+    triggers: dict[str, dict[str, list[str]]], event: str, changed: list[str]
+) -> bool:
+    """Whether EVENT runs for the CHANGED file paths.
+
+    `paths` runs the workflow when it selects at least one changed file,
+    `paths-ignore` when at least one changed file escapes it, and an event
+    with neither runs on every change.
+    """
+    filters = triggers[event]
+    if "paths" in filters:
+        return any(filter_selects(filters["paths"], path) for path in changed)
+    if "paths-ignore" in filters:
+        ignored = filters["paths-ignore"]
+        return not all(filter_selects(ignored, path) for path in changed)
+    return True
+
+
+def manifest(relative: str) -> dict:
+    return tomllib.loads(read(relative))
+
+
+def dependency_tables(data: dict, dev: bool) -> list[dict]:
+    """The dependency tables of one manifest that reach a build.
+
+    Plain, build and per-target tables, plus the dev ones when DEV. A path
+    dependency's own dev-dependencies never enter its consumer's build, so
+    the walk past the gateway's manifests reads the build tables only.
+    """
+    kinds = ["dependencies", "build-dependencies"]
+    if dev:
+        kinds.append("dev-dependencies")
+    tables = [data.get(kind, {}) for kind in kinds]
+    for target in data.get("target", {}).values():
+        tables.extend(target.get(kind, {}) for kind in kinds)
+    return tables
+
+
+def path_dependency(spec: object, base: Path) -> Path | None:
+    if isinstance(spec, dict) and "path" in spec:
+        return (base / spec["path"]).resolve()
+    return None
+
+
+def gateway_root_crates() -> dict[str, str]:
+    """Every root workspace crate the gateway workspace compiles.
+
+    Repo-relative crate directory to the edge that reaches it. The seeds
+    are the path dependencies leaving gateway/ in gateway/Cargo.toml and in
+    every member manifest, dev-dependencies included since Gateway CI
+    compiles the members' tests. From each seed the walk follows the
+    build tables: a `workspace = true` edge resolves through the root
+    Cargo.toml's [workspace.dependencies], a direct `path` resolves beside
+    the manifest, and either lands on a root crate when it points inside
+    the repository. Breadth first, so a crate the gateway names directly
+    reports that edge rather than one further down the chain.
+    """
+    gateway_dir = ROOT / "gateway"
+    workspace = manifest("gateway/Cargo.toml")
+    manifests = ["gateway/Cargo.toml"] + [
+        f"gateway/{member}/Cargo.toml" for member in workspace["workspace"]["members"]
+    ]
+    pending: list[tuple[Path, str]] = []
+    for relative in manifests:
+        data = manifest(relative)
+        base = (ROOT / relative).parent
+        tables = dependency_tables(data, dev=True)
+        if relative == "gateway/Cargo.toml":
+            tables.append(data.get("workspace", {}).get("dependencies", {}))
+        for table in tables:
+            for name, spec in table.items():
+                target = path_dependency(spec, base)
+                if target is not None and not target.is_relative_to(gateway_dir):
+                    pending.append((target, f"{relative} dependency {name}"))
+
+    root_workspace = manifest("Cargo.toml")["workspace"]["dependencies"]
+    reached: dict[Path, str] = {}
+    while pending:
+        crate_dir, edge = pending.pop(0)
+        if crate_dir in reached:
+            continue
+        if not crate_dir.is_relative_to(ROOT):
+            raise ContractError(
+                f"{edge}: path dependency {crate_dir} leaves the repository"
+            )
+        reached[crate_dir] = edge
+        relative = crate_dir.relative_to(ROOT).as_posix()
+        for table in dependency_tables(manifest(f"{relative}/Cargo.toml"), dev=False):
+            for name, spec in table.items():
+                if isinstance(spec, dict) and spec.get("workspace") is True:
+                    target = path_dependency(root_workspace.get(name), ROOT)
+                else:
+                    target = path_dependency(spec, crate_dir)
+                if target is not None:
+                    pending.append((target, f"{relative}/Cargo.toml dependency {name}"))
+    return {path.relative_to(ROOT).as_posix(): edge for path, edge in reached.items()}
+
+
+def check_gateway_trigger_contract() -> None:
+    """Gateway CI runs on every root workspace crate the gateway compiles.
+
+    The gateway builds the root's tunnel crates by path, those crates read
+    the root Cargo.toml through `workspace = true`, and only Gateway CI runs
+    the gateway's Postgres-backed integration tests and container builds,
+    so a change to any of them that its filter does not select reaches
+    neither. Both event filters must select every file of every crate in
+    that closure and the root Cargo.toml; a few file paths stand in for a
+    directory, since a filter is a pattern list. The two filters are one
+    list on purpose, and everything ci.yml ignores must be selected here, so
+    that no change escapes both gates.
+    """
+    path = ".github/workflows/gateway-ci.yml"
+    triggers = workflow_triggers(read(path), path)
+    lists: dict[str, list[str]] = {}
+    for event in ("push", "pull_request"):
+        if "paths" not in triggers.get(event, {}):
+            raise ContractError(f"{path}: missing on.{event}.paths")
+        lists[event] = triggers[event]["paths"]
+    if lists["push"] != lists["pull_request"]:
+        raise ContractError(f"{path}: on.push.paths and on.pull_request.paths differ")
+
+    crates = gateway_root_crates()
+    if not crates:
+        raise ContractError(
+            "gateway/Cargo.toml: no path dependency reaches the root workspace; "
+            "retire this contract if the gateway stopped consuming root crates"
+        )
+    samples = {
+        "Cargo.toml": (
+            "the root Cargo.toml, whose [workspace.dependencies] decide what the "
+            "root crates the gateway compiles are built against"
+        )
+    }
+    for crate_dir, edge in sorted(crates.items()):
+        for sample in ("Cargo.toml", "src/lib.rs", "src/deep/nested.rs"):
+            samples[f"{crate_dir}/{sample}"] = f"{crate_dir} is reached from {edge}"
+    for event, patterns in lists.items():
+        for sample, reason in samples.items():
+            if not filter_selects(patterns, sample):
+                raise ContractError(
+                    f"{path}: on.{event}.paths does not select {sample} ({reason})"
+                )
+
+    core_path = ".github/workflows/ci.yml"
+    core = workflow_triggers(read(core_path), core_path)
+    for event in ("push", "pull_request"):
+        ignored = core.get(event, {}).get("paths-ignore")
+        if not ignored:
+            raise ContractError(f"{core_path}: missing on.{event}.paths-ignore")
+        for pattern in ignored:
+            if pattern not in lists[event]:
+                raise ContractError(
+                    f"{core_path}: on.{event}.paths-ignore {pattern!r} is not in "
+                    f"{path} on.{event}.paths, so a change there runs neither gate"
+                )
+
+
 def check_docker_contract() -> None:
     script = read("packaging/docker/build.sh")
     require(script, "--chan-only", "packaging/docker/build.sh")
@@ -718,6 +980,7 @@ def main() -> int:
         check_make_contract()
         check_desktop_contract()
         check_workflow_contract()
+        check_gateway_trigger_contract()
         check_docker_contract()
         check_nix_contract()
     except (ContractError, KeyError, json.JSONDecodeError) as error:
