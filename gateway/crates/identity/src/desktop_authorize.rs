@@ -143,9 +143,9 @@ use crate::pages;
 use crate::profile_client::User;
 
 /// Session key under which `/desktop/authorize` stashes a pending
-/// authorize. Read by `auth_callback` (to redirect to consent after
-/// OAuth completes) and by the consent / confirm handlers.
-pub const KEY_DESKTOP_AUTHORIZE: &str = "desktop_authorize";
+/// authorize. This module's pending-flow helpers serve the OAuth callback
+/// and the consent / confirm handlers.
+const KEY_DESKTOP_AUTHORIZE: &str = "desktop_authorize";
 
 /// Session key for the consent-form CSRF nonce. Regenerated each time
 /// the consent page is rendered; consumed by the confirm POST.
@@ -177,7 +177,7 @@ const ALLOWED_SCOPES: &[&str] = &[TUNNEL_SCOPE, DESKTOP_CONNECT_SCOPE, DESKTOP_A
 
 /// Default when the client omits `scopes`. Matches the SPA / general
 /// PAT default so silence means "private tunnel only".
-const DEFAULT_SCOPES: &[&str] = &[TUNNEL_SCOPE];
+const DEFAULT_SCOPES: &[&str] = crate::api_tokens::DEFAULT_TOKEN_SCOPES;
 
 /// Path the consent page lives at. Exported so other modules (today
 /// `auth_callback`) can build a redirect without restating the literal.

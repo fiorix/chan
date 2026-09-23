@@ -34,7 +34,7 @@ use crate::token_throttle::TokenThrottle;
 
 /// Production session cookie. `__Host-` requires Secure, `Path=/`, and
 /// no `Domain`; tower-sessions defaults to `Path=/` with no `Domain`,
-/// and `COOKIE_SECURE` supplies Secure (A11).
+/// and `COOKIE_SECURE` supplies Secure.
 const SESSION_COOKIE: &str = "__Host-id_session";
 /// Session cookie for `COOKIE_SECURE=false` runs. Browsers reject
 /// `__Host-` names without Secure, so an insecure dev session must use
@@ -42,7 +42,7 @@ const SESSION_COOKIE: &str = "__Host-id_session";
 const SESSION_COOKIE_INSECURE_DEV: &str = "id_session_insecure_dev";
 
 /// The `__Host-` production name is only legal on Secure cookies; an
-/// insecure run gets the visibly test-only name instead (A11).
+/// insecure run gets the visibly test-only name instead.
 fn session_cookie_name(cookie_secure: bool) -> &'static str {
     if cookie_secure {
         SESSION_COOKIE
@@ -163,7 +163,7 @@ pub fn routers(
     // does not propagate to the proxy fleet's tenant origins. The
     // devserver-gate handoff covers the cross-service auth need; see
     // crates/identity/design.md. The `__Host-` name additionally makes
-    // the browser reject any Domain-carrying shadow of it (A11), which
+    // the browser reject any Domain-carrying shadow of it, which
     // is why the insecure dev fallback must use a different name.
     let session_layer = SessionManagerLayer::new(store.clone())
         .with_name(session_cookie_name(cfg.cookie_secure))
@@ -371,7 +371,7 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
             .join("/desktop/v1/devservers")
             .map_err(|e| Error::Anyhow(anyhow::anyhow!("discovery roster url: {e}")))?
             .to_string(),
-        devserver_proxy_origin: devserver_proxy_origin.clone(),
+        devserver_proxy_origin,
         devserver_proxy_host_depth: 2,
         tunnel_url: format!("{tunnel_origin}{}", chan_tunnel_proto::TUNNEL_PATH),
     }))
@@ -889,7 +889,7 @@ struct MeResponse {
     /// controller is unreachable; in the unreachable case we log and
     /// serve an empty list so the dashboard renders). Per-workspace
     /// online state is NOT here: it comes from the devserver's own API
-    /// over the owner's direct connection (design 4.1).
+    /// over the owner's direct connection.
     devservers: Vec<DevserverView>,
     /// Resolved feature flags for this user. Map of flag_key -> bool.
     /// Sourced from profile each call (no caching) so a gradual
@@ -1224,7 +1224,7 @@ async fn tokens_create(
         .transpose()?;
 
     let scopes: Vec<String> = match body.scopes {
-        Some(ref s) if !s.is_empty() => s.clone(),
+        Some(s) if !s.is_empty() => s,
         _ => DEFAULT_TOKEN_SCOPES
             .iter()
             .map(|s| (*s).to_string())
@@ -1422,9 +1422,8 @@ async fn devservers_incoming(
 
 /// Shape-only validator; profile re-checks. 1-64 chars, lowercase
 /// ascii alnum + `[._-]`, with `.` / `..` / leading-dot rejected to
-/// match the canonical rule in profile-service. Still used by the
-/// transitional open + share-landing routes, where the path segment is
-/// a workspace/tenant name.
+/// match the canonical rule in profile-service. Share landings use it
+/// for the owner handle path segment.
 fn is_workspace_name_shape(s: &str) -> bool {
     let len = s.len();
     if !(1..=64).contains(&len) {
@@ -1441,12 +1440,16 @@ fn is_workspace_name_shape(s: &str) -> bool {
 /// (SHA-256 of the PAT). profile re-checks; this catches a malformed
 /// path segment before the round trip.
 fn is_devserver_id_shape(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 64 && is_lower_hex(s)
 }
 
 // ---------------------------------------------------------------------------
 // Share landing
 // ---------------------------------------------------------------------------
+
+fn is_lower_hex(s: &str) -> bool {
+    s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
 
 /// Optional devserver selector on the share landings: a full
 /// devserver id or a hex prefix of one (the 12-hex disc form in
@@ -1465,9 +1468,7 @@ fn sanitize_disc_selector(raw: &str) -> Option<String> {
     if s.is_empty() || s.len() > 64 {
         return None;
     }
-    s.bytes()
-        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        .then_some(s)
+    is_lower_hex(&s).then_some(s)
 }
 
 /// Outcome of picking one of an owner's live devservers for an
@@ -2129,10 +2130,7 @@ async fn internal_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> std::result::Result<Response, Error> {
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let provided = bearer_token(&headers);
     match provided {
         Some(t) if ct_eq(t, &state.cfg.internal_auth_token) => Ok(next.run(request).await),
         _ => Err(Error::Unauthorized),
@@ -2170,10 +2168,7 @@ async fn admin_auth(
     if expected.is_empty() {
         return Err(Error::NotFound);
     }
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+    let provided = bearer_token(&headers);
     match provided {
         Some(t) if ct_eq(t, expected) => Ok(next.run(request).await),
         _ => Err(Error::Unauthorized),
@@ -2193,6 +2188,7 @@ async fn account_admin_auth(
     }
     let authorized = bearer_token(&headers)
         .map(|token| {
+            // Evaluate both credentials without short-circuiting their comparison.
             configured_token_matches(token, operator) | configured_token_matches(token, account)
         })
         .unwrap_or(false);
@@ -2204,6 +2200,7 @@ async fn account_admin_auth(
 }
 
 fn configured_token_matches(provided: &str, expected: &str) -> bool {
+    // Compare even an empty configured token to preserve the constant-time path.
     !expected.is_empty() & ct_eq(provided, expected)
 }
 
@@ -2758,7 +2755,7 @@ async fn admin_tokens_create(
         .await?
         .ok_or(Error::NotFound)?;
     let scopes: Vec<String> = match body.scopes {
-        Some(ref s) if !s.is_empty() => s.clone(),
+        Some(s) if !s.is_empty() => s,
         _ => DEFAULT_TOKEN_SCOPES
             .iter()
             .map(|s| (*s).to_string())
@@ -2863,7 +2860,7 @@ async fn validate_token(
     // fingerprints' state. A real PAT starts with `chan_pat_`; the same
     // 401 we'd return on "throttled" / "unknown token" keeps the shape
     // indistinguishable on the wire.
-    if !body.token.starts_with("chan_pat_") {
+    if !body.token.starts_with(crate::api_tokens::TOKEN_PREFIX) {
         return Err(Error::Unauthorized);
     }
     // Per-token-fingerprint rate limit before the DB lookup. Same

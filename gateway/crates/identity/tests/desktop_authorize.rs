@@ -217,7 +217,6 @@ impl<'a> Client<'a> {
 struct Sent {
     status: StatusCode,
     location: String,
-    #[allow(dead_code)]
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }

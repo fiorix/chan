@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 
-const TOKEN_PREFIX: &str = "chan_pat_";
+pub(crate) const TOKEN_PREFIX: &str = "chan_pat_";
 
 /// Audit-log actions. Stored as text to keep migrations simple; if
 /// the set ever grows we can add a CHECK constraint.
@@ -164,16 +164,6 @@ pub struct RequestMeta {
     pub user_agent: Option<String>,
 }
 
-impl RequestMeta {
-    fn ip(&self) -> Option<&str> {
-        self.ip.as_deref()
-    }
-
-    fn user_agent(&self) -> Option<&str> {
-        self.user_agent.as_deref()
-    }
-}
-
 /// Everything that defines a token being minted. Constructed with
 /// named fields at the call site; `create` validates the label and
 /// scope list.
@@ -259,7 +249,10 @@ impl ApiTokenService {
         .bind(new.expires_at)
         .bind(new.scopes)
         .bind(self.policy_required)
-        .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
+        .bind(
+            i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS)
+                .expect("the signed devserver limit fits the database integer"),
+        )
         .fetch_optional(&mut *tx)
         .await
         .map_err(Error::from)?;
@@ -284,8 +277,8 @@ impl ApiTokenService {
         )
         .bind(token.id)
         .bind(new.origin.audit_action())
-        .bind(meta.ip())
-        .bind(meta.user_agent())
+        .bind(meta.ip.as_deref())
+        .bind(meta.user_agent.as_deref())
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -480,7 +473,10 @@ impl ApiTokenService {
             )
             .bind(&hash)
             .bind(self.policy_required)
-            .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
+            .bind(
+                i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS)
+                    .expect("the signed devserver limit fits the database integer"),
+            )
             .fetch_optional(&self.pool)
             .await
             .map_err(Error::from)?
@@ -513,8 +509,8 @@ impl ApiTokenService {
         )
         .bind(token_id)
         .bind(action)
-        .bind(meta.ip())
-        .bind(meta.user_agent())
+        .bind(meta.ip.as_deref())
+        .bind(meta.user_agent.as_deref())
         .execute(&self.pool)
         .await
         .map_err(Error::from)?;
