@@ -61,7 +61,10 @@ impl AsyncRead for H2Duplex {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if self.pending.is_empty() {
+        // A loop, not a single poll: a peer may send a zero-length DATA frame
+        // (padding, a proxy's keepalive), and returning with nothing filled
+        // would read as EOF and end the whole tunnel session.
+        while self.pending.is_empty() {
             if self.eof {
                 return Poll::Ready(Ok(()));
             }
@@ -250,6 +253,25 @@ mod tests {
             Poll::Ready(Err(e)) => panic!("zero-capacity read failed: {e}"),
             Poll::Pending => panic!("zero-capacity read returned Pending"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_data_frame_is_not_eof() {
+        let (mut server_dup, mut client_dup) = run_h2_pair().await;
+
+        client_dup
+            .send
+            .send_data(Bytes::new(), false)
+            .expect("empty data frame");
+        client_dup.write_all(b"hi").await.expect("write");
+        client_dup.flush().await.expect("flush");
+
+        let mut buf = [0u8; 2];
+        server_dup
+            .read_exact(&mut buf)
+            .await
+            .expect("bytes after an empty frame");
+        assert_eq!(&buf, b"hi");
     }
 
     #[tokio::test]
