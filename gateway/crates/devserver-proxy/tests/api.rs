@@ -2593,6 +2593,34 @@ async fn ws_bridge_closes_when_the_upstream_answers_404() {
     );
 }
 
+/// A devserver that answers the upgrade with a 101 the WebSocket
+/// handshake rejects (here one whose `Sec-WebSocket-Accept` is not the
+/// key's) has answered, badly: the tunnel carried the answer, so the
+/// Close names a refusal rather than an unreachable upstream.
+#[tokio::test]
+async fn ws_bridge_closes_when_the_upstream_answers_a_malformed_101() {
+    let upstream = Router::new().route(
+        "/blog/ws-malformed",
+        axum::routing::get(|| async {
+            (
+                StatusCode::SWITCHING_PROTOCOLS,
+                [
+                    (header::UPGRADE, "websocket"),
+                    (header::CONNECTION, "Upgrade"),
+                    (header::SEC_WEBSOCKET_ACCEPT, "not-the-accept-key"),
+                ],
+            )
+        }),
+    );
+    let (frame, elapsed) = close_from_refusing_upstream(upstream, "/blog/ws-malformed").await;
+    assert_eq!(u16::from(frame.code), 1011, "internal error");
+    assert_eq!(frame.reason.as_str(), "upstream refused");
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+}
+
 /// A tunnel that ends while the bridge waits on its substream budget
 /// fails the open once the budget frees: the tunnel is gone, and the
 /// Close must say so rather than leave the browser with a drop.
