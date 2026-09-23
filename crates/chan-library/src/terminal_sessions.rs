@@ -79,7 +79,7 @@ const IMPORTED_CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 // Each session has a bounded logical FIFO. When the agent is IDLE (its output
 // has quiesced), the drainer delivers the largest safe batch at the head and
 // awaits the agent's generation-START before the next drain. The signal is
-// purely output quiescence (`last_output_at`); see cs-write-queue-design.md.
+// purely output quiescence (`last_output_at`).
 const WRITE_QUEUE_CAP: usize = 100;
 /// Output-idle threshold: the agent is considered done generating when no
 /// output has arrived for this long. Conservative to ride over brief
@@ -139,8 +139,8 @@ pub const ALT_SCREEN_ATTACH_PRELUDE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
 /// set sequences are gone and the fresh terminal comes up at defaults: arrows
 /// stop navigating (DECCKM) and the wheel/clicks stop reaching the program
 /// (mouse). We track the set currently on (scanned from PTY output by
-/// [`Session::update_private_modes`]) and re-assert it in the attach prelude  --
-/// generalizing the single-bool alt-screen restore. Screen-rendering modes
+/// [`Session::update_private_modes`]) and re-assert it in the attach prelude.
+/// Screen-rendering modes
 /// (autowrap, cursor visibility) are deliberately NOT tracked: the program's
 /// post-attach redraw re-establishes them. Alt-screen (1049/1047/47) is NOT
 /// here either -- it is handled by [`ALT_SCREEN_ATTACH_PRELUDE`].
@@ -181,6 +181,8 @@ const DSR_ANSWER_GRACE_MS: i64 = 150;
 #[cfg(target_os = "linux")]
 const FDSTORE_REPLAY_BYTES: usize = 128 * 1024;
 
+/// Per-tenant settings every PTY spawn reads: the workspace root, the MCP and
+/// control socket paths, and the terminal config.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
     pub workspace_root: PathBuf,
@@ -189,6 +191,9 @@ pub struct RegistryConfig {
     pub terminal: TerminalConfig,
 }
 
+/// A tenant's live terminal sessions, keyed by session id. The `/ws`
+/// handler, the control socket and the host create, attach, write to and
+/// close sessions through it.
 #[derive(Debug)]
 pub struct Registry {
     config: RegistryConfig,
@@ -499,6 +504,8 @@ pub struct LiveTerminalMetadata {
     pub group: String,
 }
 
+/// The spawn request for a new session: PTY size, tab identity, owning
+/// window, cwd, command, environment and shell profile.
 #[derive(Debug, Clone)]
 pub struct CreateOptions {
     pub size: PtySize,
@@ -645,9 +652,8 @@ pub struct FdStoreSessionMeta {
     pub command: Option<String>,
     pub env: BTreeMap<String, String>,
     /// Shell profile the session was spawned with. `#[serde(default)]` so a
-    /// manifest written before profiles existed imports as "no profile", i.e.
-    /// the built-in default -- which is exactly what those sessions were
-    /// spawned with.
+    /// manifest entry without one imports as "no profile", i.e. the built-in
+    /// default shell.
     #[serde(default)]
     pub profile: Option<String>,
     pub mcp_env: bool,
@@ -747,6 +753,8 @@ pub struct RosterEntry {
     pub broadcast: bool,
 }
 
+/// The tab selector every `*_matching` registry method shares: a `None` axis
+/// matches every session, and naming both narrows to the intersection.
 fn live_metadata_matches(
     metadata: &LiveTerminalMetadata,
     tab_name: Option<&str>,
@@ -788,29 +796,23 @@ pub struct SubmitDivergence {
     pub derived: Option<SubmitAgent>,
 }
 
-#[derive(Debug)]
+/// Why a terminal session could not be created or reattached.
+#[derive(Debug, thiserror::Error)]
 pub enum CreateError {
+    #[error("terminal session cap reached")]
     Capped,
+    #[error("{0}")]
     FdPressure(FdPressure),
+    #[error("{0}")]
     Spawn(anyhow::Error),
     /// A reattach named a session that was explicitly closed. The caller is
     /// told so rather than handed a fresh shell under that id's tab.
+    #[error("terminal session was closed")]
     Closed,
 }
 
-impl std::fmt::Display for CreateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CreateError::Capped => f.write_str("terminal session cap reached"),
-            CreateError::FdPressure(pressure) => write!(f, "{pressure}"),
-            CreateError::Spawn(e) => write!(f, "{e}"),
-            CreateError::Closed => f.write_str("terminal session was closed"),
-        }
-    }
-}
-
-impl std::error::Error for CreateError {}
-
+/// A spawn refused for descriptor headroom: the open fds, the process limit,
+/// and the headroom a new PTY needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdPressure {
     pub open: u64,
@@ -895,6 +897,7 @@ impl std::fmt::Display for TerminalExit {
     }
 }
 
+/// What a session broadcasts to its attached readers.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Output(Vec<u8>),
@@ -1035,6 +1038,9 @@ impl Drop for ChildEndedOnReturn {
     }
 }
 
+/// One client's attachment to a session: the event receiver plus the replay
+/// and prelude state the attach starts from. Dropping the last handle stamps
+/// the session's detach time.
 #[derive(Debug)]
 pub struct AttachHandle {
     id: String,
@@ -1056,6 +1062,7 @@ pub struct AttachHandle {
 }
 
 impl AttachHandle {
+    /// The session id.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1092,6 +1099,7 @@ impl AttachHandle {
         self.session.spawn_group.as_deref()
     }
 
+    /// Write client input to the PTY through the controller thread.
     pub fn send_input(&self, data: &[u8]) {
         self.session.send_input(data);
     }
@@ -1169,10 +1177,13 @@ impl AttachHandle {
         self.session.queued_prompt_ids()
     }
 
+    /// Resize the PTY through the controller thread.
     pub fn resize(&self, size: PtySize) {
         self.session.resize(size);
     }
 
+    /// Record whether a client has this session focused. Focusing resets the
+    /// unseen-output counter and broadcasts the reset.
     pub fn set_focused(&self, focused: bool) {
         self.session.set_focused(focused);
     }
@@ -1184,14 +1195,18 @@ impl AttachHandle {
         self.session.set_broadcast(on);
     }
 
+    /// Output bytes since the session was last focused.
     pub fn bytes_since_focus(&self) -> u64 {
         self.session.bytes_since_focus()
     }
 
+    /// Make the program repaint by wobbling the PTY size.
     pub fn request_redraw(&self) {
         self.session.request_redraw();
     }
 
+    /// The child's current directory, `None` when it cannot be read or lies
+    /// outside the workspace root.
     pub fn cwd(&self) -> Option<PathBuf> {
         self.session.cwd()
     }
@@ -1201,17 +1216,6 @@ impl AttachHandle {
     pub fn blocking_cwd_probe(&self) -> impl FnOnce() -> Option<PathBuf> + Send + 'static {
         let session = Arc::clone(&self.session);
         move || session.cwd()
-    }
-
-    /// Like [`cwd`](Self::cwd) but runs the probe (which shells `lsof` on
-    /// macOS) on the blocking pool, so an async caller never stalls the
-    /// runtime on the PTY's cwd lookup. `None` if the blocking task is
-    /// cancelled or the cwd can't be read.
-    pub async fn cwd_blocking(&self) -> Option<PathBuf> {
-        tokio::task::spawn_blocking(self.blocking_cwd_probe())
-            .await
-            .ok()
-            .flatten()
     }
 }
 
@@ -1259,6 +1263,7 @@ impl Drop for MetadataReservation<'_> {
 }
 
 impl Registry {
+    /// An empty registry over `config`, with no hooks installed.
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
         let terminal_profiles = TerminalProfilePrefs {
@@ -1320,6 +1325,18 @@ impl Registry {
             .terminal_profiles_resolver
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(resolver);
+    }
+
+    /// The registry config with the live-sampled terminal engine and shell
+    /// profiles, taken once per PTY spawn so a create and a restart see the
+    /// same settings.
+    fn spawn_config(&self) -> RegistryConfig {
+        let mut config = self.config.clone();
+        config.terminal.ghostty = self.resolve_terminal_backend();
+        let profiles = self.resolve_terminal_profiles();
+        config.terminal.profiles = profiles.profiles;
+        config.terminal.default_profile = profiles.default_profile;
+        config
     }
 
     /// Sample the declared profiles for one PTY spawn, on the same fail-open
@@ -1716,6 +1733,9 @@ impl Registry {
             .expect("terminal registry poisoned") = command;
     }
 
+    /// Spawn a new session and attach to it. Reaps exited sessions first,
+    /// refuses under fd pressure or at the session cap, and settles the tab
+    /// name against the live ones.
     pub fn create(&self, mut opts: CreateOptions) -> Result<AttachHandle, CreateError> {
         // Clear dead-process ghosts before minting: a killed session lingers in
         // the map (its controller thread records `exit` on exit but never
@@ -1764,11 +1784,7 @@ impl Registry {
         opts.tab_group = Some(reservation.metadata.group.clone());
         #[cfg(test)]
         self.wait_at_spawn_barrier();
-        let mut config = self.config.clone();
-        config.terminal.ghostty = self.resolve_terminal_backend();
-        let profiles = self.resolve_terminal_profiles();
-        config.terminal.profiles = profiles.profiles;
-        config.terminal.default_profile = profiles.default_profile;
+        let config = self.spawn_config();
         let session = Session::spawn(
             id.clone(),
             config,
@@ -1808,6 +1824,10 @@ impl Registry {
         Ok(session.attach(Some(0)))
     }
 
+    /// Relaunch session `id` in place under the same id, applying `overrides`
+    /// to its spawn options. `Ok(false)` when the id is unknown or closed, or
+    /// when a concurrent operation replaced the session during the spawn;
+    /// `Err` when the new PTY cannot be spawned.
     pub fn restart(&self, id: &str, overrides: RestartOverrides) -> Result<bool, CreateError> {
         let RestartOverrides {
             tab_name,
@@ -1861,11 +1881,7 @@ impl Registry {
         // the banner names a tenant's launch command (control connect), while a
         // restart override (e.g. the team-bootstrap flip from a host shell to
         // the lead's `claude`) is not a single-purpose-tenant launch.
-        let mut config = self.config.clone();
-        config.terminal.ghostty = self.resolve_terminal_backend();
-        let profiles = self.resolve_terminal_profiles();
-        config.terminal.profiles = profiles.profiles;
-        config.terminal.default_profile = profiles.default_profile;
+        let config = self.spawn_config();
         let session = Session::spawn(
             id.to_string(),
             config,
@@ -1940,6 +1956,9 @@ impl Registry {
         }
     }
 
+    /// Attach to live session `id`, replaying output after the `since` cursor
+    /// (`None` replays the whole ring). `None` when the id is unknown or
+    /// closed.
     pub fn attach_for_ws(&self, id: &str, since: Option<u64>) -> Option<AttachHandle> {
         let session = self
             .sessions
@@ -1963,6 +1982,10 @@ impl Registry {
         self.get_or_create_for_ws(id, since, opts, TerminalPlacement::default(), None)
     }
 
+    /// Reattach to session `id` when it is live, re-homing it to the attaching
+    /// window and placement, or else spawn a new one from `opts`. The `since`
+    /// cursor is honoured only when `client_generation` matches the live
+    /// session. `Err(Closed)` when `id` names an explicitly closed session.
     pub fn get_or_create_for_ws(
         &self,
         id: Option<&str>,
@@ -2060,22 +2083,7 @@ impl Registry {
         if pane_id.is_none() && side.is_none() && tab_id.is_none() {
             return;
         }
-        let session = self
-            .sessions
-            .lock()
-            .expect("terminal registry poisoned")
-            .get(id)
-            .cloned();
-        let Some(session) = session else {
-            return;
-        };
-        session.set_pane_id(pane_id);
-        session.set_side(side);
-        session.set_tab_id(tab_id);
-        // Placement rides the restart manifest; republish so a crash restore
-        // does not resurrect an arbitrarily old pane placement.
-        #[cfg(target_os = "linux")]
-        session.parked_changed();
+        self.update_session_layout(id, pane_id, side, tab_id);
     }
 
     /// Refresh browser-reported layout coordinates without reconnecting the
@@ -2100,13 +2108,17 @@ impl Registry {
         session.set_pane_id(pane_id);
         session.set_side(side);
         session.set_tab_id(tab_id);
-        // Same manifest republish as `bind_session_layout`: a Hybrid-side
-        // move without a reconnect still changes the restored placement.
+        // Placement rides the restart manifest; republish so a crash restore
+        // does not resurrect an arbitrarily old pane placement (a Hybrid-side
+        // move without a reconnect changes it too).
         #[cfg(target_os = "linux")]
         session.parked_changed();
         true
     }
 
+    /// Remove session `id` and kill its PTY, broadcasting `Closed(reason)`.
+    /// An explicit close is remembered so a later reattach is refused. False
+    /// when the id is unknown.
     pub fn close(&self, id: &str, reason: CloseReason) -> bool {
         let session = {
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -2129,6 +2141,8 @@ impl Registry {
         }
     }
 
+    /// Drop session `id` from the registry without closing its PTY, ending
+    /// only its fd-store membership. False when the id is unknown.
     pub fn remove(&self, id: &str) -> bool {
         let removed = self
             .sessions
@@ -2267,10 +2281,10 @@ impl Registry {
     }
 
     /// Write raw bytes to the PTY stdin of every live session matching the
-    /// given tab name and/or group, for `cs term write`. A `None` filter
-    /// matches every session on that axis; passing both narrows to the
-    /// intersection. Returns how many sessions were written to. This is the
-    /// natural PTY-stdin path, independent of any SPA state.
+    /// given tab name and/or group, bypassing the write queue. Returns how many
+    /// sessions were written to. Tests only: `cs terminal write` goes through
+    /// the queue (`enqueue_write_matching`).
+    #[cfg(test)]
     pub fn write_input_matching(
         &self,
         tab_name: Option<&str>,
@@ -2299,7 +2313,7 @@ impl Registry {
     /// normal `input` frame + the client-side fan, which also respects the
     /// per-member selection); this covers only the cross-window members a
     /// single standalone terminal window's SPA cannot reach, since they live
-    /// in this shared registry. Group resolves like `write_input_matching`
+    /// in this shared registry. Group resolves like `live_metadata_matches`
     /// (absent = `DEFAULT_TERMINAL_GROUP`).
     pub fn broadcast_input_cross_window(&self, source_id: &str, data: &[u8]) {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -2332,7 +2346,7 @@ impl Registry {
 
     /// Enqueue `data` onto the write FIFO of every live session matching the
     /// given tab name and/or group, for `cs terminal write`. Same selector
-    /// semantics as `write_input_matching` (a `None` axis matches all; both
+    /// semantics as `live_metadata_matches` (a `None` axis matches all; both
     /// narrow to the intersection), but the bytes are QUEUED, not written
     /// straight to the PTY: the drainer delivers logical messages when the
     /// agent is idle. See [`EnqueueOutcome`] for the return shape.
@@ -2400,8 +2414,8 @@ impl Registry {
     /// The bytes are the raw PTY stream the WS attach replays (ANSI and
     /// all), so a reader sees exactly what is on screen. There is no group
     /// axis: scrollback targets one terminal, and the control socket
-    /// enforces the single-match policy, so this stays a thin selector like
-    /// `write_input_matching`.
+    /// enforces the single-match policy, so this stays a thin selector over
+    /// `live_metadata_matches`.
     pub fn scrollback_matching(&self, tab_name: &str) -> Vec<(String, Vec<u8>)> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
@@ -2429,7 +2443,7 @@ impl Registry {
 
     /// Restart every live session matching the given tab name and/or
     /// group, for `cs terminal restart`. Same selector semantics as
-    /// `write_input_matching` (a `None` axis matches all; both narrow to
+    /// `live_metadata_matches` (a `None` axis matches all; both narrow to
     /// the intersection). Returns how many sessions were restarted.
     ///
     /// Passing [`RestartOverrides::default`] preserves each session's spawn
@@ -2465,12 +2479,6 @@ impl Registry {
         Ok(restarted)
     }
 
-    /// Close every live session matching the given tab name and/or group, for
-    /// `cs terminal close`. Same selector semantics as `restart_matching` (a
-    /// `None` axis matches all; both narrow to the intersection). Closes the
-    /// PTY and removes the registry entry -- the explicit teardown that was
-    /// missing (killing the pid out-of-band left the entry to linger and hold
-    /// its tab name). Returns how many sessions were closed.
     /// True when `id` names a session that was closed explicitly (bounded
     /// memory; see `closed_ids`).
     pub fn was_closed(&self, id: &str) -> bool {
@@ -2520,6 +2528,12 @@ impl Registry {
             .collect()
     }
 
+    /// Close every live session matching the given tab name and/or group, for
+    /// `cs terminal close`. Same selector semantics as `restart_matching` (a
+    /// `None` axis matches all; both narrow to the intersection). Closes the
+    /// PTY and removes the registry entry, so the tab name is free at once
+    /// rather than held by an entry whose pid was killed out-of-band. Returns
+    /// how many sessions were closed.
     pub fn close_matching(&self, tab_name: Option<&str>, tab_group: Option<&str>) -> usize {
         let ids: Vec<String> = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -2543,7 +2557,7 @@ impl Registry {
 
     /// The DISTINCT window ids that own a live session matching the given
     /// tab name and/or group, for `cs terminal survey`. Same selector
-    /// semantics as `write_input_matching` (a `None` axis matches all; both
+    /// semantics as `live_metadata_matches` (a `None` axis matches all; both
     /// narrow to the intersection). A survey overlay is an SPA-window
     /// affordance, not a PTY one, so the survey transport resolves the tab
     /// selector to the window(s) hosting those tabs and pushes the overlay
@@ -2684,14 +2698,14 @@ impl Registry {
         reaped
     }
 
-    pub fn prune_idle(&self) -> usize {
+    fn prune_idle(&self) -> usize {
         self.prune_idle_at(now_unix_secs() as i64)
     }
 
     /// Reap sessions whose window can never come back. Persistence-driven, NOT
     /// activity-driven: a busy detached session refreshes `last_activity` on
-    /// every output byte, so activity alone would keep htop or a `for` loop
-    /// immortal. The rule:
+    /// every output byte, so an activity rule would never reap htop or a `for`
+    /// loop. The rule:
     ///
     /// - **attached** (`attach_count > 0`) -- keep; a client is live on it.
     /// - **detached, window persisted** (a durable layout blob exists, tracked
@@ -2702,7 +2716,7 @@ impl Registry {
     ///   blob -- a hard client crash before any save) -- orphan; reap once it has
     ///   been detached longer than the grace.
     /// - **detached, no `window_id`** (a headless `cs terminal new` from a
-    ///   native terminal) -- unchanged activity-idle cleanup, timed off
+    ///   native terminal) -- activity-idle cleanup, timed off
     ///   `last_activity`; these are intentional, not browser-window orphans.
     ///
     /// The detach/idle grace reuses `terminal.idle_timeout_secs`.
@@ -2730,7 +2744,7 @@ impl Registry {
                             let detached = session.detached_at.load(Ordering::Relaxed);
                             (now.saturating_sub(detached) > idle_timeout).then(|| id.clone())
                         }
-                        // Headless / control terminal: legacy activity-idle.
+                        // Headless / control terminal: activity-idle.
                         None => {
                             let last = session.last_activity.load(Ordering::Relaxed);
                             (now.saturating_sub(last) > idle_timeout).then(|| id.clone())
@@ -2746,6 +2760,8 @@ impl Registry {
         n
     }
 
+    /// Start the minute tick that reaps exited and orphaned sessions; on
+    /// shutdown it closes every session and stops.
     pub fn spawn_pruner(self: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -2815,6 +2831,8 @@ impl Registry {
             .collect()
     }
 
+    /// Adopt the sessions a previous process parked in the systemd fd store,
+    /// reporting each one skipped and why.
     #[cfg(target_os = "linux")]
     pub fn restore_fdstore_sessions(
         &self,
@@ -3293,8 +3311,9 @@ struct Session {
     /// Unix seconds when `attach_count` last fell to 0 (every client detached).
     /// Seeded at spawn. The orphan-grace pruner times a detached session from
     /// THIS, not `last_activity` -- a busy detached session (htop, a `for` loop)
-    /// keeps `last_activity` fresh forever, so timing the grace off output kept
-    /// it immortal (the FD leak). Meaningless while `attach_count > 0`.
+    /// keeps `last_activity` fresh forever, so a grace timed off output would
+    /// never expire and the session would hold its PTY fds. Meaningless while
+    /// `attach_count > 0`.
     detached_at: AtomicI64,
     winsize: Mutex<PtySize>,
     focused: AtomicBool,
@@ -3371,8 +3390,8 @@ impl Session {
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
         // Resolve the shell for this spawn: the profile the caller asked for,
         // else the configured default, else `None` -- which keeps the built-in
-        // resolution, so a client that never names a profile behaves exactly as
-        // it did before profiles existed.
+        // resolution, so a client that never names a profile gets the default
+        // shell.
         //
         // Both halves are already cached (discovery in a `OnceLock`, the user's
         // declarations in the loaded config), so this is a merge of two small
@@ -3491,17 +3510,11 @@ impl Session {
         // Every terminal has a well-defined group, so $CHAN_TAB_GROUP is
         // always set (default when unset) -- an agent can read it
         // unconditionally to learn its broadcast group.
-        let spawn_group = Some(
-            opts.tab_group
-                .clone()
-                .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string()),
-        );
-        cmd.env(
-            "CHAN_TAB_GROUP",
-            spawn_group
-                .as_deref()
-                .expect("new terminal spawn group is resolved"),
-        );
+        let spawn_group = opts
+            .tab_group
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TERMINAL_GROUP.to_string());
+        cmd.env("CHAN_TAB_GROUP", &spawn_group);
         let window_id = opts.window_id.clone();
         if let Some(window_id) = window_id.as_deref() {
             cmd.env("CHAN_WINDOW_ID", window_id);
@@ -3545,12 +3558,10 @@ impl Session {
             id,
             live_metadata: Mutex::new(LiveTerminalMetadata {
                 name: spawn_name.clone(),
-                group: spawn_group
-                    .clone()
-                    .expect("new terminal spawn group is resolved"),
+                group: spawn_group.clone(),
             }),
             spawn_name,
-            spawn_group,
+            spawn_group: Some(spawn_group),
             window_id: Mutex::new(window_id),
             pane_id: Mutex::new(None),
             side: Mutex::new(None),
@@ -3864,8 +3875,8 @@ impl Session {
                 command: meta.command.clone(),
                 env: meta.env.clone(),
                 // Restored so a later restart of an fd-store-adopted session
-                // reproduces its original shell. Absent in manifests written
-                // before profiles existed, which is correct for them.
+                // reproduces its original shell. An entry without one spawned
+                // the built-in default, which `None` reproduces.
                 profile: meta.profile.clone(),
             },
             child_pid: meta.child_pid,
@@ -4210,20 +4221,7 @@ impl Session {
     /// `cs terminal list --json` show. A Gemini poke occupies two entries and
     /// still reports position 1 on an empty queue.
     fn enqueue_cs_write(&self, data: String, submit: Option<ResolvedSubmit>) -> Option<usize> {
-        let depth = {
-            let mut q = self
-                .write_queue
-                .lock()
-                .expect("terminal write queue poisoned");
-            push_message(&mut q, data, submit, QueueSource::CsWrite, None)?;
-            msg_depth(&q)
-        };
-        // Outside the QUEUE guard. The enqueue_write_matching caller does
-        // hold the REGISTRY guard here, which is fine: broadcast::send is
-        // sync, takes only the channel's internal lock, and nothing it
-        // wakes can re-enter the registry synchronously.
-        self.broadcast(SessionEvent::QueueDepth(depth));
-        Some(depth)
+        self.enqueue(data, submit, QueueSource::CsWrite, None)
     }
 
     /// Push a Rich Prompt as one logical message, all-or-nothing at the byte
@@ -4235,14 +4233,29 @@ impl Session {
         submit: Option<ResolvedSubmit>,
         prompt_id: Option<String>,
     ) -> Option<usize> {
+        self.enqueue(data, submit, QueueSource::RichPrompt, prompt_id)
+    }
+
+    /// Push one message from `source` and announce the new depth.
+    fn enqueue(
+        &self,
+        data: String,
+        submit: Option<ResolvedSubmit>,
+        source: QueueSource,
+        prompt_id: Option<String>,
+    ) -> Option<usize> {
         let depth = {
             let mut q = self
                 .write_queue
                 .lock()
                 .expect("terminal write queue poisoned");
-            push_message(&mut q, data, submit, QueueSource::RichPrompt, prompt_id)?;
+            push_message(&mut q, data, submit, source, prompt_id)?;
             msg_depth(&q)
         };
+        // Outside the QUEUE guard. The enqueue_write_matching caller does
+        // hold the REGISTRY guard here, which is fine: broadcast::send is
+        // sync, takes only the channel's internal lock, and nothing it
+        // wakes can re-enter the registry synchronously.
         self.broadcast(SessionEvent::QueueDepth(depth));
         Some(depth)
     }
@@ -7449,9 +7462,9 @@ mod tests {
 
     #[test]
     fn reap_exited_removes_a_dead_detached_session() {
-        // A killed agent: its controller thread recorded `exit` on process
-        // exit but the entry lingered (the ghost-tab name-holding bug). Once
-        // detached (frontend gone) it is a pure ghost ⇒ reaped, freeing the name.
+        // A killed agent: its controller thread records `exit` on process
+        // exit but keeps the entry, which holds the tab name. Once detached
+        // (frontend gone) it is a pure ghost ⇒ reaped, freeing the name.
         let registry = Registry::new(test_config(1024, 4, 10));
         let handle = registry.create(opts_with_window("win-dead")).unwrap();
         drop(handle); // frontend gone (detached)
@@ -7468,7 +7481,7 @@ mod tests {
     fn reap_exited_keeps_an_attached_dead_session() {
         // A natural `exit` while a client still views the final output: the
         // process is dead but a viewer is attached, so the pane survives until
-        // the client detaches. Guards against a natural-exit-vanishes regression.
+        // the client detaches, so the final output stays readable.
         let registry = Registry::new(test_config(1024, 4, 10));
         let _handle = registry.create(opts_with_window("win-viewed")).unwrap(); // attached
         {
