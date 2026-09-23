@@ -4,13 +4,13 @@
 //! [`crate::bulk_transfer`] owns the bound and pins its own production half
 //! free of the ambient blocking pool, since bulk work must never expand into
 //! the threads interactive work needs. The bridges here are that interactive
-//! work: editor-size text reads, report rows and graph views, each a handful
-//! of frames, run on the blocking pool on purpose. What they
+//! work: editor-size text reads, raw byte reads, report rows and graph views,
+//! each a handful of frames, run on the blocking pool on purpose. What they
 //! borrow from the lane is only its no-progress policy, through a signal a
 //! tenant mints.
 
 use axum::body::{Body, Bytes};
-use futures::{stream, StreamExt};
+use futures::{stream, Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::bulk_transfer::BulkCancel;
@@ -23,8 +23,9 @@ pub(crate) const BRIDGE_CAPACITY: usize = 8;
 /// A blocking producer bridged onto a response body through a bounded
 /// channel, with the transfer stall bound on every send.
 ///
-/// Editor-size text reads, report rows and graph views run on the blocking
-/// pool rather than the lane: each is a handful of frames, and admitting them
+/// Editor-size text reads, raw byte reads, report rows and graph views run on
+/// the blocking pool rather than the lane: each is a handful of frames, and
+/// admitting them
 /// would spend transfer slots on the interactive work the lane exists to
 /// protect. What they share with a bulk send is the failure: a client that
 /// stops reading fills the channel, and an unbounded send then parks the pool
@@ -81,8 +82,17 @@ impl<T: Send + 'static> StreamBridge<T> {
         first: Bytes,
         mut render: impl FnMut(T) -> Bytes + Send + 'static,
     ) -> Body {
+        let rest = self.frames().map(move |frame| frame.map(&mut render));
+        Body::from_stream(
+            stream::once(async move { Ok::<Bytes, std::io::Error>(first) }).chain(rest),
+        )
+    }
+
+    /// Every frame the producer queues, then the stall error when the bound
+    /// stopped it.
+    fn frames(self) -> impl Stream<Item = Result<T, std::io::Error>> + Send {
         let Self { rx, signal } = self;
-        let rest = stream::unfold((rx, signal, false), |(mut rx, signal, ended)| async move {
+        stream::unfold((rx, signal, false), |(mut rx, signal, ended)| async move {
             if ended {
                 return None;
             }
@@ -98,10 +108,15 @@ impl<T: Send + 'static> StreamBridge<T> {
                 None => None,
             }
         })
-        .map(move |frame| frame.map(&mut render));
-        Body::from_stream(
-            stream::once(async move { Ok::<Bytes, std::io::Error>(first) }).chain(rest),
-        )
+    }
+}
+
+impl StreamBridge<std::io::Result<Bytes>> {
+    /// The body of a raw byte stream, which has no leading frame to decide
+    /// its status with: every chunk as produced, a read error as the item
+    /// that ends it, and the stall error when the bound stopped the producer.
+    pub(crate) fn into_raw_body(self) -> Body {
+        Body::from_stream(self.frames().map(|frame| frame.and_then(|chunk| chunk)))
     }
 }
 

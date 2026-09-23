@@ -458,7 +458,7 @@ pub(crate) async fn standalone_read_file(
             })
             .await;
             match plan {
-                Ok(Ok(plan)) => stream_binary_plan(&path, plan, false, None),
+                Ok(Ok(plan)) => stream_binary_plan(signal, &path, plan, false, None),
                 Ok(Err(e)) => standalone_err(&e),
                 Err(failed) => failed.into_response(),
             }

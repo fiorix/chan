@@ -8,7 +8,7 @@ use axum::extract::{multipart::Field, Multipart, Path as AxumPath, Query, State}
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -773,7 +773,13 @@ fn planned_workspace_download_response(
 /// production caller.
 #[cfg(test)]
 fn stream_binary_download(path: &str, plan: BinaryPlan) -> Response {
-    stream_binary_plan(path, plan, true, None)
+    stream_binary_plan(
+        crate::bulk_transfer::test_support::uncancelled(),
+        path,
+        plan,
+        true,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -783,12 +789,19 @@ fn stream_binary_download_with_completion(
 ) -> (Response, tokio::sync::oneshot::Receiver<()>) {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     (
-        stream_binary_plan(path, BinaryPlan::Full(reader), true, Some(done_tx)),
+        stream_binary_plan(
+            crate::bulk_transfer::test_support::uncancelled(),
+            path,
+            BinaryPlan::Full(reader),
+            true,
+            Some(done_tx),
+        ),
         done_rx,
     )
 }
 
 pub(crate) fn stream_binary_plan(
+    signal: crate::bulk_transfer::BulkCancel,
     path: &str,
     plan: BinaryPlan,
     attachment: bool,
@@ -798,7 +811,7 @@ pub(crate) fn stream_binary_plan(
         BinaryPlan::Full(reader) => {
             let len = reader.slice().1;
             let etag = strong_file_etag(reader.stat());
-            let mut response = Response::new(bounded_reader_body(reader, completion));
+            let mut response = Response::new(bounded_reader_body(signal, reader, completion));
             response.headers_mut().insert(
                 header::CONTENT_LENGTH,
                 len.to_string()
@@ -814,7 +827,7 @@ pub(crate) fn stream_binary_plan(
             let total = reader.stat().size;
             let etag = strong_file_etag(reader.stat());
             let (start, len) = reader.slice();
-            let mut response = Response::new(bounded_reader_body(reader, completion));
+            let mut response = Response::new(bounded_reader_body(signal, reader, completion));
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             response.headers_mut().insert(
                 header::CONTENT_RANGE,
@@ -887,19 +900,22 @@ fn strong_file_etag(stat: &FileStat) -> String {
     format!("\"{:x}-{}\"", stat.size, modified.unwrap_or_default())
 }
 
-/// Bridge a synchronous bounded reader onto a response body through a small async channel. The blocking task reads chunks on its own thread; dropping the response closes the channel so the next send stops the bridge and releases the reader's file handle.
+/// Bridge a synchronous bounded reader onto a response body. The blocking
+/// task reads chunks on its own pool thread under the stall bound; dropping
+/// the response closes the channel so the next send stops the bridge and
+/// releases the reader's file handle.
 fn bounded_reader_body(
+    signal: crate::bulk_transfer::BulkCancel,
     mut reader: BoundedFileReader,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Body {
-    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
-    tokio::task::spawn_blocking(move || {
+    crate::stream_bridge::StreamBridge::spawn(signal, move |chunks| {
         for next in reader.by_ref() {
             let message = next
                 .map(Bytes::from)
                 .map_err(|error| std::io::Error::other(error.to_string()));
             let terminal = message.is_err();
-            if tx.blocking_send(message).is_err() || terminal {
+            if !chunks.send(message) || terminal {
                 break;
             }
         }
@@ -908,10 +924,8 @@ fn bounded_reader_body(
         if let Some(completion) = completion {
             let _ = completion.send(());
         }
-    });
-    Body::from_stream(stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| (message, rx))
-    }))
+    })
+    .into_raw_body()
 }
 
 /// Pre-flight for a directory download: confirm every file in the tree is
@@ -1255,6 +1269,7 @@ fn binary_plan_sync(
 /// shrinkage into a body error, so a successful transfer always matches its
 /// declared framing.
 async fn binary_stream_response(
+    signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
     range_header: Option<String>,
@@ -1270,7 +1285,7 @@ async fn binary_stream_response(
         Ok(Err(e)) => return err_from(&e),
         Err(failed) => return failed.into_response(),
     };
-    stream_binary_plan(&path, plan, attachment, None)
+    stream_binary_plan(signal, &path, plan, attachment, None)
 }
 
 #[cfg(test)]
@@ -1279,7 +1294,14 @@ async fn media_stream_response(
     path: String,
     range_header: Option<String>,
 ) -> Response {
-    binary_stream_response(workspace, path, range_header, false).await
+    binary_stream_response(
+        crate::bulk_transfer::test_support::uncancelled(),
+        workspace,
+        path,
+        range_header,
+        false,
+    )
+    .await
 }
 
 #[derive(Default, Deserialize)]
@@ -1411,7 +1433,14 @@ pub async fn api_read_file(
         })
         .into_response(),
         Ok(Ok(ReadFileResult::Binary)) => {
-            binary_stream_response(workspace, path, range_header, false).await
+            binary_stream_response(
+                state.bulk_transfer.stall_signal(),
+                workspace,
+                path,
+                range_header,
+                false,
+            )
+            .await
         }
         Ok(Ok(ReadFileResult::TooLarge { size, limit })) => err(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -4862,9 +4891,11 @@ mod write_tests {
             "the reader must outrun the channel, got {chunks} chunks"
         );
         let plan = binary_plan_sync(&workspace, "big.bin", None).unwrap();
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::stream_bridge::test_support::assert_unread_stream_frees_its_pool_thread(
             "raw byte stream",
-            || async { stream_binary_plan("big.bin", plan, false, None) },
+            || async { stream_binary_plan(bulk.stall_signal(), "big.bin", plan, false, None) },
         );
         assert!(
             body.is_err(),
