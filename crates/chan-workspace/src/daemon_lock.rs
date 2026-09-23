@@ -247,7 +247,7 @@ fn write_record(record_path: &Path, addr: &str) -> Result<()> {
 /// returns `None` (Unix relies on flock auto-release for staleness), matching the
 /// "Windows-mandatory, Unix best-effort" guard policy.
 #[cfg(windows)]
-pub fn process_creation_time(pid: u32) -> Option<u64> {
+fn process_creation_time(pid: u32) -> Option<u64> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -277,7 +277,7 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
 /// Non-Windows: no dependency-free creation-time read; the guard degrades to
 /// liveness-only and the flock proves staleness.
 #[cfg(not(windows))]
-pub fn process_creation_time(_pid: u32) -> Option<u64> {
+fn process_creation_time(_pid: u32) -> Option<u64> {
     None
 }
 
