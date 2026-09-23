@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   __testApplyTreeExpandedReloadSnapshot,
   __testReadLayoutReloadSnapshot,
@@ -8,6 +8,7 @@ import {
   __testResetSessionDiscarded,
   __testApplyOverlaysFromHash,
   browserSelection,
+  closeEmptiedWindow,
   discardWindowSession,
   fileOps,
   graphReloadSignal,
@@ -348,6 +349,79 @@ describe("session persistence bootstrap guard", () => {
     expect(String(url)).toContain("moved=1");
 
     fetchSpy.mockRestore();
+  });
+
+  describe("closing a desktop window that emptied", () => {
+    let events: string[];
+    afterEach(() => {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      __testResetSessionDiscarded();
+      vi.restoreAllMocks();
+    });
+    beforeEach(() => {
+      events = [];
+      (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+        invoke: (cmd: string) => {
+          events.push(cmd);
+          return Promise.resolve();
+        },
+      };
+      __testSetBootstrapHydrated(true);
+      setTerminalLayout({ terminalSessionId: "term_live" });
+    });
+
+    /// A DELETE that stays in flight until the test ends it, recording both.
+    function holdDeletes(outcome: "ok" | "fail" = "ok"): () => void {
+      let finish = () => {};
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        const moved = String(input).includes("moved=1") ? "moved" : "reap";
+        events.push(`${init?.method} ${moved}`);
+        return new Promise<Response>((resolve, reject) => {
+          finish = () => {
+            events.push("DELETE settled");
+            if (outcome === "ok") resolve(new Response(null, { status: 204 }));
+            else reject(new TypeError("network down"));
+          };
+        });
+      });
+      return () => finish();
+    }
+
+    test("after a move-out, the window closes only once the server has the move-out", async () => {
+      // The host's close discards the window and reaps every session still
+      // bound to it. The moved terminal stays bound to this window until the
+      // target attaches, so the close must follow the move-out DELETE that
+      // exempts it, not race it.
+      const settle = holdDeletes();
+      const closing = closeEmptiedWindow({ movedOut: true });
+      await vi.waitFor(() => expect(events).toEqual(["DELETE moved"]));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(events).toEqual(["DELETE moved"]);
+      settle();
+      await closing;
+      expect(events).toEqual(["DELETE moved", "DELETE settled", "request_close_window"]);
+    });
+
+    test("a failed move-out DELETE still closes the window", async () => {
+      // A window never sits empty; the move-out exemption is lost with the
+      // DELETE, which is no worse than the close racing it.
+      const settle = holdDeletes("fail");
+      const closing = closeEmptiedWindow({ movedOut: true });
+      await vi.waitFor(() => expect(events).toEqual(["DELETE moved"]));
+      settle();
+      await closing;
+      expect(events).toEqual(["DELETE moved", "DELETE settled", "request_close_window"]);
+    });
+
+    test("a discard closes without waiting for its DELETE", async () => {
+      // Nothing moved, so nothing needs the server first: the reaping DELETE
+      // and the host's own discard agree, and the window closes at once.
+      holdDeletes();
+      await closeEmptiedWindow({ movedOut: false });
+      await vi.waitFor(() => expect(events).toContain("DELETE reap"));
+      expect(events).toContain("request_close_window");
+      expect(events).not.toContain("DELETE settled");
+    });
   });
 });
 

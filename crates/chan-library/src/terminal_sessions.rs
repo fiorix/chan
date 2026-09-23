@@ -7985,6 +7985,46 @@ mod tests {
     }
 
     #[test]
+    fn a_move_out_keeps_the_moved_session_through_the_source_windows_discard() {
+        // A window's only terminal is dragged to another window. The source
+        // empties, sends its move-out DELETE (`unpersist_window`), and then
+        // asks the desktop host to close the window, whose discard runs
+        // `forget_window` on every tenant. The target's attach is asynchronous
+        // and can arrive after both, so the session must still be live for it.
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let handle = registry.create(opts_with_window("win-a")).unwrap();
+        let id = handle.id().to_string();
+        drop(handle);
+        registry.mark_window_persisted("win-a");
+
+        registry.unpersist_window("win-a");
+        assert_eq!(
+            registry.forget_window("win-a"),
+            0,
+            "the source window's discard must not reap the session it moved out"
+        );
+        let reattached = registry
+            .get_or_create_for_ws(
+                Some(&id),
+                Some(0),
+                opts_with_window("win-b"),
+                TerminalPlacement::default(),
+                None,
+            )
+            .expect("the target attaches after the source window closed");
+        assert_eq!(reattached.id(), id, "the same session, not a fresh shell");
+        drop(reattached);
+
+        // The exemption covers only what the move carried: a session the
+        // source window opens afterwards is reaped by its next discard.
+        let later = registry.create(opts_with_window("win-a")).unwrap();
+        drop(later);
+        assert_eq!(registry.forget_window("win-a"), 1);
+        assert_eq!(registry.forget_window("win-b"), 1);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
     fn cap_exceeded_refuses_create() {
         let registry = Registry::new(test_config(1024, 1, 10));
         let _first = registry
