@@ -332,6 +332,8 @@ pub struct WorkspaceHost {
     revalidate_thread_probe:
         std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
+    blocking_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+    #[cfg(test)]
     open_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     open_attempt_probe: std::sync::Mutex<Option<WorkspaceOpenProbe>>,
@@ -596,14 +598,14 @@ impl Drop for HostedWorkspaceRuntime {
 
 struct WorkspaceCloseGuard<'a> {
     host: &'a WorkspaceHost,
-    root: PathBuf,
+    key: PathBuf,
     armed: bool,
 }
 
 impl Drop for WorkspaceCloseGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.host.clear_mount_state(&self.root);
+            self.host.clear_mount_state_by_key(&self.key);
             self.host.notify_window_change();
         }
     }
@@ -652,7 +654,7 @@ impl Drop for WorkspaceMountGuard<'_> {
 
 struct WorkspaceRemoveGuard<'a> {
     host: &'a WorkspaceHost,
-    root: PathBuf,
+    key: PathBuf,
     error: Option<String>,
     armed: bool,
 }
@@ -667,7 +669,7 @@ impl Drop for WorkspaceRemoveGuard<'_> {
                     "workspace removal cancelled; retry".into()
                 }
             });
-            self.host.mark_mount_error(&self.root, reason);
+            self.host.mark_mount_error_by_key(&self.key, reason);
         }
     }
 }
@@ -699,6 +701,8 @@ impl WorkspaceHost {
             open_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             revalidate_thread_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            blocking_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_release_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -2489,25 +2493,29 @@ impl WorkspaceHost {
     /// Self::assemble_window_records) uses), discarding each via
     /// [`discard_window`](Self::discard_window) so its tenant state is reaped too.
     /// Returns the count discarded; a no-op with no registry or no match. Fires
-    /// only on explicit off/forget (via [`close_workspace`](Self::close_workspace)
-    /// / [`remove_workspace_for_root`](Self::remove_workspace_for_root)), NOT on
-    /// host shutdown (which drops runtimes without closing), so windows still
-    /// restore across a restart.
-    pub fn discard_workspace_windows(&self, root: &Path) -> usize {
+    /// only on explicit forget (via
+    /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
+    /// keeps the records and filters them from the live feed, and host shutdown
+    /// drops runtimes without closing, so windows still restore across a
+    /// restart. `target` is the canonical key the removal already holds.
+    /// Matching a record canonicalizes the path it stores, so the match runs
+    /// off the runtime thread; the discards canonicalize nothing and stay on it.
+    async fn discard_workspace_windows(&self, target: &Path) -> usize {
         let Some(registry) = self.window_registry() else {
             return 0;
         };
-        let target = canonical_key(root);
-        let ids: Vec<String> = registry
-            .snapshot()
-            .into_iter()
-            .filter(|row| {
-                row.workspace_path
-                    .as_deref()
-                    .is_some_and(|p| canonical_key(Path::new(p)) == target)
-            })
-            .map(|row| row.window_id)
-            .collect();
+        let registry = Arc::clone(registry);
+        let target = target.to_path_buf();
+        let ids = match self
+            .off_runtime(move || workspace_window_ids(&registry, &target))
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "workspace window match task failed");
+                Vec::new()
+            }
+        };
         for id in &ids {
             let _ = self.discard_window(id);
         }
@@ -2765,6 +2773,41 @@ impl WorkspaceHost {
         self.close_workspace_for_root_impl(root, force, false).await
     }
 
+    /// Run filesystem work on the blocking pool and hand its value back. A
+    /// workspace key is a filesystem lookup, and the registry reads and
+    /// writes beside it touch the disk too; on a slow or cloud-synced root
+    /// they must stall a pool thread, never the runtime worker every tenant
+    /// shares, the way `Library::open_workspace` runs for a mount. The
+    /// closure takes no host guard, and the caller holds only the
+    /// asynchronous registration mutex across the hop, so it adds no edge to
+    /// the lock order.
+    async fn off_runtime<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, Error> {
+        #[cfg(test)]
+        let probe = self.blocking_thread_probe.lock().unwrap().clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = probe {
+                let _ = probe.send(std::thread::current().id());
+            }
+            work()
+        })
+        .await
+        .map_err(|error| {
+            Error::from(std::io::Error::other(format!(
+                "workspace host blocking task failed: {error}"
+            )))
+        })
+    }
+
+    /// The canonical key of `root`, computed off the runtime thread.
+    async fn canonical_key_off_runtime(&self, root: &Path) -> Result<PathBuf, Error> {
+        let root = root.to_path_buf();
+        self.off_runtime(move || canonical_key(&root)).await
+    }
+
     /// Shared body for the close-by-root variants. `record_off` gates the off
     /// write to the on/off overlay: a user-intent close (`chan close`, the
     /// launcher off-toggle, the control-socket close) records off so a devserver
@@ -2777,7 +2820,8 @@ impl WorkspaceHost {
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let _registering = self.register_lock.lock().await;
-        self.close_workspace_for_root_locked(root, force, record_off)
+        let target = self.canonical_key_off_runtime(root).await?;
+        self.close_workspace_for_root_locked(root, &target, force, record_off)
             .await
     }
 
@@ -2786,14 +2830,15 @@ impl WorkspaceHost {
     /// Serializing registration with teardown prevents a close from observing
     /// the gap after a mount starts but before its runtime enters `workspaces`.
     /// `remove_workspace_for_root` also calls this body under the same guard so
-    /// unregister cannot race a workspace open.
+    /// unregister cannot race a workspace open. `target` is `root`'s canonical
+    /// key, which the caller computed off the runtime thread.
     async fn close_workspace_for_root_locked(
         &self,
         root: &Path,
+        target: &Path,
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = canonical_key(root);
         let prefix = {
             let workspaces = self
                 .workspaces
@@ -2807,7 +2852,7 @@ impl WorkspaceHost {
         match prefix {
             Some(prefix) => {
                 let outcome = self
-                    .close_workspace_impl(&prefix, force, record_off.then_some(target.as_path()))
+                    .close_workspace_impl(&prefix, force, record_off.then_some(target))
                     .await?;
                 if record_off && outcome.not_found() {
                     if let Some(overlay) = self.workspace_overlay() {
@@ -2817,19 +2862,24 @@ impl WorkspaceHost {
                 Ok(outcome)
             }
             None => {
-                let registered = self.library.workspace_paths_for(root).is_some();
+                let registered = {
+                    let library = self.library.clone();
+                    let root = root.to_path_buf();
+                    self.off_runtime(move || library.workspace_paths_for(&root).is_some())
+                        .await?
+                };
                 let starting = self
                     .mount_state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .get(&target)
+                    .get(target)
                     .is_some_and(|state| matches!(state, MountState::Starting));
                 if record_off && registered {
                     if let Some(overlay) = self.workspace_overlay() {
                         overlay.set(&target.to_string_lossy(), false);
                     }
                 }
-                self.clear_workspace_lifecycle(root);
+                self.clear_workspace_lifecycle_by_key(target);
                 if registered && starting {
                     Ok(WorkspaceLifecycleOutcome::Completed)
                 } else {
@@ -2854,12 +2904,12 @@ impl WorkspaceHost {
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let _registering = self.register_lock.lock().await;
-        let target = canonical_key(root);
+        let target = self.canonical_key_off_runtime(root).await?;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
         match self
-            .close_workspace_for_root_locked(root, force, true)
+            .close_workspace_for_root_locked(root, &target, force, true)
             .await?
         {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
@@ -2870,17 +2920,28 @@ impl WorkspaceHost {
 
         let mut removing = WorkspaceRemoveGuard {
             host: self,
-            root: target.clone(),
+            key: target.clone(),
             error: None,
             armed: true,
         };
-        self.mark_mount_removing(&target);
-        let removed = match self.library().unregister_workspace(root) {
-            Ok(removed) => removed,
-            Err(error) => {
-                let error = Error::from(error);
-                removing.error = Some(error.to_string());
-                return Err(error);
+        self.mark_mount_removing_by_key(&target);
+        let removed = {
+            let library = self.library.clone();
+            let root = root.to_path_buf();
+            match self
+                .off_runtime(move || library.unregister_workspace(&root))
+                .await
+            {
+                Ok(Ok(removed)) => removed,
+                Ok(Err(error)) => {
+                    let error = Error::from(error);
+                    removing.error = Some(error.to_string());
+                    return Err(error);
+                }
+                Err(error) => {
+                    removing.error = Some(error.to_string());
+                    return Err(error);
+                }
             }
         };
         // Forget the on/off state so a devserver restart doesn't re-mount it.
@@ -2891,8 +2952,8 @@ impl WorkspaceHost {
         // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
         // and leaves the records -- filtered from the live feed until ON restores
         // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(root);
-        self.clear_mount_state(&target);
+        self.discard_workspace_windows(&target).await;
+        self.clear_mount_state_by_key(&target);
         self.notify_window_change();
         removing.armed = false;
         if removed {
@@ -2930,7 +2991,9 @@ impl WorkspaceHost {
         off_path: Option<&Path>,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
-        let (root, active_terminals) = {
+        // The runtime's stored key serves every mount-state edit below, so a
+        // close never canonicalizes on the runtime thread.
+        let (canonical_root, active_terminals) = {
             let workspaces = self
                 .workspaces
                 .read()
@@ -2939,17 +3002,17 @@ impl WorkspaceHost {
                 return Ok(WorkspaceLifecycleOutcome::NotFound);
             };
             (
-                runtime.root.clone(),
+                runtime.canonical_root.clone(),
                 runtime.artifacts.terminal_sessions.roster().len(),
             )
         };
         if active_terminals > 0 && !force {
             return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
         }
-        self.mark_mount_closing(&root);
+        self.mark_mount_closing_by_key(&canonical_root);
         let mut closing = WorkspaceCloseGuard {
             host: self,
-            root,
+            key: canonical_root.clone(),
             armed: true,
         };
         let runtime = {
@@ -2976,12 +3039,11 @@ impl WorkspaceHost {
         // Tear down explicitly (rather than leaving it to Drop) so tenant
         // tasks finish while the workspace cell is live, then the cell clears
         // and the per-workspace flock is verified released.
-        let runtime_root = runtime.root.clone();
         runtime.shutdown().await;
         // A running workspace carries no transient lifecycle state, but clear
         // defensively so a leftover `error`/`starting` can never outlive a
         // close. No feed push here -- the `notify_window_change` below covers it.
-        self.clear_mount_state(&runtime_root);
+        self.clear_mount_state_by_key(&canonical_root);
         self.notify_window_change();
         closing.armed = false;
         Ok(WorkspaceLifecycleOutcome::Completed)
@@ -3228,12 +3290,17 @@ impl WorkspaceHost {
     /// mounted to close (a failed mount is not in the `workspaces` map, so
     /// `close_workspace` is a no-op for it).
     pub fn clear_workspace_lifecycle(&self, root: &Path) {
-        let key = canonical_key(root);
+        self.clear_workspace_lifecycle_by_key(&canonical_key(root));
+    }
+
+    /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
+    /// caller that already holds the canonical key.
+    fn clear_workspace_lifecycle_by_key(&self, key: &Path) {
         let had = self
             .mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&key)
+            .remove(key)
             .is_some();
         if had {
             self.notify_window_change();
@@ -3271,21 +3338,19 @@ impl WorkspaceHost {
         self.notify_window_change();
     }
 
-    fn mark_mount_closing(&self, root: &Path) {
-        let key = canonical_key(root);
+    fn mark_mount_closing_by_key(&self, key: &Path) {
         self.mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, MountState::Closing);
+            .insert(key.to_path_buf(), MountState::Closing);
         self.notify_window_change();
     }
 
-    fn mark_mount_removing(&self, root: &Path) {
-        let key = canonical_key(root);
+    fn mark_mount_removing_by_key(&self, key: &Path) {
         self.mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, MountState::Removing);
+            .insert(key.to_path_buf(), MountState::Removing);
         self.notify_window_change();
     }
 
@@ -3293,11 +3358,14 @@ impl WorkspaceHost {
     /// interrupted operation. Notify the watch feed so the launcher clears the
     /// spinner and surfaces the reason.
     fn mark_mount_error(&self, root: &Path, reason: String) {
-        let key = canonical_key(root);
+        self.mark_mount_error_by_key(&canonical_key(root), reason);
+    }
+
+    fn mark_mount_error_by_key(&self, key: &Path, reason: String) {
         self.mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, MountState::Error(reason));
+            .insert(key.to_path_buf(), MountState::Error(reason));
         self.notify_window_change();
     }
 
@@ -3417,11 +3485,14 @@ impl WorkspaceHost {
     /// or was torn down). No feed push: the settling transition already fired
     /// one (mount success in `open_workspace`, close in `close_workspace`).
     fn clear_mount_state(&self, root: &Path) {
-        let key = canonical_key(root);
+        self.clear_mount_state_by_key(&canonical_key(root));
+    }
+
+    fn clear_mount_state_by_key(&self, key: &Path) {
         self.mount_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
+            .remove(key);
     }
 
     /// Clear successful mounts and foreign-lock contention; publish failures
@@ -3677,6 +3748,22 @@ fn canonical_key(root: &Path) -> PathBuf {
     chan_workspace::paths::canonicalize_normalized(root)
 }
 
+/// Window records whose stored workspace path canonicalizes to `target`. A
+/// record keeps the path its window was minted with, which may be an alias of
+/// the mounted root, so each is canonicalized rather than compared as text.
+fn workspace_window_ids(registry: &WindowRegistry, target: &Path) -> Vec<String> {
+    registry
+        .snapshot()
+        .into_iter()
+        .filter(|row| {
+            row.workspace_path
+                .as_deref()
+                .is_some_and(|p| canonical_key(Path::new(p)) == target)
+        })
+        .map(|row| row.window_id)
+        .collect()
+}
+
 fn display_prefix(prefix: &str) -> &str {
     if prefix.is_empty() {
         "/"
@@ -3879,6 +3966,17 @@ mod tests {
             }
         }
         let _reset = ResetProbe;
+        let (probe, pool_hops) = std::sync::mpsc::channel();
+        *host.blocking_thread_probe.lock().unwrap() = Some(probe);
+        let runtime_thread = std::thread::current().id();
+        let hops_off_runtime = |name: &str| {
+            let hops: Vec<_> = pool_hops.try_iter().collect();
+            assert!(!hops.is_empty(), "{name} did no work on the blocking pool");
+            assert!(
+                hops.iter().all(|thread| *thread != runtime_thread),
+                "a {name} hop ran on the runtime thread"
+            );
+        };
 
         assert_eq!(
             host.close_workspace_for_root(&alias, false)
@@ -3891,6 +3989,7 @@ mod tests {
             0,
             "close canonicalized the workspace key on the runtime thread"
         );
+        hops_off_runtime("close");
         assert!(
             host.mounted_prefix_for_root(root.path()).is_none(),
             "close did not unmount the aliased root"
@@ -3902,6 +4001,7 @@ mod tests {
             .await
             .expect("remount");
         on_runtime.set(0);
+        pool_hops.try_iter().count();
 
         assert_eq!(
             host.remove_workspace_for_root(&alias, false)
@@ -3914,6 +4014,7 @@ mod tests {
             0,
             "remove canonicalized the workspace key on the runtime thread"
         );
+        hops_off_runtime("remove");
         assert!(
             registry.snapshot().is_empty(),
             "removal did not purge the aliased root's window records"
@@ -4568,13 +4669,13 @@ mod tests {
         lib.register_workspace(root.path()).expect("register");
         let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
 
-        host.mark_mount_closing(root.path());
+        host.mark_mount_closing_by_key(&canonical_key(root.path()));
         assert_eq!(
             host.workspace_status(root.path()),
             (WorkspaceStatus::Closing, None)
         );
 
-        host.mark_mount_removing(root.path());
+        host.mark_mount_removing_by_key(&canonical_key(root.path()));
         assert_eq!(
             host.workspace_status(root.path()),
             (WorkspaceStatus::Removing, None)
@@ -4925,13 +5026,13 @@ mod tests {
             library.register_workspace(root.path()).unwrap();
             let host = WorkspaceHost::new(library, fake_builder());
             for panicking in [false, true] {
-                host.mark_mount_removing(root.path());
+                host.mark_mount_removing_by_key(&canonical_key(root.path()));
                 let notify = host.library_change_notify();
                 let changed = notify.notified();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _removing = WorkspaceRemoveGuard {
                         host: &host,
-                        root: canonical_key(root.path()),
+                        key: canonical_key(root.path()),
                         error: None,
                         armed: true,
                     };
