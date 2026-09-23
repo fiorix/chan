@@ -191,9 +191,10 @@ impl http_body::Body for DeadlineBody {
 /// a parent-domain cookie of the same name can never shadow it.
 const COOKIE_NAME: &str = "__Host-devserver_gate";
 const CSRF_COOKIE_NAME: &str = "__Host-devserver_csrf";
-/// Parent-domain cookie names. The proxy never reads them, but upstream
-/// `Set-Cookie` on these names stays stripped: allowing a devserver to
-/// mint look-alike session cookies would only invite confusion.
+/// The gate and CSRF names without the `__Host-` prefix. The proxy never
+/// reads or sets them, but upstream `Set-Cookie` on these names is stripped
+/// like the prefixed ones: a devserver minting look-alike session cookies
+/// would only invite confusion.
 const LEGACY_COOKIE_NAME: &str = "devserver_gate";
 const LEGACY_CSRF_COOKIE_NAME: &str = "devserver_csrf";
 const CSRF_HEADER_NAME: &str = "x-chan-csrf";
