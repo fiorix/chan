@@ -1245,10 +1245,12 @@ async fn identity_credentials_are_route_scoped_and_optional_scopes_hide() {
 
 #[tokio::test]
 async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
+    use tracing::instrument::WithSubscriber;
     let app = TestApp::new().await;
     let user_id = fake_user_id();
 
     mock_policy_update_round(&app, user_id, 3, 1, StatusCode::BAD_GATEWAY).await;
+    let (subscriber, output) = capture_logs();
     let (status, report) = authenticated_json(
         &app.router,
         Method::PUT,
@@ -1259,8 +1261,17 @@ async fn composite_policy_and_fleet_retries_converge_after_partial_drain() {
             "max_connected_devservers": 1,
         })),
     )
+    .with_subscriber(subscriber)
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(
+        captured.contains("admin control-plane drain failed")
+            && captured.contains("session revoke")
+            && captured.contains("502"),
+        "{captured}"
+    );
+    assert!(!captured.contains("tunnel kill"), "{captured}");
     assert_eq!(report["durable"]["policy"]["max_connected_devservers"], 1);
     assert_eq!(report["tenant_sessions_revoked"], 0);
     assert_eq!(report["tunnels_evicted"], 2);
@@ -2921,11 +2932,15 @@ async fn known_rename_conflicts_preserve_live_tunnels() {
     }
 }
 
-#[tokio::test]
-async fn logout_audit_failure_is_logged_without_blocking_logout() {
+/// Plain-text log lines written while a future runs under the returned
+/// subscriber; a per-future subscriber keeps parallel tests from reading
+/// each other's lines.
+fn capture_logs() -> (
+    impl tracing::Subscriber + Send + Sync,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+) {
     use std::io::Write;
     use std::sync::Mutex;
-    use tracing::instrument::WithSubscriber;
     #[derive(Clone)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
     impl Write for Capture {
@@ -2937,6 +2952,19 @@ async fn logout_audit_failure_is_logged_without_blocking_logout() {
             Ok(())
         }
     }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    (subscriber, output)
+}
+
+#[tokio::test]
+async fn logout_audit_failure_is_logged_without_blocking_logout() {
+    use tracing::instrument::WithSubscriber;
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
     happy_login(&app, &mut c, fake_user_id(), "octo@example.com").await;
@@ -2945,13 +2973,7 @@ async fn logout_audit_failure_is_logged_without_blocking_logout() {
         .respond_with(ResponseTemplate::new(503))
         .mount(&app.profile)
         .await;
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let writer = Capture(output.clone());
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
+    let (subscriber, output) = capture_logs();
     let (status, _, _, _) = c
         .send(Method::POST, "/api/logout", None)
         .with_subscriber(subscriber)

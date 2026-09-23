@@ -2448,6 +2448,27 @@ struct AdminDevserverPolicyBody {
     max_connected_devservers: i32,
 }
 
+/// A composite admin route answers a failed drain leg with counts only, and
+/// the controller client leaves logging to its caller, so this is the one
+/// server-side record of which call failed and the operation, status and
+/// body prefix its error carries.
+fn warn_drain_failure<T, E: std::fmt::Display>(
+    route: &'static str,
+    leg: &'static str,
+    user_id: Option<Uuid>,
+    result: &std::result::Result<T, E>,
+) {
+    if let Err(error) = result {
+        tracing::warn!(
+            route,
+            leg,
+            user_id = user_id.map(tracing::field::display),
+            %error,
+            "admin control-plane drain failed"
+        );
+    }
+}
+
 fn composite_failure(
     durable: serde_json::Value,
     oauth_sessions_revoked: usize,
@@ -2525,6 +2546,9 @@ async fn admin_put_devserver_policy(
         .unwrap_or(0);
     let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
     if sessions.is_err() || tunnels.is_err() {
+        let route = "devserver-policy";
+        warn_drain_failure(route, "session revoke", Some(user_id), &sessions);
+        warn_drain_failure(route, "tunnel kill", Some(user_id), &tunnels);
         return Err(composite_failure(
             serde_json::json!({ "policy": policy }),
             0,
@@ -2570,6 +2594,9 @@ async fn admin_pause_fleet(
         .unwrap_or(0);
     let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
     if sessions.is_err() || tunnels.is_err() {
+        let route = "fleet pause";
+        warn_drain_failure(route, "session revoke", None, &sessions);
+        warn_drain_failure(route, "tunnel kill", None, &tunnels);
         return Err(composite_failure(
             serde_json::json!({ "admissions_enabled": policy.admissions_enabled }),
             0,
@@ -2622,6 +2649,10 @@ async fn admin_revoke_user_access(
         .unwrap_or(0);
     let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
     if oauth.is_err() || sessions.is_err() || tunnels.is_err() {
+        let route = "access revoke";
+        warn_drain_failure(route, "oauth session revoke", Some(user_id), &oauth);
+        warn_drain_failure(route, "session revoke", Some(user_id), &sessions);
+        warn_drain_failure(route, "tunnel kill", Some(user_id), &tunnels);
         return Err(composite_failure(
             serde_json::json!({
                 "user_id": durable.user_id,
@@ -2679,6 +2710,10 @@ async fn admin_delete_user(
         .unwrap_or(0);
     let tunnels_evicted = tunnels.as_ref().copied().unwrap_or(0);
     if oauth.is_err() || sessions.is_err() || tunnels.is_err() {
+        let route = "user delete";
+        warn_drain_failure(route, "oauth session revoke", Some(user_id), &oauth);
+        warn_drain_failure(route, "session revoke", Some(user_id), &sessions);
+        warn_drain_failure(route, "tunnel kill", Some(user_id), &tunnels);
         return Err(composite_failure(
             serde_json::json!({
                 "user_id": user_id,
@@ -2707,6 +2742,10 @@ async fn admin_delete_user(
             })));
         }
         if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                %user_id,
+                "admin user delete: profile row still present at the deadline"
+            );
             return Err(composite_failure(
                 serde_json::json!({
                     "user_id": user_id,
