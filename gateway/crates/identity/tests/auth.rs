@@ -2885,7 +2885,23 @@ async fn known_rename_conflicts_preserve_live_tunnels() {
         user["username"] = json!("new-handle");
         Mock::given(method("GET"))
             .and(path("/v1/users/by-username"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(user))
+            .respond_with(if exhausted {
+                ResponseTemplate::new(404)
+            } else {
+                ResponseTemplate::new(200).set_body_json(user)
+            })
+            .mount(&app.profile)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/admin/v1/owners/{uid}/tunnels/kill")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"killed":1})))
+            .mount(&app.profile)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/v1/users/{uid}/username")))
+            .respond_with(
+                ResponseTemplate::new(409).set_body_json(json!({"error":"rename conflict"})),
+            )
             .mount(&app.profile)
             .await;
         let (status, _, _, _) = c
