@@ -2917,7 +2917,7 @@ impl WorkspaceHost {
                 let registered = {
                     let library = self.library.clone();
                     let root = root.to_path_buf();
-                    self.off_runtime(move || library.workspace_paths_for(&root).is_some())
+                    self.off_runtime(move || registered_workspace_paths(&library, &root).is_some())
                         .await?
                 };
                 let starting = self
@@ -3008,7 +3008,7 @@ impl WorkspaceHost {
                     if let Some(probe) = probe {
                         probe(RemovalHop::Unregister);
                     }
-                    let removed = library.unregister_workspace(&root)?;
+                    let removed = unregister_registered_workspace(&library, &root)?;
                     {
                         let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
                         state.remove(&key);
@@ -3801,9 +3801,22 @@ fn window_command_frame(
 
 #[cfg(test)]
 std::thread_local! {
-    static CANONICAL_KEY_PROBE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const {
+    /// Fires on the calling thread, with the call's name, for every
+    /// canonicalization of a workspace key the host makes or causes: its own
+    /// [`canonical_key`] and the registry calls that canonicalize inside
+    /// chan-workspace, whose key function is private.
+    static CANONICAL_KEY_PROBE: std::cell::RefCell<Option<Box<dyn Fn(&'static str)>>> = const {
         std::cell::RefCell::new(None)
     };
+}
+
+#[cfg(test)]
+fn observe_canonicalization(call: &'static str) {
+    CANONICAL_KEY_PROBE.with(|probe| {
+        if let Some(probe) = probe.borrow().as_ref() {
+            probe(call);
+        }
+    });
 }
 
 /// Canonical-form key for matching a caller path against a mounted
@@ -3816,12 +3829,28 @@ std::thread_local! {
 /// Mirrors the private `canonical_key` in `chan_workspace::library`.
 fn canonical_key(root: &Path) -> PathBuf {
     #[cfg(test)]
-    CANONICAL_KEY_PROBE.with(|probe| {
-        if let Some(probe) = probe.borrow().as_ref() {
-            probe();
-        }
-    });
+    observe_canonicalization("canonical_key");
     chan_workspace::paths::canonicalize_normalized(root)
+}
+
+/// [`Library::workspace_paths_for`] for the close path, which must call it
+/// off the runtime thread: the registry canonicalizes `root` to find it.
+fn registered_workspace_paths(
+    library: &Library,
+    root: &Path,
+) -> Option<chan_workspace::paths::WorkspacePaths> {
+    #[cfg(test)]
+    observe_canonicalization("workspace_paths_for");
+    library.workspace_paths_for(root)
+}
+
+/// [`Library::unregister_workspace`] for the removal, which must call it off
+/// the runtime thread: the registry canonicalizes `root` and resets its
+/// metadata on disk.
+fn unregister_registered_workspace(library: &Library, root: &Path) -> chan_workspace::Result<bool> {
+    #[cfg(test)]
+    observe_canonicalization("unregister_workspace");
+    library.unregister_workspace(root)
 }
 
 /// Window records whose stored workspace path canonicalizes to `target`. A
@@ -3945,7 +3974,7 @@ mod tests {
         CANONICAL_KEY_PROBE.with(|probe| {
             let host = Arc::clone(&host);
             let observed = std::rc::Rc::clone(&observed);
-            *probe.borrow_mut() = Some(Box::new(move || {
+            *probe.borrow_mut() = Some(Box::new(move |_| {
                 observed
                     .borrow_mut()
                     .push(host.workspaces.try_write().is_err());
@@ -4007,9 +4036,12 @@ mod tests {
     /// registry up and unregister it, and each of those touches the
     /// filesystem. None may run on a runtime worker: a slow or cloud-synced
     /// root would stall every tenant that worker serves. The probe on this
-    /// thread sees every canonicalization the runtime thread performs, and
-    /// the paths go in through an alias only canonicalization resolves, so
-    /// the unmount, the purge and the unregister prove the key was computed.
+    /// thread sees every canonicalization the runtime thread performs or
+    /// asks the registry for, and the paths go in through an alias only
+    /// canonicalization resolves, so the unmount, the purge and the
+    /// unregister prove the key was computed. The close runs both arms: a
+    /// mounted workspace, and a registered one still starting, which only
+    /// the registry lookup can find.
     #[tokio::test(flavor = "current_thread")]
     async fn closing_and_removing_by_root_canonicalize_off_the_runtime_thread() {
         let cfg = tempfile::tempdir().expect("config dir");
@@ -4030,10 +4062,10 @@ mod tests {
             .await
             .expect("mount");
 
-        let on_runtime = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let on_runtime = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
         CANONICAL_KEY_PROBE.with(|probe| {
             let on_runtime = std::rc::Rc::clone(&on_runtime);
-            *probe.borrow_mut() = Some(Box::new(move || on_runtime.set(on_runtime.get() + 1)));
+            *probe.borrow_mut() = Some(Box::new(move |call| on_runtime.borrow_mut().push(call)));
         });
         struct ResetProbe;
         impl Drop for ResetProbe {
@@ -4045,7 +4077,16 @@ mod tests {
         let (probe, pool_hops) = std::sync::mpsc::channel();
         *host.blocking_thread_probe.lock().unwrap() = Some(probe);
         let runtime_thread = std::thread::current().id();
-        let hops_off_runtime = |name: &str| {
+        let reset = || {
+            on_runtime.borrow_mut().clear();
+            pool_hops.try_iter().count();
+        };
+        let off_runtime_only = |name: &str| {
+            assert_eq!(
+                std::mem::take(&mut *on_runtime.borrow_mut()),
+                Vec::<&'static str>::new(),
+                "{name} canonicalized a workspace key on the runtime thread"
+            );
             let hops: Vec<_> = pool_hops.try_iter().collect();
             assert!(!hops.is_empty(), "{name} did no work on the blocking pool");
             assert!(
@@ -4054,21 +4095,35 @@ mod tests {
             );
         };
 
-        assert_eq!(
-            host.close_workspace_for_root(&alias, false)
-                .await
-                .expect("close"),
-            WorkspaceLifecycleOutcome::Completed
-        );
-        assert_eq!(
-            on_runtime.get(),
-            0,
-            "close canonicalized the workspace key on the runtime thread"
-        );
-        hops_off_runtime("close");
+        let outcome = host
+            .close_workspace_for_root(&alias, false)
+            .await
+            .expect("close");
+        off_runtime_only("close");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(
             host.mounted_prefix_for_root(root.path()).is_none(),
             "close did not unmount the aliased root"
+        );
+
+        // Registered and starting but not mounted: only the registry lookup
+        // can tell the close it has something to settle.
+        host.mark_workspace_starting(root.path());
+        reset();
+        let outcome = host
+            .close_workspace_for_root(&alias, false)
+            .await
+            .expect("unmounted close");
+        off_runtime_only("unmounted close");
+        assert_eq!(
+            outcome,
+            WorkspaceLifecycleOutcome::Completed,
+            "the unmounted close did not find the aliased root registered"
+        );
+        assert_eq!(
+            host.workspace_status(root.path()).0,
+            WorkspaceStatus::Stopped,
+            "the unmounted close did not clear the starting row"
         );
 
         // A second mount, so removal has a tenant to unmount as well. The
@@ -4076,21 +4131,14 @@ mod tests {
         host.open_registered_workspace(root.path(), serve_config("/workspace"))
             .await
             .expect("remount");
-        on_runtime.set(0);
-        pool_hops.try_iter().count();
+        reset();
 
-        assert_eq!(
-            host.remove_workspace_for_root(&alias, false)
-                .await
-                .expect("remove"),
-            WorkspaceLifecycleOutcome::Completed
-        );
-        assert_eq!(
-            on_runtime.get(),
-            0,
-            "remove canonicalized the workspace key on the runtime thread"
-        );
-        hops_off_runtime("remove");
+        let outcome = host
+            .remove_workspace_for_root(&alias, false)
+            .await
+            .expect("remove");
+        off_runtime_only("remove");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(
             registry.snapshot().is_empty(),
             "removal did not purge the aliased root's window records"
