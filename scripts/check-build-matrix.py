@@ -7,7 +7,6 @@ import glob
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 
 
@@ -728,8 +727,28 @@ def filter_selects(patterns: list[str], path: str) -> bool:
     return selected
 
 
+def toml_module():
+    """The tomllib module, or a contract failure that names the floor.
+
+    Only the gateway trigger contract parses TOML, so the import happens
+    here rather than at the top of the file: on an interpreter older than
+    3.11 every other contract still runs, and this one fails with its
+    reason instead of the whole checker dying at import.
+    """
+    try:
+        import tomllib
+    except ImportError as error:
+        version = ".".join(str(part) for part in sys.version_info[:3])
+        raise ContractError(
+            "the gateway trigger contract needs Python 3.11 or newer for "
+            f"tomllib; {sys.executable} is Python {version}"
+        ) from error
+    return tomllib
+
+
 def manifest(relative: str) -> dict:
     """RELATIVE parsed as TOML, or a contract failure that names the file."""
+    tomllib = toml_module()
     try:
         return tomllib.loads(read(relative))
     except tomllib.TOMLDecodeError as error:
@@ -1019,15 +1038,24 @@ def check_nix_contract() -> None:
 
 
 def main() -> int:
-    try:
-        check_make_contract()
-        check_desktop_contract()
-        check_workflow_contract()
-        check_gateway_trigger_contract()
-        check_docker_contract()
-        check_nix_contract()
-    except (ContractError, KeyError, OSError, json.JSONDecodeError) as error:
-        print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
+    # Each contract runs even when an earlier one fails, so one broken
+    # contract, or an interpreter too old for the gateway one, does not hide
+    # the verdict of the rest.
+    failed = False
+    for check in (
+        check_make_contract,
+        check_desktop_contract,
+        check_workflow_contract,
+        check_gateway_trigger_contract,
+        check_docker_contract,
+        check_nix_contract,
+    ):
+        try:
+            check()
+        except (ContractError, KeyError, OSError, json.JSONDecodeError) as error:
+            print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
+            failed = True
+    if failed:
         return 1
 
     print("build-matrix contract: PASS")
