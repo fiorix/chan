@@ -31,7 +31,6 @@
 //! --accept` connection can find it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -207,6 +206,17 @@ impl Participant {
         self.default_name.clone()
     }
 
+    /// The display role, derived from origin and independent of the single
+    /// designated-owner slot: a local window reads Leader, a tunnel window
+    /// reads Follower, even the remote holding the fallback owner slot.
+    fn role(&self) -> Role {
+        if self.local {
+            Role::Leader
+        } else {
+            Role::Follower
+        }
+    }
+
     /// The lifecycle state implied by the socket count and the grace clock at
     /// `now`. Live while a socket is held; otherwise stepped by elapsed grace.
     fn computed_state(&self, now: Instant) -> ParticipantState {
@@ -248,9 +258,6 @@ pub struct SessionRegistry {
     /// Fired whenever a participant disconnects so the reaper recomputes its
     /// sleep deadline. Runtime-agnostic to fire; only the reaper awaits it.
     reaper_wake: Notify,
-    /// Process-local id source for handover requests (lifetime-unique is
-    /// enough; the registry is in memory).
-    handover_counter: AtomicU64,
     /// The library's aggregate change signal, installed by the host when it
     /// mounts the tenant. A roster or leader change fires it so the window
     /// watch feed re-publishes the per-tenant leaders map. Absent in unit tests
@@ -590,15 +597,7 @@ impl SessionRegistry {
             .participants
             .iter()
             .map(|(window_id, p)| {
-                // Display role is origin-derived, independent of the single
-                // designated-owner slot: a local window reads Leader, a tunnel
-                // window reads Follower, even the remote holding the fallback
-                // owner slot.
-                let role = if p.local {
-                    Role::Leader
-                } else {
-                    Role::Follower
-                };
+                let role = p.role();
                 (
                     p.join_seq,
                     ParticipantInfo {
@@ -626,22 +625,11 @@ impl SessionRegistry {
         Some(WhoamiInfo {
             window_id: window_id.to_string(),
             name: p.effective_name(),
-            // Display role is origin-derived, like `snapshot()`.
-            role: if p.local {
-                Role::Leader
-            } else {
-                Role::Follower
-            },
+            role: p.role(),
             status: p.computed_state(now),
             is_leader: inner.leader.as_deref() == Some(window_id),
             identity: p.identity.as_ref().and_then(|i| i.display_string()),
         })
-    }
-
-    /// Mint a fresh handover request id (`handover-{n}`), lifetime-unique.
-    pub fn mint_handover_id(&self) -> String {
-        let n = self.handover_counter.fetch_add(1, Ordering::Relaxed);
-        format!("handover-{n}")
     }
 
     /// Park a handover request from `requester` (becoming leader as `target`,
@@ -1242,7 +1230,7 @@ mod tests {
         let reg = Arc::new(SessionRegistry::new());
         let _leader = reg.join("w-a", true, None).guard;
         let _follower = reg.join("w-b", true, None).guard;
-        let id = reg.mint_handover_id();
+        let id = "handover-1".to_string();
         // w-b asks to become leader; the prompt goes to the live leader w-a.
         let recipient = reg
             .request_handover(&id, "w-b", None)
@@ -1266,7 +1254,7 @@ mod tests {
         let reg = Arc::new(SessionRegistry::new());
         let _leader = reg.join("w-a", true, None).guard;
         let _follower = reg.join("w-b", true, None).guard;
-        let id = reg.mint_handover_id();
+        let id = "handover-1".to_string();
         reg.request_handover(&id, "w-b", None).expect("parked");
         let resolved = reg.resolve_handover(&id, false).expect("resolved");
         assert!(!resolved.accepted);
@@ -1280,9 +1268,9 @@ mod tests {
         let _leader = reg.join("w-a", true, None).guard;
         let _b = reg.join("w-b", true, None).guard;
         let _c = reg.join("w-c", true, None).guard;
-        let id = reg.mint_handover_id();
+        let id = "handover-1".to_string();
         reg.request_handover(&id, "w-b", None).expect("parked");
-        let id2 = reg.mint_handover_id();
+        let id2 = "handover-2".to_string();
         assert_eq!(
             reg.request_handover(&id2, "w-c", None),
             Err(HandoverError::AlreadyPending)
@@ -1297,7 +1285,7 @@ mod tests {
         let _b = reg.join("w-b", true, None).guard;
         drop(leader);
         reg.reap_due(t0 + RELOAD_GRACE + Duration::from_secs(1)); // leader Disconnected
-        let id = reg.mint_handover_id();
+        let id = "handover-1".to_string();
         assert_eq!(
             reg.request_handover(&id, "w-b", None),
             Err(HandoverError::LeaderNotLive)
