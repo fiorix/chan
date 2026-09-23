@@ -1926,6 +1926,11 @@ impl Workspace {
     /// really want those gone can `rm` them out-of-band.
     pub fn remove(&self, rel: &str) -> Result<()> {
         let rel_path = self.rel(rel)?;
+        // The graph and index keys, and the trash label, use the validated
+        // spelling: a caller's `notes/` or `./a.md` names the same path but
+        // matches none of the keys it was stored under.
+        let rel_key = rel_path.to_string_lossy().replace('\\', "/");
+        let rel = rel_key.as_str();
         // cap-std lstat: TOCTOU-free type check. The subsequent
         // trash::move_into still operates path-based (it has to
         // bridge into the trash dir which lives outside the cap-std
@@ -8174,6 +8179,37 @@ mod tests {
         workspace.trash_restore(&entries[0].id).unwrap();
         assert_eq!(workspace.read_text("notes/a.md").unwrap(), "hello");
         assert!(workspace.trash_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_forgets_the_graph_rows_of_a_non_canonical_spelling() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("notes/a.md", "a").unwrap();
+        workspace.write_text("b.md", "b").unwrap();
+        workspace.reindex(None).unwrap();
+        let graph_files = |workspace: &Workspace| {
+            let mut files = workspace.graph().unwrap().files().unwrap();
+            files.sort();
+            files
+        };
+        assert_eq!(graph_files(&workspace), vec!["b.md", "notes/a.md"]);
+
+        workspace.remove("notes/").unwrap();
+        workspace.remove("./b.md").unwrap();
+
+        assert!(
+            graph_files(&workspace).is_empty(),
+            "{:?}",
+            graph_files(&workspace)
+        );
+        let mut labels: Vec<String> = workspace
+            .trash_list()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.original_path)
+            .collect();
+        labels.sort();
+        assert_eq!(labels, vec!["b.md", "notes"]);
     }
 
     #[test]
