@@ -19,7 +19,7 @@ use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, RestartOverrides, SessionEvent,
-    TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE,
+    TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -505,20 +505,7 @@ pub async fn api_create_terminal(
             )
                 .into_response()
         }
-        Err(CreateError::Capped) => {
-            (StatusCode::CONFLICT, "terminal session cap reached").into_response()
-        }
-        Err(CreateError::FdPressure(e)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
-        }
-        Err(CreateError::Spawn(e)) => (
-            StatusCode::BAD_REQUEST,
-            format!("failed to start terminal: {e}"),
-        )
-            .into_response(),
-        Err(CreateError::Closed) => {
-            (StatusCode::GONE, "terminal session was closed").into_response()
-        }
+        Err(e) => create_error_response(e, "start"),
     }
 }
 
@@ -565,20 +552,26 @@ pub async fn api_restart_terminal(
     match state.terminal_sessions.restart(&session, overrides) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "terminal session not found").into_response(),
-        Err(CreateError::Capped) => {
+        Err(e) => create_error_response(e, "restart"),
+    }
+}
+
+/// The HTTP answer for a failed create or restart. The status per variant is
+/// the route contract; `verb` names the failed operation in a spawn error.
+fn create_error_response(error: CreateError, verb: &str) -> Response {
+    match error {
+        CreateError::Capped => {
             (StatusCode::CONFLICT, "terminal session cap reached").into_response()
         }
-        Err(CreateError::FdPressure(e)) => {
+        CreateError::FdPressure(e) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
         }
-        Err(CreateError::Spawn(e)) => (
+        CreateError::Spawn(e) => (
             StatusCode::BAD_REQUEST,
-            format!("failed to restart terminal: {e}"),
+            format!("failed to {verb} terminal: {e}"),
         )
             .into_response(),
-        Err(CreateError::Closed) => {
-            (StatusCode::GONE, "terminal session was closed").into_response()
-        }
+        CreateError::Closed => (StatusCode::GONE, "terminal session was closed").into_response(),
     }
 }
 
@@ -1239,9 +1232,17 @@ async fn terminal_cwd_payload_blocking<C>(
 where
     C: FnOnce() -> Option<PathBuf> + Send + 'static,
 {
-    terminal_cwd_payload_blocking_with_hook(workspace, cwd_probe, || {}).await
+    tokio::task::spawn_blocking(move || {
+        let cwd = cwd_probe();
+        terminal_cwd_payload(workspace.as_deref(), cwd)
+    })
+    .await
+    .unwrap_or((None, None))
 }
 
+/// [`terminal_cwd_payload_blocking`] with a hook run between the probe and the
+/// mapping, so a test can act inside that window.
+#[cfg(test)]
 async fn terminal_cwd_payload_blocking_with_hook<C, H>(
     workspace: Option<Arc<chan_workspace::Workspace>>,
     cwd_probe: C,
@@ -1274,7 +1275,7 @@ fn pty_size(cols: Option<u16>, rows: Option<u16>) -> PtySize {
 /// (mirrors the SPA wire, which omits the default).
 fn normalize_tab_group(group: &str) -> Option<String> {
     let trimmed = group.trim();
-    if trimmed.is_empty() || trimmed == "default" {
+    if trimmed.is_empty() || trimmed == DEFAULT_TERMINAL_GROUP {
         return None;
     }
     Some(trimmed.chars().take(128).collect())
