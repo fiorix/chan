@@ -1,50 +1,21 @@
-// Graph DB: relations between files via wiki-links, mentions, tags,
-// and headings. Backed by sqlite (rusqlite, bundled feature).
+// Graph DB: relations between files via wiki-links, mentions, and tags,
+// plus each file's headings. Backed by sqlite (rusqlite, bundled feature).
 //
-// Schema (applied on first open via PRAGMA user_version migration):
+// `GraphView::migrate` is the schema of record, applied on open through a
+// PRAGMA user_version chain. The shape it builds rests on three decisions:
 //
-//   nodes(rel_path TEXT PRIMARY KEY,
-//         kind     TEXT NOT NULL,    -- "file" | "tag" | "heading"
-//         mtime    INTEGER,          -- Unix seconds, NULL for tags
-//         title    TEXT,             -- file's display title (h1 or
-//                                       frontmatter `title`); NULL
-//                                       for non-file rows or until
-//                                       the next index_file pass
-//         basename TEXT,             -- file_name() of rel_path,
-//                                       used by link_targets prefix
-//                                       lookup. NULL for non-file
-//                                       rows.
-//         emails   TEXT)             -- space-separated lowercased
-//                                       email addresses pulled from
-//                                       a contact-kind file's body
-//                                       so the @ picker can match
-//                                       `alice` against
-//                                       `alice@example.com`.
-//                                       NULL for non-contact rows.
+// - One writer connection behind a Mutex and a pool of read-only WAL
+//   readers, so the per-keystroke `[[` typeahead never waits on another read.
+// - `anchor` is part of the `edges` primary key and is '' (never NULL) when
+//   absent, so one file can link the same target through two distinct
+//   anchors without the rows colliding.
+// - A full rebuild stages each file into the `staging_*` tables and swaps
+//   them into the live tables in one transaction (`stage_file`,
+//   `swap_staging_with_text_files`), so a crashed rebuild resumes from the
+//   staging cursor and readers never see a half-built graph.
 //
-//   edges(src      TEXT NOT NULL,    -- node rel_path
-//         dst      TEXT NOT NULL,    -- node rel_path
-//         kind     TEXT NOT NULL,    -- "link" | "mention" | "tag"
-//         anchor   TEXT NOT NULL DEFAULT '',  -- heading/block anchor on
-//                                       dst; '' (never NULL) when none
-//         PRIMARY KEY (src, dst, kind, anchor))
-//                                    -- anchor is in the PK so one file
-//                                       can link the SAME target via two
-//                                       distinct anchors (heading + block)
-//                                       without the rows colliding
-//
-//   headings(rel_path TEXT NOT NULL,
-//            level    INTEGER NOT NULL,
-//            text     TEXT NOT NULL,
-//            anchor   TEXT NOT NULL,
-//            ord      INTEGER NOT NULL,
-//            PRIMARY KEY (rel_path, ord))
-//
-// `Workspace::graph()` constructs a `GraphView` against the per-workspace
-// sqlite handle. Reads (neighbors / backlinks / tags / files_with_tag
-// / headings_of / files) and writes (replace_file / forget_file /
-// clear) are both wired; `Workspace::reindex` calls `clear` then
-// `replace_file` per file as it walks the tree.
+// Node rows are files and contacts (`NodeKind`); a tag is an edge `dst`
+// string, never a node.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -90,7 +61,7 @@ const READER_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Node kind. Distinguishes a regular markdown file from one that
 /// the contacts importer dropped (frontmatter `chan.kind: contact`).
-/// The graph stores both as `nodes` rows; the kind workspaces downstream
+/// The graph stores both as `nodes` rows; the kind drives downstream
 /// filtering (the editor's `@` picker reads only contacts; backlinks
 /// and link-autocomplete read both). Aliasing a contact onto its
 /// file row keeps the graph free of double-counted edges.
@@ -111,6 +82,15 @@ impl NodeKind {
         match self {
             NodeKind::File => "file",
             NodeKind::Contact => "contact",
+        }
+    }
+
+    /// The inverse of `as_str` for a stored `nodes.kind`. Any value other
+    /// than `contact` reads as a file, the column's default kind.
+    fn from_db(s: &str) -> Self {
+        match s {
+            "contact" => NodeKind::Contact,
+            _ => NodeKind::File,
         }
     }
 }
@@ -163,7 +143,7 @@ pub struct ContactNode {
     /// Alternate names declared in the contact note's top-level
     /// `aliases:` frontmatter array. Resolves `@@<alias>` mentions
     /// to this contact at graph query time (see
-    /// chan-server's mention_to_contact map). Empty for contacts
+    /// [`crate::graph_normalize::MentionContactResolver`]). Empty for contacts
     /// without an aliases declaration and for contacts indexed
     /// before the v6 schema bump until the next index pass.
     #[serde(default)]
@@ -219,7 +199,8 @@ pub struct Edge {
 pub type FileStatRow = (String, Option<i64>, Option<i64>);
 
 /// Borrow-only payload describing one file's graph state, used by
-/// `GraphView::replace_all` for the atomic rebuild path. It borrows
+/// `GraphView::stage_file` for the staged rebuild path (and by
+/// `GraphView::replace_all`). It borrows
 /// from the caller's parsed data and is not re-exported from the crate
 /// root.
 pub struct FileGraph<'a> {
@@ -283,9 +264,8 @@ pub struct Mention {
 ///     typeahead, backlinks, and status reads draw from the pool
 ///     so they don't block on each other or on the writer.
 ///
-/// All public methods log entry at debug. Errors are wrapped in
-/// `ChanError::Graph` with enough context to attribute them to a
-/// specific operation in `tracing` output.
+/// Errors are wrapped in `ChanError::Graph` with enough context to
+/// attribute them to a specific operation in `tracing` output.
 pub struct GraphView {
     writer: Mutex<Connection>,
     readers: ReaderPool,
@@ -462,19 +442,10 @@ impl GraphView {
             // that already has the columns (the IF NOT EXISTS / no-op
             // ALTER TABLE pattern). That's why we tolerate "column
             // already exists" by inspecting PRAGMA before re-ALTERing.
-            let cols: Vec<String> = {
-                let mut stmt = conn.prepare("PRAGMA table_info(nodes)")?;
-                let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
-                let mut out = Vec::new();
-                for row in rows {
-                    out.push(row?);
-                }
-                out
-            };
-            if !cols.iter().any(|c| c == "title") {
+            if !Self::column_exists(conn, "nodes", "title")? {
                 conn.execute_batch("ALTER TABLE nodes ADD COLUMN title TEXT;")?;
             }
-            if !cols.iter().any(|c| c == "basename") {
+            if !Self::column_exists(conn, "nodes", "basename")? {
                 conn.execute_batch("ALTER TABLE nodes ADD COLUMN basename TEXT;")?;
             }
             conn.execute_batch(
@@ -605,7 +576,7 @@ impl GraphView {
         }
         if v < 6 {
             // v6: persist top-level `aliases:` frontmatter on nodes
-            // / staging_nodes so chan-server's mention resolver can
+            // / staging_nodes so the mention resolver can
             // map `@@<alias>` to a contact file without re-parsing
             // every contact's frontmatter on each graph query. NULL
             // on legacy rows; reconcile / index_file backfill them
@@ -837,9 +808,9 @@ impl GraphView {
     ///
     /// Includes BOTH unresolved mentions (where `dst` is the raw
     /// `@@<Name>` string) AND resolved mentions whose `dst` was
-    /// rewritten to a contact file path by chan-server's graph
-    /// route. Resolved mentions in the graph DB keep the raw
-    /// `@@<Name>` dst -- the rewrite is per-call in chan-server,
+    /// rewritten to a contact file path at query time by
+    /// [`crate::graph_normalize::normalize_graph_edges`]. Resolved mentions in
+    /// the graph DB keep the raw `@@<Name>` dst -- the rewrite is per-call,
     /// not persisted -- so the SQL filter on `kind = 'mention'`
     /// captures every reference.
     pub fn mentions(&self) -> Result<Vec<Mention>> {
@@ -1254,25 +1225,11 @@ impl GraphView {
         Ok(())
     }
 
-    /// Wipe every file, edge, and heading. Used by `Workspace::reindex`
-    /// before rebuilding from scratch.
-    pub fn clear(&self) -> Result<()> {
-        tracing::debug!("graph::clear");
-        let conn = self.writer.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM edges", [])?;
-        tx.execute("DELETE FROM headings", [])?;
-        tx.execute("DELETE FROM nodes", [])?;
-        tx.execute("DELETE FROM text_files", [])?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Atomic rebuild: clear the graph and re-insert `entries` in a
     /// single transaction. If any insert fails, the transaction
     /// rolls back and the graph stays in its previous state.
     ///
-    /// One transaction matters because `clear()` followed by per-file
+    /// One transaction matters because a wipe followed by per-file
     /// `replace_file()` calls (one transaction each, the path for
     /// incremental updates) leaves the graph half-populated when a
     /// write errors partway. The server's boot-time check requests a
@@ -1398,10 +1355,7 @@ impl GraphView {
         let row: Option<String> = stmt
             .query_row(params![rel], |r| r.get::<_, String>(0))
             .optional()?;
-        Ok(row.map(|s| match s.as_str() {
-            "contact" => NodeKind::Contact,
-            _ => NodeKind::File,
-        }))
+        Ok(row.map(|s| NodeKind::from_db(&s)))
     }
 
     /// All contact-kind nodes, sorted by display name. Convenience
@@ -1411,12 +1365,13 @@ impl GraphView {
         self.contacts_filtered(None, usize::MAX)
     }
 
-    /// Contact-kind nodes filtered + capped at the SQL layer. Workspaces
+    /// Contact-kind nodes filtered + capped at the SQL layer. Backs
     /// the editor's `@` picker and `GET /api/contacts`.
     ///
     /// `query`: case-insensitive substring matched against `title`
-    /// (the `# H1` of the imported note) and `basename` (the file
-    /// name minus directory). `None` or empty matches everything.
+    /// (the `# H1` of the imported note), `basename` (the file name
+    /// minus directory), and the space-joined `emails` and `aliases`
+    /// columns, LIKE-escaped. `None` or empty matches everything.
     /// `limit`: hard cap on rows returned. Callers that want
     /// "everything" pass `usize::MAX`.
     ///
@@ -1424,11 +1379,7 @@ impl GraphView {
     /// loading the full list + lowercasing every row in Rust is O(N)
     /// per request. SQLite's `LIKE` with `COLLATE NOCASE` does the
     /// same case-insensitive contains check at the storage layer and
-    /// stops walking once `limit` rows match. Email-aware matching
-    /// is not yet pushed down: emails live in the body bullets, not
-    /// the `nodes` row, so a future schema bump (or a side
-    /// `contact_emails` table) would be required before the picker
-    /// can match `alice` to `alice@example.com`.
+    /// stops walking once `limit` rows match.
     pub fn contacts_filtered(&self, query: Option<&str>, limit: usize) -> Result<Vec<ContactNode>> {
         let needle = query.map(|s| s.trim()).filter(|s| !s.is_empty());
         tracing::debug!(?needle, limit, "graph::contacts_filtered");
@@ -1437,9 +1388,9 @@ impl GraphView {
 
         // Two SQL shapes so the unfiltered path stays a clean
         // `WHERE kind = 'contact'` (planner picks the kind index, no
-        // wasted LIKE work), and the filtered path adds two
-        // case-insensitive contains predicates against title and
-        // basename.
+        // wasted LIKE work), and the filtered path adds
+        // case-insensitive contains predicates against title,
+        // basename, emails, and aliases.
         if let Some(q) = needle {
             // Use the same LIKE-wildcard escape pair (`like_escape` +
             // `ESCAPE '\\'`) the link-targets path uses so a query of
