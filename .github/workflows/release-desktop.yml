@@ -136,6 +136,41 @@ jobs:
             Get-ChildItem -LiteralPath $extractRoot -Recurse | Select-Object FullName
             exit 1
           }
+          # CodeSignTool runs its own bundled JDK (11.0.2, from 2019), never the
+          # runner's trust store, and that JDK's cacerts predates SSL.com TLS RSA
+          # Root CA 2022, the root cs.ssl.com chains to since 2026-09-22. Without
+          # the import every sign call fails its TLS handshake and the tool still
+          # exits 0 (dev/v0100-team/evidence/lead/rc1-release-35821827608/signing-diagnosis.md).
+          $rootPem = Join-Path $env:GITHUB_WORKSPACE "chan/desktop/src-tauri/scripts/windows/ssl-com-tls-rsa-root-ca-2022.pem"
+          $rootAlias = "sslcom-tls-rsa-root-ca-2022"
+          $rootFingerprint = "8FAF7D2E2CB4709BB8E0B33666BF75A5DD45B5DE480F8EA8D4BFE6BEBC17F2ED"
+          $jdks = @(Get-ChildItem -LiteralPath $tool.DirectoryName -Filter "keytool.exe" -Recurse -File |
+            Where-Object { $_.Directory.Name -eq "bin" } |
+            ForEach-Object { $_.Directory.Parent } |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "lib\security\cacerts") -PathType Leaf })
+          if ($jdks.Count -ne 1) {
+            Write-Output "::error::Expected exactly one bundled JDK (bin\keytool.exe + lib\security\cacerts) under $($tool.DirectoryName), found $($jdks.Count)"
+            Get-ChildItem -LiteralPath $tool.DirectoryName -Recurse -Filter "keytool.exe" | Select-Object FullName
+            Get-ChildItem -LiteralPath $tool.DirectoryName -Recurse -Filter "cacerts" | Select-Object FullName
+            exit 1
+          }
+          $jdk = $jdks[0].FullName
+          $keytool = Join-Path $jdk "bin\keytool.exe"
+          $cacerts = Join-Path $jdk "lib\security\cacerts"
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $rootPem
+          $gotFingerprint = $cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+          if ($gotFingerprint -ne $rootFingerprint) {
+            throw "Committed SSL.com root $rootPem has SHA256 $gotFingerprint, expected $rootFingerprint"
+          }
+          & $keytool -importcert -noprompt -alias $rootAlias -file $rootPem -keystore $cacerts -storepass changeit
+          if ($LASTEXITCODE -ne 0) {
+            throw "keytool -importcert into $cacerts failed with exit code $LASTEXITCODE"
+          }
+          & $keytool -list -alias $rootAlias -keystore $cacerts -storepass changeit
+          if ($LASTEXITCODE -ne 0) {
+            throw "keytool -list did not find alias $rootAlias in $cacerts (exit code $LASTEXITCODE)"
+          }
+          Write-Output "CodeSignTool JDK truststore: imported $rootAlias (SHA256 $gotFingerprint) into $cacerts"
           "path=$($tool.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "root=$($tool.DirectoryName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Output "CodeSignTool.bat: $($tool.FullName)"
