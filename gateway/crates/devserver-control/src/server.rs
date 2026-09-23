@@ -224,11 +224,7 @@ where
         Ok(proxy_id) => proxy_id,
         Err(status) => {
             send_http_response(&mut respond, status, true)?;
-            connection.graceful_shutdown();
-            let _ = tokio::time::timeout(Duration::from_secs(1), async {
-                while connection.accept().await.is_some() {}
-            })
-            .await;
+            drain_connection(&mut connection).await;
             return Ok(());
         }
     };
@@ -261,12 +257,19 @@ where
             }
         }
     };
+    drain_connection(&mut connection).await;
+    result
+}
+
+async fn drain_connection<T>(connection: &mut h2::server::Connection<T, bytes::Bytes>)
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     connection.graceful_shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(1), async {
         while connection.accept().await.is_some() {}
     })
     .await;
-    result
 }
 
 fn validate_request<B>(
@@ -345,30 +348,20 @@ where
         ));
     };
     if proxy_id != authenticated_proxy_id {
-        send_shutdown(
+        return illegal_frame(
             &mut writer,
             "ClientHello proxy id does not match its credential",
         )
-        .await?;
-        return Err(SessionError::Protocol(
-            "ClientHello proxy id does not match its credential".into(),
-        ));
+        .await;
     }
     if protocol_version != PROTOCOL_VERSION {
-        send_shutdown(&mut writer, "unsupported control protocol version").await?;
-        return Err(SessionError::Protocol(
-            "unsupported control protocol version".into(),
-        ));
+        return illegal_frame(&mut writer, "unsupported control protocol version").await;
     }
     if package_version != env!("CARGO_PKG_VERSION") {
-        send_shutdown(&mut writer, "gateway package version mismatch").await?;
-        return Err(SessionError::Protocol(
-            "gateway package version mismatch".into(),
-        ));
+        return illegal_frame(&mut writer, "gateway package version mismatch").await;
     }
     if let Err(message) = validate_origin(&origin_template, &proxy_id, &proxy_base_url) {
-        send_shutdown(&mut writer, message).await?;
-        return Err(SessionError::Protocol(message.to_string()));
+        return illegal_frame(&mut writer, message).await;
     }
 
     let mut session = match controller
@@ -713,17 +706,13 @@ where
                             .await?
                     }
                 };
-                if status == MutationStatus::Resyncing {
-                    *phase = Phase::awaiting_snapshot();
-                }
+                phase.apply_mutation_status(status);
             }
             ClientFrame::BrowserSessionUp { generation, row } => {
                 let status = controller
                     .browser_session_up(proxy_id.clone(), incarnation, generation, row)
                     .await?;
-                if status == MutationStatus::Resyncing {
-                    *phase = Phase::awaiting_snapshot();
-                }
+                phase.apply_mutation_status(status);
             }
             ClientFrame::BrowserSessionDown {
                 generation,
@@ -737,9 +726,7 @@ where
                         admin_session_id,
                     )
                     .await?;
-                if status == MutationStatus::Resyncing {
-                    *phase = Phase::awaiting_snapshot();
-                }
+                phase.apply_mutation_status(status);
             }
             ClientFrame::TunnelDown {
                 generation,
@@ -748,9 +735,7 @@ where
                 let status = controller
                     .tunnel_down(proxy_id.clone(), incarnation, generation, registration_id)
                     .await?;
-                if status == MutationStatus::Resyncing {
-                    *phase = Phase::awaiting_snapshot();
-                }
+                phase.apply_mutation_status(status);
             }
             ClientFrame::AdmissionRequest {
                 request_id,
@@ -1099,6 +1084,12 @@ enum Phase {
 }
 
 impl Phase {
+    fn apply_mutation_status(&mut self, status: MutationStatus) {
+        if status == MutationStatus::Resyncing {
+            *self = Self::awaiting_snapshot();
+        }
+    }
+
     fn awaiting_snapshot() -> Self {
         Self::AwaitSnapshot {
             deadline: Instant::now() + SNAPSHOT_TIMEOUT,

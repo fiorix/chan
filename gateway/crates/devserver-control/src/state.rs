@@ -174,6 +174,10 @@ struct ProxySession {
 }
 
 impl ProxySession {
+    fn is_fleet_ready(&self) -> bool {
+        self.status == ProxyStatus::Active && self.fleet_ready
+    }
+
     fn remember_removal(&mut self, registration_id: Uuid) {
         if self.removed_registrations.len() < MAX_REMOVED_REGISTRATIONS {
             self.removed_registrations.insert(registration_id);
@@ -896,7 +900,7 @@ impl ControllerState {
         session
             .browser_sessions
             .insert(row.admin_session_id, row.clone());
-        if session.status == ProxyStatus::Active && session.fleet_ready {
+        if session.is_fleet_ready() {
             self.view_generations.browser_sessions =
                 self.view_generations.browser_sessions.wrapping_add(1);
             self.browser_sessions.insert(
@@ -977,7 +981,7 @@ impl ControllerState {
         let active = self
             .proxies
             .get(proxy_id.as_str())
-            .is_some_and(|session| session.status == ProxyStatus::Active && session.fleet_ready);
+            .is_some_and(|session| session.is_fleet_ready());
         if !self.ready || !active {
             return Ok(vec![admission_effect(
                 session_key,
@@ -1936,11 +1940,7 @@ impl ControllerState {
         let mut grouped: BTreeMap<TunnelKey, Vec<OwnedTunnel>> = BTreeMap::new();
         let mut signed_limits: HashMap<Uuid, usize> = HashMap::new();
         for candidate in candidates {
-            let deployment_limit = if self.max_devservers_per_user == 0 {
-                usize::MAX
-            } else {
-                self.max_devservers_per_user
-            };
+            let deployment_limit = self.deployment_limit();
             signed_limits
                 .entry(candidate.row.owner_user_id)
                 .and_modify(|limit| {
@@ -1967,7 +1967,6 @@ impl ControllerState {
             }
             let winner = rows.remove(0);
             desired.insert(key, winner);
-            losers.extend(rows);
         }
 
         let mut by_user: BTreeMap<Uuid, Vec<(TunnelKey, OwnedTunnel)>> = BTreeMap::new();
@@ -2029,11 +2028,7 @@ impl ControllerState {
                 .insert(devserver_id.clone());
         }
         for ((owner, _), tunnel) in &desired {
-            let deployment_limit = if self.max_devservers_per_user == 0 {
-                usize::MAX
-            } else {
-                self.max_devservers_per_user
-            };
+            let deployment_limit = self.deployment_limit();
             limits_per_user
                 .entry(*owner)
                 .and_modify(|limit| {
@@ -2044,11 +2039,7 @@ impl ControllerState {
                 });
         }
         for ((owner, _), claim) in &self.pending {
-            let deployment_limit = if self.max_devservers_per_user == 0 {
-                usize::MAX
-            } else {
-                self.max_devservers_per_user
-            };
+            let deployment_limit = self.deployment_limit();
             limits_per_user
                 .entry(*owner)
                 .and_modify(|limit| *limit = (*limit).min(claim.max_connected_devservers as usize))
@@ -2057,11 +2048,7 @@ impl ControllerState {
 
         let mut grouped: BTreeMap<TunnelKey, Vec<TunnelRow>> = BTreeMap::new();
         for row in rows {
-            let deployment_limit = if self.max_devservers_per_user == 0 {
-                usize::MAX
-            } else {
-                self.max_devservers_per_user
-            };
+            let deployment_limit = self.deployment_limit();
             limits_per_user
                 .entry(row.owner_user_id)
                 .and_modify(|limit| *limit = (*limit).min(row.max_connected_devservers as usize))
@@ -2496,12 +2483,16 @@ impl ControllerState {
             .map_or(0, HashMap::len)
     }
 
-    fn effective_owner_limit(&self, owner_user_id: Uuid, candidate_limit: u32) -> usize {
-        let deployment_limit = if self.max_devservers_per_user == 0 {
+    fn deployment_limit(&self) -> usize {
+        if self.max_devservers_per_user == 0 {
             usize::MAX
         } else {
             self.max_devservers_per_user
-        };
+        }
+    }
+
+    fn effective_owner_limit(&self, owner_user_id: Uuid, candidate_limit: u32) -> usize {
+        let deployment_limit = self.deployment_limit();
         self.tunnels
             .iter()
             .filter_map(|((owner, _), tunnel)| {
