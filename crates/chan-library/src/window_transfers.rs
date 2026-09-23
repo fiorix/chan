@@ -78,6 +78,10 @@ impl WindowTransfers {
     }
 }
 
+/// Largest in-flight count one socket may report. Far above any real transfer
+/// fan-out, and small enough that `isize` arithmetic on it never overflows.
+const MAX_REPORTED_TRANSFERS: usize = 1 << 20;
+
 /// RAII handle for one window socket's transfer contribution. `set` updates
 /// this socket's reported in-flight count; Drop subtracts whatever it last
 /// reported, so a dropped socket (a reload, a network drop, server shutdown)
@@ -95,6 +99,10 @@ impl TransferGuard {
     /// socket's own pump (single-threaded per guard), so the swap-then-adjust
     /// pair needs no extra synchronization beyond the map lock.
     pub fn set(&self, active: usize) {
+        // The count comes from the client. Capped, the signed deltas below
+        // cannot wrap, and no report can leave the window's sum stuck above
+        // zero after the socket reports zero or drops.
+        let active = active.min(MAX_REPORTED_TRANSFERS);
         let prev = self.last.swap(active, Ordering::SeqCst);
         if active != prev {
             self.transfers
@@ -115,6 +123,22 @@ impl Drop for TransferGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A report of any size clears when the socket reports zero or drops, and
+    // dropping after an enormous report does not overflow.
+    #[test]
+    fn an_absurd_report_still_clears() {
+        let transfers = Arc::new(WindowTransfers::new());
+        let guard = transfers.register("w1");
+        guard.set(usize::MAX);
+        assert!(transfers.window_has_active_transfer("w1"));
+        guard.set(0);
+        assert!(!transfers.window_has_active_transfer("w1"));
+
+        guard.set(usize::MAX / 2 + 1);
+        drop(guard);
+        assert!(!transfers.window_has_active_transfer("w1"));
+    }
 
     #[test]
     fn set_then_clear_follows_the_count() {
