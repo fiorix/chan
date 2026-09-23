@@ -1380,7 +1380,8 @@ pub async fn api_read_file(
     }
 
     if query_flag(&query.stream) {
-        return stream_read_file_response(workspace, path).await;
+        return stream_read_file_response(state.bulk_transfer.stall_signal(), workspace, path)
+            .await;
     }
 
     let read_workspace = workspace.clone();
@@ -1636,21 +1637,20 @@ async fn read_via_session(
 }
 
 async fn stream_read_file_response(
+    signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
 ) -> Response {
-    let (tx, mut rx) = mpsc::channel::<FileStreamMessage>(8);
-    let path_for_read = path.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = stream_read_file_sync(&workspace, &path_for_read, |bytes| {
-            tx.blocking_send(FileStreamMessage::Data(bytes)).is_ok()
+    let mut bridge = crate::bulk_transfer::StreamBridge::spawn(signal, move |frames| {
+        let result = stream_read_file_sync(&workspace, &path, |bytes| {
+            frames.send(FileStreamMessage::Data(bytes))
         });
         if let Err(e) = result {
-            let _ = tx.blocking_send(FileStreamMessage::Error(e));
+            frames.send(FileStreamMessage::Error(e));
         }
     });
 
-    let first = match rx.recv().await {
+    let first = match bridge.first().await {
         Some(FileStreamMessage::Data(bytes)) => bytes,
         Some(FileStreamMessage::Error(e)) => return err_from(&e),
         None => {
@@ -1660,17 +1660,10 @@ async fn stream_read_file_response(
             )
         }
     };
-    let rest = stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| {
-            let bytes = match message {
-                FileStreamMessage::Data(bytes) => bytes,
-                FileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
-            };
-            (Ok::<Bytes, Infallible>(bytes), rx)
-        })
+    let body = bridge.into_body(first, |message| match message {
+        FileStreamMessage::Data(bytes) => bytes,
+        FileStreamMessage::Error(e) => ndjson_error_bytes(e.to_string()),
     });
-    let body =
-        Body::from_stream(stream::once(async move { Ok::<Bytes, Infallible>(first) }).chain(rest));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
@@ -4837,9 +4830,11 @@ mod write_tests {
             frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
             "the producer must outrun the channel, got {frames} frames"
         );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
             "workspace text stream",
-            || stream_read_file_response(workspace, "big.md".into()),
+            || stream_read_file_response(bulk.stall_signal(), workspace, "big.md".into()),
         );
         assert!(
             body.is_err(),
