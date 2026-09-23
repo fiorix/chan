@@ -751,19 +751,35 @@ fn id_is_taken(windows: &[PersistedWindow], unreadable: &[UnreadableRow], id: &s
 /// set so the per-library id is unique structurally, not reliant on entropy
 /// width. The opaque id never carries meaning; clients treat it as a black box.
 fn mint_id(windows: &[PersistedWindow], unreadable: &[UnreadableRow]) -> String {
-    use std::fmt::Write as _;
+    mint_id_from(windows, unreadable, random_window_id)
+}
+
+/// The re-roll loop behind [`mint_id`], over any candidate source, so a test
+/// can offer a taken id first and see the loop pass over it.
+fn mint_id_from(
+    windows: &[PersistedWindow],
+    unreadable: &[UnreadableRow],
+    mut candidate: impl FnMut() -> String,
+) -> String {
     loop {
-        let mut bytes = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        let mut id = String::with_capacity(18);
-        id.push_str("w-");
-        for b in bytes {
-            let _ = write!(id, "{b:02x}");
-        }
+        let id = candidate();
         if !id_is_taken(windows, unreadable, &id) {
             return id;
         }
     }
+}
+
+/// One random `w-<16 hex>` candidate id.
+fn random_window_id() -> String {
+    use std::fmt::Write as _;
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut id = String::with_capacity(18);
+    id.push_str("w-");
+    for b in bytes {
+        let _ = write!(id, "{b:02x}");
+    }
+    id
 }
 
 /// Allocate "Window N" within the same `(kind, workspace_path)` family.
@@ -1885,12 +1901,11 @@ mod tests {
         let (path, _readable, _unknown) = store_with_an_unknown_kind(dir.path());
         let reg = WindowRegistry::open(path);
         let windows = reg.lock();
-        assert!(id_is_taken(&windows, &reg.unreadable, "w-readable"));
-        assert!(
-            id_is_taken(&windows, &reg.unreadable, "w-unknown"),
-            "an unreadable row's id is reserved"
-        );
-        assert!(!id_is_taken(&windows, &reg.unreadable, "w-free"));
+        let mut candidates = ["w-unknown", "w-fresh"].into_iter();
+        let id = mint_id_from(&windows, &reg.unreadable, || {
+            candidates.next().expect("a candidate").to_string()
+        });
+        assert_eq!(id, "w-fresh", "the mint passes over an unreadable row's id");
     }
 
     #[test]
