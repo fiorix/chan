@@ -73,6 +73,8 @@ createdb chan_gateway_test   # test database used by integration tests
 export DATABASE_URL=postgres://localhost/chan_gateway
 ```
 
+The gateway database must run a UTF-8 locale (an `LC_CTYPE` such as `C.UTF-8`, for example `createdb --template=template0 --locale=C.UTF-8`): profile folds grant-claim and admin-filter emails with PostgreSQL `lower()`, which folds only ASCII under a `C` or `POSIX` ctype.
+
 Only identity-service ships a SPA. Its source is `@chan/profile` and the shared chrome is `@chan/web-shared`, both members of the `./web` npm workspace at the repo root:
 
 ```bash

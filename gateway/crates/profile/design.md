@@ -177,6 +177,8 @@ Access decisions: identity-service calls `GET /v1/users/{owner}/devservers/{devs
 
 devserver_id normalization: handler lowercases + trims and rejects anything that is not exactly 64 hex chars, the canonical SHA-256(PAT) shape. Email uniqueness is case-insensitive via a functional `lower(grantee_email)` index; display preserves the as-typed casing. Token rotation mints a new PAT and thus a new devserver_id, so existing grants do not survive rotation (re-share required); this is the settled trade-off in ADR-0001.
 
+Grant claims (`POST /v1/users/{id}/grants/claim`) and the admin email filter match on PostgreSQL `lower()` of both the stored and the supplied emails, so a verified address claims a grant made to any case variant of it, non-ASCII capitals included, and both sides fold by the same rule. Unicode lowering is not injective, so the fold also merges distinct characters: U+212A KELVIN SIGN lowers to ASCII `k`, and a provider-verified `\u{212A}ate@corp.example` claims a pending grant made to `kate@corp.example`. Reaching that needs an identity provider that verifies a mailbox with such a character at the grantee's own domain; the gateway accepts that residual rather than fold one side ASCII-only, which would miss genuine non-ASCII case variants. `lower()` follows the database's `LC_CTYPE`, and a `C` or `POSIX` ctype folds ASCII only, so the non-ASCII promise holds only when the gateway database runs a UTF-8 locale (for example `C.UTF-8`).
+
 Listings: `GET /v1/users/{id}/grants/owned` returns `(owner_user_id, devserver_id, label, grant_count)` for every devserver the user owns (zero-grant rows included); `GET /v1/users/{id}/grants/incoming` returns devservers shared *with* the user (claimed grants only). FK cascades on `users(id)` drop grants when either the owner or the grantee is deleted.
 
 ### Feature flags
@@ -187,7 +189,7 @@ The seeded flags ship `default_enabled = false`, so a fresh deploy refuses every
 
 ### All SQL is parameterized
 
-Column lists are constants `format!`'d into queries; user input always rides through `.bind()` at `$N`. Substring search on email in the admin list endpoint uses `position($1 in lower(email)) > 0` with the substring as a bound parameter.
+Column lists are constants `format!`'d into queries; user input always rides through `.bind()` at `$N`. Substring search on email in the admin list endpoint uses `position(lower($1) in lower(email)) > 0` with the substring as a bound parameter.
 
 ## Invariants
 
@@ -225,5 +227,3 @@ Database errors are logged with `tracing::error!(error = ?e, ...)`; clients see 
 - Rate limiting on the service API (mitigated at the network layer; admin tree is bearer-gated by a separate token)
 
 The access gate grants the owner independently of the durable devserver registry. Unnamed rows may be swept or asynchronously recreated without denying their owner. Other callers still require a claimed grant for the exact owner and devserver.
-
-Grant claims and admin email filters apply PostgreSQL case conversion to both stored and supplied emails, including non-ASCII characters.
