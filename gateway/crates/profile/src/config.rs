@@ -56,7 +56,10 @@ fn parse_retention_minutes(raw: Option<&str>) -> anyhow::Result<Option<std::time
     let minutes: u64 = raw.trim().parse().with_context(|| {
         format!("DEVSERVER_RETENTION_MINUTES must be a whole number of minutes (0 disables), got {raw:?}")
     })?;
-    Ok((minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60)))
+    let seconds = minutes
+        .checked_mul(60)
+        .context("DEVSERVER_RETENTION_MINUTES is out of range")?;
+    Ok((seconds > 0).then(|| std::time::Duration::from_secs(seconds)))
 }
 
 impl Config {
@@ -128,6 +131,17 @@ mod tests {
         // Whitespace tolerated, value honored.
         let parsed = parse_retention_minutes(Some(" 45 ")).expect("45 parses");
         assert_eq!(parsed, Some(std::time::Duration::from_secs(45 * 60)));
+    }
+
+    #[test]
+    fn retention_rejects_overflow_and_accepts_the_largest_duration() {
+        let max_minutes = u64::MAX / 60;
+        assert_eq!(
+            parse_retention_minutes(Some(&max_minutes.to_string())).unwrap(),
+            Some(std::time::Duration::from_secs(max_minutes * 60))
+        );
+        assert!(parse_retention_minutes(Some(&(max_minutes + 1).to_string())).is_err());
+        assert!(parse_retention_minutes(Some(&u64::MAX.to_string())).is_err());
     }
 
     #[test]
