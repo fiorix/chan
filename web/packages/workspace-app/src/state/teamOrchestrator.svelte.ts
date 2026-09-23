@@ -231,9 +231,14 @@ function realEstateFromWire(
 }
 
 /// The workspace root as the prompt names it: trailing separators
-/// dropped, except that a bare filesystem root keeps its one.
+/// dropped, except that a bare filesystem root keeps its one. A Windows
+/// drive root counts as bare: `C:` alone names the drive's current
+/// directory, not its root, so `C:\` stays whole.
 function promptRoot(root: string): string {
-  return root.replace(/[/\\]+$/, "") || root;
+  const trimmed = root.replace(/[/\\]+$/, "");
+  if (!trimmed) return root;
+  if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}${root.charAt(trimmed.length)}`;
+  return trimmed;
 }
 
 /// `{root}/{teamDir}/bootstrap.md` with one separator however the two
