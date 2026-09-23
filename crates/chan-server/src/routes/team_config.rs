@@ -943,6 +943,53 @@ mod tests {
         assert_eq!(read.tab_group, "alpha", "tab_group must round-trip");
     }
 
+    /// Whether a whitespace-split token of the generated document names an
+    /// absolute filesystem path: a POSIX root, a home shorthand, a Windows
+    /// drive, or a UNC prefix. Leading punctuation (a backtick, a quote, a
+    /// dash) is skipped so a quoted path is still seen.
+    fn looks_absolute(token: &str) -> bool {
+        let token = token.trim_start_matches(|c: char| !c.is_alphanumeric() && !"/~\\".contains(c));
+        let bytes = token.as_bytes();
+        let posix = bytes.len() > 1 && bytes[0] == b'/' && bytes[1] != b'/';
+        let home = token.starts_with("~/");
+        let drive = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/');
+        let unc = token.starts_with("\\\\");
+        posix || home || drive || unc
+    }
+
+    #[test]
+    fn bootstrap_md_keeps_workspace_relative_paths() {
+        // bootstrap.md is a persisted, shareable workspace file that `team
+        // load` respawns without regenerating, so it must not carry the
+        // author's absolute layout; the identity poke is what anchors it.
+        let doc = generate_bootstrap_md("teams/alpha", &sample_config(), None);
+        let absolute: Vec<&str> = doc
+            .split_whitespace()
+            .filter(|token| looks_absolute(token))
+            .collect();
+        assert!(
+            absolute.is_empty(),
+            "bootstrap.md names absolute paths: {absolute:?}"
+        );
+        assert!(
+            doc.contains("teams/alpha/tasks/task-{from}-{to}-{n}.md"),
+            "task paths stay workspace-relative: {doc}"
+        );
+        assert!(
+            doc.contains("teams/alpha/journals/journal-{your-name}.md"),
+            "journal paths stay workspace-relative: {doc}"
+        );
+        // The detector itself sees what the assertion guards against.
+        assert!(looks_absolute("/home/someone/ws/teams/alpha"));
+        assert!(looks_absolute("`C:\\ws\\teams`"));
+        assert!(looks_absolute("~/ws"));
+        assert!(!looks_absolute("teams/alpha/tasks"));
+        assert!(!looks_absolute("/"));
+    }
+
     #[test]
     fn write_creates_config_bootstrap_and_subdirs() {
         let (_cfg, _root, workspace) = test_workspace();
