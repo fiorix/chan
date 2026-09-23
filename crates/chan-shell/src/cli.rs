@@ -665,7 +665,7 @@ pub enum SessionAction {
         #[arg(long)]
         accept: bool,
         /// Reject a pending handover request (leader only).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "accept")]
         reject: bool,
         /// Seconds to wait for the leader's answer.
         #[arg(long, default_value_t = 30)]
@@ -895,7 +895,7 @@ pub enum TerminalAction {
         cmd: Option<String>,
         /// Read up to 4096 UTF-8 bytes from this process's stdin instead of
         /// `cmd`; refuse larger input rather than truncating it.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "cmd")]
         stdin: bool,
         /// Submit the input into each target hands-free (the completion-poke
         /// path), encoded for the AGENT you name. Your value selects the
@@ -995,7 +995,7 @@ pub enum TerminalAction {
         timeout: u64,
         /// Read the markdown problem body from this process's stdin
         /// instead of the positional `body` (handy for multi-line bodies).
-        #[arg(long, verbatim_doc_comment)]
+        #[arg(long, conflicts_with = "body", verbatim_doc_comment)]
         stdin: bool,
         /// The markdown problem body. Multiple words join with spaces.
         /// Omit only with `--stdin`.
@@ -2749,6 +2749,44 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("max 4096 bytes"), "{error}");
+    }
+
+    // A contradictory pair is refused at parse time instead of one side being
+    // silently dropped: accept wins over reject, and stdin over a body given
+    // on the command line.
+    #[test]
+    fn contradictory_flags_are_refused() {
+        for argv in [
+            &["cs", "session", "handover", "--accept", "--reject"][..],
+            &[
+                "cs",
+                "terminal",
+                "write",
+                "--tab-name",
+                "@@A",
+                "--stdin",
+                "hello",
+            ][..],
+            &[
+                "cs",
+                "terminal",
+                "survey",
+                "--tab-name",
+                "@@A",
+                "--stdin",
+                "body",
+            ][..],
+        ] {
+            assert!(CsCli::try_parse_from(argv).is_err(), "{argv:?} parsed");
+        }
+        // Each flag alone still parses.
+        for argv in [
+            &["cs", "session", "handover", "--reject"][..],
+            &["cs", "terminal", "write", "--tab-name", "@@A", "--stdin"][..],
+            &["cs", "terminal", "survey", "--tab-name", "@@A", "body"][..],
+        ] {
+            assert!(CsCli::try_parse_from(argv).is_ok(), "{argv:?} refused");
+        }
     }
 
     #[test]
