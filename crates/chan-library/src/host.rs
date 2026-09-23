@@ -1254,10 +1254,7 @@ impl WorkspaceHost {
                 .read()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
             if workspaces.contains_key(&prefix) {
-                return Err(Error::Config(format!(
-                    "workspace prefix already mounted: {}",
-                    display_prefix(&prefix)
-                )));
+                return Err(duplicate_prefix_error(&prefix));
             }
             if workspaces.values().any(|runtime| runtime.root == root) {
                 return Err(Error::Config(format!(
@@ -1278,26 +1275,7 @@ impl WorkspaceHost {
                 self.control_identity(),
             )
             .await?;
-        // Presence transitions (a window's first socket connecting / last one
-        // dropping) shift its `connected` flag with no registry change, so feed
-        // the tenant's presence the aggregate signal the watch awaits.
-        artifacts
-            .window_presence
-            .install_change_notify(self.library_change_notify.clone());
-        // A leader change (election, reaper promotion, handover) shifts the
-        // watch feed's per-tenant leaders map with no registry change, so feed
-        // the tenant's session registry the same aggregate signal.
-        artifacts
-            .session_registry
-            .install_change_notify(self.library_change_notify.clone());
-        // Continuous fd parking spans every tenant's registry (workspace
-        // panes park exactly like standalone terminals).
-        #[cfg(target_os = "linux")]
-        if let Some(parker) = self.terminal_fd_parker.get() {
-            artifacts
-                .terminal_sessions
-                .install_fd_parker(parker.clone());
-        }
+        self.wire_tenant_signals(&artifacts);
         let handle = ServeHandle {
             addr: config.addr,
             prefix: prefix.clone(),
@@ -1350,10 +1328,7 @@ impl WorkspaceHost {
                 .write()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
             if workspaces.contains_key(&prefix) {
-                Error::Config(format!(
-                    "workspace prefix already mounted: {}",
-                    display_prefix(&prefix)
-                ))
+                duplicate_prefix_error(&prefix)
             } else if workspaces
                 .values()
                 .any(|existing| existing.canonical_root == runtime.canonical_root)
@@ -1460,10 +1435,7 @@ impl WorkspaceHost {
                 .read()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
             if workspaces.contains_key(&prefix) {
-                return Err(Error::Config(format!(
-                    "workspace prefix already mounted: {}",
-                    display_prefix(&prefix)
-                )));
+                return Err(duplicate_prefix_error(&prefix));
             }
         }
 
@@ -1487,22 +1459,7 @@ impl WorkspaceHost {
                 self.control_identity(),
             )
             .await?;
-        // Feed the tenant's presence the aggregate change signal (see
-        // `open_workspace`); a terminal window's `connected` is presence-driven.
-        artifacts
-            .window_presence
-            .install_change_notify(self.library_change_notify.clone());
-        // Same for the session registry, so a terminal-tenant leader change
-        // refreshes the watch feed's leaders map (see `open_workspace`).
-        artifacts
-            .session_registry
-            .install_change_notify(self.library_change_notify.clone());
-        #[cfg(target_os = "linux")]
-        if let Some(parker) = self.terminal_fd_parker.get() {
-            artifacts
-                .terminal_sessions
-                .install_fd_parker(parker.clone());
-        }
+        self.wire_tenant_signals(&artifacts);
         // A standalone terminal window IS its PTY. When the shell exits and
         // no client is attached, the registry's `reap_exited` closes the session;
         // hook it so the window-feed row leaves with it instead of lingering as a
@@ -1549,10 +1506,7 @@ impl WorkspaceHost {
             .write()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
         if workspaces.contains_key(&prefix) {
-            return Err(Error::Config(format!(
-                "workspace prefix already mounted: {}",
-                display_prefix(&prefix)
-            )));
+            return Err(duplicate_prefix_error(&prefix));
         }
         workspaces.insert(prefix, runtime);
         drop(workspaces);
@@ -2482,10 +2436,9 @@ impl WorkspaceHost {
     /// Discard a window: drop its registry row, reap its terminal sessions, and
     /// fire the watch. Returns whether a row existed (a `DELETE` handler maps
     /// `false` to 404). Reaping on discard frees the fds a busy detached session
-    /// would otherwise keep alive. A terminal window's sessions reap once terminal
-    /// tenant wiring is present; until then only that tenant is absent, so the reap
-    /// is simply a no-op for terminal windows (workspace windows reap their panes
-    /// today).
+    /// would otherwise keep alive. A terminal window's sessions reap when the
+    /// terminal tenant is wired; without it the reap is a no-op for terminal
+    /// windows.
     pub fn discard_window(&self, window_id: &str) -> Result<bool, Error> {
         let registry = self
             .window_registry()
@@ -2799,11 +2752,10 @@ impl WorkspaceHost {
 
     /// Shutdown-flavored close: unmount the workspace at `root` WITHOUT recording
     /// it off in the on/off overlay. The desired-state overlay must survive
-    /// teardown so the next boot restores the same on-set. The process-shutdown
-    /// paths (the desktop Exit handler and the panic-unwind `Drop`) snapshot the
-    /// on-set first, then close every mounted workspace this way, so a slow
-    /// per-workspace teardown racing process death can never flip a workspace off
-    /// for the next boot. Every other close is genuine user intent and records
+    /// teardown so the next boot restores the same on-set. No in-tree caller
+    /// uses it outside the tests: the process-shutdown paths drain through
+    /// [`shutdown_all`](Self::shutdown_all), which leaves the overlay alone for
+    /// the same reason. Every other close is genuine user intent and records
     /// off through [`close_workspace_for_root`](Self::close_workspace_for_root).
     pub async fn close_workspace_for_root_preserving_overlay(
         &self,
@@ -3077,6 +3029,28 @@ impl WorkspaceHost {
         runtime.shutdown().await;
         self.notify_window_change();
         Ok(true)
+    }
+
+    /// Feed a freshly built tenant the host's aggregate change signal and fd
+    /// parker. Presence transitions (a window's first socket connecting / last
+    /// one dropping) shift its `connected` flag, and a leader change (election,
+    /// reaper promotion, handover) shifts the watch feed's per-tenant leaders
+    /// map, both with no registry change, so the watch must hear them. fd
+    /// parking spans every tenant's registry (workspace panes park exactly like
+    /// standalone terminals).
+    fn wire_tenant_signals(&self, artifacts: &TenantArtifacts) {
+        artifacts
+            .window_presence
+            .install_change_notify(self.library_change_notify.clone());
+        artifacts
+            .session_registry
+            .install_change_notify(self.library_change_notify.clone());
+        #[cfg(target_os = "linux")]
+        if let Some(parker) = self.terminal_fd_parker.get() {
+            artifacts
+                .terminal_sessions
+                .install_fd_parker(parker.clone());
+        }
     }
 
     /// Drain every mounted tenant for normal process shutdown without changing
@@ -3709,6 +3683,14 @@ fn display_prefix(prefix: &str) -> &str {
     } else {
         prefix
     }
+}
+
+/// The refusal every mount path gives when `prefix` is already taken.
+fn duplicate_prefix_error(prefix: &str) -> Error {
+    Error::Config(format!(
+        "workspace prefix already mounted: {}",
+        display_prefix(prefix)
+    ))
 }
 
 // The workspace-cell teardown (cancel indexer, drop watcher + workspace, return
@@ -4613,7 +4595,7 @@ mod tests {
     #[tokio::test]
     async fn off_filters_windows_from_feed_but_preserves_them_for_on_restore() {
         // Turning a workspace OFF must HIDE its windows from the live feed
-        // (finding #1) but PRESERVE the persisted records so turning it back ON
+        // but PRESERVE the persisted records so turning it back ON
         // restores them. A terminal window is never workspace-gated. Only FORGET
         // purges (covered by `forget_purges_the_workspaces_windows`).
         let cfg = tempfile::tempdir().expect("config dir");
