@@ -1342,6 +1342,90 @@ mod tests {
         );
     }
 
+    /// The tunnel driver closes yamux over the tunnel's h2 stream, and
+    /// that close is a write: a peer that has stopped granting h2 window
+    /// leaves it pending for as long as the peer likes. The handler must
+    /// return within the drain bound all the same, since the h2 driver
+    /// is released only once it has.
+    #[tokio::test]
+    async fn an_ended_tunnel_whose_peer_grants_no_window_still_returns() {
+        use futures::AsyncWriteExt as _;
+
+        let registry = Registry::new();
+        let mut held = dial_and_hold(
+            Arc::new(ScriptedValidator(Verdict::Admit)),
+            Arc::new(AllowAllAdmission),
+            registry.clone(),
+        )
+        .await;
+        assert_eq!(held.status, StatusCode::OK);
+        let tunnel = held.tunnel.take().expect("an admitted dial gets its 200");
+        // The peer never polls its yamux connection, so it never reads
+        // the tunnel stream and never grants the server more h2 window
+        // than the default 65_535 its connection started with.
+        let (_registration, _yamux) = tokio::time::timeout(
+            Duration::from_secs(5),
+            chan_tunnel_client::handshake(&client_config(), tunnel),
+        )
+        .await
+        .expect("no HelloAck")
+        .expect("admitted handshake");
+        let mut registered = None;
+        for _ in 0..100 {
+            if let Some(entry) = registry.get("alice", "ds-1") {
+                registered = Some(entry);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let handle = registered.expect("the admitted tunnel never registered");
+
+        // Write more than the peer's window down a substream: the tunnel
+        // driver forwards it until h2 has no capacity left, and every
+        // later write on the tunnel stream, the yamux close included,
+        // waits on a window update that never comes.
+        let filler = tokio::spawn(async move {
+            let mut stream = handle.open().await.expect("substream open");
+            let _ = stream.write_all(&[0u8; 256 * 1024]).await;
+            stream
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert!(
+            registry.evict("alice", "ds-1"),
+            "the eviction found no tunnel to end",
+        );
+        let ended_at = tokio::time::Instant::now();
+        let handler = tokio::time::timeout(CLOSE_WINDOW, &mut held.serving)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the tunnel ended against a peer granting no window, and {CLOSE_WINDOW:?} \
+                     later the handler has not returned"
+                )
+            })
+            .expect("handler task");
+        let returned_after = ended_at.elapsed();
+        assert!(
+            handler.is_ok(),
+            "the handler reported an error: {handler:?}"
+        );
+        assert!(
+            returned_after >= REJECTION_DRAIN_TIMEOUT,
+            "the handler returned {returned_after:?} after the eviction, inside the drain bound: \
+             the peer's window was not exhausted, so the stalled close was never reached",
+        );
+        let closed = tokio::time::timeout(CLOSE_WINDOW, &mut held.connection)
+            .await
+            .is_ok();
+        assert!(
+            closed,
+            "the handler returned, and {CLOSE_WINDOW:?} later the server still holds the \
+             connection open",
+        );
+        filler.abort();
+    }
+
     /// `accept(2)` fails for reasons that say nothing about the listening
     /// socket: a peer that reset before it was accepted, or a process
     /// out of descriptors under exactly the flood this listener exists to
