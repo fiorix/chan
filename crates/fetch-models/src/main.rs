@@ -49,7 +49,10 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&staging).with_context(|| format!("create {}", staging.display()))?;
 
     if let Some((var, val)) = active_proxy() {
-        eprintln!("fetch-models: using {var}={val}");
+        eprintln!(
+            "fetch-models: using {var}={}",
+            redact_proxy_credentials(&val)
+        );
     }
     eprintln!(
         "fetch-models: seeding {DEFAULT_MODEL} into {}",
@@ -268,9 +271,39 @@ fn active_proxy() -> Option<(&'static str, String)> {
     None
 }
 
+/// The proxy value with any `user:pass@` credentials replaced, so the log
+/// line names the proxy without putting its password in build output.
+fn redact_proxy_credentials(value: &str) -> String {
+    let (scheme, rest) = match value.find("://") {
+        Some(at) => value.split_at(at + 3),
+        None => ("", value),
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{scheme}***@{}", &rest[at + 1..]),
+        None => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_credentials_never_reach_the_log() {
+        assert_eq!(
+            redact_proxy_credentials("http://user:secret@proxy.example:3128"),
+            "http://***@proxy.example:3128"
+        );
+        assert_eq!(
+            redact_proxy_credentials("user:secret@proxy.example:3128/path@x"),
+            "***@proxy.example:3128/path@x"
+        );
+        assert_eq!(
+            redact_proxy_credentials("http://proxy.example:3128"),
+            "http://proxy.example:3128"
+        );
+    }
 
     struct TestDir(PathBuf);
 
