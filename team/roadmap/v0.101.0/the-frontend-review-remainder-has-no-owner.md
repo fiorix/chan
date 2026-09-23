@@ -12,7 +12,7 @@ Several wait on a decision more than on work: whether graph filesystem mode is s
 
 **4 findings deliberately not scheduled**: the proposals to split `tabs.svelte.ts` (7,470 lines), `store.svelte.ts` (5,798), `GraphPanel.svelte` (3,552) and `TerminalTab.svelte` (3,073). The review names the seams and advises against cutting them alongside other work; they are recorded in the design documents and revisited when a feature needs one opened.
 
-The working ledger, one row per finding with its verdict at HEAD and its target, is `dev/frontend-review-status.md` in the round's working tree, beside the five re-verification reports under `dev/v0100-team/prep/`.
+The working ledger, one row per finding with its verdict at HEAD and its target, is `dev/frontend-review-status.md` in the round's working tree, beside the five re-verification reports the round wrote before it opened.
 
 ## Desired contract
 

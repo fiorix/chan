@@ -1,6 +1,6 @@
 # Windows signing has no early credential probe
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Windows signing leftovers and the rc1 signing diagnosis (`dev/v0100-team/evidence/lead/rc1-release-35821827608/signing-diagnosis.md`, proposal C). A source reading against `main` at `6237c2677`.
+Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Windows signing leftovers and the rc1 Windows signing diagnosis of release dry run `35821827608`, proposal C. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 
