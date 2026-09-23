@@ -754,8 +754,11 @@ def gateway_root_crates() -> dict[str, str]:
     Repo-relative crate directory to the edge that reaches it. The seeds
     are the path dependencies leaving gateway/ in gateway/Cargo.toml and in
     every member manifest, dev-dependencies included since Gateway CI
-    compiles the members' tests. From each seed the walk follows the
-    build tables: a `workspace = true` edge resolves through the root
+    compiles the members' tests, and the path targets leaving gateway/ in
+    gateway/Cargo.toml's [patch.<registry>] and [replace] tables, since
+    cargo builds a patched or replaced crate from that path in place of
+    the registry one. From each seed the walk follows the build tables: a
+    `workspace = true` edge resolves through the root
     Cargo.toml's [workspace.dependencies], a direct `path` resolves beside
     the manifest, and either lands on a root crate when it points inside
     the repository. Breadth first, so a crate the gateway names directly
@@ -770,14 +773,18 @@ def gateway_root_crates() -> dict[str, str]:
     for relative in manifests:
         data = manifest(relative)
         base = (ROOT / relative).parent
-        tables = dependency_tables(data, dev=True)
+        tables = [("dependency", table) for table in dependency_tables(data, dev=True)]
         if relative == "gateway/Cargo.toml":
-            tables.append(data.get("workspace", {}).get("dependencies", {}))
-        for table in tables:
+            workspace_dependencies = data.get("workspace", {}).get("dependencies", {})
+            tables.append(("dependency", workspace_dependencies))
+            for registry, table in data.get("patch", {}).items():
+                tables.append((f"patch.{registry}", table))
+            tables.append(("replace", data.get("replace", {})))
+        for kind, table in tables:
             for name, spec in table.items():
                 target = path_dependency(spec, base)
                 if target is not None and not target.is_relative_to(gateway_dir):
-                    pending.append((target, f"{relative} dependency {name}"))
+                    pending.append((target, f"{relative} {kind} {name}"))
 
     root_workspace = manifest("Cargo.toml")["workspace"]["dependencies"]
     reached: dict[Path, str] = {}
