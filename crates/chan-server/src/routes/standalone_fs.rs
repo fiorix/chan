@@ -780,12 +780,19 @@ fn standalone_upload_stream_sync(
             sink.write_chunk(chunk)
         })
     });
+    // A replace upload rewrites a file that already existed, so its
+    // subscribers hear a modification, not a creation.
+    let kind = if destination.replace_path.is_some() {
+        WatchKind::Modified
+    } else {
+        WatchKind::Created
+    };
     match result {
         Ok(stat) => {
             commit_mutation(
                 files,
                 ticket,
-                vec![WatchEvent::file(WatchKind::Created, &rel, generation())],
+                vec![WatchEvent::file(kind, &rel, generation())],
             );
             Ok(UploadFileResponse {
                 path: rel,
@@ -2064,6 +2071,33 @@ mod tests {
                 "conflicts": [],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn an_upload_frame_says_created_or_modified_by_destination() {
+        let fx = files_fixture();
+        let (id, mut rx) = fx.registry.register();
+        fx.registry.subscribe(id, "");
+        let upload = |parts: &'static [(&'static str, Option<&'static str>, &'static str)]| {
+            router(&fx).oneshot(multipart_request("/api/fs/upload?app=files&w=w-up", parts))
+        };
+
+        let response = upload(&[("dir", None, ""), ("file", Some("up.bin"), "data")])
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let frame: Value = serde_json::from_str(&rx.try_recv().expect("create frame")).unwrap();
+        assert_eq!(frame["event"]["kind"], "Created", "{frame}");
+
+        let response = upload(&[
+            ("path", None, "up.bin"),
+            ("file", Some("x.bin"), "replaced"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let frame: Value = serde_json::from_str(&rx.try_recv().expect("replace frame")).unwrap();
+        assert_eq!(frame["event"]["kind"], "Modified", "{frame}");
     }
 
     #[tokio::test]
