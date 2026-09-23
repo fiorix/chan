@@ -4842,6 +4842,36 @@ mod write_tests {
         );
     }
 
+    /// The raw byte read behind the workspace and standalone binary GETs
+    /// has the same shape again: a blocking reader, an eight-slot channel,
+    /// a client that may stop reading. Sixteen chunks outrun the channel.
+    #[test]
+    fn unread_raw_byte_stream_frees_its_pool_thread() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        std::fs::write(
+            root.path().join("big.bin"),
+            vec![0x42; chan_workspace::BINARY_STREAM_CHUNK_SIZE * 16],
+        )
+        .unwrap();
+        let chunks = match binary_plan_sync(&workspace, "big.bin", None).unwrap() {
+            BinaryPlan::Full(reader) => reader.count(),
+            _ => panic!("expected a whole-file plan"),
+        };
+        assert!(
+            chunks > crate::stream_bridge::BRIDGE_CAPACITY + 1,
+            "the reader must outrun the channel, got {chunks} chunks"
+        );
+        let plan = binary_plan_sync(&workspace, "big.bin", None).unwrap();
+        let body = crate::stream_bridge::test_support::assert_unread_stream_frees_its_pool_thread(
+            "raw byte stream",
+            || async { stream_binary_plan("big.bin", plan, false, None) },
+        );
+        assert!(
+            body.is_err(),
+            "an abandoned stream must fail its body rather than end short"
+        );
+    }
+
     #[test]
     fn send_reader_into_forwards_a_read_error_instead_of_ending_the_stream() {
         // The shrink path at the seam: the error must arrive as an item, not
