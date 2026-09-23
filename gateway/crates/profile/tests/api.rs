@@ -2021,18 +2021,15 @@ async fn devserver_create_with_a_blank_label_inserts_a_label_less_row() {
 }
 
 #[tokio::test]
-async fn devserver_access_for_the_owner_follows_the_row() {
-    // The owner arm of `devserver_access` selects from `devservers`,
-    // so an owner is refused entry to their own live devserver while
-    // its row is missing. A label-less create is all it takes to let
-    // them back in.
+async fn devserver_access_for_the_owner_survives_registry_changes() {
+    // Registry creation and sweeping must not interrupt owner access.
     let app = TestApp::new().await;
     let owner = mk_user(&app, "owner@x.com").await;
     let dsid = ds("a");
     let access = format!("/v1/users/{owner}/devservers/{dsid}/access?as={owner}");
 
     let (s, _) = app.req(Method::GET, &access, None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "no row, no entry, owner included");
+    assert_eq!(s, StatusCode::OK, "owner access precedes registry creation");
 
     let (s, _) = app
         .req(
@@ -2046,6 +2043,13 @@ async fn devserver_access_for_the_owner_follows_the_row() {
     let (s, v) = app.req(Method::GET, &access, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["access"], true);
+
+    sqlx::query("DELETE FROM devservers WHERE owner_user_id = $1")
+        .bind(owner.parse::<Uuid>().unwrap())
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(app.req(Method::GET, &access, None).await.0, StatusCode::OK);
 
     app.cleanup().await;
 }
