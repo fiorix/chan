@@ -6616,6 +6616,88 @@ mod tests {
     }
 
     #[test]
+    fn forget_file_keeps_inbound_markdown_links() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("a.md", "# a\n[b](b.md)\n").unwrap();
+        workspace
+            .write_text("b.md", "# b\nforgettoken\n[c](c.md)\n")
+            .unwrap();
+        workspace.write_text("c.md", "# c\n").unwrap();
+        workspace.reindex(None).unwrap();
+        let graph = workspace.graph().unwrap();
+        assert_eq!(graph.backlinks("b.md").unwrap().len(), 1);
+        assert_eq!(graph.neighbors("b.md").unwrap().len(), 1);
+
+        workspace.forget_file("b.md").unwrap();
+
+        let inbound = graph.backlinks("b.md").unwrap();
+        assert_eq!(
+            inbound.len(),
+            1,
+            "a.md's link into b.md did not survive the forget: {inbound:?}"
+        );
+        assert_eq!(inbound[0].src, "a.md");
+        let outgoing = graph.neighbors("b.md").unwrap();
+        assert!(
+            outgoing.is_empty(),
+            "b.md's own links survived the forget: {outgoing:?}"
+        );
+        assert!(graph.backlinks("c.md").unwrap().is_empty());
+        assert!(!graph.files().unwrap().contains(&"b.md".to_string()));
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert!(workspace
+            .search("forgettoken", &opts)
+            .unwrap()
+            .hits
+            .is_empty());
+    }
+
+    #[test]
+    fn reconcile_keeps_inbound_links_across_scope_exclusion() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace
+            .write_text("notes/a.md", "# a\n[atticked](../attic/b.md)\n")
+            .unwrap();
+        workspace
+            .write_text("attic/b.md", "# b\nattictoken\n")
+            .unwrap();
+        workspace.reindex(None).unwrap();
+        let graph = workspace.graph().unwrap();
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+        assert_eq!(graph.backlinks("attic/b.md").unwrap().len(), 1);
+        assert_eq!(workspace.search("attictoken", &opts).unwrap().hits.len(), 1);
+
+        workspace
+            .set_excluded_dirs(vec!["attic".to_string()])
+            .unwrap();
+        let excluded = workspace.reconcile().unwrap();
+        assert_eq!(excluded.forgotten, ["attic/b.md"], "{excluded:?}");
+        assert!(workspace
+            .search("attictoken", &opts)
+            .unwrap()
+            .hits
+            .is_empty());
+        let inbound = graph.backlinks("attic/b.md").unwrap();
+        assert_eq!(
+            inbound.len(),
+            1,
+            "excluding attic/ dropped notes/a.md's link into it: {inbound:?}"
+        );
+
+        workspace.set_excluded_dirs(vec![]).unwrap();
+        let included = workspace.reconcile().unwrap();
+        assert_eq!(included.upserted, ["attic/b.md"], "{included:?}");
+        assert_eq!(graph.backlinks("attic/b.md").unwrap().len(), 1);
+        assert_eq!(workspace.search("attictoken", &opts).unwrap().hits.len(), 1);
+    }
+
+    #[test]
     fn reconcile_is_noop_when_disk_matches_graph() {
         // Steady state after a clean reindex: every file on disk
         // has a graph row with matching mtime. Reconcile must

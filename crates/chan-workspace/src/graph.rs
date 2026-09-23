@@ -2163,6 +2163,60 @@ mod tests {
     }
 
     #[test]
+    fn forget_file_keeps_the_edges_other_files_own() {
+        let tmp = TempDir::new().unwrap();
+        let g = GraphView::open(&tmp.path().join("g.sqlite")).unwrap();
+        let link = |src: &str, dst: &str| Edge {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            kind: EdgeKind::Link,
+            anchor: None,
+        };
+        g.replace_file(FileRecord {
+            rel: "a.md",
+            title: None,
+            mtime: Some(1),
+            size: Some(1),
+            node_kind: NodeKind::File,
+            outgoing: &[link("a.md", "b.md")],
+            headings: &[],
+            emails: None,
+            aliases: None,
+        })
+        .unwrap();
+        g.replace_file(FileRecord {
+            rel: "b.md",
+            title: None,
+            mtime: Some(1),
+            size: Some(1),
+            node_kind: NodeKind::File,
+            outgoing: &[link("b.md", "c.md")],
+            headings: &[],
+            emails: None,
+            aliases: None,
+        })
+        .unwrap();
+
+        g.forget_file("b.md").unwrap();
+
+        // The edge a.md owns describes a.md's body, which still carries
+        // the link; only b.md's own edge goes with b.md.
+        let inbound = g.backlinks("b.md").unwrap();
+        assert_eq!(
+            inbound.len(),
+            1,
+            "forgetting b.md dropped the link a.md owns into it: {inbound:?}"
+        );
+        assert_eq!(inbound[0].src, "a.md");
+        assert!(g.neighbors("b.md").unwrap().is_empty());
+        assert!(g.backlinks("c.md").unwrap().is_empty());
+        assert_eq!(
+            count(&g, "SELECT COUNT(*) FROM nodes WHERE rel_path = 'b.md'"),
+            0
+        );
+    }
+
+    #[test]
     fn replace_file_keeps_two_anchors_to_the_same_target() {
         // A file that links the same target via two different anchors must keep
         // both edges, so the primary key includes the anchor.
