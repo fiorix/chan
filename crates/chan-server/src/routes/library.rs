@@ -96,7 +96,8 @@ pub type LauncherBearer = Arc<std::sync::RwLock<String>>;
 
 /// Build the launcher router installed as the [`WorkspaceHost`] root fallback:
 /// the static launcher SPA ([`serve_launcher`]) plus the host-backed
-/// `/api/library/*` data surface (windows today; workspaces next). One bundle,
+/// `/api/library/*` data surface (windows, workspaces, devservers, gateways,
+/// command capabilities and per-surface config). One bundle,
 /// installed on both surfaces so the launcher is functional everywhere.
 ///
 /// `bearer` is the per-surface launcher token: `Some` gates `/api/library/*` on
@@ -355,8 +356,8 @@ pub fn launcher_router(
     // gated on the launcher token. The local-color (`config`) routes set the
     // surface's OWN cosmetic colour from a pane menu, called by whatever window
     // is open -- which carries a per-TENANT token, not the launcher token -- so
-    // they get a relaxed SURFACE gate (launcher OR any valid tenant token). A
-    // launcher-only gate 401'd every window's colour GET/PUT/watch.
+    // they get a relaxed SURFACE gate (launcher OR any valid tenant token): a
+    // launcher-only gate would 401 every window's colour GET/PUT/watch.
     let launcher_api = windows.merge(workspaces).merge(gateways).merge(devservers);
     let (launcher_api, config) = match bearer {
         Some(token) => {
@@ -930,7 +931,9 @@ async fn handle_library_command_launch(
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
 ) -> Response {
-    let capability = match resolve_command_capability(&state, &capability) {
+    // Held to the end of the handler, so the resolved capability outlives the
+    // launch URL built from it.
+    let _capability = match resolve_command_capability(&state, &capability) {
         Ok(capability) => capability,
         Err(error) => return error.into_response(),
     };
@@ -961,10 +964,6 @@ async fn handle_library_command_launch(
         query.append_pair("kind", "terminal");
     }
     let target = format!("{path}?{}", query.finish());
-    // The capability was checked above; retaining the binding through this
-    // response ensures a source that closes between snapshot and Enter cannot
-    // use a stale launch URL.
-    let _ = capability;
     Redirect::temporary(&target).into_response()
 }
 
@@ -1159,7 +1158,7 @@ async fn handle_create_library_window(
         return *resp;
     }
     // Stamp the client-claimed affinity at mint so chan-desktop never opens a
-    // native twin for a browser-minted window (honest-client input, D4).
+    // native twin for a browser-minted window (honest-client input).
     match host.mint_window_with_origin(req.kind, req.workspace_path, req.origin) {
         Ok(record) => Json(record).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1656,7 +1655,8 @@ async fn dispatch_window_op(
 }
 
 // ---------------------------------------------------------------------------
-// Workspaces (`/api/library/workspaces`). List today; add/on/off/rm next.
+// Workspaces (`/api/library/workspaces`): list on every surface; add, on, off
+// and remove need the desktop loopback (`require_mutable`).
 // ---------------------------------------------------------------------------
 
 /// `GET /api/library/workspaces`: one row per registered library workspace (the
@@ -2184,7 +2184,7 @@ async fn handle_set_local_color(
         Ok(()) => {
             // Broadcast the change so every open window of this library
             // live-updates its `--pane-highlight-color` (and new windows read
-            // fresh), replacing the desktop's old per-library colour poll.
+            // fresh).
             state.host.notify_local_color_change();
             StatusCode::NO_CONTENT.into_response()
         }
