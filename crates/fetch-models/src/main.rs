@@ -11,8 +11,8 @@
 //!   1. Open the candle embedder against a stable staging dir under
 //!      `target/fetch-models-cache/`. hf-hub downloads the model
 //!      there if missing; a re-run with the cache populated skips
-//!      the network. cargo-clean wipes the dir; that's intentional,
-//!      the next build re-downloads.
+//!      the network. With the default target dir, `cargo clean`
+//!      wipes it and the next build re-downloads.
 //!   2. tar+zstd encode the staging dir into the embed bundle.
 //!      Drops `*.lock`, `*.no_exists` and `**/blobs/**` along the
 //!      way; tar follows the snapshots/ symlinks into the blob bytes,
@@ -66,11 +66,9 @@ fn main() -> Result<()> {
 
     // Skip the (slow) zstd-19 re-encode when the existing bundle is
     // already newer than every file under staging. Force a rebuild
-    // by deleting the bundle (or running `cargo clean`).
+    // by deleting the bundle (or the staging dir).
     if bundle_up_to_date(&bundle, &staging)? {
-        let size = std::fs::metadata(&bundle)
-            .map(|m| m.len())
-            .unwrap_or_default();
+        let size = bundle_size(&bundle);
         eprintln!(
             "fetch-models: bundle up-to-date ({}, {})",
             bundle.display(),
@@ -81,9 +79,7 @@ fn main() -> Result<()> {
 
     eprintln!("fetch-models: encoding bundle to {}", bundle.display());
     encode_tar_zst(&staging, &bundle)?;
-    let size = std::fs::metadata(&bundle)
-        .map(|m| m.len())
-        .unwrap_or_default();
+    let size = bundle_size(&bundle);
     eprintln!(
         "fetch-models: done ({} -> {})",
         staging.display(),
@@ -92,31 +88,40 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Stable staging dir for the hf-hub cache. Lives under
-/// `target/` so cargo-clean wipes it; survives normal builds so
-/// re-runs of fetch-models hit the on-disk cache and skip the
+/// The bundle's size in bytes, 0 when it cannot be read (for the log line).
+fn bundle_size(bundle: &Path) -> u64 {
+    std::fs::metadata(bundle)
+        .map(|m| m.len())
+        .unwrap_or_default()
+}
+
+/// The workspace's `crates/` directory, the parent of this crate.
+fn crates_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// Stable staging dir for the hf-hub cache. Lives under the repo's
+/// default `target/`, so `cargo clean` there wipes it; survives normal
+/// builds so re-runs of fetch-models hit the on-disk cache and skip the
 /// network. Keep this OUT of `crates/chan-server/resources/` so
 /// the only thing under that dir is the final bundle.
 fn staging_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    crates_dir()
         .join("..")
         .join("target")
         .join("fetch-models-cache")
 }
 
 fn bundle_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    crates_dir()
         .join("chan-server")
         .join("resources")
         .join("models.tar.zst")
 }
 
 /// True if `bundle` exists and its mtime is at least as new as
-/// every non-skipped file under `staging`. Mirrors the filter set
-/// used by `encode_tar_zst` so newly-arrived `*.lock` / `blobs/`
-/// files don't force a re-encode.
+/// every bundled file under `staging`, so newly-arrived `*.lock` /
+/// `blobs/` files don't force a re-encode.
 fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
     let Ok(meta) = std::fs::metadata(bundle) else {
         return Ok(false);
@@ -125,13 +130,7 @@ fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
         return Ok(false);
     }
     let bundle_mtime = meta.modified().context("bundle mtime")?;
-    for entry in walk_files(staging)? {
-        let rel = entry
-            .strip_prefix(staging)
-            .with_context(|| format!("strip {}", entry.display()))?;
-        if should_skip(rel) {
-            continue;
-        }
+    for (entry, _rel) in bundle_entries(staging)? {
         let m = std::fs::metadata(&entry)
             .with_context(|| format!("stat {}", entry.display()))?
             .modified()
@@ -168,14 +167,8 @@ fn encode_tar_zst_via<S: Write + Into<File>>(
         // Walk the staging tree explicitly so we can filter
         // entries; `Builder::append_dir_all` would happily include
         // blobs/ and lock files.
-        for entry in walk_files(src)? {
-            let rel = entry
-                .strip_prefix(src)
-                .with_context(|| format!("strip {}", entry.display()))?;
-            if should_skip(rel) {
-                continue;
-            }
-            tarw.append_path_with_name(&entry, rel)
+        for (entry, rel) in bundle_entries(src)? {
+            tarw.append_path_with_name(&entry, &rel)
                 .with_context(|| format!("append {}", entry.display()))?;
         }
         let zenc = tarw.into_inner().context("finalize tar")?;
@@ -201,7 +194,24 @@ fn encode_tar_zst_via<S: Write + Into<File>>(
     Ok(())
 }
 
-/// Recursive walk (no external dep), sorted. Yields regular files
+/// The files that go into the bundle, as (absolute, relative to `root`)
+/// pairs in walk order, with the `should_skip` filter applied.
+fn bundle_entries(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut out = Vec::new();
+    for entry in walk_files(root)? {
+        let rel = entry
+            .strip_prefix(root)
+            .with_context(|| format!("strip {}", entry.display()))?
+            .to_path_buf();
+        if should_skip(&rel) {
+            continue;
+        }
+        out.push((entry, rel));
+    }
+    Ok(out)
+}
+
+/// Recursive walk, sorted. Yields regular files
 /// and symlinks, and skips any other entry type; a listed symlink
 /// is followed by its consumer (tar's `follow_symlinks(true)`, or
 /// `std::fs::metadata` in `bundle_up_to_date`).
