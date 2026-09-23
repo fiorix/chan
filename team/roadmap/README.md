@@ -101,6 +101,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | item | state | next |
 | --- | --- | --- |
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | raised | decide |
+| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -154,6 +155,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [nsis]: v0.101.0/the-nsis-uninstaller-stub-ships-unsigned.md
 [cprb]: v0.101.0/signing-has-no-early-credential-probe.md
 [revab]: v0.101.0/a-revocation-aborts-the-bridge-before-its-close.md
+[lfetch]: v0.101.0/a-late-fetch-after-teardown-reds-the-web-check.md
 
 ## Completed
 
