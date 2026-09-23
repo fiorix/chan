@@ -11,6 +11,7 @@ import {
 import {
   allTerminalTabs,
   layout,
+  registerTerminalPromptSink,
   terminalBroadcastMemberIds,
   type LeafNode,
   type TerminalTab,
@@ -233,6 +234,41 @@ describe("runTeamBootstrap: lead-first flow", () => {
       /const leadAgent = leadDraft[\s\S]{1,180}agentForMember\(leadDraft\.command, leadDraft\.env\)[\s\S]{1,220}deliverLeadIdentity\([\s\S]{1,100}leadAgent === "none" \? undefined : leadAgent/,
     );
     expect(src).not.toMatch(/primeTeamWork/);
+  });
+
+  test("delivers a lead prompt naming bootstrap.md under the workspace root", async () => {
+    // The prompt the lead receives, not the builder: runs the real bootstrap
+    // under a seeded root and captures what reaches the lead's prompt sink,
+    // the registration a mounted TerminalTab makes for its WS. The first send
+    // goes out before any sink exists, so the capture comes from the retry.
+    resetLayoutWithLead(leadTerminalTab());
+    mockApi();
+    workspace.info = { root: "/srv/team-root" } as unknown as WorkspaceInfo;
+    const delivered: string[] = [];
+    let unregister = () => {};
+    try {
+      await runTeamBootstrap(tabsConfig(), {
+        leadTabId: "lead-tab",
+        leadPaneId: "pane-test",
+      });
+      unregister = registerTerminalPromptSink(leadFromLayout().id, (text) => {
+        delivered.push(text);
+        return true;
+      });
+      await vi.waitFor(() => expect(delivered).toHaveLength(1), {
+        timeout: 5000,
+        interval: 50,
+      });
+    } finally {
+      unregister();
+      workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
+    }
+    expect(delivered[0]).toContain(
+      "Read the team process at /srv/team-root/new-team-1/bootstrap.md before you start.",
+    );
+    expect(delivered[0]).toContain(
+      "Relative paths in that document resolve against /srv/team-root.",
+    );
   });
 
   test("spawns an OpenCode lead whose identity delivery derives opencode", async () => {
