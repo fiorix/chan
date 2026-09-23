@@ -3883,6 +3883,8 @@ impl Workspace {
                 // A rebuild can stamp text before its index read fails. A matching
                 // stamp then needs repair unless the content legitimately has no
                 // chunks. Respect the incremental indexer's existing size ceiling.
+                #[cfg(test)]
+                derived_state_read_probe(self, rel);
                 match self.read_text(rel) {
                     Ok(content) => {
                         needs_index =
@@ -6307,13 +6309,93 @@ mod tests {
             workspace.graph().unwrap().files_with_stat().unwrap().len(),
             3
         );
-        for _ in 0..2 {
+        for pass in 0..2 {
+            arm_derived_state_read_probe(workspace.root().to_path_buf());
             let report = workspace.reconcile().unwrap();
+            let reads = take_derived_state_reads(workspace.root());
             assert!(report.upserted.is_empty(), "{report:?}");
             assert!(report.forgotten.is_empty(), "{report:?}");
             assert!(report.failed.is_empty(), "{report:?}");
             assert_eq!(report.unchanged, 3);
+            // The rebuild stamps text without settling what the index holds
+            // for it, so the first pass may read a stamped file once to learn
+            // that its content has no chunks. Later passes must not.
+            if pass == 1 {
+                assert!(
+                    reads.is_empty(),
+                    "second pass re-read chunkless text: {reads:?}"
+                );
+            }
         }
+    }
+
+    /// The pass that discovers a `.txt` it cannot decode records it, and the
+    /// next pass leaves it alone: no read, no index write, no failure entry.
+    /// `warm` runs the discovery after a full rebuild, which is how a cold
+    /// open reaches reconcile; otherwise the graph starts empty.
+    fn assert_undecodable_txt_is_recorded_once(warm: bool) {
+        let (_cfg, root, workspace) = fixture();
+        workspace
+            .write_text("good.md", "# good\ngoodtoken\n")
+            .unwrap();
+        std::fs::write(root.path().join("bad.txt"), [0xffu8, 0xfe, 0xfd]).unwrap();
+        if warm {
+            workspace.reindex(None).unwrap();
+        }
+        let opts = SearchOpts {
+            mode: crate::SearchMode::Bm25,
+            ..SearchOpts::default()
+        };
+
+        arm_derived_state_read_probe(workspace.root().to_path_buf());
+        let first = workspace.reconcile().unwrap();
+        let first_reads = take_derived_state_reads(workspace.root());
+        // Positive control for the instrument: the discovering pass reads
+        // the file, so an empty second read list means something.
+        assert!(
+            first_reads.contains(&"bad.txt".to_string()),
+            "{first_reads:?}; {first:?}"
+        );
+        assert_eq!(first.failed, ["bad.txt"], "{first:?}");
+        assert!(workspace
+            .index()
+            .unwrap()
+            .known_paths()
+            .unwrap()
+            .iter()
+            .all(|path| path != "bad.txt"));
+
+        arm_derived_state_read_probe(workspace.root().to_path_buf());
+        let second = workspace.reconcile().unwrap();
+        let second_reads = take_derived_state_reads(workspace.root());
+        assert!(
+            !second_reads.contains(&"bad.txt".to_string()),
+            "second pass read the undecodable file again: {second_reads:?}; {second:?}"
+        );
+        assert!(second.failed.is_empty(), "{second:?}");
+        assert!(second.upserted.is_empty(), "{second:?}");
+        assert_eq!(second.unchanged, 2, "{second:?}");
+        assert_eq!(workspace.search("goodtoken", &opts).unwrap().hits.len(), 1);
+
+        // Recorded is not ignored: a rewrite that decodes is picked up. The
+        // size differs, so this holds even within the same mtime second.
+        std::fs::write(root.path().join("bad.txt"), "rewrittentoken\n").unwrap();
+        let third = workspace.reconcile().unwrap();
+        assert_eq!(third.upserted, ["bad.txt"], "{third:?}");
+        assert_eq!(
+            workspace.search("rewrittentoken", &opts).unwrap().hits[0].path,
+            "bad.txt"
+        );
+    }
+
+    #[test]
+    fn reconcile_records_an_undecodable_txt_once() {
+        assert_undecodable_txt_is_recorded_once(false);
+    }
+
+    #[test]
+    fn reconcile_records_an_undecodable_txt_once_after_a_rebuild() {
+        assert_undecodable_txt_is_recorded_once(true);
     }
 
     fn assert_reconcile_retains_existing_file_missed_by_walk(rel: &str) {
