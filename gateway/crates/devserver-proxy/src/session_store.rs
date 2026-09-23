@@ -184,12 +184,9 @@ impl ActiveOperations {
         }
     }
 
-    fn is_drained(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .active
-            .is_empty()
+    fn is_revoked_and_drained(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.revoked && state.active.is_empty()
     }
 
     async fn wait_drained(&self, deadline: Instant) -> bool {
@@ -916,7 +913,7 @@ fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
         // A retry must still see a timed-out transport, including one admitted
         // through an extension binding of this principal.
         if record.cancellation.is_cancelled()
-            && (!record.operations.is_drained()
+            && (!record.operations.is_revoked_and_drained()
                 || state
                     .principal_bindings
                     .get(&record.principal)
@@ -926,7 +923,7 @@ fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
                             .filter_map(|selector| state.bindings.get(selector))
                             .any(|binding| {
                                 binding.cancellation.is_cancelled()
-                                    && !binding.operations.is_drained()
+                                    && !binding.operations.is_revoked_and_drained()
                             })
                     }))
         {
@@ -1845,6 +1842,26 @@ mod tests {
         let store = SessionStore::new(10_000, Duration::from_secs(60));
         assert_eq!(store.max_bindings, 40_000);
         assert_eq!(store.max_bindings_per_principal, 32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expiry_retains_cancellation_until_operation_admission_is_revoked() {
+        let store = SessionStore::new(1, Duration::from_secs(60));
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .unwrap();
+        // Pause revocation between token cancellation and closing admission.
+        issued.record.cancellation.cancel();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        store.prune_expired();
+        assert_eq!(store.len(), 1);
+        let operation = issued.record.begin_operation().unwrap();
+        issued.record.operations.revoke();
+        store.prune_expired();
+        assert_eq!(store.len(), 1);
+        drop(operation);
+        store.prune_expired();
+        assert!(store.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
