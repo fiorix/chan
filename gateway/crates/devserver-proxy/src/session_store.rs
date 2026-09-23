@@ -195,6 +195,14 @@ impl ActiveOperations {
         }
     }
 
+    fn is_drained(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active
+            .is_empty()
+    }
+
     async fn wait_drained(&self, deadline: Instant) -> bool {
         loop {
             let changed = self.changed.notified();
@@ -903,19 +911,45 @@ fn live_sessions<'a>(
 
 fn take_expired(state: &mut SessionState, now: Instant) -> Vec<SessionRecord> {
     let mut expired = Vec::new();
+    let mut draining = Vec::new();
     while let Some(Reverse((expiry, id))) = state.expiries.peek().cloned() {
         if expiry > now {
             break;
         }
         state.expiries.pop();
-        if state.sessions.get(&id).is_some_and(|record| {
-            record.expires_at == expiry && !record.cancellation.is_cancelled()
-        }) {
-            if let Some(record) = remove_session(state, &id) {
-                expired.push(record);
-            }
+        let Some(record) = state
+            .sessions
+            .get(&id)
+            .filter(|record| record.expires_at == expiry)
+        else {
+            continue;
+        };
+        // A retry must still see a timed-out transport, including one admitted
+        // through an extension binding of this principal.
+        if record.cancellation.is_cancelled()
+            && (!record.operations.is_drained()
+                || state
+                    .principal_bindings
+                    .get(&record.principal)
+                    .is_some_and(|selectors| {
+                        selectors
+                            .iter()
+                            .filter_map(|selector| state.bindings.get(selector))
+                            .any(|binding| {
+                                binding.cancellation.is_cancelled()
+                                    && !binding.operations.is_drained()
+                            })
+                    }))
+        {
+            draining.push(Reverse((expiry, id)));
+            continue;
+        }
+        if let Some(record) = remove_session(state, &id) {
+            expired.push(record);
         }
     }
+    // Revisit pending drains on the next prune without blocking other expiries.
+    state.expiries.extend(draining);
     expired
 }
 
@@ -1822,6 +1856,58 @@ mod tests {
         let store = SessionStore::new(10_000, Duration::from_secs(60));
         assert_eq!(store.max_bindings, 40_000);
         assert_eq!(store.max_bindings_per_principal, 32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_tombstones_release_quota_only_after_all_transports_drain() {
+        for through_binding in [false, true] {
+            let store = SessionStore::new(1, Duration::from_secs(60));
+            let who = principal(1, 10, "dev-a");
+            let issued = store.issue(who.clone(), ClientType::Browser).unwrap();
+            let record = if through_binding {
+                let token = store
+                    .bind_extension(&who, ClientType::Browser, target('a'))
+                    .unwrap();
+                store
+                    .resolve_extension_binding(&token)
+                    .unwrap()
+                    .authorization
+            } else {
+                issued.record.clone()
+            };
+            let operation = record.begin_operation().unwrap();
+            let revocation = Revocation::Subject {
+                subject_user_id: who.subject_user_id,
+            };
+            assert_eq!(
+                store.revoke(&revocation).await,
+                Err(RevokeError::DrainTimedOut)
+            );
+            tokio::time::advance(Duration::from_secs(61)).await;
+            store.prune_expired();
+            assert_eq!(
+                store.len(),
+                1,
+                "an active transport must retain its tombstone"
+            );
+            assert_eq!(
+                store.revoke(&revocation).await,
+                Err(RevokeError::DrainTimedOut)
+            );
+            assert!(store.issue(who.clone(), ClientType::Browser).is_err());
+            let mut events = store.events.subscribe();
+            drop(operation);
+            store.prune_expired();
+            assert!(
+                store.is_empty(),
+                "a drained expired tombstone must release quota"
+            );
+            assert_eq!(store.binding_count(), 0);
+            assert!(
+                matches!(events.try_recv().unwrap(), SessionEvent::Down(id) if id == issued.record.admin_session_id)
+            );
+            assert!(store.issue(who, ClientType::Browser).is_ok());
+        }
     }
 
     #[tokio::test(start_paused = true)]
