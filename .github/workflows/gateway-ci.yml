@@ -136,9 +136,12 @@ jobs:
         working-directory: chan/gateway
         run: cargo fmt --check
 
+      # --locked on every cargo step, as in the Makefile's gateway recipes,
+      # so a stale gateway/Cargo.lock fails at the first step that resolves
+      # it, with cargo's own message, instead of re-resolving on the runner.
       - name: clippy
         working-directory: chan/gateway
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: doc
         working-directory: chan/gateway
@@ -148,7 +151,7 @@ jobs:
 
       - name: test
         working-directory: chan/gateway
-        run: cargo test
+        run: cargo test --locked
 
   containers:
     name: gateway containers

@@ -209,6 +209,10 @@ def check_make_contract() -> None:
         "docker-gateway-build",
         ("packaging/docker/build.sh --gateway-only",),
     )
+    # release.yml builds the gateway through this recipe alone, so a stale
+    # gateway/Cargo.lock re-resolves inside a release build unless the recipe
+    # itself refuses it.
+    require_target(makefile, "gateway-build", ("$(CARGO) build --locked",))
 
 
 def check_desktop_contract() -> None:

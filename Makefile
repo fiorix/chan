@@ -512,7 +512,11 @@ gateway-build: gateway-spa ## Build, but do not test, the gateway release crates
 	$(LINUX_ONLY)
 	# Depends on gateway-spa: identity embeds web/dist via rust-embed at
 	# compile time, so the bundle must exist or the derive fails to build.
-	cd gateway && $(CARGO) build $(GATEWAY_CARGO_FLAGS) \
+	# --locked because release.yml builds the gateway through this recipe
+	# alone, so without it a stale gateway/Cargo.lock re-resolves silently
+	# inside a release build instead of failing with cargo's own message;
+	# the doc recipe's --locked never runs there.
+	cd gateway && $(CARGO) build --locked $(GATEWAY_CARGO_FLAGS) \
 		$(foreach crate,$(GATEWAY_RELEASE_CRATES),-p $(crate))
 
 .PHONY: gateway-version-pin-check
@@ -540,8 +544,9 @@ gateway-lint: gateway-version-pin-check gateway-spa ## Clippy all gateway target
 	# gateway-build, and on gateway-version-pin-check first: the deb pins and
 	# the static packaging isolation contracts are sub-second checks, so a
 	# stale pin or a broken packaging contract should not cost an SPA build
-	# and a full clippy pass to discover.
-	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
+	# and a full clippy pass to discover. --locked for the reason gateway-build
+	# gives: the same stale lock would re-resolve here.
+	cd gateway && RUSTFLAGS="-D warnings" $(CARGO) clippy --locked --all-targets -- -D warnings
 
 .PHONY: gateway-doc
 gateway-doc: gateway-spa ## Rustdoc the separate gateway workspace with warnings denied.
@@ -564,12 +569,14 @@ gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
 		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
 		'gateway-test: EXECUTE: unit tests of every gateway binary' \
 		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
-	cd gateway && $(CARGO) test --workspace --lib
-	cd gateway && $(CARGO) test -p devserver-proxy
+	# --locked for the reason gateway-build gives: the same stale lock would
+	# re-resolve here.
+	cd gateway && $(CARGO) test --locked --workspace --lib
+	cd gateway && $(CARGO) test --locked -p devserver-proxy
 	# --lib above never selects a binary target's unit tests: admin is a
 	# binary crate with no library target, and the identity and profile
 	# service binaries keep tests of their own beside their libraries.
-	cd gateway && $(CARGO) test --workspace --bins
+	cd gateway && $(CARGO) test --locked --workspace --bins
 
 .PHONY: gateway-release-crates
 gateway-release-crates: ## Print the gateway release crate names on one line.
