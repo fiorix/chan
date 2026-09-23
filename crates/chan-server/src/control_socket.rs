@@ -46,13 +46,10 @@ use chan_shell::{
     MAX_TERMINAL_WRITE_BYTES,
 };
 
+// Each variant name is its wire tag: serde renames it to the snake_case
+// command string the SPA's `handleWindowCommand` matches on.
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
-// The shared `Open` prefix is the wire contract: serde renames each
-// variant to its `open_*` command string that the SPA's
-// `handleWindowCommand` matches on. Renaming to drop the prefix would
-// rename the wire command and break the SPA.
-#[allow(clippy::enum_variant_names)]
 enum WindowCommand {
     /// Open a WINDOW, not a tab: sent to the window that asked for something
     /// which landed elsewhere, when the surface that has to create that window
@@ -301,6 +298,8 @@ struct WindowCommandFrame {
     command: WindowCommand,
 }
 
+/// A bound control socket and its accept loop. Dropping it aborts the loop
+/// and, on unix, unlinks the socket node.
 #[derive(Debug)]
 pub struct ControlHandle {
     socket_path: PathBuf,
@@ -316,6 +315,8 @@ pub struct ControlHandle {
 }
 
 impl ControlHandle {
+    /// The bound path (a named-pipe name on Windows) that `cs` reaches through
+    /// `$CHAN_CONTROL_SOCKET`.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
@@ -333,7 +334,11 @@ impl Drop for ControlHandle {
     }
 }
 
-#[cfg(unix)]
+/// A fresh pid-scoped control-socket path. On Windows the control "socket" is
+/// a named pipe, so the path is the pipe name `\\.\pipe\chan-control-<pid>-<rand>`.
+/// It is carried verbatim through `$CHAN_CONTROL_SOCKET` and read identically
+/// by `cs` (a `PathBuf` holds the string unchanged), mirroring the unix
+/// socket-path contract.
 pub fn pick_socket_path() -> PathBuf {
     crate::mcp_bridge::pick_named_socket_path("control")
 }
@@ -383,22 +388,6 @@ pub(crate) fn fnv1a64(input: &str) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
-}
-
-/// On Windows the control "socket" is a named pipe, so the path is the pipe
-/// name `\\.\pipe\chan-control-<pid>-<rand>`. It is carried verbatim through
-/// `$CHAN_CONTROL_SOCKET` and read identically by `cs` (a `PathBuf` holds the
-/// string unchanged), mirroring the unix socket-path contract.
-#[cfg(windows)]
-pub fn pick_socket_path() -> PathBuf {
-    use rand::RngCore;
-    let mut bytes = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    PathBuf::from(format!(
-        r"\\.\pipe\chan-control-{}-{suffix}",
-        std::process::id()
-    ))
 }
 
 /// Which kind of tenant this control socket fronts. Workspace commands
@@ -764,7 +753,11 @@ use chan_library::UnserveScope;
 #[derive(Clone)]
 pub struct ControlSocketCtx {
     pub workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
+    /// The tenant's `/ws` event broadcast, which window commands ride to the
+    /// SPA window they target.
     pub events_tx: broadcast::Sender<String>,
+    /// The watcher's suppression set, so a write this socket makes is not
+    /// echoed back as an external change.
     pub self_writes: Arc<crate::self_writes::SelfWrites>,
     pub terminal_registry: TerminalRegistryCell,
     pub survey_bus: Arc<crate::survey::SurveyBus>,
@@ -788,6 +781,8 @@ pub struct ControlSocketCtx {
     pub standalone_files: Option<Arc<crate::state::StandaloneFilesState>>,
 }
 
+/// Bind the control socket at `socket_path` and start accepting connections
+/// served from `ctx`. Dropping the returned handle unbinds it.
 pub fn start(socket_path: PathBuf, ctx: ControlSocketCtx) -> std::io::Result<ControlHandle> {
     let listener = transport::bind(&socket_path)?;
     Ok(ControlHandle {
@@ -1757,9 +1752,10 @@ where
             window_id,
             tab_name,
         } => {
-            handle_pane_query(
+            handle_pane(
                 window_id,
                 tab_name,
+                |request_id| WindowCommand::PaneQuery { request_id },
                 events_tx,
                 window_bus,
                 terminal_registry,
@@ -1772,10 +1768,10 @@ where
             tab_name,
             op,
         } => {
-            handle_pane_exec(
+            handle_pane(
                 window_id,
                 tab_name,
-                op,
+                move |request_id| WindowCommand::PaneExec { request_id, op },
                 events_tx,
                 window_bus,
                 terminal_registry,
@@ -1868,38 +1864,33 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
             // `DELETE /api/library/workspaces/{id}` equivalent), so the host's
             // own library + persisted overlay reflect it; a plain close just
             // unmounts the tenant and keeps the registration.
-            Some(host) if remove => match host.remove_workspace_for_root(path, false).await {
-                Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
-                    message: format!("removed {}", path.display()),
-                },
-                Ok(chan_library::WorkspaceLifecycleOutcome::NotFound) => ControlResponse::Error {
-                    message: format!("no workspace registered for {}", path.display()),
-                },
-                Ok(chan_library::WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-                    ControlResponse::Error {
-                        message: live_terminals_body(active_terminals),
+            Some(host) => {
+                let (outcome, done, held, doing) = if remove {
+                    let outcome = host.remove_workspace_for_root(path, false).await;
+                    (outcome, "removed", "registered", "removing")
+                } else {
+                    let outcome = host.close_workspace_for_root(path, false).await;
+                    (outcome, "unmounted", "mounted", "unmounting")
+                };
+                match outcome {
+                    Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
+                        message: format!("{done} {}", path.display()),
+                    },
+                    Ok(chan_library::WorkspaceLifecycleOutcome::NotFound) => {
+                        ControlResponse::Error {
+                            message: format!("no workspace {held} for {}", path.display()),
+                        }
                     }
-                }
-                Err(e) => ControlResponse::Error {
-                    message: format!("removing {}: {e}", path.display()),
-                },
-            },
-            Some(host) => match host.close_workspace_for_root(path, false).await {
-                Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
-                    message: format!("unmounted {}", path.display()),
-                },
-                Ok(chan_library::WorkspaceLifecycleOutcome::NotFound) => ControlResponse::Error {
-                    message: format!("no workspace mounted for {}", path.display()),
-                },
-                Ok(chan_library::WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-                    ControlResponse::Error {
-                        message: live_terminals_body(active_terminals),
+                    Ok(chan_library::WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
+                        ControlResponse::Error {
+                            message: live_terminals_body(active_terminals),
+                        }
                     }
+                    Err(e) => ControlResponse::Error {
+                        message: format!("{doing} {}: {e}", path.display()),
+                    },
                 }
-                Err(e) => ControlResponse::Error {
-                    message: format!("unmounting {}: {e}", path.display()),
-                },
-            },
+            }
         },
         UnserveScope::Unsupported => ControlResponse::Error {
             message: format!(
@@ -2030,7 +2021,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             if terminal_registry.is_some()
                 && !tabs
                 && team_grid_shape(&config).is_some()
-                && !explicit_pane(&destination)
+                && !explicit_pane(destination.as_ref())
             {
                 if let Some(window_id) = window_id.as_deref() {
                     if let Err(message) = require_single_pane_window(window_id, ctx).await {
@@ -2083,7 +2074,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
                     message: generate_bootstrap_script(dir, &config, None),
                 };
             }
-            // Load now brings the saved team UP, not just summarizes it: read
+            // Load brings the saved team UP, not just summarizes it: read
             // + validate `{dir}/config.toml`, then spawn lead-first and
             // identity-poke each agent, exactly like `new` does after its
             // write (it shares spawn_and_poke_team, so a freshly-written and a
@@ -2107,7 +2098,7 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             };
             // Same grid precondition as `new`; `load` mutates nothing, so
             // it runs right before the spawn.
-            if !tabs && team_grid_shape(&config).is_some() && !explicit_pane(&destination) {
+            if !tabs && team_grid_shape(&config).is_some() && !explicit_pane(destination.as_ref()) {
                 if let Some(window_id) = window_id.as_deref() {
                     if let Err(message) = require_single_pane_window(window_id, ctx).await {
                         return ControlResponse::Error { message };
@@ -2132,8 +2123,8 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
 /// Whether the caller named the exact seed pane (`--pane`), which replaces
 /// the single-pane precondition: the grid carves the named pane instead of
 /// the window's only one.
-fn explicit_pane(destination: &Option<TabDestination>) -> bool {
-    destination.as_ref().is_some_and(|d| d.pane_id.is_some())
+fn explicit_pane(destination: Option<&TabDestination>) -> bool {
+    destination.is_some_and(|d| d.pane_id.is_some())
 }
 
 /// The pane-grid precondition for a positioned team config: the target
@@ -2305,8 +2296,7 @@ fn spawn_team(
             env: m.env.clone(),
             // Team members take the configured default profile. A per-member
             // shell override would be a team-config field and a `cs terminal
-            // team` flag; neither exists yet, and `None` is the same shell
-            // these spawns have always used.
+            // team` flag; `None` takes the default profile.
             profile: None,
         };
         match registry.create(opts) {
@@ -2679,7 +2669,7 @@ where
             return ControlResponse::Error { message };
         }
     }
-    // Block until C's reply route fires the oneshot, a flagged client exits,
+    // Block until `POST /api/survey/reply` fires the oneshot, a flagged client exits,
     // the deadline passes, or the sender is dropped. Mirrors the `cs pane`
     // round-trip (PANE_REPLY_TIMEOUT), but the window is the caller's
     // `--timeout` (the host needs real time to read and answer, unlike pane's
@@ -2786,7 +2776,7 @@ fn send_survey_close_commands(
 /// The stdout line the CLI prints for a completed survey. Each variant prints
 /// a distinct line so the asking agent can tell an answer from a deferral from
 /// a dismissal: the chosen option label; the "host will follow up later"
-/// signal on `[F]`; or the dismissed line (Part C).
+/// signal on `[F]`; or the dismissed line.
 fn format_survey_reply(reply: &SurveyReply) -> String {
     match reply {
         SurveyReply::Option { option_label, .. } => option_label.clone(),
@@ -2891,16 +2881,22 @@ where
     }
 }
 
-/// `cs pane` (layout query): resolve the target window, then round-trip a
-/// `pane_query`. The reply payload is the layout snapshot the CLI formats.
-async fn handle_pane_query(
+/// `cs pane`: resolve the target window, then round-trip the command
+/// `make_command` builds around the request id: a `pane_query` for the layout
+/// snapshot, or a `pane_exec` carrying an op (new / focus / resize / equalize /
+/// swap / close). The reply payload is what the CLI formats.
+async fn handle_pane<F>(
     window_id: Option<String>,
     tab_name: Option<String>,
+    make_command: F,
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
     terminal_registry: Option<&Arc<TerminalRegistry>>,
     session_registry: &SessionRegistry,
-) -> ControlResponse {
+) -> ControlResponse
+where
+    F: FnOnce(String) -> WindowCommand,
+{
     let target = match resolve_pane_window(window_id, tab_name.as_deref(), terminal_registry) {
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
@@ -2910,36 +2906,7 @@ async fn handle_pane_query(
     }
     pane_round_trip(
         &target,
-        |request_id| WindowCommand::PaneQuery { request_id },
-        events_tx,
-        window_bus,
-        session_registry,
-    )
-    .await
-}
-
-/// `cs pane <exec>` (new / focus / resize / equalize / swap / close): resolve
-/// the target window, then round-trip a `pane_exec` carrying the op. The reply
-/// payload is the exec result the CLI formats.
-async fn handle_pane_exec(
-    window_id: Option<String>,
-    tab_name: Option<String>,
-    op: PaneOp,
-    events_tx: &broadcast::Sender<String>,
-    window_bus: &Arc<crate::window_bus::WindowBus>,
-    terminal_registry: Option<&Arc<TerminalRegistry>>,
-    session_registry: &SessionRegistry,
-) -> ControlResponse {
-    let target = match resolve_pane_window(window_id, tab_name.as_deref(), terminal_registry) {
-        Ok(target) => target,
-        Err(message) => return ControlResponse::Error { message },
-    };
-    if let Err(message) = require_connected_window(session_registry, &target) {
-        return ControlResponse::Error { message };
-    }
-    pane_round_trip(
-        &target,
-        move |request_id| WindowCommand::PaneExec { request_id, op },
+        make_command,
         events_tx,
         window_bus,
         session_registry,
@@ -3941,12 +3908,7 @@ fn send_window_command(
     command: WindowCommand,
     events_tx: &broadcast::Sender<String>,
 ) -> Result<(), String> {
-    let frame = WindowCommandFrame {
-        frame_type: "window_command",
-        window_id: window_id.to_string(),
-        command,
-    };
-    let raw = serde_json::to_string(&frame).map_err(|e| format!("encode window command: {e}"))?;
+    let raw = serialize_window_command(window_id, command)?;
     // Window commands fan out over the /ws event broadcast; the SPA window
     // owning `window_id` acts on its frame. `events_tx` is subscribed ONLY by
     // /ws connections, so a zero receiver count means NO window is connected:
@@ -3955,26 +3917,17 @@ fn send_window_command(
     // common cause is running a window-scoped `cs` command outside a chan
     // terminal, where $CHAN_WINDOW_ID is unset and no window is open).
     if events_tx.send(raw).is_err() {
-        return Err(
-            "no chan window is connected to receive this; open the workspace in a window, \
-             or run from inside a chan terminal so $CHAN_WINDOW_ID targets one"
-                .into(),
-        );
+        return Err(NO_WINDOW_CONNECTED.into());
     }
     Ok(())
 }
 
-// Every fire-and-forget opener (`cs open`, `cs graph`, `cs dashboard`, `cs
-// terminal new`, `cs terminal team new|load`) funnels its exact-window
-// dispatch through here and then returns "... request queued" straight to
-// the CLI without awaiting the SPA. `--pane`/`--side` placement is validated
-// and, on failure, surfaced as a visible transient status in the SPA (see
-// `resolveWindowCommandDestination` in store.svelte.ts), but that failure is
-// NOT reflected back to the CLI's exit code: the opener has already returned
-// "queued" by the time the SPA resolves placement. Making that CLI-visible
-// would mean converting openers to blocking round-trips like `cs pane`
-// (`pane_round_trip`, above), which also calls this same function but awaits
-// a reply afterward instead of returning immediately.
+/// The refusal both window-command senders give when no window is subscribed
+/// to receive the frame.
+const NO_WINDOW_CONNECTED: &str =
+    "no chan window is connected to receive this; open the workspace in a window, \
+     or run from inside a chan terminal so $CHAN_WINDOW_ID targets one";
+
 /// Serialize a window command as the `/ws` frame its target reads. Shared by
 /// the live send and by the routed-open path, which parks the same bytes for a
 /// window that has not connected yet.
@@ -4004,6 +3957,16 @@ pub(crate) fn terminal_broadcast_frame(
     )
 }
 
+/// Send a window command only while `window_id` holds a live `/ws` socket,
+/// and refuse otherwise instead of broadcasting into nothing.
+///
+/// Every fire-and-forget opener (`cs open`, `cs graph`, `cs dashboard`, `cs
+/// terminal new`, `cs terminal team new|load`) sends through here and returns
+/// "... request queued" to the CLI without awaiting the SPA. A `--pane`/`--side`
+/// placement failure surfaces as a transient status in the SPA
+/// (`resolveWindowCommandDestination` in store.svelte.ts) but not in the CLI's
+/// exit code, since the opener has already returned; making it CLI-visible
+/// would take a blocking round-trip like `pane_round_trip`.
 fn send_window_command_if_live(
     session_registry: &SessionRegistry,
     window_id: &str,
@@ -4014,11 +3977,7 @@ fn send_window_command_if_live(
     match session_registry.dispatch_if_live(window_id, || events_tx.send(raw)) {
         None => Err(format!("window {window_id:?} is not connected")),
         Some(Ok(_)) => Ok(()),
-        Some(Err(_)) => Err(
-            "no chan window is connected to receive this; open the workspace in a window, \
-             or run from inside a chan terminal so $CHAN_WINDOW_ID targets one"
-                .into(),
-        ),
+        Some(Err(_)) => Err(NO_WINDOW_CONNECTED.into()),
     }
 }
 
@@ -4414,10 +4373,8 @@ struct TermWriteOutcome {
 
 /// Convert a terminal write outcome into its typed control response.
 ///
-/// A requested submit is always encoded, so this path never produces
-/// `ControlResponse::SubmitRefused`. The variant stays on the wire so a `cs`
-/// client can still read one from an older devserver, which refused whenever
-/// the target's spawn command named no agent.
+/// A requested submit is always encoded, so this path never answers
+/// `ControlResponse::SubmitRefused`.
 fn term_write_response(
     registry: &TerminalRegistry,
     tab_name: Option<&str>,
@@ -4854,9 +4811,6 @@ pub(crate) fn standalone_open_target(
     }
 }
 
-/// [`open_path`] over the standalone filesystem surface: the same decision
-/// tree, resolved through the `/`-rooted capability instead of a workspace
-/// root, then sent to the calling window.
 /// The window command an already-resolved [`StandaloneOpenTarget`] becomes,
 /// plus the path to name in the acknowledgement. Split from
 /// [`open_path_standalone`] because the escape route from a WORKSPACE window
@@ -6149,7 +6103,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_download_on_a_terminal_tenant_signal_the_window_cwd_scoped() {
-        // `cs upload` / `cs download` from a standalone terminal now WORK
+        // `cs upload` / `cs download` from a standalone terminal WORK
         // (cwd / shell-uid scoped) instead of refusing. The CLI absolutized the
         // path; the control socket signals the window with it, leading `/`
         // stripped, rather than refusing as a workspace-only command. A live
@@ -7314,9 +7268,8 @@ mod tests {
     }
 
     // The sender's agent is always encodable, so this path answers Ok even
-    // when a target derives nothing. `ControlResponse::SubmitRefused` stays on
-    // the wire for a `cs` talking to an older devserver, but nothing here
-    // produces one any more.
+    // when a target derives nothing and never answers
+    // `ControlResponse::SubmitRefused`.
     #[test]
     fn term_write_answers_ok_and_names_every_disagreement() {
         let (_root, registry) = empty_registry();
