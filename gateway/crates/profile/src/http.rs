@@ -1584,15 +1584,10 @@ async fn devserver_access(
         return Err(Error::BadRequest("invalid devserver id".into()));
     }
     let granted: bool = sqlx::query_scalar(
-        "SELECT EXISTS( \
-             SELECT 1 FROM devservers d \
-             WHERE d.owner_user_id = $1 AND d.devserver_id = $2 \
-               AND (d.owner_user_id = $3 OR EXISTS( \
-                   SELECT 1 FROM devserver_grants g \
-                   WHERE g.owner_user_id = d.owner_user_id \
-                     AND g.devserver_id = d.devserver_id \
-                     AND g.grantee_user_id = $3 \
-               )) \
+        "SELECT $1 = $3 OR EXISTS( \
+             SELECT 1 FROM devserver_grants g \
+             WHERE g.owner_user_id = $1 AND g.devserver_id = $2 \
+               AND g.grantee_user_id = $3 \
          )",
     )
     .bind(owner_id)

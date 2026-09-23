@@ -26,11 +26,8 @@
 //! admission ensure carries no label and the announce labels the row a
 //! moment later; a client that announces no name keeps the label-less
 //! row, which the dashboard renders by id prefix. A grant create also
-//! recreates the row, label-less. The owner's own entry needs the row
-//! too: profile's `devserver_access` selects from `devservers` for the
-//! owner as well as for grantees, so identity denies the owner entry
-//! to a live devserver whose row is missing until one of those
-//! recreates it.
+//! recreates the row, label-less. Owner entry is independent of the
+//! registry row; claimed grants authorize other callers.
 //!
 //! Fleet coverage: the snapshot is devserver-control's cluster-wide
 //! aggregate, so registrations on every connected proxy count as live.

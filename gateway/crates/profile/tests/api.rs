@@ -3260,3 +3260,25 @@ async fn revocation_worker_starts_with_the_app() {
     .await
     .expect("revocation worker startup test timed out");
 }
+
+#[tokio::test]
+async fn owner_access_does_not_depend_on_a_registry_row() {
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let stranger = mk_user(&app, "stranger@x.com").await;
+    let dsid = ds("a");
+    for (caller, expected) in [(&owner, StatusCode::OK), (&stranger, StatusCode::NOT_FOUND)] {
+        let (status, body) = app
+            .req(
+                Method::GET,
+                &format!("/v1/users/{owner}/devservers/{dsid}/access?as={caller}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, expected);
+        if status == StatusCode::OK {
+            assert_eq!(body["access"], true);
+        }
+    }
+    app.cleanup().await;
+}

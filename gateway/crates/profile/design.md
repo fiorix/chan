@@ -223,3 +223,5 @@ Database errors are logged with `tracing::error!(error = ?e, ...)`; clients see 
 - mTLS (auth is Bearer only)
 - Soft deletes (delete cascades via FK)
 - Rate limiting on the service API (mitigated at the network layer; admin tree is bearer-gated by a separate token)
+
+The access gate grants the owner independently of the durable devserver registry. Unnamed rows may be swept or asynchronously recreated without denying their owner. Other callers still require a claimed grant for the exact owner and devserver.
