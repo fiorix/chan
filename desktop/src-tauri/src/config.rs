@@ -2,7 +2,8 @@
 //!
 //! The chan registry (`~/.chan/config.toml`) is the source of truth
 //! for which workspaces exist. This file holds only desktop-specific
-//! state that has no place in chan proper:
+//! state that has no place in chan proper; [`Config`]'s field docs list
+//! it.
 //!
 //! Per-workspace serve URLs are intentionally NOT persisted: chan rotates
 //! the bearer token on every `chan serve`, so a saved URL would
@@ -54,8 +55,8 @@ pub struct Devserver {
     /// The full devserver URL the desktop dials, scheme included
     /// (`https://box.example.com:8787`, or `http://127.0.0.1:8787` for an
     /// `ssh -L` loopback forward). The scheme is load-bearing: the dial path
-    /// branches raw-tunnel vs proxied-HTTPS on it (the proxied + OAuth branch
-    /// is a deferred follow-up). The parsed host is also the default
+    /// branches raw-tunnel vs proxied-HTTPS on it. The parsed host is also the
+    /// default
     /// `[DEVSERVER {host}]` section label until the devserver reports its own
     /// `host_label`. A missing port defaults from the scheme at dial time.
     pub url: String,
@@ -85,11 +86,10 @@ pub struct Devserver {
     /// bury notice) once connected.
     #[serde(default)]
     pub auto_hide_control: bool,
-    /// Legacy markers from the retired pick-one gateway flow: the picked
-    /// devserver's OWNER username plus its full id, recorded by sign-in
-    /// callbacks before gateways became first-class. Nothing writes them
-    /// anymore; the startup migration reads them to convert the row into a
-    /// [`Gateway`] entry (and clears them on a row it keeps).
+    /// Read-only markers found in config files written by the pick-one
+    /// gateway flow: the picked devserver's OWNER username plus its full id.
+    /// The startup migration converts such a row into a [`Gateway`] entry
+    /// (and clears them on a row it keeps). Never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,11 +163,7 @@ pub fn native_trust(
     devserver_id: &str,
 ) -> Result<bool, String> {
     let cfg = store.lock().unwrap().get().map_err(|e| e.to_string())?;
-    let gateway = cfg
-        .gateways
-        .iter()
-        .find(|gateway| gateway.id == gateway_id)
-        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    let gateway = cfg.gateway(gateway_id)?;
     Ok(gateway.trusts_native(owner_user_id, devserver_id))
 }
 
@@ -183,11 +179,7 @@ pub fn set_native_trust(
 ) -> Result<bool, String> {
     let mut store = store.lock().unwrap();
     let mut cfg = store.get().map_err(|e| e.to_string())?;
-    let gateway = cfg
-        .gateways
-        .iter_mut()
-        .find(|gateway| gateway.id == gateway_id)
-        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    let gateway = cfg.gateway_mut(gateway_id)?;
     let present = gateway.trusts_native(owner_user_id, devserver_id);
     if present == trusted {
         return Ok(false);
@@ -217,11 +209,7 @@ pub fn prune_native_trust_by_label(
 ) -> Result<bool, String> {
     let mut store = store.lock().unwrap();
     let mut cfg = store.get().map_err(|e| e.to_string())?;
-    let gateway = cfg
-        .gateways
-        .iter_mut()
-        .find(|gateway| gateway.id == gateway_id)
-        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    let gateway = cfg.gateway_mut(gateway_id)?;
     let before = gateway.native_trust.len();
     gateway
         .native_trust
@@ -378,6 +366,24 @@ pub struct Config {
     /// collapses a card. Stale ids are harmless and left unpruned.
     #[serde(default)]
     pub collapsed_machines: Vec<String>,
+}
+
+impl Config {
+    /// The gateway row `id`, or the "no gateway" refusal every lookup gives.
+    fn gateway(&self, id: &str) -> Result<&Gateway, String> {
+        self.gateways
+            .iter()
+            .find(|gateway| gateway.id == id)
+            .ok_or_else(|| format!("no gateway {id}"))
+    }
+
+    /// Mutable [`Self::gateway`].
+    fn gateway_mut(&mut self, id: &str) -> Result<&mut Gateway, String> {
+        self.gateways
+            .iter_mut()
+            .find(|gateway| gateway.id == id)
+            .ok_or_else(|| format!("no gateway {id}"))
+    }
 }
 
 pub struct ConfigStore {
@@ -736,8 +742,8 @@ fn entry_from_devserver(
         // The connected library id, learned from the live window feed (`None`
         // until this devserver is connected with ≥1 window). `pane_color` matches
         // a devserver window's `library_id` against this (in the feed) to resolve
-        // its colour; no colour lives on the entry anymore (each library's colour
-        // is on its own host).
+        // its colour; the entry carries no colour (each library's colour is on
+        // its own host).
         library_id: feed.library_id_of(&d.id),
         // Whether the control terminal auto-hides on connect success.
         auto_hide_control: d.auto_hide_control,
@@ -1133,7 +1139,7 @@ impl GatewayMigration {
     }
 }
 
-/// Convert devserver rows recorded by the retired pick-one gateway flow
+/// Convert devserver rows recorded by the pick-one gateway flow
 /// (`gateway_owner`/`gateway_devserver_id` set) into [`Gateway`] entries,
 /// dropping the rows: the gateway's roster now supplies its devservers, so
 /// a persisted per-devserver row would shadow the synthesized one. Rows
@@ -1410,10 +1416,6 @@ pub(crate) fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-pub fn current_millis() -> u64 {
-    now_millis()
 }
 
 /// chan-desktop keeps its config under `~/.chan/desktop/` -- the same
