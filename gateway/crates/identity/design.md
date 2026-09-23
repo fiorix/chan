@@ -367,3 +367,5 @@ Username changes preflight the edit limit and known name collisions before cutti
 PAT creation commits the credential hash and creation audit together. An audit insertion failure rolls back the PAT, so a failed mint cannot leave an undelivered active credential.
 
 Desktop redemption delivers the PAT once even when its audit write fails. The one-time code remains consumed and the audit failure is logged without the code or secret; audit availability cannot strand the already-minted credential.
+
+Feature flag lookup failures keep login denied and profile flags empty, and emit warnings. Login denial audits distinguish an unavailable flag lookup from an explicit policy denial.

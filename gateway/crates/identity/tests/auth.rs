@@ -2739,6 +2739,15 @@ async fn share_landing_no_access_is_404() {
 
 #[tokio::test]
 async fn callback_denied_when_oauth_login_flag_off() {
+    assert_flag_denial(false).await;
+}
+
+#[tokio::test]
+async fn flag_lookup_failure_is_audited_as_failure_and_grants_no_session() {
+    assert_flag_denial(true).await;
+}
+
+async fn assert_flag_denial(lookup_fails: bool) {
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
     let uid = fake_user_id();
@@ -2789,7 +2798,11 @@ async fn callback_denied_when_oauth_login_flag_off() {
     // Flags mock: oauth_login disabled.
     Mock::given(method("GET"))
         .and(path(format!("/v1/users/{uid}/flags")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"oauth_login": false})))
+        .respond_with(if lookup_fails {
+            ResponseTemplate::new(503)
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({"oauth_login": false}))
+        })
         .mount(&app.profile)
         .await;
 
@@ -2806,6 +2819,21 @@ async fn callback_denied_when_oauth_login_flag_off() {
     // No session was granted: /api/me returns 401.
     let (s, _, _, _) = c.send(Method::GET, "/api/me", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let requests = app.profile.received_requests().await.unwrap();
+    let audit = requests
+        .iter()
+        .find(|r| r.url.path() == "/v1/auth-audit")
+        .unwrap();
+    let audit: Value = audit.body_json().unwrap();
+    assert_eq!(audit["action"], "login_denied");
+    assert_eq!(
+        audit["note"],
+        if lookup_fails {
+            "oauth_login flag lookup failed"
+        } else {
+            "oauth_login flag not granted"
+        }
+    );
     app.cleanup().await;
 }
 

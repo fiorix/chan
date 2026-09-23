@@ -552,12 +552,13 @@ async fn auth_callback_inner(
     // 303s to the SPA's denied panel. We do this *before* cycle_id
     // so the session never holds an authenticated state for a
     // denied account.
-    let flags = state
-        .cfg
-        .profile_client
-        .get_user_flags(user.id)
-        .await
-        .unwrap_or_default();
+    let (flags, denial_note) = match state.cfg.profile_client.get_user_flags(user.id).await {
+        Ok(flags) => (flags, "oauth_login flag not granted"),
+        Err(error) => {
+            tracing::warn!(?error, user_id = %user.id, "login feature flag lookup failed");
+            (Default::default(), "oauth_login flag lookup failed")
+        }
+    };
     if !flags.get("oauth_login").copied().unwrap_or(false) {
         if let Err(e) = state
             .cfg
@@ -567,7 +568,7 @@ async fn auth_callback_inner(
                 "login_denied",
                 ip.as_deref(),
                 ua.as_deref(),
-                Some("oauth_login flag not granted"),
+                Some(denial_note),
             )
             .await
         {
@@ -946,7 +947,10 @@ async fn me(State(state): State<AppState>, session: Session) -> Result<Response>
         .profile_client
         .get_user_flags(user.id)
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, user_id = %user.id, "profile feature flag lookup failed");
+            Default::default()
+        });
 
     Ok(Json(MeResponse {
         user,
