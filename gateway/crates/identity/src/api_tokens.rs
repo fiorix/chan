@@ -262,14 +262,14 @@ impl ApiTokenService {
         .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
         .fetch_optional(&mut *tx)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         let Some(token) = token else {
             let exists =
                 sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
                     .bind(new.user_id)
                     .fetch_one(&mut *tx)
                     .await
-                    .map_err(map_db)?;
+                    .map_err(Error::from)?;
             if !exists {
                 return Err(Error::NotFound);
             }
@@ -302,7 +302,7 @@ impl ApiTokenService {
             .bind(email)
             .fetch_optional(&self.pool)
             .await
-            .map_err(map_db)
+            .map_err(Error::from)
     }
 
     /// Token id -> owning user, revoked or not: the operator revoke
@@ -313,7 +313,7 @@ impl ApiTokenService {
             .bind(token_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(map_db)
+            .map_err(Error::from)
     }
 
     pub async fn list(&self, user_id: Uuid) -> Result<Vec<ApiToken>> {
@@ -327,7 +327,7 @@ impl ApiTokenService {
         .bind(user_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         Ok(rows)
     }
 
@@ -342,7 +342,7 @@ impl ApiTokenService {
         .bind(user_id)
         .execute(&self.pool)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         if res.rows_affected() == 0 {
             return Ok(false);
         }
@@ -358,7 +358,7 @@ impl ApiTokenService {
             .bind(user_id)
             .fetch_one(&self.pool)
             .await
-            .map_err(map_db)
+            .map_err(Error::from)
     }
 
     pub async fn audit(
@@ -377,7 +377,7 @@ impl ApiTokenService {
         .bind(user_id)
         .fetch_one(&self.pool)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         if !owned {
             return Err(Error::NotFound);
         }
@@ -392,7 +392,7 @@ impl ApiTokenService {
         .bind(limit)
         .fetch_all(&self.pool)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         Ok(rows)
     }
 
@@ -483,7 +483,7 @@ impl ApiTokenService {
             .bind(i32::try_from(devserver_control_proto::MAX_SIGNED_CONNECTED_DEVSERVERS).unwrap())
             .fetch_optional(&self.pool)
             .await
-            .map_err(map_db)?
+            .map_err(Error::from)?
             .ok_or(Error::Unauthorized)?;
 
         Ok(ValidatedToken {
@@ -517,7 +517,7 @@ impl ApiTokenService {
         .bind(meta.user_agent())
         .execute(&self.pool)
         .await
-        .map_err(map_db)?;
+        .map_err(Error::from)?;
         Ok(())
     }
 }
@@ -587,14 +587,25 @@ fn hash_token(token: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
 
-fn map_db(e: sqlx::Error) -> Error {
-    tracing::error!(error = ?e, "api_tokens db error");
-    Error::Anyhow(anyhow::anyhow!(e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_database_errors_preserve_the_database_variant() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let error = ApiTokenService::new(pool)
+            .owner_of(Uuid::nil())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Database(sqlx::Error::PoolClosed)),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn devserver_id_is_lowercase_hex_sha256() {
