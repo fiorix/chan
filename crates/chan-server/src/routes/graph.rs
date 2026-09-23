@@ -14,7 +14,7 @@
 //! so the UI can render partial relationship data while the full
 //! graph is still being composed.
 
-use std::{convert::Infallible, sync::Arc};
+use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -25,9 +25,7 @@ use chan_workspace::{
     normalize_graph_edges, resolve_link_target as resolve_link_dst, CocomoSummary, EdgeKind,
     FileClass, PathClass, PathPermission, ReportFileBucket, ReportFileStats,
 };
-use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 use crate::error::{err_from, err_state};
 use crate::routes::blocking_response;
@@ -1436,7 +1434,7 @@ pub async fn api_graph(
         .into_response();
     }
     if stream {
-        return stream_graph_response(workspace, params).await;
+        return stream_graph_response(state.bulk_transfer.stall_signal(), workspace, params).await;
     }
     blocking_response("graph", move || api_graph_sync(workspace, params)).await
 }
@@ -1521,23 +1519,23 @@ where
 }
 
 async fn stream_graph_response(
+    signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     p: GraphParams,
 ) -> Response {
-    let (tx, mut rx) = mpsc::channel::<GraphStreamMessage>(8);
-    tokio::task::spawn_blocking(move || {
+    let mut bridge = crate::bulk_transfer::StreamBridge::spawn(signal, move |frames| {
         let result = stream_graph_sync(workspace, p, |bytes| {
-            tx.blocking_send(GraphStreamMessage::Data(bytes)).is_ok()
+            frames.send(GraphStreamMessage::Data(bytes))
         });
         match result {
             Ok(()) | Err(GraphBuildError::Cancelled) => {}
             Err(e) => {
-                let _ = tx.blocking_send(GraphStreamMessage::Error(e));
+                frames.send(GraphStreamMessage::Error(e));
             }
         }
     });
 
-    let first = match rx.recv().await {
+    let first = match bridge.first().await {
         Some(GraphStreamMessage::Data(bytes)) => bytes,
         Some(GraphStreamMessage::Error(e)) => return e.into_response(),
         None => {
@@ -1548,17 +1546,10 @@ async fn stream_graph_response(
                 .into_response()
         }
     };
-    let rest = stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| {
-            let bytes = match message {
-                GraphStreamMessage::Data(bytes) => bytes,
-                GraphStreamMessage::Error(e) => graph_ndjson_error_bytes(e.to_string()),
-            };
-            (Ok::<Bytes, Infallible>(bytes), rx)
-        })
+    let body = bridge.into_body(first, |message| match message {
+        GraphStreamMessage::Data(bytes) => bytes,
+        GraphStreamMessage::Error(e) => graph_ndjson_error_bytes(e.to_string()),
     });
-    let body =
-        Body::from_stream(stream::once(async move { Ok::<Bytes, Infallible>(first) }).chain(rest));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
@@ -1948,7 +1939,8 @@ pub async fn api_backlinks(
         return Json(Vec::<ApiBacklinkEdge>::new()).into_response();
     }
     if stream {
-        return stream_backlinks_response(workspace, path).await;
+        return stream_backlinks_response(state.bulk_transfer.stall_signal(), workspace, path)
+            .await;
     }
     blocking_response("backlinks", move || api_backlinks_sync(workspace, path)).await
 }
@@ -2048,24 +2040,23 @@ where
 }
 
 async fn stream_backlinks_response(
+    signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
 ) -> Response {
-    let (tx, mut rx) = mpsc::channel::<BacklinksStreamMessage>(8);
-    tokio::task::spawn_blocking(move || {
+    let mut bridge = crate::bulk_transfer::StreamBridge::spawn(signal, move |frames| {
         let result = stream_backlinks_sync(&workspace, &path, |bytes| {
-            tx.blocking_send(BacklinksStreamMessage::Data(bytes))
-                .is_ok()
+            frames.send(BacklinksStreamMessage::Data(bytes))
         });
         match result {
             Ok(()) | Err(chan_workspace::ChanError::Cancelled) => {}
             Err(e) => {
-                let _ = tx.blocking_send(BacklinksStreamMessage::Error(e));
+                frames.send(BacklinksStreamMessage::Error(e));
             }
         }
     });
 
-    let first = match rx.recv().await {
+    let first = match bridge.first().await {
         Some(BacklinksStreamMessage::Data(bytes)) => bytes,
         Some(BacklinksStreamMessage::Error(e)) => return err_from(&e),
         None => {
@@ -2076,17 +2067,10 @@ async fn stream_backlinks_response(
                 .into_response()
         }
     };
-    let rest = stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|message| {
-            let bytes = match message {
-                BacklinksStreamMessage::Data(bytes) => bytes,
-                BacklinksStreamMessage::Error(e) => backlinks_ndjson_error_bytes(e.to_string()),
-            };
-            (Ok::<Bytes, Infallible>(bytes), rx)
-        })
+    let body = bridge.into_body(first, |message| match message {
+        BacklinksStreamMessage::Data(bytes) => bytes,
+        BacklinksStreamMessage::Error(e) => backlinks_ndjson_error_bytes(e.to_string()),
     });
-    let body =
-        Body::from_stream(stream::once(async move { Ok::<Bytes, Infallible>(first) }).chain(rest));
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
@@ -2295,9 +2279,11 @@ mod tests {
             frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
             "the producer must outrun the channel, got {frames} frames"
         );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
             "graph stream",
-            || stream_graph_response(workspace, params()),
+            || stream_graph_response(bulk.stall_signal(), workspace, params()),
         );
         assert!(
             body.is_err(),
@@ -2327,9 +2313,11 @@ mod tests {
             frames > crate::bulk_transfer::BRIDGE_CAPACITY + 1,
             "the producer must outrun the channel, got {frames} frames"
         );
+        let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
+        let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::bulk_transfer::test_support::assert_unread_stream_frees_its_pool_thread(
             "backlinks stream",
-            || stream_backlinks_response(workspace, "notes/target.md".into()),
+            || stream_backlinks_response(bulk.stall_signal(), workspace, "notes/target.md".into()),
         );
         assert!(
             body.is_err(),
