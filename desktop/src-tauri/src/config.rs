@@ -701,7 +701,10 @@ fn entry_from_devserver(
     let (os, pretty_name) = feed.os_of(&d.id).unwrap_or_default();
     DevserverEntry {
         id: d.id.clone(),
-        url: d.url.clone(),
+        // A row stored with its bearer in the URL (typed that way, or saved by
+        // an older build) must not carry it onto the launcher wire, where the
+        // token is write-only and reported only as `has_token`.
+        url: display_devserver_url(&d.url),
         host,
         port,
         label: d.label.clone(),
@@ -1622,6 +1625,39 @@ mod tests {
         // the on-disk config still holds it for the connect path.
         let cfg = store.lock().unwrap().get().unwrap();
         assert_eq!(cfg.devservers[0].token, "tok_secret");
+    }
+
+    /// A devserver URL that carries a `?t=` bearer is shown without it: the
+    /// wire url never echoes the token, whatever the row was stored with.
+    #[test]
+    fn registry_entry_url_never_carries_the_bearer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let added = reg
+            .add(DevserverInput {
+                url: Some("http://box.example.com:8787/?t=tok_in_url".into()),
+                host: String::new(),
+                port: 0,
+                label: None,
+                script: None,
+                token: None,
+                clear_token: false,
+                auto_hide_control: false,
+            })
+            .expect("add");
+        assert!(!added.url.contains("tok_in_url"), "{}", added.url);
+        let listed = reg.list();
+        assert!(!listed[0].url.contains("tok_in_url"), "{}", listed[0].url);
     }
 
     /// The wire `connected` flag the launcher reads
