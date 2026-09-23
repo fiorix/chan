@@ -2113,15 +2113,8 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 fn validate_desktop_entry_path(path: Option<&str>) -> Result<String> {
     let path = path.unwrap_or("/").trim();
-    if path.is_empty()
-        || !path.starts_with('/')
-        || path.starts_with("//")
-        || path.contains("://")
-        || path.contains('\r')
-        || path.contains('\n')
-    {
-        return Err(Error::BadRequest("invalid entry path".into()));
-    }
+    gateway_common::devserver_gate::validate_entry_next_path(path)
+        .map_err(|_| Error::BadRequest("invalid entry path".into()))?;
     Ok(path.to_string())
 }
 
@@ -3143,6 +3136,24 @@ mod tests {
             assert!(
                 validate_desktop_entry_path(Some(bad)).is_err(),
                 "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_entry_path_rejects_every_signer_invalid_shape_as_bad_request() {
+        for path in [
+            "/a\\b".to_string(),
+            "/a\tb".to_string(),
+            "/a\0b".to_string(),
+            format!("/{}", "a".repeat(2048)),
+        ] {
+            assert!(
+                matches!(
+                    validate_desktop_entry_path(Some(&path)),
+                    Err(Error::BadRequest(_))
+                ),
+                "{path:?}"
             );
         }
     }
