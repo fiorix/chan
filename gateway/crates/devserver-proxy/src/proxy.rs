@@ -74,7 +74,7 @@ use axum::http::{
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use chan_tunnel_proto::gateway_assertion;
-use chan_tunnel_server::TunnelHandle;
+use chan_tunnel_server::{OpenError, TunnelHandle};
 use futures_util::{SinkExt, StreamExt};
 use gateway_common::devserver_gate;
 use http_body_util::Limited;
@@ -83,6 +83,7 @@ use subtle::ConstantTimeEq;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as TgCloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TgCloseFrame;
+use tokio_tungstenite::tungstenite::Error as TgError;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 use tokio_tungstenite::tungstenite::Utf8Bytes as TgUtf8Bytes;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -1574,9 +1575,11 @@ fn safe_upstream_set_cookie(value: &HeaderValue) -> bool {
 /// waits for a slot while the tunnel is at its substream budget) and the
 /// upstream WebSocket handshake, since no frame moves either way until
 /// both are done. The client already has its 101 by then, so a setup that
-/// outlasts the window, or meets revocation or expiry, ends the client
-/// socket with a Close: 1011 "upstream timed out", or the same 1008 the
-/// pump sends.
+/// outlasts the window, fails, or meets revocation or expiry, ends the
+/// client socket with a Close: 1011 "upstream timed out", 1011 with the
+/// reason [`BridgeSetupError::close_reason`] gives, or the same 1008 the
+/// pump sends. A socket that ended with no Close would read as a network
+/// drop in a browser, which could not tell it from a refusal.
 ///
 /// Each direction owns its source stream and destination sink. The policy
 /// monitor resets the shared idle deadline from either source and requests a
@@ -1630,6 +1633,32 @@ fn upstream_bridge_close(stop: BridgeStop) -> TgMessage {
     }))
 }
 
+/// Why a bridge's setup failed, which picks the Close reason the client
+/// gets. An open that fails means the tunnel is gone, so a browser may
+/// retry once it is back; a handshake the devserver answered with
+/// anything but a 101 is this path refused, and a retry of it is not
+/// going to help.
+#[derive(Debug, thiserror::Error)]
+enum BridgeSetupError {
+    #[error("substream open: {0}")]
+    Open(#[from] OpenError),
+    #[error("ws handshake: {0}")]
+    Handshake(#[from] TgError),
+}
+
+impl BridgeSetupError {
+    /// The reasons share the 1011 code with the setup timeout: 1014, the
+    /// registered bad-gateway close code, is one tungstenite refuses on
+    /// receipt and reports as a 1002 protocol violation, so the reason
+    /// is what tells the cases apart.
+    fn close_reason(&self) -> &'static str {
+        match self {
+            Self::Handshake(TgError::Http(_)) => "upstream refused",
+            Self::Open(_) | Self::Handshake(_) => "upstream unreachable",
+        }
+    }
+}
+
 async fn bridge_ws(
     client: WebSocket,
     handle: TunnelHandle,
@@ -1647,9 +1676,8 @@ async fn bridge_ws(
 
     let setup = async {
         let stream = handle.open().await?;
-        tokio_tungstenite::client_async(request, stream.compat())
-            .await
-            .map_err(|e| anyhow::anyhow!("ws handshake: {e}"))
+        let connected = tokio_tungstenite::client_async(request, stream.compat()).await?;
+        Ok::<_, BridgeSetupError>(connected)
     };
     let setup_deadline = tokio::time::Instant::now() + policy.idle_timeout;
     let (upstream, _resp) = tokio::select! {
@@ -1663,7 +1691,11 @@ async fn bridge_ws(
             return Ok(());
         }
         set_up = tokio::time::timeout_at(setup_deadline, setup) => match set_up {
-            Ok(result) => result?,
+            Ok(Ok(connected)) => connected,
+            Ok(Err(failure)) => {
+                close_unbridged(client, 1011, failure.close_reason()).await;
+                return Err(failure.into());
+            }
             Err(_) => {
                 close_unbridged(client, 1011, "upstream timed out").await;
                 anyhow::bail!(
