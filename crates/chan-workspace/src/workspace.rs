@@ -1,6 +1,6 @@
 // Workspace: a registered directory exposed as a sandboxed filesystem
-// plus search and graph. All I/O routes through `resolve_safe` and
-// the editable-text gate. Per-workspace metadata (index, graph,
+// plus search and graph. All user-path I/O routes through the cap-std
+// `RootedFs` core and the editable-text gate. Per-workspace metadata (index, graph,
 // sessions, tokens, trash, report) lives outside the user's notes
 // tree under ~/.chan/workspaces/<metadata_key>/.
 
@@ -78,9 +78,19 @@ const RENAME_LOG_FILE: &str = "rename_log.json";
 /// runs first (sqlite), the index commit runs second (tantivy +
 /// vectors), and a crash between them leaves graph and index
 /// disagreeing about the file. On the next `Workspace::open` any
-/// entries still in the journal seed supervised replay;
-/// `needs_replay_writes()` remains the compatibility status projection.
+/// entries still in the journal seed supervised replay, which
+/// `needs_replay_writes()` reports.
 const PENDING_WRITES_FILE: &str = "pending_writes.json";
+
+/// Store `value` in `slot` and report whether that changed it, the shape
+/// every dashboard setter hands to `update_dashboard`.
+fn replace_if_changed<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
 
 /// What `replay_pending_writes` should do for a journaled entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +124,7 @@ pub struct SearchOpts {
 
 pub use fs_ops::TreeEntry;
 
+/// One entry of a single-directory listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
@@ -321,8 +332,10 @@ pub struct ReconcileReport {
 pub struct WorkspaceGeneration(u64);
 
 impl WorkspaceGeneration {
+    /// The generation before any recovery was requested.
     pub const INITIAL: Self = Self(0);
 
+    /// The raw counter value.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -418,19 +431,26 @@ pub trait RecoveryDriver: Send + Sync {
 /// Point-in-time state of the workspace recovery coordinator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryStatus {
+    /// The newest generation recovery has been asked to reach.
     pub generation: WorkspaceGeneration,
+    /// The newest generation a finished pass reached.
     pub completed_generation: WorkspaceGeneration,
+    /// The pass running now, if any.
     pub active: Option<RecoveryPass>,
+    /// The pass queued behind it, if any.
     pub pending: Option<RecoveryPass>,
 }
 
 impl RecoveryStatus {
+    /// Ready when no pass is active or pending and the completed generation
+    /// has caught up with the requested one.
     pub fn is_ready(self) -> bool {
         self.active.is_none()
             && self.pending.is_none()
             && self.completed_generation >= self.generation
     }
 
+    /// The action of the pending pass, else of the active one.
     pub fn required_action(self) -> Option<RecoveryAction> {
         self.pending.or(self.active).map(|pass| pass.action)
     }
@@ -475,6 +495,7 @@ pub enum WorkspaceReadiness {
 }
 
 impl WorkspaceReadiness {
+    /// Whether the workspace is `Ready`.
     pub fn is_ready(self) -> bool {
         matches!(self, Self::Ready { .. })
     }
@@ -814,8 +835,8 @@ pub struct Workspace {
     /// even when tests or callers try to open many workspaces at once.
     _fd_permit: crate::fd_budget::WorkspacePermit,
     /// Opened from sidecar metadata during startup readiness probing.
-    /// `OnceLock` retains the existing retry-on-access behavior when
-    /// a corrupt sidecar could not be opened during that probe.
+    /// `OnceLock` so a sidecar that failed to open during that probe is
+    /// retried on first use.
     index: std::sync::OnceLock<Index>,
     graph: std::sync::OnceLock<GraphView>,
     /// Cumulative rename log accumulated since the last `reindex`.
@@ -1015,8 +1036,8 @@ impl Workspace {
         // one meta-less junk entry and reclaims it wholesale. Must run
         // before the first sweep of this open.
         let _ = trash::hoist_nested_entries(&paths.trash, "drafts");
-        // Lazy GC: reclaim expired trash entries on every open. No
-        // background thread, matches the codebase's sync-only rule.
+        // Lazy GC: reclaim expired trash entries on every open. The
+        // sweep is cheap enough not to need its own thread.
         // Errors are swallowed: a corrupt trash dir must never block
         // a legitimate workspace open.
         let _ = trash::sweep_expired(&paths.trash, TRASH_RETENTION_SECS);
@@ -1040,7 +1061,7 @@ impl Workspace {
             };
         let drafts_root = entry.root_path.join(&drafts_dir_name);
         // A stale `rebuild.inprogress` marker means the previous
-        // reindex did not finish atomically. Promote it to an
+        // reindex did not finish atomically. Promote it to a
         // pending full-rebuild plan. The plan runs on the owned recovery
         // worker after open returns.
         let needs_rebuild = paths.graph_dir.join(REBUILD_MARKER).exists();
@@ -1481,13 +1502,14 @@ impl Workspace {
         self.fs.physical_path_to_virtual(path)
     }
 
+    /// The workspace root as registered (see `canonical_root` for the
+    /// resolved form).
     pub fn root(&self) -> &std::path::Path {
         self.fs.root()
     }
 
-    /// Effective transfer ceiling captured by the Library that opened this
-    /// workspace. The fixed transfer limits remain authoritative until their
-    /// call sites consume this value.
+    /// Transfer ceiling captured from the Library that opened this workspace;
+    /// it bounds opaque-byte writes and downloads.
     pub fn transfer_max_bytes(&self) -> u64 {
         self.fs.transfer_max_bytes()
     }
@@ -1846,14 +1868,14 @@ impl Workspace {
         self.fs.list(rel)
     }
 
+    /// Recursive walk of the whole workspace tree.
     pub fn list_tree(&self) -> Result<Vec<TreeEntry>> {
         fs_ops::list_tree(self.root())
     }
 
-    /// Recursive listing in chan's public namespace. Drafts now live
-    /// in-root under `<drafts_dir_name>/...`, so the plain `list_tree`
-    /// walk already surfaces them; this is a thin alias kept for the
-    /// chan-server callers that still address the unified view.
+    /// Alias of `list_tree`: drafts are ordinary in-root files under
+    /// `<drafts_dir_name>/...`, so one walk covers them. Kept for
+    /// chan-llm's MCP tools, which address the unified view.
     pub fn list_tree_unified(&self) -> Result<Vec<TreeEntry>> {
         self.list_tree()
     }
@@ -1909,6 +1931,7 @@ impl Workspace {
         fs_ops::list_tree_prefix_scoped(self.root(), &resolved, &policy)
     }
 
+    /// Create directory `rel` inside the sandbox.
     pub fn create_dir(&self, rel: &str) -> Result<()> {
         self.fs.create_dir(rel)
     }
@@ -2311,6 +2334,8 @@ impl Workspace {
         crate::contacts::import::run(self, dir, contacts, opts, progress)
     }
 
+    /// Rename one path inside the sandbox, rewriting no links (see
+    /// `rename_with_link_rewrite`).
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.fs.rename(from, to)
     }
@@ -3060,13 +3085,7 @@ impl Workspace {
     /// endpoints both route here; the change persists to `<root>/dashboard.toml`
     /// so a `chan serve` restart honours it.
     pub fn set_semantic_enabled(&self, enabled: bool) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.semantic_enabled == enabled {
-                return false;
-            }
-            cfg.semantic_enabled = enabled;
-            true
-        })?;
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.semantic_enabled, enabled))?;
         if !enabled {
             // Opting out bins the vectors so a later re-enable rebuilds from
             // scratch. Best-effort: BM25 is untouched, and a wipe error logs and
@@ -3125,13 +3144,7 @@ impl Workspace {
     /// `report.jsonl` so re-enabling later triggers a fresh
     /// scan. Mirrors `set_semantic_enabled`'s shape.
     pub fn set_reports_enabled(&self, enabled: bool) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.reports_enabled == enabled {
-                return false;
-            }
-            cfg.reports_enabled = enabled;
-            true
-        })?;
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.reports_enabled, enabled))?;
         if !enabled {
             // Drop the persisted JSONL so a re-enable later
             // starts from a fresh scan. Best-effort: a missing
@@ -3233,14 +3246,8 @@ impl Workspace {
     /// `set_reports_enabled`'s jsonl drop) -- the overlay state
     /// lives entirely client-side; this just persists the toggle.
     pub fn set_screensaver_enabled(&self, enabled: bool) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.screensaver_enabled == enabled {
-                return false;
-            }
-            cfg.screensaver_enabled = enabled;
-            true
-        })
-        .map(|_| ())
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.screensaver_enabled, enabled))
+            .map(|_| ())
     }
 
     /// Read the idle window (seconds) before the
@@ -3253,14 +3260,8 @@ impl Workspace {
     /// minimum + maximum client-side; chan-workspace stores whatever
     /// value lands.
     pub fn set_screensaver_timeout_secs(&self, secs: u32) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.screensaver_timeout_secs == secs {
-                return false;
-            }
-            cfg.screensaver_timeout_secs = secs;
-            true
-        })
-        .map(|_| ())
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.screensaver_timeout_secs, secs))
+            .map(|_| ())
     }
 
     /// Read the persisted visual theme. Default
@@ -3271,14 +3272,8 @@ impl Workspace {
 
     /// Persist the visual theme.
     pub fn set_screensaver_theme(&self, theme: ScreensaverTheme) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.screensaver_theme == theme {
-                return false;
-            }
-            cfg.screensaver_theme = theme;
-            true
-        })
-        .map(|_| ())
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.screensaver_theme, theme))
+            .map(|_| ())
     }
 
     /// Atomically apply the optional screensaver state fields and return the
@@ -3322,14 +3317,8 @@ impl Workspace {
     /// stores them verbatim (SPA does PBKDF2 client-side);
     /// `None` clears the PIN.
     pub fn set_screensaver_pin_hash(&self, hash: Option<Vec<u8>>) -> Result<()> {
-        self.update_dashboard(|cfg| {
-            if cfg.screensaver_pin_hash == hash {
-                return false;
-            }
-            cfg.screensaver_pin_hash = hash;
-            true
-        })
-        .map(|_| ())
+        self.update_dashboard(|cfg| replace_if_changed(&mut cfg.screensaver_pin_hash, hash))
+            .map(|_| ())
     }
 
     /// BOOT entry-point. Consumers call this after
@@ -3868,8 +3857,8 @@ impl Workspace {
         let mut unchanged = 0usize;
 
         // Pass 1: every file currently on disk. New or modified
-        // entries trigger an index_file; the journal in PR5 covers
-        // crash recovery for each per-file commit pair.
+        // entries trigger an index_file; the pending-writes journal
+        // covers crash recovery for each per-file commit pair.
         for (rel, (disk_mtime, disk_size)) in &disk_files {
             let mut needs_index = match graph_snapshot.get(rel) {
                 None => true,
@@ -4174,7 +4163,7 @@ impl Workspace {
             self.refresh_report_scope_if_needed(s)?;
             return Ok(s);
         }
-        // Bug 7: the report's initial `Index::scan` walks the workspace and
+        // The report's initial `Index::scan` walks the workspace and
         // reads every file (one descriptor at a time, but a full pass).
         // When it warms concurrently with a cold-boot search reindex it
         // adds to the descriptor pressure. Gate the scan start behind
@@ -5020,9 +5009,8 @@ fn build_edges(
                 kind: EdgeKind::Mention,
                 anchor: None,
             }),
-            // Dates aren't graph edges yet; the graph view groups
-            // files by date through a future query rather than a
-            // stored edge. Skip for now.
+            // Date tokens are not edges; grouping files by date is a
+            // query-time concern, not a stored edge.
             markdown::Token::Date { .. } => {}
         }
     }
@@ -6736,8 +6724,8 @@ mod tests {
 
     #[test]
     fn reconcile_catches_same_mtime_different_size_rewrite() {
-        // Regression for the same-mtime-different-content gap that
-        // PR9's size column closes. We forcibly stamp the graph's
+        // A same-mtime rewrite with different content is caught by the
+        // size column. We forcibly stamp the graph's
         // mtime back onto the file after editing so reconcile
         // cannot rely on mtime to spot the change; the size delta
         // is the only signal.
@@ -10174,9 +10162,9 @@ mod tests {
         workspace
             .rename_with_link_rewrite("friends/alice.md", "archive/alice-2.md")
             .unwrap();
-        // Move 2: target moves. Bug 2 was here: alice-2.md kept the
-        // stale `../notes/beta.md` because the graph still had alice's
-        // pre-move src path and the lookup failed silently.
+        // Move 2: target moves. alice-2.md's `../notes/beta.md` must be
+        // rewritten, which needs the graph to know alice's post-move src
+        // path.
         workspace
             .rename_with_link_rewrite("notes/beta.md", "archive/beta.md")
             .unwrap();
