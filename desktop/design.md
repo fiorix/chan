@@ -144,6 +144,8 @@ chan-desktop is self-contained. It links `chan-workspace` and `chan-server` dire
 
 Local workspaces open through the embedded chan-server `WorkspaceHost`, which owns a single `chan_workspace::Library`. Every registry mutation runs in-process against that `Library`.
 
+The embedded server drives chan-server's root health probe (`spawn_root_health_probe`), which `EmbeddedServer::assemble` starts for every embedded server however it was constructed and which re-checks each mounted workspace root every fifteen seconds until the server drops, because the desktop serves the launcher routes itself and nothing in their request path re-checks a root while the user is idle, so without it a gone or replaced root would read `running` in the launcher until a redundant add or on.
+
 The embedded server also owns one process-wide local extension runtime shared by every mounted workspace. It starts declarations once when the server starts and shuts their process groups down after hosted tenants drain. Extension HTTP is reverse-proxied under each workspace tenant, so webviews remain on the embedded server's existing origin and no loopback-any-port frame source is required. Note the configured Tauri CSP governs only the custom protocol: workspace windows load the SPA via `WebviewUrl::External` over `http://127.0.0.1`, so no CSP applies to those windows today; `'self'` was added to the configured `frame-src` purely as insurance against a future switch to the asset protocol.
 
 The macOS artifact is a single codesigned and notarised app; Windows signs the desktop exe, the bundled CLI, and the installer. External `chan serve` processes remain independent; remote desktop connections use the devserver or gateway modes (section 11).
