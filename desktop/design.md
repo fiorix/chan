@@ -223,7 +223,7 @@ Standalone terminal windows host the SPA in terminal-only mode (`kind=terminal`:
 
 ### 6.6 Remote windows
 
-Devservers own their window records and state server-side. The desktop subscribes to each connected devserver's `/api/library/windows/watch` feed and reconciles native `lib-<hex>::<window_id>` windows from those records. Hiding persists the record as hidden and closes the native surface; showing it lets the watcher rebuild the same composite label and session id.
+Devservers own their window records and state server-side. The desktop subscribes to each connected devserver's `/api/library/windows/watch` feed and reconciles native `lib-<hex>::<window_id>` windows from those records. It reads that feed and the seed list row by row, because a devserver on another release can serve a row this desktop cannot read, such as a window kind it does not know: such a row is left out and logged with the devserver id and its `window_id` (its index when it has none), the readable rows still reconcile, and a frame that does not parse at all is logged and skipped while the last snapshot stands, so one unreadable row never freezes or empties the view of that devserver. Hiding persists the record as hidden and closes the native surface; showing it lets the watcher rebuild the same composite label and session id.
 
 ### 6.7 Gateway roster devservers
 
