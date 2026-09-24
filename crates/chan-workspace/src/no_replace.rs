@@ -29,9 +29,14 @@
 //! then wins. The lock spans every root because a `Workspace` and a
 //! `MiniWorkspace` can cover the same directory.
 //!
-//! On a case-insensitive filesystem a case-only rename names an existing
-//! entry, the source itself, so every arm refuses it; callers that allow a
-//! case-only rename must detect the same file before coming here.
+//! On a case-insensitive filesystem a case-only rename (`readme.md` to
+//! `README.md`) names an existing entry, the source itself. It never reaches
+//! this module: `MiniWorkspace::move_plain`'s early destination check finds
+//! the source under the new spelling and refuses it before any arm runs.
+//! Whether an arm would refuse it differs by platform and is not relied on,
+//! so a caller that allows a case-only rename must handle it before coming
+//! here. The other callers rename a fresh staging name, which is never a case
+//! alias of its destination.
 
 use std::io;
 use std::path::Path;
