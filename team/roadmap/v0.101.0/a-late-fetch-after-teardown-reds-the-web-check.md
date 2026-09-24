@@ -12,6 +12,8 @@ By reading: the test mounts `App` over a demo workspace (`installDemoWorkspace`,
 
 A test's teardown leaves no continuation of the app's bootstrap able to reach the transport afterwards, so the web check's verdict does not depend on how loaded the box is.
 
+A second signature of the same family, seen on 2026-09-24 on an integration candidate with no change under `web/` (`dev/v0101-tasks/evidence/int/gate-4f451ef.log`): every test passed (432 files, 4570 tests) and vitest reported one uncaught exception, `ReferenceError: window is not defined` from `persistStateToHash` (`store.svelte.ts:3059`) called by the `schedulePersistStateToHash` debounce timer, attributed to `src/components/graphDepthProbeFailure.svelte.test.ts` after its environment was torn down. The debounce timer is armed by a layout mutation during the test and outlives the test's `window`. The fix below should cover any timer or continuation the app arms, not only the bootstrap's fetch.
+
 ## What to do
 
 Either make the cover test wait for the bootstrap to settle before it unmounts, or give the bootstrap chain a cancellation that unmounting the app triggers, and make the demo transport's uninstall fail loudly on any later call, with a fetch that throws a named error instead of falling through to the real one, so a leak reads as the test that leaked it. Acceptance: a test that fails on a transport call after teardown, green with the fix and red without it; and `make web-check` green on the box while the other lanes' gates run beside it.
