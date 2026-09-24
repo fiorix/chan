@@ -947,7 +947,7 @@ impl RootedFs {
         }
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         create_claim::reached();
         match dir.open_with(&rel_path, &options) {
             Ok(file) => drop(file),
@@ -1882,7 +1882,9 @@ mod mutation_tests {
 /// installs a closure here to learn whether a create reached the claim, which
 /// is how it tells a preflight that refused first from one that ran after the
 /// name was already taken; the closure runs once, on the thread that set it.
-#[cfg(test)]
+/// Unix-only, like the tests that use it: they rename an open root away,
+/// which Windows refuses.
+#[cfg(all(test, unix))]
 mod create_claim {
     use std::cell::RefCell;
 
@@ -1903,7 +1905,7 @@ mod create_claim {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod create_text_new_tests {
     use super::*;
     use std::cell::Cell;
@@ -1918,7 +1920,6 @@ mod create_text_new_tests {
         out
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_root_renamed_away_is_missing_and_gains_nothing_at_the_old_path() {
         let parent = tempfile::tempdir().expect("tempdir");
@@ -1940,7 +1941,6 @@ mod create_text_new_tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn the_root_check_runs_before_the_name_is_claimed() {
         let parent = tempfile::tempdir().expect("tempdir");
@@ -1963,7 +1963,6 @@ mod create_text_new_tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_parent_symlink_escaping_the_root_is_a_symlink_escape() {
         let root = tempfile::tempdir().expect("tempdir");
