@@ -729,7 +729,34 @@ fn replace_subtree(paths: &WorkspacePaths, payload: &Path, subtree: &str) -> Res
     Ok(())
 }
 
+/// Most tar entries one import reads, the manifest and directory entries
+/// included.
+pub const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
+
+/// Most payload bytes one import writes to disk.
+pub const MAX_ARCHIVE_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ExtractLimits {
+    entries: u64,
+    bytes: u64,
+}
+
+const EXTRACT_LIMITS: ExtractLimits = ExtractLimits {
+    entries: MAX_ARCHIVE_ENTRIES,
+    bytes: MAX_ARCHIVE_PAYLOAD_BYTES,
+};
+
 fn extract_payload(archive: &Path, payload: &Path) -> Result<(usize, u64)> {
+    extract_payload_within(archive, payload, EXTRACT_LIMITS)
+}
+
+fn extract_payload_within(
+    archive: &Path,
+    payload: &Path,
+    limits: ExtractLimits,
+) -> Result<(usize, u64)> {
+    let _ = (limits.entries, limits.bytes);
     let file = File::open(archive)?;
     let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
         ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
@@ -1828,6 +1855,81 @@ mod tests {
 
         assert!(guard_scm_identity(&manifest, Some(&target)).is_err());
         assert!(guard_scm_identity(&manifest, manifest.scm.as_ref()).is_ok());
+    }
+
+    /// A hand-built archive: the manifest entry plus one payload file per
+    /// size in `files`, so `files.len() + 1` tar entries in all.
+    fn archive_with_files(dir: &Path, files: &[usize]) -> PathBuf {
+        let out = dir.join("limits.tar.zst");
+        let file = File::create(&out).unwrap();
+        let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), 0).unwrap();
+        let mut builder = Builder::new(encoder);
+        let mut append = |path: &str, bytes: &[u8]| {
+            let mut header = Header::new_gnu();
+            header.set_entry_type(EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, path, bytes).unwrap();
+        };
+        append(MANIFEST_PATH, b"{}");
+        for (i, size) in files.iter().enumerate() {
+            append(&format!("{PAYLOAD_ROOT}/index/f{i}"), &vec![b'x'; *size]);
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn extraction_accepts_exactly_the_entry_limit_and_refuses_one_more() {
+        let dir = TempDir::new().unwrap();
+        let limit = usize::try_from(MAX_ARCHIVE_ENTRIES).unwrap();
+
+        let at_limit = archive_with_files(dir.path(), &vec![0; limit - 1]);
+        let (files, _) = extract_payload(&at_limit, &dir.path().join("at")).unwrap();
+        assert_eq!(files, limit - 1);
+
+        let past_limit = archive_with_files(dir.path(), &vec![0; limit]);
+        let err = extract_payload(&past_limit, &dir.path().join("past")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChanError::ArchiveLimit {
+                    unit: "entries",
+                    limit: MAX_ARCHIVE_ENTRIES
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn extraction_accepts_exactly_the_byte_limit_and_refuses_one_more() {
+        let dir = TempDir::new().unwrap();
+        let limits = ExtractLimits {
+            entries: MAX_ARCHIVE_ENTRIES,
+            bytes: 1024,
+        };
+
+        let at_limit = archive_with_files(dir.path(), &[1000, 24]);
+        let (_, bytes) = extract_payload_within(&at_limit, &dir.path().join("at"), limits).unwrap();
+        assert_eq!(bytes, 1024);
+
+        let past_limit = archive_with_files(dir.path(), &[1000, 25]);
+        let past = dir.path().join("past");
+        let err = extract_payload_within(&past_limit, &past, limits).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChanError::ArchiveLimit {
+                    unit: "bytes",
+                    limit: 1024
+                }
+            ),
+            "{err:?}"
+        );
+        let written = std::fs::metadata(past.join("index/f1")).map_or(0, |m| m.len());
+        assert!(written <= 25, "the refused entry stops at the limit: {written}");
     }
 
     #[test]

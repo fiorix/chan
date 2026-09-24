@@ -64,6 +64,10 @@ pub enum ChanError {
         size: u64,
         limit: u64,
     },
+    /// An imported metadata archive holds more of `unit` than extraction
+    /// accepts; nothing from it replaces the live metadata.
+    #[error("metadata archive exceeds its limit of {limit} {unit}")]
+    ArchiveLimit { unit: &'static str, limit: u64 },
     #[error("listing exceeds {limit} entries (encountered at least {observed}); narrow the path or clean up the directory")]
     ListingTooLarge { observed: usize, limit: usize },
     #[error("config decode error in {path}: {message}")]

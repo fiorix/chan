@@ -468,6 +468,33 @@ mod tests {
         assert!(reg.scope_exists(""));
     }
 
+    #[test]
+    fn a_socket_holds_exactly_the_scope_limit_and_is_refused_one_more() {
+        const MAX_SCOPES_PER_SOCKET: usize = 65_536;
+        let reg = ScopeRegistry::new();
+        let (id, _rx) = reg.register();
+        let sub = |dir: String| {
+            apply_client_frame(
+                &reg,
+                None,
+                id,
+                &serde_json::json!({"type": "sub", "dir": dir}).to_string(),
+                None,
+            )
+        };
+        for i in 0..MAX_SCOPES_PER_SOCKET {
+            assert_eq!(sub(format!("d{i}")), ClientFrameReply::None, "sub {i}");
+        }
+
+        sub("one-more".to_string());
+
+        assert!(
+            !reg.scope_exists("one-more"),
+            "a sub past the limit must not add a scope"
+        );
+        assert_eq!(reg.subscribed_dirs().len(), MAX_SCOPES_PER_SOCKET);
+    }
+
     // Contract B: the client heartbeat `{"type":"ping"}` parses to
     // `ClientFrame::Ping` and owes the socket a `pong`; it is not a
     // subscription, so it registers no scope. Old servers (no `Ping` variant)

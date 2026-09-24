@@ -607,6 +607,115 @@ mod tests {
         assert_eq!(push_error_reason(&PushError::Closed), "session-closed");
     }
 
+    // ---- the socket's message limit, over a real route --------------------
+
+    const SCENE_WS_MESSAGE_LIMIT: usize = 16 * 1024 * 1024;
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Serve the scene route over one workspace holding an empty board and
+    /// attach a client to it, past its opening snapshot.
+    async fn attached_client() -> (TempDir, TempDir, Client, tokio::task::JoinHandle<()>) {
+        let cfg = TempDir::new().expect("temp config");
+        let root = TempDir::new().expect("temp workspace");
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace
+            .write_text(
+                "b.excalidraw",
+                r#"{"type":"excalidraw","version":2,"source":"t","elements":[],"appState":{},"files":{}}"#,
+            )
+            .unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            lib,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        let app = axum::Router::new()
+            .route("/api/scene/ws", axum::routing::get(api_scene_ws))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/scene/ws?path=b.excalidraw&w=win-1"
+        ))
+        .await
+        .expect("dial the scene route");
+        let first = next_frame(&mut client).await;
+        assert_eq!(first["type"], "snapshot", "{first}");
+        (cfg, root, client, server)
+    }
+
+    async fn next_frame(client: &mut Client) -> Value {
+        use futures::StreamExt;
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(30), client.next())
+                .await
+                .expect("a frame within the deadline")
+                .expect("socket open")
+                .expect("frame read");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                return serde_json::from_str(&text).expect("server frames are JSON");
+            }
+        }
+    }
+
+    async fn error_after_sending(bytes: usize) -> Value {
+        use futures::{SinkExt, StreamExt};
+        let (_cfg, _root, client, server) = attached_client().await;
+        let (mut sink, mut stream) = client.split();
+        // Send from its own task, as a page does, so the refusal can be read
+        // while the upload is still in flight. The send itself may fail when
+        // the server stops reading mid-message; the frame is the verdict.
+        // Not JSON, so a message the socket reads in full is a malformed
+        // frame and one it refuses at the transport is the size error.
+        let upload = tokio::spawn(async move {
+            let _ = sink
+                .send(tokio_tungstenite::tungstenite::Message::text("x".repeat(bytes)))
+                .await;
+        });
+        let frame = loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+                .await
+                .expect("a frame within the deadline")
+                .expect("an error frame before the socket ends");
+            let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = message else {
+                panic!("expected an error frame, got {message:?}");
+            };
+            let frame: Value = serde_json::from_str(&text).expect("server frames are JSON");
+            if frame["type"] == "error" {
+                break frame;
+            }
+        };
+        upload.abort();
+        server.abort();
+        frame
+    }
+
+    #[tokio::test]
+    async fn a_message_at_the_limit_is_read_in_full() {
+        let frame = error_after_sending(SCENE_WS_MESSAGE_LIMIT).await;
+        assert_eq!(frame["reason"], "malformed-frame", "{frame}");
+    }
+
+    #[tokio::test]
+    async fn a_message_past_the_limit_is_refused_by_name_before_parsing() {
+        let frame = error_after_sending(SCENE_WS_MESSAGE_LIMIT + 1).await;
+        assert_eq!(frame["reason"], "doc-too-large", "{frame}");
+        assert!(
+            frame["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(&SCENE_WS_MESSAGE_LIMIT.to_string())),
+            "the refusal names the limit: {frame}"
+        );
+    }
+
     // ---- two scripted clients over the attach-handle surface ------------
 
     fn fixture(files: &[(&str, &str)]) -> (TempDir, TempDir, Arc<chan_workspace::Workspace>) {
