@@ -264,7 +264,7 @@ export function createDemoFetch(
       ]);
     }
     if (path === "/api/links" && method === "GET") {
-      return json({ edges: [], broken: [], file_count: 0 });
+      return json([]);
     }
     if (path === "/api/fs-graph" && method === "GET") {
       return fsGraph(
@@ -358,7 +358,16 @@ export function createDemoFetch(
       return json({ root: "", nodes: [] });
     }
     if (path === "/api/health" && method === "GET") {
-      return json({ instance: "demo", indexer: { status: "idle", queue_depth: 0 } });
+      return json({
+        instance: "demo",
+        indexer: {
+          status: "idle",
+          queue_depth: 0,
+          last_event_at: null,
+          last_settled_at: null,
+          coalesced_rebuild: false,
+        },
+      });
     }
     if (path === "/api/build-info" && method === "GET") {
       return json({ version: "demo", features: { embeddings: false } });

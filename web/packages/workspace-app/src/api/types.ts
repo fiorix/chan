@@ -576,17 +576,10 @@ export type LinkTarget = {
   mtime?: number | null;
 };
 
-export type LinkEdge = {
-  source: string;
-  target: string;
-  resolved: string | null;
-  wiki: boolean;
-};
-
-/// Graph edge as returned by /api/backlinks/{path}. Mirrors
-/// chan-workspace's graph::Edge: `kind` is "link" / "mention" / "tag";
-/// `anchor` is the heading slug or block id (with leading `^`)
-/// when the link points inside a file, else null.
+/// Graph edge as returned by /api/backlinks/{path}. Mirrors that route's
+/// own ApiBacklinkEdge, which spells `kind` in lower case: "link" /
+/// "mention" / "tag"; `anchor` is the heading slug or block id (with
+/// leading `^`) when the link points inside a file, else null.
 export type GraphEdge = {
   src: string;
   dst: string;
@@ -594,10 +587,15 @@ export type GraphEdge = {
   anchor: string | null;
 };
 
-export type GraphSnapshot = {
-  edges: LinkEdge[];
-  broken: LinkEdge[];
-  file_count: number;
+/// One edge of GET /api/links, a bare array of chan-workspace's
+/// graph::Edge serialized as it is: `kind` keeps serde's variant spelling,
+/// and the route returns link edges only. `anchor` is the heading slug or
+/// block id the link points at, else null.
+export type WorkspaceLinkEdge = {
+  src: string;
+  dst: string;
+  kind: "Link";
+  anchor: string | null;
 };
 
 /// Typed nodes returned by GET /api/graph. The discriminated union
@@ -1088,8 +1086,9 @@ export type HealthResponse = {
   indexer?: {
     status: HealthIndexerStatus;
     queue_depth: number;
-    last_event_at?: string | null;
-    last_settled_at?: string | null;
+    /// Unix seconds (chan-server's `IndexerHealth`, `Option<i64>`).
+    last_event_at: number | null;
+    last_settled_at: number | null;
     coalesced_rebuild?: boolean;
   } | null;
 };

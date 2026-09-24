@@ -19,7 +19,6 @@ import type {
   PreflightDecisionRequest,
   GlobalConfig,
   GraphEdge,
-  GraphSnapshot,
   GraphView,
   GraphViewEdge,
   GraphViewNode,
@@ -50,6 +49,7 @@ import type {
   TerminalSpawnResponse,
   TreeEntry,
   WorkspaceInfo,
+  WorkspaceLinkEdge,
   WorkspaceReadiness,
   BubbleOverlayMode,
   FsContext,
@@ -1220,7 +1220,7 @@ export const api = {
   /// `cs window list`, instead of leaving an empty blob behind.
   /// Idempotent on the server (missing key → 204).
   deleteSession: () => req<void>("DELETE", sessionPath()),
-  links: () => req<GraphSnapshot>("GET", "/api/links"),
+  links: () => req<WorkspaceLinkEdge[]>("GET", "/api/links"),
   /// Typed graph payload powering the graph view tab.
   graph: (opts: { scope?: "workspace" | "directory" | "file"; path?: string; depth?: number } = {}) => {
     const params = new URLSearchParams();
