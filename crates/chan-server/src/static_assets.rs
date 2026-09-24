@@ -679,6 +679,30 @@ mod tests {
         assert_eq!(v["icons"][1]["src"], "/icon-512.png");
     }
 
+    #[tokio::test]
+    async fn serve_launcher_names_the_build_recipe_when_the_bundle_is_missing() {
+        use axum::body::to_bytes;
+
+        let uri: axum::http::Uri = "/".parse().unwrap();
+        let resp = serve_launcher(uri, LauncherSurface::Devserver).await;
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        // A tree that has built the launcher serves the shell instead, so the
+        // refusal is pinned only where the bundle is absent (the gate's
+        // `cargo test` runs before any frontend build).
+        if LauncherAssets::get("index.html").is_some() {
+            eprintln!("launcher refusal not exercised: launcher bundle available");
+            assert_eq!(status, StatusCode::OK);
+            return;
+        }
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // `web-launcher/` is build output with no package.json, so the one
+        // command that works from a fresh clone is the make recipe, which
+        // runs the npm install and the workspace-scoped build from `web/`.
+        assert_eq!(body, "launcher bundle not built; run `make web-launcher`");
+    }
+
     #[test]
     fn static_cache_headers_do_not_store_spa_shell() {
         let response = with_static_cache_headers("ok".into_response(), true, "index.html");
