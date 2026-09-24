@@ -8,10 +8,11 @@ if (target) {
   const variant = target.dataset.variant;
   mount(LauncherDemo, {
     target,
-    // Per-page config rides on the mount node so one bundle serves the home
-    // hero (no data attributes, populated library), the manual's empty
-    // first-run embed (data-variant="empty" data-hints="true"), and the
-    // devserver-form embed page (data-variant="devserver").
+    // Per-page config rides on the mount node so one bundle serves both
+    // pages that load it: the manual's empty first-run embed
+    // (data-variant="empty" data-hints="true") and the devserver-form embed
+    // page (data-variant="devserver"). The home page does not load it; a
+    // node without a known variant gets the populated library.
     props: {
       variant: variant === "empty" || variant === "devserver" ? variant : "populated",
       hints: target.dataset.hints === "true",
