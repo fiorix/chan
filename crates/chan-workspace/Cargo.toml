@@ -110,7 +110,6 @@ libc = "0.2"
 # handle is unlinked. Pinned to chan-desktop's version so the lockfile
 # carries one windows-sys.
 [target.'cfg(windows)'.dependencies]
-#
 # MoveFileExW backs the no-clobber rename (`no_replace.rs`): without
 # MOVEFILE_REPLACE_EXISTING it refuses an existing destination.
 windows-sys = { version = "0.59", features = [
