@@ -37,6 +37,12 @@ struct WebAssets;
 #[folder = "../../web-launcher/dist/"]
 struct LauncherAssets;
 
+/// The launcher's 404 body when no bundle is on disk or embedded.
+/// `web-launcher/` is build output with no `package.json`, so the hint names
+/// the make recipe, which runs the npm install and the workspace-scoped build
+/// from `web/`.
+const LAUNCHER_NOT_BUILT: &str = "launcher bundle not built; run `make web-launcher`";
+
 const SPA_CACHE_CONTROL: HeaderValue = HeaderValue::from_static("no-store");
 const ASSET_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("public, max-age=31536000, immutable");
@@ -250,11 +256,7 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
             "index.html",
         );
     }
-    (
-        StatusCode::NOT_FOUND,
-        "launcher bundle not built; run `make web-launcher`",
-    )
-        .into_response()
+    (StatusCode::NOT_FOUND, LAUNCHER_NOT_BUILT).into_response()
 }
 
 fn with_static_cache_headers(mut response: Response, spa_shell: bool, candidate: &str) -> Response {
@@ -701,6 +703,22 @@ mod tests {
         // command that works from a fresh clone is the make recipe, which
         // runs the npm install and the workspace-scoped build from `web/`.
         assert_eq!(body, "launcher bundle not built; run `make web-launcher`");
+    }
+
+    #[test]
+    fn launcher_not_built_hint_names_a_makefile_recipe() {
+        // The handler test above reaches the 404 only on a tree without the
+        // launcher bundle; this one pins the body on every tree and ties the
+        // command it names to a target the repository Makefile defines.
+        assert!(
+            LAUNCHER_NOT_BUILT.ends_with("run `make web-launcher`"),
+            "hint does not name `make web-launcher`: {LAUNCHER_NOT_BUILT}"
+        );
+        let makefile = include_str!("../../../Makefile");
+        assert!(
+            makefile.lines().any(|l| l.starts_with("web-launcher:")),
+            "the Makefile defines no `web-launcher:` target, so the hint names a command that fails"
+        );
     }
 
     #[test]
