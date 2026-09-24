@@ -209,22 +209,24 @@ impl ScopeRegistry {
         (id, rx)
     }
 
-    /// Subscribe `id` to `dir`. Idempotent: a repeat `sub` for a dir the
-    /// socket already holds does not double-count (the subscriber set is
-    /// keyed by `SubId`). The first subscriber for a dir creates the
-    /// scope entry; later subscribers reuse it. The returned delta names
-    /// `dir` in `attach` only on the global 0 -> 1 transition, computed
-    /// under the same lock as the map mutation so deltas can never be
-    /// observed out of order. No filesystem or notify work runs here.
+    /// [`Self::subscribe_within`] without a cap, for tests that exercise
+    /// scope bookkeeping rather than the limit.
+    #[cfg(test)]
     pub fn subscribe(&self, id: SubId, dir: &str) -> ScopeDelta {
         self.subscribe_within(id, dir, usize::MAX)
             .unwrap_or_default()
     }
 
-    /// [`Self::subscribe`] with a per-socket cap: `None`, and no change,
-    /// when `id` already holds `limit` dirs and `dir` is not one of them. A
-    /// repeat `sub` for a held dir is never refused. The count and the
-    /// insert share one lock, so the cap cannot be overshot.
+    /// Subscribe `id` to `dir`, holding the socket to at most `limit` dirs:
+    /// `None`, and no change, when `id` already holds `limit` dirs and `dir`
+    /// is not one of them. The count and the insert share one lock, so the
+    /// cap cannot be overshot. Idempotent: a repeat `sub` for a dir the
+    /// socket already holds does not double-count (the subscriber set is
+    /// keyed by `SubId`) and is never refused. The first subscriber for a
+    /// dir creates the scope entry; later subscribers reuse it. The returned
+    /// delta names `dir` in `attach` only on the global 0 -> 1 transition,
+    /// computed under the same lock as the map mutation so deltas can never
+    /// be observed out of order. No filesystem or notify work runs here.
     pub fn subscribe_within(&self, id: SubId, dir: &str, limit: usize) -> Option<ScopeDelta> {
         let dir = normalize_dir(dir);
         let mut inner = self.lock();
