@@ -411,6 +411,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_move_out_delete_spares_only_the_session_it_names() {
+        // The source window emptied because one terminal moved away; a second
+        // terminal still bound to it is detached (no tab shows it). The
+        // move-out DELETE names the moved session, and the host's close of
+        // the emptied window must reap the other one at once rather than
+        // leave it to the orphan idle timeout.
+        let state = make_test_state(false);
+        let create = || crate::terminal_sessions::CreateOptions {
+            size: portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            tab_name: None,
+            tab_group: None,
+            window_id: Some("w-source".to_string()),
+            mcp_env: false,
+            cwd: None,
+            command: Some("sleep 30".into()),
+            env: Default::default(),
+            profile: None,
+        };
+        let moved = state.terminal_sessions.create(create()).unwrap();
+        let detached = state.terminal_sessions.create(create()).unwrap();
+        let (moved_id, detached_id) = (moved.id().to_string(), detached.id().to_string());
+        drop(moved);
+        drop(detached);
+
+        let uri: axum::http::Uri = format!("/api/session?w=w-source&moved=1&session={moved_id}")
+            .parse()
+            .unwrap();
+        let resp = api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.terminal_sessions.len(),
+            2,
+            "the move-out DELETE reaps nothing"
+        );
+
+        assert_eq!(
+            state.terminal_sessions.forget_window("w-source"),
+            1,
+            "the emptied window's close reaps the detached session the move did not carry"
+        );
+        let live: Vec<String> = state
+            .terminal_sessions
+            .roster()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(live, vec![moved_id], "only the moved session survives");
+        assert!(!live.contains(&detached_id));
+    }
+
+    #[tokio::test]
     async fn delete_session_broadcasts_deleted() {
         let state = make_test_state(false);
         let mut rx = state.events_tx.subscribe();
