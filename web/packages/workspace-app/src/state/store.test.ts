@@ -413,6 +413,23 @@ describe("session persistence bootstrap guard", () => {
       expect(events).toEqual(["DELETE moved", "DELETE settled", "request_close_window"]);
     });
 
+    test("a move-out DELETE that never settles still closes the window within a few seconds", async () => {
+      // A hung local request must not hold an empty window open: past the
+      // bound the window closes, at worst reaping a move the target has not
+      // attached yet, which is what a DELETE that failed outright does too.
+      vi.useFakeTimers();
+      try {
+        holdDeletes();
+        void closeEmptiedWindow({ movedOut: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events).toEqual(["DELETE moved"]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(events).toEqual(["DELETE moved", "request_close_window"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     test("a discard closes without waiting for its DELETE", async () => {
       // Nothing moved, so nothing needs the server first: the reaping DELETE
       // and the host's own discard agree, and the window closes at once.
