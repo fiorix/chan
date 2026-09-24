@@ -215,10 +215,14 @@ fn resolve_fallback_home(
 /// Create `path` as a directory, `0700` on Unix; an existing one is left as
 /// it is, since the last resort has nothing left to refuse it for.
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    match builder.create(path) {
+    let created = {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    };
+    #[cfg(not(unix))]
+    let created = std::fs::create_dir(path);
+    match created {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
         _ => Ok(()),
     }
