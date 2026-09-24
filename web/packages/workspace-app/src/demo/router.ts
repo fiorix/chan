@@ -313,7 +313,7 @@ export function createDemoFetch(
       return json({ path: resolved, kind: "file" });
     }
 
-    // --- chan-reports (SLOC / complexity / COCOMO from the snapshot) ---
+    // --- chan-reports (SLOC / complexity / COCOMO over the in-memory stats) ---
     if (path === "/api/report/file" && method === "GET") {
       const rel = qs.get("path") ?? "";
       const stats = reports.file(rel);

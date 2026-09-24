@@ -239,7 +239,7 @@ export class MockWorkspaceStore {
     };
   }
 
-  // --- read access for graph/headings/search phases ---
+  // --- read access for the graph, search, metadata export and router ---
   entries(): MockFileEntry[] {
     return [...this.#files.values()];
   }
