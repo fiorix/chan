@@ -452,7 +452,8 @@ mod tests {
         let uri: axum::http::Uri = format!("/api/session?w=w-source&moved=1&session={moved_id}")
             .parse()
             .unwrap();
-        let resp = api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
+        let resp =
+            api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.terminal_sessions.len(),
