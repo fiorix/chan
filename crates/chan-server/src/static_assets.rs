@@ -252,7 +252,7 @@ pub async fn serve_launcher(uri: axum::http::Uri, surface: LauncherSurface) -> R
     }
     (
         StatusCode::NOT_FOUND,
-        "launcher bundle not built; run `cd web-launcher && npm install && npm run build`",
+        "launcher bundle not built; run `make web-launcher`",
     )
         .into_response()
 }

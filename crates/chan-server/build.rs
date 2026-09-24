@@ -29,8 +29,8 @@ fn main() {
     // gitignored build artifact, so a fresh clone / isolated gate worktree
     // has none -- create the empty dir so the rust-embed macro succeeds (it
     // errors on a missing folder), and track it so a rebuilt launcher
-    // relinks. The binary serves the launcher only once
-    // `cd web-launcher && npm install && npm run build` has run.
+    // relinks. The binary serves the launcher only once `make web-launcher`
+    // has run.
     let launcher_dist = Path::new("../../web-launcher/dist");
     create_required_dir(launcher_dist);
     println!("cargo:rerun-if-changed={}", launcher_dist.display());
