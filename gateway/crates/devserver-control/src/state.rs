@@ -2299,10 +2299,15 @@ impl ControllerState {
         }
     }
 
+    /// Send `FleetReady` to every Active session not yet told. A session
+    /// whose join completed while the controller was unready already has
+    /// its frame, and a proxy accepts one `FleetReady` per control session:
+    /// devserver-proxy's frame loop takes it only while not yet fleet-ready
+    /// and ends the session on any frame illegal in its state.
     fn mark_fleet_ready(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         for (proxy_id, session) in &mut self.proxies {
-            if session.status != ProxyStatus::Active {
+            if session.status != ProxyStatus::Active || session.fleet_ready {
                 continue;
             }
             session.fleet_ready = true;
