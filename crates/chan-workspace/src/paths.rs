@@ -101,17 +101,22 @@ fn home_unavailable_config_dir() -> PathBuf {
 }
 
 /// Where chan put its home when the OS home could not be resolved, with
-/// one line per location it refused on the way.
+/// one line per location it refused on the way and one per caveat about the
+/// location it took.
 #[derive(Debug)]
 struct FallbackHome {
     path: PathBuf,
     refused: Vec<String>,
+    caveats: Vec<String>,
 }
 
 impl FallbackHome {
     fn report(&self) {
         for why in &self.refused {
             tracing::warn!("chan home fallback refused {why}");
+        }
+        for caveat in &self.caveats {
+            tracing::warn!("chan home fallback: {caveat}");
         }
         tracing::warn!(
             "no OS home directory; using {} as the chan home",
@@ -145,6 +150,7 @@ fn resolve_fallback_home(
             return FallbackHome {
                 path: predictable.to_path_buf(),
                 refused,
+                caveats: Vec::new(),
             }
         }
         Err(why) => refused.push(format!("{}: {why}", predictable.display())),
@@ -166,6 +172,7 @@ fn resolve_fallback_home(
                 return FallbackHome {
                     path: dir.keep(),
                     refused,
+                    caveats: Vec::new(),
                 }
             }
             Err(error) => refused.push(format!(
@@ -177,6 +184,7 @@ fn resolve_fallback_home(
     FallbackHome {
         path: cwd.map_or_else(|| PathBuf::from(".chan"), |cwd| cwd.join(".chan")),
         refused,
+        caveats: Vec::new(),
     }
 }
 
@@ -880,6 +888,25 @@ mod tests {
         assert_eq!(home.path, fx.cwd.join(".chan"));
         assert!(home.path.is_absolute());
         assert!(!home.refused.is_empty());
+        assert!(home.path.is_dir(), "the last resort is created");
+        assert_eq!(mode_of(&home.path), 0o700, "the last resort is private");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_working_directory_is_logged_as_a_relative_last_resort() {
+        let fx = fallback_fixture();
+        let missing = fx.var_tmp.join("missing");
+
+        let home = unix_fallback_home(&missing, &missing, None, uid());
+
+        assert_eq!(home.path, PathBuf::from(".chan"));
+        assert!(
+            home.caveats
+                .iter()
+                .any(|why| why.contains("working directory could not be read")),
+            "a relative last resort must be logged as one: {home:?}"
+        );
     }
 
     #[cfg(unix)]
