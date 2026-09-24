@@ -97,7 +97,7 @@ For orchestration (Postgres + the four services wired together) and the local sd
 
 ## Design notes
 
-- **Base images.** Builder `node:20-bookworm`, runtime `debian:bookworm-slim`. Both are Debian bookworm so the binary's glibc requirement never exceeds the runtime's glibc. Pin by digest for reproducible production builds.
+- **Base images.** Builder `node:22-bookworm`, runtime `debian:bookworm-slim`. Both are Debian bookworm so the binary's glibc requirement never exceeds the runtime's glibc. The builder's node major is the one the repository's `.nvmrc` declares; a `FROM` tag cannot read that file, so `make build-matrix-check` fails a `FROM node:` line under `packaging/docker/` that names another major. Pin by digest for reproducible production builds.
 - **No runtime deps beyond glibc + ca-certificates.** The gateway is sqlx + rustls (no libpq, no openssl). chan-tunnel-client uses rustls-native-certs, so the chan image needs `ca-certificates` for the outbound tunnel TLS dial.
 - **Non-root.** Runtime images create and run as a non-root user (`chan`, `chan-gateway`). Container boundaries isolate gateway workloads; systemd packages use a distinct Unix identity for each service.
 - **Secrets stay out of the image.** Config and secrets arrive as environment variables / mounted files at runtime.

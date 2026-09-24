@@ -9,7 +9,10 @@
 #
 #   docker build -f packaging/docker/test/upload/Dockerfile -t chan-upload-test:dev \
 #       packaging/docker/test/upload
-FROM node:20-bookworm-slim
+# The node major is the one the repository's .nvmrc declares. A FROM tag
+# cannot read that file, so scripts/check-build-matrix.py holds this line
+# to it.
+FROM node:22-bookworm-slim
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

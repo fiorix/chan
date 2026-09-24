@@ -17,7 +17,10 @@
 # glibc requirement never exceeds the runtime's glibc (forward-incompat guard).
 
 # ---- builder -------------------------------------------------------------
-FROM node:20-bookworm AS builder
+# The node major is the one the repository's .nvmrc declares. A FROM tag
+# cannot read that file, so scripts/check-build-matrix.py holds this line
+# to it.
+FROM node:22-bookworm AS builder
 
 # build-essential + pkg-config for the cargo build; git/make/curl for the
 # toolchain bootstrap and the Makefile. No GTK/webkit (this image is the

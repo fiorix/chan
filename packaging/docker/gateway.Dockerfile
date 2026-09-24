@@ -24,7 +24,10 @@
 # service is reachable across pods (the default in the .env is 127.0.0.1).
 
 # ---- builder -------------------------------------------------------------
-FROM node:20-bookworm AS builder
+# The node major is the one the repository's .nvmrc declares. A FROM tag
+# cannot read that file, so scripts/check-build-matrix.py holds this line
+# to it.
+FROM node:22-bookworm AS builder
 
 # build-essential + pkg-config for cargo; nodejs/npm (from the base image) build
 # the identity SPA that rust-embed bakes in. No libpq/libssl: the gateway is
