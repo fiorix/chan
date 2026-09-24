@@ -541,6 +541,100 @@ mod tests {
         assert!(index_paths.iter().any(|path| path == "keep.md"));
     }
 
+    /// Applies `events` the way `run_loop` does, then indexes whatever they
+    /// scheduled as if every debounce window had elapsed.
+    fn apply_and_settle(workspace: &Arc<Workspace>, events: Vec<WatchEvent>) {
+        let debounce = Duration::from_millis(DEBOUNCE_TEST_MS);
+        let now = Instant::now();
+        let mut pending = HashMap::new();
+        let state = graph_indexer_state();
+        for event in events {
+            apply_event(event, &mut pending, workspace, &state, debounce, now);
+        }
+        for path in collect_matured(&pending, now + debounce) {
+            workspace.index_file(&path).unwrap();
+        }
+    }
+
+    /// macOS FSEvents names neither end of a rename, so `mv a.md b.md`
+    /// arrives as one single-path event per name, both in the source slot.
+    /// Driven through `apply_event` so the shape runs on every platform.
+    #[test]
+    fn single_path_rename_indexes_a_file_that_still_exists() {
+        let (_cfg, workspace_dir, workspace) = setup_workspace();
+        workspace
+            .write_text("a.md", "# A\nrenamed-token\n")
+            .unwrap();
+        workspace.reindex(None).unwrap();
+        std::fs::rename(
+            workspace_dir.path().join("a.md"),
+            workspace_dir.path().join("b.md"),
+        )
+        .unwrap();
+        let generation = workspace.scope_policy().generation();
+
+        apply_and_settle(
+            &workspace,
+            vec![
+                WatchEvent::rename(Some("a.md".to_string()), None, false, None, generation),
+                WatchEvent::rename(Some("b.md".to_string()), None, false, None, generation),
+            ],
+        );
+
+        let graph_paths = workspace.graph().unwrap().files().unwrap();
+        let index_paths = workspace.indexed_paths().unwrap();
+        assert!(
+            graph_paths.iter().any(|path| path == "b.md"),
+            "the rename destination is missing from the graph: {graph_paths:?}"
+        );
+        assert!(
+            index_paths.iter().any(|path| path == "b.md"),
+            "the rename destination is missing from search: {index_paths:?}"
+        );
+        assert!(graph_paths.iter().all(|path| path != "a.md"));
+        assert!(index_paths.iter().all(|path| path != "a.md"));
+    }
+
+    /// The directory form of the same shape. The moved directory's files
+    /// raise no events of their own, so indexing the destination means
+    /// finding them.
+    #[test]
+    fn single_path_rename_indexes_a_directory_that_still_exists() {
+        let (_cfg, workspace_dir, workspace) = setup_workspace();
+        for (path, body) in [
+            ("old/a.md", "# A\nold-a-token\n"),
+            ("old/nested/b.md", "# B\nold-b-token\n"),
+        ] {
+            workspace.write_text(path, body).unwrap();
+        }
+        workspace.reindex(None).unwrap();
+        std::fs::rename(
+            workspace_dir.path().join("old"),
+            workspace_dir.path().join("moved"),
+        )
+        .unwrap();
+        let generation = workspace.scope_policy().generation();
+
+        apply_and_settle(
+            &workspace,
+            vec![
+                WatchEvent::rename(Some("old".to_string()), None, true, None, generation),
+                WatchEvent::rename(Some("moved".to_string()), None, true, None, generation),
+            ],
+        );
+
+        let mut graph_paths = workspace.graph().unwrap().files().unwrap();
+        graph_paths.sort();
+        let mut index_paths = workspace.indexed_paths().unwrap();
+        index_paths.sort();
+        assert_eq!(
+            graph_paths,
+            vec!["moved/a.md", "moved/nested/b.md"],
+            "the renamed directory's files must replace the source's in the graph"
+        );
+        assert_eq!(index_paths, vec!["moved/a.md", "moved/nested/b.md"]);
+    }
+
     #[test]
     fn writes_to_disk_get_indexed_after_debounce() {
         let _serial = fs_test_lock();
