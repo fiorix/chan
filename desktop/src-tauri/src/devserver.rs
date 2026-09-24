@@ -15,7 +15,7 @@
 //! Assembling client-side keeps the desktop in control of the local tunnel
 //! port and avoids the devserver needing to know how it is reached.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1992,35 +1992,53 @@ async fn row_from_launcher(
     })
 }
 
+/// What one feed connection remembers about the rows it has decoded. A
+/// devserver sends its whole window set in every `/watch` frame, one frame
+/// per window change, so a connection logs an unreadable row the first time
+/// it sees that row's `window_id` rather than once per frame. A reconnect
+/// starts from a fresh one and logs the row again, and the list call is a
+/// connection of its own.
+#[derive(Default)]
+pub(crate) struct ConnectionRows {
+    /// `window_id`s of unreadable rows this connection has logged.
+    logged: HashSet<String>,
+}
+
 /// Decode a devserver's window rows one at a time, so a row this desktop
 /// cannot read (a `kind` or `origin` tag from a later release, a damaged row)
 /// costs that row alone rather than the desktop's whole view of the
-/// devserver. Each such row is logged with the devserver id, `source` (which
-/// feed carried it) and its `window_id`, or its index when even that is
-/// unreadable, and left out: the devserver keeps it in its own store, so
+/// devserver. Such a row is logged with the devserver id, `source` (which
+/// feed carried it) and its `window_id` the first time `seen`'s connection
+/// meets it, or with its index on every decode when even the id is
+/// unreadable, since such a row cannot be tracked. It is left out: the
+/// devserver keeps it in its own store, so
 /// hiding it here loses nothing. A catch-all variant on the closed enums
 /// would instead reach every server-side consumer of the record.
 pub(crate) fn decode_window_rows(
     devserver_id: &str,
     source: &str,
     rows: Vec<serde_json::Value>,
+    seen: &mut ConnectionRows,
 ) -> Vec<chan_server::WindowRecord> {
     let mut windows = Vec::with_capacity(rows.len());
     for (index, value) in rows.iter().enumerate() {
         match chan_server::WindowRecord::deserialize(value) {
             Ok(record) => windows.push(record),
             Err(error) => {
-                let row = match value.get("window_id").and_then(serde_json::Value::as_str) {
-                    Some(id) => format!("window_id {id}"),
-                    None => format!("index {index}"),
+                let (row, first) = match value.get("window_id").and_then(serde_json::Value::as_str)
+                {
+                    Some(id) => (format!("window_id {id}"), seen.logged.insert(id.to_owned())),
+                    None => (format!("index {index}"), true),
                 };
-                tracing::warn!(
-                    devserver = %devserver_id,
-                    source = %source,
-                    %row,
-                    %error,
-                    "unreadable devserver window row is hidden from the desktop"
-                );
+                if first {
+                    tracing::warn!(
+                        devserver = %devserver_id,
+                        source = %source,
+                        %row,
+                        %error,
+                        "unreadable devserver window row is hidden from the desktop"
+                    );
+                }
             }
         }
     }
@@ -2056,7 +2074,12 @@ pub async fn fetch_library_windows(
         .json::<Vec<serde_json::Value>>()
         .await
         .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))?;
-    Ok(decode_window_rows(devserver_id, "list", rows))
+    Ok(decode_window_rows(
+        devserver_id,
+        "list",
+        rows,
+        &mut ConnectionRows::default(),
+    ))
 }
 
 /// Mint a window on a connected devserver's library
@@ -4756,7 +4779,8 @@ mod tests {
         let logs = log_capture::Lines::default();
         let _logs = logs.install();
 
-        let windows = decode_window_rows("dev-1", "watch frame", rows);
+        let windows =
+            decode_window_rows("dev-1", "watch frame", rows, &mut ConnectionRows::default());
 
         let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
         assert_eq!(ids, ["w-1"]);

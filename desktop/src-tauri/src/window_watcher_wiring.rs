@@ -22,7 +22,7 @@ use chan_server::WindowRecord;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Notify};
 
-use crate::devserver::DevserverConn;
+use crate::devserver::{ConnectionRows, DevserverConn};
 use crate::window_watcher::{
     native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState,
     WatchLoopStop, WatcherViewState, WindowFeed,
@@ -842,15 +842,21 @@ struct WindowFeedFrame {
     windows: Vec<serde_json::Value>,
 }
 
-/// The rows one `/watch` text frame carries that this desktop can read. A
-/// frame that does not parse at all is logged and yields `None`: the view
-/// keeps its last snapshot, and the next frame, a full snapshot, repairs it.
-fn decode_window_frame(devserver_id: &str, text: &str) -> Option<Vec<WindowRecord>> {
+/// The rows one `/watch` text frame carries that this desktop can read,
+/// decoded against what the frame's connection remembers (`seen`). A frame
+/// that does not parse at all is logged and yields `None`: the view keeps its
+/// last snapshot, and the next frame, a full snapshot, repairs it.
+fn decode_window_frame(
+    devserver_id: &str,
+    text: &str,
+    seen: &mut ConnectionRows,
+) -> Option<Vec<WindowRecord>> {
     match serde_json::from_str::<WindowFeedFrame>(text) {
         Ok(frame) => Some(crate::devserver::decode_window_rows(
             devserver_id,
             "watch frame",
             frame.windows,
+            seen,
         )),
         Err(error) => {
             tracing::warn!(
@@ -906,6 +912,7 @@ async fn stream_window_feed(
         connect_raw_ws(conn, "/api/library/windows/watch", "watch", "/watch").await?
     };
     let mut saw_snapshot = false;
+    let mut rows = ConnectionRows::default();
     keepalive_pump(&mut ws, FEED_PING_INTERVAL, FEED_MAX_MISSED, |text| {
         // Any inbound data frame means the feed is live. Mark it, and on the FIRST
         // such frame clear any Unreachable state so the launcher's red icon clears
@@ -918,7 +925,7 @@ async fn stream_window_feed(
                 embedded.signal_library_change();
             }
         }
-        if let Some(windows) = decode_window_frame(id, text) {
+        if let Some(windows) = decode_window_frame(id, text, &mut rows) {
             // Rows keep their devserver-local tokens: `should_show` reads
             // token emptiness as the tenant on/off signal, and gateway
             // navigation credentials are minted at open/retarget time
@@ -1479,7 +1486,7 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        let windows = decode_window_frame("dev-1", &frame)
+        let windows = decode_window_frame("dev-1", &frame, &mut ConnectionRows::default())
             .expect("one unreadable row must not drop the frame");
 
         let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
@@ -1510,7 +1517,9 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        assert!(decode_window_frame("dev-1", "{\"windows\":").is_none());
+        assert!(
+            decode_window_frame("dev-1", "{\"windows\":", &mut ConnectionRows::default()).is_none()
+        );
 
         let warnings = logs.warnings();
         assert_eq!(
@@ -1548,14 +1557,42 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        decode_window_frame("dev-1", &frame).expect("the first frame parses");
-        decode_window_frame("dev-1", &frame).expect("the second frame parses");
+        let mut connection = ConnectionRows::default();
+        decode_window_frame("dev-1", &frame, &mut connection).expect("the first frame parses");
+        decode_window_frame("dev-1", &frame, &mut connection).expect("the second frame parses");
 
         let warnings = logs.warnings();
         assert_eq!(
             warnings.len(),
             1,
             "a second frame on the same connection logs the row again: {warnings:?}"
+        );
+
+        let mut reconnect = ConnectionRows::default();
+        decode_window_frame("dev-1", &frame, &mut reconnect).expect("a reconnect's frame parses");
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            2,
+            "a reconnect logs the row again: {warnings:?}"
+        );
+        assert!(warnings[1].contains("row=window_id w-2"), "{}", warnings[1]);
+
+        // A row with no readable id cannot be tracked, so it logs every time.
+        let idless = serde_json::json!({ "windows": [7] }).to_string();
+        decode_window_frame("dev-1", &idless, &mut reconnect).expect("the frame parses");
+        decode_window_frame("dev-1", &idless, &mut reconnect).expect("the frame parses");
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            4,
+            "an id-less row logs per frame: {warnings:?}"
+        );
+        assert!(
+            warnings[2..]
+                .iter()
+                .all(|line| line.contains("row=index 0")),
+            "{warnings:?}"
         );
     }
 
@@ -1572,9 +1609,11 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        decode_window_frame("dev-1", &first.to_string()).expect("the first frame parses");
-        let windows =
-            decode_window_frame("dev-1", &second.to_string()).expect("the second frame parses");
+        let mut connection = ConnectionRows::default();
+        decode_window_frame("dev-1", &first.to_string(), &mut connection)
+            .expect("the first frame parses");
+        let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
+            .expect("the second frame parses");
 
         assert_eq!(
             windows,
