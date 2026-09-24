@@ -39,10 +39,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [an-admitted-tunnel-outlives-its-connection][tunl] | raised | accept |
-| [a-stalled-reader-parks-a-pool-thread][stall] | raised | accept |
+| [an-admitted-tunnel-outlives-its-connection][tunl] | landed | GA |
+| [a-stalled-reader-parks-a-pool-thread][stall] | landed | GA |
 | [one-root-blocks-every-other-mount][rlock] | raised | accept |
-| [a-non-utf8-text-file-loses-its-backlinks][nutf] | raised | accept |
+| [a-non-utf8-text-file-loses-its-backlinks][nutf] | landed | GA |
 | [two-copies-to-one-free-name-can-collide][copy2] | raised | accept |
 | [a-blocking-pool-pin-passes-without-proof][bpin] | raised | accept |
 | [stale-sentences-outlive-their-code][prose] | raised | accept |
@@ -54,8 +54,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | item | state | next |
 | --- | --- | --- |
 | [refusals-answer-in-four-shapes][refus] | raised | decide |
-| [the-team-poke-names-a-path-it-does-not-anchor][poke] | raised | build |
-| [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | accepted | intake |
+| [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
+| [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
 | [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
 | [the-test-util-comments-omit-the-attach-seam][tutil] | raised | decide |
 | [the-fdstore-manifest-splits-seq-and-tail][fdsq] | raised | decide |
@@ -90,11 +90,11 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-chan-cli-crate-is-one-13k-line-file][clib] | raised | analyze |
 | [two-exact-pins-hold-back-web-upgrades][pins] | raised | measure |
 | [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | raised | measure |
-| [gateway-ci-misses-root-tunnel-crate-changes][gwci] | raised | build |
+| [gateway-ci-misses-root-tunnel-crate-changes][gwci] | landed | GA |
 | [the-web-bundles-still-build-on-node-20][nd22] | raised | build |
 | [the-launcher-build-hint-cannot-run][hint] | raised | build |
 | [the-site-carries-a-workspace-mock-nobody-ships][mock] | raised | build |
-| [an-unknown-window-kind-may-drop-every-window-row][wkind] | raised | repro |
+| [an-unknown-window-kind-may-drop-every-window-row][wkind] | landed | GA |
 
 **Raised during v0.101.0**
 
