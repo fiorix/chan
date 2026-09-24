@@ -287,6 +287,15 @@ describe("tab close confirmation", () => {
     const pane2 = resetLayout([closing]);
     await closeTab(pane2.id, closing.id, { force: true });
     expect(consumeLastMovedOutSession()).toBe(null);
+
+    // A terminal moved before its session id arrived is still a move-out: the
+    // record says a terminal moved without naming its session.
+    const unbound = terminalTab({ id: "term-unbound" });
+    const pane3 = resetLayout([unbound]);
+    markTerminalMovingOut(unbound.id);
+    await closeTab(pane3.id, unbound.id, { force: true });
+    expect(consumeLastMovedOutSession()).toEqual({ session: null });
+    isTerminalMoving(unbound.id);
   });
 
   test("draft tab close prompts for discard or save", async () => {

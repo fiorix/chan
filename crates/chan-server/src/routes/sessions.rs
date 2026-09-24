@@ -474,6 +474,28 @@ mod tests {
             .collect();
         assert_eq!(live, vec![moved_id], "only the moved session survives");
         assert!(!live.contains(&detached_id));
+
+        // A terminal that moved before its session id reached the SPA: the
+        // DELETE says a terminal moved but not which, so the close spares
+        // every session still bound to the window.
+        let unbound = || crate::terminal_sessions::CreateOptions {
+            window_id: Some("w-unbound".to_string()),
+            ..create()
+        };
+        let first = state.terminal_sessions.create(unbound()).unwrap();
+        let second = state.terminal_sessions.create(unbound()).unwrap();
+        drop(first);
+        drop(second);
+        let uri: axum::http::Uri = "/api/session?w=w-unbound&moved=1".parse().unwrap();
+        let resp =
+            api_delete_session(State(state.clone()), Query::try_from_uri(&uri).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.terminal_sessions.forget_window("w-unbound"),
+            0,
+            "a move-out without a session id spares every session bound to the window"
+        );
+        assert_eq!(state.terminal_sessions.len(), 3);
     }
 
     #[tokio::test]

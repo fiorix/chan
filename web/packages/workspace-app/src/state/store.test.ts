@@ -38,6 +38,11 @@ import {
   activePane,
   layout,
   paneMode,
+  closeFileTabAfterMove,
+  closeTab,
+  consumeLastMovedOutSession,
+  isTerminalMoving,
+  markTerminalMovingOut,
   removeExplicitlyClosedTerminalTab,
   reproveRestoredPrompt,
   resolvePromptCancelled,
@@ -46,6 +51,7 @@ import {
   type FileTab,
   type GraphTab,
   type LeafNode,
+  type Tab,
   type TerminalTab,
 } from "./tabs.svelte";
 import { richPrompt } from "./richPrompt.svelte";
@@ -430,20 +436,85 @@ describe("session persistence bootstrap guard", () => {
       }
     });
 
+    /// Empty the window by moving its only tab out, the way the drag-end does,
+    /// then close it as App does; returns the query of the one session DELETE.
+    async function emptyByMove(tab: Tab): Promise<URLSearchParams> {
+      const deletes: string[] = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        if (init?.method === "DELETE" && String(input).includes("/api/session")) {
+          deletes.push(String(input));
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      const pane: LeafNode = { kind: "leaf", id: "pane-move", tabs: [tab], activeTabId: tab.id };
+      layout.rootId = pane.id;
+      layout.activePaneId = pane.id;
+      layout.nodes = { [pane.id]: pane };
+      if (tab.kind === "terminal") {
+        markTerminalMovingOut(tab.id);
+        await closeTab(pane.id, tab.id, { force: true });
+        isTerminalMoving(tab.id);
+      } else {
+        await closeFileTabAfterMove(pane.id, tab.id);
+      }
+      await closeEmptiedWindow({ movedSession: consumeLastMovedOutSession() });
+      expect(deletes).toHaveLength(1);
+      expect(events).toContain("request_close_window");
+      return new URL(deletes[0], "http://localhost").searchParams;
+    }
+
+    const movedTerminal = (terminalSessionId?: string): TerminalTab => ({
+      kind: "terminal",
+      id: "term-moving",
+      title: "Terminal",
+      createdAt: 1,
+      broadcastEnabled: false,
+      broadcastTargetIds: [],
+      terminalSessionId,
+    });
+
     test("the move-out DELETE names the session that moved", async () => {
       // The server spares only the named session from the close's reap; any
       // other terminal still bound to this window is detached and goes with it.
-      const urls: string[] = [];
-      vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-        urls.push(String(input));
-        return Promise.resolve(new Response(null, { status: 204 }));
-      });
-      await closeEmptiedWindow({ movedSession: "term_moved" });
-      expect(urls).toHaveLength(1);
-      const params = new URL(urls[0], "http://localhost").searchParams;
+      const params = await emptyByMove(movedTerminal("term_moved"));
       expect(params.get("moved")).toBe("1");
       expect(params.get("session")).toBe("term_moved");
-      expect(events).toContain("request_close_window");
+    });
+
+    test("a terminal moved before its session id arrived still sends a move-out", async () => {
+      // The server cannot tell which session moved, so it spares the window's
+      // bound sessions rather than reap the one the target is about to attach.
+      const params = await emptyByMove(movedTerminal(undefined));
+      expect(params.get("moved")).toBe("1");
+      expect(params.has("session")).toBe(false);
+    });
+
+    test("a non-terminal tab moved out closes its window as a plain discard", async () => {
+      const file: FileTab = {
+        kind: "file",
+        fileKind: "document",
+        id: "file-moving",
+        path: "notes/a.md",
+        content: "saved",
+        saved: "saved",
+        savedMtime: 1,
+        mode: "wysiwyg",
+        loading: false,
+        error: null,
+        fileMissing: null,
+        inspectorOpen: false,
+        outlineOpen: false,
+        repoRoot: null,
+        readMode: false,
+        fsWritable: true,
+        styleToolbarOpen: false,
+        syntaxHighlight: true,
+        highlightTrailingWhitespace: false,
+        codeBlocksCollapsed: false,
+      };
+      const params = await emptyByMove(file);
+      expect(params.has("moved")).toBe(false);
+      expect(params.has("session")).toBe(false);
     });
 
     test("a discard closes without waiting for its DELETE", async () => {
