@@ -43,6 +43,7 @@ pub mod lock;
 pub mod markdown;
 pub mod metadata_archive;
 pub mod mini_workspace;
+mod no_replace;
 pub mod paths;
 pub mod progress;
 pub mod registry;

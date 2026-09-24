@@ -278,15 +278,11 @@ impl MiniWorkspace {
     }
 
     /// Create a file that must not exist yet, with optional text content.
+    /// The exclusive create is the existence check, so an entry that appears
+    /// at the path at any point before it is a conflict, never overwritten.
     pub fn create_file(&self, rel: &str, content: &str) -> Result<()> {
         self.wire_rel(rel)?;
-        if !matches!(
-            self.fs.classify_workspace_path(rel)?,
-            WorkspacePath::Missing
-        ) {
-            return Err(ChanError::PathAlreadyExists(rel.to_string()));
-        }
-        self.fs.write_text(rel, content)
+        self.fs.create_text_new(rel, content)
     }
 
     /// Create a directory chain; the leaf must not exist yet.
@@ -335,7 +331,10 @@ impl MiniWorkspace {
     }
 
     /// Plain move: no link rewriting, no clobbering, both protected paths
-    /// refused. Same-filesystem moves are one capability rename; a
+    /// refused. The early existence check only gives a clean refusal before
+    /// any parent is created; the rename itself refuses an existing
+    /// destination, so one that appears after the check is a conflict too.
+    /// Same-filesystem moves are one capability rename; a
     /// cross-device move copies the preflighted tree to a uniquely named
     /// temporary sibling of the destination, renames it into place, and
     /// removes the source only once the destination is complete.
@@ -374,8 +373,11 @@ impl MiniWorkspace {
         }
         #[cfg(test)]
         race_window::open();
-        match dir.rename(&from_path, &dir, &to_path) {
+        match self.fs.rename_no_replace(&from_path, &to_path) {
             Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ChanError::PathAlreadyExists(to.to_string()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 self.move_across_devices(from, to)
             }
@@ -503,7 +505,9 @@ impl MiniWorkspace {
     /// Stage a copy of `from` in a uniquely named temporary sibling of `to`
     /// and rename it into place once complete. The whole source tree is
     /// preflighted first; a failure at any later step removes only the
-    /// temporary tree and never creates `to`.
+    /// temporary tree and never creates `to`. The final rename refuses an
+    /// existing `to`: a copy can run for minutes, and whatever appeared at
+    /// the destination meanwhile is kept and answered as a conflict.
     fn stage_tree_copy(&self, from: &str, to: &str) -> Result<()> {
         self.fs.preflight_tree(from, false)?;
         let tmp = self.fs.temp_sibling_name(to)?;
@@ -511,12 +515,15 @@ impl MiniWorkspace {
             self.fs.remove_tree_best_effort(&tmp);
             return Err(error);
         }
-        let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
+        let (_, tmp_path) = self.fs.resolve_io(&tmp)?;
         let (_, to_path) = self.fs.resolve_io(to)?;
         #[cfg(test)]
         race_window::open();
-        if let Err(error) = dir.rename(&tmp_path, &dir, &to_path) {
+        if let Err(error) = self.fs.rename_no_replace(&tmp_path, &to_path) {
             self.fs.remove_tree_best_effort(&tmp);
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                return Err(ChanError::PathAlreadyExists(to.to_string()));
+            }
             return Err(ChanError::from(error));
         }
         Ok(())

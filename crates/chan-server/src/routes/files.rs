@@ -2316,7 +2316,7 @@ fn create_file_sync(
     if body.is_dir {
         workspace.create_dir(&body.path)
     } else {
-        workspace.write_text(&body.path, &body.content.unwrap_or_default())
+        workspace.create_file(&body.path, &body.content.unwrap_or_default())
     }
 }
 

@@ -1748,6 +1748,14 @@ impl Workspace {
         self.fs.write_text(rel, content)
     }
 
+    /// Create `rel` as a new text file with `content`. Editable-text gate
+    /// applies. Refuses with `PathAlreadyExists` when anything exists at the
+    /// path by the time of the exclusive create, including an entry that
+    /// appeared after the caller's own existence check.
+    pub fn create_file(&self, rel: &str, content: &str) -> Result<()> {
+        self.fs.create_text_new(rel, content)
+    }
+
     /// Optimistic-concurrency write: succeeds only when the file's
     /// current mtime (nanoseconds) matches `expected_mtime_ns`. The
     /// editor pairs this with `read_text_with_stat`: it reads

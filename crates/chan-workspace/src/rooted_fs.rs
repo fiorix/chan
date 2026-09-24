@@ -902,6 +902,60 @@ impl RootedFs {
         Ok(out)
     }
 
+    /// Rename two validated root-relative paths, refusing an existing
+    /// destination at the syscall rather than by an earlier check, so a
+    /// destination created after the caller's check is never replaced. The
+    /// refusal is `ErrorKind::AlreadyExists`; see `no_replace` for each
+    /// platform's arm.
+    pub(crate) fn rename_no_replace(
+        &self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> std::io::Result<()> {
+        crate::no_replace::rename(&self.dir(), &self.canon(), from, to)
+    }
+
+    /// Create `rel` as a new editable text file. The name is claimed with an
+    /// exclusive create, so a path that exists by then, however recently it
+    /// appeared, is `PathAlreadyExists` and is never written. Content then
+    /// replaces the empty claim through the ordinary atomic write, so a reader
+    /// sees the empty file or the whole content, never a prefix of it.
+    pub(crate) fn create_text_new(&self, rel: &str, content: &str) -> Result<()> {
+        if !self.editable_text_gate(rel) {
+            return Err(ChanError::NotEditableText(rel.to_string()));
+        }
+        let (dir, rel_path) = self.resolve_io(rel)?;
+        if let Some(parent) = rel_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                dir.create_dir_all(parent).map_err(ChanError::from)?;
+            }
+        }
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        match dir.open_with(&rel_path, &options) {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(ChanError::PathAlreadyExists(rel.to_string()));
+            }
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        }
+        if content.is_empty() {
+            return self.ensure_root_available();
+        }
+        if let Err(error) = self.write_text(rel, content) {
+            // Withdraw the claim only while it is still the empty file this
+            // call made; anything else there now belongs to another writer.
+            if dir
+                .symlink_metadata(&rel_path)
+                .is_ok_and(|meta| meta.is_file() && meta.len() == 0)
+            {
+                let _ = dir.remove_file(&rel_path);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Create a directory chain under the root.
     pub(crate) fn create_dir(&self, rel: &str) -> Result<()> {
         let rel_path = self.rel(rel)?;
