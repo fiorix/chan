@@ -2089,7 +2089,9 @@ pub(crate) fn decode_window_rows(
 /// devserver's `library_id`, stamped per row, the watcher's first read of which
 /// library it is reconciling). The WS `/watch` then pushes every change. Rows
 /// this desktop cannot read are left out and logged under `devserver_id`
-/// ([`decode_window_rows`]); only a body that is not a JSON array fails.
+/// ([`decode_window_rows`], as a connection of its own). A transport error
+/// or a non-2xx status fails the list, and of a 2xx body only one that is not
+/// a JSON array fails to decode.
 pub async fn fetch_library_windows(
     devserver_id: &str,
     conn: &DevserverConn,
