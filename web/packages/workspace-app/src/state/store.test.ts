@@ -430,6 +430,22 @@ describe("session persistence bootstrap guard", () => {
       }
     });
 
+    test("the move-out DELETE names the session that moved", async () => {
+      // The server spares only the named session from the close's reap; any
+      // other terminal still bound to this window is detached and goes with it.
+      const urls: string[] = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+        urls.push(String(input));
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      await closeEmptiedWindow({ movedSession: "term_moved" });
+      expect(urls).toHaveLength(1);
+      const params = new URL(urls[0], "http://localhost").searchParams;
+      expect(params.get("moved")).toBe("1");
+      expect(params.get("session")).toBe("term_moved");
+      expect(events).toContain("request_close_window");
+    });
+
     test("a discard closes without waiting for its DELETE", async () => {
       // Nothing moved, so nothing needs the server first: the reaping DELETE
       // and the host's own discard agree, and the window closes at once.
