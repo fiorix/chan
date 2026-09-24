@@ -2693,11 +2693,10 @@ fn stalling_upstream(path: &str, reached: Arc<tokio::sync::Notify>) -> Router {
 /// Cancelling the session while the bridge is still in its setup ends
 /// the client socket the way it ends a bridged one: with the 1008
 /// Close that names the revocation, without waiting for the setup
-/// bound. The session's token is cancelled directly. A revocation
-/// through the session store cancels the token and then aborts the
-/// bridge task: on this current-thread test runtime the abort always
-/// lands before the task is polled again, so the Close is never sent,
-/// and on the multi-thread production runtime the two race.
+/// bound. The session's token is cancelled directly, which pins the
+/// bridge's own arm apart from the session store;
+/// `ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup`
+/// drives the same Close through a store revocation.
 #[tokio::test]
 async fn ws_bridge_closes_as_revoked_when_the_session_is_cancelled_during_setup() {
     let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;

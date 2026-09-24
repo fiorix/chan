@@ -31,10 +31,27 @@ const MAX_BINDINGS_PER_PRINCIPAL: usize = 32;
 /// Proxy-wide bindings allowed per session slot. The total is refused, never
 /// evicted, when full, so one user's frames cannot push out another user's.
 const BINDINGS_PER_SESSION_SLOT: usize = 4;
+/// The drain bound of a revocation. A transport that ends itself on
+/// cancellation (a WebSocket bridge sending its 1008 Close) has this long
+/// before it is aborted, and a revocation then waits as long again for the
+/// aborted tasks to drop before it reports a drain timeout, so the
+/// controller's acknowledgement waits at most twice this.
 #[cfg(not(test))]
 const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+// A bridge's final Close sends are bounded by the bridge's own timeout,
+// which must end inside the drain bound or every revoked bridge would be
+// aborted before its Close could go out.
+#[cfg(not(test))]
+const _: () =
+    assert!(crate::proxy::WS_BRIDGE_CLOSE_TIMEOUT.as_nanos() < REVOCATION_DRAIN_TIMEOUT.as_nanos());
+
+/// When a revocation starting now aborts the transports that have not
+/// ended themselves.
+fn close_deadline() -> Instant {
+    Instant::now() + REVOCATION_DRAIN_TIMEOUT
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionPrincipal {
@@ -83,15 +100,37 @@ impl std::fmt::Debug for SessionRecord {
 ///
 /// The guard is registered before the transport starts. Moving it into the
 /// transport task makes Drop the proof that the bridge has stopped; session
-/// revocation aborts that task and waits for the guard to disappear before the
-/// controller may acknowledge the command.
+/// revocation stops that task, cooperatively or by abort, and waits for the
+/// guard to disappear before the controller may acknowledge the command.
 pub(crate) struct ActiveOperation {
     operations: Arc<ActiveOperations>,
     id: u64,
 }
 
 impl ActiveOperation {
+    /// Spawn a transport that a revocation aborts at once. The session's
+    /// token already stops its data, so it owes the client nothing more.
     pub(crate) fn spawn<F, T>(self, future: F) -> JoinHandle<T>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.spawn_as(future, Ending::Aborted)
+    }
+
+    /// Spawn a transport that ends itself when the session's token is
+    /// cancelled and owes the client a farewell first, as a WebSocket bridge
+    /// owes its 1008 Close. A revocation lets it run until the drain deadline
+    /// and aborts it only if it is still running then.
+    pub(crate) fn spawn_closing<F, T>(self, future: F) -> JoinHandle<T>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.spawn_as(future, Ending::Closes)
+    }
+
+    fn spawn_as<F, T>(self, future: F, ending: Ending) -> JoinHandle<T>
     where
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -102,9 +141,25 @@ impl ActiveOperation {
             let _operation = self;
             future.await
         });
-        operations.attach(id, task.abort_handle());
+        operations.attach(id, task.abort_handle(), ending);
         task
     }
+}
+
+/// How a revocation stops an operation's task.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Aborted as soon as the session is revoked.
+    Aborted,
+    /// Left to end itself on the cancelled token, and aborted at the
+    /// revocation's drain deadline if it has not.
+    Closes,
+}
+
+#[derive(Default)]
+struct OperationSlot {
+    /// `None` until the operation's task is spawned.
+    task: Option<(AbortHandle, Ending)>,
 }
 
 impl Drop for ActiveOperation {
@@ -117,8 +172,9 @@ impl Drop for ActiveOperation {
             .active
             .remove(&self.id)
             .is_some();
+        // Both a revocation and its reaper can be waiting for the drain.
         if removed {
-            self.operations.changed.notify_one();
+            self.operations.changed.notify_waiters();
         }
     }
 }
@@ -132,8 +188,11 @@ struct ActiveOperations {
 #[derive(Default)]
 struct ActiveOperationState {
     revoked: bool,
+    /// Set by the first revocation: when operations that end themselves
+    /// are aborted if they are still running.
+    close_by: Option<Instant>,
     next_id: u64,
-    active: HashMap<u64, Option<AbortHandle>>,
+    active: HashMap<u64, OperationSlot>,
 }
 
 impl ActiveOperations {
@@ -144,23 +203,29 @@ impl ActiveOperations {
         }
         let id = state.next_id;
         state.next_id = state.next_id.wrapping_add(1);
-        state.active.insert(id, None);
+        state.active.insert(id, OperationSlot::default());
         Some(ActiveOperation {
             operations: self.clone(),
             id,
         })
     }
 
-    fn attach(&self, id: u64, abort: AbortHandle) {
+    /// Record a spawned operation's task. One spawned after its session was
+    /// revoked is aborted here if a revocation would already have aborted it:
+    /// an abortable one always, one that ends itself once the drain deadline
+    /// has passed, since the revocation's reaper has run by then.
+    fn attach(&self, id: u64, abort: AbortHandle, ending: Ending) {
         let abort_now = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let past_close = state
+                .close_by
+                .is_some_and(|close_by| Instant::now() >= close_by);
             let revoked = state.revoked;
             match state.active.get_mut(&id) {
-                Some(slot) if !revoked => {
-                    *slot = Some(abort.clone());
-                    false
+                Some(slot) => {
+                    slot.task = Some((abort.clone(), ending));
+                    revoked && (ending == Ending::Aborted || past_close)
                 }
-                Some(_) => true,
                 None => false,
             }
         };
@@ -169,16 +234,60 @@ impl ActiveOperations {
         }
     }
 
-    fn revoke(&self) {
-        let aborts = {
+    /// Refuse new operations, abort the abortable ones now, and abort every
+    /// one still running at `close_by`, the drain deadline. Only the first
+    /// revocation sets the deadline and starts the reaper that enforces it.
+    fn revoke(self: &Arc<Self>, close_by: Instant) {
+        let (aborts, reap_at) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.revoked = true;
-            state
+            let reap_at = match state.close_by {
+                Some(_) => None,
+                None => {
+                    state.close_by = Some(close_by);
+                    Some(close_by)
+                }
+            };
+            let aborts = state
                 .active
                 .values()
-                .filter_map(|abort| abort.clone())
-                .collect::<Vec<_>>()
+                .filter_map(|slot| match slot.task {
+                    Some((ref abort, Ending::Aborted)) => Some(abort.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (aborts, reap_at)
         };
+        for abort in aborts {
+            abort.abort();
+        }
+        let Some(close_by) = reap_at else {
+            return;
+        };
+        // Expiry revokes from synchronous paths; outside a runtime there is
+        // nothing to wait on, so the deadline is now.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                let operations = self.clone();
+                runtime.spawn(async move {
+                    if !operations.wait_drained(close_by).await {
+                        operations.abort_all();
+                    }
+                });
+            }
+            Err(_) => self.abort_all(),
+        }
+    }
+
+    fn abort_all(&self) {
+        let aborts = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active
+            .values()
+            .filter_map(|slot| slot.task.as_ref().map(|(abort, _)| abort.clone()))
+            .collect::<Vec<_>>();
         for abort in aborts {
             abort.abort();
         }
@@ -215,7 +324,7 @@ impl SessionRecord {
 
     fn revoke_authority(&self) {
         self.cancellation.cancel();
-        self.operations.revoke();
+        self.operations.revoke(close_deadline());
     }
 }
 
@@ -265,7 +374,7 @@ struct ExtensionBinding {
 impl ExtensionBinding {
     fn revoke_authority(&self) {
         self.cancellation.cancel();
-        self.operations.revoke();
+        self.operations.revoke(close_deadline());
     }
 }
 
@@ -601,7 +710,9 @@ impl SessionStore {
         for (_, record) in &selected {
             record.revoke_authority();
         }
-        let deadline = Instant::now() + REVOCATION_DRAIN_TIMEOUT;
+        // A bridge has until its drain deadline to send its Close and end,
+        // and is aborted there; the second bound is for aborted tasks to drop.
+        let deadline = close_deadline() + REVOCATION_DRAIN_TIMEOUT;
         for (_, record) in &selected {
             if !record.operations.wait_drained(deadline).await {
                 return Err(RevokeError::DrainTimedOut);
@@ -838,7 +949,7 @@ struct BindingHandle {
 impl BindingHandle {
     fn revoke_authority(&self) {
         self.cancellation.cancel();
-        self.operations.revoke();
+        self.operations.revoke(close_deadline());
     }
 
     /// Remove the binding this handle was taken from, and not a different
@@ -1493,6 +1604,135 @@ mod tests {
         );
     }
 
+    /// A transport that ends itself on cancellation, as a bridge sending its
+    /// Close does, after `closing` has passed; it reports the time it ended.
+    fn closing_transport(
+        operation: ActiveOperation,
+        cancellation: CancellationToken,
+        closing: Duration,
+        ended: tokio::sync::oneshot::Sender<(Instant, bool)>,
+    ) {
+        let task = operation.spawn_closing(async move {
+            let mut notice = EndNotice(Some(ended), false);
+            cancellation.cancelled().await;
+            tokio::time::sleep(closing).await;
+            notice.1 = true;
+        });
+        drop(task);
+    }
+
+    /// Sends when it was dropped and whether its transport finished.
+    struct EndNotice(Option<tokio::sync::oneshot::Sender<(Instant, bool)>>, bool);
+
+    impl Drop for EndNotice {
+        fn drop(&mut self) {
+            if let Some(ended) = self.0.take() {
+                let _ = ended.send((Instant::now(), self.1));
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revocation_lets_a_closing_transport_end_itself() {
+        let store = SessionStore::new(1, Duration::from_secs(60));
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+        let closing = REVOCATION_DRAIN_TIMEOUT / 2;
+        closing_transport(
+            issued.record.begin_operation().expect("active authority"),
+            issued.record.cancellation.clone(),
+            closing,
+            ended_tx,
+        );
+        tokio::task::yield_now().await;
+
+        let started = Instant::now();
+        assert_eq!(
+            store
+                .revoke(&Revocation::Subject {
+                    subject_user_id: Uuid::from_u128(1),
+                })
+                .await,
+            Ok(1)
+        );
+        let (ended_at, finished) = ended_rx.await.expect("transport ended");
+        assert!(finished, "the transport was aborted before it could close");
+        assert_eq!(ended_at - started, closing);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revocation_aborts_a_closing_transport_at_the_drain_deadline() {
+        let store = SessionStore::new(1, Duration::from_secs(60));
+        let issued = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+        closing_transport(
+            issued.record.begin_operation().expect("active authority"),
+            issued.record.cancellation.clone(),
+            Duration::from_secs(3600),
+            ended_tx,
+        );
+        tokio::task::yield_now().await;
+
+        let started = Instant::now();
+        assert_eq!(
+            store
+                .revoke(&Revocation::Subject {
+                    subject_user_id: Uuid::from_u128(1),
+                })
+                .await,
+            Ok(1)
+        );
+        let (ended_at, finished) = ended_rx.await.expect("transport ended");
+        assert!(!finished, "the transport was not aborted");
+        assert_eq!(ended_at - started, REVOCATION_DRAIN_TIMEOUT);
+        assert!(started.elapsed() < 2 * REVOCATION_DRAIN_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expiry_lets_a_closing_transport_end_itself_until_the_drain_deadline() {
+        let store = SessionStore::new(2, Duration::from_secs(60));
+        let lingering = store
+            .issue(principal(1, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let closing = store
+            .issue(principal(2, 10, "dev-a"), ClientType::Browser)
+            .expect("issue");
+        let (lingering_tx, lingering_rx) = tokio::sync::oneshot::channel();
+        let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
+        closing_transport(
+            lingering
+                .record
+                .begin_operation()
+                .expect("active authority"),
+            lingering.record.cancellation.clone(),
+            Duration::from_secs(3600),
+            lingering_tx,
+        );
+        closing_transport(
+            closing.record.begin_operation().expect("active authority"),
+            closing.record.cancellation.clone(),
+            REVOCATION_DRAIN_TIMEOUT / 2,
+            closing_tx,
+        );
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let expired_at = Instant::now();
+        store.prune_expired();
+        assert!(lingering.record.cancellation.is_cancelled());
+        assert!(closing.record.cancellation.is_cancelled());
+        let (ended_at, finished) = closing_rx.await.expect("transport ended");
+        assert!(finished, "the transport was aborted before it could close");
+        assert_eq!(ended_at - expired_at, REVOCATION_DRAIN_TIMEOUT / 2);
+        let (ended_at, finished) = lingering_rx.await.expect("transport ended");
+        assert!(!finished, "the transport was not aborted");
+        assert_eq!(ended_at - expired_at, REVOCATION_DRAIN_TIMEOUT);
+    }
+
     fn target(capability: char) -> ExtensionTarget {
         ExtensionTarget {
             tenant: "notes".to_string(),
@@ -1856,7 +2096,7 @@ mod tests {
         store.prune_expired();
         assert_eq!(store.len(), 1);
         let operation = issued.record.begin_operation().unwrap();
-        issued.record.operations.revoke();
+        issued.record.operations.revoke(close_deadline());
         store.prune_expired();
         assert_eq!(store.len(), 1);
         drop(operation);

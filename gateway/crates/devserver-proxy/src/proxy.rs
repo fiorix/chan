@@ -488,7 +488,7 @@ async fn handle_gated(
         let cancellation = authorization.cancellation.clone();
         let expires_at = authorization.expires_at;
         let (client_tx, client_rx) = tokio::sync::oneshot::channel();
-        let bridge = operation.spawn(async move {
+        let bridge = operation.spawn_closing(async move {
             let Ok(client) = client_rx.await else {
                 return;
             };
@@ -1582,14 +1582,14 @@ fn safe_upstream_set_cookie(value: &HeaderValue) -> bool {
 /// pump sends. A socket that ended with no Close would read as a network
 /// drop in a browser, which could not tell it from a refusal.
 ///
-/// A revocation through the session store is the exception, in the setup
-/// and in the pump alike: it cancels the session's token and then aborts
-/// the session's operations, this bridge's task among them, so the task is
-/// normally gone before it can send its 1008 "session revoked" and the
-/// browser sees the socket reset with no Close. The 1008 arms send when the
-/// token is cancelled without that abort, or when the multi-thread runtime
-/// happens to poll the task on another worker between the cancel and the
-/// abort.
+/// A revocation through the session store cancels the session's token and
+/// leaves this bridge, spawned as an operation that ends itself, to send its
+/// 1008 Close; the store aborts the task only if it is still running at the
+/// revocation's drain deadline, which the bounded Close sends end inside.
+/// The store cancels the token of a session it expires as well (a prune, or
+/// a lookup past the expiry), so a cancellation at or after `expires_at`
+/// reads as "session expired", the reason the bridge's own expiry timer
+/// would have given, whichever of the two the bridge sees first.
 ///
 /// Each direction owns its source stream and destination sink. The policy
 /// monitor resets the shared idle deadline from either source and requests a
@@ -1604,7 +1604,16 @@ struct BridgePolicy {
     expires_at: tokio::time::Instant,
 }
 
-const WS_BRIDGE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const WS_BRIDGE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The Close reason for a cancelled session: see [`BridgePolicy`].
+fn cancelled_reason(expires_at: tokio::time::Instant) -> &'static str {
+    if tokio::time::Instant::now() >= expires_at {
+        "session expired"
+    } else {
+        "session revoked"
+    }
+}
 
 #[derive(Clone, Copy)]
 struct BridgeStop {
@@ -1706,7 +1715,7 @@ async fn bridge_ws(
     let (upstream, _resp) = tokio::select! {
         biased;
         _ = policy.cancellation.cancelled() => {
-            close_unbridged(client, 1008, "session revoked").await;
+            close_unbridged(client, 1008, cancelled_reason(policy.expires_at)).await;
             return Ok(());
         }
         _ = tokio::time::sleep_until(policy.expires_at) => {
@@ -1878,7 +1887,7 @@ async fn bridge_ws(
                 break Some(BridgeStop {
                     client_code: 1008,
                     upstream_code: TgCloseCode::Policy,
-                    reason: "session revoked",
+                    reason: cancelled_reason(policy.expires_at),
                 });
             }
             _ = tokio::time::sleep_until(policy.expires_at) => {
