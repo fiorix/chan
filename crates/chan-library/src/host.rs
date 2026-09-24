@@ -3800,12 +3800,15 @@ fn window_command_frame(
 }
 
 #[cfg(test)]
+type CanonicalizationProbe = Box<dyn Fn(&'static str)>;
+
+#[cfg(test)]
 std::thread_local! {
     /// Fires on the calling thread, with the call's name, for every
     /// canonicalization of a workspace key the host makes or causes: its own
     /// [`canonical_key`] and the registry calls that canonicalize inside
     /// chan-workspace, whose key function is private.
-    static CANONICAL_KEY_PROBE: std::cell::RefCell<Option<Box<dyn Fn(&'static str)>>> = const {
+    static CANONICAL_KEY_PROBE: std::cell::RefCell<Option<CanonicalizationProbe>> = const {
         std::cell::RefCell::new(None)
     };
 }
