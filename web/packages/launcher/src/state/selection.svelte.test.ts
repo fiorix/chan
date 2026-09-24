@@ -109,28 +109,54 @@ describe("workspace multi-select", () => {
     const row = library.workspaces.find((w) => w.workspace_id === unread.workspace_id)!;
     expect(row.status).toBe("unknown");
     expect(row.on).toBe(false);
-    expect(selection.note).toBe("1 locked workspace skipped");
+    // Nobody is known to hold it, so the note must not say it is locked.
+    expect(selection.note).toBe("1 workspace with an unknown lock state skipped");
+  });
+
+  it("names a locked row and an unknown row apart when one run skips both", async () => {
+    await addLocalWorkspace("/tmp/sel-mix-locked");
+    await addLocalWorkspace("/tmp/sel-mix-unknown-a");
+    await addLocalWorkspace("/tmp/sel-mix-unknown-b");
+    const status: Record<string, WorkspaceStatus> = {
+      "/tmp/sel-mix-locked": "locked",
+      "/tmp/sel-mix-unknown-a": "unknown",
+      "/tmp/sel-mix-unknown-b": "unknown",
+    };
+    library.workspaces = library.workspaces.map((w) =>
+      w.path in status ? { ...w, on: false, status: status[w.path]! } : w,
+    );
+    for (const path of Object.keys(status)) {
+      toggleSelected("workspace", library.workspaces.find((w) => w.path === path)!.workspace_id);
+    }
+
+    await bulkSetOnAll(true);
+
+    expect(selection.note).toBe(
+      "1 locked workspace skipped; 2 workspaces with an unknown lock state skipped",
+    );
   });
 
   // Total over the wire union: which status a bulk run refuses to act on is the
   // classifier's `foreign` or `unknown` answer, so a status added to the wire needs an entry
-  // here. A degraded mount is not one of them -- it is up, and turning it off is
-  // the one action that helps it.
-  const SKIPPED_BY_BULK: Record<WorkspaceStatus, boolean> = {
-    stopped: false,
-    starting: false,
-    running: false,
-    locked: true,
-    closing: false,
-    removing: false,
-    error: false,
-    unavailable: false,
-    unknown: true,
+  // here, with the note a lone skipped row of that status reads. A degraded
+  // mount is not one of them -- it is up, and turning it off is the one action
+  // that helps it.
+  const SKIPPED_BY_BULK: Record<WorkspaceStatus, string | null> = {
+    stopped: null,
+    starting: null,
+    running: null,
+    locked: "1 locked workspace skipped",
+    closing: null,
+    removing: null,
+    error: null,
+    unavailable: null,
+    unknown: "1 workspace with an unknown lock state skipped",
   };
 
   it("skips a bulk run over a foreign or unknown lock alone", async () => {
     for (const status of Object.keys(SKIPPED_BY_BULK) as WorkspaceStatus[]) {
-      const skipped = SKIPPED_BY_BULK[status];
+      const note = SKIPPED_BY_BULK[status];
+      const skipped = note !== null;
       const path = `/tmp/sel-bulk-${status}`;
       clearSelection();
       await addLocalWorkspace(path);
@@ -146,7 +172,7 @@ describe("workspace multi-select", () => {
       const row = library.workspaces.find((w) => w.workspace_id === id)!;
       expect({ status, note: selection.note, on: row.on }).toEqual({
         status,
-        note: skipped ? "1 locked workspace skipped" : null,
+        note,
         on: skipped,
       });
     }
@@ -190,6 +216,33 @@ describe("workspace multi-select", () => {
     expect(library.workspaces.some((w) => w.workspace_id === locked.workspace_id)).toBe(true);
     expect(isSelected("workspace", locked.workspace_id)).toBe(true);
     expect(selection.note).toBe("1 locked workspace skipped");
+  });
+
+  it("confirmed bulk remove names locked and unknown skips apart and keeps both selected", async () => {
+    await addLocalWorkspace("/tmp/sel-rm-mix-locked");
+    await addLocalWorkspace("/tmp/sel-rm-mix-unknown");
+    const status: Record<string, WorkspaceStatus> = {
+      "/tmp/sel-rm-mix-locked": "locked",
+      "/tmp/sel-rm-mix-unknown": "unknown",
+    };
+    library.workspaces = library.workspaces.map((w) =>
+      w.path in status ? { ...w, on: false, status: status[w.path]! } : w,
+    );
+    const ids = Object.keys(status).map(
+      (path) => library.workspaces.find((w) => w.path === path)!.workspace_id,
+    );
+    for (const id of ids) toggleSelected("workspace", id);
+    requestBulkDelete();
+
+    await confirmBulkDelete();
+
+    for (const id of ids) {
+      expect(library.workspaces.some((w) => w.workspace_id === id)).toBe(true);
+      expect(isSelected("workspace", id)).toBe(true);
+    }
+    expect(selection.note).toBe(
+      "1 locked workspace skipped; 1 workspace with an unknown lock state skipped",
+    );
   });
 });
 
