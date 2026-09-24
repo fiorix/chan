@@ -118,7 +118,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version-file: chan/.nvmrc
           cache: 'npm'
           cache-dependency-path: chan/web/package-lock.json
 

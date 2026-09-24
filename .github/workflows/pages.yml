@@ -31,7 +31,7 @@ jobs:
           path: chan
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version-file: chan/.nvmrc
       - name: Install web workspace deps
         run: npm install
         working-directory: chan/web
