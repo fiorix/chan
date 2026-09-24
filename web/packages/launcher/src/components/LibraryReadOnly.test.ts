@@ -12,7 +12,7 @@ import { mount, unmount, flushSync } from "svelte";
 import Library from "./Library.svelte";
 import { library, loadLibrary, stopWatching } from "../state/library.svelte";
 import { collapsedState } from "../state/machineCollapse.svelte";
-import type { DevserverEntry, WorkspaceEntry } from "../api/library";
+import type { DevserverEntry, WorkspaceEntry, WorkspaceStatus } from "../api/library";
 
 // Force the read-only surface for the whole file (hoisted before the imports):
 // no registry mutation, no desktop bridge, not self-managed.
@@ -126,6 +126,55 @@ describe("Library on the read-only surface", () => {
     expect([...target!.querySelectorAll(".pill")].some((p) => p.textContent?.trim() === "On")).toBe(
       true,
     );
+  });
+
+  // Total over the wire union for both desired states. The word is the desired
+  // state; a settled observed state that contradicts it rides beside it, and a
+  // transition (starting, closing, removing) is not a contradiction. The lock
+  // and degraded words keep their precedence over both.
+  const PILL_WORD: Record<"on" | "off", Record<WorkspaceStatus, string>> = {
+    on: {
+      stopped: "On, stopped",
+      starting: "On",
+      running: "On",
+      locked: "Locked",
+      closing: "On",
+      removing: "On",
+      error: "On, failed",
+      unavailable: "Degraded",
+      unknown: "Unknown",
+    },
+    off: {
+      stopped: "Off",
+      starting: "Off",
+      running: "Off, running",
+      locked: "Locked",
+      closing: "Off",
+      removing: "Off",
+      error: "Off",
+      unavailable: "Degraded",
+      unknown: "Unknown",
+    },
+  };
+
+  it("says the desired state and names an observed state that contradicts it", () => {
+    mountList();
+    const notes = (): HTMLElement =>
+      [...target!.querySelectorAll<HTMLElement>(".ws-card")].find(
+        (card) => card.querySelector(".row-sub")?.getAttribute("title") === "/home/hacker/notes",
+      )!;
+    const seen: Record<string, Record<string, string>> = { on: {}, off: {} };
+    for (const desired of ["on", "off"] as const) {
+      for (const status of Object.keys(PILL_WORD[desired]) as WorkspaceStatus[]) {
+        library.workspaces = library.workspaces.map(
+          (w): WorkspaceEntry =>
+            w.workspace_id === "ws-1" ? { ...w, on: desired === "on", status } : w,
+        );
+        flushSync();
+        seen[desired]![status] = notes().querySelector(".pill")?.textContent?.trim() ?? "";
+      }
+    }
+    expect(seen).toEqual(PILL_WORD);
   });
 
   it("keeps the machine-collapse toggle: it is not a mutation control", () => {

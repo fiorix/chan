@@ -117,6 +117,39 @@ describe("Library: Local group", () => {
     }
   });
 
+  it("names an observed state that contradicts the desired one on the power control", () => {
+    // The editable row has no state word: the power control shows the desired
+    // state (lit when on) and New window shows the observed one (enabled only
+    // while running). When a settled observed state contradicts the desired
+    // one, the control says both rather than leaving the two to disagree.
+    mountList();
+    const cases: Array<[boolean, WorkspaceEntry["status"], string]> = [
+      [false, "running", "Turn on (Off, running)"],
+      [true, "stopped", "Turn off (On, stopped)"],
+      [true, "error", "Turn off (On, failed)"],
+      [true, "running", "Turn off"],
+      [false, "stopped", "Turn on"],
+    ];
+    const seen = cases.map(([on, status]) => {
+      library.workspaces = library.workspaces.map(
+        (w): WorkspaceEntry => (w.workspace_id === "ws-1" ? { ...w, on, status } : w),
+      );
+      flushSync();
+      const power = [...target!.querySelectorAll<HTMLButtonElement>("button[aria-label]")].find(
+        (b) => /^Turn (on|off) notes/.test(b.getAttribute("aria-label") ?? ""),
+      );
+      return [on, status, power?.title ?? "", power?.getAttribute("aria-label") ?? ""];
+    });
+    expect(seen).toEqual(
+      cases.map(([on, status, title]) => [
+        on,
+        status,
+        title,
+        title.replace(/^Turn (on|off)/, (verb) => `${verb} notes`),
+      ]),
+    );
+  });
+
   it("disables New window unless the workspace status is running", () => {
     mountList();
     const id = library.workspaces.find((w) => w.devserver_id === null)!.workspace_id;
