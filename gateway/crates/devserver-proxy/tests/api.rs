@@ -2898,11 +2898,15 @@ async fn ws_bridge_closes_as_revoked_when_the_session_is_revoked_while_bridged()
 }
 
 /// A session the store expires while the bridge is pumping frames ends
-/// the client socket with the 1008 Close that names the expiry. The
-/// test blocks its current-thread runtime past the expiry and then looks
-/// the session up, so the store's expiry path runs before the bridge's
-/// own expiry timer can be polled, which is the order a prune on another
-/// clock can take in production.
+/// the client socket with the 1008 Close that names the expiry, not a
+/// reset. The test blocks its current-thread runtime past the expiry and
+/// then looks the session up, so the store's expiry path has cancelled
+/// the token before the bridge is polled again. The reason has two
+/// writers here: the pump monitor's `select!` is unbiased, so either the
+/// cancellation arm (through `cancelled_reason`) or the bridge's own
+/// expiry arm can send it. This test pins the Close; the setup-phase
+/// test, whose select polls the cancellation first, pins
+/// `cancelled_reason`.
 #[tokio::test]
 async fn ws_bridge_closes_as_expired_when_the_store_expires_the_session() {
     use tokio_tungstenite::tungstenite::Message as WsMsg;
