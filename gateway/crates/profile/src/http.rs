@@ -69,9 +69,11 @@ pub struct AppState {
 }
 
 /// How long shutdown waits for the background workers to finish the pass
-/// they are in before aborting them. A pass is bounded by the controller
-/// client's 5-second request timeout and the pool's 5-second acquire
-/// timeout. Aborting past the bound is safe: every worker write is one
+/// they are in before aborting them. A pass is not bounded by the
+/// controller client's request timeout or the pool's acquire timeout: no
+/// query carries a statement timeout, so a statement blocked on a row lock
+/// waits indefinitely, and this abort exists for exactly that. Aborting
+/// past the bound is safe: every worker write is one
 /// statement or one transaction, and a job claimed by an aborted pass is
 /// claimed again by the next process once its claim lease lapses.
 pub const WORKER_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
