@@ -3444,3 +3444,542 @@ async fn a_test_router_starts_no_revocation_worker() {
     app.cleanup().await;
     assert!(!claimed, "building a router claimed a revocation job");
 }
+
+/// The service lifecycle under interruption: the real `profile-service`
+/// binary is stopped by SIGINT or SIGKILL at a named point of its
+/// background work, then started again against the same schema. Each case
+/// asserts that the restarted service comes up and serves the data, that
+/// the revocation the first process was working on lands, and that the
+/// sweeper runs again. Process logs go to `PROFILE_LIFECYCLE_LOG_DIR`, or to
+/// `profile-lifecycle/` under Cargo's test tmpdir.
+mod interruption {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Where the first process is stopped.
+    #[derive(Clone, Copy, Debug)]
+    enum Point {
+        /// The worker has claimed a job and its cut is in flight: the
+        /// claim is written, the outcome is not.
+        ClaimedCut,
+        /// The worker is inside the account-delete settlement transaction,
+        /// its audit row inserted and its `DELETE FROM users` waiting on a
+        /// row lock the test holds.
+        SettlementWrite,
+        /// The sweeper's mark `UPDATE` is waiting on a row lock the test
+        /// holds, so the tick has fetched the live set and written nothing.
+        Sweep,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Signal {
+        Int,
+        Kill,
+    }
+
+    /// A devserver-control stand-in: counts cut and sweep requests, and
+    /// holds cut requests open while `hold_cuts` is set.
+    #[derive(Clone, Default)]
+    struct Control {
+        hold_cuts: Arc<AtomicBool>,
+        cuts: Arc<AtomicUsize>,
+        live: Arc<Mutex<Vec<(Uuid, String)>>>,
+    }
+
+    impl Control {
+        async fn start(&self) -> (String, tokio::task::JoinHandle<()>) {
+            let cut = {
+                let control = self.clone();
+                move || {
+                    let control = control.clone();
+                    async move {
+                        control.cuts.fetch_add(1, SeqCst);
+                        if control.hold_cuts.load(SeqCst) {
+                            std::future::pending::<()>().await;
+                        }
+                        axum::Json(json!({
+                            "killed": 0,
+                            "revoked": 0,
+                            "proxies_confirmed": 1,
+                            "proxies_expected": 1
+                        }))
+                    }
+                }
+            };
+            let tunnels = {
+                let control = self.clone();
+                move || {
+                    let control = control.clone();
+                    async move {
+                        let live = control.live.lock().unwrap().clone();
+                        let now = chrono::Utc::now();
+                        axum::Json(
+                            live.into_iter()
+                                .map(|(owner_user_id, devserver_id)| {
+                                    json!({
+                                        "registration_id": Uuid::new_v4(),
+                                        "owner_user_id": owner_user_id,
+                                        "user": "owner",
+                                        "devserver_id": devserver_id,
+                                        "max_connected_devservers": 4,
+                                        "peer_addr": null,
+                                        "connected_at": now,
+                                        "proxy_id": "proxy-a",
+                                        "proxy_base_url": "https://proxy-a.example",
+                                        "admission_lease": "lease",
+                                        "admission_lease_expires_at": now + chrono::Duration::hours(1),
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                }
+            };
+            let router = Router::new()
+                .route("/admin/v1/tunnels", axum::routing::get(tunnels))
+                .route(
+                    "/admin/v1/owners/{owner}/tunnels/kill",
+                    axum::routing::post(cut.clone()),
+                )
+                .route("/admin/v1/sessions/revoke", axum::routing::post(cut));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            (url, server)
+        }
+    }
+
+    /// A running `profile-service` child, killed if a test fails with it
+    /// still up.
+    struct Service {
+        child: std::process::Child,
+        port: u16,
+        log: PathBuf,
+    }
+
+    impl Drop for Service {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    impl Service {
+        async fn start(database_url: &str, control_url: &str, log: PathBuf) -> Self {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let output = std::fs::File::create(&log).unwrap();
+            let child = std::process::Command::new(env!("CARGO_BIN_EXE_profile-service"))
+                .env_clear()
+                .env("CHAN_GATEWAY_MIGRATIONS", "external")
+                .env("BIND_ADDR", format!("127.0.0.1:{port}"))
+                .env("DATABASE_URL", database_url)
+                .env("PROFILE_AUTH_TOKEN", TOKEN)
+                .env("DEVSERVER_ADMIN_URL", control_url)
+                .env("DEVSERVER_PROFILE_ADMIN_TOKEN", "test-profile-admin-token")
+                .env("DEVSERVER_RETENTION_MINUTES", "1")
+                .env("RUST_LOG", "info")
+                .stdout(output.try_clone().unwrap())
+                .stderr(output)
+                .spawn()
+                .unwrap();
+            let mut service = Self { child, port, log };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = service.child.try_wait().unwrap() {
+                    panic!(
+                        "profile-service exited at startup with {status}; log {}",
+                        service.log.display()
+                    );
+                }
+                if matches!(service.get("/healthz").await, Some((200, _))) {
+                    return service;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "profile-service never answered /healthz; log {}",
+                    service.log.display()
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        async fn get(&self, path: &str) -> Option<(u16, String)> {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+                .await
+                .ok()?;
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: profile\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(request.as_bytes()).await.ok()?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.ok()?;
+            let status = response.split(' ').nth(1)?.parse().ok()?;
+            Some((status, response))
+        }
+
+        fn signal(&mut self, signal: Signal) {
+            match signal {
+                Signal::Int => {
+                    let sent = std::process::Command::new("kill")
+                        .args(["-s", "INT", &self.child.id().to_string()])
+                        .status()
+                        .unwrap();
+                    assert!(sent.success(), "kill -s INT failed");
+                }
+                Signal::Kill => self.child.kill().unwrap(),
+            }
+        }
+
+        async fn exit_status(&mut self, bound: Duration) -> std::process::ExitStatus {
+            let deadline = tokio::time::Instant::now() + bound;
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "profile-service did not exit within {bound:?}; log {}",
+                    self.log.display()
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    fn log_dir() -> PathBuf {
+        let dir = std::env::var_os("PROFILE_LIFECYCLE_LOG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("profile-lifecycle"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn eventually<F, Fut>(what: &str, bound: Duration, mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + bound;
+        while !check().await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what} did not happen within {bound:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn insert_user(pool: &PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar("INSERT INTO users (email, username) VALUES ($1, $2) RETURNING id")
+            .bind(format!("{name}@x.com"))
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn insert_stale_devserver(pool: &PgPool, owner: Uuid, devserver_id: &str) {
+        sqlx::query(
+            "INSERT INTO devservers (owner_user_id, devserver_id, created_at) \
+             VALUES ($1, $2, now() - interval '1 day')",
+        )
+        .bind(owner)
+        .bind(devserver_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn waiting_on_lock(pool: &PgPool, application_name: &str, statement: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE application_name = $1 AND wait_event_type = 'Lock' \
+               AND starts_with(query, $2))",
+        )
+        .bind(application_name)
+        .bind(statement)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn interrupt_and_restart(point: Point, signal: Signal) {
+        let app = TestApp::new_database().await;
+        let case = format!("{point:?}-{signal:?}").to_lowercase();
+        let application_name = format!("profile-{}", app.schema);
+        let separator = if app.admin_url.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        let database_url = format!(
+            "{}{separator}options=-c%20search_path%3D{}&application_name={application_name}",
+            app.admin_url, app.schema
+        );
+        let pool = app.pool.clone();
+
+        // One owner with a live and a stale registry row, and one user whose
+        // revocation job the first process is working on when it stops.
+        let owner = insert_user(&pool, "owner").await;
+        let (live, stale, stale_later) = (ds("b"), ds("c"), ds("d"));
+        insert_stale_devserver(&pool, owner, &live).await;
+        insert_stale_devserver(&pool, owner, &stale).await;
+        let subject = insert_user(&pool, "subject").await;
+        let job = match point {
+            Point::ClaimedCut | Point::Sweep => {
+                profile::revocation::RevocationJob::Subject(subject)
+            }
+            Point::SettlementWrite => profile::revocation::RevocationJob::AccountDelete(subject),
+        };
+        profile::revocation::reserve(&pool, &job).await.unwrap();
+        let job_key = format!("subject:{subject}");
+        if let Point::SettlementWrite = point {
+            // Skip ahead to a job whose quiet window has elapsed, so the
+            // next claim runs the settlement transaction.
+            sqlx::query(
+                "UPDATE control_revocation_jobs SET phase = 'settling', \
+                 first_cut_confirmed_at = now() - interval '41 seconds', \
+                 settle_not_before = now() - interval '1 second', \
+                 deadline = now() + interval '5 minutes', next_attempt_at = now() \
+                 WHERE job_key = $1",
+            )
+            .bind(&job_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let control = Control::default();
+        control.live.lock().unwrap().push((owner, live.clone()));
+        control
+            .hold_cuts
+            .store(matches!(point, Point::ClaimedCut), SeqCst);
+        let (control_url, control_server) = control.start().await;
+
+        let mut lock = pool.begin().await.unwrap();
+        match point {
+            Point::ClaimedCut => {}
+            Point::SettlementWrite => {
+                sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR SHARE")
+                    .bind(subject)
+                    .execute(&mut *lock)
+                    .await
+                    .unwrap();
+            }
+            Point::Sweep => {
+                sqlx::query("SELECT 1 FROM devservers WHERE devserver_id = $1 FOR SHARE")
+                    .bind(&live)
+                    .execute(&mut *lock)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let logs = log_dir();
+        let mut first = Service::start(
+            &database_url,
+            &control_url,
+            logs.join(format!("{case}-first.log")),
+        )
+        .await;
+        let reached = Duration::from_secs(20);
+        match point {
+            Point::ClaimedCut => {
+                eventually("a held cut request", reached, || async {
+                    control.cuts.load(SeqCst) > 0
+                })
+                .await;
+            }
+            Point::SettlementWrite => {
+                eventually("a settlement DELETE waiting on the lock", reached, || {
+                    waiting_on_lock(&pool, &application_name, "DELETE FROM users")
+                })
+                .await;
+            }
+            Point::Sweep => {
+                eventually("a sweep mark waiting on the lock", reached, || {
+                    waiting_on_lock(&pool, &application_name, "UPDATE devservers")
+                })
+                .await;
+            }
+        }
+        let at_stop: (String, i32, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+            "SELECT phase, attempts, deadline FROM control_revocation_jobs WHERE job_key = $1",
+        )
+        .bind(&job_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            at_stop.2.is_some(),
+            "the job is claimed when the process stops"
+        );
+
+        first.signal(signal);
+        let status = first.exit_status(Duration::from_secs(30)).await;
+        match signal {
+            Signal::Int => assert!(
+                status.success(),
+                "SIGINT exit {status}; log {}",
+                first.log.display()
+            ),
+            Signal::Kill => assert_eq!(status.signal(), Some(9), "SIGKILL exit {status}"),
+        }
+        drop(first);
+        lock.rollback().await.unwrap();
+
+        let after_stop: Option<(String, i32)> = sqlx::query_as(
+            "SELECT phase, attempts FROM control_revocation_jobs WHERE job_key = $1",
+        )
+        .bind(&job_key)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let subject_left: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
+                .bind(subject)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        eprintln!(
+            "{case}: at stop job (phase, attempts, deadline)={at_stop:?}; after exit job={after_stop:?} subject_present={subject_left} exit={status}"
+        );
+
+        // Only a sweep in the restarted process can remove a row added now.
+        insert_stale_devserver(&pool, owner, &stale_later).await;
+        let restarted_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        control.hold_cuts.store(false, SeqCst);
+        let cuts_before_restart = control.cuts.load(SeqCst);
+        let mut second = Service::start(
+            &database_url,
+            &control_url,
+            logs.join(format!("{case}-restart.log")),
+        )
+        .await;
+
+        let (status, body) = second
+            .get(&format!("/v1/users/{owner}"))
+            .await
+            .expect("the restarted service answers");
+        assert_eq!(
+            status, 200,
+            "the owner's record loads after restart: {body}"
+        );
+        assert!(body.contains("owner@x.com"));
+
+        // The claim lease is 15 seconds, and the worker ticks once a second.
+        let lands = Duration::from_secs(45);
+        match point {
+            Point::ClaimedCut | Point::Sweep => {
+                eventually("the revocation's first cut", lands, || async {
+                    let phase: String = sqlx::query_scalar(
+                        "SELECT phase FROM control_revocation_jobs WHERE job_key = $1",
+                    )
+                    .bind(&job_key)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    phase == "settling"
+                })
+                .await;
+            }
+            Point::SettlementWrite => {
+                eventually("the account deletion", lands, || async {
+                    !sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)",
+                    )
+                    .bind(subject)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                })
+                .await;
+                let job_left: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM control_revocation_jobs WHERE job_key = $1)",
+                )
+                .bind(&job_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(!job_left, "the settled job leaves with its account");
+            }
+        }
+        if let Point::ClaimedCut = point {
+            assert!(
+                control.cuts.load(SeqCst) > cuts_before_restart,
+                "the restarted process made the cut"
+            );
+        }
+
+        eventually("the restarted sweeper's tick", lands, || async {
+            let rows: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+                "SELECT devserver_id, last_seen_at FROM devservers \
+                 WHERE owner_user_id = $1 ORDER BY devserver_id",
+            )
+            .bind(owner)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            rows.len() == 1
+                && rows[0].0 == live
+                && rows[0].1.is_some_and(|seen| seen >= restarted_at)
+        })
+        .await;
+        let owner_left: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(owner_left, "the owner's account survives");
+
+        second.signal(Signal::Int);
+        let status = second.exit_status(Duration::from_secs(30)).await;
+        assert!(status.success(), "restarted service stop {status}");
+        drop(second);
+        control_server.abort();
+        app.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn sigint_between_a_claim_and_its_outcome_resumes() {
+        interrupt_and_restart(Point::ClaimedCut, Signal::Int).await;
+    }
+
+    #[tokio::test]
+    async fn sigkill_between_a_claim_and_its_outcome_resumes() {
+        interrupt_and_restart(Point::ClaimedCut, Signal::Kill).await;
+    }
+
+    #[tokio::test]
+    async fn sigint_inside_the_settlement_transaction_resumes() {
+        interrupt_and_restart(Point::SettlementWrite, Signal::Int).await;
+    }
+
+    #[tokio::test]
+    async fn sigkill_inside_the_settlement_transaction_resumes() {
+        interrupt_and_restart(Point::SettlementWrite, Signal::Kill).await;
+    }
+
+    #[tokio::test]
+    async fn sigint_mid_sweep_resumes() {
+        interrupt_and_restart(Point::Sweep, Signal::Int).await;
+    }
+
+    #[tokio::test]
+    async fn sigkill_mid_sweep_resumes() {
+        interrupt_and_restart(Point::Sweep, Signal::Kill).await;
+    }
+}
