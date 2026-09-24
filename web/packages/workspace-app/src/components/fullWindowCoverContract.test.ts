@@ -17,13 +17,18 @@
 // is, and the desktop close button's fast path is a separate acceptance.
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
 import PreflightOverlay from "./PreflightOverlay.svelte";
 import { api } from "../api/client";
 import type { MockWorkspaceData } from "../demo/data";
-import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import {
+  demoTransportSettled,
+  installDemoWorkspace,
+  uninstallDemoWorkspace,
+} from "../demo/install";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   allCommands,
   dispatchAllowsCommand,
@@ -37,6 +42,7 @@ import {
   FULL_WINDOW_COVERS,
   raisedCoverKeys,
   setCoverBlocking,
+  stopIndexStatusPoller,
   ui,
   type FullWindowCover,
 } from "../state/store.svelte";
@@ -178,8 +184,27 @@ async function mountApp() {
   await tick();
 }
 
-afterEach(() => {
+let timers: TimerTrack | null = null;
+
+beforeEach(() => {
+  timers = trackTimers();
+});
+
+afterEach(async () => {
+  // Real timers first: the settle below runs on them, and the release must
+  // not put the tracked functions back over a fake clock.
+  vi.useRealTimers();
+  // Unmounting cancels nothing the bootstrap still has in flight, so let it
+  // settle against the demo backend before the backend goes away.
+  await demoTransportSettled();
   for (const c of mounted.splice(0)) unmount(c);
+  // What the app armed and unmounting did not stop (the wake-gap probe and
+  // the resume it drives, the index poll, the hash and session debounces,
+  // the watcher's timers) is cleared here, not left to fire into the next
+  // test or past the file's environment.
+  stopIndexStatusPoller();
+  timers?.release();
+  timers = null;
   uninstallDemoWorkspace();
   document.body.innerHTML = "";
   screensaver.locked = false;

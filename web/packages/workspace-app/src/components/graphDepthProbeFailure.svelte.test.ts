@@ -21,6 +21,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import GraphPanel from "./GraphPanel.svelte";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { GraphTab } from "../state/tabs.svelte";
 import { FS_GRAPH_DEPTH_MAX } from "../graph/depth";
 
@@ -180,13 +181,20 @@ function dirProbes(path: string): Array<{ path: string; depth: number }> {
   return probes.calls.filter((c) => c.path === path && c.depth === FS_GRAPH_DEPTH_MAX);
 }
 
+let timers: TimerTrack;
+
 beforeEach(() => {
   probes.calls = [];
   probes.fail = true;
+  timers = trackTimers();
 });
 
 afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
+  // The panel's layout effects arm the store's hash and session debounces,
+  // which unmounting does not cancel; one left pending fires after the file's
+  // environment is gone and reads a `window` that no longer exists.
+  timers.release();
   document.body.innerHTML = "";
   vi.clearAllMocks();
 });
