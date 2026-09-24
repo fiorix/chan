@@ -3471,8 +3471,9 @@ mod interruption {
         /// its audit row inserted and its `DELETE FROM users` waiting on a
         /// row lock the test holds.
         SettlementWrite,
-        /// The sweeper's mark `UPDATE` is waiting on a row lock the test
-        /// holds, so the tick has fetched the live set and written nothing.
+        /// The sweeper's mark `UPDATE` has committed and its `DELETE` is
+        /// waiting on a row lock the test holds on a stale row: the gap
+        /// between the sweep's two statements.
         Sweep,
     }
 
@@ -3777,7 +3778,7 @@ mod interruption {
             }
             Point::Sweep => {
                 sqlx::query("SELECT 1 FROM devservers WHERE devserver_id = $1 FOR SHARE")
-                    .bind(&live)
+                    .bind(&stale)
                     .execute(&mut *lock)
                     .await
                     .unwrap();
@@ -3806,10 +3807,18 @@ mod interruption {
                 .await;
             }
             Point::Sweep => {
-                eventually("a sweep mark waiting on the lock", reached, || {
-                    waiting_on_lock(&pool, &application_name, "UPDATE devservers")
+                eventually("a sweep delete waiting on the lock", reached, || {
+                    waiting_on_lock(&pool, &application_name, "DELETE FROM devservers")
                 })
                 .await;
+                let marked: bool = sqlx::query_scalar(
+                    "SELECT last_seen_at IS NOT NULL FROM devservers WHERE devserver_id = $1",
+                )
+                .bind(&live)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(marked, "the mark committed before the delete");
             }
         }
         let at_stop: (String, i32, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
