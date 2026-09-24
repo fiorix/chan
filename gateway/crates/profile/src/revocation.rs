@@ -3,11 +3,18 @@
 //! Postgres is the source of truth. The in-process worker only accelerates due
 //! rows; a crash during the entry-credential quiet period leaves a resumable
 //! outbox row for the next profile-service process.
+//!
+//! Every write the worker makes is one statement or one transaction, so a
+//! process that dies at any point leaves each row either as it was claimed or
+//! as the finished step left it. A claim pushes `next_attempt_at` forward by
+//! the claim lease, which is how a row claimed by a process that died is
+//! picked up again by the next one.
 
 use std::time::Duration;
 
 use gateway_common::devserver_control_client::DevserverControlClient;
 use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 const MAX_CONCURRENCY: i64 = 8;
@@ -66,15 +73,6 @@ impl RevocationJob {
             _ => (None, None),
         }
     }
-}
-
-/// Start the durable revocation worker: one `process_once` pass per second
-/// that claims due outbox rows and drives their cuts through `client`. The
-/// loop runs detached for the life of the process; process shutdown is its
-/// cancellation path, and a row it was mid-way through is resumed by the
-/// next process from the outbox.
-pub(crate) fn spawn_worker(pool: PgPool, client: DevserverControlClient) {
-    tokio::spawn(run(pool, client));
 }
 
 /// Reserve a durable job in the caller's denial transaction. Every generation
@@ -187,15 +185,26 @@ impl JobRow {
     }
 }
 
-async fn run(pool: PgPool, client: DevserverControlClient) {
+/// The durable revocation worker: one `process_once` pass per second that
+/// claims due outbox rows and drives their cuts through `client`, until
+/// `stop` turns true or its sender is dropped. The stop is read between
+/// passes, so a pass in flight records the outcome of every attempt it made
+/// before the loop returns; `http::serve` bounds that wait and aborts past
+/// it, which leaves the claimed rows to their lease like a crash would.
+pub async fn run(pool: PgPool, client: DevserverControlClient, mut stop: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => break,
+            _ = interval.tick() => {}
+        }
         if let Err(error) = process_once(&pool, &client).await {
             tracing::error!(?error, "durable revocation worker tick failed");
         }
     }
+    tracing::info!("durable revocation worker stopped");
 }
 
 pub async fn process_once(pool: &PgPool, client: &DevserverControlClient) -> sqlx::Result<usize> {

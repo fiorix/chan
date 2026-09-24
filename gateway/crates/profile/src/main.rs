@@ -65,28 +65,24 @@ async fn run() -> anyhow::Result<()> {
             retention_secs = retention.as_secs(),
             "devserver registry sweeper enabled"
         );
-        tokio::spawn(profile::sweeper::run(
-            pool.clone(),
-            cfg.workspace_admin.clone(),
-            retention,
-        ));
     } else {
         tracing::info!("devserver registry sweeper disabled by DEVSERVER_RETENTION_MINUTES=0");
     }
 
-    let app = http::app(
+    let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
+    http::serve(
+        listener,
         http::AppState {
             pool,
             auth_token: cfg.auth_token.clone(),
             admin_token: cfg.admin_token.clone(),
         },
         cfg.workspace_admin.clone(),
-    );
-
-    let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(gateway_common::shutdown_signal())
-        .await?;
+        cfg.devserver_retention,
+        gateway_common::shutdown_signal(),
+    )
+    .await?;
+    tracing::info!("profile-service stopped");
     Ok(())
 }
 

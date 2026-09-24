@@ -32,14 +32,16 @@
 //! Fleet coverage: the snapshot is devserver-control's cluster-wide
 //! aggregate, so registrations on every connected proxy count as live.
 //!
-//! The loop runs detached for the life of the process (spawned from
-//! `run()` in main before serve); process shutdown is its cancellation
-//! path.
+//! `http::serve` starts the loop with the service and stops and joins it
+//! at shutdown. A sweep is two statements, mark then delete, so a process
+//! that dies between or during them leaves at most a mark without its
+//! delete, which the next tick repeats.
 
 use std::time::Duration;
 
 use gateway_common::devserver_control_client::DevserverControlClient;
 use sqlx::postgres::PgPool;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 /// The longest retention the delete query can evaluate. The query subtracts
@@ -107,14 +109,25 @@ pub async fn sweep_once(
     })
 }
 
-/// Sweep loop: one tick per minute, each tick gated on a SUCCESSFUL
-/// `list_all_tunnels` fetch; any fetch error skips the whole tick.
-pub async fn run(pool: PgPool, admin: DevserverControlClient, retention: Duration) {
+/// Sweep loop: one tick per minute, the first at once, each tick gated on a
+/// SUCCESSFUL `list_all_tunnels` fetch; any fetch error skips the whole
+/// tick. The loop returns when `stop` turns true or its sender is dropped,
+/// read between ticks so a sweep in flight finishes first.
+pub async fn run(
+    pool: PgPool,
+    admin: DevserverControlClient,
+    retention: Duration,
+    mut stop: watch::Receiver<bool>,
+) {
     const TICK: Duration = Duration::from_secs(60);
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => break,
+            _ = interval.tick() => {}
+        }
         let snapshot = match admin.list_all_tunnels().await {
             Ok(tunnels) => tunnels,
             Err(err) => {
@@ -130,4 +143,5 @@ pub async fn run(pool: PgPool, admin: DevserverControlClient, retention: Duratio
             tracing::warn!(error = %err, "sweeper: sweep failed");
         }
     }
+    tracing::info!("devserver registry sweeper stopped");
 }

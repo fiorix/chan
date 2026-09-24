@@ -68,12 +68,68 @@ pub struct AppState {
     pub admin_token: Option<String>,
 }
 
-/// Start the durable revocation worker and build the HTTP application from
-/// the same pool. The worker runs detached for the life of the process.
-/// Call this inside a Tokio runtime: spawning the worker panics outside one.
-pub fn app(state: AppState, client: DevserverControlClient) -> Router {
-    crate::revocation::spawn_worker(state.pool.clone(), client);
+/// How long shutdown waits for the background workers to finish the pass
+/// they are in before aborting them. A pass is bounded by the controller
+/// client's 5-second request timeout and the pool's 5-second acquire
+/// timeout. Aborting past the bound is safe: every worker write is one
+/// statement or one transaction, and a job claimed by an aborted pass is
+/// claimed again by the next process once its claim lease lapses.
+pub const WORKER_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Run profile-service on `listener` until `shutdown` resolves. The durable
+/// revocation worker and, when `sweeper_retention` is set, the registry
+/// sweeper start with the service and share its pool; once the HTTP server
+/// has drained, both are told to stop and joined, and aborted if they are
+/// still running after [`WORKER_DRAIN`].
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    control: DevserverControlClient,
+    sweeper_retention: Option<std::time::Duration>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(crate::revocation::run(
+        state.pool.clone(),
+        control.clone(),
+        stopped.clone(),
+    ));
+    if let Some(retention) = sweeper_retention {
+        workers.spawn(crate::sweeper::run(
+            state.pool.clone(),
+            control,
+            retention,
+            stopped,
+        ));
+    }
+
+    let served = axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown)
+        .await;
+    let _ = stop.send(true);
+    let drained = tokio::time::timeout(WORKER_DRAIN, async {
+        while let Some(joined) = workers.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(?error, "background worker failed");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            running = workers.len(),
+            "background workers outlived the shutdown drain; aborting them"
+        );
+        workers.shutdown().await;
+    }
+    served?;
+    Ok(())
+}
+
+/// Build the HTTP application. It starts no background work, so tests can
+/// build as many routers as they like; [`serve`] owns the workers.
+pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/v1/users", post(create_user))
         .route(

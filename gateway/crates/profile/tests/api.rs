@@ -42,26 +42,17 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
-        Self::new_with_control("http://127.0.0.1:7003").await
+        let mut app = Self::new_database().await;
+        app.router = profile::http::app(app.state());
+        app
     }
 
-    async fn new_with_control(control_url: &str) -> Self {
-        let mut app = Self::new_database().await;
-        let workspace_admin =
-            gateway_common::devserver_control_client::DevserverControlClient::new(
-                control_url.parse().unwrap(),
-                "test-profile-admin-token".into(),
-            )
-            .unwrap();
-        app.router = profile::http::app(
-            profile::http::AppState {
-                pool: app.pool.clone(),
-                auth_token: TOKEN.to_string(),
-                admin_token: Some(ADMIN_TOKEN.to_string()),
-            },
-            workspace_admin,
-        );
-        app
+    fn state(&self) -> profile::http::AppState {
+        profile::http::AppState {
+            pool: self.pool.clone(),
+            auth_token: TOKEN.to_string(),
+            admin_token: Some(ADMIN_TOKEN.to_string()),
+        }
     }
 
     async fn new_database() -> Self {
@@ -2872,7 +2863,7 @@ async fn admin_delete_finalizes_only_after_confirmed_settlement() {
         );
     let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
     let control_url = format!("http://{addr}");
-    let app = TestApp::new_with_control(&control_url).await;
+    let app = TestApp::new().await;
     let user_id: Uuid = mk_user(&app, "finalize@x.com").await.parse().unwrap();
     app.req(
         Method::POST,
@@ -2989,7 +2980,7 @@ async fn exhausted_account_delete_rearms_and_finalizes_after_recovery() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
-    let app = TestApp::new_with_control(&control_url).await;
+    let app = TestApp::new().await;
     let uid: Uuid = mk_user(&app, "exhausted-delete@x.com")
         .await
         .parse()
@@ -3236,7 +3227,7 @@ async fn settling_cut_gets_a_fresh_retry_window_after_a_late_first_cut() {
 }
 
 #[tokio::test]
-async fn revocation_worker_starts_with_the_app() {
+async fn revocation_worker_starts_with_the_service_and_stops_with_it() {
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let control = Router::new().fallback(|| async {
             axum::Json(json!({
@@ -3249,9 +3240,25 @@ async fn revocation_worker_starts_with_the_app() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
-        // Production and the fixture share app startup. This test never calls
-        // process_once, so only the app's worker can confirm the first cut.
-        let app = TestApp::new_with_control(&control_url).await;
+        // This test never calls process_once, so only the worker the service
+        // started can confirm the first cut.
+        let app = TestApp::new_database().await;
+        let control = gateway_common::devserver_control_client::DevserverControlClient::new(
+            control_url.parse().unwrap(),
+            "test-profile-admin-token".into(),
+        )
+        .unwrap();
+        let service_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (stop_service, stopped) = tokio::sync::oneshot::channel::<()>();
+        let service = tokio::spawn(profile::http::serve(
+            service_listener,
+            app.state(),
+            control,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         let mut observed = None;
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let uid: Uuid = sqlx::query_scalar(
@@ -3282,14 +3289,47 @@ async fn revocation_worker_starts_with_the_app() {
             }
         })
         .await;
+
+        // Shutdown joins the worker: serve returns well inside the drain
+        // bound, and a job reserved afterwards is never claimed.
+        stop_service.send(()).unwrap();
+        let stopping = std::time::Instant::now();
+        tokio::time::timeout(profile::http::WORKER_DRAIN, service)
+            .await
+            .expect("serve returned within the worker drain bound")
+            .expect("serve task joined")
+            .expect("serve shut down cleanly");
+        let stop_took = stopping.elapsed();
+        let late: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, username) VALUES ('after-stop@x.com', 'after-stop') RETURNING id",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(late))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let late_claimed: bool = sqlx::query_scalar(
+            "SELECT deadline IS NOT NULL FROM control_revocation_jobs WHERE job_key = $1",
+        )
+        .bind(format!("subject:{late}"))
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
         server.abort();
         app.cleanup().await;
         result
             .unwrap_or_else(|_| panic!("worker never settled the job: last (phase, attempts, claimed)={observed:?}"))
             .expect("reserve and observe the revocation job");
+        assert!(
+            stop_took < std::time::Duration::from_secs(3),
+            "an idle worker stops at once, took {stop_took:?}"
+        );
+        assert!(!late_claimed, "a stopped service's worker claimed a job");
     })
     .await
-    .expect("revocation worker startup test timed out");
+    .expect("revocation worker lifecycle test timed out");
 }
 
 #[tokio::test]
