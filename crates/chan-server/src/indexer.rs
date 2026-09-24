@@ -2601,12 +2601,11 @@ mod tests {
 
     #[test]
     fn embed_batch_flips_to_idle_background_embedding() {
-        // The embed phase runs after BM25 is committed (facade.rs),
-        // so the first EmbedBatch flips the status from Building to
-        // Idle{embedding:Some}. preflight maps Idle -> ready, so the
-        // overlay unlocks while the slow embed pass finishes in the
-        // background instead of pinning Building for minutes. File-progress
-        // for the chip comes from the preceding IndexFile ticks.
+        // The first EmbedBatch flips the status from Building to
+        // Idle{embedding:Some} and latches the embed phase, so a later
+        // IndexFile tick advances the chip instead of reverting the status
+        // to Building. The chip's file progress comes from the preceding
+        // IndexFile ticks, not from the batch's chunk counts.
         let status = Arc::new(Mutex::new(IndexStatus::Building {
             current: 0,
             total: 0,
@@ -2621,7 +2620,7 @@ mod tests {
             embed: Mutex::new(EmbedPhaseState::default()),
             bg_embed: Arc::new(Mutex::new(None)),
         };
-        // A foreground IndexFile tick gates preflight (Building) and seeds
+        // Before any EmbedBatch, an IndexFile tick sets Building and seeds
         // the file counters.
         updater.on_progress(progress_event(
             ProgressStage::IndexFile,
@@ -2637,7 +2636,7 @@ mod tests {
                 ..
             }
         ));
-        // The first EmbedBatch means BM25 is ready: flip to Idle+embedding.
+        // The first EmbedBatch flips the status to Idle+embedding.
         updater.on_progress(progress_event(
             ProgressStage::EmbedBatch,
             4096,
@@ -2657,7 +2656,7 @@ mod tests {
             other => panic!("expected Idle+embedding after EmbedBatch, got {other:?}"),
         }
         // A later interleaved IndexFile tick must NOT revert to Building
-        // (preflight must stay unlocked); it only advances the counters.
+        // once the embed phase has started; it only advances the counters.
         updater.on_progress(progress_event(
             ProgressStage::IndexFile,
             300,
