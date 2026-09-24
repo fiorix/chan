@@ -419,7 +419,7 @@ pub struct WorkspaceTraversalProfile {
 /// Budget truncation flags and observed candidate counts. Observed counts describe work examined, not exhaustive totals for unvisited graph regions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSearchTruncation {
-    /// More hits exist than were returned: the fetch window held more distinct files than the content-hit limit, or more chunks matched than the window holds, so files past it were never examined.
+    /// More hits exist than were returned: the fetch window held more distinct files than the content-hit limit, or more chunks matched than the window holds, so files past it were never examined. The window is eight chunks per requested hit, at most 200. In hybrid mode the semantic side ranks every embedded chunk as a match whatever the query, so there this reads true whenever the workspace holds more embedded chunks than the window, and says nothing about how many chunks match the query's words.
     pub content_hits: bool,
     /// Distinct file hits observed before applying the result limit.
     pub content_hits_observed: u32,
