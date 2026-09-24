@@ -10,8 +10,9 @@
 # walk-up gives rpmbuild and debian/rules offline resolution with no
 # activation glue, and it cannot leak into a developer checkout.
 #
-# Needs network (npm install + crate downloads) and node >= 20; run on the
-# host or in the COPR SRPM chroot, never on the offline builders.
+# Needs network (npm install + crate downloads) and node at the major the
+# root .nvmrc declares; run on the host or in the COPR SRPM chroot (which
+# installs its own nodejs), never on the offline builders.
 #
 # Outputs under --outdir, all one content, three names:
 #   chan-vendored-<version>.tar.xz          rpm Source0

@@ -7,7 +7,8 @@
 // claim, comes through as a real jsdom Storage). Every test that drives a
 // persistence seam then reads `undefined` and dies in its own `beforeEach`.
 //
-// CI pins Node 20, so this only bites locally, which is the worst shape for a
+// CI runs the Node major the root `.nvmrc` declares; while that is below 24
+// this only bites a local run on a newer Node, which is the worst shape for a
 // gate: the pre-push run disagrees with the run that decides the merge. Install
 // a Storage whenever the environment fails to supply a working one so the suite
 // reads the same under every Node the gate runs on.
