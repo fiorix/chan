@@ -60,7 +60,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-test-util-comments-omit-the-attach-seam][tutil] | accepted | build |
 | [the-fdstore-manifest-splits-seq-and-tail][fdsq] | accepted | build |
 | [a-mount-retry-test-races-a-wall-clock][mwclk] | accepted | build |
-| [desktop-design-omits-the-root-health-probe][dhp] | accepted | build |
+| [desktop-design-omits-the-root-health-probe][dhp] | landed | GA |
 | [a-dropped-indexers-driver-eats-recovery][drvr] | accepted | build |
 | [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
 | [mcp-write-errors-follow-an-unpinned-display][mcpd] | accepted | build |
@@ -76,7 +76,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-graph-indexer-drops-renames-and-lingers][gidx] | accepted | build |
 | [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
 | [the-launcher-says-off-beside-running][offrn] | accepted | build |
-| [devserver-root-probe-wiring-has-no-test][rprob] | accepted | build |
+| [devserver-root-probe-wiring-has-no-test][rprob] | landed | GA |
 | [page-break-scan-and-renderer-still-differ][pgres] | withdrawn | GA |
 | [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | accepted | build |
 | [graph-bodies-have-no-mounted-test][gmnt] | accepted | after rawt |
@@ -91,9 +91,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [two-exact-pins-hold-back-web-upgrades][pins] | raised | measure |
 | [tower-sessions-lags-and-axum-has-a-dead-feature][tses] | raised | measure |
 | [gateway-ci-misses-root-tunnel-crate-changes][gwci] | landed | GA |
-| [the-web-bundles-still-build-on-node-20][nd22] | raised | build |
-| [the-launcher-build-hint-cannot-run][hint] | raised | build |
-| [the-site-carries-a-workspace-mock-nobody-ships][mock] | raised | build |
+| [the-web-bundles-still-build-on-node-20][nd22] | landed | GA |
+| [the-launcher-build-hint-cannot-run][hint] | landed | GA |
+| [the-site-carries-a-workspace-mock-nobody-ships][mock] | landed | GA |
 | [an-unknown-window-kind-may-drop-every-window-row][wkind] | landed | GA |
 
 **Raised during v0.101.0**
@@ -102,7 +102,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | --- | --- | --- |
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | accepted | build |
-| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | accepted | build |
+| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | landed | GA |
 | [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
 | [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
 | [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | raised | decide |
