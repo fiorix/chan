@@ -103,6 +103,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-revocation-aborts-the-bridge-before-its-close][revab] | accepted | build |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | accepted | build |
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | accepted | build |
+| [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
+| [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
+| [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | raised | decide |
+| [a-failed-dial-makes-the-next-replay-from-zero][fdial] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -158,6 +162,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [revab]: v0.101.0/a-revocation-aborts-the-bridge-before-its-close.md
 [lfetch]: v0.101.0/a-late-fetch-after-teardown-reds-the-web-check.md
 [wfeed]: v0.101.0/the-desktop-decodes-a-window-feed-all-or-nothing.md
+[rtail]: v0.101.0/a-restart-replays-only-the-manifest-tail.md
+[crash]: v0.101.0/a-crash-restart-restores-a-stale-manifest.md
+[gdrop]: v0.101.0/a-graceful-restart-drops-output-past-its-snapshot.md
+[fdial]: v0.101.0/a-failed-dial-makes-the-next-replay-from-zero.md
 
 ## Completed
 
