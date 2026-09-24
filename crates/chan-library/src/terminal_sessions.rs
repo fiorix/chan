@@ -954,6 +954,9 @@ pub enum AttachSeam {
     AttachAfterRingLock,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
+    /// In `Session::fdstore_manifest_entry`, just before it snapshots the
+    /// replay tail under the ring lock.
+    ManifestBeforeReplayTail,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -3888,10 +3891,13 @@ impl Session {
             alt_screen: self.in_alt_screen.load(Ordering::Relaxed),
             private_modes,
         };
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::ManifestBeforeReplayTail);
+        let replay = self.fdstore_replay_tail();
         Some(FdStoreManifestEntry {
             fd_name,
             meta,
-            replay: self.fdstore_replay_tail(),
+            replay,
         })
     }
 
@@ -7001,6 +7007,66 @@ mod tests {
             "seq is the end of the snapshot the replay came from"
         );
         assert_eq!(attached.seq + live.len() as u64, ring_end(&session));
+    }
+
+    #[cfg(target_os = "linux")]
+    struct NoopPark;
+
+    #[cfg(target_os = "linux")]
+    impl FdStorePark for NoopPark {
+        fn park(&self, _fd_name: &str, _fd: std::os::fd::BorrowedFd<'_>) -> bool {
+            true
+        }
+        fn unpark(&self, _fd_name: &str) {}
+        fn adopt(&self, _fd_name: &str) -> bool {
+            true
+        }
+        fn changed(&self) {}
+    }
+
+    // A PTY read landing while the restart manifest is built: the manifest's
+    // `seq` and replay tail must describe the same ring, because the next
+    // process rebuilds its ring as that tail ending at that `seq`. A `seq`
+    // read before the read and a tail taken after it leave the restored ring
+    // numbering the raced bytes as history the client already has.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fdstore_manifest_takes_seq_and_tail_from_one_ring_snapshot() {
+        let id = "seam-manifest-before-replay-tail";
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        *session.fdstore_parked.lock().unwrap() = Some(ParkedFd {
+            name: "chan-pty-seam".to_string(),
+            parker: FdStoreParker::new(NoopPark),
+        });
+        session.record_output(b"before\n");
+        let client_cursor = ring_end(&session);
+        {
+            let session = session.clone();
+            arm_attach_seam(id, AttachSeam::ManifestBeforeReplayTail, move || {
+                session.record_output(b"raced\n");
+            });
+        }
+        let entry = session
+            .fdstore_manifest_entry("t")
+            .expect("a parked session has a manifest entry");
+
+        assert_eq!(
+            entry.replay, b"before\nraced\n",
+            "the tail holds the raced read"
+        );
+        let restored = RingBuffer::new_with_replay(1024, entry.meta.seq, &entry.replay);
+        let (resumed, missed) = restored.snapshot_since(Some(client_cursor));
+        assert_eq!(missed, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&resumed.concat()),
+            "raced\n",
+            "a client that saw everything before the race resumes the restored ring at the raced read"
+        );
+        assert_eq!(
+            entry.meta.seq,
+            ring_end(&session),
+            "the manifest's seq is the end of the tail it carries"
+        );
     }
 
     // An alternate-screen attach takes no replay (the program repaints on the
