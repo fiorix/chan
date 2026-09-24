@@ -1526,6 +1526,63 @@ mod tests {
         );
     }
 
+    /// A frame beside one readable row and one row of a kind this desktop
+    /// does not know.
+    fn frame_with_an_unknown_kind_row() -> String {
+        let mut unknown_kind = serde_json::to_value(WindowRecord {
+            window_id: "w-2".into(),
+            ..rec()
+        })
+        .unwrap();
+        unknown_kind["kind"] = "panel".into();
+        serde_json::json!({ "windows": [serde_json::to_value(rec()).unwrap(), unknown_kind] })
+            .to_string()
+    }
+
+    /// A devserver keeps serving an unreadable row in every frame, and a frame
+    /// goes out on every window change. The row is logged the first time a
+    /// connection sees it, not once per frame.
+    #[test]
+    fn an_unreadable_row_is_logged_once_per_connection() {
+        let frame = frame_with_an_unknown_kind_row();
+        let logs = crate::devserver::log_capture::Lines::default();
+        let _logs = logs.install();
+
+        decode_window_frame("dev-1", &frame).expect("the first frame parses");
+        decode_window_frame("dev-1", &frame).expect("the second frame parses");
+
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a second frame on the same connection logs the row again: {warnings:?}"
+        );
+    }
+
+    /// A row the desktop has shown can come back unreadable in a later frame.
+    /// Its absence from the snapshot would close the native window and settle
+    /// a pending close intent, so the row keeps the record last read for it.
+    #[test]
+    fn a_row_that_turns_unreadable_keeps_its_last_readable_record() {
+        let shown = rec();
+        let mut turned = serde_json::to_value(rec()).unwrap();
+        turned["kind"] = "panel".into();
+        let first = serde_json::json!({ "windows": [serde_json::to_value(&shown).unwrap()] });
+        let second = serde_json::json!({ "windows": [turned] });
+        let logs = crate::devserver::log_capture::Lines::default();
+        let _logs = logs.install();
+
+        decode_window_frame("dev-1", &first.to_string()).expect("the first frame parses");
+        let windows =
+            decode_window_frame("dev-1", &second.to_string()).expect("the second frame parses");
+
+        assert_eq!(
+            windows,
+            vec![shown],
+            "the row keeps the record the desktop last read for it"
+        );
+    }
+
     #[tokio::test]
     async fn keepalive_pump_forwards_frames_then_ok_on_clean_close() {
         use futures::SinkExt;
