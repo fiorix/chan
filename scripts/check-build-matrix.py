@@ -1076,13 +1076,15 @@ def workflow_steps(workflow: str, action: str) -> list[tuple[int, int, dict[str,
     """Each step of WORKFLOW that uses ACTION, with its job and its inputs.
 
     Line-based like workflow_job: a step is its `- uses:` line (or the
-    `uses:` line under a `- name:`) plus every line indented past that
-    dash, its job is the nearest two-space key above it, and its inputs
-    are the scalar `key: value` lines in that span, quoted or bare, each
-    with the 1-based line it sits on. Every such key in the step counts,
-    wherever it sits, so a version input a typo moved out of `with:` is
-    still seen rather than accepted. The tuple is the job's line, the
-    step's line, and the inputs.
+    `uses:` line under a `- name:`), the action quoted or bare, plus every
+    line indented past that dash, its job is the nearest two-space key
+    above it, and its inputs are the scalar `key: value` lines in that
+    span, quoted or bare, each with the 1-based line it sits on. Every such
+    key in the step counts, wherever it sits, so a version input a typo
+    moved out of `with:` is still seen rather than accepted. The tuple is
+    the job's line, the step's line, and the inputs. A job key that carries
+    a trailing comment is not seen as a job, as in workflow_job, so its
+    steps count toward the job above it.
     """
     lines = workflow.splitlines()
     job_pattern = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
@@ -1091,7 +1093,7 @@ def workflow_steps(workflow: str, action: str) -> list[tuple[int, int, dict[str,
     for index, line in enumerate(lines):
         if job_pattern.match(line):
             job_line = index + 1
-        match = re.match(rf"^(\s*)(- )?uses:\s*{re.escape(action)}@", line)
+        match = re.match(rf"""^(\s*)(- )?uses:\s*['"]?{re.escape(action)}@""", line)
         if not match:
             continue
         dash = len(match.group(1)) - (0 if match.group(2) else 2)
@@ -1168,11 +1170,14 @@ def check_node_major_contract() -> None:
     workspace, and none carries a `node-version` literal, the right major
     included, since a literal is a second place to edit. A checkout that
     names a `repository` is some other repository's and offers no
-    `.nvmrc` of ours, so it does not count. A job whose `run:` steps
-    install or build the web workspace (`npm`, `mkdist`, a `make web*` or
-    `make distros-tarball` target) needs such a step before them, since
-    without one the bundle builds on whatever node the runner image
-    carries and no setup-node step exists to check. The Docker images and
+    `.nvmrc` of ours, so it does not count. The checkout has to come before
+    the setup-node step, and a checkout that pins a `ref` counts only when
+    it is the job's one checkout of this repository, since beside another
+    it is some other revision than the tree the job builds. A job whose
+    `run:` steps install or build the web workspace (`npm`, `mkdist`, a
+    `make web*` or `make distros-tarball` target) needs such a step before
+    them, since without one the bundle builds on whatever node the runner
+    image carries and no setup-node step exists to check. The Docker images and
     the Nix packages cannot read the file (a `FROM` tag and a nixpkgs
     attribute are fixed before anything runs), so they name the major and
     this holds them to it.
@@ -1184,13 +1189,16 @@ def check_node_major_contract() -> None:
     for workflow_path in workflows:
         path = workflow_path.relative_to(ROOT).as_posix()
         workflow = read(path)
-        checkouts: dict[int, set[str]] = {}
-        for job_line, _line, inputs in workflow_steps(workflow, "actions/checkout"):
+        # Per job, each checkout of this repository: its line, the path its
+        # .nvmrc lands at, and the `ref` it pins, if any.
+        checkouts: dict[int, list[tuple[int, str, str | None]]] = {}
+        for job_line, line, inputs in workflow_steps(workflow, "actions/checkout"):
             if "repository" in inputs:
                 continue
             prefix = inputs.get("path", ("", 0))[0].strip("/")
             expected = f"{prefix}/{NODE_MAJOR_FILE}" if prefix else NODE_MAJOR_FILE
-            checkouts.setdefault(job_line, set()).add(expected)
+            ref = inputs["ref"][0] if "ref" in inputs else None
+            checkouts.setdefault(job_line, []).append((line, expected, ref))
         node_steps: dict[int, int] = {}
         for job_line, line, inputs in workflow_steps(workflow, "actions/setup-node"):
             steps += 1
@@ -1207,17 +1215,41 @@ def check_node_major_contract() -> None:
                     "(no node-version-file input)"
                 )
             value, at = inputs["node-version-file"]
-            expected = checkouts.get(job_line, set())
-            if not expected:
+            job_checkouts = checkouts.get(job_line, [])
+            if not job_checkouts:
                 raise ContractError(
                     f"{path}:{line}: setup-node in a job with no actions/checkout "
                     f"of this repository, so no {NODE_MAJOR_FILE} to read"
                 )
+            expected = {checkout_path for _, checkout_path, _ in job_checkouts}
             if value not in expected:
                 raise ContractError(
                     f"{path}:{at}: node-version-file is {value!r}, expected "
                     f"{' or '.join(repr(item) for item in sorted(expected))} "
                     "(where the job checks the repository out)"
+                )
+            sources = [checkout for checkout in job_checkouts if checkout[1] == value]
+            earlier = [checkout for checkout in sources if checkout[0] < line]
+            if not earlier:
+                raise ContractError(
+                    f"{path}:{line}: setup-node runs before the actions/checkout "
+                    f"at line {sources[0][0]} that puts {value!r} in place"
+                )
+            # A job with one checkout of this repository builds that tree,
+            # whatever ref it pins, so its .nvmrc is the one that tree
+            # declares. Beside another checkout, a pinned ref is some other
+            # revision (an older tag, say), not the tree the job builds.
+            own = [
+                checkout
+                for checkout in earlier
+                if checkout[2] is None or len(job_checkouts) == 1
+            ]
+            if not own:
+                raise ContractError(
+                    f"{path}:{at}: setup-node reads {value!r} from the "
+                    f"actions/checkout at line {earlier[0][0]}, which pins ref "
+                    f"{earlier[0][2]!r} beside another checkout of this "
+                    "repository, so it is not the tree the job builds"
                 )
         lines = workflow.splitlines()
         for job_line, number, command in workflow_run_lines(workflow):
