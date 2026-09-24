@@ -17,64 +17,10 @@
     defaultSpec, makeTunerGraph,
     type GraphSpec, type TunerEdge, type TunerGraph, type TunerNode,
   } from "./fakeData";
-  // Real-graph fixture: GET /api/graph on a workspace seeded with this
-  // repo's own source (1361 nodes / 2636 edges), captured to a static
-  // file so the tuner has a realistic sample without a running server.
-  // Loaded via ?raw + JSON.parse so the ~380 KB literal never enters the
-  // type-checker. Edges use short keys (s/t/k/b) and files/media drop the
-  // redundant `path` (== id); both are expanded below.
-  import sampleGraphRaw from "./sampleGraph.json?raw";
-
-  // ---- data sources -----------------------------------------------------
-
-  type RawNode = {
-    kind: string; id: string; label: string; path?: string;
-    files?: number; code?: number; language?: string;
-    node_kind?: "contact"; missing?: boolean;
-  };
-  type RawEdge = { s: string; t: string; k: string; b?: number };
-  const RENDERED_EDGE_KINDS = new Set(
-    ["link", "tag", "mention", "contains", "language", "group"],
-  );
-
-  // Map the server's GraphView shape onto what GraphCanvas consumes:
-  // the same remap GraphPanel does in the app: directory -> folder,
-  // media -> file, drop date/unknown; edges keep link/tag/mention/
-  // contains/language.
-  function mapSample(raw: { nodes: RawNode[]; edges: RawEdge[] }): TunerGraph {
-    const nodes: TunerNode[] = [];
-    for (const n of raw.nodes) {
-      const path = n.path ?? n.id; // files/media: id==path; root folder: ""
-      if (n.kind === "directory" || n.kind === "folder") {
-        nodes.push({ kind: "folder", id: n.id, label: n.label, path, files: n.files ?? 0, code: n.code ?? 0 });
-      } else if (n.kind === "media" || n.kind === "file") {
-        nodes.push({
-          kind: "file", id: n.id, label: n.label, path,
-          ...(n.node_kind ? { node_kind: n.node_kind } : {}),
-          ...(n.missing ? { missing: true } : {}),
-        });
-      } else if (n.kind === "tag" || n.kind === "mention") {
-        nodes.push({ kind: n.kind, id: n.id, label: n.label });
-      } else if (n.kind === "language") {
-        nodes.push({ kind: "language", id: n.id, label: n.label, language: n.language ?? n.label, files: n.files ?? 0, code: n.code ?? 0 });
-      }
-    }
-    const edges: TunerEdge[] = [];
-    for (const e of raw.edges) {
-      if (!RENDERED_EDGE_KINDS.has(e.k)) continue;
-      const kind = e.k as TunerEdge["kind"];
-      edges.push(e.b ? { source: e.s, target: e.t, kind, broken: true } : { source: e.s, target: e.t, kind });
-    }
-    return { nodes, edges };
-  }
-
-  const chanGraph: TunerGraph = mapSample(JSON.parse(sampleGraphRaw));
-
   // ---- tunable state ----------------------------------------------------
 
   let force = $state<GraphForce>({ ...DEFAULT_FORCE });
   let spec = $state<GraphSpec>({ ...defaultSpec });
-  let dataSource = $state<"chan" | "synthetic">("chan");
   /// Filesystem depth cutoff, mirroring the Graph tab's workspace-scope
   /// depth slider: at depth D every file/dir whose path is within D
   /// levels of the root shows, plus the tags / mentions / languages
@@ -89,9 +35,7 @@
   let selectedId = $state<string | null>(null);
   let copied = $state(false);
 
-  const activeGraph: TunerGraph = $derived(
-    dataSource === "chan" ? chanGraph : makeTunerGraph(spec),
-  );
+  const activeGraph: TunerGraph = $derived(makeTunerGraph(spec));
 
   /// Path-depth of a node: workspace root = 0, top-level = 1, nested = n.
   /// Non-hierarchical kinds (tag / mention / language) have no path, so
@@ -105,9 +49,9 @@
 
   // Cap at FS_GRAPH_DEPTH_MAX to match chan's workspace-scope depth
   // slider: GraphPanel fetches + caps the fs-graph at that depth
-  // (graph/depth graphDepthCap), so the app can't reveal past it. The raw
-  // tree may be deeper (the chan-source sample reaches 8), but the tuner
-  // tracks whatever the app actually allows.
+  // (graph/depth graphDepthCap), so the app can't reveal past it. A generated
+  // tree may be deeper, but the tuner tracks whatever the app actually
+  // allows.
   const maxDepth: number = $derived.by(() => {
     let m = 1;
     for (const n of activeGraph.nodes) {
@@ -242,13 +186,6 @@
 
     <section>
       <div class="section-head"><h2>Data</h2></div>
-      <label class="row inline">
-        <span class="name">Source</span>
-        <select value={dataSource} onchange={(e) => (dataSource = e.currentTarget.value as typeof dataSource)}>
-          <option value="chan">chan source (real)</option>
-          <option value="synthetic">synthetic</option>
-        </select>
-      </label>
       <label class="row" title="Filesystem depth (directory expansion), like the Graph tab's workspace-scope depth slider">
         <span class="name">Depth</span>
         <span class="val">{effDepth} / {maxDepth}</span>
@@ -294,37 +231,35 @@
       <p class="note">Paste into <code>DEFAULT_FORCE</code> in <code>src/graph/force.ts</code>.</p>
     </section>
 
-    {#if dataSource === "synthetic"}
-      <section>
-        <div class="section-head">
-          <h2>Synthetic dataset</h2>
-          <button class="ghost" onclick={regenerate}>Regenerate</button>
-        </div>
-        <label class="row inline">
-          <span class="name">Seed</span>
+    <section>
+      <div class="section-head">
+        <h2>Synthetic dataset</h2>
+        <button class="ghost" onclick={regenerate}>Regenerate</button>
+      </div>
+      <label class="row inline">
+        <span class="name">Seed</span>
+        <input
+          class="num"
+          type="number"
+          value={spec.seed}
+          oninput={(e) => updateSpec("seed", Math.trunc(+e.currentTarget.value) || 0)}
+        />
+      </label>
+      {#each SPEC_SLIDERS as s (s.key)}
+        <label class="row">
+          <span class="name">{s.label}</span>
+          <span class="val">{fmt(spec[s.key])}</span>
           <input
-            class="num"
-            type="number"
-            value={spec.seed}
-            oninput={(e) => updateSpec("seed", Math.trunc(+e.currentTarget.value) || 0)}
+            type="range"
+            min={s.min}
+            max={s.max}
+            step={s.step}
+            value={spec[s.key]}
+            oninput={(e) => updateSpec(s.key, +e.currentTarget.value)}
           />
         </label>
-        {#each SPEC_SLIDERS as s (s.key)}
-          <label class="row">
-            <span class="name">{s.label}</span>
-            <span class="val">{fmt(spec[s.key])}</span>
-            <input
-              type="range"
-              min={s.min}
-              max={s.max}
-              step={s.step}
-              value={spec[s.key]}
-              oninput={(e) => updateSpec(s.key, +e.currentTarget.value)}
-            />
-          </label>
-        {/each}
-      </section>
-    {/if}
+      {/each}
+    </section>
 
     <section>
       <div class="section-head"><h2>View</h2></div>
