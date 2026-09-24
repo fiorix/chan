@@ -22,6 +22,16 @@ std::thread_local! {
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const SESSION_DEAD_AFTER: Duration = Duration::from_secs(15);
 pub const CONVERGENCE_WINDOW: Duration = Duration::from_secs(30);
+/// How long a disconnected `(proxy_id, boot_id)` authority marker lasts.
+/// While it exists, a session revocation counts that proxy unreachable
+/// unless a session from the same boot is connected, because only a
+/// connected session can confirm the revocation for the browser sessions
+/// the old one may still hold. A reconnected session receives revocations
+/// from the moment it begins, whether its join is reconciling, deferred
+/// behind another proxy's reconciliation, or done; the marker is cleared
+/// only when that join reaches `FleetReady`, and a disconnect before then
+/// extends it, so no window opens in which the proxy is neither reachable
+/// nor counted unreachable.
 pub const DISCONNECTED_AUTHORITY_RETENTION: Duration =
     Duration::from_secs(CONTROLLER_DISCONNECTED_AUTHORITY_RETENTION_SECONDS);
 pub const ADMISSION_CLAIM_TTL: Duration = Duration::from_secs(15);
@@ -290,8 +300,6 @@ pub enum StateError {
     BrowserSessionSnapshotTooLarge(usize),
     #[error("snapshot contains duplicate browser session id {0}")]
     DuplicateBrowserSession(Uuid),
-    #[error("another reconciliation is in progress")]
-    ReconciliationInProgress,
     #[error("pong nonce is not outstanding")]
     InvalidPong,
     #[error("proxy id already has a live session")]
@@ -347,6 +355,10 @@ pub(crate) struct ControllerState {
     browser_orphan_total: FleetUsage,
     boot_history: HashMap<String, Uuid>,
     reconciliation: Option<Reconciliation>,
+    /// Joining sessions whose snapshot arrived while another
+    /// reconciliation ran, in arrival order. Each starts its own join once
+    /// the running one finishes; one reconciliation runs at a time.
+    deferred_joins: VecDeque<SessionKey>,
     convergence_deadline: Option<Instant>,
 }
 
@@ -376,6 +388,7 @@ impl ControllerState {
             browser_orphan_total: FleetUsage::default(),
             boot_history: HashMap::new(),
             reconciliation: None,
+            deferred_joins: VecDeque::new(),
             convergence_deadline: None,
         }
     }
@@ -521,9 +534,6 @@ impl ControllerState {
         now: Instant,
         wall_now: DateTime<Utc>,
     ) -> Result<Vec<Effect>, StateError> {
-        if self.ready && self.reconciliation.is_some() {
-            return Err(StateError::ReconciliationInProgress);
-        }
         let published_rows = rows.len().saturating_add(refused.len());
         if published_rows > MAX_ROWS_PER_SESSION {
             return Err(StateError::SnapshotTooLarge(published_rows));
@@ -1896,13 +1906,21 @@ impl ControllerState {
         self.start_reconciliation(ReconciliationKind::Initial, losers, now)
     }
 
+    /// Reconcile an accepted joining snapshot, or defer it while another
+    /// reconciliation runs. A deferred session has its snapshot accepted
+    /// and stays Joining: its rows stay out of the aggregate, it takes
+    /// deltas and revocations, and its join starts when the running
+    /// reconciliation finishes.
     fn reconcile_joining(
         &mut self,
         joining: SessionKey,
         now: Instant,
     ) -> Result<Vec<Effect>, StateError> {
         if self.reconciliation.is_some() {
-            return Err(StateError::ReconciliationInProgress);
+            if !self.deferred_joins.contains(&joining) {
+                self.deferred_joins.push_back(joining);
+            }
+            return Ok(Vec::new());
         }
         let session = self
             .proxies
@@ -2128,6 +2146,49 @@ impl ControllerState {
     }
 
     fn finish_reconciliation_if_complete(&mut self, now: Instant) -> Vec<Effect> {
+        let mut effects = self.complete_reconciliation(now);
+        effects.extend(self.start_deferred_joins(now));
+        effects
+    }
+
+    /// Start deferred joins while no reconciliation runs. A session that
+    /// left, was superseded, or was force-resynced since it was deferred is
+    /// skipped; a resynced one is deferred again by its next snapshot. A
+    /// join that completes at once lets the next one start in the same
+    /// call. When the controller has dropped out of readiness meanwhile,
+    /// a deferred session becomes Active the way an unready controller
+    /// accepts any snapshot, and joins initial reconciliation instead.
+    fn start_deferred_joins(&mut self, now: Instant) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        while self.reconciliation.is_none() {
+            let Some(joining) = self.deferred_joins.pop_front() else {
+                break;
+            };
+            let ready = self.ready;
+            let Some(session) = self.proxies.get_mut(&joining.proxy_id).filter(|session| {
+                session.incarnation == joining.incarnation
+                    && session.status == ProxyStatus::Joining
+                    && session.generation.is_some()
+            }) else {
+                continue;
+            };
+            if !ready {
+                session.status = ProxyStatus::Active;
+                self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
+                if self.convergence_deadline.is_none() {
+                    self.convergence_deadline = Some(now + CONVERGENCE_WINDOW);
+                }
+                continue;
+            }
+            match self.reconcile_joining(joining, now) {
+                Ok(started) => effects.extend(started),
+                Err(error) => tracing::warn!(?error, "deferred join could not start"),
+            }
+        }
+        effects
+    }
+
+    fn complete_reconciliation(&mut self, now: Instant) -> Vec<Effect> {
         if self
             .reconciliation
             .as_ref()
@@ -2343,6 +2404,7 @@ impl ControllerState {
             })
             .unwrap_or_default();
         self.proxies.remove(&key.proxy_id);
+        self.deferred_joins.retain(|deferred| deferred != key);
         self.view_generations.proxies = self.view_generations.proxies.wrapping_add(1);
         let retain_until = now + DISCONNECTED_AUTHORITY_RETENTION;
         self.disconnected_proxy_deadlines
@@ -2419,6 +2481,7 @@ impl ControllerState {
         }
         effects.extend(self.finish_reconciliation_if_complete(now));
         self.leave_readiness_if_no_active_sessions();
+        effects.extend(self.start_deferred_joins(now));
         effects
     }
 
@@ -7040,7 +7103,10 @@ pub(super) mod tests {
             } if session.proxy_id == "p3"
         )));
         assert!(!fleet_ready_for(&effects, "p3"));
-        assert!(state.tunnel_views().iter().all(|view| view.proxy_id != "p3"));
+        assert!(state
+            .tunnel_views()
+            .iter()
+            .all(|view| view.proxy_id != "p3"));
 
         // A revocation between the two joins reaches every connected
         // session, the deferred one included, and counts nobody
@@ -7079,6 +7145,7 @@ pub(super) mod tests {
         assert!(fleet_ready_for(&effects, "p2"));
         assert!(fleet_ready_for(&effects, "p3"));
         assert!(state.reconciliation.is_none());
+        assert!(state.deferred_joins.is_empty());
         assert!(state.disconnected_proxy_deadlines.is_empty());
         assert!(state
             .tunnel_views()
@@ -7089,6 +7156,160 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(unreachable, 0);
         assert!(authority_ready);
+    }
+
+    #[test]
+    fn deferred_joins_run_in_order_and_drop_departed_sessions() {
+        let now = Instant::now();
+        let mut state = ControllerState::new(100);
+        let (_p1, _, _) = ready_one(
+            &mut state,
+            "p1",
+            vec![row("alice", "one", Uuid::from_u128(1))],
+            now,
+        );
+        let at = now + CONVERGENCE_WINDOW;
+        let (p2, p2_incarnation) = begin(&mut state, "p2", at);
+        let p2_dup = Uuid::from_u128(2);
+        let effects = snapshot(
+            &mut state,
+            &p2,
+            p2_incarnation,
+            vec![row("alice", "one", p2_dup)],
+            at,
+        );
+        let p2_kill = kill_command(&effects, "p2", p2_dup);
+
+        // p3 loses a key of its own; p4 leaves before its turn.
+        let (p3, p3_incarnation) = begin(&mut state, "p3", at);
+        let p3_dup = Uuid::from_u128(3);
+        let effects = snapshot(
+            &mut state,
+            &p3,
+            p3_incarnation,
+            vec![row("alice", "one", p3_dup)],
+            at,
+        );
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Send {
+                frame: ServerFrame::KillRegistrations { .. },
+                ..
+            }
+        )));
+        let (p4, p4_incarnation) = begin(&mut state, "p4", at);
+        snapshot(&mut state, &p4, p4_incarnation, Vec::new(), at);
+        assert_eq!(state.deferred_joins.len(), 2);
+        state.disconnect(&p4, p4_incarnation, at).unwrap();
+        assert_eq!(state.deferred_joins.len(), 1);
+
+        let effects = state
+            .command_result(
+                &p2,
+                p2_incarnation,
+                p2_kill,
+                vec![p2_dup],
+                Vec::new(),
+                Vec::new(),
+                at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(fleet_ready_for(&effects, "p2"));
+        assert!(!fleet_ready_for(&effects, "p3"));
+        let p3_kill = kill_command(&effects, "p3", p3_dup);
+        assert!(matches!(
+            state.reconciliation.as_ref().map(|reconciliation| &reconciliation.kind),
+            Some(ReconciliationKind::Joining(session)) if session.proxy_id == "p3"
+        ));
+        assert!(state.deferred_joins.is_empty());
+
+        let effects = state
+            .command_result(
+                &p3,
+                p3_incarnation,
+                p3_kill,
+                vec![p3_dup],
+                Vec::new(),
+                Vec::new(),
+                at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(fleet_ready_for(&effects, "p3"));
+        assert!(state.reconciliation.is_none());
+        assert!(!state.proxies.contains_key("p4"));
+    }
+
+    #[test]
+    fn a_deferred_join_survives_the_controller_leaving_readiness() {
+        let now = Instant::now();
+        let mut state = ControllerState::new(100);
+        let (p1, p1_incarnation, _) = ready_one(
+            &mut state,
+            "p1",
+            vec![row("alice", "one", Uuid::from_u128(1))],
+            now,
+        );
+        let at = now + CONVERGENCE_WINDOW;
+        let (p2, p2_incarnation) = begin(&mut state, "p2", at);
+        let dup = Uuid::from_u128(2);
+        let effects = snapshot(
+            &mut state,
+            &p2,
+            p2_incarnation,
+            vec![row("alice", "one", dup)],
+            at,
+        );
+        let p2_kill = kill_command(&effects, "p2", dup);
+        let (p3, p3_incarnation) = begin(&mut state, "p3", at);
+        snapshot(
+            &mut state,
+            &p3,
+            p3_incarnation,
+            vec![row("bob", "two", Uuid::from_u128(3))],
+            at,
+        );
+        assert_eq!(state.deferred_joins.len(), 1);
+
+        // The last Active session leaves while p2 reconciles.
+        state.disconnect(&p1, p1_incarnation, at).unwrap();
+        assert!(!state.is_ready());
+        state
+            .command_result(
+                &p2,
+                p2_incarnation,
+                p2_kill,
+                vec![dup],
+                Vec::new(),
+                Vec::new(),
+                at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(state.reconciliation.is_none());
+        assert!(state.deferred_joins.is_empty());
+        let p3_view = state
+            .proxy_views()
+            .into_iter()
+            .find(|view| view.proxy_id == "p3")
+            .unwrap();
+        assert_eq!(p3_view.status, ProxyStatus::Active);
+
+        // Initial reconciliation takes p3 in and marks it fleet-ready.
+        let converged = at + CONVERGENCE_WINDOW;
+        for (proxy, incarnation) in [(&p2, p2_incarnation), (&p3, p3_incarnation)] {
+            state
+                .record_activity(proxy, incarnation, converged, Utc::now())
+                .unwrap();
+        }
+        let effects = state.tick(converged, Utc::now());
+        assert!(state.is_ready());
+        assert!(fleet_ready_for(&effects, "p3"));
+        assert!(state
+            .tunnel_views()
+            .iter()
+            .any(|view| view.proxy_id == "p3" && view.devserver_id == "two"));
     }
 
     fn kill_command(effects: &[Effect], proxy_id: &str, registration_id: Uuid) -> Uuid {
