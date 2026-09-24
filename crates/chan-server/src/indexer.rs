@@ -78,13 +78,13 @@ pub enum IndexStatus {
     Reindexing { file: String },
     /// Steady state. Counters mirror `Workspace::index_stats`.
     ///
-    /// `embedding` is `Some` while the search index is BM25-ready (so
-    /// preflight unlocks and search answers) but the background embedding
-    /// pass is still running; `None` once fully settled. This is the
-    /// Option-A split: a heavy cold reindex reaches Idle as soon as BM25
-    /// is searchable, and the slow embed forward-pass finishes in the
-    /// background (search upgrades bm25 -> hybrid as vectors land) instead
-    /// of pinning the status at `Building` for minutes.
+    /// `embedding` is `Some` while the search index is BM25-ready but the
+    /// background embedding pass is still running; `None` once fully
+    /// settled. A heavy cold reindex reaches Idle as soon as BM25 is
+    /// searchable, because every embed flush follows a BM25 commit, and
+    /// the slow embed forward-pass finishes in the background, with hybrid
+    /// search fusing the vectors as they land, instead of pinning the
+    /// status at `Building` for minutes.
     Idle {
         indexed_docs: u64,
         indexed_vectors: u64,
@@ -1324,9 +1324,10 @@ fn update_queue_depth(
 struct StatusUpdater {
     status: Arc<Mutex<IndexStatus>>,
     forward: Arc<dyn ProgressCallback>,
-    /// Live workspace handle for reading index stats when we flip to
-    /// Idle mid-build (the Option-A background-embed state). Weak so the
-    /// updater never keeps the workspace alive past reset/shutdown.
+    /// Live workspace handle for reading index stats when the status flips
+    /// to Idle mid-build, on the first embed flush of a pass, so the chip
+    /// shows the growing index. Weak so the updater never keeps the
+    /// workspace alive past reset/shutdown.
     workspace: Weak<Workspace>,
     /// Latch + last file progress for the background-embed flip. Once the
     /// first EmbedBatch fires in a pass, BM25 is committed and searchable
