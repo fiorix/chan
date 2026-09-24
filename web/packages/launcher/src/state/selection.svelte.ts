@@ -12,7 +12,7 @@
 // surfaced; the per-row quick actions stay the single-item path; remove is
 // bulk-only (behind selection + a confirm).
 
-import { unactionable, type WorkspaceEntry } from "../api/library";
+import { unactionable, workspaceCondition, type WorkspaceEntry } from "../api/library";
 import {
   connectDevserver,
   connectGateway,
@@ -154,30 +154,45 @@ function unactionableMount(row: WorkspaceEntry | undefined): boolean {
   return row !== undefined && unactionable(row.status);
 }
 
-function lockedWorkspace(item: SelItem): boolean {
+function workspaceRow(item: SelItem): WorkspaceEntry | undefined {
   if (item.kind === "workspace") {
-    return unactionableMount(
-      library.workspaces.find((w) => w.devserver_id === null && w.workspace_id === item.id),
-    );
+    return library.workspaces.find((w) => w.devserver_id === null && w.workspace_id === item.id);
   }
   if (item.kind === "served") {
-    return unactionableMount(
-      library.workspaces.find((w) => w.devserver_id === item.devserverId && w.prefix === item.id),
-    );
+    return library.workspaces.find((w) => w.devserver_id === item.devserverId && w.prefix === item.id);
   }
-  return false;
+  return undefined;
 }
 
+function lockedWorkspace(item: SelItem): boolean {
+  return unactionableMount(workspaceRow(item));
+}
+
+/** A skipped row whose lock could not be read. Nobody is known to hold it, so
+ * the note counts it apart from the rows another process holds. */
+function lockUnknownWorkspace(item: SelItem): boolean {
+  const row = workspaceRow(item);
+  return row !== undefined && workspaceCondition(row.status) === "unknown";
+}
+
+/** The skip counts are taken when the run starts, from the rows it left alone:
+ * the live re-fetch can move a row's status while the run is in flight. */
 function bulkNote(
   verb: string,
   total: number,
   failures: SelItem[],
-  skipped: SelItem[],
+  skippedLocked: number,
+  skippedUnknown: number,
 ): string | null {
   const parts: string[] = [];
   if (failures.length > 0) parts.push(`${failures.length} of ${total} failed to ${verb}`);
-  if (skipped.length > 0) {
-    parts.push(`${skipped.length} locked workspace${skipped.length === 1 ? "" : "s"} skipped`);
+  if (skippedLocked > 0) {
+    parts.push(`${skippedLocked} locked workspace${skippedLocked === 1 ? "" : "s"} skipped`);
+  }
+  if (skippedUnknown > 0) {
+    parts.push(
+      `${skippedUnknown} workspace${skippedUnknown === 1 ? "" : "s"} with an unknown lock state skipped`,
+    );
   }
   return parts.length > 0 ? parts.join("; ") : null;
 }
@@ -195,6 +210,7 @@ export async function bulkSetOnAll(on: boolean): Promise<void> {
   selection.busy = true;
   selection.note = null;
   const skipped = items.filter(lockedWorkspace);
+  const skippedUnknown = skipped.filter(lockUnknownWorkspace).length;
   const active = items.filter((item) => !lockedWorkspace(item));
   // Exhaustive per-kind dispatch (no catch-all arm): a new SelKind fails the
   // compile here instead of silently riding another kind's op.
@@ -212,7 +228,13 @@ export async function bulkSetOnAll(on: boolean): Promise<void> {
   });
   selection.busy = false;
   const verb = on ? "turn on" : "turn off";
-  selection.note = bulkNote(verb, items.length, failures, skipped);
+  selection.note = bulkNote(
+    verb,
+    items.length,
+    failures,
+    skipped.length - skippedUnknown,
+    skippedUnknown,
+  );
 }
 
 export function requestBulkDelete(): void {
@@ -248,6 +270,7 @@ export async function confirmBulkDelete(): Promise<void> {
   selection.busy = true;
   selection.note = null;
   const skipped = selection.selected.filter(lockedWorkspace);
+  const skippedUnknown = skipped.filter(lockUnknownWorkspace).length;
   const failures: SelItem[] = [];
   failures.push(...(await runBulk(locals.filter((s) => !lockedWorkspace(s)), (s) => removeWorkspace(s.id))));
   failures.push(
@@ -261,5 +284,11 @@ export async function confirmBulkDelete(): Promise<void> {
   selection.confirmingDelete = false;
   // Keep only the failures/skips selected (succeeded rows drop); surface the count.
   selection.selected = [...failures, ...skipped];
-  selection.note = bulkNote("remove", total, failures, skipped);
+  selection.note = bulkNote(
+    "remove",
+    total,
+    failures,
+    skipped.length - skippedUnknown,
+    skippedUnknown,
+  );
 }
