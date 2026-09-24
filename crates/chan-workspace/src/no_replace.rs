@@ -16,7 +16,9 @@
 //! - Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` fails when the
 //!   destination exists, file or directory. Without `MOVEFILE_COPY_ALLOWED` a
 //!   move to another volume fails as `ERROR_NOT_SAME_DEVICE` instead of
-//!   copying, which callers already read as a cross-device move.
+//!   copying, which callers already read as a cross-device move. The call
+//!   takes paths, so each parent is opened through the capability handle and
+//!   named by that open handle's final path, as cap-std's own rename does.
 //! - FreeBSD and every other target: rename(2) offers no such flag (the
 //!   FreeBSD page documents only "If to exists, it is first removed"), so the
 //!   fallback is the only arm.
@@ -38,14 +40,13 @@ use std::sync::{Mutex, PoisonError};
 use cap_std::fs::Dir;
 
 /// Rename `from` to `to`, both relative to `dir`, failing with
-/// `ErrorKind::AlreadyExists` when `to` exists. `root` is the absolute path
-/// `dir` was opened at; only the Windows arm, which renames by path, reads it.
-pub(crate) fn rename(dir: &Dir, root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+/// `ErrorKind::AlreadyExists` when `to` exists.
+pub(crate) fn rename(dir: &Dir, from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(test)]
     if hooks::fallback_forced() {
         return fallback(dir, from, to);
     }
-    match native(dir, root, from, to) {
+    match native(dir, from, to) {
         Native::Done(result) => result,
         Native::Unsupported => fallback(dir, from, to),
     }
@@ -59,7 +60,7 @@ enum Native {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn native(dir: &Dir, _root: &Path, from: &Path, to: &Path) -> Native {
+fn native(dir: &Dir, from: &Path, to: &Path) -> Native {
     use rustix::fs::{renameat_with, RenameFlags};
 
     // Resolve each parent through the capability handle, as cap-std's own
@@ -94,7 +95,12 @@ fn no_replace_unsupported(errno: rustix::io::Errno) -> bool {
 
 /// Split a validated relative path into its opened parent (`None` for the
 /// handle itself) and its leaf name.
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
 fn split<'p>(dir: &Dir, path: &'p Path) -> io::Result<(Option<Dir>, &'p std::ffi::OsStr)> {
     let leaf = path.file_name().ok_or_else(|| {
         io::Error::new(
@@ -110,24 +116,35 @@ fn split<'p>(dir: &Dir, path: &'p Path) -> io::Result<(Option<Dir>, &'p std::ffi
 }
 
 #[cfg(windows)]
-fn native(_dir: &Dir, root: &Path, from: &Path, to: &Path) -> Native {
+fn native(dir: &Dir, from: &Path, to: &Path) -> Native {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
-    // Push component by component: `root` is a canonical `\\?\` path, where
-    // Windows applies no separator normalization, so a `/` joined in as text
-    // would name a file with a slash in it.
-    let wide = |rel: &Path| {
-        let mut path = root.to_path_buf();
-        for component in rel.components() {
-            path.push(component);
-        }
+    // Resolve each parent through the capability handle and name it by the
+    // final path of that open handle, as cap-std's own Windows rename does.
+    // A junction swapped into an intermediate component after the parent is
+    // opened is not walked from the root; what remains is the window between
+    // reading the handle's path and the move, the same one cap-std has.
+    let resolved = (|| {
+        let (from_parent, from_leaf) = split(dir, from)?;
+        let (to_parent, to_leaf) = split(dir, to)?;
+        let mut from_path = handle_path(from_parent.as_ref().unwrap_or(dir))?;
+        from_path.push(from_leaf);
+        let mut to_path = handle_path(to_parent.as_ref().unwrap_or(dir))?;
+        to_path.push(to_leaf);
+        Ok::<_, io::Error>((from_path, to_path))
+    })();
+    let (from_path, to_path) = match resolved {
+        Ok(paths) => paths,
+        Err(error) => return Native::Done(Err(error)),
+    };
+    let wide = |path: &Path| {
         path.as_os_str()
             .encode_wide()
             .chain(Some(0))
             .collect::<Vec<u16>>()
     };
-    let (from_wide, to_wide) = (wide(from), wide(to));
+    let (from_wide, to_wide) = (wide(&from_path), wide(&to_path));
     // SAFETY: both buffers are NUL-terminated UTF-16 that outlive the call.
     let moved = unsafe { MoveFileExW(from_wide.as_ptr(), to_wide.as_ptr(), 0) };
     if moved != 0 {
@@ -137,13 +154,49 @@ fn native(_dir: &Dir, root: &Path, from: &Path, to: &Path) -> Native {
     }
 }
 
+/// The final path of an open directory handle, in its `\\?\` form, which
+/// takes a pushed leaf name as is and has no `MAX_PATH` limit.
+#[cfg(windows)]
+fn handle_path(dir: &Dir) -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
+    };
+
+    let mut buf = vec![0u16; 512];
+    loop {
+        let capacity = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        // SAFETY: the handle stays open for the borrow of `dir`, and `buf`
+        // holds `capacity` UTF-16 units.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                dir.as_raw_handle(),
+                buf.as_mut_ptr(),
+                capacity,
+                FILE_NAME_NORMALIZED,
+            )
+        } as usize;
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Success returns the length without the NUL; a buffer too small
+        // returns the size it needs, NUL included.
+        if len < buf.len() {
+            buf.truncate(len);
+            return Ok(std::ffi::OsString::from_wide(&buf).into());
+        }
+        buf.resize(len, 0);
+    }
+}
+
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
     windows
 )))]
-fn native(_dir: &Dir, _root: &Path, _from: &Path, _to: &Path) -> Native {
+fn native(_dir: &Dir, _from: &Path, _to: &Path) -> Native {
     Native::Unsupported
 }
 
@@ -220,8 +273,8 @@ mod tests {
         stdfs::create_dir(tmp.path().join("src")).unwrap();
         stdfs::create_dir(tmp.path().join("empty")).unwrap();
 
-        let file = rename(&dir, tmp.path(), Path::new("a.txt"), Path::new("b.txt"));
-        let empty_dir = rename(&dir, tmp.path(), Path::new("src"), Path::new("empty"));
+        let file = rename(&dir, Path::new("a.txt"), Path::new("b.txt"));
+        let empty_dir = rename(&dir, Path::new("src"), Path::new("empty"));
 
         assert_eq!(file.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(empty_dir.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
@@ -235,13 +288,7 @@ mod tests {
         );
         assert!(tmp.path().join("src").is_dir() && tmp.path().join("empty").is_dir());
 
-        rename(
-            &dir,
-            tmp.path(),
-            Path::new("a.txt"),
-            Path::new("src/moved.txt"),
-        )
-        .unwrap();
+        rename(&dir, Path::new("a.txt"), Path::new("src/moved.txt")).unwrap();
         assert_eq!(
             stdfs::read_to_string(tmp.path().join("src/moved.txt")).unwrap(),
             "a",
@@ -288,7 +335,7 @@ mod tests {
                 hooks::force_fallback(true);
                 let dir = Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
                 start_rx.recv().unwrap();
-                let result = rename(&dir, &root, Path::new("second.txt"), Path::new("dst.txt"));
+                let result = rename(&dir, Path::new("second.txt"), Path::new("dst.txt"));
                 second_done.store(true, Ordering::SeqCst);
                 result
             })
@@ -308,12 +355,7 @@ mod tests {
         }
         hooks::force_fallback(true);
         let dir = open(&tmp);
-        let first = rename(
-            &dir,
-            tmp.path(),
-            Path::new("first.txt"),
-            Path::new("dst.txt"),
-        );
+        let first = rename(&dir, Path::new("first.txt"), Path::new("dst.txt"));
         hooks::force_fallback(false);
         let second_result = second.join().unwrap();
 
@@ -348,12 +390,7 @@ mod tests {
         hooks::set_fallback_window(move || stdfs::write(theirs, "theirs").unwrap());
         let dir = open(&tmp);
 
-        let result = rename(
-            &dir,
-            tmp.path(),
-            Path::new("mine.txt"),
-            Path::new("dst.txt"),
-        );
+        let result = rename(&dir, Path::new("mine.txt"), Path::new("dst.txt"));
         hooks::force_fallback(false);
 
         assert!(result.is_ok(), "{result:?}");

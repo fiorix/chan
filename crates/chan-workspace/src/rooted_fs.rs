@@ -912,7 +912,7 @@ impl RootedFs {
         from: &std::path::Path,
         to: &std::path::Path,
     ) -> std::io::Result<()> {
-        crate::no_replace::rename(&self.dir(), &self.canon(), from, to)
+        crate::no_replace::rename(&self.dir(), from, to)
     }
 
     /// Create `rel` as a new editable text file. The preflight matches
