@@ -31,9 +31,11 @@ use sha2::{Digest, Sha256};
 /// Checked FIRST, so every delegator (`state_dir`, `cache_dir`,
 /// `global_config_path`, `workspaces_dir`, …) inherits it. This is the SINGLE
 /// authority for the chan home; nothing else resolves `~/.chan` independently.
-/// On Unix, if the OS cannot resolve a home directory, chan uses the absolute
-/// `/var/tmp/chan-<uid>` fallback rather than resolving state against the
-/// process working directory. Windows uses `C:\ProgramData\chan`.
+/// If the OS cannot resolve a home directory, chan falls back to
+/// `/var/tmp/chan-<uid>` on Unix and `C:\ProgramData\chan` on Windows, then
+/// to a fresh private directory under a temp location, and only last to
+/// `.chan` under the working directory; see `resolve_fallback_home`. The
+/// choice is made once per process and logged.
 pub fn config_dir() -> PathBuf {
     config_dir_with_sources(chan_home_override(), dirs::home_dir())
 }
@@ -58,13 +60,39 @@ fn default_config_dir(home: Option<PathBuf>, fallback: impl FnOnce() -> PathBuf)
 
 #[cfg(unix)]
 fn home_unavailable_config_dir() -> PathBuf {
-    unix_fallback_home(
-        Path::new("/var/tmp"),
-        &std::env::temp_dir(),
-        std::env::current_dir().ok().as_deref(),
-        rustix::process::getuid().as_raw(),
-    )
-    .path
+    // Resolved once: the later steps make a fresh directory per call, and
+    // one process must not scatter its state across several homes.
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let home = unix_fallback_home(
+                Path::new("/var/tmp"),
+                &std::env::temp_dir(),
+                std::env::current_dir().ok().as_deref(),
+                rustix::process::getuid().as_raw(),
+            );
+            home.report();
+            home.path
+        })
+        .clone()
+}
+
+#[cfg(windows)]
+fn home_unavailable_config_dir() -> PathBuf {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let home = resolve_fallback_home(
+                Path::new(r"C:\ProgramData\chan"),
+                vet_windows_home,
+                &[&std::env::temp_dir()],
+                "chan-",
+                std::env::current_dir().ok().as_deref(),
+            );
+            home.report();
+            home.path
+        })
+        .clone()
 }
 
 /// Where chan put its home when the OS home could not be resolved, with
@@ -75,22 +103,161 @@ struct FallbackHome {
     refused: Vec<String>,
 }
 
-#[cfg(unix)]
-fn unix_fallback_home(
-    var_tmp: &Path,
-    _temp_dir: &Path,
-    _cwd: Option<&Path>,
-    uid: u32,
-) -> FallbackHome {
-    FallbackHome {
-        path: var_tmp.join(format!("chan-{uid}")),
-        refused: Vec::new(),
+impl FallbackHome {
+    fn report(&self) {
+        for why in &self.refused {
+            tracing::warn!("chan home fallback refused {why}");
+        }
+        tracing::warn!(
+            "no OS home directory; using {} as the chan home",
+            self.path.display()
+        );
     }
 }
 
+/// The fallback chain, in order of preference. A broken system must never
+/// stop chan from starting, so every step that fails is recorded and the
+/// next one tried, and the last step cannot fail:
+///
+/// 1. `predictable`, accepted only if `vet` passes. It is the one location
+///    a later run finds again, which keeps the registry and tokens across
+///    restarts.
+/// 2. A fresh directory under each of `fresh_parents`, made by mkdtemp, so
+///    no other user can have prepared it. It is new per process, so state
+///    kept there does not survive a restart.
+/// 3. `.chan` under the working directory, where chan otherwise never keeps
+///    state; nothing checks it, because nothing is left to fall back to.
+fn resolve_fallback_home(
+    predictable: &Path,
+    vet: impl Fn(&Path) -> Result<(), String>,
+    fresh_parents: &[&Path],
+    fresh_prefix: &str,
+    cwd: Option<&Path>,
+) -> FallbackHome {
+    let mut refused = Vec::new();
+    match vet(predictable) {
+        Ok(()) => {
+            return FallbackHome {
+                path: predictable.to_path_buf(),
+                refused,
+            }
+        }
+        Err(why) => refused.push(format!("{}: {why}", predictable.display())),
+    }
+    let mut tried: Vec<&Path> = Vec::new();
+    for parent in fresh_parents {
+        if tried.contains(parent) {
+            continue;
+        }
+        tried.push(parent);
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(fresh_prefix);
+        // Private from creation rather than chmod'ed after it: the directory
+        // is never visible under a laxer mode.
+        #[cfg(unix)]
+        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        match builder.tempdir_in(parent) {
+            Ok(dir) => {
+                return FallbackHome {
+                    path: dir.keep(),
+                    refused,
+                }
+            }
+            Err(error) => refused.push(format!(
+                "{}: cannot create a private directory there: {error}",
+                parent.display()
+            )),
+        }
+    }
+    FallbackHome {
+        path: cwd.map_or_else(|| PathBuf::from(".chan"), |cwd| cwd.join(".chan")),
+        refused,
+    }
+}
+
+/// The Unix chain: `/var/tmp/chan-<uid>`, then mkdtemp under `/var/tmp` and
+/// the temp dir, then the working directory. `/var/tmp` is world-writable,
+/// so another local user can create the predictable name first.
+#[cfg(unix)]
+fn unix_fallback_home(
+    var_tmp: &Path,
+    temp_dir: &Path,
+    cwd: Option<&Path>,
+    uid: u32,
+) -> FallbackHome {
+    resolve_fallback_home(
+        &var_tmp.join(format!("chan-{uid}")),
+        |path| vet_private_dir(path, uid),
+        &[var_tmp, temp_dir],
+        &format!("chan-{uid}-"),
+        cwd,
+    )
+}
+
+/// Make `path` a directory only `uid` can use, or say why it cannot be one:
+/// create it `0700`, and accept an existing entry only when it is a real
+/// directory owned by `uid`, tightening its mode if needed.
+#[cfg(unix)]
+fn vet_private_dir(path: &Path, uid: u32) -> Result<(), String> {
+    use rustix::fs::{fchmod, fstat, lstat, mkdir, open, FileType, Mode, OFlags};
+    use rustix::io::Errno;
+
+    let describe = |errno: Errno| std::io::Error::from(errno).to_string();
+    match mkdir(path, Mode::RWXU) {
+        Ok(()) => {}
+        Err(errno) if errno == Errno::EXIST => {}
+        Err(errno) => return Err(format!("cannot create it: {}", describe(errno))),
+    }
+    let stat = lstat(path).map_err(|errno| format!("cannot stat it: {}", describe(errno)))?;
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::Directory => {}
+        FileType::Symlink => return Err("it is a symlink".to_string()),
+        _ => return Err("it is not a directory".to_string()),
+    }
+    // Everything after the lstat goes through one descriptor that cannot
+    // follow a link swapped in since, so the owner read and the mode change
+    // both land on the directory that was checked.
+    let dir = open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|errno| format!("cannot open it as a directory: {}", describe(errno)))?;
+    let stat = fstat(&dir).map_err(|errno| format!("cannot stat it: {}", describe(errno)))?;
+    if stat.st_uid != uid {
+        return Err(format!("it is owned by uid {}", stat.st_uid));
+    }
+    if stat.st_mode & 0o777 != 0o700 {
+        fchmod(&dir, Mode::RWXU).map_err(|errno| {
+            format!(
+                "it has mode {:o} and cannot be made private: {}",
+                stat.st_mode & 0o777,
+                describe(errno)
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Windows vetting refuses a reparse point and a non-directory. It does not
+/// read the owner: that needs the security API, and a subdirectory of
+/// `C:\ProgramData` inherits an ACL that gives its creator full control and
+/// other users read access only.
 #[cfg(windows)]
-fn home_unavailable_config_dir() -> PathBuf {
-    PathBuf::from(r"C:\ProgramData\chan")
+fn vet_windows_home(path: &Path) -> Result<(), String> {
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("cannot create it: {error}")),
+    }
+    let meta = std::fs::symlink_metadata(path).map_err(|error| format!("cannot stat it: {error}"))?;
+    if meta.file_type().is_symlink() {
+        return Err("it is a symlink".to_string());
+    }
+    if !meta.is_dir() {
+        return Err("it is not a directory".to_string());
+    }
+    Ok(())
 }
 
 /// The `CHAN_HOME` override, if set to a non-empty value: the directory chan
@@ -716,7 +883,7 @@ mod tests {
     #[test]
     fn default_config_dir_uses_home_and_absolute_fallback() {
         let home = test_home();
-        let fallback = home_unavailable_config_dir();
+        let fallback = test_override_dir();
         let resolved = [
             default_config_dir(Some(home.clone()), || fallback.clone()),
             default_config_dir(None, || fallback.clone()),
