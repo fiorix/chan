@@ -4896,6 +4896,70 @@ mod tests {
         );
     }
 
+    /// The devserver's half of the root health probe: the tasks
+    /// `run_devserver` keeps for its serve loop turn a replaced root's row
+    /// `unavailable` within one probe interval, and nothing else in this test
+    /// re-checks the root. The interval runs on a paused clock, which costs
+    /// no wall time and cannot skip a tick: a probe's stat on the blocking
+    /// pool holds auto-advance off until it returns.
+    ///
+    /// Unix only: the state is reached by replacing the root directory under
+    /// a live tenant, and Windows refuses to delete a tree whose handles the
+    /// tenant holds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_serve_tasks_report_a_replaced_root_within_one_probe_interval() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = state
+            .register_workspace(workspace.path())
+            .await
+            .expect("the mount");
+        let row = |state: &DevserverState| {
+            state
+                .workspace_entries()
+                .into_iter()
+                .find(|entry| entry.prefix == prefix)
+                .expect("the mounted workspace is listed")
+        };
+
+        // The mount ran on the real clock; the cadence runs on a paused one.
+        tokio::time::pause();
+        let signal_tx = tokio::sync::watch::channel(false).0;
+        let tasks = ServeLifetimeTasks::spawn(&state, &signal_tx);
+        // The interval's first tick is immediate, and this sleep ends only
+        // after that probe has returned and the task waits on the next tick.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(
+            row(&state).status,
+            WorkspaceStatus::Running,
+            "fixture: a probe of the healthy root leaves the row running"
+        );
+
+        // Same path, new inode: the tenant's root identity check fails.
+        std::fs::remove_dir_all(workspace.path()).expect("remove the root");
+        std::fs::create_dir(workspace.path()).expect("replace the root");
+        tokio::time::sleep(ROOT_HEALTH_PROBE_INTERVAL).await;
+
+        let degraded = row(&state);
+        assert_eq!(
+            degraded.status,
+            WorkspaceStatus::Unavailable,
+            "no probe reported the replaced root within one interval"
+        );
+        let reason = degraded.error.expect("a degraded row carries a reason");
+        assert!(
+            reason.contains(&degraded.path),
+            "the reason must name the root {}: {reason}",
+            degraded.path
+        );
+
+        let _ = signal_tx.send(true);
+        tasks.finish().await.expect("the shutdown observer joins");
+    }
+
     /// A registration for a workspace whose root the health probe currently
     /// calls unavailable still mounts, still mints its window and still
     /// answers with the prefix.
