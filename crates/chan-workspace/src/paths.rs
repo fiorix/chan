@@ -288,10 +288,11 @@ fn vet_private_dir(path: &Path, uid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Windows vetting refuses a reparse point and a non-directory. It does not
-/// read the owner: that needs the security API, and a subdirectory of
-/// `C:\ProgramData` inherits an ACL that gives its creator full control and
-/// other users read access only.
+/// Windows vetting refuses a reparse point and a non-directory. It has no
+/// owner check, so a `C:\ProgramData\chan` that another user created first is
+/// trusted, and because a subdirectory of `C:\ProgramData` gives its creator
+/// full control, that user keeps control of chan's home. Reading the owner
+/// needs the Windows security API, which this does not call.
 #[cfg(windows)]
 fn vet_windows_home(path: &Path) -> Result<(), String> {
     match std::fs::create_dir(path) {
