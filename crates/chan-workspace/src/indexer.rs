@@ -27,6 +27,12 @@
 //     and re-creating the same path inside the debounce window is
 //     fine (the subsequent `Modified`/`Created` re-schedules the
 //     deadline).
+//   * A `Renamed` that names a single path in the source slot can
+//     name either end (FSEvents reports each end of a move alone),
+//     so the path is checked first. One that is gone is forgotten as
+//     a source; a file that exists is scheduled like a create, and a
+//     directory that exists triggers a reconcile, because the files
+//     under it raise no events of their own.
 //   * `ProviderError` and path-less events (the watcher's "scope
 //     unknown" signal) clear the pending map and trigger a full
 //     `Workspace::reconcile`. The reconcile is the same convergence
@@ -136,7 +142,8 @@ impl GraphIndexer {
     }
 
     /// Cumulative count of full-reconcile passes triggered by
-    /// `ProviderError` or path-less events. A high count here
+    /// `ProviderError` or path-less events, or by a single-path
+    /// directory rename whose path still exists. A high count here
     /// usually means the watcher backend is dropping events
     /// (inotify queue overflow on Linux, FSEvents coalesce on
     /// macOS) and the consumer should consider raising
@@ -337,25 +344,37 @@ fn apply_event(
             }
         }
         WatchKind::Renamed => {
+            // A rename that names one path can name either end: FSEvents
+            // reports each end of a move as its own event, with the path in
+            // this slot. One that still exists is where something arrived,
+            // so it is indexed; only one that is gone is a source to forget.
+            let lone = event.to.is_none();
             if let Some(from) = event.path {
-                if is_dir {
-                    remove_pending_subtree(pending, &from);
+                if lone && is_dir && workspace.is_dir(&from) {
+                    // The files under it raise no events of their own.
+                    run_reconcile(workspace, state, "directory renamed into place");
+                } else if lone && !is_dir && workspace.exists(&from) {
+                    schedule_pending(pending, from, now, debounce);
                 } else {
-                    pending.remove(&from);
-                }
-                let result = if is_dir {
-                    workspace.forget_subtree(&from)
-                } else {
-                    workspace.forget_file(&from).map(|()| 1)
-                };
-                match result {
-                    Ok(forgotten) => {
-                        state
-                            .forgotten_total
-                            .fetch_add(forgotten as u64, Ordering::Relaxed);
+                    if is_dir {
+                        remove_pending_subtree(pending, &from);
+                    } else {
+                        pending.remove(&from);
                     }
-                    Err(e) => {
-                        tracing::warn!(path = %from, ?e, "indexer: forget failed on rename src");
+                    let result = if is_dir {
+                        workspace.forget_subtree(&from)
+                    } else {
+                        workspace.forget_file(&from).map(|()| 1)
+                    };
+                    match result {
+                        Ok(forgotten) => {
+                            state
+                                .forgotten_total
+                                .fetch_add(forgotten as u64, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %from, ?e, "indexer: forget failed on rename src");
+                        }
                     }
                 }
             }
