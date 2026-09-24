@@ -16,8 +16,6 @@ web/packages/marketing/
 |   +-- site.js
 |   +-- styles.css
 |   +-- launcher-demo.ts        eager entry: mounts the launcher demo widget
-|   +-- workspace-demo.ts       lazy loader for the workspace demo overlay
-|   +-- WorkspaceDemoOverlay.svelte  hosts @chan/workspace-app/demo
 |   `-- templates/
 |       `-- base.html
 +-- assets/                     public media assets copied to dist/assets/
@@ -65,11 +63,10 @@ Then open `http://localhost:8080/`.
 
 ## Embedded Demo
 
-The site runs the launcher SPA frontend-only, with no backend, so the landing page can show a live launcher widget. The full workspace demo source remains in this package, but it is not wired into the public marketing build.
+The site runs the launcher SPA frontend-only, with no backend, so the manual can show a live launcher widget. The workspace app is not part of the site.
 
-- The landing page eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as the hero widget.
-- The launcher widget is mounted without an `onOpenWindow` hook, so clicking a window row cannot open the workspace app demo.
-- `workspace-demo.ts` and `WorkspaceDemoOverlay.svelte` are retained as dormant source files for a future re-enable.
+- The manual page eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed and, in an iframe under `/manual/demo/devserver/`, as the devserver form; a launcher mount is one per page, so the second instance gets its own document.
+- The launcher widget is mounted without an `onOpenWindow` hook, so clicking a window row opens nothing.
 
 `scripts/build.mjs` produces, under `dist/assets/`:
 

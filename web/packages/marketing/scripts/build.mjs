@@ -187,22 +187,14 @@ async function buildLauncherDemo() {
   await viteBuild({
     configFile: false,
     root: siteRoot,
-    // Everything the demo build emits lives under /assets/; the dynamic
-    // chunk loader resolves CSS preloads and asset urls against this base.
+    // Everything the launcher build emits lives under /assets/, and the
+    // bundle resolves its asset urls against this base.
     base: "/assets/",
     plugins: [svelte()],
     resolve: {
       alias: {
         "@chan/launcher/demo": path.join(repoRoot, "web/packages/launcher/src/LauncherDemo.svelte"),
         "@chan/launcher/styles.css": path.join(repoRoot, "web/packages/launcher/src/styles.css"),
-        "@chan/workspace-app/demo": path.join(
-          repoRoot,
-          "web/packages/workspace-app/src/WorkspaceDemo.svelte",
-        ),
-        "@chan/workspace-app/demo-data": path.join(
-          repoRoot,
-          "web/packages/workspace-app/src/demo/data.ts",
-        ),
       },
     },
     build: {
@@ -220,9 +212,9 @@ async function buildLauncherDemo() {
     },
   });
 
-  // Scope each demo bundle's global CSS (`:root` variable blocks, `body`
-  // rules) to its own frame so loading a demo chunk can never restyle the
-  // marketing page around it.
+  // Scope the launcher bundle's global CSS (`:root` variable blocks, `body`
+  // rules) to its frame so the embed can never restyle the marketing page
+  // around it.
   await scopeDemoCss("launcher-demo.css", ".launcher-demo-frame");
 }
 
