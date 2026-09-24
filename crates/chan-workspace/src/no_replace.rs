@@ -54,6 +54,7 @@ pub(crate) fn rename(dir: &Dir, root: &Path, from: &Path, to: &Path) -> io::Resu
 enum Native {
     Done(io::Result<()>),
     /// The platform or this filesystem has no no-replace rename.
+    #[cfg_attr(windows, allow(dead_code, reason = "MoveFileExW always refuses"))]
     Unsupported,
 }
 
