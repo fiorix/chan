@@ -315,7 +315,12 @@ fn inspect_metadata_archive(archive: &Path) -> Result<MetadataManifest> {
     let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
         ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
     })?;
-    let mut archive = Archive::new(decoder);
+    read_manifest(decoder, EXTRACT_LIMITS)
+}
+
+/// Read the manifest entry from a decoded tar stream.
+fn read_manifest<R: Read>(stream: R, _limits: ExtractLimits) -> Result<MetadataManifest> {
+    let mut archive = Archive::new(stream);
     let mut entries = archive.entries()?;
     let Some(first) = entries.next() else {
         return Err(ChanError::Io("metadata archive is empty".into()));
@@ -743,15 +748,20 @@ pub const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
 /// into the import staging directory before it is refused and removed.
 pub const MAX_ARCHIVE_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Largest manifest entry an import reads.
+pub const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 1024 * 1024;
+
 #[derive(Clone, Copy)]
 struct ExtractLimits {
     entries: u64,
     bytes: u64,
+    manifest: u64,
 }
 
 const EXTRACT_LIMITS: ExtractLimits = ExtractLimits {
     entries: MAX_ARCHIVE_ENTRIES,
     bytes: MAX_ARCHIVE_PAYLOAD_BYTES,
+    manifest: MAX_ARCHIVE_MANIFEST_BYTES,
 };
 
 fn extract_payload(archive: &Path, payload: &Path) -> Result<(usize, u64)> {
@@ -767,7 +777,16 @@ fn extract_payload_within(
     let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
         ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
     })?;
-    let mut archive = Archive::new(decoder);
+    extract_stream_within(decoder, payload, limits)
+}
+
+/// Extract the payload entries of a decoded tar stream into `payload`.
+fn extract_stream_within<R: Read>(
+    stream: R,
+    payload: &Path,
+    limits: ExtractLimits,
+) -> Result<(usize, u64)> {
+    let mut archive = Archive::new(stream);
     let mut stats = ArchiveStats::default();
     let mut entries_read = 0u64;
     for entry in archive.entries()? {
@@ -1936,6 +1955,7 @@ mod tests {
         let limits = ExtractLimits {
             entries: MAX_ARCHIVE_ENTRIES,
             bytes: 1024,
+            manifest: MAX_ARCHIVE_MANIFEST_BYTES,
         };
 
         let at_limit = archive_with_files(dir.path(), &[1000, 24]);
@@ -1959,6 +1979,131 @@ mod tests {
         assert!(
             written <= 25,
             "the refused entry stops at the limit: {written}"
+        );
+    }
+
+    /// Counts the decoded bytes a reader hands on, so a test can tell a
+    /// bounded read from one that drained the stream.
+    struct CountingReader<R> {
+        inner: R,
+        count: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.count.set(self.count.get() + n as u64);
+            Ok(n)
+        }
+    }
+
+    /// The decoded stream of `archive`, counted.
+    fn counted_stream(archive: &Path) -> (impl Read, std::rc::Rc<std::cell::Cell<u64>>) {
+        let decoder = zstd::stream::read::Decoder::new(BufReader::new(File::open(archive).unwrap()))
+            .unwrap();
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let reader = CountingReader {
+            inner: decoder,
+            count: std::rc::Rc::clone(&count),
+        };
+        (reader, count)
+    }
+
+    /// An archive of one entry at `path` holding `bytes`.
+    fn archive_with_entry(dir: &Path, name: &str, path: &str, bytes: &[u8]) -> PathBuf {
+        let out = dir.join(name);
+        let file = File::create(&out).unwrap();
+        let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), 0).unwrap();
+        let mut builder = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        builder.append_data(&mut header, path, bytes).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        out
+    }
+
+    const STAND_IN: ExtractLimits = ExtractLimits {
+        entries: 4,
+        bytes: 1024,
+        manifest: 1024,
+    };
+
+    #[test]
+    fn a_manifest_at_its_limit_is_read_and_one_past_is_refused_by_name() {
+        let dir = TempDir::new().unwrap();
+        let limit = usize::try_from(STAND_IN.manifest).unwrap();
+        let manifest = MetadataManifest {
+            archive_format_version: 1,
+            chan_version: "0.0.0-test".into(),
+            created_at: "2026-09-24T00:00:00Z".into(),
+            source_root: "/tmp/workspace".into(),
+            source_metadata_key: "-tmp-workspace-deadbeef".into(),
+            metadata_schema: MetadataSchema {
+                path_key_scheme: PATH_KEY_SCHEME.into(),
+                index_schema_version: 3,
+                graph_user_version: None,
+                vector_shard_format_version: None,
+                report_schema_version: None,
+            },
+            scm: None,
+            included_subtrees: Vec::new(),
+            excluded_subtrees: Vec::new(),
+        };
+        // Trailing whitespace keeps the JSON valid at exactly the limit.
+        let mut raw = serde_json::to_vec(&manifest).unwrap();
+        raw.resize(limit, b' ');
+        let at = archive_with_entry(dir.path(), "at.tar.zst", MANIFEST_PATH, &raw);
+        let (stream, _) = counted_stream(&at);
+        assert_eq!(read_manifest(stream, STAND_IN).unwrap(), manifest);
+
+        let past = archive_with_entry(
+            dir.path(),
+            "past.tar.zst",
+            MANIFEST_PATH,
+            &vec![b' '; limit * 64],
+        );
+        let (stream, count) = counted_stream(&past);
+        let err = read_manifest(stream, STAND_IN).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChanError::ArchiveLimit {
+                    unit: "manifest bytes",
+                    limit: 1024
+                }
+            ),
+            "a manifest past its limit must be refused by name: {err:?}"
+        );
+        // One 512-byte tar header, then the manifest read stops one byte past
+        // the limit.
+        assert_eq!(count.get(), 512 + STAND_IN.manifest + 1);
+    }
+
+    #[test]
+    fn a_long_name_header_past_the_stream_cap_is_refused_before_the_stream_drains() {
+        let dir = TempDir::new().unwrap();
+        let name_len = 256 * 1024;
+        let long = format!("{PAYLOAD_ROOT}/{}", "a".repeat(name_len));
+        let archive = archive_with_entry(dir.path(), "long.tar.zst", &long, b"x");
+        let (stream, count) = counted_stream(&archive);
+        let err = extract_stream_within(stream, &dir.path().join("out"), STAND_IN).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ChanError::ArchiveLimit {
+                    unit: "decoded bytes",
+                    ..
+                }
+            ),
+            "an extension header past the stream cap must be refused by name: {err:?}"
+        );
+        assert!(
+            count.get() < name_len as u64,
+            "the refusal comes before the long name is read in full: {}",
+            count.get()
         );
     }
 
