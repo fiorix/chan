@@ -1231,9 +1231,21 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
             let mut changes = Vec::with_capacity(2);
             if let Some(from) = event.path.as_deref() {
                 if chan_workspace::fs_ops::is_indexable_text(from) {
+                    // A rename that names one path can name either end:
+                    // FSEvents reports each end of a move, and the target of
+                    // an editor's atomic save, as its own event with the path
+                    // in this slot. Queued as a change, not a delete, it is
+                    // stat'ed when applied: a file there is indexed and a
+                    // path that is gone is forgotten. Only a paired rename's
+                    // source is known to be gone.
+                    //
+                    // On a case-insensitive volume a case-only rename leaves
+                    // the old name indexed as well, since a lookup finds the
+                    // file under it, and a reconcile keeps that row; a full
+                    // rebuild, or deleting the file, clears it.
                     changes.push(PendingChange {
                         path: from.to_owned(),
-                        deleted: true,
+                        deleted: event.to.is_some(),
                         is_dir: false,
                         last_seen: now,
                     });
