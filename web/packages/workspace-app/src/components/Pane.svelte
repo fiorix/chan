@@ -131,11 +131,25 @@
 
   let { pane }: { pane: LeafNode } = $props();
 
+  /// The strip and the keep-alive body lists are keyed by tab id, and a keyed
+  /// each raises `each_key_duplicate` from its own evaluation, where no
+  /// per-tab boundary encloses it. So an id the layout repeats, on one side or
+  /// across both Hybrid sides, is dropped here before any list is keyed on it;
+  /// the first tab with that id is the one drawn.
+  function uniqueTabs(tabs: Tab[]): Tab[] {
+    const seen = new Set<string>();
+    return tabs.filter((tab) => {
+      if (seen.has(tab.id)) return false;
+      seen.add(tab.id);
+      return true;
+    });
+  }
+
   const visibleSide = $derived(paneSide(pane));
-  const visibleTabs = $derived(paneTabs(pane, visibleSide));
+  const visibleTabs = $derived(uniqueTabs(paneTabs(pane, visibleSide)));
   const visibleActiveTabId = $derived(paneActiveTabId(pane, visibleSide));
   const active = $derived(activeTabInPane(pane, visibleSide));
-  const everyTab = $derived(allPaneTabs(pane));
+  const everyTab = $derived(uniqueTabs(allPaneTabs(pane)));
   type PaneFlipAxis = "horizontal" | "vertical";
 
   function isVisibleTab(tab: Tab): boolean {
@@ -1751,25 +1765,22 @@
     <!-- The outer net for this pane's body. Every tab body has a boundary of
          its own, the five keep-alive kinds below and the browser kind in the
          active-tab chain above, so what reaches this one is the rest of what
-         the body draws: the Hybrid Nav preview, the empty-pane placeholder,
-         and the keying of the tab lists themselves.
+         the body draws: the Hybrid Nav preview and the empty-pane placeholder.
 
-         The keying is the part worth knowing. A keyed each evaluates its key
-         in the block's own effect, and each item's subtree is a branch below
-         that, while the boundary walk climbs parents only: a per-tab boundary
-         is never an ancestor of the block that raises a duplicate key, so
-         that failure lands here. What this boundary buys there is that a
-         duplicate id costs a pane rather than the window, and two clicks
-         rather than a reload; it is not a fix for the duplicate.
+         The keying of the tab lists is not among them. A keyed each
+         evaluates its key in the block's own effect, and each item's subtree
+         is a branch below that, while the boundary walk climbs parents only:
+         a per-tab boundary is never an ancestor of the block that raises a
+         duplicate key, and the strip's list renders outside this boundary as
+         well. So `visibleTabs` and `everyTab` drop a repeated id before any
+         list is keyed on them (`uniqueTabs`), and no list here can raise one.
 
          It catches a throw from rendering these children, not one raised
          while this component computes what it passes down. `visibleTabs` and
          the tab labels feed the strip, which renders outside it, so a throw
          in those still reaches the window; that is the price of keeping the
          strip alive. `everyTab` is read only inside it, so a throw from
-         `allPaneTabs` is contained here, which matters because that is the
-         one list in this file concatenating both Hybrid sides and so the one
-         that can carry a duplicate id. -->
+         `allPaneTabs` is contained here. -->
     <svelte:boundary>
     {#if paneMode.active}
           <div class="pane-mode-preview" aria-label="Hybrid Nav preview">

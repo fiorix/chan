@@ -9,19 +9,18 @@
 // that the rest of the window is still there.
 //
 // One tab component is replaced by one that throws while rendering, which is
-// the item's acceptance stated directly, and is what a duplicate key looks
-// like from a pane's side: `each_key_duplicate` is thrown while a keyed list
-// renders.
+// the item's acceptance stated directly.
 //
 // Where the two boundaries divide, stated because it decides where the next
 // one goes. The per-tab boundary takes a throw from that tab's own render;
 // the pane boundary around the whole body takes everything else the body
-// draws, including the keying of the lists themselves, which is where
-// `each_key_duplicate` is raised. Pane's `visibleTabs` and its tab labels
-// feed the strip, which renders outside both, so a throw there still reaches
-// the window. `everyTab` is read only inside the pane boundary, so a throw
-// from `allPaneTabs` is contained: it concatenates both Hybrid sides and is
-// the one list here that can carry a duplicate id.
+// draws. Pane's `visibleTabs` and its tab labels feed the strip, which
+// renders outside both, so a throw there still reaches the window. `everyTab`
+// is read only inside the pane boundary, so a throw from `allPaneTabs` is
+// contained. A duplicate tab id is neither boundary's: a keyed list raises
+// `each_key_duplicate` from its own evaluation, which no per-tab boundary
+// encloses, so Pane drops a repeated id before any list is keyed on it
+// (paneDuplicateTabId.test.ts).
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
