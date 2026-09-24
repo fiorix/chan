@@ -78,13 +78,16 @@ pub enum IndexStatus {
     Reindexing { file: String },
     /// Steady state. Counters mirror `Workspace::index_stats`.
     ///
-    /// `embedding` is `Some` while the search index is BM25-ready but the
-    /// background embedding pass is still running; `None` once fully
-    /// settled. A heavy cold reindex reaches Idle as soon as BM25 is
-    /// searchable, because every embed flush follows a BM25 commit, and
-    /// the slow embed forward-pass finishes in the background, with hybrid
-    /// search fusing the vectors as they land, instead of pinning the
-    /// status at `Building` for minutes.
+    /// `embedding` is `Some` while a build's embedding pass is running and
+    /// `None` once the pass returns. The status becomes
+    /// `Idle { embedding: Some }` on the build's first embed batch, which
+    /// follows a BM25 commit of the files indexed so far and can arrive long
+    /// before the drain reaches the last file. Under that state the rest of
+    /// the tree may still be being read, chunked and BM25-committed while
+    /// vectors land, so search covers only what the latest commit holds.
+    /// The status flips early because the status chip and the search
+    /// route's indexing state read the flip; a long cold reindex would
+    /// otherwise sit at `Building` until the whole build returns.
     Idle {
         indexed_docs: u64,
         indexed_vectors: u64,
