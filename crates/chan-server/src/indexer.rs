@@ -3153,7 +3153,12 @@ mod tests {
     // workspace across their drain, and a run the coordinator started keeps it
     // until the run ends and requeues its pass. A pass requeued then has no
     // claimant, and must say so rather than wake a channel nobody drains.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    //
+    // Two things can make it read unowned: the drop uninstalling the driver,
+    // and the aborted coordinator dropping its receiver, which closes the
+    // driver. On a current-thread runtime the aborted task is not dropped
+    // until the test first yields, so the read below sees the uninstall alone.
+    #[tokio::test(flavor = "current_thread")]
     async fn a_pass_requeued_after_its_indexer_drops_is_unowned_until_claimed() {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
