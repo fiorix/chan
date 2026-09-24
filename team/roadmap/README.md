@@ -69,10 +69,10 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-email-fold-merges-distinct-characters][fold] | withdrawn | GA |
 | [the-move-out-spare-covers-the-whole-window][spare] | accepted | build |
 | [an-emptied-window-waits-without-a-bound][ewait] | accepted | build |
-| [the-chan-home-fallback-trusts-var-tmp][vtmp] | accepted | build |
-| [three-inputs-have-no-size-cap][caps] | accepted | build |
+| [the-chan-home-fallback-trusts-var-tmp][vtmp] | landed | GA |
+| [three-inputs-have-no-size-cap][caps] | landed | GA |
 | [content-search-truncation-ignores-its-window][trunc] | accepted | build |
-| [move-and-create-can-replace-a-new-file][clob] | accepted | build |
+| [move-and-create-can-replace-a-new-file][clob] | landed | GA |
 | [the-graph-indexer-drops-renames-and-lingers][gidx] | accepted | build |
 | [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
 | [the-launcher-says-off-beside-running][offrn] | accepted | build |
