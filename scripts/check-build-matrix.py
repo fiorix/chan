@@ -1072,20 +1072,26 @@ def declared_node_major() -> str:
     return major
 
 
-def setup_node_steps(workflow: str) -> list[tuple[int, dict[str, tuple[str, int]]]]:
-    """Each actions/setup-node step of WORKFLOW with its version inputs.
+def workflow_steps(workflow: str, action: str) -> list[tuple[int, int, dict[str, tuple[str, int]]]]:
+    """Each step of WORKFLOW that uses ACTION, with its job and its inputs.
 
     Line-based like workflow_job: a step is its `- uses:` line (or the
     `uses:` line under a `- name:`) plus every line indented past that
-    dash, and the inputs are the `node-version` and `node-version-file`
-    keys in that span, quoted or bare, each with the 1-based line it sits
-    on. Any such key inside the step counts, wherever it sits, so a version
-    input a typo moved out of `with:` is still seen rather than accepted.
+    dash, its job is the nearest two-space key above it, and its inputs
+    are the scalar `key: value` lines in that span, quoted or bare, each
+    with the 1-based line it sits on. Every such key in the step counts,
+    wherever it sits, so a version input a typo moved out of `with:` is
+    still seen rather than accepted. The tuple is the job's line, the
+    step's line, and the inputs.
     """
     lines = workflow.splitlines()
-    steps: list[tuple[int, dict[str, tuple[str, int]]]] = []
+    job_pattern = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
+    steps: list[tuple[int, int, dict[str, tuple[str, int]]]] = []
+    job_line = 0
     for index, line in enumerate(lines):
-        match = re.match(r"^(\s*)(- )?uses:\s*actions/setup-node@", line)
+        if job_pattern.match(line):
+            job_line = index + 1
+        match = re.match(rf"^(\s*)(- )?uses:\s*{re.escape(action)}@", line)
         if not match:
             continue
         dash = len(match.group(1)) - (0 if match.group(2) else 2)
@@ -1097,14 +1103,14 @@ def setup_node_steps(workflow: str) -> list[tuple[int, dict[str, tuple[str, int]
             if len(later) - len(later.lstrip()) <= dash:
                 break
             key = re.match(
-                r"""^\s*(node-version(?:-file)?):\s*"""
-                r"""(?:'([^']*)'|"([^"]*)"|([^\s#]*))\s*(?:#.*)?$""",
+                r"""^\s*([A-Za-z0-9_-]+):\s*"""
+                r"""(?:'([^']*)'|"([^"]*)"|([^\s#'"][^#]*?))?\s*(?:#.*)?$""",
                 later,
             )
             if key:
-                value = next(group for group in key.groups()[1:] if group is not None)
-                inputs[key.group(1)] = (value, number)
-        steps.append((index + 1, inputs))
+                value = next((group for group in key.groups()[1:] if group is not None), "")
+                inputs[key.group(1)] = (value.strip(), number)
+        steps.append((job_line, index + 1, inputs))
     return steps
 
 
@@ -1112,22 +1118,32 @@ def check_node_major_contract() -> None:
     """One node major builds every bundle, and `.nvmrc` is where it is stated.
 
     The workflows read the file: every setup-node step names it through
-    `node-version-file`, as `chan/.nvmrc` because every workflow checks the
-    repository out at `chan/` and setup-node resolves the path from the
-    runner's workspace, and none carries a `node-version` literal, the
-    right major included, since a literal is a second place to edit. The
-    Docker builder images and the Nix packages cannot read the file (a
-    `FROM` tag and a nixpkgs attribute are fixed before anything runs), so
-    they name the major and this holds them to it.
+    `node-version-file`, at the path where its job's actions/checkout put
+    the repository (`chan/.nvmrc` under `path: chan`, `.nvmrc` for a root
+    checkout), since setup-node resolves that input from the runner's
+    workspace, and none carries a `node-version` literal, the right major
+    included, since a literal is a second place to edit. A checkout that
+    names a `repository` is some other repository's and offers no
+    `.nvmrc` of ours, so it does not count. The Docker builder images and
+    the Nix packages cannot read the file (a `FROM` tag and a nixpkgs
+    attribute are fixed before anything runs), so they name the major and
+    this holds them to it.
     """
     major = declared_node_major()
-    expected = f"chan/{NODE_MAJOR_FILE}"
     workflows_dir = ROOT / ".github" / "workflows"
     workflows = sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml"))
     steps = 0
     for workflow_path in workflows:
         path = workflow_path.relative_to(ROOT).as_posix()
-        for line, inputs in setup_node_steps(read(path)):
+        workflow = read(path)
+        checkouts: dict[int, set[str]] = {}
+        for job_line, _line, inputs in workflow_steps(workflow, "actions/checkout"):
+            if "repository" in inputs:
+                continue
+            prefix = inputs.get("path", ("", 0))[0].strip("/")
+            expected = f"{prefix}/{NODE_MAJOR_FILE}" if prefix else NODE_MAJOR_FILE
+            checkouts.setdefault(job_line, set()).add(expected)
+        for job_line, line, inputs in workflow_steps(workflow, "actions/setup-node"):
             steps += 1
             if "node-version" in inputs:
                 value, at = inputs["node-version"]
@@ -1141,10 +1157,17 @@ def check_node_major_contract() -> None:
                     "(no node-version-file input)"
                 )
             value, at = inputs["node-version-file"]
-            if value != expected:
+            expected = checkouts.get(job_line, set())
+            if not expected:
+                raise ContractError(
+                    f"{path}:{line}: setup-node in a job with no actions/checkout "
+                    f"of this repository, so no {NODE_MAJOR_FILE} to read"
+                )
+            if value not in expected:
                 raise ContractError(
                     f"{path}:{at}: node-version-file is {value!r}, expected "
-                    f"{expected!r} (the workflows check the repository out at chan/)"
+                    f"{' or '.join(repr(item) for item in sorted(expected))} "
+                    "(where the job checks the repository out)"
                 )
     if steps == 0:
         raise ContractError(
