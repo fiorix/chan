@@ -955,4 +955,33 @@ mod tests {
         // for last-known values, no new threads or watchers active.
         assert_eq!(indexer.pending_count(), 0);
     }
+
+    #[test]
+    fn dropping_the_last_handle_stops_the_worker() {
+        // The worker holds the workspace for as long as it runs, so the
+        // count says whether it still runs. A drop that stops it joins the
+        // worker before returning, so these are synchronous reads, not waits.
+        let (_cfg, _workspace_dir, workspace) = setup_workspace();
+        let indexer = GraphIndexer::start_on(Arc::clone(&workspace), DEBOUNCE_TEST_MS).unwrap();
+        let clone = indexer.clone();
+        assert_eq!(
+            Arc::strong_count(&workspace),
+            2,
+            "the running worker holds the workspace"
+        );
+
+        drop(indexer);
+        assert_eq!(
+            Arc::strong_count(&workspace),
+            2,
+            "a surviving clone keeps the worker running"
+        );
+
+        drop(clone);
+        assert_eq!(
+            Arc::strong_count(&workspace),
+            1,
+            "dropping the last handle must stop the worker, which releases the workspace"
+        );
+    }
 }
