@@ -58,10 +58,34 @@ fn default_config_dir(home: Option<PathBuf>, fallback: impl FnOnce() -> PathBuf)
 
 #[cfg(unix)]
 fn home_unavailable_config_dir() -> PathBuf {
-    PathBuf::from(format!(
-        "/var/tmp/chan-{}",
-        rustix::process::getuid().as_raw()
-    ))
+    unix_fallback_home(
+        Path::new("/var/tmp"),
+        &std::env::temp_dir(),
+        std::env::current_dir().ok().as_deref(),
+        rustix::process::getuid().as_raw(),
+    )
+    .path
+}
+
+/// Where chan put its home when the OS home could not be resolved, with
+/// one line per location it refused on the way.
+#[derive(Debug)]
+struct FallbackHome {
+    path: PathBuf,
+    refused: Vec<String>,
+}
+
+#[cfg(unix)]
+fn unix_fallback_home(
+    var_tmp: &Path,
+    _temp_dir: &Path,
+    _cwd: Option<&Path>,
+    uid: u32,
+) -> FallbackHome {
+    FallbackHome {
+        path: var_tmp.join(format!("chan-{uid}")),
+        refused: Vec::new(),
+    }
 }
 
 #[cfg(windows)]
@@ -509,6 +533,174 @@ mod tests {
             "default chan home is absolute: {default:?}"
         );
         assert_eq!(default, home.join(".chan"));
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn uid() -> u32 {
+        rustix::process::getuid().as_raw()
+    }
+
+    /// A private `var_tmp` and temp dir per test, so no test touches the
+    /// host's real `/var/tmp`.
+    #[cfg(unix)]
+    struct FallbackFixture {
+        _tmp: tempfile::TempDir,
+        var_tmp: PathBuf,
+        temp: PathBuf,
+        cwd: PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn fallback_fixture() -> FallbackFixture {
+        let tmp = tempfile::tempdir().unwrap();
+        let var_tmp = tmp.path().join("var-tmp");
+        let temp = tmp.path().join("temp");
+        let cwd = tmp.path().join("cwd");
+        for dir in [&var_tmp, &temp, &cwd] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        FallbackFixture {
+            _tmp: tmp,
+            var_tmp,
+            temp,
+            cwd,
+        }
+    }
+
+    #[cfg(unix)]
+    fn fresh_under(home: &FallbackHome, parent: &Path, uid: u32) -> bool {
+        home.path.parent() == Some(parent)
+            && home
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("chan-{uid}-")))
+            && home.path.is_dir()
+            && mode_of(&home.path) == 0o700
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_home_is_created_private() {
+        let fx = fallback_fixture();
+
+        let home = unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), uid());
+
+        assert_eq!(home.path, fx.var_tmp.join(format!("chan-{}", uid())));
+        assert!(home.path.is_dir(), "the fallback home exists");
+        assert_eq!(mode_of(&home.path), 0o700);
+        assert!(home.refused.is_empty(), "{:?}", home.refused);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_own_fallback_home_with_an_open_mode_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fallback_fixture();
+        let predictable = fx.var_tmp.join(format!("chan-{}", uid()));
+        std::fs::create_dir(&predictable).unwrap();
+        std::fs::set_permissions(&predictable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let home = unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), uid());
+
+        assert_eq!(home.path, predictable);
+        assert_eq!(mode_of(&predictable), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_fallback_home_is_refused_for_a_fresh_one() {
+        let fx = fallback_fixture();
+        let elsewhere = fx.cwd.join("attacker-owned");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let predictable = fx.var_tmp.join(format!("chan-{}", uid()));
+        std::os::unix::fs::symlink(&elsewhere, &predictable).unwrap();
+
+        let home = unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), uid());
+
+        assert!(
+            fresh_under(&home, &fx.var_tmp, uid()),
+            "a symlink is refused for a fresh private directory: {home:?}"
+        );
+        assert!(
+            home.refused.iter().any(|why| why.contains("symlink")),
+            "{:?}",
+            home.refused
+        );
+        assert!(
+            std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+            "nothing is written through the symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fallback_home_owned_by_another_uid_is_refused_for_a_fresh_one() {
+        let fx = fallback_fixture();
+        // The fake uid is the check under test: the directory this process
+        // creates is owned by its real uid, which is "another user" to it.
+        let fake_uid = uid().wrapping_add(4242);
+        let predictable = fx.var_tmp.join(format!("chan-{fake_uid}"));
+        std::fs::create_dir(&predictable).unwrap();
+
+        let home = unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), fake_uid);
+
+        assert!(fresh_under(&home, &fx.var_tmp, fake_uid), "{home:?}");
+        assert!(
+            home.refused
+                .iter()
+                .any(|why| why.contains(&format!("owned by uid {}", uid()))),
+            "{:?}",
+            home.refused
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fallback_home_that_is_a_file_is_refused_for_a_fresh_one() {
+        let fx = fallback_fixture();
+        let predictable = fx.var_tmp.join(format!("chan-{}", uid()));
+        std::fs::write(&predictable, "not a directory").unwrap();
+
+        let home = unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), uid());
+
+        assert!(fresh_under(&home, &fx.var_tmp, uid()), "{home:?}");
+        assert!(
+            home.refused.iter().any(|why| why.contains("not a directory")),
+            "{:?}",
+            home.refused
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unusable_var_tmp_falls_back_to_the_temp_dir() {
+        let fx = fallback_fixture();
+        let missing = fx.var_tmp.join("missing");
+
+        let home = unix_fallback_home(&missing, &fx.temp, Some(&fx.cwd), uid());
+
+        assert!(fresh_under(&home, &fx.temp, uid()), "{home:?}");
+        assert_eq!(home.refused.len(), 2, "{:?}", home.refused);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_no_usable_temp_location_the_working_directory_is_the_last_resort() {
+        let fx = fallback_fixture();
+        let missing = fx.var_tmp.join("missing");
+
+        let home = unix_fallback_home(&missing, &missing, Some(&fx.cwd), uid());
+
+        assert_eq!(home.path, fx.cwd.join(".chan"));
+        assert!(home.path.is_absolute());
+        assert!(!home.refused.is_empty());
     }
 
     #[test]
