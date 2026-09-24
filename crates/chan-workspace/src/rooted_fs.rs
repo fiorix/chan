@@ -915,7 +915,10 @@ impl RootedFs {
         crate::no_replace::rename(&self.dir(), &self.canon(), from, to)
     }
 
-    /// Create `rel` as a new editable text file. The name is claimed with an
+    /// Create `rel` as a new editable text file. The preflight matches
+    /// [`ensure_writable`](Self::ensure_writable): the root is checked (and a
+    /// remount adopted) before anything is created, and a path that resolves
+    /// outside the root is `SymlinkEscape`. The name is then claimed with an
     /// exclusive create, so a path that exists by then, however recently it
     /// appeared, is `PathAlreadyExists` and is never written. Content then
     /// replaces the empty claim through the ordinary atomic write, so a reader
@@ -924,10 +927,22 @@ impl RootedFs {
         if !self.editable_text_gate(rel) {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
+        // A capability directory can outlive a root renamed or unlinked away.
+        // Never create parents or claim a name inside that unreachable
+        // directory, and let a remount be adopted before the handle is used.
+        self.ensure_root_available()?;
         let (dir, rel_path) = self.resolve_io(rel)?;
+        // Resolving the leaf is what names an escaping parent symlink: the
+        // parent chain below answers a plain "File exists" for it.
+        match dir.symlink_metadata(&rel_path) {
+            Ok(_) => return Err(ChanError::PathAlreadyExists(rel.to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(map_cap_err(error, &rel_path)),
+        }
         if let Some(parent) = rel_path.parent() {
             if !parent.as_os_str().is_empty() {
-                dir.create_dir_all(parent).map_err(ChanError::from)?;
+                dir.create_dir_all(parent)
+                    .map_err(|error| map_cap_err(error, &rel_path))?;
             }
         }
         let mut options = cap_std::fs::OpenOptions::new();
@@ -942,7 +957,7 @@ impl RootedFs {
             Err(error) => return Err(map_cap_err(error, &rel_path)),
         }
         if content.is_empty() {
-            return self.ensure_root_available();
+            return Ok(());
         }
         if let Err(error) = self.write_text(rel, content) {
             // Withdraw the claim only while it is still the empty file this
