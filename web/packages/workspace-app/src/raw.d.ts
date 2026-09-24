@@ -8,16 +8,6 @@ declare module "*.ts?raw" {
   export default content;
 }
 
-declare module "*.md?raw" {
-  const content: string;
-  export default content;
-}
-
-declare module "*.json?raw" {
-  const content: string;
-  export default content;
-}
-
 // Minimal `node:fs` shim for tests that need to read on-disk files
 // the `?raw` Vite import can't surface (notably `.css`, which the
 // CSS plugin chain consumes before vitest sees the file). The full
