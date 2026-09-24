@@ -20,8 +20,9 @@ use crate::util::raw_json_response;
 
 /// Window id query param (`?w=<id>`) for session routes. `moved=1` (DELETE
 /// only) marks a cross-window MOVE-OUT so the handler deletes the blob but does
-/// NOT reap the window's sessions; the moved PTY survives. Get /
-/// put ignore it. `client` is the writer's per-SPA-instance nonce, echoed on
+/// NOT reap the window's sessions, and `session=<id>` names the terminal that
+/// moved, the one session the window's later close spares. Get / put ignore
+/// both. `client` is the writer's per-SPA-instance nonce, echoed on
 /// the `session_changed` broadcast so the writer can drop its own frame; GET
 /// accepts and ignores it. `app=files` addresses the Files blob namespace on a
 /// workspace-less tenant (a `files/` child of the terminal blob dir, or the
@@ -32,6 +33,8 @@ pub struct SessionQuery {
     w: String,
     #[serde(default)]
     moved: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
     #[serde(default)]
     client: Option<String>,
     #[serde(default)]
@@ -181,7 +184,8 @@ pub async fn api_delete_session(
     Query(q): Query<SessionQuery>,
 ) -> Response {
     let moved = matches!(q.moved.as_deref(), Some("1"));
-    let response = delete_session_response(&state, q.w.clone(), q.app, moved).await;
+    let response =
+        delete_session_response(&state, q.w.clone(), q.app, moved, q.session.as_deref()).await;
     if response.status().is_success() {
         broadcast_session_changed(&state, &q.w, q.client.as_deref(), true);
     }
@@ -193,6 +197,7 @@ async fn delete_session_response(
     key: String,
     app: Option<crate::app_query::AppQuery>,
     moved: bool,
+    moved_session: Option<&str>,
 ) -> Response {
     // A DELETE either DISCARDS the window or signals a cross-window MOVE-OUT:
     // - `?w=W` (discard: ^W to empty / ^D / Ctrl+Shift+W (off-mac tab close) /
@@ -200,15 +205,17 @@ async fn delete_session_response(
     //   drop it from the persisted set AND reap its sessions (kill the PTYs,
     //   release the fds) -- the "discard ⇒ reap" half that frees a busy detached
     //   session the pruner keeps alive.
-    // - `?w=W&moved=1`: the source window emptied because its tab
+    // - `?w=W&moved=1&session=S`: the source window emptied because its tab
     //   moved to another window. Drop the blob + unpersist so it leaves
-    //   `cs window list`, but do NOT reap; the moved PTY survives, and
+    //   `cs window list`, but do NOT reap; the moved PTY `S` survives, and
     //   reattach re-binds it to the target window. Skipping the
     //   reap is the deterministic guard against the source DELETE racing ahead
     //   of the target's attach/rebind.
     // Either way the blob delete below runs (an unsaved window can still go).
     if moved {
-        state.terminal_sessions.unpersist_window(&key);
+        state
+            .terminal_sessions
+            .unpersist_window(&key, moved_session);
     } else {
         state.terminal_sessions.forget_window(&key);
     }
@@ -280,6 +287,7 @@ mod tests {
         Query(SessionQuery {
             w: w.to_string(),
             moved: None,
+            session: None,
             client: client.map(str::to_string),
             app: None,
         })
@@ -289,6 +297,7 @@ mod tests {
         Query(SessionQuery {
             w: w.to_string(),
             moved: None,
+            session: None,
             client: None,
             app: Some(crate::app_query::AppQuery::Files),
         })

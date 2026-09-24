@@ -264,9 +264,11 @@ pub struct Registry {
     /// keyed by session id with the window that moved them out. The source
     /// window's discard can reach the registry before the target's attach
     /// rebinds the session, so [`forget_window`](Self::forget_window) spares
-    /// these. An entry ends when the target attaches or the source's discard
-    /// consumes it; a target that never attaches leaves the session to the
-    /// orphan reap, since its window is no longer persisted.
+    /// these. Only the session the move-out names is recorded, so any other
+    /// session still bound to the source is reaped with it. An entry ends
+    /// when the target attaches or the source's discard consumes it; a target
+    /// that never attaches leaves the session to the orphan reap, since its
+    /// window is no longer persisted.
     moved_out: Mutex<HashMap<String, String>>,
     /// Optional hook fired when [`reap_exited`](Self::reap_exited) reaps a
     /// session that owns a window: the host installs it (on the SHARED terminal
@@ -2283,30 +2285,33 @@ impl Registry {
     /// window emptied because its tab moved away, so its layout blob is deleted
     /// (it leaves `cs window list`) but the moved PTY must survive; reattach
     /// rebinds it to the target. A move-out DELETE
-    /// (`?w=W&moved=1`) routes here; a real discard (`?w=W`) routes through
-    /// [`forget_window`](Self::forget_window) and reaps.
+    /// (`?w=W&moved=1&session=S`) routes here; a real discard (`?w=W`) routes
+    /// through [`forget_window`](Self::forget_window) and reaps.
     ///
-    /// Every session still bound to the window at this point is one the move
-    /// carried away, since a window sends this only once it holds no tab, so
-    /// each is recorded as moved out and the window's later discard (the
-    /// desktop host closing the emptied window) does not reap it before the
-    /// target attaches.
-    pub fn unpersist_window(&self, window_id: &str) {
+    /// `moved_session`, when it is still bound to the window, is recorded as
+    /// moved out, so the window's later discard (the desktop host closing the
+    /// emptied window) does not reap it before the target attaches. Any other
+    /// session bound to the window has no tab showing it, since a window sends
+    /// this only once it holds none, and that discard reaps it.
+    pub fn unpersist_window(&self, window_id: &str, moved_session: Option<&str>) {
         self.persisted_windows
             .lock()
             .expect("terminal registry poisoned")
             .remove(window_id);
-        let bound: Vec<String> = {
-            let sessions = self.sessions.lock().expect("terminal registry poisoned");
-            sessions
-                .iter()
-                .filter(|(_, session)| session.window_id().as_deref() == Some(window_id))
-                .map(|(id, _)| id.clone())
-                .collect()
+        let Some(id) = moved_session else {
+            return;
         };
-        let mut moved_out = self.moved_out.lock().expect("terminal registry poisoned");
-        for id in bound {
-            moved_out.insert(id, window_id.to_string());
+        let bound = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(id)
+            .is_some_and(|session| session.window_id().as_deref() == Some(window_id));
+        if bound {
+            self.moved_out
+                .lock()
+                .expect("terminal registry poisoned")
+                .insert(id.to_string(), window_id.to_string());
         }
     }
 
@@ -7651,10 +7656,10 @@ mod tests {
         // the window but must NOT reap; attach rebinds the moved PTY to the
         // target window.
         let registry = Registry::new(test_config(1024, 4, 10));
-        let _a = registry.create(opts_with_window("win-a")).unwrap();
+        let a = registry.create(opts_with_window("win-a")).unwrap();
         registry.mark_window_persisted("win-a");
 
-        registry.unpersist_window("win-a");
+        registry.unpersist_window("win-a", Some(a.id()));
         assert_eq!(registry.len(), 1, "move-out keeps the PTY alive (no reap)");
         assert!(
             !registry.persisted_windows.lock().unwrap().contains("win-a"),
@@ -8217,9 +8222,9 @@ mod tests {
     #[test]
     fn a_move_out_keeps_the_moved_session_through_the_source_windows_discard() {
         // A window's only terminal is dragged to another window. The source
-        // empties, sends its move-out DELETE (`unpersist_window`), and then
-        // asks the desktop host to close the window, whose discard runs
-        // `forget_window` on every tenant. The target's attach is asynchronous
+        // empties, sends its move-out DELETE (`unpersist_window` naming the
+        // moved session), and then asks the desktop host to close the window,
+        // whose discard runs `forget_window` on every tenant. The target's attach is asynchronous
         // and can arrive after both, so the session must still be live for it.
         let registry = Registry::new(test_config(1024, 4, 10));
         let handle = registry.create(opts_with_window("win-a")).unwrap();
@@ -8227,7 +8232,7 @@ mod tests {
         drop(handle);
         registry.mark_window_persisted("win-a");
 
-        registry.unpersist_window("win-a");
+        registry.unpersist_window("win-a", Some(&id));
         assert_eq!(
             registry.forget_window("win-a"),
             0,
