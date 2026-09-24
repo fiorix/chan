@@ -206,6 +206,12 @@ afterEach(async () => {
   timers?.release();
   timers = null;
   uninstallDemoWorkspace();
+  // The settle above yields to the event loop with the app still mounted, so
+  // a debounce that came due there can have written this test's layout into
+  // the URL hash or the reload snapshot. The next mount's bootstrap restores
+  // from either, after that test has seeded its own layout.
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  sessionStorage.clear();
   document.body.innerHTML = "";
   screensaver.locked = false;
   screensaver.pin_set = false;
