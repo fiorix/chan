@@ -1114,8 +1114,52 @@ def workflow_steps(workflow: str, action: str) -> list[tuple[int, int, dict[str,
     return steps
 
 
+def workflow_run_lines(workflow: str) -> list[tuple[int, int, str]]:
+    """Each command line of every `run:` step in WORKFLOW, with its job.
+
+    Line-based like workflow_steps: a `run:` body is the value on the key's
+    own line plus every later line indented past the key (a `|` or `>`
+    block), and a line whose first non-blank character is `#` is a shell
+    comment and not returned. The tuple is the job's line, the 1-based line
+    the command sits on, and the command text.
+    """
+    lines = workflow.splitlines()
+    job_pattern = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
+    commands: list[tuple[int, int, str]] = []
+    job_line = 0
+    for index, line in enumerate(lines):
+        if job_pattern.match(line):
+            job_line = index + 1
+        match = re.match(r"^(\s*)(- )?run:(.*)$", line)
+        if not match:
+            continue
+        column = len(match.group(1)) + (2 if match.group(2) else 0)
+        body = [(index + 1, match.group(3))]
+        for number, later in enumerate(lines[index + 1 :], start=index + 2):
+            if later.strip() and len(later) - len(later.lstrip()) <= column:
+                break
+            body.append((number, later))
+        for number, text in body:
+            stripped = text.strip()
+            if stripped and not stripped.startswith("#"):
+                commands.append((job_line, number, stripped))
+    return commands
+
+
+# A command that installs the web workspace or builds a bundle from it, so
+# the node that runs it is the node the bundle is built on.
+BUNDLE_BUILD = re.compile(
+    r"\bnpm(?:\s|$)|\bmkdist\b|\bmake\b[^;&|]*?\s(?:web[A-Za-z0-9_-]*|distros-tarball)(?=[\s;&|)]|$)"
+)
+
+
 def check_node_major_contract() -> None:
-    """One node major builds every bundle, and `.nvmrc` is where it is stated.
+    """One node major, stated in `.nvmrc`, builds the bundles this can see.
+
+    That is every bundle a GitHub workflow builds, the container images and
+    the Nix packages; the COPR SRPM stage builds its bundles on the mock
+    chroot's own `nodejs` (`.copr/Makefile`), which this cannot reach and
+    which is 22 or 24 on Fedora 43 and 44 today.
 
     The workflows read the file: every setup-node step names it through
     `node-version-file`, at the path where its job's actions/checkout put
@@ -1124,7 +1168,11 @@ def check_node_major_contract() -> None:
     workspace, and none carries a `node-version` literal, the right major
     included, since a literal is a second place to edit. A checkout that
     names a `repository` is some other repository's and offers no
-    `.nvmrc` of ours, so it does not count. The Docker builder images and
+    `.nvmrc` of ours, so it does not count. A job whose `run:` steps
+    install or build the web workspace (`npm`, `mkdist`, a `make web*` or
+    `make distros-tarball` target) needs such a step before them, since
+    without one the bundle builds on whatever node the runner image
+    carries and no setup-node step exists to check. The Docker images and
     the Nix packages cannot read the file (a `FROM` tag and a nixpkgs
     attribute are fixed before anything runs), so they name the major and
     this holds them to it.
@@ -1143,8 +1191,10 @@ def check_node_major_contract() -> None:
             prefix = inputs.get("path", ("", 0))[0].strip("/")
             expected = f"{prefix}/{NODE_MAJOR_FILE}" if prefix else NODE_MAJOR_FILE
             checkouts.setdefault(job_line, set()).add(expected)
+        node_steps: dict[int, int] = {}
         for job_line, line, inputs in workflow_steps(workflow, "actions/setup-node"):
             steps += 1
+            node_steps.setdefault(job_line, line)
             if "node-version" in inputs:
                 value, at = inputs["node-version"]
                 raise ContractError(
@@ -1168,6 +1218,20 @@ def check_node_major_contract() -> None:
                     f"{path}:{at}: node-version-file is {value!r}, expected "
                     f"{' or '.join(repr(item) for item in sorted(expected))} "
                     "(where the job checks the repository out)"
+                )
+        lines = workflow.splitlines()
+        for job_line, number, command in workflow_run_lines(workflow):
+            build = BUNDLE_BUILD.search(command)
+            if not build:
+                continue
+            node_line = node_steps.get(job_line)
+            if node_line is None or node_line > number:
+                job = lines[job_line - 1].strip().rstrip(":") if job_line else "(no job)"
+                raise ContractError(
+                    f"{path}:{number}: job {job!r} runs {build.group(0).strip()!r} "
+                    f"with no actions/setup-node step before it reading "
+                    f"{NODE_MAJOR_FILE}, so the bundle builds on the runner's "
+                    "default node"
                 )
     if steps == 0:
         raise ContractError(
