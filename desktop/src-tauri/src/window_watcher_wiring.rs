@@ -833,6 +833,12 @@ async fn keepalive_pump(
     Ok(())
 }
 
+/// The window rows one `/watch` text frame carries, or `None` for a frame
+/// that does not parse as a [`WindowSet`].
+fn decode_window_frame(text: &str) -> Option<Vec<WindowRecord>> {
+    serde_json::from_str::<WindowSet>(text).ok().map(|set| set.windows)
+}
+
 /// Settle DELETEs already absent from a full feed snapshot, then claim one
 /// retry attempt for each remaining close intent on the first snapshot of a
 /// connection round. Later frames only settle state; they cannot create an
@@ -887,13 +893,12 @@ async fn stream_window_feed(
                 embedded.signal_library_change();
             }
         }
-        if let Ok(set) = serde_json::from_str::<WindowSet>(text) {
+        if let Some(windows) = decode_window_frame(text) {
             // Rows keep their devserver-local tokens: `should_show` reads
             // token emptiness as the tenant on/off signal, and gateway
             // navigation credentials are minted at open/retarget time
             // (`devserver::window_navigation_url`), never stamped into
             // the feed.
-            let windows = set.windows;
             let first_snapshot = !saw_snapshot;
             saw_snapshot = true;
             let pending_attempts = pending_delete_attempts_for_feed_snapshot(
