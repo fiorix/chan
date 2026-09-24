@@ -1620,6 +1620,63 @@ mod tests {
             vec![shown],
             "the row keeps the record the desktop last read for it"
         );
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the stale row is logged once: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("turned unreadable")
+                && warnings[0].contains("stale")
+                && warnings[0].contains("row=window_id w-1")
+                && warnings[0].contains("devserver=dev-1"),
+            "the line says the row is stale and names it: {}",
+            warnings[0]
+        );
+
+        // Later frames keep standing in for the row, without another line.
+        let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
+            .expect("the third frame parses");
+        assert_eq!(windows.len(), 1, "the stale record still stands in");
+        assert_eq!(
+            logs.warnings().len(),
+            1,
+            "the stale row logs once per connection"
+        );
+
+        // A reconnect has read nothing, so the row is hidden there.
+        let windows =
+            decode_window_frame("dev-1", &second.to_string(), &mut ConnectionRows::default())
+                .expect("a reconnect's frame parses");
+        assert!(
+            windows.is_empty(),
+            "a row never read on a connection is hidden"
+        );
+    }
+
+    /// A row a frame no longer carries is forgotten: a discarded window closes
+    /// as the feed says, and its record never stands in for a later
+    /// unreadable row under the same id.
+    #[test]
+    fn a_discarded_row_is_not_kept_for_a_later_unreadable_one() {
+        let mut turned = serde_json::to_value(rec()).unwrap();
+        turned["kind"] = "panel".into();
+        let shown = serde_json::json!({ "windows": [serde_json::to_value(rec()).unwrap()] });
+        let discarded = serde_json::json!({ "windows": [] });
+        let returned = serde_json::json!({ "windows": [turned] });
+        let mut connection = ConnectionRows::default();
+
+        decode_window_frame("dev-1", &shown.to_string(), &mut connection).expect("shown");
+        let windows = decode_window_frame("dev-1", &discarded.to_string(), &mut connection)
+            .expect("discarded");
+        assert!(windows.is_empty(), "a discarded row leaves the snapshot");
+        let windows =
+            decode_window_frame("dev-1", &returned.to_string(), &mut connection).expect("returned");
+        assert!(
+            windows.is_empty(),
+            "a discarded window's record stood in for a later row: {windows:?}"
+        );
     }
 
     #[tokio::test]

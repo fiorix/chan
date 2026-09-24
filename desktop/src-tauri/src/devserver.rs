@@ -1995,25 +1995,34 @@ async fn row_from_launcher(
 /// What one feed connection remembers about the rows it has decoded. A
 /// devserver sends its whole window set in every `/watch` frame, one frame
 /// per window change, so a connection logs an unreadable row the first time
-/// it sees that row's `window_id` rather than once per frame. A reconnect
-/// starts from a fresh one and logs the row again, and the list call is a
-/// connection of its own.
+/// it meets that row's `window_id` unreadable rather than once per frame, and
+/// it keeps the last readable record of every row it still carries, which
+/// stands in for that row if a later frame serves it unreadable. A reconnect
+/// starts from a fresh one, and the list call is a connection of its own.
 #[derive(Default)]
 pub(crate) struct ConnectionRows {
     /// `window_id`s of unreadable rows this connection has logged.
     logged: HashSet<String>,
+    /// The last readable record per `window_id`, for the rows the latest
+    /// decode carried.
+    last_readable: HashMap<String, chan_server::WindowRecord>,
 }
 
 /// Decode a devserver's window rows one at a time, so a row this desktop
 /// cannot read (a `kind` or `origin` tag from a later release, a damaged row)
 /// costs that row alone rather than the desktop's whole view of the
-/// devserver. Such a row is logged with the devserver id, `source` (which
-/// feed carried it) and its `window_id` the first time `seen`'s connection
-/// meets it, or with its index on every decode when even the id is
-/// unreadable, since such a row cannot be tracked. It is left out: the
-/// devserver keeps it in its own store, so
-/// hiding it here loses nothing. A catch-all variant on the closed enums
-/// would instead reach every server-side consumer of the record.
+/// devserver. A catch-all variant on the closed enums would instead reach
+/// every server-side consumer of the record.
+///
+/// A row `seen`'s connection has read before keeps the record last read for
+/// it, because its absence would close the window the desktop shows for it
+/// and settle a pending close intent; that record stays as last read until
+/// the row reads again or the connection ends. A row never read on this
+/// connection is left out, since there is no record to show, and the
+/// devserver keeps it in its own store. Either way the row is logged with
+/// the devserver id, `source` (which feed carried it) and its `window_id` the
+/// first time the connection meets it unreadable, or with its index on every
+/// decode when even the id is unreadable, since such a row cannot be tracked.
 pub(crate) fn decode_window_rows(
     devserver_id: &str,
     source: &str,
@@ -2022,26 +2031,56 @@ pub(crate) fn decode_window_rows(
 ) -> Vec<chan_server::WindowRecord> {
     let mut windows = Vec::with_capacity(rows.len());
     for (index, value) in rows.iter().enumerate() {
-        match chan_server::WindowRecord::deserialize(value) {
-            Ok(record) => windows.push(record),
-            Err(error) => {
-                let (row, first) = match value.get("window_id").and_then(serde_json::Value::as_str)
-                {
-                    Some(id) => (format!("window_id {id}"), seen.logged.insert(id.to_owned())),
-                    None => (format!("index {index}"), true),
-                };
+        let error = match chan_server::WindowRecord::deserialize(value) {
+            Ok(record) => {
+                seen.last_readable
+                    .insert(record.window_id.clone(), record.clone());
+                windows.push(record);
+                continue;
+            }
+            Err(error) => error,
+        };
+        let Some(id) = value.get("window_id").and_then(serde_json::Value::as_str) else {
+            tracing::warn!(
+                devserver = %devserver_id,
+                source = %source,
+                row = %format!("index {index}"),
+                %error,
+                "unreadable devserver window row is hidden from the desktop"
+            );
+            continue;
+        };
+        let first = seen.logged.insert(id.to_owned());
+        let row = format!("window_id {id}");
+        match seen.last_readable.get(id) {
+            Some(last) => {
+                windows.push(last.clone());
                 if first {
                     tracing::warn!(
                         devserver = %devserver_id,
                         source = %source,
                         %row,
                         %error,
-                        "unreadable devserver window row is hidden from the desktop"
+                        "devserver window row turned unreadable; its window keeps the stale record last read"
                     );
                 }
             }
+            None if first => tracing::warn!(
+                devserver = %devserver_id,
+                source = %source,
+                %row,
+                %error,
+                "unreadable devserver window row is hidden from the desktop"
+            ),
+            None => {}
         }
     }
+    // Forget the rows this decode no longer carried, so the map stays the size
+    // of the current window set and a discarded window's record never stands
+    // in for a row again.
+    let carried: HashSet<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
+    seen.last_readable
+        .retain(|id, _| carried.contains(id.as_str()));
     windows
 }
 
