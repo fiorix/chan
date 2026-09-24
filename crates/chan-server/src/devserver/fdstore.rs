@@ -67,6 +67,8 @@ mod linux {
     const MANIFEST_DEBOUNCE: Duration = Duration::from_millis(250);
     /// Bound on the post-FDSTORE manager sync in a park's additive commit.
     const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Bound on the seal's wait for the parked sessions' PTY readers to stop.
+    const READER_STOP_WAIT: Duration = Duration::from_secs(2);
     /// The canonical unit's FileDescriptorStoreMax, the cap fallback where
     /// the manager does not export `$FDSTORE`.
     const UNIT_FDSTORE_MAX: usize = 512;
@@ -385,9 +387,9 @@ mod linux {
             self.shared.write_if_active();
         }
 
-        /// Seal parking at the head of graceful shutdown. Active parking takes
-        /// one final manifest write, then removes and detaches exactly the
-        /// parked set. A shutdown before activation preserves the inherited
+        /// Seal parking at the head of graceful shutdown. Active parking stops
+        /// the parked sessions' PTY readers, takes one final manifest write,
+        /// then removes and detaches exactly the parked set. A shutdown before activation preserves the inherited
         /// manifest untouched: the mounted tenant set is incomplete and cannot
         /// truthfully replace it.
         pub(crate) fn seal_flush_detach(&self) -> usize {
@@ -398,6 +400,20 @@ mod linux {
                     return 0;
                 }
                 *phase = ParkerPhase::Sealed;
+                // Stop the PTY readers first, so the final manifest is each
+                // session's last read: a read recorded after this write would
+                // reach no manifest and no socket, while output the readers
+                // leave in the PTY reaches the next process.
+                let running = self
+                    .shared
+                    .host
+                    .stop_parked_terminal_readers(READER_STOP_WAIT);
+                if running > 0 {
+                    tracing::warn!(
+                        running,
+                        "PTY readers still running at the final fdstore manifest write; output they read after it is lost"
+                    );
+                }
                 if let Err(error) = self.shared.write_manifest_locked(&phase) {
                     tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
                 }

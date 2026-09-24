@@ -182,6 +182,91 @@ const DSR_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
 const DSR_ANSWER_GRACE_MS: i64 = 150;
 #[cfg(target_os = "linux")]
 const FDSTORE_REPLAY_BYTES: usize = 128 * 1024;
+/// How long a PTY reader waits for output before it looks for a restart
+/// seal's stop request again. It bounds how long an idle reader keeps the seal
+/// waiting.
+#[cfg(target_os = "linux")]
+const READER_STOP_POLL: Duration = Duration::from_millis(200);
+/// Reads a stopping reader may still take from a PTY that keeps producing
+/// output, so a child that never pauses cannot hold the seal. What it leaves
+/// stays in the PTY for the next process.
+#[cfg(target_os = "linux")]
+const READER_STOP_DRAIN_READS: usize = 64;
+
+/// A restart seal's handshake with a session's PTY reader thread. The seal
+/// asks the reader to stop and waits until it has recorded its last read, so
+/// the final manifest holds everything this process took from the PTY, and
+/// what the child writes afterwards stays in the PTY for the next process.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct ReaderStop {
+    state: Mutex<ReaderStopState>,
+    changed: Condvar,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct ReaderStopState {
+    running: bool,
+    requested: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl ReaderStop {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReaderStopState> {
+        self.state.lock().expect("terminal reader stop poisoned")
+    }
+
+    fn requested(&self) -> bool {
+        self.lock().requested
+    }
+
+    fn request(&self) {
+        self.lock().requested = true;
+    }
+
+    fn set_running(&self, running: bool) {
+        self.lock().running = running;
+        self.changed.notify_all();
+    }
+
+    /// Whether the reader is stopped (or never ran) by `deadline`.
+    fn wait(&self, deadline: std::time::Instant) -> bool {
+        let mut state = self.lock();
+        while state.running {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, deadline - now)
+                .expect("terminal reader stop poisoned")
+                .0;
+        }
+        true
+    }
+}
+
+/// Marks a session's PTY reader running for as long as the thread that owns
+/// it holds this, whichever way that thread ends.
+#[cfg(target_os = "linux")]
+struct ReaderRunning(Arc<Session>);
+
+#[cfg(target_os = "linux")]
+impl ReaderRunning {
+    fn start(session: &Arc<Session>) -> Self {
+        session.reader_stop.set_running(true);
+        Self(session.clone())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ReaderRunning {
+    fn drop(&mut self) {
+        self.0.reader_stop.set_running(false);
+    }
+}
 
 /// Per-tenant settings every PTY spawn reads: the workspace root, the MCP and
 /// control socket paths, and the terminal config.
@@ -2722,6 +2807,36 @@ impl Registry {
         parked.len()
     }
 
+    /// Ask the PTY reader of every parked session to stop once it has read
+    /// what the PTY already holds. [`wait_parked_readers`](Self::wait_parked_readers)
+    /// waits for them; the two are split so a host stops every tenant's
+    /// readers at once and waits once.
+    #[cfg(target_os = "linux")]
+    pub fn request_parked_reader_stop(&self) {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        for session in sessions.values().filter(|s| s.is_fdstore_parked()) {
+            session.reader_stop.request();
+        }
+    }
+
+    /// Wait until `deadline` for every parked session whose reader was asked
+    /// to stop, returning how many readers were still running at the deadline.
+    #[cfg(target_os = "linux")]
+    pub fn wait_parked_readers(&self, deadline: std::time::Instant) -> usize {
+        let stopping: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .values()
+            .filter(|s| s.reader_stop.requested())
+            .cloned()
+            .collect();
+        stopping
+            .iter()
+            .filter(|session| !session.reader_stop.wait(deadline))
+            .count()
+    }
+
     /// Child pids of every not-yet-closed session, for the drain endpoint's
     /// bounded child-death wait.
     pub fn live_child_pids(&self) -> Vec<u32> {
@@ -3446,6 +3561,9 @@ struct Session {
     /// snapshot); never invoke the parker while holding this lock.
     #[cfg(target_os = "linux")]
     fdstore_parked: Mutex<Option<ParkedFd>>,
+    /// Stops the PTY reader ahead of a restart seal's final manifest write.
+    #[cfg(target_os = "linux")]
+    reader_stop: ReaderStop,
     /// The PTY's exit state, set once its child process exits (the same value
     /// broadcast as [`SessionEvent::Exit`]). `None` while the process runs.
     /// Stored -- not only broadcast -- so a poller (the desktop's control-script
@@ -3703,6 +3821,8 @@ impl Session {
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            reader_stop: ReaderStop::default(),
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
@@ -3723,11 +3843,21 @@ impl Session {
 
         {
             let session = session.clone();
+            #[cfg(target_os = "linux")]
+            let running = ReaderRunning::start(&session);
             std::thread::Builder::new()
                 .name("chan-terminal-reader".into())
                 .spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    let _running = running;
+                    #[cfg(target_os = "linux")]
+                    let mut drained = 0;
                     let mut buf = [0u8; 8192];
                     loop {
+                        #[cfg(target_os = "linux")]
+                        if !session.reader_may_read(&mut drained) {
+                            break;
+                        }
                         match reader.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
@@ -4014,6 +4144,8 @@ impl Session {
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            reader_stop: ReaderStop::default(),
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
@@ -4021,11 +4153,17 @@ impl Session {
         {
             let session = session.clone();
             let registry_last_exit = registry_last_exit.clone();
+            let running = ReaderRunning::start(&session);
             std::thread::Builder::new()
                 .name("chan-terminal-fdstore-reader".into())
                 .spawn(move || {
+                    let _running = running;
+                    let mut drained = 0;
                     let mut buf = [0u8; 8192];
                     loop {
+                        if !session.reader_may_read(&mut drained) {
+                            break;
+                        }
                         match reader.read(&mut buf) {
                             Ok(0) => {
                                 session.record_terminal_exit(
@@ -4121,6 +4259,45 @@ impl Session {
         }
 
         Ok(session)
+    }
+
+    /// Wait until the PTY has output for the reader. False once a restart
+    /// seal has asked the reader to stop and it has read what the PTY already
+    /// held, or `READER_STOP_DRAIN_READS` more reads, whichever comes first;
+    /// `drained` counts those. Without a master fd to poll the reader blocks
+    /// in its read as it always would, and the seal's wait runs out.
+    #[cfg(target_os = "linux")]
+    fn reader_may_read(&self, drained: &mut usize) -> bool {
+        let Some(fd) = self.master_fd.as_ref() else {
+            return true;
+        };
+        loop {
+            let stopping = self.reader_stop.requested();
+            if stopping && *drained >= READER_STOP_DRAIN_READS {
+                return false;
+            }
+            let mut poll = [filedescriptor::pollfd {
+                fd: fd.as_raw_fd(),
+                events: filedescriptor::POLLIN,
+                revents: 0,
+            }];
+            let wait = if stopping {
+                Duration::ZERO
+            } else {
+                READER_STOP_POLL
+            };
+            match filedescriptor::poll(&mut poll, Some(wait)) {
+                Ok(0) if stopping => return false,
+                Ok(0) => continue,
+                // Readable, hung up or failed: the read reports which.
+                _ => {
+                    if stopping {
+                        *drained += 1;
+                    }
+                    return true;
+                }
+            }
+        }
     }
 
     /// The ring's end `seq` and its bounded replay tail, read under one ring
@@ -5438,6 +5615,8 @@ mod tests {
             closed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fdstore_parked: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            reader_stop: ReaderStop::default(),
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });

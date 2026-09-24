@@ -1683,6 +1683,32 @@ impl WorkspaceHost {
         }
     }
 
+    /// Stops the PTY reader of every parked session in every tenant once it
+    /// has read what its PTY already holds, waiting at most `wait` for all of
+    /// them. The devserver's graceful-shutdown seal runs this BEFORE its final
+    /// manifest write, so that write holds the last output this process takes
+    /// from each PTY. Returns how many readers were still running at the bound.
+    #[cfg(target_os = "linux")]
+    pub fn stop_parked_terminal_readers(&self, wait: std::time::Duration) -> usize {
+        let registries: Vec<Arc<crate::terminal_sessions::Registry>> = {
+            let Ok(workspaces) = self.workspaces.read() else {
+                return 0;
+            };
+            workspaces
+                .values()
+                .map(|runtime| runtime.artifacts.terminal_sessions.clone())
+                .collect()
+        };
+        for registry in &registries {
+            registry.request_parked_reader_stop();
+        }
+        let deadline = std::time::Instant::now() + wait;
+        registries
+            .iter()
+            .map(|registry| registry.wait_parked_readers(deadline))
+            .sum()
+    }
+
     /// Removes and detaches every parked session in every tenant (no kill,
     /// no unpark). The devserver's graceful-shutdown sweep: runs AFTER the
     /// final manifest write and BEFORE `shutdown_all`, so tenant teardown
