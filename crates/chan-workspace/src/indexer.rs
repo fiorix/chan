@@ -400,6 +400,16 @@ fn apply_event(
             // so it is indexed by what it is on disk now, since the event's
             // directory flag can be stale by the time it is handled; only
             // one that is gone is a source to forget.
+            //
+            // On a case-insensitive volume a case-only rename (`mv Note.md
+            // note.md`) arrives as two lone events, and a lookup finds the
+            // file under either name, so the old name is indexed too: a file
+            // keeps a second row under it, a directory its old rows.
+            // Reconcile keeps those rows, because its deletion pass confirms
+            // a missing path with the same lookup; a full rebuild, or
+            // deleting the file, clears them. Forgetting every lone path a
+            // lookup finds would instead drop the destination of each
+            // ordinary move.
             let lone = event.to.is_none();
             if let Some(from) = event.path {
                 if lone && workspace.is_dir(&from) {
