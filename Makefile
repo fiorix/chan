@@ -360,6 +360,7 @@ endif
 	$(MAKE) web-marketing-check
 	$(MAKE) e2e-check
 	$(MAKE) shortcuts-check
+	$(MAKE) file-classes-check
 	$(MAKE) host-build-check WEB_ALREADY_BUILT=1
 
 .PHONY: host-devserver-build-check
@@ -693,6 +694,17 @@ shortcuts-check: ## Verify chan serve's keybinding table matches shortcuts.ts.
 	# not guarantee.
 	cd web && $(NPM) install >/dev/null
 	python3 scripts/check-shortcuts-help.py
+
+.PHONY: file-classes-check
+file-classes-check: ## Verify the frontend path classifier mirrors chan-workspace's.
+	# chan-workspace's classify_ext and classify_basename decide a file's wire
+	# kind; the workspace app classifies a bare path with the sets in
+	# state/fileTypes.ts, which every file-kind surface reads. Neither side
+	# sees the other, so compile the frontend module and diff its sets against
+	# the Rust match arms. Lives on the web side for the same reason as
+	# shortcuts-check: the generator needs node.
+	cd web && $(NPM) install >/dev/null
+	python3 scripts/check-file-classes.py
 
 .PHONY: web-marketing-check
 web-marketing-check: ## Run marketing site checks.

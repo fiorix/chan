@@ -1,9 +1,13 @@
 // Path-based file-class predicates. Mirrors chan-workspace's
 // `fs_ops::classify_ext` + basename fallback so the editor's "can I
 // open this as text?" gate matches the server's `Workspace::read_text`
-// gate. Keep the lists in lockstep with `chan-workspace/src/fs_ops.rs`;
-// each phase that widens chan-workspace should also widen these sets so
-// the editor and the workspace agree on what counts as text.
+// gate. Keep the lists in lockstep with `chan-workspace/src/fs_ops.rs`:
+// `make file-classes-check` compiles this module and fails when
+// SERVER_CLASSIFIER_MIRROR and the Rust match arms differ.
+//
+// This module owns the frontend's file classification. `classifyPath`
+// here, and `classifyFile` and `fileBucket` in `./kinds.ts` built on it,
+// are what the graph canvas, its filter chips and the file browser read.
 //
 // Most surfaces in the app should rely on the server-provided wire
 // `kind` (via `classifyEntry` in `./kinds.ts`); these path helpers
@@ -11,7 +15,7 @@
 // ghost rows, link targets pointing at deleted files, drag-drop
 // previews before the watcher has indexed the new path).
 //
-// Three sets:
+// Four sets mirror the server:
 //   - MARKDOWN_EXTENSIONS: .md / .txt. Markdown-class, editable +
 //     BM25-searchable; maps to `FileClass::EditableText`. NOTE only
 //     Markdown (.md) is a graph "document" (graphed + wikilinked, the
@@ -22,7 +26,9 @@
 //     Maps to `FileClass::Text`. Editable through the UTF-8 gate
 //     but not indexed (false positives like `#include` looking
 //     like a `#tag` would pollute the graph).
-//   - IMAGE_EXTENSIONS: raster + svg. Maps to `FileClass::Image`.
+//   - IMAGE_EXTENSIONS: raster + svg. Maps to `FileClass::Image`, plus
+//     bmp, which that class lacks.
+//   - PDF_EXTENSIONS: .pdf. Maps to `FileClass::Pdf`.
 //
 // Well-known no-extension files (Makefile, Dockerfile, LICENSE, ...)
 // resolve via TEXT_BASENAMES after the extension check misses.
@@ -56,10 +62,13 @@ const IMAGE_EXTENSIONS = new Set([
   "webp",
   "svg",
   "avif",
-  // bmp is treated as image by the inspector but chan-workspace folds it
-  // into Other; harmless drift since image preview is frontend-only.
+  // chan-workspace's FileClass::Image lacks bmp, so the server lists a .bmp
+  // as binary; it stays here so a bmp previews as an image. The one
+  // difference scripts/check-file-classes.py allows, by name.
   "bmp",
 ]);
+
+const PDF_EXTENSIONS = new Set(["pdf"]);
 
 // Mirrors chan-workspace `fs_ops::classify_ext`'s `FileClass::Text` arm.
 // Add to both files together when widening.
@@ -235,6 +244,23 @@ const TEXT_BASENAMES = new Set([
   "MANIFEST",
 ]);
 
+/// The sets above that mirror chan-workspace's path classifier, keyed by the
+/// Rust function and the `FileClass` each mirrors. This is what
+/// `make file-classes-check` reads (through
+/// `web/packages/workspace-app/scripts/file-classes.mjs`) and diffs against
+/// the match arms in `crates/chan-workspace/src/fs_ops.rs`.
+export const SERVER_CLASSIFIER_MIRROR: Record<string, Record<string, ReadonlySet<string>>> = {
+  classify_ext: {
+    EditableText: MARKDOWN_EXTENSIONS,
+    Image: IMAGE_EXTENSIONS,
+    Pdf: PDF_EXTENSIONS,
+    Text: TEXT_EXTENSIONS,
+  },
+  classify_basename: {
+    Text: TEXT_BASENAMES,
+  },
+};
+
 function extOf(path: string): string | null {
   const dot = path.lastIndexOf(".");
   if (dot < 0 || dot === path.length - 1) return null;
@@ -257,7 +283,7 @@ export function classifyPath(
 ): "document" | "text" | "media" | "binary" {
   const ext = extOf(path);
   if (ext !== null) {
-    if (IMAGE_EXTENSIONS.has(ext) || ext === "pdf") return "media";
+    if (IMAGE_EXTENSIONS.has(ext) || PDF_EXTENSIONS.has(ext)) return "media";
     // Only Markdown (.md) is a graph "document". .txt is editable +
     // searchable text but not a document node, so it rides the "text"
     // wire kind -- mirroring the server's project_kind and
@@ -298,7 +324,7 @@ export function isImage(path: string): boolean {
 /// to the PDF viewer overlay instead of the image zoom overlay,
 /// even though both share `media` kind on the wire.
 export function isPdf(path: string): boolean {
-  return extOf(path) === "pdf";
+  return PDF_EXTENSIONS.has(extOf(path) ?? "");
 }
 
 /// True for browser-native video files. Standalone predicate rather
