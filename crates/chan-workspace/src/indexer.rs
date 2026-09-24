@@ -30,11 +30,14 @@
 //   * A `Renamed` that names a single path in the source slot can
 //     name either end (FSEvents reports each end of a move alone),
 //     so the path is checked first. One that is gone is forgotten as
-//     a source; a file that exists is scheduled like a create, and a
-//     directory that exists triggers a reconcile, because the files
-//     under it raise no events of their own.
+//     a source. One that exists is indexed by what it is on disk,
+//     not by the event's directory flag, which can be stale by then:
+//     a file is scheduled like a create, and a directory asks for a
+//     reconcile, because the files under it raise no events of their
+//     own. Reconcile asks debounce like a path, so a burst of them
+//     runs one reconcile.
 //   * `ProviderError` and path-less events (the watcher's "scope
-//     unknown" signal) clear the pending map and trigger a full
+//     unknown" signal) clear everything pending and trigger a full
 //     `Workspace::reconcile`. The reconcile is the same convergence
 //     path used for cold-open and offline-edit catch-up.
 //
@@ -152,8 +155,9 @@ impl GraphIndexer {
     }
 
     /// Cumulative count of full-reconcile passes triggered by
-    /// `ProviderError` or path-less events, or by a single-path
-    /// directory rename whose path still exists. A high count here
+    /// `ProviderError` or path-less events, or by single-path renames
+    /// of directories that exist, which run one reconcile per debounce
+    /// window however many arrive in it. A high count here
     /// usually means the watcher backend is dropping events
     /// (inotify queue overflow on Linux, FSEvents coalesce on
     /// macOS) and the consumer should consider raising
@@ -210,13 +214,33 @@ impl WatchCallback for EventForwarder {
     }
 }
 
+/// Work waiting on its debounce window: a deadline per path to index, and
+/// one deadline for a reconcile however many events asked for it.
+#[derive(Default)]
+struct Pending {
+    paths: HashMap<String, Instant>,
+    reconcile: Option<Instant>,
+}
+
+impl Pending {
+    fn next_deadline(&self) -> Option<Instant> {
+        self.paths.values().copied().chain(self.reconcile).min()
+    }
+
+    /// Drop everything waiting, for a caller about to reconcile anyway.
+    fn clear(&mut self) {
+        self.paths.clear();
+        self.reconcile = None;
+    }
+}
+
 fn run_loop(
     workspace: Arc<Workspace>,
     rx: mpsc::Receiver<WatchEvent>,
     state: Arc<GraphIndexerInner>,
     debounce: Duration,
 ) {
-    let mut pending: HashMap<String, Instant> = HashMap::new();
+    let mut pending = Pending::default();
     loop {
         if state.stop.load(Ordering::Acquire) {
             break;
@@ -224,7 +248,7 @@ fn run_loop(
         // Block until either a new event arrives or the next
         // debounce deadline matures. Floor at 1 ms so a stalled
         // deadline does not pin the CPU at 100%.
-        let timeout = match pending.values().min().copied() {
+        let timeout = match pending.next_deadline() {
             Some(d) => d
                 .saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1)),
@@ -243,33 +267,46 @@ fn run_loop(
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        // Process matured pending entries. We collect then mutate
-        // so the iterator doesn't borrow `pending` across the
-        // mutate-and-call sequence.
-        let ready = collect_matured(&pending, Instant::now());
-        for path in &ready {
-            pending.remove(path);
-            // Best-effort per-file: a failure to index leaves the
-            // file out of the index until the next save or a
-            // reconcile. The journal in PR5 already protects
-            // against partial-commit drift inside index_file
-            // itself. Drafts live in-root under `<drafts_dir>/...`,
-            // so they route through the normal `index_file` path with
-            // no special-casing.
-            let result = workspace.index_file(path);
-            match result {
-                Ok(()) => {
-                    state.indexed_total.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path, ?e, "indexer: index_*_file failed");
-                }
-            }
-        }
-
-        state.pending.store(pending.len(), Ordering::Release);
+        run_matured(&mut pending, &workspace, &state, Instant::now());
+        state.pending.store(pending.paths.len(), Ordering::Release);
     }
     tracing::debug!("graph indexer loop exiting");
+}
+
+/// Run the work whose debounce window has elapsed at `now`: index each
+/// matured path, then run a matured reconcile once.
+fn run_matured(
+    pending: &mut Pending,
+    workspace: &Arc<Workspace>,
+    state: &GraphIndexerInner,
+    now: Instant,
+) {
+    // Collect then mutate so the iterator doesn't borrow the map
+    // across the mutate-and-call sequence.
+    let ready = collect_matured(&pending.paths, now);
+    for path in &ready {
+        pending.paths.remove(path);
+        // Best-effort per-file: a failure to index leaves the
+        // file out of the index until the next save or a
+        // reconcile. The journal in PR5 already protects
+        // against partial-commit drift inside index_file
+        // itself. Drafts live in-root under `<drafts_dir>/...`,
+        // so they route through the normal `index_file` path with
+        // no special-casing.
+        let result = workspace.index_file(path);
+        match result {
+            Ok(()) => {
+                state.indexed_total.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                tracing::warn!(path = %path, ?e, "indexer: index_*_file failed");
+            }
+        }
+    }
+    if pending.reconcile.is_some_and(|deadline| deadline <= now) {
+        pending.reconcile = None;
+        run_reconcile(workspace, state, "directory renamed into place");
+    }
 }
 
 /// Trailing-edge debounce scheduling for one path. Repeated calls for
@@ -306,7 +343,7 @@ fn remove_pending_subtree(pending: &mut HashMap<String, Instant>, prefix: &str) 
 
 fn apply_event(
     event: WatchEvent,
-    pending: &mut HashMap<String, Instant>,
+    pending: &mut Pending,
     workspace: &Arc<Workspace>,
     state: &GraphIndexerInner,
     debounce: Duration,
@@ -325,7 +362,7 @@ fn apply_event(
         }
         WatchKind::Modified | WatchKind::Created => match event.path {
             Some(p) => {
-                schedule_pending(pending, p, now, debounce);
+                schedule_pending(&mut pending.paths, p, now, debounce);
             }
             None => {
                 pending.clear();
@@ -335,9 +372,9 @@ fn apply_event(
         WatchKind::Removed => {
             if let Some(p) = event.path {
                 if is_dir {
-                    remove_pending_subtree(pending, &p);
+                    remove_pending_subtree(&mut pending.paths, &p);
                 } else {
-                    pending.remove(&p);
+                    pending.paths.remove(&p);
                 }
                 let result = if is_dir {
                     workspace.forget_subtree(&p)
@@ -360,19 +397,23 @@ fn apply_event(
             // A rename that names one path can name either end: FSEvents
             // reports each end of a move as its own event, with the path in
             // this slot. One that still exists is where something arrived,
-            // so it is indexed; only one that is gone is a source to forget.
+            // so it is indexed by what it is on disk now, since the event's
+            // directory flag can be stale by the time it is handled; only
+            // one that is gone is a source to forget.
             let lone = event.to.is_none();
             if let Some(from) = event.path {
-                if lone && is_dir && workspace.is_dir(&from) {
-                    // The files under it raise no events of their own.
-                    run_reconcile(workspace, state, "directory renamed into place");
-                } else if lone && !is_dir && workspace.exists(&from) {
-                    schedule_pending(pending, from, now, debounce);
+                if lone && workspace.is_dir(&from) {
+                    // The files under it raise no events of their own. The
+                    // reconcile walks the whole tree under the write lock, so
+                    // it debounces like a path and a burst of these runs one.
+                    pending.reconcile = Some(now + debounce);
+                } else if lone && workspace.exists(&from) {
+                    schedule_pending(&mut pending.paths, from, now, debounce);
                 } else {
                     if is_dir {
-                        remove_pending_subtree(pending, &from);
+                        remove_pending_subtree(&mut pending.paths, &from);
                     } else {
-                        pending.remove(&from);
+                        pending.paths.remove(&from);
                     }
                     let result = if is_dir {
                         workspace.forget_subtree(&from)
@@ -392,7 +433,7 @@ fn apply_event(
                 }
             }
             if let Some(to) = event.to.filter(|_| !is_dir) {
-                schedule_pending(pending, to, now, debounce);
+                schedule_pending(&mut pending.paths, to, now, debounce);
             }
         }
     }
@@ -506,7 +547,7 @@ mod tests {
         let state = graph_indexer_state();
         apply_event(
             WatchEvent::loss(workspace.scope_policy().generation()),
-            &mut HashMap::new(),
+            &mut Pending::default(),
             &workspace,
             &state,
             Duration::from_millis(DEBOUNCE_TEST_MS),
@@ -540,7 +581,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut pending = HashMap::new();
+        let mut pending = Pending::default();
         let state = graph_indexer_state();
         apply_event(
             WatchEvent::rename(
@@ -577,14 +618,12 @@ mod tests {
     fn apply_and_settle(workspace: &Arc<Workspace>, events: Vec<WatchEvent>) -> GraphIndexerInner {
         let debounce = Duration::from_millis(DEBOUNCE_TEST_MS);
         let now = Instant::now();
-        let mut pending = HashMap::new();
+        let mut pending = Pending::default();
         let state = graph_indexer_state();
         for event in events {
             apply_event(event, &mut pending, workspace, &state, debounce, now);
         }
-        for path in collect_matured(&pending, now + debounce) {
-            workspace.index_file(&path).unwrap();
-        }
+        run_matured(&mut pending, workspace, &state, now + debounce);
         state
     }
 
