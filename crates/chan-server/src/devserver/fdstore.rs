@@ -1169,6 +1169,108 @@ mod linux {
             parker.stop().await;
         }
 
+        /// Output the PTY emitted before a graceful restart's seal must reach
+        /// the final manifest: a reader holding a read it has not recorded
+        /// yet is exactly the window the seal must wait out, since a read
+        /// recorded after the final write reaches no manifest and no socket.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_sealed_manifest_carries_a_read_the_reader_still_holds() {
+            use axum::body::Body;
+            use axum::http::{Request, StatusCode};
+            use chan_library::terminal_sessions::{arm_attach_seam, AttachSeam};
+            use chan_library::windows::WindowRegistry;
+            use tower::ServiceExt;
+
+            let store = FakeStoreOps::default();
+            let (parker, _hook, manifest) = test_parker(store);
+            let host = parker.shared.host.clone();
+            let windows = tempfile::tempdir().unwrap();
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(windows.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            let mut config =
+                crate::devserver::tenant_config("127.0.0.1:0".parse().unwrap(), "/terminal");
+            config.no_token = true;
+            host.open_terminal_session(config, None, None)
+                .await
+                .expect("mount terminal tenant");
+            parker.activate();
+            let window = host
+                .mint_window(crate::WindowKind::Terminal, None)
+                .expect("mint window");
+
+            let create = serde_json::json!({
+                "name": "held",
+                "command": "sleep 1; printf held-before-the-seal; exec sleep 86396",
+                "window_id": window.window_id,
+            })
+            .to_string();
+            let res = host
+                .clone()
+                .router()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/terminal/api/terminals")
+                        .header("content-type", "application/json")
+                        .body(Body::from(create))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED);
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["session"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+
+            // Hold the reader between its read of the printf and recording it.
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            arm_attach_seam(&id, AttachSeam::ReaderBeforeRecord, move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the reader read the printf");
+
+            let parker = Arc::new(parker);
+            let sealing = {
+                let parker = parker.clone();
+                std::thread::spawn(move || parker.seal_flush_detach())
+            };
+            std::thread::sleep(Duration::from_millis(300));
+            release_tx.send(()).unwrap();
+            assert_eq!(sealing.join().unwrap(), 1, "the parked session is detached");
+
+            let sealed: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest).expect("sealed manifest"))
+                    .expect("sealed json");
+            let session = &sealed["sessions"][0];
+            let replay = BASE64
+                .decode(session["replay_b64"].as_str().unwrap_or_default())
+                .unwrap();
+            let pid = session["meta"]["child_pid"].as_u64().expect("child pid") as i32;
+            let _ = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(pid).unwrap(),
+                rustix::process::Signal::KILL,
+            );
+            assert!(
+                String::from_utf8_lossy(&replay).contains("held-before-the-seal"),
+                "the final manifest carries output read before the seal: {:?}",
+                String::from_utf8_lossy(&replay)
+            );
+            assert_eq!(session["meta"]["seq"].as_u64(), Some(replay.len() as u64));
+            if let Ok(parker) = Arc::try_unwrap(parker) {
+                parker.stop().await;
+            }
+        }
+
         #[tokio::test]
         async fn shutdown_before_activation_preserves_the_inherited_manifest() {
             let store = FakeStoreOps::default();

@@ -959,6 +959,9 @@ pub enum AttachSeam {
     /// In `Session::fdstore_manifest_entry`, just before it takes `seq` and
     /// the replay tail under the ring lock.
     ManifestBeforeReplayTail,
+    /// In a PTY reader thread, between a read and recording its bytes: the
+    /// output is out of the PTY and not yet in the ring.
+    ReaderBeforeRecord,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -3727,7 +3730,11 @@ impl Session {
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) => break,
-                            Ok(n) => session.record_output(&buf[..n]),
+                            Ok(n) => {
+                                #[cfg(any(test, feature = "test-util"))]
+                                fire_attach_seam(&session.id, AttachSeam::ReaderBeforeRecord);
+                                session.record_output(&buf[..n]);
+                            }
                             Err(e) => {
                                 session.broadcast(SessionEvent::Error(format!(
                                     "terminal read failed: {e}"
@@ -4027,7 +4034,11 @@ impl Session {
                                 );
                                 break;
                             }
-                            Ok(n) => session.record_output(&buf[..n]),
+                            Ok(n) => {
+                                #[cfg(any(test, feature = "test-util"))]
+                                fire_attach_seam(&session.id, AttachSeam::ReaderBeforeRecord);
+                                session.record_output(&buf[..n]);
+                            }
                             Err(e) => {
                                 session.broadcast(SessionEvent::Error(format!(
                                     "terminal read failed: {e}"
