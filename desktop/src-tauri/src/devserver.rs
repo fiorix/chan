@@ -1992,11 +1992,49 @@ async fn row_from_launcher(
     })
 }
 
-/// The full window set a connected devserver serves at
+/// Decode a devserver's window rows one at a time, so a row this desktop
+/// cannot read (a `kind` or `origin` tag from a later release, a damaged row)
+/// costs that row alone rather than the desktop's whole view of the
+/// devserver. Each such row is logged with the devserver id, `source` (which
+/// feed carried it) and its `window_id`, or its index when even that is
+/// unreadable, and left out: the devserver keeps it in its own store, so
+/// hiding it here loses nothing. A catch-all variant on the closed enums
+/// would instead reach every server-side consumer of the record.
+pub(crate) fn decode_window_rows(
+    devserver_id: &str,
+    source: &str,
+    rows: Vec<serde_json::Value>,
+) -> Vec<chan_server::WindowRecord> {
+    let mut windows = Vec::with_capacity(rows.len());
+    for (index, value) in rows.iter().enumerate() {
+        match chan_server::WindowRecord::deserialize(value) {
+            Ok(record) => windows.push(record),
+            Err(error) => {
+                let row = match value.get("window_id").and_then(serde_json::Value::as_str) {
+                    Some(id) => format!("window_id {id}"),
+                    None => format!("index {index}"),
+                };
+                tracing::warn!(
+                    devserver = %devserver_id,
+                    source = %source,
+                    %row,
+                    %error,
+                    "unreadable devserver window row is hidden from the desktop"
+                );
+            }
+        }
+    }
+    windows
+}
+
+/// The window set a connected devserver serves at
 /// `GET /api/library/windows` -- the watcher's initial seed (it also carries the
 /// devserver's `library_id`, stamped per row, the watcher's first read of which
-/// library it is reconciling). The WS `/watch` then pushes every change.
+/// library it is reconciling). The WS `/watch` then pushes every change. Rows
+/// this desktop cannot read are left out and logged under `devserver_id`
+/// ([`decode_window_rows`]); only a body that is not a JSON array fails.
 pub async fn fetch_library_windows(
+    devserver_id: &str,
     conn: &DevserverConn,
 ) -> Result<Vec<chan_server::WindowRecord>, String> {
     let label = PerArmLabel {
@@ -2014,9 +2052,11 @@ pub async fn fetch_library_windows(
     if !resp.status().is_success() {
         return Err(devserver_status_error(conn, resp.status(), label));
     }
-    resp.json::<Vec<chan_server::WindowRecord>>()
+    let rows = resp
+        .json::<Vec<serde_json::Value>>()
         .await
-        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))?;
+    Ok(decode_window_rows(devserver_id, "list", rows))
 }
 
 /// Mint a window on a connected devserver's library
@@ -4173,8 +4213,8 @@ mod tests {
             };
             let (rows, error) = tokio::time::timeout(Duration::from_secs(10), async {
                 (
-                    fetch_library_windows(&conn).await,
-                    fetch_library_windows(&conn).await.unwrap_err(),
+                    fetch_library_windows("dev-1", &conn).await,
+                    fetch_library_windows("dev-1", &conn).await.unwrap_err(),
                 )
             })
             .await
@@ -4669,10 +4709,13 @@ mod tests {
         let logs = log_capture::Lines::default();
         let _logs = logs.install();
 
-        let rows = tokio::time::timeout(Duration::from_secs(10), fetch_library_windows(&conn))
-            .await
-            .expect("the window-list request must finish")
-            .expect("one unreadable row must not fail the list");
+        let rows = tokio::time::timeout(
+            Duration::from_secs(10),
+            fetch_library_windows("dev-1", &conn),
+        )
+        .await
+        .expect("the window-list request must finish")
+        .expect("one unreadable row must not fail the list");
 
         let ids: Vec<&str> = rows.iter().map(|row| row.window_id.as_str()).collect();
         assert_eq!(ids, ["window-1"], "the readable row survives its neighbour");
@@ -4687,7 +4730,66 @@ mod tests {
             "the line names the row and why it was unreadable: {}",
             warnings[0]
         );
+        assert!(
+            warnings[0].contains("devserver=dev-1") && warnings[0].contains("source=list"),
+            "the line names the devserver and the feed: {}",
+            warnings[0]
+        );
         server.assert_responses_drained();
+    }
+
+    /// Every way a row can be unreadable costs that row alone: an `origin`
+    /// this desktop does not know, an element that is not an object, and an
+    /// object with neither a readable shape nor a `window_id`. A row is named
+    /// by its `window_id` when it has one and by its index otherwise, and no
+    /// line carries a token.
+    #[test]
+    fn decode_window_rows_names_each_unreadable_row() {
+        let mut unknown_origin = serde_json::to_value(window_row("w-tablet", "/t", "t-2")).unwrap();
+        unknown_origin["origin"] = "tablet".into();
+        let rows = vec![
+            serde_json::to_value(window_row("w-1", "/terminal", "t-1")).unwrap(),
+            unknown_origin,
+            serde_json::json!(7),
+            serde_json::json!({ "kind": "panel", "token": "t-4" }),
+        ];
+        let logs = log_capture::Lines::default();
+        let _logs = logs.install();
+
+        let windows = decode_window_rows("dev-1", "watch frame", rows);
+
+        let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
+        assert_eq!(ids, ["w-1"]);
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            3,
+            "one line per unreadable row: {warnings:?}"
+        );
+        for (line, row) in
+            warnings
+                .iter()
+                .zip(["row=window_id w-tablet", "row=index 2", "row=index 3"])
+        {
+            assert!(line.contains(row), "{row} is named: {line}");
+            assert!(
+                line.contains("devserver=dev-1"),
+                "the devserver is named: {line}"
+            );
+            assert!(
+                line.contains("source=watch frame"),
+                "the feed is named: {line}"
+            );
+            assert!(
+                !line.contains("t-2") && !line.contains("t-4"),
+                "a token leaked: {line}"
+            );
+        }
+        assert!(
+            warnings[0].contains("tablet"),
+            "the serde error says why: {}",
+            warnings[0]
+        );
     }
 
     #[tokio::test]
@@ -4724,7 +4826,7 @@ mod tests {
                 "fetching devserver colour: ",
             );
             assert_prefix(
-                &fetch_library_windows(&conn).await.unwrap_err(),
+                &fetch_library_windows("dev-1", &conn).await.unwrap_err(),
                 "listing library windows: ",
             );
             assert_prefix(

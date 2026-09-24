@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chan_server::{WindowRecord, WindowSet};
+use chan_server::WindowRecord;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Notify};
 
@@ -833,10 +833,34 @@ async fn keepalive_pump(
     Ok(())
 }
 
-/// The window rows one `/watch` text frame carries, or `None` for a frame
-/// that does not parse as a [`WindowSet`].
-fn decode_window_frame(text: &str) -> Option<Vec<WindowRecord>> {
-    serde_json::from_str::<WindowSet>(text).ok().map(|set| set.windows)
+/// A `/watch` frame as the desktop reads it: the rows stay raw JSON until
+/// [`decode_window_rows`](crate::devserver::decode_window_rows) takes them one
+/// at a time, and the frame's other fields (the additive `leaders` map) are
+/// not read here.
+#[derive(serde::Deserialize)]
+struct WindowFeedFrame {
+    windows: Vec<serde_json::Value>,
+}
+
+/// The rows one `/watch` text frame carries that this desktop can read. A
+/// frame that does not parse at all is logged and yields `None`: the view
+/// keeps its last snapshot, and the next frame, a full snapshot, repairs it.
+fn decode_window_frame(devserver_id: &str, text: &str) -> Option<Vec<WindowRecord>> {
+    match serde_json::from_str::<WindowFeedFrame>(text) {
+        Ok(frame) => Some(crate::devserver::decode_window_rows(
+            devserver_id,
+            "watch frame",
+            frame.windows,
+        )),
+        Err(error) => {
+            tracing::warn!(
+                devserver = %devserver_id,
+                %error,
+                "unreadable devserver window frame is skipped; the view keeps its last snapshot"
+            );
+            None
+        }
+    }
 }
 
 /// Settle DELETEs already absent from a full feed snapshot, then claim one
@@ -857,9 +881,10 @@ fn pending_delete_attempts_for_feed_snapshot(
     }
 }
 
-/// One connection's lifetime: open the `/watch` WS, then push every `WindowSet`
-/// text frame into `snapshot` + wake `change`. Raw tunnel devservers auth with a
-/// bearer header; gateway devservers auth with the devserver-gate cookie.
+/// One connection's lifetime: open the `/watch` WS, then push the rows this
+/// desktop can read from every `WindowSet` text frame into `snapshot` + wake
+/// `change`. Raw tunnel devservers auth with a bearer header; gateway
+/// devservers auth with the devserver-gate cookie.
 ///
 /// The [`keepalive_pump`] read-deadline turns a half-open socket into an error
 /// instead of a forever-pending `next()`. `saw_frame` is set on the first inbound
@@ -893,7 +918,7 @@ async fn stream_window_feed(
                 embedded.signal_library_change();
             }
         }
-        if let Some(windows) = decode_window_frame(text) {
+        if let Some(windows) = decode_window_frame(id, text) {
             // Rows keep their devserver-local tokens: `should_show` reads
             // token emptiness as the tenant on/off signal, and gateway
             // navigation credentials are minted at open/retarget time
@@ -1049,9 +1074,16 @@ pub(crate) async fn spawn_devserver_window_watcher(
     ),
     String,
 > {
-    let seed = crate::devserver::fetch_library_windows(&conn)
+    let seed = crate::devserver::fetch_library_windows(&id, &conn)
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                devserver = %id,
+                %error,
+                "devserver window list failed; seeding no windows until the watch feed's first snapshot"
+            );
+            Vec::new()
+        });
     let snapshot = Arc::new(Mutex::new(seed));
     // A handle on the snapshot for the caller's launcher feed: the same
     // Arc the feed task mutates, so the launcher reads this devserver's live windows.
@@ -1447,8 +1479,8 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        let windows =
-            decode_window_frame(&frame).expect("one unreadable row must not drop the frame");
+        let windows = decode_window_frame("dev-1", &frame)
+            .expect("one unreadable row must not drop the frame");
 
         let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
         assert_eq!(ids, ["w-1"], "the readable row survives its neighbour");
@@ -1463,6 +1495,11 @@ mod tests {
             "the line names the row and why it was unreadable: {}",
             warnings[0]
         );
+        assert!(
+            warnings[0].contains("devserver=dev-1") && warnings[0].contains("source=watch frame"),
+            "the line names the devserver and the feed: {}",
+            warnings[0]
+        );
     }
 
     /// A frame that does not parse at all carries no row to keep, so the
@@ -1473,7 +1510,7 @@ mod tests {
         let logs = crate::devserver::log_capture::Lines::default();
         let _logs = logs.install();
 
-        assert!(decode_window_frame("{\"windows\":").is_none());
+        assert!(decode_window_frame("dev-1", "{\"windows\":").is_none());
 
         let warnings = logs.warnings();
         assert_eq!(
@@ -1482,8 +1519,9 @@ mod tests {
             "the skipped frame is logged: {warnings:?}"
         );
         assert!(
-            warnings[0].contains("unreadable devserver window frame"),
-            "the line says what was skipped: {}",
+            warnings[0].contains("unreadable devserver window frame")
+                && warnings[0].contains("devserver=dev-1"),
+            "the line says what was skipped and from which devserver: {}",
             warnings[0]
         );
     }
