@@ -932,6 +932,8 @@ impl RootedFs {
         }
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
+        #[cfg(test)]
+        create_claim::reached();
         match dir.open_with(&rel_path, &options) {
             Ok(file) => drop(file),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1858,6 +1860,109 @@ mod mutation_tests {
             "note"
         );
         assert!(root.path().join("target").is_dir());
+    }
+}
+
+/// Test-only marker at the exclusive claim in `create_text_new`. A test
+/// installs a closure here to learn whether a create reached the claim, which
+/// is how it tells a preflight that refused first from one that ran after the
+/// name was already taken; the closure runs once, on the thread that set it.
+#[cfg(test)]
+mod create_claim {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn reached() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+}
+
+#[cfg(test)]
+mod create_text_new_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn entries(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<_> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_renamed_away_is_missing_and_gains_nothing_at_the_old_path() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("ws");
+        std::fs::create_dir(&root).expect("create root");
+        let fs = RootedFs::open(root.clone(), 1 << 20).expect("open rooted fs");
+        let old = parent.path().join("ws-old");
+        std::fs::rename(&root, &old).expect("rename root away");
+
+        let result = fs.create_text_new("sub/new.md", "");
+        assert!(
+            matches!(result, Err(ChanError::WorkspaceRootMissing(_))),
+            "a root renamed away must answer missing: {result:?}"
+        );
+        assert_eq!(
+            entries(&old),
+            Vec::<std::path::PathBuf>::new(),
+            "nothing may be created at the root's old location"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_root_check_runs_before_the_name_is_claimed() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("ws");
+        std::fs::create_dir(&root).expect("create root");
+        let fs = RootedFs::open(root.clone(), 1 << 20).expect("open rooted fs");
+        std::fs::rename(&root, parent.path().join("ws-old")).expect("rename root away");
+        let claimed = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&claimed);
+        create_claim::set(move || flag.set(true));
+
+        let result = fs.create_text_new("new.md", "content");
+        assert!(
+            matches!(result, Err(ChanError::WorkspaceRootMissing(_))),
+            "{result:?}"
+        );
+        assert!(
+            !claimed.get(),
+            "the root check must refuse before the exclusive claim runs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_symlink_escaping_the_root_is_a_symlink_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link"))
+            .expect("symlink out of the root");
+        let fs = RootedFs::open(root.path().to_path_buf(), 1 << 20).expect("open rooted fs");
+
+        let result = fs.create_text_new("link/new.md", "content");
+        assert!(
+            matches!(result, Err(ChanError::SymlinkEscape(_))),
+            "a parent escaping the root must be a symlink escape: {result:?}"
+        );
+        assert_eq!(entries(outside.path()), Vec::<std::path::PathBuf>::new());
     }
 }
 
