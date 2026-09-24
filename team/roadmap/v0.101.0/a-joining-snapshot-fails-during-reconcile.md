@@ -1,6 +1,6 @@
 # A joining snapshot fails while a reconciliation runs
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the gateway review, line 6527 (`ControllerState::accept_snapshot`), carried by the gateway-lows lane and recorded in the release report. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the gateway review, line 6527 (`ControllerState::accept_snapshot`), carried by the gateway-lows lane and recorded in the release report. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # The NSIS uninstaller stub ships unsigned
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Windows signing leftovers; unchanged from v0.99.0. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Windows signing leftovers; unchanged from v0.99.0. A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended: scheduled at rc1 rather than as a lane now, because only a release dry run can validate it. Sign the stub after a PE rename or in a post-build step; if it cannot be signed, record the limitation in `.agents/desktop.md` and close the item with that reason.
 
 ## What was seen
 

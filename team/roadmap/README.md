@@ -23,16 +23,16 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.101.0
 
-Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item is accepted: the write queue's idle signal, which the owner asked for, had built and measured, and accepted the same day with its build kept on a branch as the reference. Nothing else here is accepted yet.
+Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round raises for the version after it. The owner added ten the same day, with a ruling on each: one from an issue report, one from a defect the owner hit on v0.99.0, and eight from a re-read of the development archive's backlog. One item was accepted that day: the write queue's idle signal, which the owner asked for, had built and measured, and accepted with its build kept on a branch as the reference. On 2026-09-24 the owner decided the thirty-two items then raised for a decision: thirty accepted for v0.101.0 and two withdrawn, with each ruling recorded in its item.
 
 **Frontend review, phased from v0.100.0**
 
 | item | state | next |
 | --- | --- | --- |
-| [source-text-tests-pin-spelling-not-behaviour][rawt] | raised | decide |
-| [one-question-is-answered-in-many-places][dedup] | raised | decide |
+| [source-text-tests-pin-spelling-not-behaviour][rawt] | accepted | build |
+| [one-question-is-answered-in-many-places][dedup] | accepted | after rawt |
 | [frontend-comments-narrate-history][cmts] | raised | after rawt |
-| [hand-mirrored-contracts-have-no-gate][mirr] | raised | decide |
+| [hand-mirrored-contracts-have-no-gate][mirr] | accepted | build |
 | [the-frontend-review-remainder-has-no-owner][ferem] | raised | triage |
 
 **From the v0.99.0 follow-ups**
@@ -53,35 +53,35 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [refusals-answer-in-four-shapes][refus] | raised | decide |
+| [refusals-answer-in-four-shapes][refus] | accepted | build |
 | [the-team-poke-names-a-path-it-does-not-anchor][poke] | landed | GA |
 | [a-redrawing-tui-never-lets-the-write-queue-drain][rdrw] | landed | GA |
 | [an-expired-survey-cannot-be-dismissed][surv] | raised | repro |
-| [the-test-util-comments-omit-the-attach-seam][tutil] | raised | decide |
-| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | raised | decide |
-| [a-mount-retry-test-races-a-wall-clock][mwclk] | raised | decide |
-| [desktop-design-omits-the-root-health-probe][dhp] | raised | decide |
-| [a-dropped-indexers-driver-eats-recovery][drvr] | raised | decide |
-| [the-bulk-skip-note-calls-unknown-locked][bskip] | raised | decide |
-| [mcp-write-errors-follow-an-unpinned-display][mcpd] | raised | decide |
-| [a-joining-snapshot-fails-during-reconcile][join] | raised | decide |
-| [profile-workers-have-no-shutdown-owner][pwork] | raised | decide |
-| [the-email-fold-merges-distinct-characters][fold] | raised | decide |
-| [the-move-out-spare-covers-the-whole-window][spare] | raised | decide |
-| [an-emptied-window-waits-without-a-bound][ewait] | raised | decide |
-| [the-chan-home-fallback-trusts-var-tmp][vtmp] | raised | decide |
-| [three-inputs-have-no-size-cap][caps] | raised | decide |
-| [content-search-truncation-ignores-its-window][trunc] | raised | decide |
-| [move-and-create-can-replace-a-new-file][clob] | raised | decide |
-| [the-graph-indexer-drops-renames-and-lingers][gidx] | raised | decide |
-| [the-side-effect-and-error-lows-are-unread][unread] | raised | decide |
-| [the-launcher-says-off-beside-running][offrn] | raised | decide |
-| [devserver-root-probe-wiring-has-no-test][rprob] | raised | decide |
-| [page-break-scan-and-renderer-still-differ][pgres] | raised | decide |
-| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | raised | decide |
-| [graph-bodies-have-no-mounted-test][gmnt] | raised | decide |
-| [the-nsis-uninstaller-stub-ships-unsigned][nsis] | raised | decide |
-| [signing-has-no-early-credential-probe][cprb] | raised | decide |
+| [the-test-util-comments-omit-the-attach-seam][tutil] | accepted | build |
+| [the-fdstore-manifest-splits-seq-and-tail][fdsq] | accepted | build |
+| [a-mount-retry-test-races-a-wall-clock][mwclk] | accepted | build |
+| [desktop-design-omits-the-root-health-probe][dhp] | accepted | build |
+| [a-dropped-indexers-driver-eats-recovery][drvr] | accepted | build |
+| [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
+| [mcp-write-errors-follow-an-unpinned-display][mcpd] | accepted | build |
+| [a-joining-snapshot-fails-during-reconcile][join] | accepted | build |
+| [profile-workers-have-no-shutdown-owner][pwork] | accepted | build |
+| [the-email-fold-merges-distinct-characters][fold] | withdrawn | GA |
+| [the-move-out-spare-covers-the-whole-window][spare] | accepted | build |
+| [an-emptied-window-waits-without-a-bound][ewait] | accepted | build |
+| [the-chan-home-fallback-trusts-var-tmp][vtmp] | accepted | build |
+| [three-inputs-have-no-size-cap][caps] | accepted | build |
+| [content-search-truncation-ignores-its-window][trunc] | accepted | build |
+| [move-and-create-can-replace-a-new-file][clob] | accepted | build |
+| [the-graph-indexer-drops-renames-and-lingers][gidx] | accepted | build |
+| [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
+| [the-launcher-says-off-beside-running][offrn] | accepted | build |
+| [devserver-root-probe-wiring-has-no-test][rprob] | accepted | build |
+| [page-break-scan-and-renderer-still-differ][pgres] | withdrawn | GA |
+| [a-tab-list-duplicate-key-escapes-its-boundary][tkey] | accepted | build |
+| [graph-bodies-have-no-mounted-test][gmnt] | accepted | after rawt |
+| [the-nsis-uninstaller-stub-ships-unsigned][nsis] | accepted | rc1 |
+| [signing-has-no-early-credential-probe][cprb] | accepted | build |
 
 **From the development archive's backlog**
 
@@ -100,9 +100,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [a-revocation-aborts-the-bridge-before-its-close][revab] | raised | decide |
-| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | raised | decide |
-| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | raised | decide |
+| [a-revocation-aborts-the-bridge-before-its-close][revab] | accepted | build |
+| [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | accepted | build |
+| [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | accepted | build |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md

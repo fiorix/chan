@@ -1,6 +1,6 @@
 # The test-util comments do not name the attach seam
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the Lead follow-ups ledger (2026-09-22 20:52Z, SecondWorker order 1 report). A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the Lead follow-ups ledger (2026-09-22 20:52Z, SecondWorker order 1 report). A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

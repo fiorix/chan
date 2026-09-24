@@ -1,6 +1,10 @@
 # A revocation aborts the bridge before its Close can go out
 
-Status: raised during v0.101.0 on 2026-09-23; not accepted. From the admitted-tunnel lane's report (what the item got wrong, items 1 and 2) and the independent review of `v0101/admitted-tunnel` (finding L1 and its third question), which recorded the gap while building [an-admitted-tunnel-outlives-its-connection](an-admitted-tunnel-outlives-its-connection.md). The mechanism was reproduced once by a test the lane wrote and then removed: driven through a real `SessionStore::revoke`, it failed with `expected a Close frame, got Some(Err(Protocol(ResetWithoutClosingHandshake)))`. The code claims below are a source reading against `main` at `ee060262e`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.101.0 on 2026-09-23. From the admitted-tunnel lane's report (what the item got wrong, items 1 and 2) and the independent review of `v0101/admitted-tunnel` (finding L1 and its third question), which recorded the gap while building [an-admitted-tunnel-outlives-its-connection](an-admitted-tunnel-outlives-its-connection.md). The mechanism was reproduced once by a test the lane wrote and then removed: driven through a real `SessionStore::revoke`, it failed with `expected a Close frame, got Some(Err(Protocol(ResetWithoutClosingHandshake)))`. The code claims below are a source reading against `main` at `ee060262e`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which settles the open shape question for the cooperative shape: cancel the token, let the bridge send its bounded 1008 Close, and abort only at a drain deadline, with a test through a real `SessionStore::revoke`. The two arms stay.
 
 ## What was seen
 

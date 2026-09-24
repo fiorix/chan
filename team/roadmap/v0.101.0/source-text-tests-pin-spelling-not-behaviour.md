@@ -1,6 +1,10 @@
 # Two hundred frontend tests pin spelling, not behaviour
 
-Status: raised for v0.101.0 from the frontend review (findings ORPH-01 and ORPH-02, high, and 21 medium findings about the same convention), phased out of v0.100.0 because it waits on two owner rulings. The count was re-taken against `main` at `d3de0180b`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (findings ORPH-01 and ORPH-02, high, and 21 medium findings about the same convention), phased out of v0.100.0 because it waits on two owner rulings. The count was re-taken against `main` at `d3de0180b`.
+
+## Owner ruling
+
+Accepted on 2026-09-24. The owner's decision reads the spelling pins as the make-it-work version of these tests, a guardrail rather than a test of the behaviour, and rules that with the code now in place the work is to do it right: refactor and de-duplicate the tests toward behaviour, and make the code idiomatic along the way. The decision answered the lead's recommendation on the two shape questions, which is the shape the lane starts from: `?raw` pins survive only for build-time contracts with no runtime seam (the review's narrow rule) and everything else moves to a mounted or behavioural test, in two commits per file (rename first, edit second). The work runs as several file-disjoint lanes by package and comes before [one-question-is-answered-in-many-places](one-question-is-answered-in-many-places.md) and [graph-bodies-have-no-mounted-test](graph-bodies-have-no-mounted-test.md), which move the same test files.
 
 ## What was seen
 

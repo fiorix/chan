@@ -1,6 +1,6 @@
 # The grant-claim email fold merges distinct characters
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the Lead follow-ups ledger (2026-09-23 06:46Z, the gateway-lows corrections review of `9a0c3c794`) and the release report's documented residual. Carried as a documented residual, not a defect. A source reading against `main` at `6237c2677`.
+Status: withdrawn by the owner on 2026-09-24, and it does not ship: the documented residual is kept, so nothing changes; revisit only if an identity provider is found to verify mailboxes that differ under `lower()`, or if the gateway adopts one normalization everywhere. Raised during v0.100.0 on 2026-09-23. From the Lead follow-ups ledger (2026-09-23 06:46Z, the gateway-lows corrections review of `9a0c3c794`) and the release report's documented residual. Carried as a documented residual, not a defect. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

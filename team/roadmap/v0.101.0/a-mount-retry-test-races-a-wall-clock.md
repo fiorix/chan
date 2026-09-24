@@ -1,6 +1,6 @@
 # A mount-retry test races a five-second wall clock
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the Lead follow-ups ledger (2026-09-22 20:01Z, main CI run `35774295414` attempt 1, green on re-run). A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the Lead follow-ups ledger (2026-09-22 20:01Z, main CI run `35774295414` attempt 1, green on re-run). A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

@@ -1,6 +1,6 @@
 # Page-break line scan and renderer still differ on some inputs
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's residuals, recorded as measured residuals by the v0.100.0 item `four-detectors-disagree-about-page-breaks` under the owner's narrow reading. A source reading against `main` at `6237c2677`.
+Status: withdrawn by the owner on 2026-09-24, and it does not ship: the nine measured inputs stay accepted residuals, as the item itself says, because closing them means parsing HTML in the scan, which the contract kept out on purpose; revisit only if an author hits one. Raised during v0.100.0 on 2026-09-23. From the release report's residuals, recorded as measured residuals by the v0.100.0 item `four-detectors-disagree-about-page-breaks` under the owner's narrow reading. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

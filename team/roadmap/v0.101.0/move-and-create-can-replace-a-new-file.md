@@ -1,6 +1,10 @@
 # A move or a create can replace a file created a moment earlier
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Rust-lows follow-up (worklist L100 and L173, the create-only rename findings); distinct from `two-copies-to-one-free-name-can-collide`, which covers `RootedFs::copy`. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Rust-lows follow-up (worklist L100 and L173, the create-only rename findings); distinct from `two-copies-to-one-free-name-can-collide`, which covers `RootedFs::copy`. A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 with the lead's shape, which settles what a platform without a no-replace rename does: exclusive create for `create_file_sync`; a no-replace rename (`RENAME_NOREPLACE` on Linux) for move and copy, and on a platform without one a check-then-rename under the root's lock; the lost race answers as the existing conflict, and tests hold the window open. The owner added a requirement: nothing may break across Linux, Windows, macOS and FreeBSD or their different filesystems, and the change must guard against corrupting data and against disrupting the user's flow.
 
 ## What was seen
 

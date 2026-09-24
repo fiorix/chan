@@ -1,6 +1,10 @@
 # The graph indexer drops a rename's destination and outlives its drop
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Rust-lows follow-up (worklist L78 and L84, the `GraphIndexer` findings). A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Rust-lows follow-up (worklist L78 and L84, the `GraphIndexer` findings). A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which settles the open question: `GraphIndexer` keeps its clone-and-drop model. Both halves are in scope: re-check existence before forgetting a single-path rename's source, and give the worker a shutdown handle so `Drop` stops it, each with a test shown red first.
 
 ## What was seen
 

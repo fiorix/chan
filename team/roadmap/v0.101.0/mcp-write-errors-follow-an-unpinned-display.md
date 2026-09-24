@@ -1,6 +1,6 @@
 # Three MCP error texts follow an unpinned Display
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the Lead follow-ups ledger (2026-09-23 02:50Z, review of the Rust-lows folds, risk 4) and the release report's Rust-lows follow-up. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the Lead follow-ups ledger (2026-09-23 02:50Z, review of the Rust-lows folds, risk 4) and the release report's Rust-lows follow-up. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

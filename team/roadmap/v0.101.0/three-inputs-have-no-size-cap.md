@@ -1,6 +1,10 @@
 # Three inputs have no size cap
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Rust-lows follow-up (worklist L77, L133 and L139, the sizing findings); each needs an owner decision on the limit before a patch. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Rust-lows follow-up (worklist L77, L133 and L139, the sizing findings); each needs an owner decision on the limit before a patch. A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which sets the limits the item asked the owner for, as the starting point the lane checks against the code's existing budgets: archive extraction at 10,000 entries and 256 MiB decompressed; a scene WebSocket message at 16 MiB, below tungstenite's 64 MiB default, with the scene budget deciding the rest; and 256 subscriptions per socket. Each refusal is named and pinned at and past its limit.
 
 ## What was seen
 

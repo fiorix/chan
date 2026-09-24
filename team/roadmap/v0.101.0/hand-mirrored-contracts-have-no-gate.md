@@ -1,6 +1,10 @@
 # Contracts mirrored by hand across the seam have nothing checking the copies
 
-Status: raised for v0.101.0 from the frontend review (its third theme, its section on the frontend and backend seam, and findings GPANEL-04 and FILES-04, medium), phased out of v0.100.0. The two findings were re-verified against `main` at `d3de0180b`. The other seam observations below restate the review as it read `a7c3ce9d` and were not re-verified; `api/types.ts` has changed since. The review marks the wider work optional and names the one mirror it would gate.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (its third theme, its section on the frontend and backend seam, and findings GPANEL-04 and FILES-04, medium), phased out of v0.100.0. The two findings were re-verified against `main` at `d3de0180b`. The other seam observations below restate the review as it read `a7c3ce9d` and were not re-verified; `api/types.ts` has changed since. The review marks the wider work optional and names the one mirror it would gate.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which settles the open shape question by narrowing the item to the file classifier: one frontend classifier used by `GraphPanel.svelte`, the file browser and `SOURCE_EXT_RE`'s callers, a gate that diffs it against the Rust classifier, the two wrong wire types in `api/types.ts`, and the `routes/graph.rs` comment. Every other mirror stays ungated until it bites.
 
 ## What was seen
 

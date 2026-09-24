@@ -1,6 +1,6 @@
 # A dropped indexer's driver swallows a recovery wake
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the Lead follow-ups ledger (2026-09-22 22:03Z, SecondWorker order 2 report, by reading); pre-existing and described in the driver's own comment. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the Lead follow-ups ledger (2026-09-22 22:03Z, SecondWorker order 2 report, by reading); pre-existing and described in the driver's own comment. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # The launcher says Off beside a running status
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's residuals, recorded by the v0.100.0 item `a-timed-out-mount-closes-a-tenant-it-did-not-open` as a vocabulary question for the whole surface. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's residuals, recorded by the v0.100.0 item `a-timed-out-mount-closes-a-tenant-it-did-not-open` as a vocabulary question for the whole surface. A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which settles the vocabulary: the row's word is the desired state (`On` or `Off`), the status pill is the observed state, and a row whose two disagree says both (`Off, running`), on every launcher surface that shows both.
 
 ## What was seen
 

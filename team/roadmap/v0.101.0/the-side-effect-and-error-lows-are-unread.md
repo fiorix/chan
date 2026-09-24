@@ -1,6 +1,6 @@
 # The side-effect and error-handling lows were never read
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Rust-lows follow-up. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Rust-lows follow-up. A source reading against `main` at `6237c2677`.
 
 ## What was seen
 

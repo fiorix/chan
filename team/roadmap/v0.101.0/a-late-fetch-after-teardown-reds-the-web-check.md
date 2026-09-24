@@ -1,6 +1,6 @@
 # A late fetch after a test's teardown reds the web check
 
-Status: raised during v0.101.0 on 2026-09-23; not accepted. From the intake gate of the first three v0.101.0 lanes: `make web-check` failed once on the integration candidate with every test passing, and passed on the same sha when rerun. The mechanism below is a source reading against `main` at `5fe07b465`; which promise dropped its handler was not established.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.101.0 on 2026-09-23. From the intake gate of the first three v0.101.0 lanes: `make web-check` failed once on the integration candidate with every test passing, and passed on the same sha when rerun. The mechanism below is a source reading against `main` at `5fe07b465`; which promise dropped its handler was not established.
 
 ## What was seen
 

@@ -1,6 +1,10 @@
 # One question is answered independently in three to eight places
 
-Status: raised for v0.101.0 from the frontend review (its second theme and Phase 3: 134 verified patterns, 23 of them filed as medium findings), phased out of v0.100.0. The medium findings were re-verified against `main` at `d3de0180b` and all still apply; several have grown.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised for v0.101.0 from the frontend review (its second theme and Phase 3: 134 verified patterns, 23 of them filed as medium findings), phased out of v0.100.0. The medium findings were re-verified against `main` at `d3de0180b` and all still apply; several have grown.
+
+## Owner ruling
+
+Accepted on 2026-09-24. The owner wants the code de-duplicated and its modules organised properly, and left the timing to the lead's recommendation: after [source-text-tests-pin-spelling-not-behaviour](source-text-tests-pin-spelling-not-behaviour.md), because both move the same test files. That recommendation also proposed mechanical seams only, the five shared primitives the review names (modal shell, slot table, WebGL program helper, card chrome, deck focus restore) and no module decomposition. The owner's words about organising the modules properly read wider than that last clause, so how far module decomposition goes is confirmed with the owner before the lane fixes its scope.
 
 ## What was seen
 

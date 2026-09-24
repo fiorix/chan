@@ -1,6 +1,10 @@
 # Content search can report a truncated result as complete
 
-Status: raised during v0.100.0 on 2026-09-23; not accepted. From the release report's Rust-lows follow-up (worklist L81, the contract finding); it needs an owner decision on what the flag promises. A source reading against `main` at `6237c2677`.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.100.0 on 2026-09-23. From the release report's Rust-lows follow-up (worklist L81, the contract finding); it needs an owner decision on what the flag promises. A source reading against `main` at `6237c2677`.
+
+## Owner ruling
+
+Accepted on 2026-09-24 as the lead recommended, which settles the open question: the flag means more hits exist than were returned. It is set from the fetch window's cut-off as well as from the collapse, and both cases are pinned in a test.
 
 ## What was seen
 

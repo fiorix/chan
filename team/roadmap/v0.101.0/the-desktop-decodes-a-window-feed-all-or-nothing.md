@@ -1,6 +1,10 @@
 # The desktop decodes a devserver's window feed all or nothing
 
-Status: raised during v0.101.0 on 2026-09-23; not accepted. From the independent review of `v0101/unknown-window-kind` (its one medium finding) and that lane's report, which both read the two sites below while closing [an-unknown-window-kind-may-drop-every-window-row](an-unknown-window-kind-may-drop-every-window-row.md) and found that the store repair does not reach them. A source reading against `main` at `5fe07b465`; not reproduced.
+Status: accepted for v0.101.0 by the owner on 2026-09-24; raised during v0.101.0 on 2026-09-23. From the independent review of `v0101/unknown-window-kind` (its one medium finding) and that lane's report, which both read the two sites below while closing [an-unknown-window-kind-may-drop-every-window-row](an-unknown-window-kind-may-drop-every-window-row.md) and found that the store repair does not reach them. A source reading against `main` at `5fe07b465`; not reproduced.
+
+## Owner ruling
+
+Accepted on 2026-09-24 with the lead's shape: decode the list and each watch frame element by element in the desktop, logging unreadable rows with the devserver id and `window_id`. The owner stressed that resilience and testing matter here: one unreadable row must never cost the desktop its view of a devserver, and the tests prove that for the list and for a watch frame.
 
 ## What was seen
 
