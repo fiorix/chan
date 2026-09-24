@@ -64,8 +64,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-dropped-indexers-driver-eats-recovery][drvr] | accepted | build |
 | [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
 | [mcp-write-errors-follow-an-unpinned-display][mcpd] | accepted | build |
-| [a-joining-snapshot-fails-during-reconcile][join] | accepted | build |
-| [profile-workers-have-no-shutdown-owner][pwork] | accepted | build |
+| [a-joining-snapshot-fails-during-reconcile][join] | landed | GA |
+| [profile-workers-have-no-shutdown-owner][pwork] | landed | GA |
 | [the-email-fold-merges-distinct-characters][fold] | withdrawn | GA |
 | [the-move-out-spare-covers-the-whole-window][spare] | accepted | build |
 | [an-emptied-window-waits-without-a-bound][ewait] | accepted | build |
@@ -100,7 +100,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 
 | item | state | next |
 | --- | --- | --- |
-| [a-revocation-aborts-the-bridge-before-its-close][revab] | accepted | build |
+| [a-revocation-aborts-the-bridge-before-its-close][revab] | landed | GA |
 | [a-late-fetch-after-teardown-reds-the-web-check][lfetch] | accepted | build |
 | [the-desktop-decodes-a-window-feed-all-or-nothing][wfeed] | accepted | build |
 | [a-restart-replays-only-the-manifest-tail][rtail] | raised | decide |
