@@ -572,8 +572,9 @@ mod tests {
     }
 
     /// Applies `events` the way `run_loop` does, then indexes whatever they
-    /// scheduled as if every debounce window had elapsed.
-    fn apply_and_settle(workspace: &Arc<Workspace>, events: Vec<WatchEvent>) {
+    /// scheduled as if every debounce window had elapsed. Returns the
+    /// counters the events and the settling moved.
+    fn apply_and_settle(workspace: &Arc<Workspace>, events: Vec<WatchEvent>) -> GraphIndexerInner {
         let debounce = Duration::from_millis(DEBOUNCE_TEST_MS);
         let now = Instant::now();
         let mut pending = HashMap::new();
@@ -584,6 +585,12 @@ mod tests {
         for path in collect_matured(&pending, now + debounce) {
             workspace.index_file(&path).unwrap();
         }
+        state
+    }
+
+    fn lone_rename(path: &str, is_dir: bool, workspace: &Workspace) -> WatchEvent {
+        let generation = workspace.scope_policy().generation();
+        WatchEvent::rename(Some(path.to_string()), None, is_dir, None, generation)
     }
 
     /// macOS FSEvents names neither end of a rename, so `mv a.md b.md`
@@ -663,6 +670,71 @@ mod tests {
             "the renamed directory's files must replace the source's in the graph"
         );
         assert_eq!(index_paths, vec!["moved/a.md", "moved/nested/b.md"]);
+    }
+
+    /// A tool moving several folders at once on FSEvents raises one lone
+    /// event per destination. Each asks for a reconcile, a walk of the whole
+    /// tree under the workspace write lock, so the asks inside one debounce
+    /// window must run one.
+    #[test]
+    fn lone_directory_renames_in_one_window_run_one_reconcile() {
+        let (_cfg, _workspace_dir, workspace) = setup_workspace();
+        for dir in ["one", "two", "three"] {
+            workspace
+                .write_text(&format!("{dir}/a.md"), "# A\nbody\n")
+                .unwrap();
+        }
+
+        let state = apply_and_settle(
+            &workspace,
+            ["one", "two", "three"]
+                .map(|dir| lone_rename(dir, true, &workspace))
+                .to_vec(),
+        );
+
+        assert_eq!(
+            state.reconciles_total.load(Ordering::Relaxed),
+            1,
+            "three lone directory renames in one window must run one reconcile"
+        );
+        let mut graph_paths = workspace.graph().unwrap().files().unwrap();
+        graph_paths.sort();
+        assert_eq!(graph_paths, vec!["one/a.md", "three/a.md", "two/a.md"]);
+    }
+
+    /// The event's directory flag can be stale by the time it is handled;
+    /// what the lone path is on disk decides how it is indexed.
+    #[test]
+    fn a_lone_rename_flagged_directory_whose_path_is_a_file_is_indexed() {
+        let (_cfg, _workspace_dir, workspace) = setup_workspace();
+        workspace.write_text("note.md", "# Note\nbody\n").unwrap();
+
+        let state = apply_and_settle(&workspace, vec![lone_rename("note.md", true, &workspace)]);
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["note.md"],
+            "a lone path that is a file on disk is indexed as a file"
+        );
+        assert_eq!(state.reconciles_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_lone_rename_flagged_file_whose_path_is_a_directory_reconciles() {
+        let (_cfg, _workspace_dir, workspace) = setup_workspace();
+        workspace.write_text("dir/a.md", "# A\nbody\n").unwrap();
+
+        let state = apply_and_settle(&workspace, vec![lone_rename("dir", false, &workspace)]);
+
+        assert_eq!(
+            state.reconciles_total.load(Ordering::Relaxed),
+            1,
+            "a lone path that is a directory on disk asks for a reconcile"
+        );
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["dir/a.md"]
+        );
     }
 
     #[test]
