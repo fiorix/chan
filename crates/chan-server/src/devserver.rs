@@ -1708,6 +1708,42 @@ fn resolve_boot_token(persisted: &mut PersistedConfig, now: u64) -> BootToken {
     BootToken::Kept
 }
 
+/// The tasks `run_devserver` keeps for the whole serve loop, both started
+/// before route exposure and both ended by the shutdown signal.
+struct ServeLifetimeTasks {
+    /// Moves startup to Stopping and cancels reindex work once the shutdown
+    /// signal fires.
+    cancel: tokio::task::JoinHandle<()>,
+    /// The root health probe, on the cadence and the blocking-pool discipline
+    /// that [`spawn_root_health_probe`] documents. The desktop's embedded host
+    /// drives the same one, so a mounted root is watched wherever the launcher
+    /// routes are served rather than only here.
+    probe: tokio::task::JoinHandle<()>,
+}
+
+impl ServeLifetimeTasks {
+    fn spawn(state: &DevserverState, signal_tx: &tokio::sync::watch::Sender<bool>) -> Self {
+        let cancel_host = state.host.clone();
+        let cancel_startup = state.startup.clone();
+        let mut cancel_rx = signal_tx.subscribe();
+        let cancel = tokio::spawn(async move {
+            let _ = cancel_rx.changed().await;
+            cancel_startup.stop();
+            cancel_host.cancel_all_reindex();
+        });
+        let probe = spawn_root_health_probe(state.host.clone(), signal_tx.subscribe());
+        Self { cancel, probe }
+    }
+
+    /// End both tasks after the serve arm has joined. The probe is aborted
+    /// rather than joined: one stuck in a stalled mount's `lstat` is
+    /// uninterruptible, and shutdown must not wait on it.
+    async fn finish(self) -> Result<(), tokio::task::JoinError> {
+        self.probe.abort();
+        self.cancel.await
+    }
+}
+
 /// Run the devserver in the foreground until the process is interrupted.
 /// Loads (or mints) the persisted token, re-mounts the enabled workspaces,
 /// echoes the bind+token line, binds the management + discovery surfaces,
@@ -1863,24 +1899,10 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         state.bound_port.store(local_addr.port(), Ordering::Relaxed);
         state.persist_state();
     }
-    // Shutdown wiring is installed before route exposure. The observer moves
-    // startup to Stopping and cancels reindex work; the owned restore task uses
-    // another receiver and joins before this function returns.
+    // Shutdown wiring is installed before route exposure; the owned restore
+    // task uses another receiver and joins before this function returns.
     let signal_tx = Arc::new(tokio::sync::watch::channel(false).0);
-    let cancel_host = host.clone();
-    let cancel_startup = state.startup.clone();
-    let mut cancel_rx = signal_tx.subscribe();
-    let cancel_task = tokio::spawn(async move {
-        let _ = cancel_rx.changed().await;
-        cancel_startup.stop();
-        cancel_host.cancel_all_reindex();
-    });
-
-    // Root health probe, on the cadence and the blocking-pool discipline that
-    // `spawn_root_health_probe` documents. The desktop's embedded host drives
-    // the same one, so a mounted root is watched wherever the launcher routes
-    // are served rather than only here.
-    let probe_task = spawn_root_health_probe(host.clone(), signal_tx.subscribe());
+    let serve_tasks = ServeLifetimeTasks::spawn(&state, &signal_tx);
 
     state
         .startup
@@ -1975,10 +1997,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     let watchdog_pings = (ready && notify_result.is_ok())
         .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
     let serve_join = serve_arm.join(watchdog_pings).await;
-    // Aborted rather than joined: a probe stuck in a stalled mount's
-    // `lstat` is uninterruptible, and shutdown must not wait on it.
-    probe_task.abort();
-    let cancel_join = cancel_task.await;
+    let cancel_join = serve_tasks.finish().await;
     let tunnel_join = match tunnel_task {
         Some(task) => Some(task.await),
         None => None,
