@@ -1051,6 +1051,140 @@ def check_nix_contract() -> None:
         require(smoke, needle, "scripts/smoke-nix-package.sh")
 
 
+NODE_MAJOR_FILE = ".nvmrc"
+
+
+def declared_node_major() -> str:
+    """The node major every bundle builds on, as `.nvmrc` states it.
+
+    One bare major such as `22` and nothing else: a Docker `FROM` tag and a
+    nixpkgs attribute name can carry only a major, so a minor, a `v` prefix
+    or an nvm alias in the file would leave the sites that cannot read it
+    with nothing to agree with.
+    """
+    text = read(NODE_MAJOR_FILE)
+    major = text.strip()
+    if not re.fullmatch(r"[1-9][0-9]*", major):
+        raise ContractError(
+            f"{NODE_MAJOR_FILE}: expected one bare node major such as 22, "
+            f"found {text!r}"
+        )
+    return major
+
+
+def setup_node_steps(workflow: str) -> list[tuple[int, dict[str, tuple[str, int]]]]:
+    """Each actions/setup-node step of WORKFLOW with its version inputs.
+
+    Line-based like workflow_job: a step is its `- uses:` line (or the
+    `uses:` line under a `- name:`) plus every line indented past that
+    dash, and the inputs are the `node-version` and `node-version-file`
+    keys in that span, quoted or bare, each with the 1-based line it sits
+    on. Any such key inside the step counts, wherever it sits, so a version
+    input a typo moved out of `with:` is still seen rather than accepted.
+    """
+    lines = workflow.splitlines()
+    steps: list[tuple[int, dict[str, tuple[str, int]]]] = []
+    for index, line in enumerate(lines):
+        match = re.match(r"^(\s*)(- )?uses:\s*actions/setup-node@", line)
+        if not match:
+            continue
+        dash = len(match.group(1)) - (0 if match.group(2) else 2)
+        inputs: dict[str, tuple[str, int]] = {}
+        for number, later in enumerate(lines[index + 1 :], start=index + 2):
+            stripped = later.strip()
+            if stripped == "" or stripped.startswith("#"):
+                continue
+            if len(later) - len(later.lstrip()) <= dash:
+                break
+            key = re.match(
+                r"""^\s*(node-version(?:-file)?):\s*"""
+                r"""(?:'([^']*)'|"([^"]*)"|([^\s#]*))\s*(?:#.*)?$""",
+                later,
+            )
+            if key:
+                value = next(group for group in key.groups()[1:] if group is not None)
+                inputs[key.group(1)] = (value, number)
+        steps.append((index + 1, inputs))
+    return steps
+
+
+def check_node_major_contract() -> None:
+    """One node major builds every bundle, and `.nvmrc` is where it is stated.
+
+    The workflows read the file: every setup-node step names it through
+    `node-version-file`, as `chan/.nvmrc` because every workflow checks the
+    repository out at `chan/` and setup-node resolves the path from the
+    runner's workspace, and none carries a `node-version` literal, the
+    right major included, since a literal is a second place to edit. The
+    Docker builder images and the Nix packages cannot read the file (a
+    `FROM` tag and a nixpkgs attribute are fixed before anything runs), so
+    they name the major and this holds them to it.
+    """
+    major = declared_node_major()
+    expected = f"chan/{NODE_MAJOR_FILE}"
+    workflows_dir = ROOT / ".github" / "workflows"
+    workflows = sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml"))
+    steps = 0
+    for workflow_path in workflows:
+        path = workflow_path.relative_to(ROOT).as_posix()
+        for line, inputs in setup_node_steps(read(path)):
+            steps += 1
+            if "node-version" in inputs:
+                value, at = inputs["node-version"]
+                raise ContractError(
+                    f"{path}:{at}: setup-node carries node-version {value!r} "
+                    f"instead of reading {NODE_MAJOR_FILE}"
+                )
+            if "node-version-file" not in inputs:
+                raise ContractError(
+                    f"{path}:{line}: setup-node does not read {NODE_MAJOR_FILE} "
+                    "(no node-version-file input)"
+                )
+            value, at = inputs["node-version-file"]
+            if value != expected:
+                raise ContractError(
+                    f"{path}:{at}: node-version-file is {value!r}, expected "
+                    f"{expected!r} (the workflows check the repository out at chan/)"
+                )
+    if steps == 0:
+        raise ContractError(
+            ".github/workflows: no actions/setup-node step; retire this "
+            "contract if the workflows stopped building the bundles"
+        )
+
+    docker_dir = ROOT / "packaging" / "docker"
+    dockerfiles = sorted(
+        candidate
+        for candidate in docker_dir.rglob("*")
+        if candidate.is_file()
+        and (candidate.name == "Dockerfile" or candidate.name.endswith(".Dockerfile"))
+    )
+    if not dockerfiles:
+        raise ContractError("packaging/docker: no Dockerfile found")
+    for dockerfile in dockerfiles:
+        path = dockerfile.relative_to(ROOT).as_posix()
+        for number, line in enumerate(read(path).splitlines(), start=1):
+            match = re.match(r"^\s*FROM\s+(?:--\S+\s+)*node:(\S+)", line, re.IGNORECASE)
+            if match and not re.match(rf"^{major}(?:[.-]|$)", match.group(1)):
+                raise ContractError(
+                    f"{path}:{number}: FROM node:{match.group(1)} does not name "
+                    f"node {major}, the major {NODE_MAJOR_FILE} declares"
+                )
+
+    for path in ("packaging/nix/chan.nix", "packaging/nix/chan-desktop.nix"):
+        found = False
+        for number, line in enumerate(read(path).splitlines(), start=1):
+            for token in re.findall(r"\bnodejs_(\d+)\b", line):
+                found = True
+                if token != major:
+                    raise ContractError(
+                        f"{path}:{number}: nodejs_{token} does not name node "
+                        f"{major}, the major {NODE_MAJOR_FILE} declares"
+                    )
+        if not found:
+            raise ContractError(f"{path}: no nodejs_{major} attribute")
+
+
 def main() -> int:
     # Each contract runs even when an earlier one fails, so one broken
     # contract, or an interpreter too old for the gateway one, does not hide
@@ -1063,6 +1197,7 @@ def main() -> int:
         check_gateway_trigger_contract,
         check_docker_contract,
         check_nix_contract,
+        check_node_major_contract,
     ):
         try:
             check()
