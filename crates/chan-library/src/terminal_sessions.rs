@@ -954,8 +954,8 @@ pub enum AttachSeam {
     AttachAfterRingLock,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
-    /// In `Session::fdstore_manifest_entry`, just before it snapshots the
-    /// replay tail under the ring lock.
+    /// In `Session::fdstore_manifest_entry`, just before it takes `seq` and
+    /// the replay tail under the ring lock.
     ManifestBeforeReplayTail,
 }
 
@@ -3865,6 +3865,13 @@ impl Session {
             .copied()
             .collect();
         let live_metadata = self.live_metadata();
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::ManifestBeforeReplayTail);
+        // The PTY reader keeps running while the manifest is rewritten, and the
+        // next process rebuilds the ring as this tail ending at this `seq`, so
+        // both come from one snapshot under the ring lock `record_output`
+        // pushes and advances `seq` under.
+        let (seq, replay) = self.fdstore_replay_tail();
         let meta = FdStoreSessionMeta {
             tenant_prefix: tenant_prefix.to_string(),
             session_id: self.id.clone(),
@@ -3886,14 +3893,11 @@ impl Session {
             mcp_env: self.spawn_opts.mcp_env,
             child_pid: self.child_pid,
             size: size.into(),
-            seq: self.seq.load(Ordering::Relaxed),
+            seq,
             generation: self.generation,
             alt_screen: self.in_alt_screen.load(Ordering::Relaxed),
             private_modes,
         };
-        #[cfg(any(test, feature = "test-util"))]
-        fire_attach_seam(&self.id, AttachSeam::ManifestBeforeReplayTail);
-        let replay = self.fdstore_replay_tail();
         Some(FdStoreManifestEntry {
             fd_name,
             meta,
@@ -4092,18 +4096,19 @@ impl Session {
         Ok(session)
     }
 
+    /// The ring's end `seq` and its bounded replay tail, read under one ring
+    /// lock so the tail ends exactly at that `seq`.
     #[cfg(target_os = "linux")]
-    fn fdstore_replay_tail(&self) -> Vec<u8> {
-        let (chunks, _missed) = self
-            .ring
-            .lock()
-            .expect("terminal ring poisoned")
-            .snapshot_since(None);
+    fn fdstore_replay_tail(&self) -> (u64, Vec<u8>) {
+        let (seq, chunks) = {
+            let ring = self.ring.lock().expect("terminal ring poisoned");
+            (ring.end_seq(), ring.snapshot_since(None).0)
+        };
         let replay = chunks.concat();
         if replay.len() <= FDSTORE_REPLAY_BYTES {
-            return replay;
+            return (seq, replay);
         }
-        replay[replay.len() - FDSTORE_REPLAY_BYTES..].to_vec()
+        (seq, replay[replay.len() - FDSTORE_REPLAY_BYTES..].to_vec())
     }
 
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
