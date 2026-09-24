@@ -300,6 +300,14 @@ jobs:
           # released commit (or the dispatched tag) instead.
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
 
+      # mkdist builds the tarball's web bundles with this node, so the PPA
+      # ships bundles built on the major .nvmrc declares.
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
       - name: Install packaging tools
         run: |
           sudo apt-get update -qq
