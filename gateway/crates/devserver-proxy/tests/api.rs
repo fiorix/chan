@@ -2794,6 +2794,158 @@ async fn ws_bridge_closes_as_expired_when_the_session_expires_during_setup() {
     app.cleanup().await;
 }
 
+fn exact_revocation(uid: Uuid) -> devserver_proxy::session_store::Revocation {
+    devserver_proxy::session_store::Revocation::Exact {
+        subject_user_id: uid,
+        owner_user_id: uid,
+        devserver_id: "blog".to_string(),
+    }
+}
+
+/// A revocation through the session store while the bridge is still in
+/// its setup ends the client socket with the 1008 Close that names the
+/// revocation, and the revocation returns once the bridge has sent it.
+#[tokio::test]
+async fn ws_bridge_closes_as_revoked_when_the_session_is_revoked_during_setup() {
+    let app = TestApp::new_with_ws_idle_timeout(WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    app.register_tunnel(
+        "alice",
+        "blog",
+        uid,
+        stalling_upstream("/blog/ws-stall", reached.clone()),
+    )
+    .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+    let revocation = exact_revocation(uid);
+    let started = tokio::time::Instant::now();
+    let (revoked, frame) = tokio::join!(
+        tokio::time::timeout(4 * WS_TEST_IDLE, app.sessions.revoke(&revocation)),
+        expect_close_within(
+            &mut ws,
+            4 * WS_TEST_IDLE,
+            "a WebSocket whose session was revoked during setup",
+        ),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session revoked");
+    assert_eq!(
+        revoked.expect("the revocation did not drain the bridge"),
+        Ok(1)
+    );
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the setup bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
+/// A revocation through the session store while the bridge is pumping
+/// frames ends the client socket with the 1008 Close that names the
+/// revocation.
+#[tokio::test]
+async fn ws_bridge_closes_as_revoked_when_the_session_is_revoked_while_bridged() {
+    use tokio_tungstenite::tungstenite::Message as WsMsg;
+    let app = TestApp::new_with_ws_idle_timeout(4 * WS_TEST_IDLE).await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel("alice", "blog", uid, ws_upstream_router())
+        .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let cookie = session_cookie(&app, uid, "blog", &host);
+    let mut ws = ws_connect(addr, &host, "/blog/ws-echo", &cookie).await;
+    ws.send(WsMsg::text("hello")).await.unwrap();
+    let echoed = tokio::time::timeout(WS_TEST_IDLE, ws.next())
+        .await
+        .expect("echo within budget")
+        .expect("socket open")
+        .expect("clean frame");
+    assert_eq!(echoed, WsMsg::text("hello"));
+
+    let revocation = exact_revocation(uid);
+    let started = tokio::time::Instant::now();
+    let (revoked, frame) = tokio::join!(
+        tokio::time::timeout(4 * WS_TEST_IDLE, app.sessions.revoke(&revocation)),
+        expect_close_within(
+            &mut ws,
+            4 * WS_TEST_IDLE,
+            "a bridged WebSocket whose session was revoked",
+        ),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session revoked");
+    assert_eq!(
+        revoked.expect("the revocation did not drain the bridge"),
+        Ok(1)
+    );
+    assert!(
+        elapsed < WS_TEST_IDLE,
+        "the Close waited for the idle bound: {elapsed:?}"
+    );
+    server.abort();
+    app.cleanup().await;
+}
+
+/// A session the store expires while the bridge is pumping frames ends
+/// the client socket with the 1008 Close that names the expiry. The
+/// test blocks its current-thread runtime past the expiry and then looks
+/// the session up, so the store's expiry path runs before the bridge's
+/// own expiry timer can be polled, which is the order a prune on another
+/// clock can take in production.
+#[tokio::test]
+async fn ws_bridge_closes_as_expired_when_the_store_expires_the_session() {
+    use tokio_tungstenite::tungstenite::Message as WsMsg;
+    let app =
+        TestApp::new_with_ws_idle_and_session_lifetime(4 * WS_TEST_IDLE, WS_TEST_SESSION_LIFETIME)
+            .await;
+    let uid = Uuid::new_v4();
+    app.register_tunnel("alice", "blog", uid, ws_upstream_router())
+        .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let issued = std::time::Instant::now();
+    let session = opaque_session(&app, uid, uid, "blog", &host);
+    let cookie = format!("__Host-devserver_gate={session}");
+    let mut ws = ws_connect(addr, &host, "/blog/ws-echo", &cookie).await;
+    ws.send(WsMsg::text("hello")).await.unwrap();
+    let echoed = tokio::time::timeout(WS_TEST_IDLE, ws.next())
+        .await
+        .expect("echo within budget")
+        .expect("socket open")
+        .expect("clean frame");
+    assert_eq!(echoed, WsMsg::text("hello"));
+
+    let expired_at = issued + WS_TEST_SESSION_LIFETIME + std::time::Duration::from_millis(50);
+    std::thread::sleep(expired_at.saturating_duration_since(std::time::Instant::now()));
+    assert!(
+        app.sessions.lookup(&session).is_none(),
+        "the lookup expires the session"
+    );
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a bridged WebSocket whose session the store expired",
+    )
+    .await;
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session expired");
+    server.abort();
+    app.cleanup().await;
+}
+
 // ---------------------------------------------------------------
 // Extension lane
 // ---------------------------------------------------------------
