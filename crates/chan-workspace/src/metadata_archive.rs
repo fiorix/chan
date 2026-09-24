@@ -318,8 +318,15 @@ fn inspect_metadata_archive(archive: &Path) -> Result<MetadataManifest> {
     read_manifest(decoder, EXTRACT_LIMITS)
 }
 
-/// Read the manifest entry from a decoded tar stream.
-fn read_manifest<R: Read>(stream: R, _limits: ExtractLimits) -> Result<MetadataManifest> {
+/// Read the manifest entry from a decoded tar stream, reading no more of the
+/// stream than the manifest and one entry's overhead.
+fn read_manifest<R: Read>(stream: R, limits: ExtractLimits) -> Result<MetadataManifest> {
+    let cap = limits.manifest.saturating_add(ARCHIVE_ENTRY_OVERHEAD);
+    let (stream, tripped) = DecodedCap::new(stream, cap);
+    read_manifest_from(stream, limits.manifest).map_err(|error| tripped.refusal(cap, error))
+}
+
+fn read_manifest_from<R: Read>(stream: R, limit: u64) -> Result<MetadataManifest> {
     let mut archive = Archive::new(stream);
     let mut entries = archive.entries()?;
     let Some(first) = entries.next() else {
@@ -336,9 +343,17 @@ fn read_manifest<R: Read>(stream: R, _limits: ExtractLimits) -> Result<MetadataM
     let kind = archive_entry_kind(first.header().entry_type());
     validate_archive_entry_path(&path, kind)
         .map_err(|e| ChanError::Io(format!("unsafe metadata archive manifest path: {e}")))?;
-    let mut raw = String::new();
-    first.read_to_string(&mut raw)?;
-    serde_json::from_str(&raw)
+    let mut raw = Vec::new();
+    (&mut first)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > limit {
+        return Err(ChanError::ArchiveLimit {
+            unit: "manifest bytes",
+            limit,
+        });
+    }
+    serde_json::from_slice(&raw)
         .map_err(|e| ChanError::Io(format!("decode metadata archive manifest: {e}")))
 }
 
@@ -748,8 +763,19 @@ pub const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
 /// into the import staging directory before it is refused and removed.
 pub const MAX_ARCHIVE_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Largest manifest entry an import reads.
+/// Largest manifest entry an import reads. A real manifest is under a
+/// kilobyte (780 bytes is the largest exported on the development box): its
+/// size is set by the workspace root path and the git remotes. One MiB leaves
+/// room for a machine with many long remotes while keeping the manifest read,
+/// which buffers the whole entry, small.
 pub const MAX_ARCHIVE_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// Decoded bytes one tar entry may spend besides its data: a 512-byte header,
+/// up to 511 bytes of padding, and a GNU long-name, long-link or PAX
+/// extension entry carrying a path up to the usual 4 KiB `PATH_MAX`. Eight KiB
+/// covers all of them, so no archive the other limits accept reaches the
+/// stream cap built from it.
+const ARCHIVE_ENTRY_OVERHEAD: u64 = 8 * 1024;
 
 #[derive(Clone, Copy)]
 struct ExtractLimits {
@@ -763,6 +789,87 @@ const EXTRACT_LIMITS: ExtractLimits = ExtractLimits {
     bytes: MAX_ARCHIVE_PAYLOAD_BYTES,
     manifest: MAX_ARCHIVE_MANIFEST_BYTES,
 };
+
+impl ExtractLimits {
+    /// Most decoded bytes extraction reads from the whole stream: the payload
+    /// budget, the manifest, and every entry's overhead, with one more entry's
+    /// worth for the end-of-archive blocks. tar reads a GNU long-name,
+    /// long-link or PAX entry into memory whole before it yields the entry it
+    /// describes, outside the per-entry byte meter, so this cap is what bounds
+    /// that allocation.
+    fn stream_cap(self) -> u64 {
+        self.bytes.saturating_add(self.manifest).saturating_add(
+            self.entries
+                .saturating_add(1)
+                .saturating_mul(ARCHIVE_ENTRY_OVERHEAD),
+        )
+    }
+}
+
+/// A decoded stream that fails once more than `cap` bytes are read from it.
+/// The failure is recorded beside the reader, because tar hands a reader
+/// error back in whatever shape the call that met it has, and the caller
+/// names the refusal from the record rather than from the error.
+struct DecodedCap<R> {
+    inner: R,
+    remaining: u64,
+    tripped: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+/// The record a [`DecodedCap`] leaves behind.
+struct Tripped(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl Tripped {
+    /// `error`, or the named refusal when the cap is why the read failed.
+    fn refusal(&self, cap: u64, error: ChanError) -> ChanError {
+        if self.0.get() {
+            ChanError::ArchiveLimit {
+                unit: "decoded bytes",
+                limit: cap,
+            }
+        } else {
+            error
+        }
+    }
+}
+
+impl<R: Read> DecodedCap<R> {
+    fn new(inner: R, cap: u64) -> (Self, Tripped) {
+        let tripped = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reader = Self {
+            inner,
+            remaining: cap,
+            tripped: std::rc::Rc::clone(&tripped),
+        };
+        (reader, Tripped(tripped))
+    }
+}
+
+impl<R: Read> Read for DecodedCap<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            // A stream that ends exactly at the cap is within it; only a byte
+            // past it is a refusal.
+            let mut probe = [0u8; 1];
+            if self.inner.read(&mut probe)? == 0 {
+                return Ok(0);
+            }
+            self.tripped.set(true);
+            return Err(std::io::Error::other(
+                "metadata archive exceeds its decoded-bytes limit",
+            ));
+        }
+        let want = buf
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..want])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
 
 fn extract_payload(archive: &Path, payload: &Path) -> Result<(usize, u64)> {
     extract_payload_within(archive, payload, EXTRACT_LIMITS)
@@ -782,6 +889,16 @@ fn extract_payload_within(
 
 /// Extract the payload entries of a decoded tar stream into `payload`.
 fn extract_stream_within<R: Read>(
+    stream: R,
+    payload: &Path,
+    limits: ExtractLimits,
+) -> Result<(usize, u64)> {
+    let cap = limits.stream_cap();
+    let (stream, tripped) = DecodedCap::new(stream, cap);
+    extract_entries(stream, payload, limits).map_err(|error| tripped.refusal(cap, error))
+}
+
+fn extract_entries<R: Read>(
     stream: R,
     payload: &Path,
     limits: ExtractLimits,
@@ -1999,8 +2116,8 @@ mod tests {
 
     /// The decoded stream of `archive`, counted.
     fn counted_stream(archive: &Path) -> (impl Read, std::rc::Rc<std::cell::Cell<u64>>) {
-        let decoder = zstd::stream::read::Decoder::new(BufReader::new(File::open(archive).unwrap()))
-            .unwrap();
+        let decoder =
+            zstd::stream::read::Decoder::new(BufReader::new(File::open(archive).unwrap())).unwrap();
         let count = std::rc::Rc::new(std::cell::Cell::new(0));
         let reader = CountingReader {
             inner: decoder,
