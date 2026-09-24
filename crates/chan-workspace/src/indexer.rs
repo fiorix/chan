@@ -10,10 +10,10 @@
 //     to the indexer through an mpsc channel via an internal
 //     `WatchCallback` so the indexer thread is the only one
 //     touching graph + index.
-//   * Drop the `GraphIndexer` (or call `stop()`) to tear down both
-//     the watcher and the worker. Cleanup is synchronous: the
-//     watcher is dropped first to close the channel, then the
-//     worker joined.
+//   * Drop the last `GraphIndexer` clone (or call `stop()` on any)
+//     to tear down both the watcher and the worker. Cleanup is
+//     synchronous: the watcher is dropped first to close the
+//     channel, then the worker joined.
 //
 // Debouncing:
 //
@@ -60,32 +60,41 @@ use crate::workspace::Workspace;
 pub const DEFAULT_DEBOUNCE_MS: u64 = 150;
 
 /// Handle to a running graph indexer. Cheap to clone (Arc inside).
-/// Drop to stop; the watcher is released and the worker thread
-/// joined synchronously.
+/// Dropping the last clone stops it; the watcher is released and the
+/// worker thread joined synchronously.
 pub struct GraphIndexer {
-    inner: Arc<GraphIndexerInner>,
+    owner: Arc<IndexerOwner>,
 }
 
 impl Clone for GraphIndexer {
     fn clone(&self) -> Self {
         Self {
-            inner: Arc::clone(&self.inner),
+            owner: Arc::clone(&self.owner),
         }
     }
 }
 
-struct GraphIndexerInner {
-    stop: AtomicBool,
-    pending: AtomicUsize,
-    indexed_total: AtomicU64,
-    forgotten_total: AtomicU64,
-    reconciles_total: AtomicU64,
+/// The part of a running indexer only its handles hold. The worker holds
+/// `state` alone, so this is dropped exactly when the last handle is, and
+/// dropping it is the teardown.
+struct IndexerOwner {
+    state: Arc<GraphIndexerInner>,
     /// Worker thread handle. `Option` so `stop()` can take it.
     thread: Mutex<Option<JoinHandle<()>>>,
     /// Held to keep the watcher producer alive. Dropping this
     /// closes the channel, which lets the worker exit on its next
     /// `recv_timeout`.
     watch: Mutex<Option<WatchHandle>>,
+}
+
+/// What the worker shares with the handles: the stop flag it polls and
+/// the counters it updates.
+struct GraphIndexerInner {
+    stop: AtomicBool,
+    pending: AtomicUsize,
+    indexed_total: AtomicU64,
+    forgotten_total: AtomicU64,
+    reconciles_total: AtomicU64,
 }
 
 impl GraphIndexer {
@@ -95,14 +104,12 @@ impl GraphIndexer {
     /// handle and worker), though pairing two indexers against the
     /// same workspace in production would only burn CPU.
     pub fn start_on(workspace: Arc<Workspace>, debounce_ms: u64) -> Result<Self> {
-        let inner = Arc::new(GraphIndexerInner {
+        let state = Arc::new(GraphIndexerInner {
             stop: AtomicBool::new(false),
             pending: AtomicUsize::new(0),
             indexed_total: AtomicU64::new(0),
             forgotten_total: AtomicU64::new(0),
             reconciles_total: AtomicU64::new(0),
-            thread: Mutex::new(None),
-            watch: Mutex::new(None),
         });
 
         let (tx, rx) = mpsc::channel::<WatchEvent>();
@@ -110,35 +117,38 @@ impl GraphIndexer {
         let watch = workspace.watch(cb)?;
 
         let workspace_w = Arc::clone(&workspace);
-        let inner_w = Arc::clone(&inner);
+        let state_w = Arc::clone(&state);
         let debounce = Duration::from_millis(debounce_ms);
         let thread = std::thread::Builder::new()
             .name("chan-workspace::indexer".into())
-            .spawn(move || run_loop(workspace_w, rx, inner_w, debounce))
+            .spawn(move || run_loop(workspace_w, rx, state_w, debounce))
             .map_err(|e| ChanError::io_with_context(e, "spawn indexer thread"))?;
 
-        *inner.thread.lock().unwrap() = Some(thread);
-        *inner.watch.lock().unwrap() = Some(watch);
-
-        Ok(Self { inner })
+        Ok(Self {
+            owner: Arc::new(IndexerOwner {
+                state,
+                thread: Mutex::new(Some(thread)),
+                watch: Mutex::new(Some(watch)),
+            }),
+        })
     }
 
     /// Files currently waiting on their debounce window.
     pub fn pending_count(&self) -> usize {
-        self.inner.pending.load(Ordering::Acquire)
+        self.owner.state.pending.load(Ordering::Acquire)
     }
 
     /// Cumulative number of files successfully indexed since start.
     /// Includes per-event index_file calls AND files indexed by
     /// reconcile.
     pub fn indexed_total(&self) -> u64 {
-        self.inner.indexed_total.load(Ordering::Acquire)
+        self.owner.state.indexed_total.load(Ordering::Acquire)
     }
 
     /// Cumulative number of files forgotten since start (per-event
     /// removes AND reconcile-driven forgets).
     pub fn forgotten_total(&self) -> u64 {
-        self.inner.forgotten_total.load(Ordering::Acquire)
+        self.owner.state.forgotten_total.load(Ordering::Acquire)
     }
 
     /// Cumulative count of full-reconcile passes triggered by
@@ -149,37 +159,40 @@ impl GraphIndexer {
     /// macOS) and the consumer should consider raising
     /// `fs.inotify.max_queued_events` or similar.
     pub fn reconciles_total(&self) -> u64 {
-        self.inner.reconciles_total.load(Ordering::Acquire)
+        self.owner.state.reconciles_total.load(Ordering::Acquire)
     }
 
     /// Stop the indexer. Idempotent. Synchronous: returns only after
     /// the worker has finished its current op and the watcher is
-    /// torn down. Called automatically on `Drop` of the last clone.
+    /// torn down. Called automatically when the last clone drops.
     pub fn stop(&self) {
-        self.inner.stop.store(true, Ordering::Release);
+        self.owner.stop();
+    }
+}
+
+impl IndexerOwner {
+    fn stop(&self) {
+        self.state.stop.store(true, Ordering::Release);
         // Drop the watch first so the channel closes; the worker
         // then exits on RecvTimeoutError::Disconnected. Without this
         // we'd race the stop flag against in-flight events.
-        if let Some(watch) = self.inner.watch.lock().unwrap().take() {
+        if let Some(watch) = self.watch.lock().unwrap().take() {
             watch.stop();
             watch.join();
         }
-        if let Some(t) = self.inner.thread.lock().unwrap().take() {
+        if let Some(t) = self.thread.lock().unwrap().take() {
             let _ = t.join();
         }
     }
 }
 
-impl Drop for GraphIndexer {
+impl Drop for IndexerOwner {
     fn drop(&mut self) {
-        // Only the last surviving clone triggers the teardown. The
-        // strong_count check is best-effort: clones held by other
-        // threads can still race. We treat the indexer as a singleton
-        // in practice (chan-server holds one); the multi-clone case
-        // is allowed but undefined for stop timing.
-        if Arc::strong_count(&self.inner) == 1 && !self.inner.stop.load(Ordering::Acquire) {
-            self.stop();
-        }
+        // Runs once, when the last `GraphIndexer` clone drops, on the
+        // thread that dropped it: no reference the worker holds keeps
+        // the owner alive, so every clone can be dropped from any
+        // thread and the last one still stops the worker.
+        self.stop();
     }
 }
 
@@ -465,8 +478,6 @@ mod tests {
             indexed_total: AtomicU64::new(0),
             forgotten_total: AtomicU64::new(0),
             reconciles_total: AtomicU64::new(0),
-            thread: Mutex::new(None),
-            watch: Mutex::new(None),
         }
     }
 
