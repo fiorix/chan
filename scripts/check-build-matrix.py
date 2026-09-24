@@ -1283,10 +1283,24 @@ def check_node_major_contract() -> None:
     for dockerfile in dockerfiles:
         path = dockerfile.relative_to(ROOT).as_posix()
         for number, line in enumerate(read(path).splitlines(), start=1):
-            match = re.match(r"^\s*FROM\s+(?:--\S+\s+)*node:(\S+)", line, re.IGNORECASE)
-            if match and not re.match(rf"^{major}(?:[.-]|$)", match.group(1)):
+            match = re.match(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", line, re.IGNORECASE)
+            if not match:
+                continue
+            # The image is the last path component, so a registry prefix
+            # (`docker.io/library/node`) is still node; a digest after `@`
+            # pins bytes but names no major, so the tag has to.
+            image = match.group(1).split("@", 1)[0]
+            name, _, tag = image.rpartition("/")[2].partition(":")
+            if name.lower() != "node":
+                continue
+            if not tag:
                 raise ContractError(
-                    f"{path}:{number}: FROM node:{match.group(1)} does not name "
+                    f"{path}:{number}: FROM {match.group(1)} names no node "
+                    f"tag, so not the major {major} {NODE_MAJOR_FILE} declares"
+                )
+            if not re.match(rf"^{major}(?:[.-]|$)", tag):
+                raise ContractError(
+                    f"{path}:{number}: FROM {match.group(1)} does not name "
                     f"node {major}, the major {NODE_MAJOR_FILE} declares"
                 )
 
