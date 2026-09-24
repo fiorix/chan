@@ -136,7 +136,11 @@ impl FallbackHome {
 ///    no other user can have prepared it. It is new per process, so state
 ///    kept there does not survive a restart.
 /// 3. `.chan` under the working directory, where chan otherwise never keeps
-///    state; nothing checks it, because nothing is left to fall back to.
+///    state, created `0700` and absolute whenever the working directory can
+///    be read. Nothing vets it, because nothing is left to fall back to; a
+///    checkout used this way gains an untracked `.chan` holding the config
+///    and its token. When the working directory cannot be read the path is
+///    relative, and the caveat says so.
 fn resolve_fallback_home(
     predictable: &Path,
     vet: impl Fn(&Path) -> Result<(), String>,
@@ -181,10 +185,42 @@ fn resolve_fallback_home(
             )),
         }
     }
+    let mut caveats = Vec::new();
+    let path = match cwd {
+        Some(cwd) => {
+            let path = cwd.join(".chan");
+            if let Err(error) = create_private_dir(&path) {
+                caveats.push(format!("cannot create {}: {error}", path.display()));
+            }
+            path
+        }
+        None => {
+            // Nothing is created: with no readable working directory there
+            // is no telling where a relative `.chan` would land.
+            caveats.push(
+                "the working directory could not be read, so the chan home `.chan` \
+                 is relative to whatever directory chan runs in"
+                    .to_string(),
+            );
+            PathBuf::from(".chan")
+        }
+    };
     FallbackHome {
-        path: cwd.map_or_else(|| PathBuf::from(".chan"), |cwd| cwd.join(".chan")),
+        path,
         refused,
-        caveats: Vec::new(),
+        caveats,
+    }
+}
+
+/// Create `path` as a directory, `0700` on Unix; an existing one is left as
+/// it is, since the last resort has nothing left to refuse it for.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+        _ => Ok(()),
     }
 }
 
