@@ -149,6 +149,13 @@ pub struct Indexer {
     /// "empty" state (no commit, graph cleared but not refilled),
     /// so the on-boot `indexed_docs == 0` trigger re-fires next run.
     cancel: Arc<AtomicBool>,
+    /// Held weakly, as the coordinator and watcher tasks hold it, so that
+    /// dropping the indexer can still reach the workspace to uninstall
+    /// `recovery_driver` without keeping it alive.
+    workspace: Weak<Workspace>,
+    /// The driver installed at spawn. Uninstalled on drop, so the workspace
+    /// stops counting on a coordinator that is gone.
+    recovery_driver: Arc<dyn chan_workspace::RecoveryDriver>,
     /// Held to keep the spawned tasks alive for as long as the
     /// indexer is. Aborted on drop.
     _watcher_task: JoinHandle<()>,
@@ -163,6 +170,13 @@ impl std::fmt::Debug for Indexer {
 
 impl Drop for Indexer {
     fn drop(&mut self) {
+        // Before the coordinator goes, so a pass requeued from here on reads
+        // as unowned instead of waking a channel nobody drains. Only this
+        // indexer's driver is removed: one a later spawn installed over the
+        // same workspace stays.
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.clear_recovery_driver(&self.recovery_driver);
+        }
         self.cancel.store(true, Ordering::Relaxed);
         self._watcher_task.abort();
         self._coordinator_task.abort();
@@ -242,7 +256,9 @@ impl Indexer {
         // first poll can observe readiness. Installing also announces whatever
         // is already pending, which covers the passes parked between
         // `Workspace::open` and here.
-        workspace.set_recovery_driver(Arc::new(CoordinatorDriver { tx: rebuild_tx }));
+        let recovery_driver: Arc<dyn chan_workspace::RecoveryDriver> =
+            Arc::new(CoordinatorDriver { tx: rebuild_tx });
+        workspace.set_recovery_driver(recovery_driver.clone());
         // Trigger a full rebuild when either side of the index is
         // empty. Checking BM25 alone misses the case where a prior
         // rebuild was killed mid-graph-pass: the graph DB stays
@@ -278,6 +294,8 @@ impl Indexer {
             telemetry,
             rebuild_requester,
             cancel,
+            workspace: Arc::downgrade(&workspace),
+            recovery_driver,
             _watcher_task: watcher_task,
             _coordinator_task: coordinator_task,
         }
@@ -335,15 +353,22 @@ impl RebuildRequester {
 /// that forgot to poke the coordinator: no caller has to remember the poke.
 ///
 /// A later `Indexer::spawn` over the same workspace replaces this driver rather
-/// than stacking on it; dropping an indexer leaves the stale sender installed,
-/// whose sends are simply discarded.
+/// than stacking on it, and dropping an indexer uninstalls its own driver while
+/// leaving a successor's in place. A coordinator that stops with its driver
+/// still installed closes the channel: sends then fail, and the driver reports
+/// itself closed so the workspace counts the pass as unowned.
 struct CoordinatorDriver {
     tx: mpsc::UnboundedSender<WorkspaceGeneration>,
 }
 
 impl chan_workspace::RecoveryDriver for CoordinatorDriver {
     fn wake(&self, generation: WorkspaceGeneration) {
+        // A failed send means the receiver is gone, which `is_closed` reports.
         let _ = self.tx.send(generation);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 }
 

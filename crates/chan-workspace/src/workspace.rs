@@ -421,15 +421,25 @@ impl Drop for PersistedReportRefreshGuard<'_> {
 /// plan the workspace was opened with and then exits, and every other executor
 /// is driven from outside this crate, so a pass requested afterwards is claimed
 /// only if something is listening. Whoever owns that claim installs itself
-/// through [`Workspace::set_recovery_driver`]; a workspace with no driver
-/// reports its unclaimed passes through [`Workspace::recovery_is_unowned`]
-/// instead of parking on them silently.
+/// through [`Workspace::set_recovery_driver`] and uninstalls itself through
+/// [`Workspace::clear_recovery_driver`] when it stops; a workspace with no
+/// driver, or only a closed one, reports its unclaimed passes through
+/// [`Workspace::recovery_is_unowned`] instead of parking on them silently.
 pub trait RecoveryDriver: Send + Sync {
     /// Announce that a pass is pending and `generation` must be reached.
     ///
     /// Called from the write paths that park passes, so it must not block or
     /// re-enter the workspace.
     fn wake(&self, generation: WorkspaceGeneration);
+
+    /// True once this driver can no longer claim a pass, such as when the
+    /// executor its wakes reach has stopped. A closed driver counts as no
+    /// driver, so a pass it would have claimed reads as unowned. The same
+    /// rule as [`wake`](Self::wake) applies: it must not block or re-enter
+    /// the workspace.
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
 
 /// Point-in-time state of the workspace recovery coordinator.
@@ -1292,16 +1302,39 @@ impl Workspace {
         }
     }
 
+    /// Uninstall `driver` if it is still the installed one.
+    ///
+    /// For a claimant that stops: once it is gone, a pass requeued or parked
+    /// reads as unowned instead of waking an executor nobody runs. Only the
+    /// driver handed in is removed, so a claimant that stops after a successor
+    /// was installed leaves the successor in place.
+    pub fn clear_recovery_driver(&self, driver: &Arc<dyn RecoveryDriver>) {
+        let mut installed = self.recovery_driver.write().unwrap();
+        if installed
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, driver))
+        {
+            *installed = None;
+        }
+    }
+
     /// True when a pending pass has no claimant: nothing is executing it, the
-    /// startup worker has exited, and no driver is installed. Such a pass never
-    /// converges, so consumers must report it rather than render it as recovery
-    /// in progress.
+    /// startup worker has exited, and no driver is installed or the installed
+    /// one reports itself closed. Such a pass never converges, so consumers
+    /// must report it rather than render it as recovery in progress.
     pub fn recovery_is_unowned(&self) -> bool {
         let status = self.recovery_status();
         status.active.is_none()
             && status.pending.is_some()
             && !self.recovery_worker.is_running()
-            && self.recovery_driver.read().unwrap().is_none()
+            && !self.has_open_recovery_driver()
+    }
+
+    /// Whether an installed driver can still claim a pass. The driver is
+    /// foreign code, so it is asked after its lock is released.
+    fn has_open_recovery_driver(&self) -> bool {
+        let driver = self.recovery_driver.read().unwrap().clone();
+        driver.is_some_and(|driver| !driver.is_closed())
     }
 
     /// Announce a pending generation to the installed driver.
@@ -10752,6 +10785,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDriver {
         woken: std::sync::Mutex<Vec<WorkspaceGeneration>>,
+        closed: AtomicBool,
     }
 
     impl RecordingDriver {
@@ -10763,6 +10797,10 @@ mod tests {
     impl RecoveryDriver for RecordingDriver {
         fn wake(&self, generation: WorkspaceGeneration) {
             self.woken.lock().unwrap().push(generation);
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::Relaxed)
         }
     }
 
@@ -10875,6 +10913,48 @@ mod tests {
         assert!(
             !workspace.recovery_is_unowned(),
             "a driver is exactly what makes the pass claimable"
+        );
+    }
+
+    #[test]
+    fn a_closed_driver_leaves_a_pending_pass_unowned() {
+        let (_cfg, _root, workspace) = fixture();
+        let driver = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(driver.clone());
+        workspace.request_policy_recovery(RecoveryAction::Reconcile);
+        assert!(!workspace.recovery_is_unowned(), "an open driver claims it");
+
+        driver.closed.store(true, Ordering::Relaxed);
+
+        assert!(
+            workspace.recovery_is_unowned(),
+            "a driver that can no longer claim a pass counts as none"
+        );
+    }
+
+    #[test]
+    fn clearing_a_driver_removes_only_that_driver() {
+        let (_cfg, _root, workspace) = fixture();
+        let earlier: Arc<dyn RecoveryDriver> = Arc::new(RecordingDriver::default());
+        let later = Arc::new(RecordingDriver::default());
+        workspace.set_recovery_driver(earlier.clone());
+        workspace.set_recovery_driver(later.clone());
+
+        workspace.clear_recovery_driver(&earlier);
+        let generation = workspace.request_policy_recovery(RecoveryAction::Reconcile);
+
+        assert_eq!(
+            later.woken(),
+            vec![generation],
+            "clearing a replaced driver must leave its successor installed"
+        );
+        assert!(!workspace.recovery_is_unowned());
+
+        let later: Arc<dyn RecoveryDriver> = later;
+        workspace.clear_recovery_driver(&later);
+        assert!(
+            workspace.recovery_is_unowned(),
+            "clearing the installed driver uninstalls it"
         );
     }
 }
