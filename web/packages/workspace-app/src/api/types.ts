@@ -614,7 +614,7 @@ export type GraphViewNode =
       /// notes flagged with `chan.kind: contact` frontmatter; absent
       /// for regular markdown so the canvas falls back to the doc
       /// shape. Image files keep `node_kind` absent and are routed via
-      /// the frontend's classifyFile extension check instead.
+      /// the frontend's `fileBucket` (state/kinds.ts) instead.
       node_kind?: "contact";
       /// True for an indexed file that has since vanished from disk (a
       /// stale-index signal); rendered muted. Unresolved link targets are

@@ -4,10 +4,12 @@ import store from "../state/store.svelte.ts?raw";
 import tabs from "../state/tabs.svelte.ts?raw";
 
 // Graph filter chips include markdown + source FileBucket toggles.
-// GraphNodeView::File does not carry a bucket field, so the SPA uses
-// a client-side classifyFile helper. Tests pin: GraphFilters shape in
-// both modules; SerTab version-2 sentinel; FilterKind + FILTER_COLORS;
-// hidden-id derived sets; chip iteration sites; classifyFile dispatch.
+// GraphNodeView::File does not carry a bucket field, so the SPA buckets
+// file nodes with the shared fileBucket (state/kinds.ts). Tests pin:
+// GraphFilters shape in both modules; SerTab version-2 sentinel;
+// FilterKind + FILTER_COLORS; hidden-id derived sets; chip iteration
+// sites; the fileBucket dispatch. What a PDF node counts as is asserted
+// on a mounted panel in graphPdfClassification.svelte.test.ts.
 
 describe("GraphFilters shape (both modules)", () => {
   test("store.svelte.ts GraphFilters has markdown + source bits", () => {
@@ -68,26 +70,23 @@ describe("FilterKind + FILTER_COLORS extension", () => {
     expect(graph).toMatch(/source: "var\(--g-source\)"/);
   });
 
-  test("classifyFile dispatches doc / source / binary buckets", () => {
-    expect(graph).toMatch(
-      /function classifyFile\([\s\S]*?\): "doc" \| "img" \| "contact" \| "source" \| "binary"/,
-    );
-    expect(graph).toMatch(/if \(MARKDOWN_EXT_RE\.test\(path\)\) return "doc"/);
-    expect(graph).toMatch(/if \(SOURCE_EXT_RE\.test\(path\)\) return "source"/);
-    expect(graph).toMatch(/return "binary"/);
+  test("file nodes bucket through the shared fileBucket, with no local copy", () => {
+    expect(graph).toMatch(/import \{[\s\S]*?\bfileBucket,[\s\S]*?\} from "\.\.\/state\/kinds"/);
+    expect(graph).not.toMatch(/_EXT_RE\s*=/);
+    expect(graph).not.toMatch(/function classifyFile\(/);
   });
 });
 
 describe("hidden-id derived sets + visibility", () => {
   test("hiddenMarkdownIds set scoped to doc-class file nodes when chip OFF", () => {
     expect(graph).toMatch(
-      /const hiddenMarkdownIds = \$derived\.by\([\s\S]*?if \(show\.markdown\) return ids;[\s\S]*?classifyFile\(n\.path, n\.node_kind\) === "doc"/,
+      /const hiddenMarkdownIds = \$derived\.by\([\s\S]*?if \(show\.markdown\) return ids;[\s\S]*?fileBucket\(n\.path, n\.node_kind\) === "doc"/,
     );
   });
 
   test("hiddenSourceIds set scoped to source-class file nodes when chip OFF", () => {
     expect(graph).toMatch(
-      /const hiddenSourceIds = \$derived\.by\([\s\S]*?if \(show\.source\) return ids;[\s\S]*?classifyFile\(n\.path, n\.node_kind\) === "source"/,
+      /const hiddenSourceIds = \$derived\.by\([\s\S]*?if \(show\.source\) return ids;[\s\S]*?fileBucket\(n\.path, n\.node_kind\) === "source"/,
     );
   });
 

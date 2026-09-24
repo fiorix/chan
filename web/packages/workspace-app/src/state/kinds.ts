@@ -17,7 +17,7 @@
 import { FileText, User, FileCode, Image, File, Hash, Calendar, Folder } from "lucide-svelte";
 
 import type { TreeEntry } from "../api/types";
-import { classifyPath } from "./fileTypes";
+import { classifyPath, isMarkdown } from "./fileTypes";
 
 export type FileKind =
   | "document"
@@ -62,8 +62,9 @@ export function classifyFile(
   return classifyPath(path);
 }
 
-/// Extension buckets used by the graph canvas node fill, shared here
-/// so the inspector kind bubble can match the node it represents.
+/// Extension buckets used by the graph canvas node fill, its filter chips
+/// and the inspector kind bubble, shared here so the three always agree on
+/// a node.
 ///
 /// Two taxonomies meet at a file node: the server projects a wire
 /// `kind` (`document` | `text` | `media` | `binary` | `contact` |
@@ -73,29 +74,25 @@ export function classifyFile(
 /// token swap on `text` cannot match the canvas. Sharing this
 /// extension bucketer is the only match-by-construction fix.
 ///
-/// Mirrors `chan_workspace::FileClass` conceptually but routes Pdf
-/// into `img` (media) and Other into `binary` so the SPA's five-bucket
-/// split matches the colour split. `contact` comes from the indexer's
-/// `node_kind: "contact"` discriminator, not the extension.
+/// Built on `classifyPath`, the path classifier that mirrors
+/// `chan_workspace::FileClass`: media (images and PDFs) is `img`,
+/// Markdown-class (`.md`, `.txt`) is `doc`, the rest of the server's text
+/// class is `source`, and everything else is `binary`. `contact` comes
+/// from the indexer's `node_kind: "contact"` discriminator, not the
+/// extension.
 export type FileBucket = "doc" | "img" | "contact" | "source" | "binary";
 
-const MEDIA_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|pdf)$/i;
-const MARKDOWN_EXT_RE = /\.(md|txt)$/i;
-const SOURCE_EXT_RE =
-  /\.(rs|py|ts|tsx|js|jsx|mjs|cjs|go|c|cc|cpp|cxx|h|hh|hpp|java|kt|swift|rb|php|cs|sh|bash|zsh|fish|pl|lua|toml|yaml|yml|json|jsonc|ini|conf|cfg|env|xml|html|htm|css|scss|sass|less|vue|svelte|sql|graphql|gql|proto|elm|ex|exs|erl|hs|lhs|ml|mli|fs|fsx|clj|cljs|cljc|edn|jl|nim|d|dart|zig|odin|v|vhd|vhdl|sv|verilog|asm|s|f|f90|f95|tex|R|r)$/i;
-
-/// Classify a file path into its graph-canvas colour bucket. Media
-/// wins first (an image with contact frontmatter still reads as
-/// media), then the `contact` discriminator, then markdown (`.md` /
-/// `.txt`), then recognised source / config text, else binary.
-/// `nodeKind` is the indexer's `node_kind` hint (`"contact"` or
-/// absent). Kept byte-identical to the graph canvas's former local
-/// helper so the node fill and the inspector bubble stay in lockstep.
+/// Classify a file path into its graph colour bucket. Media wins first
+/// (an image with contact frontmatter still reads as media), then the
+/// `contact` discriminator, then Markdown-class, then the server's text
+/// class, else binary. `nodeKind` is the indexer's `node_kind` hint
+/// (`"contact"` or absent).
 export function fileBucket(path: string, nodeKind?: "contact"): FileBucket {
-  if (MEDIA_EXT_RE.test(path)) return "img";
+  const kind = classifyPath(path);
+  if (kind === "media") return "img";
   if (nodeKind === "contact") return "contact";
-  if (MARKDOWN_EXT_RE.test(path)) return "doc";
-  if (SOURCE_EXT_RE.test(path)) return "source";
+  if (isMarkdown(path)) return "doc";
+  if (kind === "text") return "source";
   // Anything else (archives, executables, fonts, etc.) is binary.
   return "binary";
 }

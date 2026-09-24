@@ -78,6 +78,7 @@
   import {
     classifyFile as classifyFileKind,
     classifyEntry,
+    fileBucket,
     isOpenableTextKind,
     type FileKind,
   } from "../state/kinds";
@@ -588,7 +589,7 @@
   /// `GraphFilters` (store.svelte.ts) stays for URL-hash
   /// back-compat but isn't consumed here.
   /// `markdown` + `source` FileBucket toggles, default ON. The
-  /// SPA-side `classifyFile` helper dispatches file nodes into
+  /// shared `fileBucket` (state/kinds.ts) dispatches file nodes into
   /// the markdown / source / binary buckets client-side:
   /// `GraphNodeView::File` doesn't carry the `bucket` field
   /// (`ReportFileStats` does), so classification happens here
@@ -881,37 +882,9 @@
   /// short of the diameter of any realistic workspace.
   const DEPTH_MAX = 10;
 
-  /// Files split into "doc", "img", or "contact" by the same rules
-  /// the GraphCanvas renderer uses: image classification is
-  /// extension-based, contact comes from the wire `node_kind:
-  /// "contact"` stamp the indexer applies to chan-workspace's
-  /// `contacts()` set, everything else is a doc. Mirrored here
-  /// because `hiddenImageIds` / `counts` / `inspectorSelection`
-  /// need the kind upfront for chip filtering.
-  /// File-class buckets (`doc` for markdown, `source` for
-  /// code/config, `binary` for everything else not covered by
-  /// img/contact) let the markdown + source filter chips route
-  /// file nodes into their buckets. Mirrors
-  /// `GraphCanvas.svelte`'s helper of the same name, plus
-  /// `MARKDOWN_EXT_RE` + `SOURCE_EXT_RE`. The two helpers stay
-  /// separate copies -- they're parallel SPA-side helpers with the
-  /// same regex set; a future cleanup task could extract them
-  /// into a shared module.
-  const MEDIA_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i;
-  const MARKDOWN_EXT_RE = /\.(md|txt)$/i;
-  const SOURCE_EXT_RE =
-    /\.(rs|py|ts|tsx|js|jsx|mjs|cjs|go|c|cc|cpp|cxx|h|hh|hpp|java|kt|swift|rb|php|cs|sh|bash|zsh|fish|pl|lua|toml|yaml|yml|json|jsonc|ini|conf|cfg|env|xml|html|htm|css|scss|sass|less|vue|svelte|sql|graphql|gql|proto|elm|ex|exs|erl|hs|lhs|ml|mli|fs|fsx|clj|cljs|cljc|edn|jl|nim|d|dart|zig|odin|v|vhd|vhdl|sv|verilog|asm|s|f|f90|f95|tex|R|r)$/i;
-
-  function classifyFile(
-    path: string,
-    nodeKind: "contact" | undefined,
-  ): "doc" | "img" | "contact" | "source" | "binary" {
-    if (MEDIA_EXT_RE.test(path)) return "img";
-    if (nodeKind === "contact") return "contact";
-    if (MARKDOWN_EXT_RE.test(path)) return "doc";
-    if (SOURCE_EXT_RE.test(path)) return "source";
-    return "binary";
-  }
+  /// File nodes reach the chips, the hidden-id sets and the inspector
+  /// through `fileBucket` (state/kinds.ts), the bucketer the canvas
+  /// paints with, so a node is counted, hidden and coloured as one kind.
 
   /// Watcher-triggered reload for visible graphs. With keep-alive the
   /// graph no longer reloads on tab activation; this forces a fresh
@@ -1121,7 +1094,7 @@
         // workspace-root short-circuit above. RenderedNode doesn't
         // model media as a separate kind - media files come through
         // as `kind: "file"` and the canvas re-classifies them via
-        // `classifyFile`. Their `.path` works the same way, so the
+        // `fileBucket`. Their `.path` works the same way, so the
         // ancestor-expanded gate covers files and subdirectories
         // alike.
         if (ancestorsExpanded(rootPath, n.path, expanded)) visible.add(n.id);
@@ -1337,7 +1310,7 @@
     const ids = new Set<string>();
     if (show.img) return ids;
     for (const n of nodes) {
-      if (n.kind === "file" && classifyFile(n.path, n.node_kind) === "img") ids.add(n.id);
+      if (n.kind === "file" && fileBucket(n.path, n.node_kind) === "img") ids.add(n.id);
     }
     return ids;
   });
@@ -1418,15 +1391,15 @@
   });
 
   /// File nodes hidden when the markdown chip is OFF.
-  /// Bucket = `classifyFile === "doc"` (.md / .txt per the
-  /// SPA-side classifier). The `contact` discriminator is gated by
+  /// Bucket = `fileBucket === "doc"` (.md / .txt per the
+  /// shared classifier). The `contact` discriminator is gated by
   /// the `mention` chip (existing hiddenContactIds) and image-class
   /// files by `img`; this hidden-set covers markdown specifically.
   const hiddenMarkdownIds = $derived.by(() => {
     const ids = new Set<string>();
     if (show.markdown) return ids;
     for (const n of nodes) {
-      if (n.kind === "file" && classifyFile(n.path, n.node_kind) === "doc") {
+      if (n.kind === "file" && fileBucket(n.path, n.node_kind) === "doc") {
         ids.add(n.id);
       }
     }
@@ -1434,13 +1407,13 @@
   });
 
   /// File nodes hidden when the source chip is OFF.
-  /// Bucket = `classifyFile === "source"` (recognised code / config
-  /// extensions).
+  /// Bucket = `fileBucket === "source"` (the rest of the server's
+  /// text class: code, config, markup, data).
   const hiddenSourceIds = $derived.by(() => {
     const ids = new Set<string>();
     if (show.source) return ids;
     for (const n of nodes) {
-      if (n.kind === "file" && classifyFile(n.path, n.node_kind) === "source") {
+      if (n.kind === "file" && fileBucket(n.path, n.node_kind) === "source") {
         ids.add(n.id);
       }
     }
@@ -1583,7 +1556,7 @@
         continue;
       }
       if (n.kind !== "file") continue;
-      const cls = classifyFile(n.path, n.node_kind);
+      const cls = fileBucket(n.path, n.node_kind);
       if (cls === "img") c.img++;
       else if (cls === "contact") c.mention++;
       else if (cls === "doc") c.markdown++;

@@ -48,11 +48,19 @@ describe("fileBucket", () => {
     }
   });
 
-  test("unrecognised + editable-but-not-source extensions bucket as binary", () => {
-    // `.csv` / `.excalidraw` are FileClass::Text on the server (wire
-    // kind `text`) but are NOT in the canvas source regex, so the node
-    // paints grey (binary) and the bubble must follow by construction.
-    for (const p of ["archive.zip", "font.woff2", "blob.bin", "data.csv", "board.excalidraw", "mystery.xyz"]) {
+  test("the rest of the server's text class buckets as source", () => {
+    // FileClass::Text on the server (wire kind `text`) is one class, so
+    // data, markup, build files and well-known basenames paint as source
+    // beside code.
+    for (const p of ["data.csv", "board.excalidraw", "notes.rst", "app.scala", "Makefile", "LICENSE"]) {
+      expect(fileBucket(p)).toBe("source");
+    }
+  });
+
+  test("extensions the server's classifier does not know bucket as binary", () => {
+    // Unknown to FileClass, so the server sniffs their content and the
+    // path alone cannot say text: `.proto`, `.graphql` and `.cs` included.
+    for (const p of ["archive.zip", "font.woff2", "blob.bin", "mystery.xyz", "api.proto", "schema.graphql", "Main.cs"]) {
       expect(fileBucket(p)).toBe("binary");
     }
   });
@@ -75,9 +83,9 @@ describe("chipColorVar (path-aware bubble colour)", () => {
     expect(chipColorVar("media", "paper.pdf")).toBe("var(--g-img)");
     expect(chipColorVar("binary", "archive.zip")).toBe("var(--g-binary)");
     expect(chipColorVar("contact", "alice.md")).toBe("var(--g-contact, var(--warn-text))");
-    // Excalidraw + csv: text wire kind, grey node, grey bubble.
-    expect(chipColorVar("text", "board.excalidraw")).toBe("var(--g-binary)");
-    expect(chipColorVar("text", "data.csv")).toBe("var(--g-binary)");
+    // Excalidraw + csv: text wire kind, source node, source bubble.
+    expect(chipColorVar("text", "board.excalidraw")).toBe("var(--g-source)");
+    expect(chipColorVar("text", "data.csv")).toBe("var(--g-source)");
   });
 
   test("pending stays neutral even with a path (excluded from bucketing)", () => {
@@ -144,30 +152,11 @@ describe("file-class colour scheme wiring", () => {
     expect(canvas).toMatch(/fileBucket\(n\.path, n\.node_kind\)/);
   });
 
-  test("markdown extension regex covers .md and .txt", () => {
-    expect(kinds).toMatch(/MARKDOWN_EXT_RE = \/\\\.\(md\|txt\)\$\/i/);
-  });
-
-  test("source extension regex covers common code + config extensions", () => {
-    expect(kinds).toMatch(/SOURCE_EXT_RE\s*=\s*\n?\s*\/\\\.\(rs\|py\|ts\|tsx/);
-    expect(kinds).toMatch(/toml\|yaml\|yml\|json/);
-  });
-
-  test("media extension regex covers image + pdf", () => {
-    expect(kinds).toMatch(/MEDIA_EXT_RE = \/\\\.\(png\|jpe\?g\|gif\|webp\|svg\|avif\|bmp\|pdf\)/);
-  });
-
-  test("fileBucket dispatches MEDIA first, then contact, then markdown, then source, else binary", () => {
-    // Order matters: image extensions on a contact-flagged file
-    // should still bucket as media (existing behaviour). The
-    // function's branch order encodes this. Behaviour is unit-tested
-    // above; this pins the source branch order.
-    expect(kinds).toMatch(/if \(MEDIA_EXT_RE\.test\(path\)\) return "img"/);
-    expect(kinds).toMatch(
-      /if \(nodeKind === "contact"\) return "contact"[\s\S]*?if \(MARKDOWN_EXT_RE\.test\(path\)\) return "doc"/,
-    );
-    expect(kinds).toMatch(/if \(SOURCE_EXT_RE\.test\(path\)\) return "source"/);
-    expect(kinds).toMatch(/return "binary"/);
+  test("fileBucket keeps no extension list of its own", () => {
+    // The buckets come from classifyPath, the classifier that mirrors the
+    // server's; a second list here is how the chips and the canvas drifted.
+    expect(kinds).not.toMatch(/_EXT_RE\s*=/);
+    expect(kinds).toMatch(/export function fileBucket\([\s\S]*?classifyPath\(path\)/);
   });
 
   test("ThemeColors carries source + binary slots", () => {
