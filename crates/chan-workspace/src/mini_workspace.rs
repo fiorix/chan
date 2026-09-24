@@ -372,6 +372,8 @@ impl MiniWorkspace {
                 dir.create_dir_all(parent).map_err(ChanError::from)?;
             }
         }
+        #[cfg(test)]
+        race_window::open();
         match dir.rename(&from_path, &dir, &to_path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -511,6 +513,8 @@ impl MiniWorkspace {
         }
         let (dir, tmp_path) = self.fs.resolve_io(&tmp)?;
         let (_, to_path) = self.fs.resolve_io(to)?;
+        #[cfg(test)]
+        race_window::open();
         if let Err(error) = dir.rename(&tmp_path, &dir, &to_path) {
             self.fs.remove_tree_best_effort(&tmp);
             return Err(ChanError::from(error));
@@ -542,6 +546,31 @@ impl MiniWorkspace {
 
 fn is_not_empty_error(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+}
+
+/// Test-only pause between a move or copy's destination check and the
+/// rename that commits it. A test installs a closure here to create the
+/// destination inside that window, which is the race a check-then-rename
+/// loses; the closure runs once, on the thread that set it.
+#[cfg(test)]
+mod race_window {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn open() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -881,6 +910,106 @@ mod tests {
             Err(ChanError::PathAlreadyExists(_))
         ));
         assert_eq!(stdfs::read_to_string(fx.root.join("b.txt")).unwrap(), "b");
+    }
+
+    fn temp_leftovers(fx: &Fixture) -> Vec<String> {
+        fx.mini
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| n.contains("chan-copy"))
+            .collect()
+    }
+
+    #[test]
+    fn move_plain_refuses_a_file_created_inside_the_race_window() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("mine.txt"), "mine").unwrap();
+        let theirs = fx.root.join("taken.txt");
+        race_window::set(move || stdfs::write(theirs, "theirs").unwrap());
+
+        let result = fx.mini.move_plain("mine.txt", "taken.txt");
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "taken.txt"),
+            "a destination created after the check must be a conflict: {result:?}"
+        );
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("taken.txt")).unwrap(),
+            "theirs",
+            "the file created inside the window survives"
+        );
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("mine.txt")).unwrap(),
+            "mine",
+            "the source stays where it was"
+        );
+    }
+
+    #[test]
+    fn move_plain_refuses_an_empty_directory_created_inside_the_race_window() {
+        let fx = fixture();
+        stdfs::create_dir(fx.root.join("src")).unwrap();
+        stdfs::write(fx.root.join("src/inner.txt"), "inner").unwrap();
+        let theirs = fx.root.join("dst");
+        // POSIX rename(2) replaces an empty destination directory, so this
+        // is the directory form of the same clobber.
+        race_window::set(move || stdfs::create_dir(theirs).unwrap());
+
+        let result = fx.mini.move_plain("src", "dst");
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "dst"),
+            "{result:?}"
+        );
+        assert!(fx.root.join("src/inner.txt").exists(), "source intact");
+        assert!(!fx.root.join("dst/inner.txt").exists(), "nothing moved in");
+    }
+
+    #[test]
+    fn copy_plain_refuses_a_file_created_inside_the_race_window() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("mine.txt"), "mine").unwrap();
+        let theirs = fx.root.join("taken.txt");
+        race_window::set(move || stdfs::write(theirs, "theirs").unwrap());
+
+        let result = fx.mini.copy_plain("mine.txt", "taken.txt");
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "taken.txt"),
+            "{result:?}"
+        );
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("taken.txt")).unwrap(),
+            "theirs"
+        );
+        assert!(temp_leftovers(&fx).is_empty(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn cross_device_move_refuses_a_file_created_inside_the_race_window() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("mine.txt"), "mine").unwrap();
+        let theirs = fx.root.join("taken.txt");
+        race_window::set(move || stdfs::write(theirs, "theirs").unwrap());
+
+        let result = fx.mini.move_across_devices("mine.txt", "taken.txt");
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "taken.txt"),
+            "{result:?}"
+        );
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("taken.txt")).unwrap(),
+            "theirs"
+        );
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("mine.txt")).unwrap(),
+            "mine",
+            "a refused cross-device move keeps its source"
+        );
+        assert!(temp_leftovers(&fx).is_empty(), "the staged copy is removed");
     }
 
     #[test]

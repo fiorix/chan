@@ -2311,6 +2311,8 @@ fn create_file_sync(
     if create_target_exists(workspace, &body.path) {
         return Err(chan_workspace::ChanError::PathAlreadyExists(body.path));
     }
+    #[cfg(test)]
+    create_race_window::open();
     if body.is_dir {
         workspace.create_dir(&body.path)
     } else {
@@ -2320,6 +2322,30 @@ fn create_file_sync(
 
 fn create_target_exists(workspace: &chan_workspace::Workspace, path: &str) -> bool {
     workspace.stat(path).is_ok()
+}
+
+/// Test-only pause between the create route's existence check and the
+/// create itself, so a test can put a file at the path inside that window.
+/// The closure runs once, on the thread that set it.
+#[cfg(test)]
+mod create_race_window {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn open() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -5506,6 +5532,36 @@ mod write_tests {
             err,
             chan_workspace::ChanError::PathAlreadyExists(_)
         ));
+    }
+
+    #[test]
+    fn create_file_sync_refuses_a_file_created_inside_the_race_window() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let theirs = root.path().join("note.md");
+        create_race_window::set(move || std::fs::write(theirs, "theirs").unwrap());
+
+        let result = create_file_sync(
+            &workspace,
+            CreateBody {
+                path: "note.md".to_string(),
+                is_dir: false,
+                content: Some("mine".to_string()),
+            },
+        );
+
+        assert!(
+            matches!(result, Err(chan_workspace::ChanError::PathAlreadyExists(ref path)) if path == "note.md"),
+            "a file created after the check must be a conflict: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("note.md")).unwrap(),
+            "theirs",
+            "the file created inside the window survives"
+        );
     }
 
     #[test]
