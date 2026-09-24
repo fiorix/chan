@@ -419,7 +419,7 @@ pub struct WorkspaceTraversalProfile {
 /// Budget truncation flags and observed candidate counts. Observed counts describe work examined, not exhaustive totals for unvisited graph regions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceSearchTruncation {
-    /// More distinct file hits were retrieved than the content-hit limit.
+    /// More hits exist than were returned: the fetch window held more distinct files than the content-hit limit, or more chunks matched than the window holds, so files past it were never examined.
     pub content_hits: bool,
     /// Distinct file hits observed before applying the result limit.
     pub content_hits_observed: u32,
@@ -863,6 +863,8 @@ fn run_content_search(
     }
     let query = request.query.as_deref().expect("content search has query");
     let expanded = request.limit.saturating_mul(8).min(request.limit.max(200));
+    // One hit past the window tells a window the matches fill exactly from one
+    // that cut them short; a full window alone cannot.
     let search = workspace.search(
         query,
         &SearchOpts {
@@ -870,7 +872,7 @@ fn run_content_search(
                 EffectiveSearchMode::Hybrid => SearchMode::Hybrid,
                 EffectiveSearchMode::NotRun | EffectiveSearchMode::Bm25 => SearchMode::Bm25,
             },
-            limit: expanded,
+            limit: expanded + 1,
             scope: None,
         },
     )?;
@@ -884,6 +886,8 @@ fn run_content_search(
             .then_with(|| left.start_line.cmp(&right.start_line))
             .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
+    let window_cut_off = hits.len() > expanded as usize;
+    hits.truncate(expanded as usize);
     let mut seen = BTreeSet::new();
     let mut collapsed = Vec::new();
     for hit in hits {
@@ -892,7 +896,7 @@ fn run_content_search(
         }
     }
     result.truncation.content_hits_observed = collapsed.len() as u32;
-    result.truncation.content_hits = collapsed.len() > request.limit as usize;
+    result.truncation.content_hits = window_cut_off || collapsed.len() > request.limit as usize;
     collapsed.truncate(request.limit as usize);
     result.content_hits = collapsed;
     Ok(())
