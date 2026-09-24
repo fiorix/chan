@@ -2359,6 +2359,75 @@ mod tests {
         assert_eq!(outcome, ApplyOutcome::Indexed);
     }
 
+    /// Classifies `event` and applies what it yields, the way the watcher
+    /// loop does once the debounce elapses.
+    fn classify_and_apply(workspace: &Workspace, event: &WatchEvent) {
+        match classify(event) {
+            WatchAction::Changes(changes) => {
+                for change in changes {
+                    apply_watch_change(workspace, &change.path, change.deleted, change.is_dir)
+                        .unwrap();
+                }
+            }
+            WatchAction::Ignore => {}
+            other => panic!("expected per-file changes, got {other:?}"),
+        }
+    }
+
+    fn bm25_paths(workspace: &Workspace, query: &str) -> Vec<String> {
+        let opts = SearchOpts {
+            mode: SearchMode::Bm25,
+            limit: 10,
+            scope: None,
+        };
+        let hits = workspace.search(query, &opts).unwrap().hits;
+        hits.into_iter().map(|hit| hit.path).collect()
+    }
+
+    // FSEvents reports each end of a rename as its own event with one path,
+    // which the watcher leaves in the source slot, so `mv a.md b.md` arrives
+    // as two lone renames. The one naming the destination must index it.
+    #[test]
+    fn a_lone_rename_whose_path_exists_is_indexed() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nloneindextoken\n").unwrap();
+        workspace.index_file("a.md").unwrap();
+        fs::rename(dir.path().join("a.md"), dir.path().join("b.md")).unwrap();
+
+        for path in ["a.md", "b.md"] {
+            classify_and_apply(&workspace, &ev(WatchKind::Renamed, Some(path), None));
+        }
+
+        assert_eq!(
+            workspace.graph().unwrap().files().unwrap(),
+            vec!["b.md"],
+            "the rename destination must be indexed and its source forgotten"
+        );
+        assert_eq!(bm25_paths(&workspace, "loneindextoken"), vec!["b.md"]);
+    }
+
+    // An editor's atomic save renames a temporary file over the target, which
+    // FSEvents reports as a lone rename of the target. The target stays.
+    #[test]
+    fn an_atomic_save_seen_as_a_lone_rename_keeps_the_file() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\noldsavetoken\n").unwrap();
+        workspace.index_file("a.md").unwrap();
+        fs::write(dir.path().join("a.md.tmp"), "# A\nnewsavetoken\n").unwrap();
+        fs::rename(dir.path().join("a.md.tmp"), dir.path().join("a.md")).unwrap();
+
+        for path in ["a.md.tmp", "a.md"] {
+            classify_and_apply(&workspace, &ev(WatchKind::Renamed, Some(path), None));
+        }
+
+        assert_eq!(
+            bm25_paths(&workspace, "newsavetoken"),
+            vec!["a.md"],
+            "a file saved by a rename over it must stay indexed, with its new content"
+        );
+        assert!(bm25_paths(&workspace, "oldsavetoken").is_empty());
+    }
+
     #[test]
     fn apply_watch_change_directory_delete_forgets_subtree() {
         let (_cfg, dir, workspace) = setup_workspace();
