@@ -217,11 +217,23 @@ impl ScopeRegistry {
     /// under the same lock as the map mutation so deltas can never be
     /// observed out of order. No filesystem or notify work runs here.
     pub fn subscribe(&self, id: SubId, dir: &str) -> ScopeDelta {
+        self.subscribe_within(id, dir, usize::MAX)
+            .unwrap_or_default()
+    }
+
+    /// [`Self::subscribe`] with a per-socket cap: `None`, and no change,
+    /// when `id` already holds `limit` dirs and `dir` is not one of them. A
+    /// repeat `sub` for a held dir is never refused. The count and the
+    /// insert share one lock, so the cap cannot be overshot.
+    pub fn subscribe_within(&self, id: SubId, dir: &str, limit: usize) -> Option<ScopeDelta> {
         let dir = normalize_dir(dir);
         let mut inner = self.lock();
         let Some(sub) = inner.subscribers.get_mut(&id) else {
-            return ScopeDelta::default(); // socket already unregistered; drop the late frame.
+            return Some(ScopeDelta::default()); // socket already unregistered; drop the late frame.
         };
+        if sub.dirs.len() >= limit && !sub.dirs.contains(&dir) {
+            return None;
+        }
         sub.dirs.insert(dir.clone());
         let scope = inner.scopes.entry(dir.clone()).or_default();
         let was_empty = scope.is_empty();
@@ -230,7 +242,7 @@ impl ScopeRegistry {
         if was_empty {
             delta.attach.push(dir);
         }
-        delta
+        Some(delta)
     }
 
     /// Unsubscribe `id` from `dir`. The scope stays alive while any

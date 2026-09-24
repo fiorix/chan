@@ -169,6 +169,15 @@ pub(crate) enum ServerFrame {
     Closed { reason: &'static str },
 }
 
+/// Largest client message the scene socket reads; tungstenite refuses a
+/// longer one at its frame header, before buffering it. The scene budget
+/// decides everything under it: new scenes may reach `TEXT_WRITE_LIMIT`
+/// (2 MiB) and a legacy scene its own larger size, and a push carries only
+/// changed elements and newly added files. Eight times the new-scene budget
+/// leaves room for any push that budget can accept on an ordinary scene;
+/// only a legacy scene over 16 MiB rewritten in one push meets the cap.
+const SCENE_WS_MESSAGE_LIMIT: usize = 16 * 1024 * 1024;
+
 pub async fn api_scene_ws(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SceneQuery>,
@@ -180,7 +189,9 @@ pub async fn api_scene_ws(
     // SPA's capability probe to "no scene sync" for the whole page
     // load.
     let workspace = state.try_workspace();
-    ws.on_upgrade(move |mut socket| async move {
+    ws.max_message_size(SCENE_WS_MESSAGE_LIMIT)
+        .max_frame_size(SCENE_WS_MESSAGE_LIMIT)
+        .on_upgrade(move |mut socket| async move {
         match workspace {
             Ok(workspace) => scene_ws(socket, state, workspace, query).await,
             Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
@@ -272,7 +283,23 @@ async fn scene_ws(
                     }
                     Ok(Message::Close(_)) => break,
                     Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                    Err(_) => break,
+                    Err(e) => {
+                        // The client's own limit error, told by name: it is
+                        // permanent for this scene, and a bare drop would read
+                        // as a network blip the client reconnects and resends
+                        // into.
+                        if exceeds_message_limit(e) {
+                            error_close(
+                                &mut socket,
+                                &format!(
+                                    "scene message exceeds the {SCENE_WS_MESSAGE_LIMIT}-byte limit"
+                                ),
+                                "doc-too-large",
+                            )
+                            .await;
+                        }
+                        break;
+                    }
                 }
             }
             frame = frames.recv() => {
@@ -302,6 +329,16 @@ async fn scene_ws(
     }
     // Dropping `handle` detaches: cursor-gone fan; a 1->0 transition
     // stamps the detach grace and requests a prompt flush.
+}
+
+/// Whether a read failed because the peer's message or frame passed the
+/// socket's size limit, as opposed to a transport or protocol failure.
+fn exceeds_message_limit(error: axum::Error) -> bool {
+    use tokio_tungstenite::tungstenite::Error;
+    error
+        .into_inner()
+        .downcast_ref::<Error>()
+        .is_some_and(|error| matches!(error, Error::Capacity(_)))
 }
 
 /// Map a rejected push onto the contract's `error.reason` values.
@@ -608,8 +645,6 @@ mod tests {
     }
 
     // ---- the socket's message limit, over a real route --------------------
-
-    const SCENE_WS_MESSAGE_LIMIT: usize = 16 * 1024 * 1024;
 
     type Client = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,

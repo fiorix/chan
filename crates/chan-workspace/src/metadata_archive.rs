@@ -730,10 +730,17 @@ fn replace_subtree(paths: &WorkspacePaths, payload: &Path, subtree: &str) -> Res
 }
 
 /// Most tar entries one import reads, the manifest and directory entries
-/// included.
+/// included. An export holds a few dozen: the index and graph are a handful
+/// of files per Tantivy segment and SQLite database, and reports and
+/// sessions a few more. The cap is far above that and bounds only a crafted
+/// archive's per-entry work and inode use.
 pub const MAX_ARCHIVE_ENTRIES: u64 = 10_000;
 
-/// Most payload bytes one import writes to disk.
+/// Most payload bytes one import writes to disk. Exported metadata grows
+/// with the workspace's text, since the index stores it: a 611 MB notes
+/// workspace exports 130 MiB. Four GiB leaves room for a workspace about
+/// thirty times that while bounding what a decompression bomb can write
+/// into the import staging directory before it is refused and removed.
 pub const MAX_ARCHIVE_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -756,14 +763,21 @@ fn extract_payload_within(
     payload: &Path,
     limits: ExtractLimits,
 ) -> Result<(usize, u64)> {
-    let _ = (limits.entries, limits.bytes);
     let file = File::open(archive)?;
     let decoder = zstd::stream::read::Decoder::new(BufReader::new(file)).map_err(|e| {
         ChanError::io_with_context(e, format!("open zstd archive {}", archive.display()))
     })?;
     let mut archive = Archive::new(decoder);
     let mut stats = ArchiveStats::default();
+    let mut entries_read = 0u64;
     for entry in archive.entries()? {
+        entries_read += 1;
+        if entries_read > limits.entries {
+            return Err(ChanError::ArchiveLimit {
+                unit: "entries",
+                limit: limits.entries,
+            });
+        }
         let mut entry = entry?;
         let entry_path = entry.path()?.into_owned();
         let kind = archive_entry_kind(entry.header().entry_type());
@@ -795,7 +809,20 @@ fn extract_payload_within(
                     std::fs::create_dir_all(parent)?;
                 }
                 let mut out = File::create(&dest)?;
-                let bytes = std::io::copy(&mut entry, &mut out)?;
+                // Metered on the bytes actually decompressed, not the header's
+                // declared size, and stopped one byte past the budget so a
+                // bomb never writes more than the limit plus one.
+                let remaining = limits.bytes - stats.bytes;
+                let bytes = std::io::copy(
+                    &mut (&mut entry).take(remaining.saturating_add(1)),
+                    &mut out,
+                )?;
+                if bytes > remaining {
+                    return Err(ChanError::ArchiveLimit {
+                        unit: "bytes",
+                        limit: limits.bytes,
+                    });
+                }
                 stats.files += 1;
                 stats.bytes += bytes;
             }

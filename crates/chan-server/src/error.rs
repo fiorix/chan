@@ -74,7 +74,9 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
-        C::WriteTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
+        C::WriteTooLarge { .. } | C::ArchiveLimit { .. } => {
+            (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+        }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     let mut response = err(status, msg);
@@ -202,6 +204,17 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(msg.contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn err_from_maps_an_archive_limit_to_413() {
+        let (status, msg) = status_and_error(err_from(&chan_workspace::ChanError::ArchiveLimit {
+            unit: "entries",
+            limit: 10_000,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(msg, "metadata archive exceeds its limit of 10000 entries");
     }
 
     #[tokio::test]

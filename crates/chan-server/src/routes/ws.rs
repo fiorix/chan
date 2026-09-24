@@ -246,7 +246,18 @@ enum ClientFrame {
 enum ClientFrameReply {
     None,
     Pong,
+    /// A `sub` past [`MAX_SCOPES_PER_SOCKET`]; carries the refusal frame.
+    SubRefused(String),
 }
+
+/// Most directory scopes one socket may hold at once. A File Browser
+/// subscribes one scope per expanded directory, and "Expand all" expands
+/// every directory in the tree, which the listing caps at
+/// `LIST_TREE_LIMIT` (500,000) entries; at about eight entries per
+/// directory that is some 62,500 directories, under this cap. Each scope
+/// costs its path in two maps (and, on the standalone tenant, one OS watch
+/// attempt), so the cap bounds one socket's hold at a few megabytes.
+const MAX_SCOPES_PER_SOCKET: usize = 65_536;
 
 /// The `pong` answer to a client `ping` heartbeat, echoed verbatim on the same
 /// socket. Pinned by [`tests::pong_frame_is_the_pinned_wire_shape`] so the
@@ -315,6 +326,7 @@ async fn pump_loop(
     transfer_guard: Option<&TransferGuard>,
     window_id: Option<&str>,
 ) {
+    let mut scope_refusal_sent = false;
     loop {
         tokio::select! {
             biased;
@@ -368,11 +380,31 @@ async fn pump_loop(
             // the WS-level Ping; the app-level heartbeat is the text `ping`).
             inbound = socket.recv() => match inbound {
                 Some(Ok(Message::Text(text))) => {
-                    if apply_client_frame(scopes, watch_manager, sub_id, &text, transfer_guard)
-                        == ClientFrameReply::Pong
-                        && socket.send(Message::text(PONG_FRAME)).await.is_err()
-                    {
-                        break;
+                    let reply = match apply_client_frame(
+                        scopes,
+                        watch_manager,
+                        sub_id,
+                        &text,
+                        transfer_guard,
+                    ) {
+                        ClientFrameReply::None => None,
+                        ClientFrameReply::Pong => Some(PONG_FRAME.to_string()),
+                        // Told once per socket: the SPA has no handler for the
+                        // frame and treats an unknown one as a filesystem
+                        // change, so a burst of refusals must not become a
+                        // burst of refreshes. The rest are only logged.
+                        ClientFrameReply::SubRefused(frame) => {
+                            tracing::warn!(
+                                limit = MAX_SCOPES_PER_SOCKET,
+                                "refused a /ws scope subscription past the per-socket limit"
+                            );
+                            (!std::mem::replace(&mut scope_refusal_sent, true)).then_some(frame)
+                        }
+                    };
+                    if let Some(reply) = reply {
+                        if socket.send(Message::text(reply)).await.is_err() {
+                            break;
+                        }
                     }
                     last_activity.store(now_unix_secs(), Ordering::Relaxed);
                 }
@@ -401,7 +433,17 @@ fn apply_client_frame(
         Ok(ClientFrame::Sub { dir }) => {
             // The delta reports global 0 -> 1 / 1 -> 0 transitions; only a
             // tenant with a real per-directory watcher consumes them.
-            let delta = scopes.subscribe(sub_id, &dir);
+            let Some(delta) = scopes.subscribe_within(sub_id, &dir, MAX_SCOPES_PER_SOCKET) else {
+                return ClientFrameReply::SubRefused(
+                    serde_json::json!({
+                        "type": "sub_refused",
+                        "dir": dir,
+                        "reason": "scope-limit",
+                        "limit": MAX_SCOPES_PER_SOCKET,
+                    })
+                    .to_string(),
+                );
+            };
             if let Some(manager) = watch_manager {
                 manager.apply_delta(delta);
             }
@@ -470,7 +512,6 @@ mod tests {
 
     #[test]
     fn a_socket_holds_exactly_the_scope_limit_and_is_refused_one_more() {
-        const MAX_SCOPES_PER_SOCKET: usize = 65_536;
         let reg = ScopeRegistry::new();
         let (id, _rx) = reg.register();
         let sub = |dir: String| {
@@ -485,14 +526,28 @@ mod tests {
         for i in 0..MAX_SCOPES_PER_SOCKET {
             assert_eq!(sub(format!("d{i}")), ClientFrameReply::None, "sub {i}");
         }
+        // A repeat of a held dir at the limit is idempotent, not refused.
+        assert_eq!(sub("d0".to_string()), ClientFrameReply::None);
 
-        sub("one-more".to_string());
+        let refused = sub("one-more".to_string());
 
+        let ClientFrameReply::SubRefused(frame) = refused else {
+            panic!("the sub past the limit must be refused: {refused:?}");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["type"], "sub_refused");
+        assert_eq!(frame["reason"], "scope-limit");
+        assert_eq!(frame["dir"], "one-more");
+        assert_eq!(frame["limit"], MAX_SCOPES_PER_SOCKET);
         assert!(
             !reg.scope_exists("one-more"),
             "a sub past the limit must not add a scope"
         );
         assert_eq!(reg.subscribed_dirs().len(), MAX_SCOPES_PER_SOCKET);
+
+        // Dropping one makes room again.
+        apply_client_frame(&reg, None, id, r#"{"type":"unsub","dir":"d0"}"#, None);
+        assert_eq!(sub("one-more".to_string()), ClientFrameReply::None);
     }
 
     // Contract B: the client heartbeat `{"type":"ping"}` parses to
