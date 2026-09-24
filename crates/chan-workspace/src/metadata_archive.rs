@@ -1956,7 +1956,10 @@ mod tests {
             "{err:?}"
         );
         let written = std::fs::metadata(past.join("index/f1")).map_or(0, |m| m.len());
-        assert!(written <= 25, "the refused entry stops at the limit: {written}");
+        assert!(
+            written <= 25,
+            "the refused entry stops at the limit: {written}"
+        );
     }
 
     #[test]

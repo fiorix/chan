@@ -192,12 +192,12 @@ pub async fn api_scene_ws(
     ws.max_message_size(SCENE_WS_MESSAGE_LIMIT)
         .max_frame_size(SCENE_WS_MESSAGE_LIMIT)
         .on_upgrade(move |mut socket| async move {
-        match workspace {
-            Ok(workspace) => scene_ws(socket, state, workspace, query).await,
-            Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
-        }
-    })
-    .into_response()
+            match workspace {
+                Ok(workspace) => scene_ws(socket, state, workspace, query).await,
+                Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
+            }
+        })
+        .into_response()
 }
 
 async fn scene_ws(
@@ -712,7 +712,9 @@ mod tests {
         // frame and one it refuses at the transport is the size error.
         let upload = tokio::spawn(async move {
             let _ = sink
-                .send(tokio_tungstenite::tungstenite::Message::text("x".repeat(bytes)))
+                .send(tokio_tungstenite::tungstenite::Message::text(
+                    "x".repeat(bytes),
+                ))
                 .await;
         });
         let frame = loop {

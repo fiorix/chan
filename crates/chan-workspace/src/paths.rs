@@ -250,7 +250,8 @@ fn vet_windows_home(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(format!("cannot create it: {error}")),
     }
-    let meta = std::fs::symlink_metadata(path).map_err(|error| format!("cannot stat it: {error}"))?;
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|error| format!("cannot stat it: {error}"))?;
     if meta.file_type().is_symlink() {
         return Err("it is a symlink".to_string());
     }
@@ -705,7 +706,11 @@ mod tests {
     #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
     }
 
     #[cfg(unix)]
@@ -839,7 +844,9 @@ mod tests {
 
         assert!(fresh_under(&home, &fx.var_tmp, uid()), "{home:?}");
         assert!(
-            home.refused.iter().any(|why| why.contains("not a directory")),
+            home.refused
+                .iter()
+                .any(|why| why.contains("not a directory")),
             "{:?}",
             home.refused
         );

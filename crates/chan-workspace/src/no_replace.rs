@@ -225,11 +225,23 @@ mod tests {
 
         assert_eq!(file.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(empty_dir.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(stdfs::read_to_string(tmp.path().join("b.txt")).unwrap(), "b");
-        assert_eq!(stdfs::read_to_string(tmp.path().join("a.txt")).unwrap(), "a");
+        assert_eq!(
+            stdfs::read_to_string(tmp.path().join("b.txt")).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            stdfs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+            "a"
+        );
         assert!(tmp.path().join("src").is_dir() && tmp.path().join("empty").is_dir());
 
-        rename(&dir, tmp.path(), Path::new("a.txt"), Path::new("src/moved.txt")).unwrap();
+        rename(
+            &dir,
+            tmp.path(),
+            Path::new("a.txt"),
+            Path::new("src/moved.txt"),
+        )
+        .unwrap();
         assert_eq!(
             stdfs::read_to_string(tmp.path().join("src/moved.txt")).unwrap(),
             "a",
@@ -296,7 +308,12 @@ mod tests {
         }
         hooks::force_fallback(true);
         let dir = open(&tmp);
-        let first = rename(&dir, tmp.path(), Path::new("first.txt"), Path::new("dst.txt"));
+        let first = rename(
+            &dir,
+            tmp.path(),
+            Path::new("first.txt"),
+            Path::new("dst.txt"),
+        );
         hooks::force_fallback(false);
         let second_result = second.join().unwrap();
 
@@ -331,7 +348,12 @@ mod tests {
         hooks::set_fallback_window(move || stdfs::write(theirs, "theirs").unwrap());
         let dir = open(&tmp);
 
-        let result = rename(&dir, tmp.path(), Path::new("mine.txt"), Path::new("dst.txt"));
+        let result = rename(
+            &dir,
+            tmp.path(),
+            Path::new("mine.txt"),
+            Path::new("dst.txt"),
+        );
         hooks::force_fallback(false);
 
         assert!(result.is_ok(), "{result:?}");
