@@ -6950,6 +6950,147 @@ pub(super) mod tests {
         assert_eq!(p0_view.status, ProxyStatus::Active);
     }
 
+    fn fleet_ready_for(effects: &[Effect], proxy_id: &str) -> bool {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Send {
+                    session,
+                    frame: ServerFrame::FleetReady,
+                } if session.proxy_id == proxy_id
+            )
+        })
+    }
+
+    #[test]
+    fn concurrent_joins_defer_and_keep_revocation_authority() {
+        let now = Instant::now();
+        let mut state = ControllerState::new(100);
+        let (p1, p1_incarnation) = begin(&mut state, "p1", now);
+        snapshot(
+            &mut state,
+            &p1,
+            p1_incarnation,
+            vec![row("alice", "one", Uuid::from_u128(1))],
+            now,
+        );
+        let (p3, p3_old) = begin(&mut state, "p3", now);
+        snapshot(&mut state, &p3, p3_old, Vec::new(), now);
+        let active_at = now + CONVERGENCE_WINDOW;
+        for (proxy, incarnation) in [(&p1, p1_incarnation), (&p3, p3_old)] {
+            state
+                .record_activity(proxy, incarnation, active_at, Utc::now())
+                .unwrap();
+        }
+        state.tick(active_at, Utc::now());
+        assert!(state.is_ready());
+
+        // p3 drops and reconnects from the same boot; its authority marker
+        // makes a revocation issued in between report it unreachable.
+        let p3_boot = state.proxies.get("p3").unwrap().boot_id;
+        state.disconnect(&p3, p3_old, active_at).unwrap();
+        let revocation = SessionRevocation::Subject {
+            subject_user_id: Uuid::new_v4(),
+        };
+        let (_, _, unreachable, _) = state
+            .begin_session_revocation(revocation.clone(), active_at)
+            .unwrap();
+        assert_eq!(unreachable, 1);
+
+        // p2 joins with a row that loses to p1's live row, so its join
+        // holds the reconciliation while it waits for the loser kill.
+        let (p2, p2_incarnation) = begin(&mut state, "p2", active_at);
+        let dup = Uuid::from_u128(2);
+        let effects = snapshot(
+            &mut state,
+            &p2,
+            p2_incarnation,
+            vec![row("alice", "one", dup)],
+            active_at,
+        );
+        let p2_kill = kill_command(&effects, "p2", dup);
+        assert!(state.reconciliation.is_some());
+
+        // p3's join arrives during p2's reconciliation and is deferred.
+        let (p3_new, _) = state.begin_session(
+            p3.clone(),
+            origin("p3"),
+            env!("CARGO_PKG_VERSION").into(),
+            p3_boot,
+            active_at,
+            Utc::now(),
+        );
+        let effects = state
+            .accept_snapshot(
+                &p3,
+                p3_new,
+                0,
+                vec![row("bob", "two", Uuid::from_u128(3))],
+                Vec::new(),
+                Vec::new(),
+                active_at,
+                Utc::now(),
+            )
+            .expect("a joining snapshot during another reconciliation is deferred, not refused");
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Send {
+                session,
+                frame: ServerFrame::SnapshotAccepted { .. },
+            } if session.proxy_id == "p3"
+        )));
+        assert!(!fleet_ready_for(&effects, "p3"));
+        assert!(state.tunnel_views().iter().all(|view| view.proxy_id != "p3"));
+
+        // A revocation between the two joins reaches every connected
+        // session, the deferred one included, and counts nobody
+        // unreachable: p3's marker stays, but p3 is connected on its boot.
+        let (command_ids, effects, unreachable, authority_ready) = state
+            .begin_session_revocation(revocation.clone(), active_at)
+            .unwrap();
+        assert_eq!(command_ids.len(), 3);
+        assert_eq!(unreachable, 0);
+        assert!(authority_ready);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Send {
+                session,
+                frame: ServerFrame::RevokeSessions { .. },
+            } if session.proxy_id == "p3" && session.incarnation == p3_new
+        )));
+        assert!(state
+            .disconnected_proxy_deadlines
+            .contains_key(&("p3".to_string(), p3_boot)));
+
+        // p2's loser is confirmed down: p2 reaches FleetReady and p3's
+        // deferred join runs right after it, with no loser of its own.
+        let effects = state
+            .command_result(
+                &p2,
+                p2_incarnation,
+                p2_kill,
+                vec![dup],
+                Vec::new(),
+                Vec::new(),
+                active_at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(fleet_ready_for(&effects, "p2"));
+        assert!(fleet_ready_for(&effects, "p3"));
+        assert!(state.reconciliation.is_none());
+        assert!(state.disconnected_proxy_deadlines.is_empty());
+        assert!(state
+            .tunnel_views()
+            .iter()
+            .any(|view| view.proxy_id == "p3" && view.devserver_id == "two"));
+        let (_, _, unreachable, authority_ready) = state
+            .begin_session_revocation(revocation, active_at)
+            .unwrap();
+        assert_eq!(unreachable, 0);
+        assert!(authority_ready);
+    }
+
     fn kill_command(effects: &[Effect], proxy_id: &str, registration_id: Uuid) -> Uuid {
         effects
             .iter()
