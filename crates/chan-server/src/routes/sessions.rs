@@ -21,8 +21,9 @@ use crate::util::raw_json_response;
 /// Window id query param (`?w=<id>`) for session routes. `moved=1` (DELETE
 /// only) marks a cross-window MOVE-OUT so the handler deletes the blob but does
 /// NOT reap the window's sessions, and `session=<id>` names the terminal that
-/// moved, the one session the window's later close spares. Get / put ignore
-/// both. `client` is the writer's per-SPA-instance nonce, echoed on
+/// moved, the one session the window's later close spares. `moved=1` without
+/// `session` is a terminal that moved before it learned its session id, and
+/// the close spares every session bound to the window. Get / put ignore both. `client` is the writer's per-SPA-instance nonce, echoed on
 /// the `session_changed` broadcast so the writer can drop its own frame; GET
 /// accepts and ignores it. `app=files` addresses the Files blob namespace on a
 /// workspace-less tenant (a `files/` child of the terminal blob dir, or the

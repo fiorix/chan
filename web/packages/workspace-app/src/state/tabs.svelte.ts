@@ -2449,18 +2449,23 @@ export function isTerminalMoving(tabId: string): boolean {
   return terminalsMovingOut.delete(tabId);
 }
 
-/// The session the most recent terminal-tab close carried away in a
-/// session-preserving cross-window MOVE, or null for a real close (or a moved
-/// tab with no session yet). `closeTab` sets it just before it removes the tab
-/// -- so the empty-window discard guard, which fires reactively right after,
-/// reads the LAST close's intent deterministically (set before the mutation, no
-/// effect-vs-teardown ordering race). A non-move close clears it.
-let lastMovedOutSession: string | null = null;
+/// A terminal a session-preserving cross-window MOVE carried away: `session` is
+/// its session id, or null when the tab moved before its session frame gave it
+/// one.
+export type MovedOutTerminal = { session: string | null };
 
-/// One-shot read for the window-discard guard: the session the close that just
+/// What the most recent tab close carried away: a moved terminal, or null for a
+/// real close or a non-terminal tab. `closeTab` sets it just before it removes
+/// the tab -- so the empty-window discard guard, which fires reactively right
+/// after, reads the LAST close's intent deterministically (set before the
+/// mutation, no effect-vs-teardown ordering race). A non-move close clears it.
+let lastMovedOut: MovedOutTerminal | null = null;
+
+/// One-shot read for the window-discard guard: the terminal the close that just
 /// emptied this window moved out, if any. The source's discard then DELETEs its
-/// blob naming that session, so the server spares it -- the moved PTY lives on,
-/// re-bound to the target window -- and reaps anything else still bound here.
+/// blob as a move-out naming that session, so the server spares it -- the moved
+/// PTY lives on, re-bound to the target window -- and reaps anything else still
+/// bound here. A move-out with no session id spares the whole window.
 ///
 /// A window that outlives its terminals (one holding a browser or an editor
 /// after its last shell moved away) does not need this flag to stay set: the
@@ -2468,9 +2473,9 @@ let lastMovedOutSession: string | null = null;
 /// CURRENT window id) and the target's attach re-binds the moved session long
 /// before the user closes the remaining tab. The flag exists for the race the
 /// move itself opens, where the source's DELETE can beat that attach.
-export function consumeLastMovedOutSession(): string | null {
-  const v = lastMovedOutSession;
-  lastMovedOutSession = null;
+export function consumeLastMovedOutSession(): MovedOutTerminal | null {
+  const v = lastMovedOut;
+  lastMovedOut = null;
   return v;
 }
 
@@ -3464,12 +3469,14 @@ async function closeTabOnce(
   // nothing left to do.
   const now = locateTab(tabId);
   if (!now) return;
-  // Record the close's moved session for the empty-window discard guard. Set
+  // Record the close's moved terminal for the empty-window discard guard. Set
   // unconditionally (null for a real close) so a prior move-out can't leak into
   // a later genuine discard, and set right before the splice so the reactive
   // empty-window `$effect` reads it deterministically.
-  lastMovedOutSession =
-    movingOut && now.tab.kind === "terminal" ? (now.tab.terminalSessionId ?? null) : null;
+  lastMovedOut =
+    movingOut && now.tab.kind === "terminal"
+      ? { session: now.tab.terminalSessionId ?? null }
+      : null;
   // A discarded file has nothing to reopen: the close deleted it, and every
   // claim the record would carry about disk (`saved`, the mtime token, the
   // authority version, `openedEmpty`) belongs to a load that ended. Replaying

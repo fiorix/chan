@@ -277,7 +277,7 @@ describe("tab close confirmation", () => {
     const pane = resetLayout([moving]);
     markTerminalMovingOut(moving.id);
     await closeTab(pane.id, moving.id, { force: true });
-    expect(consumeLastMovedOutSession()).toBe("sess-move");
+    expect(consumeLastMovedOutSession()).toEqual({ session: "sess-move" });
     // One-shot: a second read is null.
     expect(consumeLastMovedOutSession()).toBe(null);
     isTerminalMoving(moving.id); // drain the residual marker (no close-sink in test)

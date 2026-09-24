@@ -146,6 +146,7 @@ import {
   rekeyTabsForRename,
   setTerminalBroadcastBySession,
   tabsForPath,
+  type MovedOutTerminal,
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
@@ -3425,7 +3426,8 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 /// DELETE the blob so the window leaves `cs window list`, but mark it
 /// (`&moved=1`) so the server does NOT reap, and name the moved session
 /// (`&session=`) so the window's later close spares it and nothing else -- the
-/// moved PTY lives on, re-bound to the target window. Without this the source's
+/// moved PTY lives on, re-bound to the target window. Without a session the
+/// close spares every session bound to the window. Without this the source's
 /// synchronous DELETE can beat the target's async re-attach and kill the
 /// just-moved terminal.
 ///
@@ -3472,14 +3474,13 @@ const MOVE_OUT_DELETE_WAIT_MS = 3_000;
 /// lets the window close, because a window never sits empty. A plain discard
 /// has nothing to protect and closes at once.
 export async function closeEmptiedWindow(opts: {
-  movedSession: string | null;
+  movedOut: MovedOutTerminal | null;
 }): Promise<void> {
-  const movedOut = opts.movedSession !== null;
   const discarded = discardWindowSession({
-    reap: !movedOut,
-    movedSession: opts.movedSession ?? undefined,
+    reap: opts.movedOut === null,
+    movedSession: opts.movedOut?.session ?? undefined,
   });
-  if (movedOut) {
+  if (opts.movedOut) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       discarded,

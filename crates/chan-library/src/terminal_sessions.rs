@@ -264,8 +264,8 @@ pub struct Registry {
     /// keyed by session id with the window that moved them out. The source
     /// window's discard can reach the registry before the target's attach
     /// rebinds the session, so [`forget_window`](Self::forget_window) spares
-    /// these. Only the session the move-out names is recorded, so any other
-    /// session still bound to the source is reaped with it. An entry ends
+    /// these. A move-out that names its session records only that one, so any
+    /// other session still bound to the source is reaped with it. An entry ends
     /// when the target attaches or the source's discard consumes it; a target
     /// that never attaches leaves the session to the orphan reap, since its
     /// window is no longer persisted.
@@ -2293,25 +2293,36 @@ impl Registry {
     /// emptied window) does not reap it before the target attaches. Any other
     /// session bound to the window has no tab showing it, since a window sends
     /// this only once it holds none, and that discard reaps it.
+    ///
+    /// `None` is a terminal that moved before its session frame gave the tab
+    /// an id: one of the sessions bound here is the one the target is about
+    /// to attach, and nothing says which, so every session still bound to the
+    /// window is recorded as moved out. Reaping the wrong one would kill the
+    /// shell the user just moved; the others are left to the orphan reap.
     pub fn unpersist_window(&self, window_id: &str, moved_session: Option<&str>) {
         self.persisted_windows
             .lock()
             .expect("terminal registry poisoned")
             .remove(window_id);
-        let Some(id) = moved_session else {
-            return;
+        let moved: Vec<String> = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let bound = |session: &Arc<Session>| session.window_id().as_deref() == Some(window_id);
+            match moved_session {
+                Some(id) => sessions
+                    .get(id)
+                    .filter(|session| bound(session))
+                    .map(|_| vec![id.to_string()])
+                    .unwrap_or_default(),
+                None => sessions
+                    .iter()
+                    .filter(|(_, session)| bound(session))
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+            }
         };
-        let bound = self
-            .sessions
-            .lock()
-            .expect("terminal registry poisoned")
-            .get(id)
-            .is_some_and(|session| session.window_id().as_deref() == Some(window_id));
-        if bound {
-            self.moved_out
-                .lock()
-                .expect("terminal registry poisoned")
-                .insert(id.to_string(), window_id.to_string());
+        let mut moved_out = self.moved_out.lock().expect("terminal registry poisoned");
+        for id in moved {
+            moved_out.insert(id, window_id.to_string());
         }
     }
 
