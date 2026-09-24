@@ -149,7 +149,7 @@ import {
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
-import { chanFetch, handleDemoDownload, withTokenQuery } from "../api/transport";
+import { chanFetch, withTokenQuery } from "../api/transport";
 import { uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
 import { updateGlobalConfigSerial } from "./configWrite";
@@ -5586,7 +5586,6 @@ function uploadNameReason(name: string): string | null {
 
 export const fileOps = {
   downloadPath(path: string, isDir: boolean, root?: TransferRoot): void {
-    if (handleDemoDownload(path, isDir)) return;
     const link = document.createElement("a");
     link.href = api.downloadUrl(path, root);
     link.download = downloadFilename(path, isDir);
@@ -5606,7 +5605,6 @@ export const fileOps = {
   /// Fire-and-forget: the transfer model carries progress / error /
   /// savedPath so callers don't await.
   downloadPathWithProgress(path: string, isDir: boolean, root?: TransferRoot): void {
-    if (handleDemoDownload(path, isDir)) return;
     if (isTauriDesktop()) {
       const url = new URL(
         api.downloadUrl(path, root),

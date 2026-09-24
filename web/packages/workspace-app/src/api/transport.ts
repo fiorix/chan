@@ -351,25 +351,6 @@ export function setXhrFactory(factory: XhrFactory | null): void {
   xhrFactory = factory ?? (() => new XMLHttpRequest());
 }
 
-export type DownloadHandler = (path: string, isDir: boolean) => void;
-let downloadHandler: DownloadHandler | null = null;
-
-/// Install a download override (or `null` to restore the real `<a download>`
-/// path). File downloads build a browser anchor to a server URL, which no seam
-/// covers; the demo has no backend to serve the bytes, so it installs a handler
-/// that downloads a canned About page instead.
-export function setDownloadHandler(handler: DownloadHandler | null): void {
-  downloadHandler = handler;
-}
-
-/// Route a download through the installed handler. Returns true when a handler
-/// took it (the caller then skips its own download), false otherwise.
-export function handleDemoDownload(path: string, isDir: boolean): boolean {
-  if (!downloadHandler) return false;
-  downloadHandler(path, isDir);
-  return true;
-}
-
 /// The fetch every API call routes through: typed api methods, streaming
 /// NDJSON, and multipart uploads alike. Defaults to the global fetch.
 export function chanFetch(input: string, init: RequestInit = {}): Promise<Response> {

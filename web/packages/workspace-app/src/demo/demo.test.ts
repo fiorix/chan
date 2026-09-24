@@ -1,6 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
-import { handleDemoDownload, setDownloadHandler } from "../api/transport";
-import { CHAN_DEMO_MD, demoDownload } from "./download";
+import { describe, expect, test } from "vitest";
 import type {
   FileResponse,
   GraphView,
@@ -582,61 +580,6 @@ describe("metadata export / import", () => {
       files: number;
     };
     expect(report.files).toBe(0);
-  });
-});
-
-describe("demo downloads (chan-demo.md)", () => {
-  afterEach(() => setDownloadHandler(null));
-
-  test("CHAN_DEMO_MD is the About page with a fenced UTF8 QR and the chan.app link", () => {
-    expect(CHAN_DEMO_MD).toContain("Your new terminal and workspace manager.");
-    expect(CHAN_DEMO_MD).toContain("https://chan.app");
-    // UTF8 half-block QR, fenced, no ANSI escapes: square modules that scan and
-    // render in both a terminal and a Markdown editor.
-    expect(CHAN_DEMO_MD).not.toContain(String.fromCharCode(27)); // no ANSI escape
-    expect(CHAN_DEMO_MD).toContain(String.fromCharCode(0x2588)); // full block
-    expect(CHAN_DEMO_MD).toContain("```"); // fenced keeps it monospace in Markdown
-  });
-
-  test("handleDemoDownload routes through the installed handler, else no-op", () => {
-    expect(handleDemoDownload("crates/x.rs", false)).toBe(false);
-    const calls: Array<[string, boolean]> = [];
-    setDownloadHandler((p, d) => calls.push([p, d]));
-    expect(handleDemoDownload("crates/x.rs", false)).toBe(true);
-    expect(calls).toEqual([["crates/x.rs", false]]);
-  });
-
-  test("demoDownload builds a chan-demo.md anchor from an object URL", () => {
-    const created: HTMLAnchorElement[] = [];
-    const realCreate = document.createElement.bind(document);
-    const createSpy = vi
-      .spyOn(document, "createElement")
-      .mockImplementation((tag: string) => {
-        const el = realCreate(tag);
-        if (tag === "a") created.push(el as HTMLAnchorElement);
-        return el;
-      });
-    const clickSpy = vi
-      .spyOn(HTMLElement.prototype, "click")
-      .mockImplementation(() => {});
-    const urlApi = URL as unknown as {
-      createObjectURL: (b: Blob) => string;
-      revokeObjectURL: (u: string) => void;
-    };
-    urlApi.createObjectURL = () => "blob:demo-download";
-    urlApi.revokeObjectURL = () => {};
-    let clicks = 0;
-    try {
-      demoDownload();
-      clicks = clickSpy.mock.calls.length;
-    } finally {
-      createSpy.mockRestore();
-      clickSpy.mockRestore();
-    }
-    const anchor = created.at(-1);
-    expect(anchor?.download).toBe("chan-demo.md");
-    expect(anchor?.getAttribute("href")).toBe("blob:demo-download");
-    expect(clicks).toBe(1);
   });
 });
 

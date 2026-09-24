@@ -50,7 +50,9 @@ vi.mock("../api/desktop", () => ({
   saveBytesToDownloads: vi.fn(async () => {}),
 }));
 vi.mock("../api/download", () => ({ downloadBytes: vi.fn() }));
-vi.mock("../api/transport", () => ({ handleDemoDownload: () => false }));
+// The transport module is stubbed empty: any wire access that reaches it fails
+// loudly instead of hitting fetch.
+vi.mock("../api/transport", () => ({}));
 
 import FileTree from "./FileTree.svelte";
 import {
