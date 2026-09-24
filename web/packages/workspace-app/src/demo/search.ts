@@ -1,4 +1,4 @@
-// Search surfaces for the frontend-only demo, over the in-memory snapshot.
+// Search surfaces for the test transport, over the in-memory file list.
 // Serves the three real endpoints with plain-JS scoring instead of the
 // server's tantivy/BM25 index: exact-basename missing-file recovery, wiki
 // link-target search (file + heading rows), and content search (the Search

@@ -1,9 +1,9 @@
-// Metadata export/import for the frontend-only demo. The real feature ships a
+// Metadata export/import for the test transport. The real feature ships a
 // workspace's derived metadata as a tar.zst; here there is no server and no
 // separate metadata store, so export serializes the in-memory workspace (its
 // text files, including live edits) to a small JSON archive the browser
 // downloads, and import reads that archive back into the in-memory store. The
-// round-trip is self-contained: export from one demo session, import into
+// round-trip is self-contained: export from one mock session, import into
 // another.
 
 import type { DemoGraph } from "./graph";
@@ -18,7 +18,7 @@ function isMarkdown(path: string): boolean {
 }
 
 /// Serialize the in-memory workspace's text files (with current edits) to the
-/// demo archive body, plus the counts the export headers carry.
+/// mock archive body, plus the counts the export headers carry.
 export function exportMetadata(store: MockWorkspaceStore): {
   body: string;
   files: number;
@@ -34,9 +34,10 @@ export function exportMetadata(store: MockWorkspaceStore): {
   return { body, files: files.length, bytes, filename: `${store.data.metadata.label}-metadata.json` };
 }
 
-/// Apply a demo archive to the in-memory store (create/overwrite each file) and
-/// return the report the import UI renders. A non-demo archive imports zero
-/// files rather than throwing, so the UI still shows a (empty) success report.
+/// Apply a mock archive to the in-memory store (create/overwrite each file) and
+/// return the report the import UI renders. An archive in another format
+/// imports zero files rather than throwing, so the UI still shows a (empty)
+/// success report.
 export function importMetadata(
   store: MockWorkspaceStore,
   graph: DemoGraph,

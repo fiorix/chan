@@ -1,16 +1,15 @@
-// Shape of the frontend-only demo's workspace snapshot and the default
-// workspace metadata the mock serves.
+// Shape of the in-memory workspace the test transport serves and the default
+// workspace metadata the mock returns.
 //
-// The snapshot is a flat list of files produced at build time by
-// scripts/snapshot-workspace.mjs (a git repo -> JSON). Every chan-specific
-// derivation (tree listing, graph, headings, search) is computed on demand
-// from this list by the mock store, so this file only describes the raw data
-// plus the workspace/preferences defaults.
+// The data is a flat list of files, written inline by each test that installs
+// the mock. Every chan-specific derivation (tree listing, graph, headings,
+// search) is computed on demand from this list by the mock store, so this
+// file only describes the raw data plus the workspace/preferences defaults.
 
 import type { Preferences, ReportFileStats, WorkspaceInfo } from "../api/types";
 
-/// One file from the snapshot. Directories are implicit: the store derives
-/// them from the file paths, so the snapshot never lists a directory.
+/// One file of the data set. Directories are implicit: the store derives
+/// them from the file paths, so the data never lists a directory.
 export type MockFileEntry = {
   /// Workspace-relative POSIX path.
   path: string;
@@ -23,7 +22,7 @@ export type MockFileEntry = {
   /// Capped UTF-8 content. Absent for media/binary and for over-cap files
   /// (the tree still shows them; opening yields empty/placeholder content).
   content?: string;
-  /// True when `content` was truncated at snapshot time.
+  /// True when `content` holds only a prefix of the file.
   truncated?: boolean;
 };
 
@@ -39,14 +38,14 @@ export type MockWorkspaceData = {
   };
   files: MockFileEntry[];
   /// chan-reports per-file stats (language, SLOC, comments, blanks,
-  /// complexity), precomputed by the snapshot script. The mock rolls these up
-  /// per language + totals + COCOMO on demand. Absent in older snapshots.
+  /// complexity) supplied with the data. The mock rolls these up per language
+  /// + totals + COCOMO on demand. Optional.
   reports?: { files: ReportFileStats[] };
 };
 
-/// Preferences the demo boots with. Every required field is present so the
+/// Preferences the mock boots with. Every required field is present so the
 /// editor renders without a follow-up config fetch. Terminal + search fields
-/// are round-tripped but inert in the demo.
+/// are round-tripped but inert in the mock.
 export const DEMO_PREFERENCES: Preferences = {
   editor_theme: "github",
   attachments_dir: "attachments",
@@ -74,7 +73,7 @@ export const DEMO_PREFERENCES: Preferences = {
   overlay_maximized: false,
 };
 
-/// Build the WorkspaceInfo the demo serves from GET /api/workspace.
+/// Build the WorkspaceInfo the mock serves from GET /api/workspace.
 export function demoWorkspaceInfo(
   data: MockWorkspaceData,
   preferences: Preferences = DEMO_PREFERENCES,

@@ -1,12 +1,11 @@
-// The demo's mock fetch. Maps (method, path) to the in-memory store and
-// returns synthetic Response objects, so every api call (typed helpers,
+// The test transport's mock fetch. Maps (method, path) to the in-memory store
+// and returns synthetic Response objects, so every api call (typed helpers,
 // streaming NDJSON readers, and multipart alike) resolves with no backend.
 //
-// Core surfaces (workspace, config, files, drafts, session) are real. The
-// graph, headings, backlinks, and search return empty-but-valid shapes here
-// and are filled in by later phases. Everything else returns a benign inert
-// response so no surface errors; unhandled paths are logged once so gaps are
-// visible during the browser smoke.
+// Core surfaces (workspace, config, files, drafts, session), the graph,
+// headings, backlinks, search and reports are served from the in-memory data.
+// Everything else returns a benign inert response so no surface errors;
+// unhandled paths are logged once so a gap shows in the test's output.
 
 import type { FetchImpl } from "../api/transport";
 import type {
@@ -24,8 +23,8 @@ import { applyUpload } from "./upload";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
-// Temporary: log every request so gaps and freeze-triggers are visible during
-// the browser smoke. Flip off once the demo is stable.
+// Log every routed request so a component test's output shows which mock
+// routes the app reached and in what order.
 const DEMO_TRACE = true;
 
 function json(data: unknown, status = 200): Response {

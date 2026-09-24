@@ -1,10 +1,10 @@
-// Mock WebSockets for the frontend-only demo. Three channels flow through the
+// Mock WebSockets for the test transport. Three channels flow through the
 // app's socket factory: the watcher (/ws), the local-color watch, and the
 // terminal PTY (/api/terminal/ws). None have a server here.
 //
 // The watcher and local-color sockets are idle: they open, satisfy the
 // handshake, and never push (there are no external filesystem events in the
-// demo). The terminal socket is a fake PTY that streams a canned session and
+// mock). The terminal socket is a fake PTY that streams a canned session and
 // echoes input locally. Same-window broadcast still works because it is
 // fanned out in the frontend (state/tabs.svelte.ts), independent of any
 // socket.
@@ -103,7 +103,7 @@ class TerminalSocket extends MockSocket {
       return;
     }
     if (frame.type === "input" && typeof frame.data === "string") {
-      // Local echo: a real PTY echoes typed characters; the demo has no PTY,
+      // Local echo: a real PTY echoes typed characters; the mock has no PTY,
       // so echo here. Enter becomes CRLF and reprints the prompt.
       if (frame.data === "\r") {
         this.emitBinary("\r\n" + PROMPT);

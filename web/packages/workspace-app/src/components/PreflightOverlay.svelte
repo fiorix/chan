@@ -213,7 +213,8 @@
   // The `?.` is load-bearing, not defensive habit: `demo/router.ts` mocks this
   // route with a hardcoded ready snapshot that carries no `readiness` at all,
   // and its `json({...})` is untyped so the compiler cannot see the gap. Absent
-  // readiness means the offline demo, which is settled by definition.
+  // readiness means the in-memory test transport, which is settled by
+  // definition.
   function settled(snap: PreflightSnapshot): boolean {
     return snap.phase === "ready" && snap.readiness?.state !== "recovering";
   }

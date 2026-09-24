@@ -1,11 +1,11 @@
-// Uploads for the frontend-only demo. Multipart uploads (the file browser
+// Uploads for the test transport. Multipart uploads (the file browser
 // inspector's upload/replace, editor image paste) normally POST to the server;
 // here they land in the in-memory store instead, so an uploaded file shows up
 // in the tree and opens like any other.
 //
 // File uploads (uploadFile/replaceFile) use XMLHttpRequest for progress, which
-// the fetch seam does not cover, so the demo swaps in the mock XHR below.
-// Attachment uploads use fetch and are routed by the demo router; both share
+// the fetch seam does not cover, so the mock swaps in the XHR below.
+// Attachment uploads use fetch and are routed by the mock router; both share
 // applyUpload.
 
 import type { DemoGraph } from "./graph";

@@ -1,5 +1,5 @@
-// chan-reports for the frontend-only demo. Per-file stats (language, SLOC,
-// comments, blanks, complexity) are precomputed by the snapshot script; this
+// chan-reports for the test transport. Per-file stats (language, SLOC,
+// comments, blanks, complexity) arrive with the MockWorkspaceData; this
 // module serves per-file rows and rolls them up per language + totals, with
 // Basic COCOMO, matching chan-report's shapes and formulas
 // (crates/chan-report: summary.rs, cocomo.rs).

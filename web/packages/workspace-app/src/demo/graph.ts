@@ -1,4 +1,4 @@
-// Markdown-derived graph for the frontend-only demo. Reproduces, in JS, the
+// Markdown-derived graph for the test transport. Reproduces, in JS, the
 // derivation chan-workspace does in Rust (crates/chan-workspace/src/markdown):
 // wiki links and markdown links become link edges, #tags become tag edges,
 // @@names become mention edges, ATX headings become the per-file outline.
@@ -7,7 +7,7 @@
 //
 // The graph indexes document-kind files only (markdown), like the real graph
 // DB. It updates incrementally: the router calls indexFile/removeFile on the
-// demo's in-memory writes so a saved edit reshapes the graph live.
+// mock's in-memory writes so a saved edit reshapes the graph live.
 
 import type {
   GraphEdge,

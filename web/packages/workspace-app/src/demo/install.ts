@@ -1,6 +1,8 @@
-// Install the frontend-only demo backend: point the transport's fetch and
-// WebSocket factory at the in-memory mock. Call before the app mounts (see
-// WorkspaceDemo.svelte). The real transport is unchanged until this runs.
+// Install the in-memory backend the workspace app's component tests mount the
+// real App against: point the transport's fetch, WebSocket and XHR factories
+// at the mock. Call before the app mounts; the real transport is unchanged
+// until this runs, and uninstallDemoWorkspace restores it in the test's
+// teardown.
 
 import { setFetchImpl, setSocketFactory, setXhrFactory } from "../api/transport";
 import type { Preferences } from "../api/types";

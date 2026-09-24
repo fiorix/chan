@@ -316,10 +316,12 @@ export function withGatewayCsrfRetry<T extends { status: number }>(
   return sendWithGatewayCsrfRetry(first, send);
 }
 
-/// Injectable HTTP + WebSocket primitives. Both default to the real browser
-/// globals, so the production path is unchanged. A frontend-only demo (the
-/// marketing-site workspace demo) installs replacements before the app mounts
-/// to serve the whole API surface from an in-memory mock with no backend.
+/// Injectable HTTP, WebSocket and XMLHttpRequest primitives. All default to the
+/// real browser globals, so the production path is unchanged. The seam exists
+/// for the tests: the component tests that mount the real `App` install the
+/// in-memory mock from `src/demo/install.ts` before mounting, so the whole API
+/// surface is served with no backend, and the transport, sync and upload unit
+/// tests swap a single primitive for a fake the same way.
 ///
 /// The seam sits at `fetch`, not the typed api methods, on purpose: it catches
 /// the streaming NDJSON readers and multipart uploads that call `fetch`
@@ -333,20 +335,24 @@ let fetchImpl: FetchImpl = (input, init) => fetch(input, init);
 let socketFactory: SocketFactory = (url) => new WebSocket(url);
 let xhrFactory: XhrFactory = () => new XMLHttpRequest();
 
-/// Install a replacement fetch (or `null` to restore the real one).
+/// Install a replacement fetch (or `null` to restore the real one). The mock
+/// router (`src/demo/router.ts`) and `transport.test.ts` install through it.
 export function setFetchImpl(impl: FetchImpl | null): void {
   fetchImpl = impl ?? ((input, init) => fetch(input, init));
 }
 
-/// Install a replacement WebSocket factory (or `null` to restore the real one).
+/// Install a replacement WebSocket factory (or `null` to restore the real
+/// one). The mock sockets (`src/demo/socket.ts`) and the FakeSocket of the
+/// sync, heartbeat and reload-from-disk tests install through it.
 export function setSocketFactory(factory: SocketFactory | null): void {
   socketFactory = factory ?? ((url) => new WebSocket(url));
 }
 
 /// Install a replacement XMLHttpRequest factory (or `null` to restore the real
 /// one). The multipart upload helpers use XHR directly (for upload progress),
-/// which the fetch seam does not cover; the demo swaps in a mock XHR that
-/// writes uploads into the in-memory store.
+/// which the fetch seam does not cover; the mock's XHR (`src/demo/upload.ts`)
+/// writes uploads into the in-memory store, and `uploadCsrf.test.ts` installs
+/// one that records the headers the helpers set.
 export function setXhrFactory(factory: XhrFactory | null): void {
   xhrFactory = factory ?? (() => new XMLHttpRequest());
 }

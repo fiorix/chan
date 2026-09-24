@@ -1,7 +1,7 @@
-// In-memory workspace filesystem for the frontend-only demo. Loads the git
-// snapshot into maps and serves the file/tree/session surfaces the real
-// backend would. Every mutation (write/create/remove/move) stays in memory:
-// nothing is persisted and nothing is downloaded.
+// In-memory workspace filesystem for the test transport. Loads the
+// MockWorkspaceData file list into maps and serves the file/tree/session
+// surfaces the real backend would. Every mutation (write/create/remove/move)
+// stays in memory: nothing is persisted and nothing is downloaded.
 
 import type {
   FileResponse,
@@ -248,8 +248,9 @@ export class MockWorkspaceStore {
   }
 }
 
-// Classify a path the way the snapshot does, for files created at runtime
-// (drafts, new notes). Only the coarse editable-vs-media split matters here.
+// Classify a path the way the data's `kind` field does, for files created at
+// runtime (drafts, new notes). Only the coarse editable-vs-media split matters
+// here.
 const MEDIA_EXTS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico",
 ]);
