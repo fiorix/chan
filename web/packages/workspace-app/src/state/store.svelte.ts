@@ -3447,6 +3447,11 @@ export function discardWindowSession(opts?: { reap?: boolean }): Promise<void> {
   }
 }
 
+/// How long an emptied window waits for its move-out DELETE before it closes
+/// anyway. A local DELETE answers in milliseconds; one still out after this
+/// is hung, and an empty window must not stay open on it.
+const MOVE_OUT_DELETE_WAIT_MS = 3_000;
+
 /// Discard and close this desktop window now that it holds no tab.
 ///
 /// The host's close discards the window and reaps every terminal session still
@@ -3454,11 +3459,21 @@ export function discardWindowSession(opts?: { reap?: boolean }): Promise<void> {
 /// until the target window's attach rebinds it, so the close must not reach
 /// the host before the move-out DELETE has told the server which sessions
 /// moved out; racing it killed the shell the user had just dropped elsewhere.
-/// A DELETE that fails still lets the window close, because a window never
-/// sits empty. A plain discard has nothing to protect and closes at once.
+/// A DELETE that fails, or is still out after `MOVE_OUT_DELETE_WAIT_MS`, still
+/// lets the window close, because a window never sits empty. A plain discard
+/// has nothing to protect and closes at once.
 export async function closeEmptiedWindow(opts: { movedOut: boolean }): Promise<void> {
   const discarded = discardWindowSession({ reap: !opts.movedOut });
-  if (opts.movedOut) await discarded;
+  if (opts.movedOut) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      discarded,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, MOVE_OUT_DELETE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
   await requestCloseWindow();
 }
 
