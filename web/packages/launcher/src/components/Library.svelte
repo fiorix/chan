@@ -57,7 +57,7 @@
   import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
-  import { unactionable, workspaceCondition } from "../api/library";
+  import { contradictingState, powerWord, unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, WorkspaceEntry } from "../api/library";
 
   // The whole tree, recomputed when any of the three feeds change (the two-array
@@ -144,6 +144,15 @@
   // holds the workspace, only that its lock state is unknown.
   function lockUnknown(ws: WorkspaceEntry): boolean {
     return workspaceCondition(ws.status) === "unknown";
+  }
+
+  // The editable row's power control is its only state text: it is lit from
+  // the desired state while New window follows the observed one, so a row
+  // whose two disagree says both after the action (`Turn on (Off, running)`).
+  function powerAction(ws: WorkspaceEntry, name?: string): string {
+    const verb = ws.on ? "Turn off" : "Turn on";
+    const target = name === undefined ? verb : `${verb} ${name}`;
+    return contradictingState(ws.on, ws.status) === null ? target : `${target} (${powerWord(ws)})`;
   }
 
   // A mounted tenant whose root is not usable. The row keeps its controls (the
@@ -281,9 +290,7 @@
               ? "Locked"
               : degraded(ws)
                 ? "Degraded"
-                : ws.on
-                  ? "On"
-                  : "Off"}
+                : powerWord(ws)}
         </span>
       {:else}
         <button
@@ -312,16 +319,14 @@
               ? "Workspace is open in another Chan process"
               : spinning(ws)
               ? "Working…"
-              : ws.on
-                ? "Turn off"
-                : "Turn on"}
+              : powerAction(ws)}
           aria-label={lockUnknown(ws)
             ? `Lock state of ${displayName(ws)} could not be read`
             : locked(ws)
               ? `${displayName(ws)} is open in another Chan process`
               : spinning(ws)
               ? `Working on ${displayName(ws)}`
-              : `${ws.on ? "Turn off" : "Turn on"} ${displayName(ws)}`}
+              : powerAction(ws, displayName(ws))}
           onclick={() => run(setWorkspacePower(ws, !ws.on))}>
           {#if spinning(ws)}
             <LoaderCircle class="spin" size={16} />

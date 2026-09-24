@@ -159,6 +159,34 @@ export function workspaceCondition(status: WorkspaceStatus): WorkspaceCondition 
   }
 }
 
+/** The settled observed state that contradicts a row's desired state, or null
+ * when the two agree. A transition (`busy`) is the mount moving toward one of
+ * them, so it contradicts neither. The lock conditions and a degraded mount
+ * the row wants on have words of their own and are not a disagreement here. */
+export function contradictingState(
+  on: boolean,
+  status: WorkspaceStatus,
+): "running" | "degraded" | "stopped" | "failed" | null {
+  const condition = workspaceCondition(status);
+  if (on) {
+    if (condition === "idle") return "stopped";
+    if (condition === "failed") return "failed";
+    return null;
+  }
+  if (condition === "ready") return "running";
+  if (condition === "degraded") return "degraded";
+  return null;
+}
+
+/** A row's power word. The word is the desired state (`On` or `Off`); the
+ * status is the observed one, and a row whose two disagree says both (`Off,
+ * running`), so a mount someone else started never reads as plainly Off. */
+export function powerWord(ws: Pick<WorkspaceEntry, "on" | "status">): string {
+  const desired = ws.on ? "On" : "Off";
+  const observed = contradictingState(ws.on, ws.status);
+  return observed === null ? desired : `${desired}, ${observed}`;
+}
+
 /** Whether no lifecycle action may be offered on a row with this status: another
  * process holds the mount, or whether one does is not known. Eligibility asks
  * this; wording asks `workspaceCondition`, since the two conditions read
