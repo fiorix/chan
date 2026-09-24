@@ -61,7 +61,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [the-fdstore-manifest-splits-seq-and-tail][fdsq] | accepted | build |
 | [a-mount-retry-test-races-a-wall-clock][mwclk] | accepted | build |
 | [desktop-design-omits-the-root-health-probe][dhp] | landed | GA |
-| [a-dropped-indexers-driver-eats-recovery][drvr] | accepted | build |
+| [a-dropped-indexers-driver-eats-recovery][drvr] | landed | GA |
 | [the-bulk-skip-note-calls-unknown-locked][bskip] | accepted | build |
 | [mcp-write-errors-follow-an-unpinned-display][mcpd] | accepted | build |
 | [a-joining-snapshot-fails-during-reconcile][join] | landed | GA |
@@ -71,9 +71,9 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [an-emptied-window-waits-without-a-bound][ewait] | accepted | build |
 | [the-chan-home-fallback-trusts-var-tmp][vtmp] | landed | GA |
 | [three-inputs-have-no-size-cap][caps] | landed | GA |
-| [content-search-truncation-ignores-its-window][trunc] | accepted | build |
+| [content-search-truncation-ignores-its-window][trunc] | landed | GA |
 | [move-and-create-can-replace-a-new-file][clob] | landed | GA |
-| [the-graph-indexer-drops-renames-and-lingers][gidx] | accepted | build |
+| [the-graph-indexer-drops-renames-and-lingers][gidx] | landed | GA |
 | [the-side-effect-and-error-lows-are-unread][unread] | accepted | analyze |
 | [the-launcher-says-off-beside-running][offrn] | accepted | build |
 | [devserver-root-probe-wiring-has-no-test][rprob] | landed | GA |
@@ -107,6 +107,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-crash-restart-restores-a-stale-manifest][crash] | raised | decide |
 | [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | raised | decide |
 | [a-failed-dial-makes-the-next-replay-from-zero][fdial] | raised | decide |
+| [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
+| [a-case-only-rename-leaves-a-phantom-row][casef] | raised | decide |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -166,6 +168,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [crash]: v0.101.0/a-crash-restart-restores-a-stale-manifest.md
 [gdrop]: v0.101.0/a-graceful-restart-drops-output-past-its-snapshot.md
 [fdial]: v0.101.0/a-failed-dial-makes-the-next-replay-from-zero.md
+[srename]: v0.101.0/the-served-index-forgets-a-lone-rename.md
+[casef]: v0.101.0/a-case-only-rename-leaves-a-phantom-row.md
 
 ## Completed
 
