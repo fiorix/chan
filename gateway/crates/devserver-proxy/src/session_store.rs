@@ -33,9 +33,9 @@ const MAX_BINDINGS_PER_PRINCIPAL: usize = 32;
 const BINDINGS_PER_SESSION_SLOT: usize = 4;
 /// The drain bound of a revocation. A transport that ends itself on
 /// cancellation (a WebSocket bridge sending its 1008 Close) has this long
-/// before it is aborted, and a revocation then waits as long again for the
-/// aborted tasks to drop before it reports a drain timeout, so the
-/// controller's acknowledgement waits at most twice this.
+/// before it is aborted, and a revocation then waits
+/// [`ABORTED_DRAIN_TIMEOUT`] more for the aborted tasks to drop before it
+/// reports a drain timeout.
 #[cfg(not(test))]
 const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -46,6 +46,15 @@ const REVOCATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
 const _: () =
     assert!(crate::proxy::WS_BRIDGE_CLOSE_TIMEOUT.as_nanos() < REVOCATION_DRAIN_TIMEOUT.as_nanos());
+
+/// How long a revocation waits, past the drain deadline, for the tasks
+/// aborted there to drop: a quarter of the drain bound (500 ms in
+/// production), so an acknowledgement waits at most 2.5 s, half the
+/// controller's 5-second command timeout. An aborted task drops at its next
+/// poll; one still registered after this is an operation with no task to
+/// abort, which the revocation reports as a drain timeout.
+const ABORTED_DRAIN_TIMEOUT: Duration =
+    Duration::from_millis(REVOCATION_DRAIN_TIMEOUT.as_millis() as u64 / 4);
 
 /// When a revocation starting now aborts the transports that have not
 /// ended themselves.
@@ -692,9 +701,11 @@ impl SessionStore {
     }
 
     /// The tail every revocation shares once its sessions and bindings are
-    /// selected: cancel, drain, then remove. A drain that times out returns
-    /// before anything is removed, so the cancelled records and bindings stay
-    /// in the store as the tombstone a retried revocation must find.
+    /// selected: cancel, drain, then remove. It returns within
+    /// [`REVOCATION_DRAIN_TIMEOUT`] plus [`ABORTED_DRAIN_TIMEOUT`], 2.5 s in
+    /// production. A drain that times out returns before anything is
+    /// removed, so the cancelled records and bindings stay in the store as
+    /// the tombstone a retried revocation must find.
     async fn finish_revocation(
         &self,
         selected: Vec<(String, SessionRecord)>,
@@ -711,8 +722,8 @@ impl SessionStore {
             record.revoke_authority();
         }
         // A bridge has until its drain deadline to send its Close and end,
-        // and is aborted there; the second bound is for aborted tasks to drop.
-        let deadline = close_deadline() + REVOCATION_DRAIN_TIMEOUT;
+        // and is aborted there; the tail is for aborted tasks to drop.
+        let deadline = close_deadline() + ABORTED_DRAIN_TIMEOUT;
         for (_, record) in &selected {
             if !record.operations.wait_drained(deadline).await {
                 return Err(RevokeError::DrainTimedOut);
@@ -1594,6 +1605,7 @@ mod tests {
             .begin_operation()
             .expect("active operation without a task");
 
+        let started = Instant::now();
         assert_eq!(
             store
                 .revoke(&Revocation::Subject {
@@ -1601,6 +1613,11 @@ mod tests {
                 })
                 .await,
             Err(RevokeError::DrainTimedOut)
+        );
+        // The acknowledgement bound: the drain deadline plus the short tail.
+        assert_eq!(
+            started.elapsed(),
+            REVOCATION_DRAIN_TIMEOUT + ABORTED_DRAIN_TIMEOUT
         );
     }
 
@@ -1689,7 +1706,7 @@ mod tests {
         let (ended_at, finished) = ended_rx.await.expect("transport ended");
         assert!(!finished, "the transport was not aborted");
         assert_eq!(ended_at - started, REVOCATION_DRAIN_TIMEOUT);
-        assert!(started.elapsed() < 2 * REVOCATION_DRAIN_TIMEOUT);
+        assert!(started.elapsed() <= REVOCATION_DRAIN_TIMEOUT + ABORTED_DRAIN_TIMEOUT);
     }
 
     #[tokio::test(start_paused = true)]
