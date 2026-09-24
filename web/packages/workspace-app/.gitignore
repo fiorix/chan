@@ -11,6 +11,3 @@ pkg/
 # Editor swap
 *.swp
 *.swo
-
-# Dev harness artifacts for the frontend-only workspace demo (generated).
-public/demo-workspace.json

@@ -1,6 +1,6 @@
 # chan web frontend design
 
-Design reference for the chan web frontend: first the two web SPAs and how each is served, then the frontend-only demo embed, then the color system all share. Update this file with changes to the frontend serving topology (including the marketing demo embed), palette variable model, editor theme contract, syntax highlight palette, or kind taxonomy.
+Design reference for the chan web frontend: first the two web SPAs and how each is served, then the frontend-only launcher embed on the marketing site and the workspace app's in-memory test transport, then the color system all share. Update this file with changes to the frontend serving topology (including the marketing launcher embed), palette variable model, editor theme contract, syntax highlight palette, or kind taxonomy.
 
 ## Two web frontends
 
@@ -15,7 +15,7 @@ chan-desktop appends `chan-renderer=webgl|dom` to a workspace URL only when it h
 
 Both SPAs mount the same `@chan/web-shared/CommandDeck`, rendered inline inside the page that invoked it on every surface; there is no native launcher window. When hosted by a `WorkspaceHost`, the workspace adapter may mint a live-window-bound capability for the one library serving it. That capability's deck neither shows workspace state nor turns a workspace on or off, so the one question it asks of a workspace's lifecycle status is whether a window may be opened over it: only a `running` mount qualifies, and a mount that is up while its root cannot be read (`unavailable`) is left out along with every other status, because the library refuses the mint for all of them. A direct `chan serve --standalone` tenant has no root launcher router; after that route answers 404/405, its adapter exposes only same-tenant browser navigation for `New terminal` and `New window`, with a fresh `w` each time. It never fabricates a library roster or window controls. A remote workspace never receives the desktop launcher's aggregate bearer, inventory, or query.
 
-Local extensions are a main-SPA-only surface. Bootstrap fetches the process-ready catalog from `/api/extensions`, registers one late-bound Apps command per stable extension ID, and opens a keep-alive `extension` tab containing an opaque-origin sandboxed iframe. The in-memory catalog carries only a random tenant-relative proxy path; Chan keeps the subprocess port and token private and serves the iframe through the workspace's existing IP, port, and prefix in standalone, desktop, devserver, and tunnel modes. Only the ID and display title enter tab serialization or cross-window drag payloads. The iframe sends no referrer and relays only the host shell chords Chan advertises through the versioned keyboard `postMessage` contract. Terminal-only windows skip discovery, and the marketing demo installs no extension transport.
+Local extensions are a main-SPA-only surface. Bootstrap fetches the process-ready catalog from `/api/extensions`, registers one late-bound Apps command per stable extension ID, and opens a keep-alive `extension` tab containing an opaque-origin sandboxed iframe. The in-memory catalog carries only a random tenant-relative proxy path; Chan keeps the subprocess port and token private and serves the iframe through the workspace's existing IP, port, and prefix in standalone, desktop, devserver, and tunnel modes. Only the ID and display title enter tab serialization or cross-window drag payloads. The iframe sends no referrer and relays only the host shell chords Chan advertises through the versioned keyboard `postMessage` contract. Terminal-only windows skip discovery, and the in-memory test transport serves no extension catalog.
 
 ```mermaid
 flowchart TB
@@ -42,32 +42,27 @@ flowchart TB
     DEV --- GW
 ```
 
-## Frontend-only demo (marketing embed)
+## Frontend-only launcher demo and the workspace test transport
 
-Both SPAs also run with **no backend** on the public marketing site (`@chan/marketing`), so `chan.app` visitors get a live, interactive product tour instead of screenshots. This is a third serving path: not chan-server, but the static site embedding the *same* Svelte apps against in-memory mocks. Nothing is extracted or forked; the terminal, editor, graph, and file browser stay in this package and are reused whole.
+The launcher SPA also runs with **no backend** on the public marketing site (`@chan/marketing`), so the `chan.app` manual shows a live launcher instead of a screenshot. This is a third serving path: not chan-server, but the static site embedding the *same* Svelte app against an in-memory backend. Nothing is extracted or forked. `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap; the marketing build bundles it as `launcher-demo.js` under `/assets/` and scopes its global CSS to the embed frame. The launcher is mounted without an `onOpenWindow` hook, so a window tile opens nothing: the workspace app is not on the site.
 
-The launcher demo came first: `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap. The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~70 endpoints and six sockets), so its demo swaps one level lower, at the **transport seam**: `api/transport.ts` routes every HTTP call through `chanFetch` and every socket through `createSocket`, both defaulting to the real `fetch` / `WebSocket`. A demo installs replacements before mount (`setFetchImpl` / `setSocketFactory`); the in-memory mock lives in `src/demo/` (store, router, graph, search, fake PTY) and is seeded from `demo-workspace.json`, a build-time snapshot of a git repo. The default path is unchanged, so the two chan-server-embedded bundles above are byte-identical; only the demo installs a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
-
-The workspace demo bundle (plus its multi-MB snapshot) is a **lazy chunk**: the landing page ships only the launcher; clicking any window tile dynamic-imports the workspace app and opens it in `WorkspaceDemoOverlay`. So the heavy editor / graph / terminal bundle never touches the marketing page load.
+The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~70 endpoints and six sockets), so its in-memory backend swaps one level lower, at the **transport seam**: `api/transport.ts` routes every HTTP call through `chanFetch`, every socket through `createSocket` and every multipart upload through an XHR factory, all defaulting to the real browser globals. The seam is a test fixture, not a serving path. `src/demo/install.ts` installs the in-memory mock (`src/demo/`: store, router, graph, search, fake PTY) before a component test mounts the real `App`, seeded from the `MockWorkspaceData` literal the test builds; the sync, heartbeat and upload unit tests swap one primitive at a time through the same setters. The default path is unchanged, so the chan-server-embedded bundle never carries a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
 
 ```mermaid
 flowchart TB
     subgraph site["marketing site: chan.app static bundle"]
-        HOME["landing page<br/>launcher-demo.js (eager entry)"]
-        OVL["WorkspaceDemoOverlay<br/>workspace-demo.js (lazy chunk, on first tile click)"]
+        MAN["manual page + its devserver iframe<br/>launcher-demo.js (eager entry)"]
     end
     subgraph ldemo["@chan/launcher/demo"]
         L["real launcher App<br/>setBackend(createLauncherDemoApi())"]
     end
-    subgraph wdemo["@chan/workspace-app/demo"]
+    subgraph tests["workspace-app component tests (vitest)"]
         W["real workspace App<br/>editor · graph · terminals · file browser"]
-        SEAM["transport seam<br/>setFetchImpl(chanFetch) + setSocketFactory(createSocket)<br/>default: real fetch / WebSocket"]
-        MOCK["src/demo mock<br/>store · router · graph · search · fake PTY<br/>seeded from demo-workspace.json (git snapshot)"]
+        SEAM["transport seam<br/>setFetchImpl · setSocketFactory · setXhrFactory<br/>default: real fetch / WebSocket / XMLHttpRequest"]
+        MOCK["src/demo mock<br/>store · router · graph · search · fake PTY<br/>seeded from the test's MockWorkspaceData literal"]
     end
-    HOME --> L
-    L -->|onOpenWindow: any window tile| OVL
-    OVL --> W
-    W -->|every fetch + WebSocket| SEAM
+    MAN --> L
+    W -->|every fetch + WebSocket + upload| SEAM
     SEAM --> MOCK
 ```
 

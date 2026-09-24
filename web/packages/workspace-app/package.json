@@ -3,10 +3,6 @@
   "version": "0.100.0",
   "private": true,
   "type": "module",
-  "exports": {
-    "./demo": "./src/WorkspaceDemo.svelte",
-    "./demo-data": "./src/demo/data.ts"
-  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
