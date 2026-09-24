@@ -2945,6 +2945,55 @@ async fn ws_bridge_closes_as_expired_when_the_store_expires_the_session() {
     app.cleanup().await;
 }
 
+/// A session the store expires while the bridge is still in its setup
+/// ends the client socket with the 1008 Close that names the expiry. The
+/// setup's select polls the cancellation first, so after the test has
+/// blocked its runtime past the expiry and looked the session up, it is
+/// the cancellation arm, not the bridge's expiry timer, that gives the
+/// reason.
+#[tokio::test]
+async fn ws_bridge_closes_as_expired_when_the_store_expires_the_session_during_setup() {
+    let app =
+        TestApp::new_with_ws_idle_and_session_lifetime(4 * WS_TEST_IDLE, WS_TEST_SESSION_LIFETIME)
+            .await;
+    let uid = Uuid::new_v4();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    app.register_tunnel(
+        "alice",
+        "blog",
+        uid,
+        stalling_upstream("/blog/ws-stall", reached.clone()),
+    )
+    .await;
+    let (addr, server) = serve_proxy(app.router.clone()).await;
+
+    let host = host_for("alice");
+    let issued = std::time::Instant::now();
+    let session = opaque_session(&app, uid, uid, "blog", &host);
+    let cookie = format!("__Host-devserver_gate={session}");
+    let mut ws = ws_connect(addr, &host, "/blog/ws-stall", &cookie).await;
+    tokio::time::timeout(4 * WS_TEST_IDLE, reached.notified())
+        .await
+        .expect("the upgrade request must reach the devserver");
+
+    let expired_at = issued + WS_TEST_SESSION_LIFETIME + std::time::Duration::from_millis(50);
+    std::thread::sleep(expired_at.saturating_duration_since(std::time::Instant::now()));
+    assert!(
+        app.sessions.lookup(&session).is_none(),
+        "the lookup expires the session"
+    );
+    let frame = expect_close_within(
+        &mut ws,
+        4 * WS_TEST_IDLE,
+        "a WebSocket whose session the store expired during setup",
+    )
+    .await;
+    assert_eq!(u16::from(frame.code), 1008, "policy violation");
+    assert_eq!(frame.reason.as_str(), "session expired");
+    server.abort();
+    app.cleanup().await;
+}
+
 // ---------------------------------------------------------------
 // Extension lane
 // ---------------------------------------------------------------
