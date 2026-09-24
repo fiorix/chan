@@ -2632,4 +2632,99 @@ mod tests {
             WorkspaceEntityMatchClass::Exact
         );
     }
+
+    /// Writes and indexes `sections` heading sections that each carry `token`
+    /// in the heading and the body. Each section is one chunk, and matching in
+    /// both fields ranks it above a chunk that matches in its body alone.
+    fn write_matching_sections(workspace: &Workspace, path: &str, token: &str, sections: usize) {
+        let text: String = (0..sections)
+            .map(|section| format!("## {token} section {section}\n\n{token} body\n\n"))
+            .collect();
+        workspace.write_text(path, &text).unwrap();
+        workspace.index_file(path).unwrap();
+    }
+
+    fn content_search(workspace: &Workspace, query: &str, limit: u32) -> WorkspaceSearchResult {
+        let result = workspace
+            .workspace_search(&WorkspaceSearchRequest {
+                query: Some(query.into()),
+                domains: vec![WorkspaceSearchDomain::Content],
+                limit: Some(limit),
+                ..WorkspaceSearchRequest::default()
+            })
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        result
+    }
+
+    fn content_paths(result: &WorkspaceSearchResult) -> Vec<&str> {
+        result
+            .content_hits
+            .iter()
+            .map(|hit| hit.path.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn content_truncation_reports_matches_past_the_fetch_window() {
+        // A limit of 1 fetches a window of 8 chunks. The eight chunks of
+        // `many.md` outrank the one in `few.md` and fill it, so the window
+        // holds a single file and the collapse alone reads as complete.
+        let (_config, _root, workspace) = open_workspace();
+        write_matching_sections(&workspace, "many.md", "zebra", 8);
+        workspace
+            .write_text("few.md", "# Other\n\nzebra\n")
+            .unwrap();
+        workspace.index_file("few.md").unwrap();
+
+        let result = content_search(&workspace, "zebra", 1);
+
+        assert_eq!(content_paths(&result), vec!["many.md"]);
+        assert_eq!(
+            result.truncation.content_hits_observed, 1,
+            "the window holds only many.md"
+        );
+        assert!(
+            result.truncation.content_hits,
+            "few.md matches past the fetch window, so more hits exist than were returned: {:?}",
+            result.truncation
+        );
+    }
+
+    #[test]
+    fn content_truncation_reports_files_past_the_limit_and_nothing_else() {
+        let (_config, _root, workspace) = open_workspace();
+        for path in ["a.md", "b.md"] {
+            workspace.write_text(path, "# Note\n\nyak\n").unwrap();
+            workspace.index_file(path).unwrap();
+        }
+
+        let collapsed = content_search(&workspace, "yak", 1);
+        assert_eq!(collapsed.content_hits.len(), 1);
+        assert_eq!(collapsed.truncation.content_hits_observed, 2);
+        assert!(
+            collapsed.truncation.content_hits,
+            "both files were fetched and the limit returned one: {:?}",
+            collapsed.truncation
+        );
+
+        let complete = content_search(&workspace, "yak", 2);
+        assert_eq!(content_paths(&complete), vec!["a.md", "b.md"]);
+        assert!(
+            !complete.truncation.content_hits,
+            "every matching file was returned: {:?}",
+            complete.truncation
+        );
+
+        // Eight matching chunks fill the window of a limit of 1 exactly, and
+        // nothing else matches.
+        write_matching_sections(&workspace, "full.md", "gnu", 8);
+        let exact = content_search(&workspace, "gnu", 1);
+        assert_eq!(content_paths(&exact), vec!["full.md"]);
+        assert!(
+            !exact.truncation.content_hits,
+            "a window the matches fill exactly holds every match: {:?}",
+            exact.truncation
+        );
+    }
 }
