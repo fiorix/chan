@@ -27,13 +27,12 @@ pub(crate) const BRIDGE_CAPACITY: usize = 8;
 ///
 /// Editor-size text reads, raw byte reads, report rows and graph views run on
 /// the blocking pool rather than the lane: each is a handful of frames, and
-/// admitting them
-/// would spend transfer slots on the interactive work the lane exists to
-/// protect. What they share with a bulk send is the failure: a client that
-/// stops reading fills the channel, and an unbounded send then parks the pool
-/// thread for as long as the connection stays open. A send here gives up
-/// after the bound, the producer returns, and the body ends as an error
-/// rather than as a stream that looks complete.
+/// admitting them would spend transfer slots on the interactive work the lane
+/// exists to protect. What they share with a bulk send is the failure: a
+/// client that stops reading fills the channel, and an unbounded send then
+/// parks the pool thread for as long as the connection stays open. A send
+/// here gives up after the bound, the producer returns, and the body ends as
+/// an error rather than as a stream that looks complete.
 pub(crate) struct StreamBridge<T> {
     rx: mpsc::Receiver<T>,
     signal: BulkCancel,
