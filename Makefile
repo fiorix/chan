@@ -44,6 +44,18 @@ CHAN_SERVER_WINDOWS_TESTS := \
 	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
 	devserver_handoff::tests::listener_round_trip_registered_pipe
 
+# The chan-workspace tests that drive the no-replace rename's MoveFileExW arm
+# and the move, copy and cross-device race windows that commit through it.
+CHAN_WORKSPACE_WINDOWS_TESTS := \
+	no_replace::tests::the_native_arm_refuses_an_existing_file_or_empty_directory \
+	no_replace::tests::the_fallback_arm_refuses_an_existing_file_or_empty_directory \
+	no_replace::tests::the_fallback_serializes_two_chan_renames_to_one_destination \
+	no_replace::tests::the_fallback_loses_to_a_foreign_writer_inside_the_window \
+	mini_workspace::tests::move_plain_refuses_a_file_created_inside_the_race_window \
+	mini_workspace::tests::move_plain_refuses_an_empty_directory_created_inside_the_race_window \
+	mini_workspace::tests::copy_plain_refuses_a_file_created_inside_the_race_window \
+	mini_workspace::tests::cross_device_move_refuses_a_file_created_inside_the_race_window
+
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a
 # macOS workstation can produce Linux bundles. DISTRO selects the rootfs +
 # .sdme template; SDME is how sdme is reached, which differs per workstation:
@@ -393,8 +405,9 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# the registry-backed user-PATH assertion when CHAN_TEST_REAL_USER_PATH arms
 	# it, and chan-server covers the tenant builder's named-pipe control socket,
 	# the handoff named-pipe path and upgrade cases, and the devserver named-pipe
-	# path and registration round trip. The remaining chan-server, chan-workspace,
-	# and tunnel harnesses stay
+	# path and registration round trip. chan-workspace runs only the named
+	# no-replace rename tests, which exercise the MoveFileExW arm. The remaining
+	# chan-server, chan-workspace, and tunnel harnesses stay
 	# outside this Windows-specific subset: they are Unix-only, exercise Unix
 	# facilities such as POSIX shells, Unix-domain sockets, `/tmp` path semantics,
 	# or real PTYs, or have no Windows transport arm to exercise.
@@ -424,6 +437,7 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# a few seconds and is not the deferred full-suite Windows port.
 	scripts/smoke-windows-cli.sh target/release/chan.exe
 	$(MAKE) check-chan-server-windows-tests
+	$(MAKE) check-chan-workspace-windows-tests
 	RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-desktop --all-targets
 	$(MAKE) -C desktop ci-windows WEB_ALREADY_BUILT=1
 	scripts/smoke-built-devserver.sh target/release/chan-desktop.exe
@@ -431,6 +445,21 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# production/package build is complete, then prove install.ps1 and Windows
 	# self-replacement end to end on the stock Windows Server runner.
 	CARGO="$(CARGO)" scripts/smoke-windows-installer.sh target/release/chan.exe
+
+.PHONY: check-chan-workspace-windows-tests
+check-chan-workspace-windows-tests:
+	@set -eu; \
+		set -- $(CHAN_WORKSPACE_WINDOWS_TESTS); \
+		listed="$$(RUSTFLAGS="-D warnings" $(CARGO) test -p chan-workspace --lib -- --color never --list --exact "$$@")"; \
+		missing=0; \
+		for test_name in "$$@"; do \
+			if ! printf '%s\n' "$$listed" | grep -Fqx "$$test_name: test"; then \
+				printf 'error: chan-workspace Windows test did not resolve: %s\n' "$$test_name" >&2; \
+				missing=1; \
+			fi; \
+		done; \
+		[ "$$missing" -eq 0 ]; \
+		RUSTFLAGS="-D warnings" $(CARGO) test -p chan-workspace --lib -- --color never --exact "$$@"
 
 .PHONY: check-chan-server-windows-tests
 check-chan-server-windows-tests:
