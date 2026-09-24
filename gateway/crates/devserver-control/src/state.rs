@@ -7013,6 +7013,21 @@ pub(super) mod tests {
         assert_eq!(p0_view.status, ProxyStatus::Active);
     }
 
+    fn fleet_ready_count(effects: &[Effect], proxy_id: &str) -> usize {
+        effects
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect,
+                    Effect::Send {
+                        session,
+                        frame: ServerFrame::FleetReady,
+                    } if session.proxy_id == proxy_id
+                )
+            })
+            .count()
+    }
+
     fn fleet_ready_for(effects: &[Effect], proxy_id: &str) -> bool {
         effects.iter().any(|effect| {
             matches!(
@@ -7275,7 +7290,7 @@ pub(super) mod tests {
         // The last Active session leaves while p2 reconciles.
         state.disconnect(&p1, p1_incarnation, at).unwrap();
         assert!(!state.is_ready());
-        state
+        let joined = state
             .command_result(
                 &p2,
                 p2_incarnation,
@@ -7306,6 +7321,10 @@ pub(super) mod tests {
         let effects = state.tick(converged, Utc::now());
         assert!(state.is_ready());
         assert!(fleet_ready_for(&effects, "p3"));
+        // p2 finished its join before the controller converged; a proxy
+        // ends its session on a second FleetReady, so p2 gets exactly one.
+        let p2_frames = fleet_ready_count(&joined, "p2") + fleet_ready_count(&effects, "p2");
+        assert_eq!(p2_frames, 1, "p2 received {p2_frames} FleetReady frames");
         assert!(state
             .tunnel_views()
             .iter()
