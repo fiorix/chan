@@ -7336,6 +7336,72 @@ pub(super) mod tests {
             .any(|view| view.proxy_id == "p3" && view.devserver_id == "two"));
     }
 
+    #[test]
+    fn a_deferred_join_resynced_while_it_waits_is_queued_once() {
+        let now = Instant::now();
+        let mut state = ControllerState::new(100);
+        let (_p1, _, _) = ready_one(
+            &mut state,
+            "p1",
+            vec![row("alice", "one", Uuid::from_u128(1))],
+            now,
+        );
+        let at = now + CONVERGENCE_WINDOW;
+        let (p2, p2_incarnation) = begin(&mut state, "p2", at);
+        let dup = Uuid::from_u128(2);
+        let effects = snapshot(
+            &mut state,
+            &p2,
+            p2_incarnation,
+            vec![row("alice", "one", dup)],
+            at,
+        );
+        let p2_kill = kill_command(&effects, "p2", dup);
+        let (p3, p3_incarnation) = begin(&mut state, "p3", at);
+        let p3_row = row("bob", "two", Uuid::from_u128(3));
+        snapshot(&mut state, &p3, p3_incarnation, vec![p3_row.clone()], at);
+        assert_eq!(state.deferred_joins.len(), 1);
+
+        // A delta with a generation gap force-resyncs p3 while it waits.
+        let resync = state
+            .tunnel_up(
+                &p3,
+                p3_incarnation,
+                5,
+                row("bob", "nine", Uuid::new_v4()),
+                at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(has_resync(&resync, 1));
+        assert!(state.proxies.get("p3").unwrap().generation.is_none());
+
+        // Its resync snapshot is deferred again, into the same one slot.
+        let effects = snapshot(&mut state, &p3, p3_incarnation, vec![p3_row], at);
+        assert!(!fleet_ready_for(&effects, "p3"));
+        assert_eq!(state.deferred_joins.len(), 1, "p3 is queued once");
+
+        let effects = state
+            .command_result(
+                &p2,
+                p2_incarnation,
+                p2_kill,
+                vec![dup],
+                Vec::new(),
+                Vec::new(),
+                at,
+                Utc::now(),
+            )
+            .unwrap();
+        assert!(fleet_ready_for(&effects, "p2"));
+        assert_eq!(fleet_ready_count(&effects, "p3"), 1);
+        assert!(state.deferred_joins.is_empty());
+        assert!(state
+            .tunnel_views()
+            .iter()
+            .any(|view| view.proxy_id == "p3" && view.devserver_id == "two"));
+    }
+
     fn kill_command(effects: &[Effect], proxy_id: &str, registration_id: Uuid) -> Uuid {
         effects
             .iter()
