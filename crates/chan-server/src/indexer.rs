@@ -3123,6 +3123,114 @@ mod tests {
         drop(second);
     }
 
+    // A workspace outlives its indexer whenever something else still holds it:
+    // the reset and metadata-import cell swaps drop the indexer and keep the
+    // workspace across their drain, and a run the coordinator started keeps it
+    // until the run ends and requeues its pass. A pass requeued then has no
+    // claimant, and must say so rather than wake a channel nobody drains.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_requeued_after_its_indexer_drops_is_unowned_until_claimed() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        // Claimed before the indexer exists, standing in for a run that
+        // outlives the coordinator it was started under.
+        let required = workspace.request_recovery(RecoveryAction::Reconcile);
+        let pass = workspace.begin_recovery().expect("the pass is claimable");
+        let (_first_events, events_rx) = broadcast::channel(64);
+        let first = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        drop(first);
+
+        workspace
+            .finish_recovery(pass, RecoveryOutcome::Retry)
+            .unwrap();
+
+        assert!(
+            workspace.recovery_is_unowned(),
+            "the pass requeued after its indexer dropped has no claimant: {:?}",
+            workspace.recovery_status()
+        );
+        let (_later_events, events_rx) = broadcast::channel(64);
+        let later = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        assert!(
+            await_ready(&workspace, required).await,
+            "a later indexer never claimed the requeued pass; recovery={:?}",
+            workspace.recovery_status()
+        );
+        drop(later);
+    }
+
+    // `install_workspace_cell` spawns a second indexer over the same workspace
+    // when a reset or import drain fails, and a handler's clone of the first
+    // `Arc<Indexer>` (`AppState::try_indexer`) can drop after that. The first
+    // indexer's drop must leave the second one's driver installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_an_earlier_indexer_keeps_a_later_ones_driver() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        fs::write(dir.path().join("a.md"), "# A\nbody\n").unwrap();
+        let (_first_events, events_rx) = broadcast::channel(64);
+        let first = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        let (_second_events, events_rx) = broadcast::channel(64);
+        let second = Indexer::spawn(
+            workspace.clone(),
+            events_rx,
+            false,
+            SearchAggression::Conservative,
+            Arc::new(chan_workspace::NoProgress),
+        );
+        drop(first);
+
+        let required = workspace.request_recovery(RecoveryAction::Reconcile);
+
+        assert!(
+            !workspace.recovery_is_unowned(),
+            "the later indexer's driver must survive the earlier one's drop: {:?}",
+            workspace.recovery_status()
+        );
+        assert!(
+            await_ready(&workspace, required).await,
+            "the later indexer never claimed the pass; recovery={:?}",
+            workspace.recovery_status()
+        );
+        drop(second);
+    }
+
+    // The coordinator can stop while its driver is still installed, which
+    // closes the channel the driver sends on. Every wake after that fails, so
+    // a pending pass has no claimant.
+    #[test]
+    fn a_driver_whose_coordinator_is_gone_leaves_the_pass_unowned() {
+        let (_cfg, _dir, workspace) = setup_workspace();
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        workspace.set_recovery_driver(Arc::new(CoordinatorDriver { tx }));
+
+        workspace.request_recovery(RecoveryAction::Reconcile);
+
+        assert!(
+            workspace.recovery_is_unowned(),
+            "a pass announced to a closed channel has no claimant: {:?}",
+            workspace.recovery_status()
+        );
+    }
+
     // A pass whose action keeps failing is requeued each time. The retries
     // are spaced by the coordinator's cooldown rather than claimed back to
     // back, and meanwhile the workspace publishes an `Error` index status and
