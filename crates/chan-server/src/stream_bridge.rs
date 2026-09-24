@@ -16,8 +16,10 @@ use tokio::sync::mpsc;
 use crate::bulk_transfer::BulkCancel;
 
 /// Frames a bridge producer may queue ahead of its reader. Small on purpose:
-/// the channel is backpressure, not a buffer, and the stall bound counts from
-/// the last frame the reader took.
+/// the channel is backpressure, not a buffer. The stall bound counts from the
+/// moment a send blocks on a full channel, so a producer that computes for a
+/// long time before its first frame holds its thread for that compute time
+/// plus the bound when its reader has stopped.
 pub(crate) const BRIDGE_CAPACITY: usize = 8;
 
 /// A blocking producer bridged onto a response body through a bounded
