@@ -3378,3 +3378,29 @@ async fn admin_user_pages_have_a_unique_order_for_tied_timestamps() {
     assert_eq!(ids, expected);
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn a_test_router_starts_no_revocation_worker() {
+    let app = TestApp::new().await;
+    let uid: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, username) VALUES ('no-worker@x.com', 'no-worker') RETURNING id",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    profile::revocation::reserve(&app.pool, &profile::revocation::RevocationJob::Subject(uid))
+        .await
+        .unwrap();
+    // A worker ticks once a second and its claim stamps a deadline on a due
+    // row; three seconds without one means nothing is polling this schema.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let claimed: bool = sqlx::query_scalar(
+        "SELECT deadline IS NOT NULL FROM control_revocation_jobs WHERE job_key = $1",
+    )
+    .bind(format!("subject:{uid}"))
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    app.cleanup().await;
+    assert!(!claimed, "building a router claimed a revocation job");
+}
