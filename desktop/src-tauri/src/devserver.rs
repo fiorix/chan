@@ -2433,6 +2433,60 @@ pub async fn set_workspace_on(
     Ok(Some(row))
 }
 
+/// Every `tracing` line a test emits on its own thread, rendered by the same
+/// `fmt` formatter the desktop logs through, so a test pins the line an
+/// operator reads rather than a structure nobody sees.
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Lines(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+        type Writer = Lines;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl Lines {
+        /// Collect this thread's events until the guard drops. A
+        /// `#[tokio::test]` runs on a current-thread runtime, so an async
+        /// test's events stay on the thread that installed it.
+        pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            )
+        }
+
+        /// The captured `WARN` lines, in order.
+        pub(crate) fn warnings(&self) -> Vec<String> {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .lines()
+                .filter(|line| line.contains(" WARN "))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4593,6 +4647,47 @@ mod tests {
                 server.assert_responses_drained();
             }
         }
+    }
+
+    /// A devserver on a later release can list a row this desktop cannot
+    /// read. The rows the desktop can read still reach it, so a fresh connect
+    /// shows those windows, and the other row is named in a warning.
+    #[tokio::test]
+    async fn fetch_library_windows_keeps_the_rows_it_can_read() {
+        use axum::http::StatusCode;
+
+        let readable = serde_json::to_value(window_row("window-1", "/terminal", "t-1")).unwrap();
+        let mut unknown_kind =
+            serde_json::to_value(window_row("window-2", "/terminal", "t-2")).unwrap();
+        unknown_kind["kind"] = "panel".into();
+        let server = MockManagementServer::start(vec![mock_response(
+            StatusCode::OK,
+            serde_json::Value::Array(vec![readable, unknown_kind]).to_string(),
+        )])
+        .await;
+        let conn = server.raw_conn();
+        let logs = log_capture::Lines::default();
+        let _logs = logs.install();
+
+        let rows = tokio::time::timeout(Duration::from_secs(10), fetch_library_windows(&conn))
+            .await
+            .expect("the window-list request must finish")
+            .expect("one unreadable row must not fail the list");
+
+        let ids: Vec<&str> = rows.iter().map(|row| row.window_id.as_str()).collect();
+        assert_eq!(ids, ["window-1"], "the readable row survives its neighbour");
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one line per unreadable row: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("row=window_id window-2") && warnings[0].contains("panel"),
+            "the line names the row and why it was unreadable: {}",
+            warnings[0]
+        );
+        server.assert_responses_drained();
     }
 
     #[tokio::test]

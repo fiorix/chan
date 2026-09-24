@@ -1427,6 +1427,67 @@ mod tests {
         assert_eq!(frames, 0, "no frames should have arrived");
     }
 
+    /// One `/watch` frame from a devserver on a later release can hold a row
+    /// this desktop cannot read. The frame still delivers every row the
+    /// desktop can read, so its view of that devserver keeps moving, and the
+    /// other row is named in a warning.
+    #[test]
+    fn a_watch_frame_keeps_the_rows_it_can_read() {
+        let mut unknown_kind = serde_json::to_value(WindowRecord {
+            window_id: "w-2".into(),
+            ..rec()
+        })
+        .unwrap();
+        unknown_kind["kind"] = "panel".into();
+        let frame = serde_json::json!({
+            "windows": [serde_json::to_value(rec()).unwrap(), unknown_kind],
+            "leaders": { "/terminal": "w-1" },
+        })
+        .to_string();
+        let logs = crate::devserver::log_capture::Lines::default();
+        let _logs = logs.install();
+
+        let windows =
+            decode_window_frame(&frame).expect("one unreadable row must not drop the frame");
+
+        let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
+        assert_eq!(ids, ["w-1"], "the readable row survives its neighbour");
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one line per unreadable row: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("row=window_id w-2") && warnings[0].contains("panel"),
+            "the line names the row and why it was unreadable: {}",
+            warnings[0]
+        );
+    }
+
+    /// A frame that does not parse at all carries no row to keep, so the
+    /// view stays at the last snapshot, and the skip is logged rather than
+    /// silent.
+    #[test]
+    fn a_watch_frame_that_does_not_parse_is_logged() {
+        let logs = crate::devserver::log_capture::Lines::default();
+        let _logs = logs.install();
+
+        assert!(decode_window_frame("{\"windows\":").is_none());
+
+        let warnings = logs.warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the skipped frame is logged: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("unreadable devserver window frame"),
+            "the line says what was skipped: {}",
+            warnings[0]
+        );
+    }
+
     #[tokio::test]
     async fn keepalive_pump_forwards_frames_then_ok_on_clean_close() {
         use futures::SinkExt;
