@@ -41,17 +41,22 @@ pub fn config_dir() -> PathBuf {
 }
 
 fn config_dir_with_sources(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    config_dir_from(override_dir, home, home_unavailable_config_dir)
+}
+
+/// Resolve the chan home from an injected override, OS home and fallback.
+/// Keeping these inputs explicit makes the unavailable-home branch testable
+/// without mutating the process environment or touching the host's real
+/// fallback locations.
+fn config_dir_from(
+    override_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+    fallback: impl FnOnce() -> PathBuf,
+) -> PathBuf {
     if let Some(dir) = override_dir {
         return dir;
     }
-    config_dir_with_home(home)
-}
-
-/// Resolve the default chan home from an injected OS home. Keeping this input
-/// explicit makes the unavailable-home branch testable without mutating the
-/// process environment.
-fn config_dir_with_home(home: Option<PathBuf>) -> PathBuf {
-    default_config_dir(home, home_unavailable_config_dir)
+    default_config_dir(home, fallback)
 }
 
 fn default_config_dir(home: Option<PathBuf>, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
@@ -877,14 +882,18 @@ mod tests {
         assert!(!home.refused.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn config_dir_without_os_home_uses_named_absolute_fallback() {
-        let fallback = config_dir_with_sources(None, None);
+        let fx = fallback_fixture();
+        let fallback = config_dir_from(None, None, || {
+            unix_fallback_home(&fx.var_tmp, &fx.temp, Some(&fx.cwd), uid()).path
+        });
         assert!(
             fallback.is_absolute(),
             "fallback must be absolute: {fallback:?}"
         );
-        assert_eq!(fallback, home_unavailable_config_dir());
+        assert_eq!(fallback, fx.var_tmp.join(format!("chan-{}", uid())));
     }
 
     #[test]
