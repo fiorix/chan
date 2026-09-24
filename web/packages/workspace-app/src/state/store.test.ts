@@ -393,7 +393,7 @@ describe("session persistence bootstrap guard", () => {
       // target attaches, so the close must follow the move-out DELETE that
       // exempts it, not race it.
       const settle = holdDeletes();
-      const closing = closeEmptiedWindow({ movedOut: true });
+      const closing = closeEmptiedWindow({ movedSession: "term_live" });
       await vi.waitFor(() => expect(events).toEqual(["DELETE moved"]));
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(events).toEqual(["DELETE moved"]);
@@ -406,7 +406,7 @@ describe("session persistence bootstrap guard", () => {
       // A window never sits empty; the move-out exemption is lost with the
       // DELETE, which is no worse than the close racing it.
       const settle = holdDeletes("fail");
-      const closing = closeEmptiedWindow({ movedOut: true });
+      const closing = closeEmptiedWindow({ movedSession: "term_live" });
       await vi.waitFor(() => expect(events).toEqual(["DELETE moved"]));
       settle();
       await closing;
@@ -420,7 +420,7 @@ describe("session persistence bootstrap guard", () => {
       vi.useFakeTimers();
       try {
         holdDeletes();
-        void closeEmptiedWindow({ movedOut: true });
+        void closeEmptiedWindow({ movedSession: "term_live" });
         await vi.advanceTimersByTimeAsync(0);
         expect(events).toEqual(["DELETE moved"]);
         await vi.advanceTimersByTimeAsync(5_000);
@@ -450,7 +450,7 @@ describe("session persistence bootstrap guard", () => {
       // Nothing moved, so nothing needs the server first: the reaping DELETE
       // and the host's own discard agree, and the window closes at once.
       holdDeletes();
-      await closeEmptiedWindow({ movedOut: false });
+      await closeEmptiedWindow({ movedSession: null });
       await vi.waitFor(() => expect(events).toContain("DELETE reap"));
       expect(events).toContain("request_close_window");
       expect(events).not.toContain("DELETE settled");

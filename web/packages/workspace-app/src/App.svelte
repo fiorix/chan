@@ -92,7 +92,7 @@
     closePane,
     closeTab,
     closeTabsInPane,
-    consumeLastCloseWasMoveOut,
+    consumeLastMovedOutSession,
     cancelPaneMode,
     commitPaneMode,
     draftCloseState,
@@ -1186,7 +1186,7 @@
         // must survive in the target window). (Restored-empty windows survive a
         // RESTART via the persisted record + the native-close bury, not by
         // blocking this explicit close.)
-        void closeEmptiedWindow({ movedOut: consumeLastCloseWasMoveOut() });
+        void closeEmptiedWindow({ movedSession: consumeLastMovedOutSession() });
         return true;
       }
       return false;
@@ -1225,7 +1225,7 @@
     // on (re-bound to the target), and the source's synchronous DELETE could
     // otherwise beat the target's re-attach and kill it.
     if (isTauriDesktop()) {
-      void closeEmptiedWindow({ movedOut: consumeLastCloseWasMoveOut() });
+      void closeEmptiedWindow({ movedSession: consumeLastMovedOutSession() });
     }
   });
   onMount(() => document.addEventListener("keydown", onWindowKey));

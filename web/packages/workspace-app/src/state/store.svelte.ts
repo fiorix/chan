@@ -3423,16 +3423,25 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 ///
 /// `reap: false` (a cross-window terminal MOVE that emptied this window): still
 /// DELETE the blob so the window leaves `cs window list`, but mark it
-/// (`&moved=1`) so the server does NOT reap -- the moved PTY lives on, re-bound
-/// to the target window. Without this the source's synchronous DELETE can beat
-/// the target's async re-attach and kill the just-moved terminal.
+/// (`&moved=1`) so the server does NOT reap, and name the moved session
+/// (`&session=`) so the window's later close spares it and nothing else -- the
+/// moved PTY lives on, re-bound to the target window. Without this the source's
+/// synchronous DELETE can beat the target's async re-attach and kill the
+/// just-moved terminal.
 ///
 /// The returned promise settles when the DELETE does, successfully or not;
 /// `closeEmptiedWindow` waits on it after a move-out.
-export function discardWindowSession(opts?: { reap?: boolean }): Promise<void> {
+export function discardWindowSession(opts?: {
+  reap?: boolean;
+  movedSession?: string;
+}): Promise<void> {
   discardWindowSessionLocal();
   // sessionPath() always carries `?w=`, so `&moved=1` is always a valid append.
-  const url = withTokenQuery(sessionPath()) + (opts?.reap === false ? "&moved=1" : "");
+  let url = withTokenQuery(sessionPath());
+  if (opts?.reap === false) {
+    url += "&moved=1";
+    if (opts.movedSession) url += `&session=${encodeURIComponent(opts.movedSession)}`;
+  }
   try {
     return chanFetch(url, {
       method: "DELETE",
@@ -3457,14 +3466,20 @@ const MOVE_OUT_DELETE_WAIT_MS = 3_000;
 /// The host's close discards the window and reaps every terminal session still
 /// bound to it. After a cross-window move the moved session is bound here
 /// until the target window's attach rebinds it, so the close must not reach
-/// the host before the move-out DELETE has told the server which sessions
+/// the host before the move-out DELETE has told the server which session
 /// moved out; racing it killed the shell the user had just dropped elsewhere.
 /// A DELETE that fails, or is still out after `MOVE_OUT_DELETE_WAIT_MS`, still
 /// lets the window close, because a window never sits empty. A plain discard
 /// has nothing to protect and closes at once.
-export async function closeEmptiedWindow(opts: { movedOut: boolean }): Promise<void> {
-  const discarded = discardWindowSession({ reap: !opts.movedOut });
-  if (opts.movedOut) {
+export async function closeEmptiedWindow(opts: {
+  movedSession: string | null;
+}): Promise<void> {
+  const movedOut = opts.movedSession !== null;
+  const discarded = discardWindowSession({
+    reap: !movedOut,
+    movedSession: opts.movedSession ?? undefined,
+  });
+  if (movedOut) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       discarded,

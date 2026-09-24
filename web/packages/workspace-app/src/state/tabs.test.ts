@@ -29,7 +29,7 @@ import {
   closeTab,
   closeTabsInPane,
   conflictDialog,
-  consumeLastCloseWasMoveOut,
+  consumeLastMovedOutSession,
   isTerminalMoving,
   markTerminalMovingOut,
   cancelPaneMode,
@@ -277,16 +277,16 @@ describe("tab close confirmation", () => {
     const pane = resetLayout([moving]);
     markTerminalMovingOut(moving.id);
     await closeTab(pane.id, moving.id, { force: true });
-    expect(consumeLastCloseWasMoveOut()).toBe(true);
-    // One-shot: a second read is false.
-    expect(consumeLastCloseWasMoveOut()).toBe(false);
+    expect(consumeLastMovedOutSession()).toBe("sess-move");
+    // One-shot: a second read is null.
+    expect(consumeLastMovedOutSession()).toBe(null);
     isTerminalMoving(moving.id); // drain the residual marker (no close-sink in test)
 
-    // A genuine close (not marked moving-out) records false → the discard reaps.
+    // A genuine close (not marked moving-out) records null → the discard reaps.
     const closing = terminalTab({ id: "term-close", terminalSessionId: "sess-close" });
     const pane2 = resetLayout([closing]);
     await closeTab(pane2.id, closing.id, { force: true });
-    expect(consumeLastCloseWasMoveOut()).toBe(false);
+    expect(consumeLastMovedOutSession()).toBe(null);
   });
 
   test("draft tab close prompts for discard or save", async () => {
