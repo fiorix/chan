@@ -75,6 +75,31 @@ CASES = (
     passes("a trailing comment", pinned() + " # --workspace"),
     passes("a quoted mention of cargo is not a call", pinned(), '    echo "cargo test --workspace"'),
     passes("a subcommand that builds nothing", "    cargo fetch --locked", pinned()),
+    # makepkg defines pkgname in the recipe, so an expansion of it selects
+    # the installed package however it is quoted.
+    passes('-p "$pkgname"', '    cargo test --frozen --release -p "$pkgname"'),
+    passes("-p ${pkgname}", "    cargo test --frozen --release -p ${pkgname}"),
+    passes(
+        '--package="$pkgname" in the desktop recipe',
+        '    cargo test --frozen --release --package="$pkgname"',
+        pkgname="chan-desktop",
+    ),
+    # Any other expansion could hold any selection, and the refusal names it.
+    replaced(
+        "a package named by another variable",
+        '    cargo test --frozen --release -p "$p"',
+        says="'$p' is a shell expansion",
+    ),
+    beside(
+        "a variable beside the pinned selection",
+        "    cargo test --frozen --release -p chan $EXTRA",
+        says="'$EXTRA' is a shell expansion",
+    ),
+    beside(
+        "a substitution inside a cargo call",
+        "    cargo test --frozen --release -p chan `echo --workspace`",
+        says="is a shell expansion",
+    ),
     # Round one's red copies: the pinned call widened in place.
     replaced("--workspace", "    cargo test --frozen --release --workspace", says="--workspace"),
     replaced(
