@@ -1,185 +1,271 @@
-import { describe, expect, test } from "vitest";
-import graph from "./GraphPanel.svelte?raw";
+// @vitest-environment jsdom
+//
+// How deep a graph reaches: the depth slider in the tab menu, the expanded
+// directory tree of the workspace and directory scopes, a double-click that
+// expands a directory, and the depth a directory scope opens at. GraphPanel is
+// mounted over a fixed graph; the assertions read the menu and the node set
+// the panel hands the canvas.
 
-// BFS is forward-only so the depth slider reveals OUTGOING nodes
-// from the root. Previously the bidirectional walk hid the
-// "expand from the root" mental model encoded in the depth slider.
-// The `link` filter is dropped from the chip set: link edges always
-// render, and visibility is implicit (edge visible iff both
-// endpoints are visible under the node-type filters + depth).
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("forward-only BFS", () => {
-  test("BFS does NOT walk the reverse edge direction", () => {
-    // Forward-only collapse: only the source-direction branch
-    // survives at both BFS sites (tag-scope + general-scope).
-    // Strip line comments so context comments don't trip the guard.
-    const stripped = graph
-      .split("\n")
-      .filter((line) => !line.trim().startsWith("//"))
-      .join("\n");
-    expect(stripped).not.toMatch(
-      /else if \(frontier\.has\(e\.target\) && !visited\.has\(e\.source\)\)/,
-    );
+vi.mock("./GraphCanvas.svelte", async () =>
+  (await import("../__tests__/graphPanel")).canvasProbeModule(),
+);
+vi.mock("../api/client", async (importOriginal) =>
+  (await import("../__tests__/graphPanel")).graphApiModule(
+    await importOriginal<typeof import("../api/client")>(),
+  ),
+);
+
+import GraphPanel from "./GraphPanel.svelte";
+import {
+  canvas,
+  fsg,
+  g,
+  graphServer,
+  graphTab,
+  installGraphDom,
+  mountGraphPanel,
+  resetGraphServer,
+  settle,
+  unmountGraphPanels,
+  visibleIds,
+} from "../__tests__/graphPanel";
+import { trackTimers, type TimerTrack } from "../demo/timers";
+import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
+import { layout, type GraphTab } from "../state/tabs.svelte";
+
+installGraphDom();
+
+const A = "f:notes/a.md";
+const D = "f:notes/deep/d.md";
+const MAIN = "f:src/main.rs";
+const NOTES = "directory:notes";
+const DEEP = "directory:notes/deep";
+const SRC = "directory:src";
+
+/// notes/a.md, notes/deep/d.md and src/main.rs, as both the semantic graph
+/// and the filesystem graph.
+function serveGraph(): void {
+  graphServer.view = {
+    nodes: [
+      g.dir(""),
+      g.dir("notes"),
+      g.dir("notes/deep"),
+      g.dir("src"),
+      g.file("notes/a.md"),
+      g.file("notes/deep/d.md"),
+      g.file("src/main.rs"),
+      g.tag("t"),
+    ],
+    edges: [
+      g.edge("", NOTES, "contains"),
+      g.edge("", SRC, "contains"),
+      g.edge(NOTES, DEEP, "contains"),
+      g.edge(NOTES, A, "contains"),
+      g.edge(DEEP, D, "contains"),
+      g.edge(SRC, MAIN, "contains"),
+      g.edge(A, "#t", "tag"),
+    ],
+  };
+  graphServer.fs = {
+    nodes: [
+      fsg.dir(""),
+      fsg.dir("notes"),
+      fsg.dir("notes/deep"),
+      fsg.dir("src"),
+      fsg.file("notes/a.md"),
+      fsg.file("notes/deep/d.md"),
+      fsg.file("src/main.rs"),
+    ],
+    edges: [
+      fsg.contains("", "notes"),
+      fsg.contains("", "src"),
+      fsg.contains("notes", "notes/deep"),
+      fsg.contains("notes", "notes/a.md"),
+      fsg.contains("notes/deep", "notes/deep/d.md"),
+      fsg.contains("src", "src/main.rs"),
+    ],
+  };
+}
+
+/// Leaves notes/deep/d.md as the only file under notes.
+function dropNotesA(): void {
+  graphServer.view.nodes = graphServer.view.nodes.filter((n) => n.id !== A);
+  graphServer.view.edges = graphServer.view.edges.filter((e) => e.target !== A && e.source !== A);
+  graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => n.path !== "notes/a.md");
+  graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "notes/a.md");
+}
+
+let timers: TimerTrack;
+
+beforeEach(() => {
+  timers = trackTimers();
+  resetGraphServer();
+  serveGraph();
+});
+
+afterEach(() => {
+  closeTabMenu();
+  unmountGraphPanels();
+  timers.release();
+});
+
+async function depthRow(tab: GraphTab): Promise<HTMLElement> {
+  openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
+  await settle(2);
+  const row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row");
+  if (!row) throw new Error("no depth row");
+  return row;
+}
+
+describe("the depth slider", () => {
+  test("reaches the workspace's deepest level and is live", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    const row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+
+    expect(slider.disabled).toBe(false);
+    expect(slider.max, "notes/deep/d.md is three levels down").toBe("3");
+    expect(row.classList.contains("shallow")).toBe(false);
+    expect(row.querySelector(".depth-cue")).toBeNull();
   });
 
-  test("BFS still walks the forward edge direction", () => {
-    // Forward source → target traversal is still the load-bearing
-    // step. Two BFS sites (tag-scope + general-scope) share the
-    // shape.
-    const matches = graph.match(
-      /if \(frontier\.has\(e\.source\) && !visited\.has\(e\.target\)\)/g,
-    );
-    expect(matches).not.toBeNull();
-    expect(matches!.length).toBeGreaterThanOrEqual(2);
-  });
+  test("on a scope depth 1 already exhausts, is disabled and says so", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "language:rust" }));
+    const row = await depthRow(tab);
 
-  test("BFS uses next.add(e.target) from the source side, not visited.add(e.source)", () => {
-    // The general-scope BFS only adds e.target when frontier contains
-    // e.source. Confirm the next.add call sites are for e.target only
-    // (no e.source additions in a next.add call within the general BFS).
-    // This is a distinct structural invariant from the reverse-check
-    // absence above.
-    expect(graph).toMatch(
-      /frontier\.has\(e\.source\) && !visited\.has\(e\.target\)[\s\S]*?next\.add\(e\.target\)/,
-    );
+    expect(row.classList.contains("shallow")).toBe(true);
+    expect(row.getAttribute("title")).toContain("Scope is shallow");
+    expect(row.querySelector<HTMLInputElement>("input[type='range']")!.disabled).toBe(true);
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [max]");
   });
 });
 
-describe("link filter dropped", () => {
-  test("FilterKind union no longer includes 'link'", () => {
-    // FilterKind deliberately has no `link` member; bucket kinds
-    // extend the union over time. Pin the load-bearing absence
-    // (link) rather than the exact union shape so growing the kind
-    // set doesn't trip this guard.
-    expect(graph).toMatch(/type FilterKind =/);
-    expect(graph).toMatch(/\| "tag"/);
-    expect(graph).toMatch(/\| "mention"/);
-    expect(graph).toMatch(/\| "language"/);
-    expect(graph).toMatch(/\| "img"/);
-    expect(graph).toMatch(/\| "folder"/);
-    // No `link` arm in the FilterKind union; tolerate
-    // surrounding whitespace + leading separator.
-    expect(graph).not.toMatch(/type FilterKind =[\s\S]*?\| "link"/);
-    expect(graph).not.toMatch(/type FilterKind = "link"/);
+describe("the workspace tree", () => {
+  test("shows a directory's files only while it and its ancestors are expanded", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace", expanded: { "": true } }));
+    let ids = visibleIds();
+    expect(ids).toEqual(expect.arrayContaining(["", NOTES, SRC]));
+    expect(ids).not.toContain(A);
+    unmountGraphPanels();
+
+    await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", expanded: { "": true, notes: true } }),
+    );
+    ids = visibleIds();
+    expect(ids).toEqual(expect.arrayContaining([A, DEEP]));
+    expect(ids, "notes/deep is not expanded").not.toContain(D);
+    expect(ids, "src is not expanded").not.toContain(MAIN);
   });
 
-  test("link is short-circuited to always visible in edgeVisibleByChip", () => {
-    expect(graph).toMatch(/if \(kind === "link"\) return true/);
+  test("a double-click on a selected directory expands it, asks the canvas to fit it, and collapses it again", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+    );
+    canvas.props!.onSelect(NOTES);
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+
+    expect(tab.expanded.notes).toBe(true);
+    expect(visibleIds()).toContain(A);
+    const fit = canvas.props!.expansionFitRequest;
+    expect(fit?.ids, "the directory, its parent and what it revealed").toEqual(
+      expect.arrayContaining([NOTES, "", A, DEEP]),
+    );
+    expect(fit?.ids).not.toContain(SRC);
+
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.notes).toBeUndefined();
+    expect(visibleIds()).not.toContain(A);
   });
 
-  test("chip iteration no longer ships a 'link' entry", () => {
-    // The tab-menu bubble is the single chip-iteration site. Pin
-    // the load-bearing absence (link) + the leading-kind shape
-    // (starts with tag) so the guard tolerates future additions.
-    const matches = graph.match(/\["tag", "mention"[^\]]*\] as const/g);
-    expect(matches).not.toBeNull();
-    expect(matches!.length).toBe(1);
-    expect(graph).not.toMatch(/\["link",\s*"tag"/);
-  });
+  test("a depth change seeds the expansion from the selected directory", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+    );
+    canvas.props!.onSelect(NOTES);
+    await settle(2);
 
-  test("FILTER_COLORS no longer maps link", () => {
-    // Pin the literal-mapping block; the `link` key shouldn't
-    // appear inside FILTER_COLORS' object literal.
-    expect(graph).toMatch(
-      /FILTER_COLORS: Record<FilterKind, string> = \{[\s\S]*?tag: EDGE_COLORS\.tag/,
-    );
-    expect(graph).not.toMatch(
-      /FILTER_COLORS: Record<FilterKind, string> = \{[\s\S]{0,40}link:/,
-    );
-  });
-
-  test("filesystem-mode label dispatch no longer branches on 'link'", () => {
-    // The filesystem-mode chip-label dispatch used to map link →
-    // "contains". With link dropped from the iteration, that
-    // branch is dead. Confirm it's gone from the chip-label
-    // ladder.
-    expect(graph).not.toMatch(
-      /\{kind === "link"\s*\?\s*"contains"\s*:/,
-    );
-  });
-});
-
-describe("depth slider works in workspace path-scope", () => {
-  test("depthDisabled no longer pins workspace path-scope to disabled", () => {
-    // Pre-fix shape was:
-    //   `!languageMode && (!currentScope || currentScope.kind === "workspace")`
-    // The workspace branch made the default landing graph's slider
-    // unmovable. Post-fix drops the workspace guard so the slider
-    // tracks `workspaceDepthProbe`-driven `depthCap` the same way
-    // the dir scope does.
-    expect(graph).toMatch(
-      /\{@const depthDisabled = !languageMode && !currentScope\}/,
-    );
-    expect(graph).not.toMatch(
-      /depthDisabled =\s*\n?\s*!languageMode && \(!currentScope \|\| currentScope\.kind === "workspace"\)/,
-    );
-  });
-
-  test("depthShallow falls through to depthCap <= 1 for workspace scope too", () => {
-    expect(graph).toMatch(
-      /const depthShallow = \$derived\.by\(\(\) => \{[\s\S]{1,1200}if \(!currentScope\) return false;[\s\S]{1,200}return depthCap <= 1;/,
-    );
-    expect(graph).not.toMatch(
-      /const disabled = !currentScope \|\| currentScope\.kind === "workspace";\s*\n\s*if \(disabled\) return false;/,
-    );
+    tab.depth = 2;
+    await settle();
+    expect(tab.expanded.notes).toBe(true);
+    expect(tab.expanded["notes/deep"], "one level below the selection").toBe(true);
+    expect(tab.expanded.src, "not a directory under the selection").toBeUndefined();
+    expect(visibleIds()).toContain(D);
   });
 });
 
-describe("directory expand/collapse in the rich semantic graph", () => {
-  test("workspace + dir scope render the expanded-ancestor tree, keeping every layer", () => {
-    // The fresh Cmd+Shift+M graph is semantic and
-    // supports directory expand/collapse without flipping to the
-    // directories-only filesystem mode. Workspace + dir scope gate
-    // file / folder visibility on `ancestorsExpanded` (the same tree
-    // model the filesystem mode uses); tag / mention / language
-    // meta-nodes always pass through so the rich layers survive; the
-    // workspace-root anchor is unconditional so the spine has a root.
-    expect(graph).toMatch(
-      /currentScope\.kind === "workspace" \|\| currentScope\.kind === "dir"/,
-    );
-    expect(graph).toMatch(
-      /n\.kind === "tag" \|\| n\.kind === "mention" \|\| n\.kind === "language"/,
-    );
-    expect(graph).toMatch(
-      /n\.kind === "folder" && \(n\.id === "" \|\| n\.path === ""\)/,
-    );
-    expect(graph).toMatch(
-      /ancestorsExpanded\(rootPath, n\.path, expanded\)/,
-    );
-    // No flat depth filter remains in the semantic branch.
-    expect(graph).not.toMatch(
-      /relativeDepth\(rootPath, nodePath\) <= graphState\.depth/,
-    );
+describe("a directory scope", () => {
+  test("opens deep enough to show its shallowest file", async () => {
+    // Without notes/a.md the shallowest file under notes is two levels down.
+    dropNotesA();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+
+    expect(tab.depth).toBe(2);
   });
 
-  test("double-click toggles a directory in semantic mode (no fetch, no mode flip)", () => {
-    // Bug (a): on the fresh semantic graph a directory double-click
-    // toggles the spine client-side via toggleSemanticDirExpand; it no
-    // longer requires a "Graph from here" mode flip first.
-    expect(graph).toMatch(/function toggleSemanticDirExpand\(path: string\): void/);
-    expect(graph).toMatch(
-      /if \(selectedNode && selectedNode\.kind === "folder"\) \{\s*toggleSemanticDirExpand\(selectedNode\.path\);/,
-    );
+  test("stays at depth 1 when a file sits right under it", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    expect(tab.depth).toBe(1);
   });
 
-  test("the depth slider seeds the expanded set FROM THE SELECTED directory", () => {
-    // Bug (b): the slider expands from the currently selected directory
-    // downward by N levels, keeping that node's ancestors expanded.
-    // Selecting the workspace root + max reveals everything; a deep
-    // node expands only its subtree.
-    expect(graph).toMatch(/function seedExpandedFromSelected\(depth: number\): void/);
-    expect(graph).toMatch(/const seedRoot = selectedDirPath \?\? scopeRoot;/);
-    expect(graph).toMatch(/seedExpandedFromSelected\(graphState\.depth\)/);
+  test("keeps the depth a user expansion below it implies", async () => {
+    dropNotesA();
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "dir:notes", expanded: { "": true, notes: true, "notes/deep": true } }),
+    );
+    expect(tab.depth).toBe(1);
   });
 
-  test("graph-from-here spawns a new semantic graph tab seeded at the node", () => {
-    // Nav contract: "Graph from here" spawns a NEW graph tab (never an
-    // in-place re-root). It opens in semantic mode so a directory from-here
-    // keeps the rich graph (all layers) instead of the directories-only
-    // filesystem mode, and pendingSelectId lands the tab selected on the node.
-    expect(graph).toMatch(
-      /function graphFromHere\(path: string, isDir: boolean\): void \{[\s\S]{1,800}openGraphInActivePane\(\{\s*mode: "semantic",[\s\S]{1,200}pendingSelectId: path,/,
+  test("raises the depth on arrival only, not on a later depth change", async () => {
+    dropNotesA();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    expect(tab.depth).toBe(2);
+
+    tab.depth = 1;
+    await settle();
+    expect(tab.depth).toBe(1);
+  });
+});
+
+describe("the filesystem graph", () => {
+  test("shows what the expanded directories hold, and hides a collapsed one's", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true } }),
     );
-    expect(graph).not.toMatch(/graphState\.mode = "filesystem"/);
+    expect(visibleIds()).toEqual(expect.arrayContaining(["", "notes", "src", "notes/a.md", "notes/deep"]));
+    expect(visibleIds()).not.toContain("src/main.rs");
+
+    // Collapse notes with a double-click: its children stay loaded, and hidden.
+    canvas.props!.onSelect("notes");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(tab.expanded.notes).toBeUndefined();
+    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "still loaded").toBe(true);
+    expect(visibleIds()).not.toContain("notes/a.md");
+    expect(visibleIds()).toContain("notes");
+  });
+
+  test("a file scope shows everything it loaded", async () => {
+    await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "file:notes/a.md", mode: "filesystem" }),
+    );
+    expect(visibleIds().length).toBe(canvas.props!.nodes.length);
   });
 });
