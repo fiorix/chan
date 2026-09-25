@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -236,7 +236,11 @@ impl ExtensionRuntime {
                     )));
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "extension ignored");
+                    // The alternate form renders the whole context chain. The
+                    // outermost context alone says which step failed ("reading
+                    // handshake") but never why, and this line is all an
+                    // operator gets for an extension that never appears.
+                    tracing::warn!(error = %format_args!("{error:#}"), "extension ignored");
                 }
             }
         }
@@ -463,10 +467,18 @@ async fn start_extension(declaration: ExtensionDeclaration) -> anyhow::Result<St
     let handshake = match timeout(HANDSHAKE_TIMEOUT, read_handshake(&mut stdout)).await {
         Ok(Ok(handshake)) => handshake,
         Ok(Err(error)) => {
-            terminate_child(&mut child, process_group).await;
+            // A child that closed stdout by exiting had its exit status fixed
+            // before its descriptors closed, so the termination below does
+            // not change it and the status is the child's own (127 is a
+            // shell's "command not found"). A child still running when the
+            // read failed reports the termination's signal instead.
+            let exited = match terminate_child(&mut child, process_group).await {
+                Some(status) => format!(" (child {status})"),
+                None => String::new(),
+            };
             return Err(error).with_context(|| {
                 format!(
-                    "extension {id} from {}: reading handshake",
+                    "extension {id} from {}: reading handshake{exited}",
                     config_path.display()
                 )
             });
@@ -721,29 +733,44 @@ fn cleanup_process_group(process_group: Option<ExtensionProcessGroup>) {
 #[cfg(not(unix))]
 fn cleanup_process_group(_process_group: Option<ExtensionProcessGroup>) {}
 
+/// Stop the child and its process group, and return the child's exit status
+/// when the wait for it succeeds.
 #[cfg(unix)]
-async fn terminate_child(child: &mut Child, process_group: Option<ExtensionProcessGroup>) {
+async fn terminate_child(
+    child: &mut Child,
+    process_group: Option<ExtensionProcessGroup>,
+) -> Option<ExitStatus> {
     if let Some(process_group) = process_group {
         let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::TERM);
     } else {
         let _ = child.start_kill();
     }
-    if timeout(CHILD_SHUTDOWN_GRACE, child.wait()).await.is_err() {
-        if let Some(process_group) = process_group {
-            let _ =
-                rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+    match timeout(CHILD_SHUTDOWN_GRACE, child.wait()).await {
+        Ok(status) => {
+            cleanup_process_group(process_group);
+            status.ok()
         }
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-    } else {
-        cleanup_process_group(process_group);
+        Err(_) => {
+            if let Some(process_group) = process_group {
+                let _ = rustix::process::kill_process_group(
+                    process_group,
+                    rustix::process::Signal::KILL,
+                );
+            }
+            let _ = child.start_kill();
+            child.wait().await.ok()
+        }
     }
 }
 
+/// Stop the child and return its exit status when the wait for it succeeds.
 #[cfg(not(unix))]
-async fn terminate_child(child: &mut Child, _process_group: Option<ExtensionProcessGroup>) {
+async fn terminate_child(
+    child: &mut Child,
+    _process_group: Option<ExtensionProcessGroup>,
+) -> Option<ExitStatus> {
     let _ = child.kill().await;
-    let _ = child.wait().await;
+    child.wait().await.ok()
 }
 
 pub(crate) fn empty_catalog() -> Arc<ExtensionCatalog> {
