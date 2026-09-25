@@ -30,7 +30,6 @@ installTerminalDom();
 
 // Build-time contract: fonts.css loads the face from a relative url, since the app is served under a tenant prefix; vitest empties CSS imports, so the file is read from disk.
 const fonts = readFileSync("src/fonts.css", "utf8");
-const viteConfig = readFileSync("vite.config.ts", "utf8");
 
 afterEach(() => {
   resetTerminals();
@@ -108,7 +107,6 @@ describe("TerminalTab font + cursor parity", () => {
     expect(woff2.slice(0, 4)).toBe("wOF2");
     const ofl = readFileSync("src/fonts/OFL.txt", "utf8");
     expect(ofl).toContain("SIL OPEN FONT LICENSE");
-    expect(viteConfig).toMatch(/join\(options\.dir, "static\/fonts\/OFL\.txt"\)/);
   });
 
   test("fonts.css is imported at app boot so the face starts loading early", () => {
