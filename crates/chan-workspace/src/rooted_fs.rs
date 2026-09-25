@@ -1964,6 +1964,40 @@ mod mutation_tests {
             "no copy stage remains"
         );
     }
+
+    /// The atomic writer decides whether to validate UTF-8 from the path it
+    /// writes, so a file copy must write under a name that classifies like
+    /// its destination.
+    #[test]
+    fn a_file_copy_to_a_markdown_name_refuses_non_utf8_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("blob.bin"), b"\xff\xfe not text").unwrap();
+        fs::write(root.path().join("plain.bin"), "text").unwrap();
+
+        let refused = rooted.copy("blob.bin", "note.md");
+        eprintln!(
+            "copy={refused:?}; note.md exists={}",
+            root.path().join("note.md").exists()
+        );
+
+        assert!(
+            matches!(refused, Err(ChanError::NonUtf8EditableText(_))),
+            "a markdown destination must refuse non-UTF-8 bytes: {refused:?}"
+        );
+        assert!(!root.path().join("note.md").exists());
+        let copied = rooted.copy("plain.bin", "copied.md").unwrap();
+        assert_eq!(copied.created, ["copied.md"]);
+        assert_eq!(
+            fs::read_to_string(root.path().join("copied.md")).unwrap(),
+            "text"
+        );
+        assert_eq!(
+            copy_stages(root.path()),
+            Vec::<String>::new(),
+            "no copy stage remains"
+        );
+    }
 }
 
 /// Test-only pause between a copy's last destination check and the rename
