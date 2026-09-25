@@ -11,7 +11,7 @@ import { vi } from "vitest";
 
 import App from "../App.svelte";
 import type { MockWorkspaceData } from "../demo/data";
-import { installDemoWorkspace } from "../demo/install";
+import { demoTransportSettled, installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
@@ -71,7 +71,7 @@ export function demoData(
 const mounted: Array<Record<string, unknown>> = [];
 let timers: TimerTrack | null = null;
 
-/// Install the demo workspace, mount the app, and let its bootstrap settle.
+/// Install the demo workspace, mount the app, and wait for its bootstrap.
 /// Pair with `unmountApp` in `afterEach`. Timers the app arms from here
 /// on are tracked and released at unmount, so mount with real timers
 /// installed; a test may switch to fake ones after mounting and must switch
@@ -82,6 +82,9 @@ export async function mountApp(data: MockWorkspaceData = demoData()): Promise<HT
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(App, { target }) as Record<string, unknown>);
+  // Bootstrap runs a chain of requests; a test that seeds the layout before
+  // it finishes would have the restore write over it.
+  await demoTransportSettled();
   await settle();
   return target;
 }
