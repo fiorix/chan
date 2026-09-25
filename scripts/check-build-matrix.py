@@ -6,6 +6,7 @@ from __future__ import annotations
 import glob
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -1051,6 +1052,212 @@ def check_nix_contract() -> None:
         require(smoke, needle, "scripts/smoke-nix-package.sh")
 
 
+AUR_RECIPES = (
+    "packaging/distros/arch/aur/chan/PKGBUILD.in",
+    "packaging/distros/arch/aur/chan-desktop/PKGBUILD.in",
+)
+
+# cargo subcommands that resolve and fetch but compile nothing, so the
+# binary the recipe installs cannot come out of them. Every other
+# subcommand, a third-party one such as `cargo auditable` included, is held
+# to the package selection rule.
+CARGO_NON_BUILDING = frozenset(
+    {"fetch", "generate-lockfile", "locate-project", "metadata", "pkgid", "tree", "vendor"}
+)
+
+# Commands that can run cargo with a selection this check cannot read.
+OPAQUE_RUNNERS = frozenset({"bash", "eval", "gmake", "just", "make", "sh", "xargs"})
+
+
+def shell_function(text: str, name: str, path: str) -> list[tuple[int, str]]:
+    """The body of shell function NAME in TEXT, as (line number, line) pairs.
+
+    The recipes write every function as `name() {` at column zero and close
+    it with a `}` alone on a line, which is the shape makepkg's own
+    templates use; anything else fails rather than being read partially.
+    """
+    lines = text.splitlines()
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(rf"^{name}\(\)\s*\{{\s*$", line)
+        ),
+        None,
+    )
+    if start is None:
+        raise ContractError(f"{path}: no `{name}() {{` line")
+    for end in range(start + 1, len(lines)):
+        if lines[end] == "}":
+            return [(index + 1, lines[index]) for index in range(start + 1, end)]
+    raise ContractError(f"{path}: {name}() is not closed by a `}}` line")
+
+
+def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, list[str]]]:
+    """The simple commands in BODY as (first line number, words) pairs.
+
+    Backslash continuations are joined and `;`, `&&`, `||`, `|` and
+    parentheses end a command, so a cargo call chained after another one is
+    read on its own. Leading `NAME=value` assignments are dropped.
+    """
+    commands = []
+    pending = ""
+    pending_line = 0
+    for number, line in body:
+        if not pending:
+            pending_line = number
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        pending += line
+        lexer = shlex.shlex(pending, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError as error:
+            raise ContractError(
+                f"{path}:{pending_line}: cannot split the command: {error}"
+            ) from error
+        pending = ""
+        words: list[str] = []
+        for token in tokens + [";"]:
+            if token and all(character in ";&|()" for character in token):
+                while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+                    words.pop(0)
+                if words:
+                    commands.append((pending_line, words))
+                words = []
+            else:
+                words.append(token)
+    if pending:
+        raise ContractError(
+            f"{path}:{pending_line}: the last command ends in a continuation"
+        )
+    return commands
+
+
+def cargo_selection(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """The packages ARGUMENTS select with `-p`, and any wider selection.
+
+    The second list names every flag that selects beyond `-p`: `--workspace`
+    or its alias `--all` select every member, and `--manifest-path` selects
+    whatever manifest it points at. Scanning stops at `--`, after which the
+    words belong to the test binaries rather than to cargo.
+    """
+    packages: list[str] = []
+    wider: list[str] = []
+    words = iter(arguments)
+    for word in words:
+        if word == "--":
+            break
+        if word in ("--workspace", "--all"):
+            wider.append(word)
+        elif word in ("-p", "--package"):
+            packages.append(next(words, ""))
+        elif word.startswith("--package="):
+            packages.append(word.removeprefix("--package="))
+        elif word.startswith("-p") and not word.startswith("--"):
+            packages.append(word.removeprefix("-p"))
+        elif word == "--manifest-path" or word.startswith("--manifest-path="):
+            wider.append("--manifest-path")
+    return packages, wider
+
+
+def check_aur_check_selection_contract() -> None:
+    """Every cargo call in an AUR recipe's check() selects only its package.
+
+    makepkg runs check() between build() and package(). check()'s
+    `cargo test --release` rebuilds a package's `target/release` binary
+    whenever the package has an integration test, as chan does, and
+    package() then installs that binary. A test build unifies the
+    dev-dependency features of every package it selects, and chan-server's
+    dev-dependencies are the only edges that enable chan-workspace's
+    `test-hooks` and chan-library's `test-util`. A check() widened to the
+    workspace, or to chan-server, would therefore ship both test-only
+    features in the installed binary, and a stripped release binary would
+    not show it. chan-desktop has no integration test, so its check()
+    leaves the build() binary in place; its recipe is pinned all the same,
+    since one integration test would change that.
+
+    The feature sets the recipes' test builds resolve, read with cargo's
+    own resolver for each shipped package (and for chan-server as the
+    control that shows the reading can see both features):
+
+        cargo tree --locked -p <package> --target x86_64-unknown-linux-gnu \\
+            -e normal,build,dev --prefix none --format '{p} [{f}]'
+
+    `-e dev` resolves with dev units, the way `cargo test` does, so the
+    reading covers check()'s relink and not only build(). For `chan` and
+    `chan-desktop` neither the chan-workspace nor the chan-library line
+    lists a test-only feature; for `chan-server` they list `test-hooks` and
+    `test-util`, and so does the chan tree under `-p chan --workspace` or
+    `-p chan -p chan-server`, the widenings this contract refuses.
+    """
+    for path in AUR_RECIPES:
+        recipe = read(path)
+        pkgname = re.search(r"^pkgname=([A-Za-z0-9_.+-]+)$", recipe, re.MULTILINE)
+        if pkgname is None:
+            raise ContractError(f"{path}: no `pkgname=` line")
+        package = pkgname.group(1)
+        # The package is named by what package() installs, so a recipe that
+        # stops installing its own cargo package's binary has to update this
+        # contract rather than pass it.
+        require(
+            "\n".join(line for _, line in shell_function(recipe, "package", path)),
+            f"install -Dm755 target/release/{package} ",
+            f"{path} package()",
+        )
+        cargo_calls = 0
+        for number, words in shell_commands(shell_function(recipe, "check", path), path):
+            program = words[0]
+            if program in ("command", "env", "exec", "time") and len(words) > 1:
+                words = words[1:]
+                program = words[0]
+            where = f"{path}:{number}: check() runs `{' '.join(words)}`"
+            if program.startswith("$"):
+                raise ContractError(
+                    f"{where}, a program named by a variable, so its package "
+                    "selection cannot be read"
+                )
+            if Path(program).name in OPAQUE_RUNNERS:
+                raise ContractError(
+                    f"{where}, which can run cargo with a package selection "
+                    f"this check cannot read; call cargo with `-p {package}`"
+                )
+            if Path(program).name != "cargo":
+                continue
+            arguments = words[1:]
+            if arguments and arguments[0].startswith("+"):
+                arguments = arguments[1:]
+            subcommand = next((word for word in arguments if not word.startswith("-")), None)
+            if subcommand in CARGO_NON_BUILDING:
+                continue
+            cargo_calls += 1
+            packages, wider = cargo_selection(arguments)
+            if wider:
+                raise ContractError(
+                    f"{where}, and {', '.join(wider)} selects beyond {package}, "
+                    "the package this recipe installs"
+                )
+            if not packages:
+                raise ContractError(
+                    f"{where} with no `-p`, which selects the workspace's "
+                    f"default members instead of {package} alone"
+                )
+            others = sorted(set(packages) - {package})
+            if others:
+                raise ContractError(
+                    f"{where}, which selects {', '.join(others)}; only "
+                    f"{package}, the package this recipe installs, may be selected"
+                )
+        if cargo_calls == 0:
+            raise ContractError(
+                f"{path}: check() runs no cargo build or test, so the selection "
+                "this contract pins is gone; update the contract with the recipe"
+            )
+
+
 NODE_MAJOR_FILE = ".nvmrc"
 
 
@@ -1330,6 +1537,7 @@ def main() -> int:
         check_gateway_trigger_contract,
         check_docker_contract,
         check_nix_contract,
+        check_aur_check_selection_contract,
         check_node_major_contract,
     ):
         try:
