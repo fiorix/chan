@@ -1,21 +1,38 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import TwinVeilDance from "./TwinVeilDance.svelte";
 import {
   buildTwinVeilDancePoints,
   TWIN_VEIL_DANCE_POINT_COUNT,
 } from "./twinVeilDance";
+import { startAnimation, stopAnimations } from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./yuruyurauPointCloud", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./yuruyurauPointCloud")>()),
+  createYuruyurauPointCloudRenderer: () => ({ draw: () => {}, destroy: () => {} }),
+}));
+vi.mock("./twinVeilDance", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./twinVeilDance")>();
+  return { ...actual, buildTwinVeilDancePoints: vi.fn(actual.buildTwinVeilDancePoints) };
+});
+
+afterEach(stopAnimations);
 
 describe("Twin Veil Dance", () => {
-  test("keeps the source cadence and credits @yuruyurau", async () => {
-    const renderer = (await import("./TwinVeilDance.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./twinVeilDance.ts?raw"))
-      .default as string;
+  test("advances the source 4 pi / 3 radians per second", () => {
+    const { callbacks } = startAnimation(TwinVeilDance, {});
+    callbacks.resize(800, 800, false, 0);
+    const build = vi.mocked(buildTwinVeilDancePoints);
+    build.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toContain("const PHASE_SPEED = (4 * Math.PI) / 3;");
-    expect(geometry).toContain("@yuruyurau");
-    expect(geometry).toContain(
-      "https://x.com/yuruyurau/status/2051676013902639591",
-    );
+    expect(build.mock.calls.map(([sourceTime]) => sourceTime)).toEqual([
+      expect.closeTo((4 * Math.PI) / 3, 9),
+      expect.closeTo(4 * Math.PI, 9),
+    ]);
   });
 
   test("builds the source sketch's 20,000 interleaved points", () => {
