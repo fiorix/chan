@@ -1,22 +1,39 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import SpiralSpokes from "./SpiralSpokes.svelte";
 import {
   buildSpiralSpokes,
   fitSpiralSpokes,
   spiralSpokesOpacity,
   spiralSpokesPhase,
 } from "./spiralSpokes";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./spiralSpokes", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./spiralSpokes")>();
+  return { ...actual, spiralSpokesOpacity: vi.fn(actual.spiralSpokesOpacity) };
+});
+
+afterEach(stopAnimations);
 
 describe("Spiral Spokes", () => {
-  test("keeps the quadrupled cadence and attribution", async () => {
-    const renderer = (await import("./SpiralSpokes.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./spiralSpokes.ts?raw"))
-      .default as string;
+  test("steps the source sketch four times per second of animation time", () => {
+    const { callbacks } = startAnimation(SpiralSpokes, recordingContext2d().ctx);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    const opacity = vi.mocked(spiralSpokesOpacity);
+    opacity.mockClear();
+    callbacks.frame(2000);
+    callbacks.frame(2500);
 
-    expect(renderer).toMatch(/const STEPS_PER_SECOND = 4;/);
-    expect(geometry).toContain(
-      "https://x.com/hisadan/status/1945386079974301805",
-    );
+    const [first, second] = opacity.mock.calls.map(([step]) => step);
+    expect(second! - first!).toBeCloseTo(2, 9);
   });
 
   test("grows from two spokes at the source rates", () => {
