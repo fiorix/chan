@@ -8,11 +8,39 @@
 // record and serialized with the per-window session payload, so a reload or
 // a cross-window restore reopens the composer where the user left it.
 
-import { describe, expect, test, vi } from "vitest";
-import terminalSrc from "./TerminalTab.svelte?raw";
-import richPromptSrc from "./RichPrompt.svelte?raw";
+import { EditorView } from "@codemirror/view";
+import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+const draft = vi.hoisted(() => ({ content: "" }));
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      createDraft: vi.fn(async () => ({ path: ".Drafts/t/draft.md" })),
+      read: vi.fn(async () => ({ content: draft.content })),
+      write: vi.fn(async () => ({})),
+    },
+  };
+});
+
+import RichPrompt from "./RichPrompt.svelte";
+import TerminalTabComponent from "./TerminalTab.svelte";
+import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { installEditorDom } from "../__tests__/wysiwyg";
+import { installTerminalDom, mountTerminal, resetTerminals } from "../__tests__/terminalTab";
 import {
   activePane,
+  bumpTabFocusPulse,
   hydrateTerminalSessionsFromLayout,
   layout,
   restoreLayout,
@@ -53,46 +81,108 @@ function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
   };
 }
 
-describe("caret survives a tab switch (keep-mounted bubble)", () => {
-  test("TerminalTab mounts RichPrompt independent of the active flag", () => {
-    // Gating the mount on `active` would destroy the bubble (and its
-    // EditorView) on every tab switch and restart the caret at offset 0 on
-    // remount. The bubble stays mounted like its parent terminal and is
-    // hidden by the same visibility flip.
-    expect(terminalSrc).toMatch(
-      /\{#if isRichPromptVisible\(tab\.id\)\}\s*<RichPrompt \{tab\} \{focused\} \/>/,
-    );
-    expect(terminalSrc).not.toMatch(
-      /\{#if active && isRichPromptVisible\(tab\.id\)\}/,
-    );
+installTerminalDom();
+installEditorDom();
+
+const mounted: Array<Record<string, unknown>> = [];
+
+afterEach(() => {
+  for (const c of mounted.splice(0)) unmount(c);
+  resetTerminals();
+  richPrompt.byTab = {};
+  draft.content = "";
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+/// Mount the composer for `tab` and wait for its editor.
+async function composer(tab: TerminalTab, focused: boolean): Promise<{ target: HTMLElement; view: EditorView }> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(RichPrompt, { target, props: { tab, focused } }) as Record<string, unknown>);
+  for (let i = 0; i < 20 && !target.querySelector(".cm-content"); i += 1) {
+    await tick();
+    await Promise.resolve();
+  }
+  const view = EditorView.findFromDOM(target.querySelector<HTMLElement>(".cm-content")!)!;
+  for (let i = 0; i < 20 && view.state.doc.toString() !== draft.content; i += 1) await tick();
+  await Promise.resolve();
+  return { target, view };
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    await Promise.resolve();
+  }
+}
+
+describe("the composer keeps its state across a tab switch", () => {
+  test("a hidden terminal keeps its Rich Prompt mounted", async () => {
+    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    resetLayout([tab]);
+    showRichPromptForTab(tab.id);
+    const { target } = await mountTerminal(TerminalTabComponent, tab, { active: false, focused: false });
+    await settle();
+    expect(target.querySelector(".rich-prompt")).not.toBeNull();
   });
 
-  test("autofocus and refocus are gated on focused, so a hidden bubble never steals the keyboard", () => {
-    // Mount autofocus: same gate FileEditorTab feeds its editors.
-    expect(richPromptSrc).toMatch(/autoFocus=\{focused\}/);
-    expect(richPromptSrc).not.toMatch(/autoFocus=\{true\}/);
-    // Switch-back refocus: pulse-driven, double-gated, selection untouched
-    // (editor.focus(), not focusAt), so the caret stays where it was.
-    expect(richPromptSrc).toMatch(
-      /if \(!focused\) return;\s*tabFocusPulse\.value;\s*queueMicrotask\(\(\) => \{\s*if \(!focused\) return;\s*editor\?\.focus\(\);/,
-    );
-    // The delivered-phase reset keeps its intentional focusAt(0), but only
-    // for the focused terminal.
-    expect(richPromptSrc).toMatch(
-      /if \(focused\) queueMicrotask\(\(\) => editor\?\.focusAt\(0\)\);/,
-    );
+  test("an unfocused composer takes no focus, on mount or on a focus pulse", async () => {
+    const focus = vi.spyOn(EditorView.prototype, "focus");
+    await composer(terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md" }), false);
+    bumpTabFocusPulse();
+    await settle();
+    expect(focus).not.toHaveBeenCalled();
   });
 
-  test("the composer editor persists its caret and reads it back (FileEditorTab parity)", () => {
-    expect(richPromptSrc).toMatch(/initialCaret=\{tab\.richPromptCaret \?\? null\}/);
-    expect(richPromptSrc).toMatch(
-      /onCaretChange=\{\(from, to\) => setRichPromptCaret\(tab, from, to\)\}/,
-    );
-    // Height: seeded from the persisted field, committed on drag end.
-    expect(richPromptSrc).toMatch(/\$state<number \| null>\(tab\.richPromptHeight \?\? null\)/);
-    expect(richPromptSrc).toMatch(
-      /if \(customHeight !== null\) setRichPromptHeight\(tab, customHeight\);/,
-    );
+  test("a focused composer takes focus again on each pulse, and keeps its caret", async () => {
+    draft.content = "hello world";
+    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptCaret: { from: 2, to: 2 } });
+    const { view } = await composer(tab, true);
+    const focus = vi.spyOn(view, "focus");
+    bumpTabFocusPulse();
+    await settle();
+    expect(focus).toHaveBeenCalled();
+    expect(view.state.selection.main.head).toBe(2);
+  });
+
+  test("a message delivered while the composer was unfocused clears it without pulling focus", async () => {
+    draft.content = "sent already";
+    const focus = vi.spyOn(EditorView.prototype, "focus");
+    const tab = terminalTab({
+      richPromptDraftPath: ".Drafts/t/draft.md",
+      pendingPrompt: { id: "p1", phase: "delivered" } as TerminalTab["pendingPrompt"],
+    });
+    const { view } = await composer(tab, false);
+    await settle();
+    expect(view.state.doc.toString()).toBe("");
+    expect(focus).not.toHaveBeenCalled();
+  });
+});
+
+describe("the composer reopens where it was left", () => {
+  test("at the saved caret, saving the caret as it moves", async () => {
+    draft.content = "hello world";
+    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptCaret: { from: 3, to: 3 } });
+    const { view } = await composer(tab, false);
+    expect(view.state.selection.main.head).toBe(3);
+
+    view.dispatch({ selection: { anchor: 5 } });
+    expect(tab.richPromptCaret).toEqual({ from: 5, to: 5 });
+  });
+
+  test("at the saved height, saving a drag-resized one", async () => {
+    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptHeight: 180 });
+    const { target } = await composer(tab, false);
+    const root = target.querySelector<HTMLElement>(".rich-prompt")!;
+    expect(root.style.height).toBe("180px");
+
+    const handle = target.querySelector<HTMLElement>(".rp-resize")!;
+    handle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientY: 300 }));
+    handle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientY: 200 }));
+    handle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientY: 200 }));
+    await tick();
+    expect(tab.richPromptHeight).toBe(100);
   });
 });
 
