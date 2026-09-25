@@ -171,6 +171,19 @@ describe("a file node", () => {
     expect(opened?.path).toBe("notes/a.md");
   });
 
+  test("in the filesystem graph, opens in the editor too", async () => {
+    const { target } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true } }),
+    );
+    await select("notes/a.md");
+
+    (await inspectorButton(target, "Open")).click();
+    await settle();
+    expect(paneTabs().find((t): t is FileTab => t.kind === "file")?.path).toBe("notes/a.md");
+  });
+
   test("Graph from here opens a new semantic tab on its directory, preselected", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select(A);
