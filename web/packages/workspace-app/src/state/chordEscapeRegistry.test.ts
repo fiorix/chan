@@ -1,6 +1,4 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
-import shortcutsRaw from "./shortcuts.ts?raw";
-import terminalRaw from "../components/TerminalTab.svelte?raw";
 import {
   SHORTCUTS,
   chordFromEvent,
@@ -14,13 +12,10 @@ import { isHostOwnedChord } from "../terminal/hostChord";
 // user-assigned override chord escapes too (covered by the override-escape
 // test in keymapOverrides.svelte.test.ts). The `handleTerminalKeyEvent`
 // xterm-`customKeyEventHandler` callback consults the registry: matched
-// events return false so no bytes reach the PTY.
+// events return false so no bytes reach the PTY; TerminalTab.test.ts drives
+// that handler with a flagged chord.
 
 describe("chord-escape registry shape", () => {
-  test("Shortcut type carries an optional escapeTerminal flag", () => {
-    expect(shortcutsRaw).toMatch(/escapeTerminal\?: boolean;/);
-  });
-
   test("global chords flagged escapeTerminal=true", () => {
     const required = [
       "app.launcher.toggle",
@@ -292,20 +287,5 @@ describe("terminal find's escape flag decides who owns Cmd+F", () => {
 
     expect(claimedByChan).toBe(false);
     expect(isHostOwnedChord(e, { os: "mac", claimedByChan })).toBe(true);
-  });
-});
-
-describe("TerminalTab escapes terminal-owned shortcut chords", () => {
-  test("handleTerminalKeyEvent imports + calls shouldEscapeTerminal", () => {
-    expect(terminalRaw).toMatch(
-      /import \{[\s\S]*?\bshouldEscapeTerminal\b[\s\S]*?\} from "\.\.\/state\/shortcuts";/,
-    );
-    expect(terminalRaw).toMatch(
-      /function handleTerminalKeyEvent\(e: KeyboardEvent\): boolean \{[\s\S]*?if \(shouldEscapeTerminal\(e\)\) return false;/,
-    );
-  });
-
-  test("rationale comment cites the registry", () => {
-    expect(terminalRaw).toMatch(/chord-escape registry/i);
   });
 });
