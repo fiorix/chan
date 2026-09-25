@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import ExponentialEcho from "./ExponentialEcho.svelte";
 import {
   buildExponentialEchoPoints,
   exponentialEchoTrailFade,
@@ -8,21 +9,40 @@ import {
   fitExponentialEcho,
   wrapExponentialEchoPhase,
 } from "./exponentialEcho";
+import {
+  recordingContext2d,
+  startAnimation,
+  stopAnimations,
+} from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+
+afterEach(stopAnimations);
 
 describe("Exponential Echo", () => {
-  test("keeps the source trail behavior, cadence, and attribution", async () => {
-    const renderer = (await import("./ExponentialEcho.svelte?raw"))
-      .default as string;
-    const geometry = (await import("./exponentialEcho.ts?raw"))
-      .default as string;
+  test("fades the last frame out under the next one instead of clearing it", () => {
+    const { ctx, ops } = recordingContext2d();
+    const { callbacks } = startAnimation(ExponentialEcho, ctx);
+    callbacks.resize(400, 300, false, 0);
+    expect(ops.map(({ op }) => op)).toContain("clearRect");
 
-    expect(renderer).toContain(
-      'ctx.globalCompositeOperation = "destination-out";',
+    ops.length = 0;
+    callbacks.frame(50);
+    const fade = ops.findIndex(
+      ({ op, args }) =>
+        op === "set globalCompositeOperation" && args[0] === "destination-out",
     );
-    expect(renderer).toContain("{ frameRate: 30 }");
-    expect(geometry).toContain(
-      "https://x.com/hisadan/status/2039722375625986239",
-    );
+    expect(fade).toBeGreaterThanOrEqual(0);
+    expect(ops.slice(fade)).toContainEqual({ op: "fillRect", args: [0, 0, 400, 300] });
+    expect(ops.map(({ op }) => op)).not.toContain("clearRect");
+  });
+
+  test("runs at thirty frames a second", () => {
+    const { run } = startAnimation(ExponentialEcho, recordingContext2d().ctx);
+
+    expect(run.options.frameRate).toBe(30);
   });
 
   test("preserves the source sketch's growing-frequency curve", () => {
