@@ -1,88 +1,117 @@
-import { describe, expect, test } from "vitest";
-import app from "../App.svelte?raw";
-import pane from "./Pane.svelte?raw";
-import shortcuts from "../state/shortcuts.ts?raw";
+// @vitest-environment jsdom
+//
+// Reloading the window goes through `reloadWindow()` from every surface: the
+// chord (Cmd+R on macOS, Ctrl+Shift+R elsewhere, so a plain Ctrl+R stays with
+// the shell's reverse search), the host's `app.window.reload` command, and the
+// pane menu's Reload row, which shows the chord the user's OS resolves. A
+// reload restores the layout the app last saved, so the save must also follow
+// a pane's visible side and theme, which live on the pane rather than a tab.
 
-// Window-level reload via the `reloadWindow()` helper. macOS binds
-// Cmd+R; Linux/Windows binds Ctrl+Shift+R so plain Ctrl+R stays with the
-// shell's reverse-search. The pane right-click menu's Reload entry shows
-// the OS-resolved chord label.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("reload chord registry entry", () => {
-  test("app.window.reload chord descriptor present in shortcuts registry", () => {
-    expect(shortcuts).toMatch(
-      /id: "app\.window\.reload",[\s\S]*?label: "Reload window",[\s\S]*?web: "Mod\+R",[\s\S]*?native: "Mod\+R",/,
-    );
+vi.mock("@xterm/xterm", async () => (await import("./__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("./__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("./__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinks);
+
+vi.mock("./api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/desktop")>()),
+  reloadWindow: vi.fn(async () => {}),
+}));
+
+vi.mock("./state/store.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./state/store.svelte")>()),
+  schedulePersistStateToHash: vi.fn(),
+  scheduleSessionSave: vi.fn(),
+}));
+
+import { reloadWindow } from "./api/desktop";
+import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { fileTab, resetLayout } from "./__tests__/tabs";
+import { renderTable } from "./state/shortcuts";
+import { schedulePersistStateToHash, scheduleSessionSave } from "./state/store.svelte";
+import { flipHybrid, type LeafNode } from "./state/tabs.svelte";
+
+stubAppEnvironment();
+
+let pane: LeafNode;
+
+beforeEach(async () => {
+  await mountApp();
+  pane = resetLayout([fileTab({ id: "a-file", path: "README.md", content: "hello", saved: "hello" })]);
+  await settle();
+  vi.clearAllMocks();
+});
+
+afterEach(async () => {
+  await unmountApp();
+  vi.restoreAllMocks();
+});
+
+describe("the reload chord", () => {
+  test("is Ctrl+Shift+R off macOS, leaving plain Ctrl+R to the shell", async () => {
+    press({ key: "r", code: "KeyR", ctrlKey: true });
+    await settle();
+    expect(reloadWindow).not.toHaveBeenCalled();
+
+    press({ key: "R", code: "KeyR", ctrlKey: true, shiftKey: true });
+    await settle();
+    expect(reloadWindow).toHaveBeenCalledTimes(1);
   });
 
-  test("descriptor documents the Linux/Windows Ctrl+Shift+R divergence", () => {
-    expect(shortcuts).toMatch(
-      /id: "app\.window\.reload",[\s\S]*?note: "Ctrl\+Shift\+R on Linux \/ Windows",/,
+  test("is Cmd+R on macOS", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
     );
+    press({ key: "r", code: "KeyR", metaKey: true });
+    await settle();
+    expect(reloadWindow).toHaveBeenCalledTimes(1);
   });
 
-  test("osChord moves reload off plain Ctrl+R on non-macOS", () => {
-    // Mod+Shift+R -> Ctrl+Shift+R once Mod renders as Ctrl; plain Ctrl+R
-    // is never the reload chord off macOS.
-    expect(shortcuts).toMatch(
-      /RELOAD_SHORTCUT_ID && os !== "mac"\) return "Mod\+Shift\+R";/,
+  test("reads that way in the shortcut table", () => {
+    expect(renderTable("web", "linux")).toMatch(
+      /^Reload window +Ctrl\+Shift\+R +\(Ctrl\+Shift\+R on Linux \/ Windows\)$/m,
     );
+    expect(renderTable("native", "mac")).toMatch(/^Reload window +Cmd\+R /m);
   });
 });
 
-describe("App.svelte keymap binding", () => {
-  test("reloadWindow imported from api/desktop", () => {
-    // The desktop import also carries isTauriDesktop +
-    // requestCloseWindow, so match reloadWindow within the
-    // named-import list rather than the exact single-name form.
-    expect(app).toMatch(
-      /import \{[^}]*\breloadWindow\b[^}]*\} from "\.\/api\/desktop";/,
-    );
+describe("the other ways to reload", () => {
+  test("the host's reload command", async () => {
+    hostCommand("app.window.reload");
+    await settle();
+    expect(reloadWindow).toHaveBeenCalledTimes(1);
   });
 
-  test("reload handler branches per-OS and dispatches reloadWindow()", () => {
-    // macOS: Cmd+R. Non-macOS: Ctrl+Shift+R (so plain Ctrl+R is left for
-    // the terminal). preventDefault + void reloadWindow() on match.
-    expect(app).toMatch(
-      /currentOS\(\) === "mac"[\s\S]*?e\.metaKey && !e\.ctrlKey && !e\.altKey && !e\.shiftKey && shortcutLetter\(e\) === "R"[\s\S]*?e\.ctrlKey && e\.shiftKey && !e\.metaKey && !e\.altKey && shortcutLetter\(e\) === "R"/,
+  test("the pane's right-click menu Reload row, labelled with the chord", async () => {
+    document
+      .querySelector<HTMLElement>('[role="tablist"]')!
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const row = [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
+      (button) => button.querySelector(".menu-row-label")?.textContent === "Reload",
     );
-    expect(app).toMatch(
-      /if \(reloadChord\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?void reloadWindow\(\);/,
-    );
-  });
+    expect(row?.querySelector(".menu-row-chord")?.textContent).toBe("Ctrl+Shift+R");
 
-  test("chan:command bridge routes app.window.reload through reloadWindow()", () => {
-    expect(app).toMatch(
-      /case "app\.window\.reload":[\s\S]{1,80}void reloadWindow\(\);[\s\S]{1,40}return;/,
-    );
+    row!.click();
+    await settle();
+    expect(reloadWindow).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("Pane.svelte menu annotation", () => {
-  test("Reload menu entry renders the chord label via the registry", () => {
-    expect(pane).toMatch(
-      /onclick=\{doReloadPane\}[\s\S]*?<span class="menu-row-label">Reload<\/span>[\s\S]*?<span class="menu-row-chord">\{chordLabel\("app\.window\.reload"\)\}<\/span>/,
-    );
+describe("what a reload restores", () => {
+  test("a bare side flip is saved", async () => {
+    flipHybrid(pane.id);
+    await settle();
+    expect(schedulePersistStateToHash).toHaveBeenCalled();
+    expect(scheduleSessionSave).toHaveBeenCalled();
   });
 
-  test("Reload menu entry routes through reloadWindow()", () => {
-    expect(pane).toMatch(/async function doReloadPane\(\)/);
-    expect(pane).toMatch(/await reloadWindow\(\)/);
-  });
-});
-
-describe("layout-persist effect tracks the Hybrid side state (reload survival)", () => {
-  // The visible side, B-side tabs, and per-Hybrid theme live on the pane, not
-  // a tab. The single layout-persist $effect schedules the hash + session save
-  // by reading reactive deps; it MUST read these pane fields or a bare side
-  // flip / theme change never schedules a save and reload restores the wrong
-  // side. The serialize/restore already round-trip sb/bt/ht; this guards the
-  // missing reactive dep class that Svelte-5 static checks cannot catch at
-  // runtime.
-  test("the persist effect reads side, B active/tab list, and theme", () => {
-    expect(app).toMatch(
-      /void node\.activeTabId;\s*void node\.bActiveTabId;\s*void node\.side;\s*void node\.tabs\.length;\s*void \(node\.bTabs\?\.length \?\? 0\);[\s\S]{1,260}void node\.theme;/,
-    );
-    expect(app).toMatch(/for \(const t of allPaneTabs\(node\)\)/);
+  test("a pane theme change is saved", async () => {
+    pane.theme = "light";
+    await settle();
+    expect(schedulePersistStateToHash).toHaveBeenCalled();
+    expect(scheduleSessionSave).toHaveBeenCalled();
   });
 });
