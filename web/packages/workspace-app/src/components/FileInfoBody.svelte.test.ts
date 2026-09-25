@@ -13,6 +13,8 @@ import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
 import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
+import { graphData } from "../state/graphData.svelte";
+import type { GraphView, ReportFileStats, ReportPrefix } from "../api/types";
 
 type Entry = {
   path: string;
@@ -26,6 +28,8 @@ const h = vi.hoisted(() => ({
   entries: [] as Entry[],
   caps: { workspace: true, files: true, drafts: true, terminal: true },
   draftsDir: ".Drafts",
+  prefixReport: null as unknown,
+  fileReport: null as unknown,
 }));
 
 vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
@@ -33,9 +37,9 @@ vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
 vi.mock("../api/client", () => ({
   api: {
     inspector: vi.fn(async () => null),
-    reportDir: vi.fn(async () => null),
+    reportDir: vi.fn(async () => h.prefixReport),
     reportPrefix: vi.fn(async () => null),
-    reportFileStream: vi.fn(async () => null),
+    reportFileStream: vi.fn(async () => h.fileReport),
     graphStream: vi.fn(async () => null),
     backlinksStream: vi.fn(async () => {}),
   },
@@ -80,7 +84,12 @@ vi.mock("../state/imageZoom", () => ({ openImageZoom: vi.fn() }));
 vi.mock("../state/videoViewer", () => ({ openVideoViewer: vi.fn() }));
 vi.mock("../state/fileActionExecutors", () => ({ exportPathToPdf: vi.fn(async () => {}) }));
 
-import { fileOps, revealPathInBrowser } from "../state/store.svelte";
+import {
+  fileOps,
+  openGraphForContact,
+  openGraphForLanguage,
+  revealPathInBrowser,
+} from "../state/store.svelte";
 import { openTerminalInActivePane } from "../state/tabs.svelte";
 import { openMediaViewer } from "../state/mediaOpen";
 import { exportPathToPdf } from "../state/fileActionExecutors";
@@ -154,11 +163,14 @@ beforeEach(() => {
   h.entries = [];
   h.caps.workspace = true;
   h.draftsDir = ".Drafts";
+  h.prefixReport = null;
+  h.fileReport = null;
 });
 
 afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
+  graphData.view = null;
   vi.clearAllMocks();
 });
 
@@ -500,6 +512,98 @@ describe("the audio preview", () => {
     props.path = "sound/b.ogg";
     await settle();
     expect(status(), "a new selection starts clean").toBeNull();
+  });
+});
+
+describe("language and contact links open the graph", () => {
+  const fileStats: ReportFileStats = {
+    path: "src/main.rs",
+    language: "Rust",
+    code: 120,
+    comments: 10,
+    blanks: 5,
+    complexity: 7,
+    bytes: 4096,
+  };
+  const prefix: ReportPrefix = {
+    totals: { files: 3, code: 300, comments: 20, blanks: 10, complexity: 9 },
+    by_language: [
+      { name: "Rust", files: 2, code: 250, comments: 15, blanks: 8, complexity: 7 },
+      { name: "TOML", files: 1, code: 50, comments: 5, blanks: 2, complexity: 2 },
+    ],
+    cocomo: {
+      model: "organic",
+      effort_person_months: 1.2,
+      schedule_months: 2.3,
+      developers: 0.5,
+      estimated_cost_usd: 1000,
+    },
+  };
+
+  test("a file's language opens the graph scoped to that language", async () => {
+    h.fileReport = fileStats;
+    h.entries = [file("src/main.rs", "text")];
+    const target = await render({ path: "src/main.rs" });
+
+    const link = target.querySelector<HTMLButtonElement>("button.lang-link");
+    expect(link?.textContent).toBe("Rust");
+    expect(link?.title).toBe("open in graph (scoped to this language)");
+    link!.click();
+    expect(openGraphForLanguage).toHaveBeenCalledWith("Rust");
+  });
+
+  test("each language row of a directory opens the graph scoped to it", async () => {
+    h.prefixReport = prefix;
+    h.entries = [dir("src"), file("src/main.rs", "text")];
+    const target = await render({ path: "src" });
+
+    const names = [...target.querySelectorAll<HTMLButtonElement>("button.lang-name")];
+    expect(names.map((b) => b.textContent)).toEqual(["Rust", "TOML"]);
+    expect(names.every((b) => b.title === "open in graph (scoped to this language)")).toBe(true);
+    names[1]!.click();
+    expect(openGraphForLanguage).toHaveBeenCalledWith("TOML");
+  });
+
+  test("the language buttons read as text with a pointer and a keyboard focus ring", () => {
+    // Build-time contract: the clickable names keep link affordances. vitest
+    // drops component CSS, so the stylesheet is read as text.
+    for (const cls of [".lang-name", ".lang-link"]) {
+      expect(styleRule(cls)).toContain("cursor: pointer;");
+      expect(styleRule(`${cls}:focus-visible`)).toContain("outline: 2px solid var(--link);");
+    }
+  });
+
+  function mentionView(): GraphView {
+    const view: GraphView = {
+      nodes: [
+        { kind: "file", id: "f:notes/a.md", label: "a.md", path: "notes/a.md" },
+        { kind: "file", id: "f:Contacts/alice.md", label: "Alice", path: "Contacts/alice.md" },
+      ],
+      edges: [{ source: "f:notes/a.md", target: "f:Contacts/alice.md", kind: "mention" }],
+    };
+    return view;
+  }
+
+  test("a resolved contact opens the contact lens when the host binds nothing", async () => {
+    graphData.view = mentionView();
+    h.entries = [file("notes/a.md"), file("Contacts/alice.md", "contact")];
+    const target = await render({ path: "notes/a.md", showRefs: true });
+
+    const pill = target.querySelector<HTMLButtonElement>("button.ref.contact");
+    expect(pill?.textContent).toBe("Alice");
+    pill!.click();
+    expect(openGraphForContact).toHaveBeenCalledWith("Contacts/alice.md");
+  });
+
+  test("a host contact handler takes the click instead", async () => {
+    graphData.view = mentionView();
+    h.entries = [file("notes/a.md"), file("Contacts/alice.md", "contact")];
+    const onContactNavigate = vi.fn();
+    const target = await render({ path: "notes/a.md", showRefs: true, onContactNavigate });
+
+    target.querySelector<HTMLButtonElement>("button.ref.contact")!.click();
+    expect(onContactNavigate).toHaveBeenCalledWith("Contacts/alice.md");
+    expect(openGraphForContact).not.toHaveBeenCalled();
   });
 });
 
