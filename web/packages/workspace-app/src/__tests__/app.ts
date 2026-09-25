@@ -10,6 +10,7 @@ import { mount, tick } from "svelte";
 import { vi } from "vitest";
 
 import App from "../App.svelte";
+import type { Preferences } from "../api/types";
 import type { MockWorkspaceData } from "../demo/data";
 import { demoTransportSettled, installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
@@ -72,13 +73,17 @@ const mounted: Array<Record<string, unknown>> = [];
 let timers: TimerTrack | null = null;
 
 /// Install the demo workspace, mount the app, and wait for its bootstrap.
-/// Pair with `unmountApp` in `afterEach`. Timers the app arms from here
+/// `preferences` overrides the demo server's saved preferences. Pair with
+/// `unmountApp` in `afterEach`. Timers the app arms from here
 /// on are tracked and released at unmount, so mount with real timers
 /// installed; a test may switch to fake ones after mounting and must switch
 /// back before `unmountApp`.
-export async function mountApp(data: MockWorkspaceData = demoData()): Promise<HTMLElement> {
+export async function mountApp(
+  data: MockWorkspaceData = demoData(),
+  opts: { preferences?: Partial<Preferences> } = {},
+): Promise<HTMLElement> {
   timers ??= trackTimers();
-  installDemoWorkspace(data);
+  installDemoWorkspace(data, opts);
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(App, { target }) as Record<string, unknown>);
