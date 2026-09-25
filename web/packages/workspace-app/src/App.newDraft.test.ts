@@ -5,7 +5,8 @@
 // selected, ready to type over. The launcher, the pane menu and the host
 // reach it through the `app.draft.new` command; it has no built-in chord.
 // Hybrid Nav stages new drafts and diagrams instead, one per press, and
-// creates each only when the layout commits, in the pane it was staged on.
+// creates each only when the layout commits, in the pane it was staged on,
+// each on its own, so one that fails leaves the others to open.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -174,6 +175,27 @@ describe("drafts staged in Hybrid Nav", () => {
       expect(draft.caret).toEqual(TITLE);
       expect(noteDraftCreated).toHaveBeenCalledWith(draft.path);
     }
+  });
+
+  test("are each created on their own, so one that fails leaves the other to open", async () => {
+    await mountApp();
+    resetLayout([]);
+    const other = splitPane("pane-test", "row")!;
+    layout.activePaneId = "pane-test";
+    await settle();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const createDraft = mintSeededDrafts().mockRejectedValueOnce(new Error("disk full"));
+
+    enterPaneMode();
+    press({ key: "n", code: "KeyN" });
+    press({ key: "ArrowRight", code: "ArrowRight" });
+    press({ key: "n", code: "KeyN" });
+    press({ key: "Enter", code: "Enter" });
+
+    await vi.waitFor(() => expect(fileTabsIn(other)).toHaveLength(1));
+    expect(createDraft).toHaveBeenCalledTimes(2);
+    expect(fileTabsIn("pane-test")).toEqual([]);
+    expect(ui.status).toBe("New draft failed: disk full");
   });
 
   test("a staged diagram is created as a diagram and opens with no selection", async () => {
