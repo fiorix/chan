@@ -1074,6 +1074,8 @@ impl RootedFs {
         let to_canon = canonical_posix(to);
         let mut created = Vec::new();
         if src_ft.is_file() {
+            #[cfg(test)]
+            copy_window::open();
             self.copy_one_file(&from_rel, &to_rel, &to_canon, &mut created)?;
         } else {
             self.preflight_tree(&posix_path(&from_rel), true)?;
@@ -1086,6 +1088,8 @@ impl RootedFs {
             let result = (|| {
                 self.copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)?;
                 self.ensure_copy_destination_absent(&to_rel)?;
+                #[cfg(test)]
+                copy_window::open();
                 self.dir().rename(&stage_rel, &self.dir(), &to_rel)?;
                 Ok(())
             })();
@@ -1875,6 +1879,115 @@ mod mutation_tests {
             "note"
         );
         assert!(root.path().join("target").is_dir());
+    }
+
+    fn copy_stages(dir: &std::path::Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("chan-copy"))
+            .collect()
+    }
+
+    #[test]
+    fn a_file_copy_keeps_a_file_created_inside_the_race_window() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::write(root.path().join("mine.txt"), "mine").unwrap();
+        let theirs = root.path().join("taken.txt");
+        copy_window::set(move || fs::write(theirs, "theirs").unwrap());
+
+        let result = rooted.copy("mine.txt", "taken.txt");
+        eprintln!(
+            "copy={result:?}; taken.txt={:?}",
+            fs::read_to_string(root.path().join("taken.txt"))
+        );
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "taken.txt"),
+            "a destination created after the check must be a conflict: {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("taken.txt")).unwrap(),
+            "theirs",
+            "the file created inside the window survives"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("mine.txt")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            copy_stages(root.path()),
+            Vec::<String>::new(),
+            "no copy stage remains"
+        );
+    }
+
+    #[test]
+    fn a_directory_copy_keeps_an_empty_directory_created_inside_the_race_window() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/inner.txt"), "inner").unwrap();
+        let theirs = root.path().join("dst");
+        // POSIX rename(2) replaces an empty destination directory, so this
+        // is the directory form of the same clobber.
+        copy_window::set(move || fs::create_dir(theirs).unwrap());
+
+        let result = rooted.copy("src", "dst");
+        eprintln!(
+            "copy={result:?}; dst entries={:?}",
+            fs::read_dir(root.path().join("dst")).map(|entries| entries
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>())
+        );
+
+        assert!(
+            matches!(result, Err(ChanError::PathAlreadyExists(ref path)) if path == "dst"),
+            "a destination created after the check must be a conflict: {result:?}"
+        );
+        assert!(
+            root.path().join("dst").is_dir(),
+            "the directory created inside the window survives"
+        );
+        assert!(
+            !root.path().join("dst/inner.txt").exists(),
+            "nothing is moved into it"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("src/inner.txt")).unwrap(),
+            "inner"
+        );
+        assert_eq!(
+            copy_stages(root.path()),
+            Vec::<String>::new(),
+            "no copy stage remains"
+        );
+    }
+}
+
+/// Test-only pause between a copy's last destination check and the rename
+/// that publishes it. A test installs a closure here to create the
+/// destination inside that window, which is the race a check-then-publish
+/// loses; the closure runs once, on the thread that set it.
+#[cfg(test)]
+mod copy_window {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn set(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn open() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 }
 
