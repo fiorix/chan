@@ -71,6 +71,8 @@ export const graphServer = {
   streamGate: null as Promise<void> | null,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
+  /// What languageGraph answers for a single language's detail.
+  languageDetail: null as unknown,
   graphStreamCalls: 0,
   languageGraphCalls: 0,
   fsGraphCalls: [] as Array<{ path: string; depth: number; cursor?: string }>,
@@ -82,6 +84,7 @@ export function resetGraphServer(): void {
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
   graphServer.fsGate = null;
+  graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
   graphServer.languageGraphCalls = 0;
   graphServer.fsGraphCalls = [];
@@ -136,8 +139,11 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         },
       ),
       graph: vi.fn(async () => graphServer.view),
-      languageGraph: vi.fn(async () => {
+      languageGraph: vi.fn(async (o: { language?: string } = {}) => {
         graphServer.languageGraphCalls += 1;
+        if (o.language) {
+          return { nodes: [], edges: [], max_depth: 1, detail: graphServer.languageDetail };
+        }
         return { nodes: [], edges: [], max_depth: 1 };
       }),
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {

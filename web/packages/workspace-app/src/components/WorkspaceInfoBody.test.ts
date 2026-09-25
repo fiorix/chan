@@ -1,187 +1,279 @@
-import { describe, expect, test } from "vitest";
-import workspaceInfo from "./WorkspaceInfoBody.svelte?raw";
-import workspaceSlotConfig from "./dashboard/WorkspaceSlotConfig.svelte?raw";
-import carousel from "./EmptyPaneCarousel.svelte?raw";
-import graphPanel from "./GraphPanel.svelte?raw";
-import fbSurface from "./FileBrowserSurface.svelte?raw";
+// @vitest-environment jsdom
+//
+// WorkspaceInfoBody, mounted. The workspace inspector reads the tree store,
+// the report api and the shared graph snapshot; the store and the api are
+// stubbed so each test sets what the body sees and reads what it renders and
+// calls.
 
-// Workspace-root inspector behaves like any other directory. The
-// `inspector` variant renders the standard directory action row; the
-// `dashboard` variant (Dashboard front slide) drops it. The read-only
-// recent-workspaces list lives on WorkspaceSlotConfig (the slot's flip-back);
-// there is no default-workspace concept, since chan serve requires an explicit
-// path. Source-level pins lock the variant split, action row, the recents'
-// home, and host wiring.
+import { readFileSync } from "node:fs";
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("WorkspaceInfoBody variant split + directory action row", () => {
-  test("a `variant` prop selects inspector vs dashboard", () => {
-    // The prop is declared with the two-value union and defaults to
-    // "inspector" so legacy callers get the directory-style body.
-    expect(workspaceInfo).toMatch(
-      /variant\?\: "inspector" \| "dashboard";/,
-    );
-    expect(workspaceInfo).toMatch(/variant = "inspector"/);
+import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
+import type { GraphView, ReportPrefix } from "../api/types";
+import { graphData } from "../state/graphData.svelte";
+import { terminalFromHereTarget } from "../terminal/fromHere";
+
+const h = vi.hoisted(() => ({
+  caps: { workspace: true, files: true, drafts: true, terminal: true },
+  report: null as unknown,
+  reportFails404: false,
+}));
+
+vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
+
+vi.mock("../api/client", () => ({
+  api: {
+    inspector: vi.fn(async () => null),
+    reportDir: vi.fn(async () => {
+      if (h.reportFails404) throw new Error("404 not found");
+      return h.report;
+    }),
+    reportPrefix: vi.fn(async () => h.report),
+    graphStream: vi.fn(async () => ({ nodes: [], edges: [] })),
+  },
+  withTokenQuery: (u: string) => u,
+}));
+
+vi.mock("../state/store.svelte", () => ({
+  fileOps: {
+    uploadFilesTo: vi.fn(async () => {}),
+    downloadPathWithProgress: vi.fn(),
+  },
+  openGraphAtNode: vi.fn(),
+  openGraphForContact: vi.fn(),
+  openGraphForLanguage: vi.fn(),
+  revealPathInBrowser: vi.fn(),
+  tree: { entries: [], loadingDirs: {}, loadedDirs: {}, dirErrors: {} },
+  workspace: { info: { root: "/home/me/ws", label: "ws" } },
+}));
+
+vi.mock("../state/tabs.svelte", () => ({ openTerminalInActivePane: vi.fn() }));
+
+import { api } from "../api/client";
+import {
+  fileOps,
+  openGraphAtNode,
+  openGraphForContact,
+  openGraphForLanguage,
+  revealPathInBrowser,
+} from "../state/store.svelte";
+import { openTerminalInActivePane } from "../state/tabs.svelte";
+
+type Props = {
+  variant?: "inspector" | "dashboard";
+  onReveal?: () => void;
+  onSetAsScope?: () => void;
+  onLanguageClick?: (language: string) => void;
+  onContactNavigate?: (path: string) => void;
+};
+
+const mounted: Array<Record<string, unknown>> = [];
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+async function render(props: Props = {}): Promise<HTMLElement> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(WorkspaceInfoBody, { target, props }));
+  await settle();
+  return target;
+}
+
+function menu(target: HTMLElement): string[] {
+  target.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+  flushSync();
+  return [...target.querySelectorAll(".action-menu-item")].map((b) => b.textContent?.trim() ?? "");
+}
+
+function menuItem(target: HTMLElement, label: string): HTMLButtonElement {
+  const item = [...target.querySelectorAll<HTMLButtonElement>(".action-menu-item")].find(
+    (b) => b.textContent?.trim() === label,
+  );
+  if (!item) throw new Error(`no menu item ${label}`);
+  return item;
+}
+
+const prefix: ReportPrefix = {
+  totals: { files: 3, code: 300, comments: 20, blanks: 10, complexity: 9 },
+  by_language: [
+    { name: "Rust", files: 2, code: 250, comments: 15, blanks: 8, complexity: 7 },
+    { name: "TOML", files: 1, code: 50, comments: 5, blanks: 2, complexity: 2 },
+  ],
+  cocomo: {
+    model: "organic",
+    effort_person_months: 1.2,
+    schedule_months: 2.3,
+    developers: 0.5,
+    estimated_cost_usd: 1000,
+  },
+};
+
+beforeEach(() => {
+  // A loaded graph, so the body's ensureGraphLoaded has nothing to fetch.
+  graphData.view = { nodes: [], edges: [] };
+  h.caps.workspace = true;
+  h.report = null;
+  h.reportFails404 = false;
+});
+
+afterEach(() => {
+  for (const app of mounted.splice(0)) unmount(app);
+  document.body.innerHTML = "";
+  graphData.view = null;
+  vi.clearAllMocks();
+});
+
+describe("the workspace root's actions", () => {
+  test("lead with Open, and offer upload, download and a terminal behind the caret", async () => {
+    const target = await render();
+    expect(target.querySelector(".pill-main")?.textContent?.trim()).toBe("Open");
+    expect(menu(target)).toEqual(["Upload file here", "Download tarball", "New terminal here"]);
   });
 
-  test("the inspector variant renders the directory action row", () => {
-    // The action row is gated on variant === "inspector".
-    expect(workspaceInfo).toMatch(/\{#if variant === "inspector"\}/);
+  test("add Graph from here only when the host can scope a graph", async () => {
+    const onSetAsScope = vi.fn();
+    const target = await render({ onSetAsScope });
+    expect(menu(target)).toContain("Graph from here");
+    menuItem(target, "Graph from here").click();
+    expect(onSetAsScope).toHaveBeenCalledTimes(1);
   });
 
-  test("the action row is an Open pill + secondary dropdown", () => {
-    // The row renders the shared split-action pill: an "Open" primary
-    // action plus the secondary dropdown built from actionModel. The
-    // labels match the directory inspector (FileInfoBody's is_dir branch).
-    expect(workspaceInfo).toMatch(
-      /<InspectorActionPill[\s\S]*?main=\{actionModel\.main\}[\s\S]*?secondary=\{actionModel\.secondary\}/,
-    );
-    expect(workspaceInfo).toMatch(
-      /main: \{ label: "Open", onClick: openRootInBrowser \}/,
-    );
+  test("Open hands off to the host, or reveals the root in a new File Browser tab", async () => {
+    const onReveal = vi.fn();
+    const first = await render({ onReveal });
+    first.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(revealPathInBrowser).not.toHaveBeenCalled();
+
+    const second = await render();
+    second.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    expect(revealPathInBrowser).toHaveBeenCalledWith("", { enter: true, inspectorOpen: true });
   });
 
-  test("the dropdown offers Upload file here + Download tarball (download disabled while busy)", () => {
-    // Upload triggers the hidden picker; onUploadPicked uploads to the
-    // workspace root (relative path ""). Download targets the root as a
-    // directory (is_dir = true) and disables while a transfer is busy.
-    expect(workspaceInfo).toMatch(
-      /label: "Upload file here", onClick: triggerUpload/,
-    );
-    expect(workspaceInfo).toMatch(/fileOps\.uploadFilesTo\("", files\)/);
-    expect(workspaceInfo).toMatch(
-      /label: "Download tarball",\s*onClick: downloadSelection/,
-    );
-    expect(workspaceInfo).toMatch(
-      /fileOps\.downloadPathWithProgress\("", true\)/,
-    );
+  test("upload, download and the terminal all act on the root", async () => {
+    const target = await render();
+    const picker = target.querySelector<HTMLInputElement>("input[type='file']")!;
+    const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
+
+    menu(target);
+    menuItem(target, "Upload file here").click();
+    expect(pick).toHaveBeenCalledTimes(1);
+    const files = [new File(["x"], "x.txt")];
+    Object.defineProperty(picker, "files", { configurable: true, value: files });
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("", files);
+
+    menu(target);
+    menuItem(target, "Download tarball").click();
+    expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("", true);
+
+    menu(target);
+    menuItem(target, "New terminal here").click();
+    expect(openTerminalInActivePane).toHaveBeenCalledWith(terminalFromHereTarget("", true));
   });
 
-  test("the dropdown offers New terminal here, rooted at the workspace root", () => {
-    // Mirrors FileInfoBody's directory "New terminal here": a terminal
-    // rooted at the workspace root (relative path "").
-    expect(workspaceInfo).toMatch(
-      /label: "New terminal here", onClick: newTerminalHere/,
-    );
-    expect(workspaceInfo).toMatch(/terminalFromHereTarget\("", true\)/);
-  });
-
-  test("Open primary prefers onReveal, else reveals the root", () => {
-    // openRootInBrowser mirrors FileInfoBody.openDirInBrowser: call the
-    // host's onReveal when present, otherwise reveal the root ("") in the
-    // current browser.
-    expect(workspaceInfo).toMatch(
-      /function openRootInBrowser\(\)[\s\S]*?if \(onReveal\)[\s\S]*?onReveal\(\);[\s\S]*?revealPathInBrowser\("", \{ enter: true, inspectorOpen: true \}\)/,
-    );
-  });
-
-  test("Graph from here is gated on onSetAsScope inside the action model", () => {
-    expect(workspaceInfo).toMatch(
-      /if \(onSetAsScope\) \{[\s\S]*?secondary\.push\(\{ label: "Graph from here", onClick: onSetAsScope \}\)/,
-    );
-  });
-
-  test("the inline download progress indicator is retired (the transfer bubble owns it)", () => {
-    // Download progress now shows in the single transfer bubble, not an inline
-    // inspector bar -- parity with FileInfoBody, which also dropped its `.dl-*`.
-    expect(workspaceInfo).not.toContain('class="dl-indicator"');
-    expect(workspaceInfo).not.toContain("downloadTransfer");
-  });
-
-  test("WorkspaceSlotConfig carries no default-workspace config, only recents", () => {
-    // chan serve requires an explicit workspace path, so neither
-    // WorkspaceInfoBody nor WorkspaceSlotConfig carries a default-root field
-    // or its autosave plumbing. WorkspaceSlotConfig's flip-back holds only the
-    // read-only recent-workspaces list.
-    expect(workspaceInfo).not.toContain("editedDefaultRoot");
-    expect(workspaceInfo).not.toContain('class="notes-dirs"');
-
-    expect(workspaceSlotConfig).toMatch(/<h3>Workspaces<\/h3>/);
-    expect(workspaceSlotConfig).not.toContain("editedDefaultRoot");
-    expect(workspaceSlotConfig).not.toContain("scheduleDefaultRootSave");
-    expect(workspaceSlotConfig).not.toContain("default_workspace_root");
-    expect(workspaceSlotConfig).toMatch(/globalConfig\?\.workspaces/);
-  });
-
-  test("WorkspaceSlotConfig carries no migrated per-workspace config controls", () => {
-    expect(workspaceSlotConfig).not.toMatch(/<h3>chan-reports<\/h3>/);
-    expect(workspaceSlotConfig).not.toMatch(/<h3>Metadata archive<\/h3>/);
-    expect(workspaceSlotConfig).not.toMatch(/api\.reportsEnable\(\)/);
-    expect(workspaceSlotConfig).not.toMatch(/api\.metadataExport\(\)/);
-    expect(workspaceSlotConfig).not.toMatch(/class="divided"/);
-  });
-
-  test("EmptyPaneCarousel passes variant=\"dashboard\"", () => {
-    expect(carousel).toMatch(/<WorkspaceInfoBody[\s\S]*?variant="dashboard"/);
-  });
-
-  test("GraphPanel passes onReveal + onSetAsScope for the workspace root", () => {
-    expect(graphPanel).toMatch(
-      /<WorkspaceInfoBody[\s\S]*?onReveal=\{\(\) => revealPathInBrowserTab\("", true\)\}[\s\S]*?onSetAsScope=\{\(\) => graphFromHere\("", true\)\}/,
-    );
+  test("the dashboard variant has no action row", async () => {
+    const target = await render({ variant: "dashboard" });
+    expect(target.querySelector(".actions-section")).toBeNull();
+    expect(target.querySelector(".pill-main")).toBeNull();
   });
 });
 
-// Workspace inspector parity with FileInfoBody: clickable Languages
-// (graph-opening <button>) and a Contacts section derived from the
-// shared semantic graph snapshot.
+describe("the languages report", () => {
+  test("prefers the directory cache and falls back to the walk on a 404", async () => {
+    h.report = prefix;
+    await render();
+    expect(api.reportDir).toHaveBeenCalledWith("");
+    expect(api.reportPrefix).not.toHaveBeenCalled();
+    unmount(mounted.pop()!);
 
-describe("clickable Languages in the workspace inspector", () => {
-  test("an onLanguageClick prop is declared, defaulting to the store helper", () => {
-    expect(workspaceInfo).toMatch(
-      /onLanguageClick\?\: \(language: string\) => void;/,
-    );
-    expect(workspaceInfo).toMatch(/onLanguageClick = openGraphForLanguage/);
+    h.reportFails404 = true;
+    const target = await render();
+    expect(api.reportPrefix).toHaveBeenCalledWith("");
+    expect(target.querySelectorAll("button.lang-name")).toHaveLength(2);
   });
 
-  test("each language row renders a <button> that fires onLanguageClick", () => {
-    // Mirrors FileInfoBody's language rows: a <button> rather than a
-    // plain <span>, wired to onLanguageClick.
-    expect(workspaceInfo).toMatch(
-      /<button[\s\S]*?class="lang-name"[\s\S]*?title="open in graph \(scoped to this language\)"[\s\S]*?onclick=\{\(\) => onLanguageClick\(lang\.name\)\}/,
-    );
-    expect(workspaceInfo).not.toMatch(
-      /<span class="lang-name" title=\{lang\.name\}>/,
-    );
-  });
+  test("each language opens the graph scoped to it, through the host when it asks", async () => {
+    h.report = prefix;
+    const first = await render();
+    const rows = [...first.querySelectorAll<HTMLButtonElement>("button.lang-name")];
+    expect(rows.map((b) => b.textContent?.trim())).toEqual(["Rust", "TOML"]);
+    expect(rows[0]!.title).toBe("open in graph (scoped to this language)");
+    rows[1]!.click();
+    expect(openGraphForLanguage).toHaveBeenCalledWith("TOML");
 
-  test("all three mount sites pass onLanguageClick={openGraphForLanguage}", () => {
-    for (const src of [carousel, graphPanel, fbSurface]) {
-      expect(src).toMatch(/onLanguageClick=\{openGraphForLanguage\}/);
-    }
+    const onLanguageClick = vi.fn();
+    const second = await render({ onLanguageClick });
+    second.querySelector<HTMLButtonElement>("button.lang-name")!.click();
+    expect(onLanguageClick).toHaveBeenCalledWith("Rust");
   });
 });
 
-describe("Contacts section in the workspace inspector", () => {
-  test("an onContactNavigate prop is declared", () => {
-    expect(workspaceInfo).toMatch(
-      /onContactNavigate\?\: \(path: string\) => void;/,
+describe("the contacts", () => {
+  function contactsView(): GraphView {
+    const view: GraphView = {
+      nodes: [
+        { kind: "file", id: "Contacts/zed.md", label: "Zed", path: "Contacts/zed.md", node_kind: "contact" },
+        { kind: "mention", id: "@@amy", label: "@@amy" },
+        { kind: "file", id: "notes/a.md", label: "a.md", path: "notes/a.md" },
+      ],
+      edges: [],
+    };
+    return view;
+  }
+
+  test("list contact files and mentions, by name", async () => {
+    graphData.view = contactsView();
+    const target = await render();
+    const pills = [...target.querySelectorAll<HTMLButtonElement>("button.ref.contact")];
+    expect(pills.map((b) => b.textContent?.trim())).toEqual(["amy", "Zed"]);
+  });
+
+  test("a contact file opens its lens, or goes to the host; a mention opens its node", async () => {
+    graphData.view = contactsView();
+    const first = await render();
+    const [amy, zed] = [...first.querySelectorAll<HTMLButtonElement>("button.ref.contact")];
+    zed!.click();
+    expect(openGraphForContact).toHaveBeenCalledWith("Contacts/zed.md");
+    amy!.click();
+    expect(openGraphAtNode).toHaveBeenCalledWith("@@amy");
+
+    const onContactNavigate = vi.fn();
+    const second = await render({ onContactNavigate });
+    [...second.querySelectorAll<HTMLButtonElement>("button.ref.contact")][1]!.click();
+    expect(onContactNavigate).toHaveBeenCalledWith("Contacts/zed.md");
+  });
+});
+
+describe("without a workspace behind the window", () => {
+  test("makes no inspector or report request and shows no report state", async () => {
+    h.caps.workspace = false;
+    const target = await render();
+
+    expect(api.inspector).not.toHaveBeenCalled();
+    expect(api.reportDir).not.toHaveBeenCalled();
+    expect(api.reportPrefix).not.toHaveBeenCalled();
+    expect(target.textContent).not.toContain("loading report");
+    expect(target.querySelector(".refs-error")).toBeNull();
+  });
+
+  test("the routes it would call are still mounted on the workspace router only", () => {
+    // Cross-language contract, read from the server source: the guard above
+    // is right only while the terminal tenant does not mount these routes.
+    const serverRouter = readFileSync("../../../crates/chan-server/src/lib.rs", "utf8");
+    const terminalRouter = serverRouter.slice(
+      serverRouter.indexOf("fn terminal_router("),
+      serverRouter.indexOf("fn router_with_extensions("),
     );
-  });
-
-  test("contactPills derive from the shared graph snapshot", () => {
-    // Source: graphData.view.nodes, filtered to resolved contact files
-    // (node_kind === "contact") + unresolved @@name mention nodes.
-    expect(workspaceInfo).toMatch(/const contactPills = \$derived\.by/);
-    expect(workspaceInfo).toContain("graphData.view");
-    expect(workspaceInfo).toMatch(/n\.node_kind === "contact"/);
-    expect(workspaceInfo).toMatch(/n\.kind === "mention"/);
-    // Resolved contacts route through onContactNavigate (with the store
-    // helper as fallback); unresolved mentions open the node in-graph.
-    expect(workspaceInfo).toContain("openGraphForContact");
-    expect(workspaceInfo).toContain("openGraphAtNode");
-    // The graph is loaded so the section can populate.
-    expect(workspaceInfo).toContain("ensureGraphLoaded");
-  });
-
-  test("a Contacts section renders the contact pills as clickable refs", () => {
-    expect(workspaceInfo).toMatch(
-      /<h4>Contacts<\/h4>[\s\S]*?contactPills as c \(c\.key\)[\s\S]*?class="ref contact"[\s\S]*?onclick=\{c\.onClick\}/,
-    );
-  });
-
-  test("all three mount sites pass onContactNavigate={openGraphForContact}", () => {
-    for (const src of [carousel, graphPanel, fbSurface]) {
-      expect(src).toMatch(/onContactNavigate=\{openGraphForContact\}/);
-    }
+    expect(terminalRouter.length).toBeGreaterThan(0);
+    expect(terminalRouter).not.toContain("/api/inspector");
+    expect(terminalRouter).not.toContain("/api/report/");
   });
 });

@@ -36,9 +36,11 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   browserSelection,
   loadTreeDir,
+  paneWidths,
   refreshTree,
   refreshWorkspace,
 } from "../state/store.svelte";
+import { setFetchImpl } from "../api/transport";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import {
   layout,
@@ -50,6 +52,8 @@ import {
 
 installGraphDom();
 Element.prototype.scrollIntoView = () => {};
+HTMLElement.prototype.setPointerCapture = () => {};
+HTMLElement.prototype.releasePointerCapture = () => {};
 
 const A = "notes/a.md";
 const D = "notes/deep/d.md";
@@ -70,6 +74,7 @@ function serveGraph(): void {
       g.tag("t"),
       g.mention("alice"),
       g.mention("bob"),
+      g.language("rust"),
     ],
     edges: [
       g.edge("", NOTES, "contains"),
@@ -338,4 +343,132 @@ describe("the menu's scope row", () => {
       expect(document.body.querySelector(".tab-menu-bubble"), "the menu closes").toBeNull();
     });
   }
+});
+
+describe("the workspace root", () => {
+  test("shows the workspace inspector; Open reveals the workspace, Graph from here re-roots there", async () => {
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    await select("");
+    expect(target.querySelector(".inspector .kind-chip.workspace")).not.toBeNull();
+
+    (await inspectorButton(target, "Graph from here")).click();
+    await settle();
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace", pendingSelectId: "" });
+
+    (await inspectorButton(target, "Open")).click();
+    await settle();
+    const files = paneTabs().find((t): t is BrowserTab => t.kind === "browser");
+    expect(files?.showWorkspace).toBe(true);
+    expect(browserSelection.path).toBeNull();
+  });
+});
+
+describe("a folder node's inspector", () => {
+  test("is the File Browser's directory inspector, titled with the graph's label", async () => {
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await select(NOTES);
+
+    const inspector = target.querySelector<HTMLElement>(".inspector")!;
+    expect(inspector.querySelector("h3.title")?.textContent?.trim()).toBe("notes/");
+    expect(inspector.querySelector(".pill-main")?.textContent?.trim()).toBe("Open");
+    expect(inspector.querySelector(".meta-grid")?.textContent).toContain("subdirectories");
+  });
+
+  test("asks the report cache for a directory by its path", async () => {
+    const actual = await vi.importActual<typeof import("../api/client")>("../api/client");
+    const urls: string[] = [];
+    setFetchImpl(async (input) => {
+      urls.push(String(input));
+      return new Response("null", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    await actual.api.reportDir("notes/a b");
+    expect(urls.some((u) => u.includes("/api/report/dir?path=notes%2Fa%20b"))).toBe(true);
+  });
+});
+
+describe("a language node", () => {
+  test("shows the language inspector, and its Graph from here opens the language's lens", async () => {
+    graphServer.languageDetail = {
+      language: "rust",
+      files: 1,
+      code: 12,
+      cocomo: {
+        model: "organic",
+        effort_person_months: 0.1,
+        schedule_months: 0.2,
+        developers: 0.1,
+        estimated_cost_usd: 1,
+      },
+      directories: [{ path: "src/core", label: "core", rank: 1, files: 1, code: 12 }],
+    };
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await select("language:rust");
+
+    const inspector = target.querySelector<HTMLElement>(".inspector")!;
+    expect(inspector.querySelector(".kind-chip.language")?.textContent).toBe("language");
+    expect(inspector.querySelector("h3.title")?.textContent).toBe("rust");
+    [...inspector.querySelectorAll<HTMLButtonElement>("button")]
+      .find((b) => b.textContent?.trim() === "Graph from here")!
+      .click();
+    await settle();
+    expect(newGraphTabs(tab.id).map((t) => t.scopeId)).toEqual(["language:rust"]);
+  });
+
+  test("a directory row of its detail opens that directory's graph", async () => {
+    graphServer.languageDetail = {
+      language: "rust",
+      files: 1,
+      code: 12,
+      cocomo: {
+        model: "organic",
+        effort_person_months: 0.1,
+        schedule_months: 0.2,
+        developers: 0.1,
+        estimated_cost_usd: 1,
+      },
+      directories: [{ path: "src/core", label: "core", rank: 1, files: 1, code: 12 }],
+    };
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await select("language:rust");
+    await settle();
+
+    target.querySelector<HTMLButtonElement>(".inspector .dir-row .dir-name")!.click();
+    await settle();
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "dir:src/core", pendingSelectId: "src/core" });
+  });
+});
+
+describe("the inspector's width", () => {
+  function drag(handle: Element, dx: number): void {
+    const at = (type: string, clientX: number) =>
+      handle.dispatchEvent(
+        Object.assign(new MouseEvent(type, { bubbles: true, cancelable: true, clientX }), { pointerId: 1 }),
+      );
+    at("pointerdown", 500);
+    at("pointermove", 500 + dx);
+    at("pointerup", 500 + dx);
+  }
+
+  test("is the tab's own when it has one, the shared one otherwise, and a drag writes only the tab's", async () => {
+    const own = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", inspectorOpen: true, inspectorWidth: 321 }),
+    );
+    expect(own.target.querySelector<HTMLElement>("aside.inspector")!.style.width).toBe("321px");
+    unmountGraphPanels();
+
+    const shared = paneWidths.graph;
+    const { tab, target } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "workspace", inspectorOpen: true }),
+    );
+    const aside = target.querySelector<HTMLElement>("aside.inspector")!;
+    expect(aside.style.width).toBe(`${shared}px`);
+    drag(aside.previousElementSibling!, -40);
+    await settle(2);
+    expect(tab.inspectorWidth).toBe(shared + 40);
+    expect(paneWidths.graph, "the shared width is left alone").toBe(shared);
+  });
 });
