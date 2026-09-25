@@ -1052,6 +1052,10 @@ impl RootedFs {
     }
 
     /// Duplicate a regular file or subtree; the destination must not exist.
+    /// Both arms build the copy in a stage beside the destination and publish
+    /// it with a rename that refuses an existing name, so a destination taken
+    /// while the copy ran is kept and the copy is `PathAlreadyExists`: of two
+    /// copies to one free name, one lands and the other is refused.
     pub(crate) fn copy(&self, from: &str, to: &str) -> Result<CopyOutcome> {
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
@@ -1067,51 +1071,105 @@ impl RootedFs {
                 path: self.root_path.join(&from_rel),
             });
         }
-        // Refuse to clobber. The server picks a free name for a paste, so a
-        // destination that exists here was taken by another writer: a
-        // conflict, answered like any other already-exists refusal.
+        // Refuse to clobber before any stage exists. The server picks a free
+        // name for a paste, so a destination that exists here was taken by
+        // another writer: a conflict, answered like any other already-exists
+        // refusal. The publishing rename refuses one that appears later.
         self.ensure_copy_destination_absent(to, &to_rel)?;
         let to_canon = canonical_posix(to);
         let mut created = Vec::new();
         if src_ft.is_file() {
-            #[cfg(test)]
-            copy_window::open();
-            self.copy_one_file(&from_rel, &to_rel, &to_canon, &mut created)?;
+            // The staged file keeps the destination's own name inside a stage
+            // directory: the atomic writer keys the editable-text UTF-8 check
+            // on the path it writes, and a dotted sibling name would classify
+            // by its last extension and skip that check.
+            let leaf = to_rel.file_name().ok_or(ChanError::PathEmpty)?;
+            let (stage, stage_rel) = self.create_copy_stage(&to_rel, &to_canon)?;
+            let staged = stage_rel.join(leaf);
+            if let Err(error) = self
+                .copy_one_file(&from_rel, &staged, &to_canon, &mut created)
+                .and_then(|()| self.publish_copy(&staged, &to_rel, to))
+            {
+                return Err(self.discard_copy_stage(&stage, error));
+            }
+            self.remove_tree_best_effort(&stage);
+            // The atomic writer synced the stage directory and checked the
+            // root before this rename committed; do both for the directory
+            // that holds the destination name.
+            let dir = self.dir();
+            match to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                Some(parent) => fs_ops::sync_dir_handle(
+                    &dir.open_dir(parent)
+                        .map_err(|error| map_cap_err(error, &to_rel))?,
+                )?,
+                None => fs_ops::sync_dir_handle(&dir)?,
+            }
+            self.ensure_root_available()?;
         } else {
             self.preflight_tree(&posix_path(&from_rel), true)?;
-            let stage = self.temp_sibling_name(&to_canon)?;
-            let stage_rel = self.rel(&stage)?;
-            if let Some(parent) = to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                self.dir().create_dir_all(parent)?;
-            }
-            self.dir().create_dir(&stage_rel)?;
-            let result = (|| {
-                self.copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)?;
-                self.ensure_copy_destination_absent(to, &to_rel)?;
-                #[cfg(test)]
-                copy_window::open();
-                self.dir().rename(&stage_rel, &self.dir(), &to_rel)?;
-                Ok(())
-            })();
-            if let Err(error) = result {
-                if let Err(cleanup) = self.remove_tree(&stage) {
-                    let message =
-                        format!("{error}; failed to remove temporary copy {stage}: {cleanup}");
-                    return Err(
-                        if matches!(error, ChanError::NotFound(_))
-                            || matches!(cleanup, ChanError::NotFound(_))
-                        {
-                            ChanError::NotFound(message)
-                        } else {
-                            ChanError::Io(message)
-                        },
-                    );
-                }
-                return Err(error);
+            let (stage, stage_rel) = self.create_copy_stage(&to_rel, &to_canon)?;
+            if let Err(error) = self
+                .copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)
+                .and_then(|()| self.publish_copy(&stage_rel, &to_rel, to))
+            {
+                return Err(self.discard_copy_stage(&stage, error));
             }
         }
         created.sort();
         Ok(CopyOutcome { created })
+    }
+
+    /// Reserve a fresh stage directory beside `to_rel` for a copy in flight,
+    /// creating the destination's parents first. Beside it, so the publishing
+    /// rename never crosses filesystems; after a root check, so nothing is
+    /// created inside a root that was renamed or unlinked away.
+    fn create_copy_stage(
+        &self,
+        to_rel: &std::path::Path,
+        to_canon: &str,
+    ) -> Result<(String, std::path::PathBuf)> {
+        self.ensure_root_available()?;
+        let stage = self.temp_sibling_name(to_canon)?;
+        let stage_rel = self.rel(&stage)?;
+        if let Some(parent) = to_rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+            self.dir().create_dir_all(parent)?;
+        }
+        self.dir().create_dir(&stage_rel)?;
+        Ok((stage, stage_rel))
+    }
+
+    /// Publish a finished copy at `to_rel` with a rename that refuses an
+    /// existing destination, so a name taken after the absence check is kept
+    /// and the copy is `PathAlreadyExists` for `to`.
+    fn publish_copy(
+        &self,
+        staged: &std::path::Path,
+        to_rel: &std::path::Path,
+        to: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        copy_window::open();
+        match self.rename_no_replace(staged, to_rel) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ChanError::PathAlreadyExists(to.to_string()))
+            }
+            Err(error) => Err(ChanError::from(error)),
+        }
+    }
+
+    /// Remove a failed copy's stage and return the error to report, with any
+    /// cleanup failure folded in so a stage left behind is never silent.
+    fn discard_copy_stage(&self, stage: &str, error: ChanError) -> ChanError {
+        let Err(cleanup) = self.remove_tree(stage) else {
+            return error;
+        };
+        let message = format!("{error}; failed to remove temporary copy {stage}: {cleanup}");
+        if matches!(error, ChanError::NotFound(_)) || matches!(cleanup, ChanError::NotFound(_)) {
+            ChanError::NotFound(message)
+        } else {
+            ChanError::Io(message)
+        }
     }
 
     /// Refuse directory destinations whose physical ancestry contains the
