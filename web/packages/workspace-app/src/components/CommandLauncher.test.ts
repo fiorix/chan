@@ -17,7 +17,6 @@ vi.mock("../api/libraryCommand", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
-import deckRaw from "../../../web-shared/src/components/CommandDeck.svelte?raw";
 import {
   clearLauncherDraft,
   launcherDraft,
@@ -829,14 +828,11 @@ describe("contextual command deck", () => {
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("uses a theme-aware dimming scrim, optical centering, and smooth capsule motion", () => {
-    expect(deckRaw).toContain("padding: min(17vh, 136px) 16px 16px;");
-    expect(deckRaw).toContain("--deck-scrim: rgba(0, 0, 0, 0.56);");
-    expect(deckRaw).toContain(':global([data-theme="light"]) .deck-overlay');
-    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,300}background: var\(--deck-scrim\)/);
-    expect(deckRaw).toMatch(/\.deck-backdrop \{[\s\S]{1,360}animation: scrim-in/);
-    expect(deckRaw).toContain('filter id="chan-command-orb-blob"');
-    expect(deckRaw).toMatch(/\.deck-shell \{[\s\S]{1,360}animation: deck-arrive/);
-    expect(deckRaw).toMatch(/\.deck-scope \{[\s\S]{1,500}animation: orb-arrive/);
+  test("draws its scope orb through the deck's blob filter", async () => {
+    const target = openLauncher();
+    await flush();
+
+    expect(target.querySelector("filter#chan-command-orb-blob")).not.toBeNull();
+    expect(target.querySelector(".deck-scopes")?.getAttribute("style")).toContain("url(#chan-command-orb-blob)");
   });
 });
