@@ -14,7 +14,8 @@ import { fileOps } from "../state/store.svelte";
 // state/fileActions' classifyFileActions. Labels and handlers are
 // surface-local; the destructive + path-mutation rows (Copy Path,
 // Rename / Move, Delete) and ordinary-file replacement exist only in
-// the tree's separate policy.
+// the tree's separate policy. An inspector that allows no upload, as the
+// Search slide's does, leaves out only its Upload row.
 // Store and api modules are mocked; the classifier and kind
 // predicates run for real.
 
@@ -350,6 +351,19 @@ describe("plain-directory parity", () => {
     ]) {
       expect(menuLabels).toContain(label);
     }
+  });
+
+  test("an inspector that allows no upload offers the rest without Upload file here", async () => {
+    const inspector = mountInspector("docs", { allowUpload: false });
+    await tick();
+    await openInspectorDropdown(inspector);
+
+    expect(inspectorActionLabels(inspector)).toEqual([
+      "Open",
+      "Download tarball",
+      "New terminal here",
+      "Graph from here",
+    ]);
   });
 
   test("the tree upload row pipes the picked files to uploadFilesTo for the directory", async () => {
