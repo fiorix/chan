@@ -29,8 +29,11 @@
 //     deadline).
 //   * A `Renamed` that names a single path in the source slot can
 //     name either end (FSEvents reports each end of a move alone),
-//     so the path is checked first. One that is gone is forgotten as
-//     a source. One that exists is indexed by what it is on disk,
+//     so the path is checked first. It is present only when its
+//     parent directory lists its name byte for byte, since on a
+//     case-insensitive volume a lookup also finds the old spelling
+//     of a case-only rename. One that is not present is forgotten as
+//     a source. One that is present is indexed by what it is on disk,
 //     not by the event's directory flag, which can be stale by then:
 //     a file is scheduled like a create, and a directory asks for a
 //     reconcile, because the files under it raise no events of their
@@ -396,28 +399,25 @@ fn apply_event(
         WatchKind::Renamed => {
             // A rename that names one path can name either end: FSEvents
             // reports each end of a move as its own event, with the path in
-            // this slot. One that still exists is where something arrived,
-            // so it is indexed by what it is on disk now, since the event's
-            // directory flag can be stale by the time it is handled; only
-            // one that is gone is a source to forget.
+            // this slot. One that is present is where something arrived, so
+            // it is indexed by what it is on disk now, since the event's
+            // directory flag can be stale by the time it is handled; any
+            // other is a source to forget.
             //
-            // On a case-insensitive volume a case-only rename (`mv Note.md
-            // note.md`) arrives as two lone events, and a lookup finds the
-            // file under either name, so the old name is indexed too: a file
-            // keeps a second row under it, a directory its old rows.
-            // Reconcile keeps those rows, because its deletion pass confirms
-            // a missing path with the same lookup; a full rebuild, or
-            // deleting the file, clears them. Forgetting every lone path a
-            // lookup finds would instead drop the destination of each
-            // ordinary move.
+            // Present means its parent lists its name byte for byte. On a
+            // case-insensitive volume a case-only rename (`mv Note.md
+            // note.md`) arrives as two lone events and a lookup finds the
+            // file under either name, but the listing holds only `note.md`,
+            // so `Note.md` is forgotten and one row stays.
             let lone = event.to.is_none();
             if let Some(from) = event.path {
-                if lone && workspace.is_dir(&from) {
+                let listed = lone && workspace.parent_lists_name(&from);
+                if listed && workspace.is_dir(&from) {
                     // The files under it raise no events of their own. The
                     // reconcile walks the whole tree under the write lock, so
                     // it debounces like a path and a burst of these runs one.
                     pending.reconcile = Some(now + debounce);
-                } else if lone && workspace.exists(&from) {
+                } else if listed && workspace.exists(&from) {
                     schedule_pending(&mut pending.paths, from, now, debounce);
                 } else {
                     if is_dir {

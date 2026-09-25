@@ -981,11 +981,9 @@ fn spawn_watcher_loop(
                     let Some(workspace2) = workspace_w.upgrade() else {
                         return;
                     };
-                    let p = change.path.clone();
-                    let deleted = change.deleted;
-                    let is_dir = change.is_dir;
+                    let pending_change = change.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        apply_watch_change(&workspace2, &p, deleted, is_dir)
+                        apply_pending_change(&workspace2, &pending_change)
                     })
                     .await;
                     match result {
@@ -1038,6 +1036,10 @@ fn spawn_watcher_loop(
                                 // as a delete.
                                 entry.deleted = change.deleted;
                                 entry.is_dir = change.is_dir;
+                                // Any lone rename in the window asks for the
+                                // name check, which a path spelled as its
+                                // directory stores it passes.
+                                entry.lone_rename |= change.lone_rename;
                                 entry.last_seen = change.last_seen;
                             }
                             if should_rebuild_for_vcs_burst(watch_context, p.len()) {
@@ -1088,6 +1090,9 @@ struct PendingChange {
     path: String,
     deleted: bool,
     is_dir: bool,
+    /// The path came from a rename that named it alone, so it is present
+    /// only when its parent lists it by that exact name.
+    lone_rename: bool,
     last_seen: Instant,
 }
 
@@ -1126,6 +1131,22 @@ enum ApplyOutcome {
     /// quick create-then-delete burst). Same semantics as a Removed
     /// event: forget any prior index entry.
     SkippedMissing,
+}
+
+/// Apply one debounced change. A lone rename's path is present only when
+/// its parent lists it by that exact name: on a case-insensitive volume a
+/// lookup also finds the old spelling of a case-only rename, which the
+/// listing no longer holds, so that spelling is forgotten as gone. Every
+/// other change goes to [`apply_watch_change`] as it is.
+fn apply_pending_change(
+    workspace: &Workspace,
+    change: &PendingChange,
+) -> chan_workspace::Result<ApplyOutcome> {
+    if change.lone_rename && !change.deleted && !workspace.parent_lists_name(&change.path) {
+        workspace.forget_file(&change.path)?;
+        return Ok(ApplyOutcome::Forgotten);
+    }
+    apply_watch_change(workspace, &change.path, change.deleted, change.is_dir)
 }
 
 /// Per-file watch apply. Performs an explicit `std::fs::symlink_metadata`
@@ -1209,6 +1230,7 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                     path: path.to_owned(),
                     deleted: true,
                     is_dir: true,
+                    lone_rename: false,
                     last_seen: now,
                 }]);
             }
@@ -1219,6 +1241,7 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                 path: path.to_owned(),
                 deleted: matches!(event.kind, WatchKind::Removed),
                 is_dir: false,
+                lone_rename: false,
                 last_seen: now,
             }])
         }
@@ -1234,19 +1257,18 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                     // A rename that names one path can name either end:
                     // FSEvents reports each end of a move, and the target of
                     // an editor's atomic save, as its own event with the path
-                    // in this slot. Queued as a change, not a delete, it is
-                    // stat'ed when applied: a file there is indexed and a
-                    // path that is gone is forgotten. Only a paired rename's
-                    // source is known to be gone.
-                    //
-                    // On a case-insensitive volume a case-only rename leaves
-                    // the old name indexed as well, since a lookup finds the
-                    // file under it, and a reconcile keeps that row; a full
-                    // rebuild, or deleting the file, clears it.
+                    // in this slot. Queued as a lone-rename change, not a
+                    // delete, it is checked when applied: a file its parent
+                    // lists by that exact name is indexed, and anything else
+                    // is forgotten, including the old spelling of a
+                    // case-only rename that a lookup still finds on a
+                    // case-insensitive volume. Only a paired rename's source
+                    // is known to be gone.
                     changes.push(PendingChange {
                         path: from.to_owned(),
                         deleted: event.to.is_some(),
                         is_dir: false,
+                        lone_rename: event.to.is_none(),
                         last_seen: now,
                     });
                 }
@@ -1257,6 +1279,7 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                         path: to.to_owned(),
                         deleted: false,
                         is_dir: false,
+                        lone_rename: false,
                         last_seen: now,
                     });
                 }
@@ -2291,6 +2314,7 @@ mod tests {
                     path: "new.md".to_string(),
                     deleted: false,
                     is_dir: false,
+                    lone_rename: false,
                     last_seen: Instant::now() - Duration::from_secs(2),
                 },
             ),
@@ -2300,6 +2324,7 @@ mod tests {
                     path: "old.md".to_string(),
                     deleted: true,
                     is_dir: false,
+                    lone_rename: false,
                     last_seen: Instant::now() - Duration::from_secs(2),
                 },
             ),
@@ -2377,8 +2402,7 @@ mod tests {
         match classify(event) {
             WatchAction::Changes(changes) => {
                 for change in changes {
-                    apply_watch_change(workspace, &change.path, change.deleted, change.is_dir)
-                        .unwrap();
+                    apply_pending_change(workspace, &change).unwrap();
                 }
             }
             WatchAction::Ignore => {}
