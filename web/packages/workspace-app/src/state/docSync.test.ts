@@ -45,6 +45,7 @@ import {
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
+import { fileTab as harnessFileTab, readTab, resetLayout } from "../__tests__/tabs";
 
 // ---- fake socket ------------------------------------------------------------
 
@@ -95,57 +96,18 @@ const lastSocket = (): FakeSocket => sockets[sockets.length - 1]!;
 
 let nextTabId = 0;
 
+/// A clean source-mode tab with an id of its own, so the tabs of one test
+/// never share one.
 function fileTab(partial: Partial<FileTab> = {}): FileTab {
   nextTabId += 1;
-  return {
-    kind: "file",
-    fileKind: "document",
+  return harnessFileTab({
     id: `doc-tab-${nextTabId}`,
-    path: "notes/a.md",
     content: "hello",
     saved: "hello",
-    savedMtime: 1,
     savedMtimeNs: "1000000000",
     mode: "source",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
     ...partial,
-  };
-}
-
-function resetLayout(tabs: FileTab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
-}
-
-/// Read a tab back through the $state proxy (mutations through raw
-/// references captured before the layout insert do not reflect).
-function readTab(id: string): FileTab | undefined {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const t = node.tabs.find((t) => t.id === id);
-    if (t && t.kind === "file") return t;
-  }
-  return undefined;
+  });
 }
 
 const MTIME = "1751234567890123456";

@@ -29,6 +29,7 @@ import {
   type SerTab,
   type TerminalTab,
 } from "./tabs.svelte";
+import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 const PANE_ID = "clone-tab-fields-pane";
 
@@ -199,15 +200,7 @@ function neighbour(id: string): Tab {
 }
 
 function resetLayout(tabs: Tab[]): void {
-  const node: LeafNode = {
-    kind: "leaf",
-    id: PANE_ID,
-    tabs: [...tabs],
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.nodes = { [PANE_ID]: node };
-  layout.rootId = PANE_ID;
-  layout.activePaneId = PANE_ID;
+  harnessResetLayout(tabs, { id: PANE_ID });
 }
 
 function paneTabs(): Tab[] {

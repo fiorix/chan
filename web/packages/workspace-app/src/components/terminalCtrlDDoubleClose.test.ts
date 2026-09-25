@@ -28,6 +28,11 @@ import {
   type LeafNode,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
+import {
+  fileTab,
+  resetLayout as harnessResetLayout,
+  terminalTab as harnessTerminalTab,
+} from "../__tests__/tabs";
 
 const mounted: Array<Record<string, any>> = [];
 const sockets: TestWebSocket[] = [];
@@ -229,52 +234,15 @@ afterEach(() => {
 });
 
 function terminalTab(): TerminalTabState {
-  return {
-    kind: "terminal",
-    id: "term-exited",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-  };
+  return harnessTerminalTab({ id: "term-exited" });
 }
 
 function neighbourTab(): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-neighbour",
-    path: "notes/neighbour.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-  };
+  return fileTab({ id: "file-neighbour", path: "notes/neighbour.md" });
 }
 
 function resetLayout(tabs: Array<FileTab | TerminalTabState>): LeafNode {
-  const node: LeafNode = {
-    kind: "leaf",
-    id: PANE_ID,
-    tabs: [...tabs],
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.nodes = { [PANE_ID]: node };
-  layout.rootId = PANE_ID;
-  layout.activePaneId = PANE_ID;
-  return layout.nodes[PANE_ID] as LeafNode;
+  return harnessResetLayout(tabs, { id: PANE_ID });
 }
 
 /// Mount the pane's terminal tab and drive it to `status === "exited"`, the

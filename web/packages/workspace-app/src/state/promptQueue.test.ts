@@ -6,25 +6,13 @@ import {
   failPendingPrompt,
   resolvePendingPrompt,
   setTerminalQueueDepth,
-  type TerminalTab,
 } from "./tabs.svelte";
+import { terminalTab } from "../__tests__/tabs";
 
 // Rich Prompt queue visibility -- the tab-level state machine the WS frame
 // handler (TerminalTab.svelte) and the bubble (RichPrompt.svelte) share.
 // The wire/markup shape is pinned in richPromptTerminalWiring.test.ts and
 // richPromptComponent.test.ts; this exercises the store transitions.
-
-function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
 
 describe("terminal queue depth", () => {
   // The store setter takes whatever depth the server sent. What the depth

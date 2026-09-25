@@ -23,49 +23,12 @@ import {
   enterPaneMode,
   layout,
   paneMode,
-  type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
-
-function fileTab(partial: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/a.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...partial,
-  };
-}
+import { fileTab, resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 function resetLayout(): LeafNode {
-  const tab = fileTab();
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-sync",
-    tabs: [tab],
-    activeTabId: tab.id,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return layout.nodes[pane.id] as LeafNode;
+  return harnessResetLayout([fileTab()], { id: "pane-sync" });
 }
 
 /// A remote payload congruent with `resetLayout()`'s tree, carrying one

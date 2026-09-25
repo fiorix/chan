@@ -20,6 +20,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import { ui } from "../state/store.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 
 class TestResizeObserver {
   observe() {}
@@ -105,28 +106,7 @@ function demoData(): MockWorkspaceData {
 }
 
 function fileTab(id: string, path: string): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id,
-    path,
-    content: path,
-    saved: path,
-    savedMtime: 1,
-    mode: "source",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-  };
+  return harnessFileTab({ id, path, content: path, saved: path, mode: "source" });
 }
 
 /// Two panes side by side: the left one carries the duplicate, the right one

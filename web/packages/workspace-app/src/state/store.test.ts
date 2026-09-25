@@ -62,6 +62,7 @@ import {
 import type { TreeEntry } from "../api/types";
 import * as desktopApi from "../api/desktop";
 import * as mediaOpen from "./mediaOpen";
+import { fileTab } from "../__tests__/tabs";
 
 function setTerminalLayout(tab: Partial<TerminalTab> = {}): void {
   const terminal: TerminalTab = {
@@ -490,28 +491,7 @@ describe("session persistence bootstrap guard", () => {
     });
 
     test("a non-terminal tab moved out closes its window as a plain discard", async () => {
-      const file: FileTab = {
-        kind: "file",
-        fileKind: "document",
-        id: "file-moving",
-        path: "notes/a.md",
-        content: "saved",
-        saved: "saved",
-        savedMtime: 1,
-        mode: "wysiwyg",
-        loading: false,
-        error: null,
-        fileMissing: null,
-        inspectorOpen: false,
-        outlineOpen: false,
-        repoRoot: null,
-        readMode: false,
-        fsWritable: true,
-        styleToolbarOpen: false,
-        syntaxHighlight: true,
-        highlightTrailingWhitespace: false,
-        codeBlocksCollapsed: false,
-      };
+      const file: FileTab = fileTab({ id: "file-moving" });
       const params = await emptyByMove(file);
       expect(params.has("moved")).toBe(false);
       expect(params.has("session")).toBe(false);
@@ -799,29 +779,14 @@ describe("graph watcher reload signal", () => {
 describe("workspace root loss", () => {
   test("clears the tree and marks open files missing without discarding dirty buffers", async () => {
     const dirty = "unsaved words stay in memory";
-    const file: FileTab = {
-      kind: "file",
-      fileKind: "document",
+    const file: FileTab = fileTab({
       id: "file-root-loss",
       path: "notes/large.md",
       content: dirty,
       saved: "disk version",
-      savedMtime: 1,
       savedMtimeNs: "1",
       mode: "source",
-      loading: false,
-      error: null,
-      fileMissing: null,
-      inspectorOpen: false,
-      outlineOpen: false,
-      repoRoot: null,
-      readMode: false,
-      fsWritable: true,
-      styleToolbarOpen: false,
-      syntaxHighlight: true,
-      highlightTrailingWhitespace: false,
-      codeBlocksCollapsed: false,
-    };
+    });
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-root-loss",
@@ -1432,28 +1397,7 @@ describe("filesystem graph entrypoints", () => {
 
 describe("external-change banner", () => {
   function placeFileTab(path: string, content: string): FileTab {
-    const tab: FileTab = {
-      kind: "file",
-      fileKind: "document",
-      id: `file-${path}`,
-      path,
-      content,
-      saved: content,
-      savedMtime: 1,
-      mode: "wysiwyg",
-      loading: false,
-      error: null,
-      fileMissing: null,
-      inspectorOpen: false,
-      outlineOpen: false,
-      repoRoot: null,
-      readMode: false,
-      fsWritable: true,
-      styleToolbarOpen: false,
-      syntaxHighlight: true,
-      highlightTrailingWhitespace: false,
-      codeBlocksCollapsed: false,
-    };
+    const tab: FileTab = fileTab({ id: `file-${path}`, path, content, saved: content });
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-ext",
@@ -1536,28 +1480,7 @@ describe("resolveSpawnContext", () => {
   }
 
   function makeFileTab(path: string): FileTab {
-    return {
-      kind: "file",
-      fileKind: "document",
-      id: `file-${path}`,
-      path,
-      content: "",
-      saved: "",
-      savedMtime: 1,
-      mode: "wysiwyg",
-      loading: false,
-      error: null,
-      fileMissing: null,
-      inspectorOpen: false,
-      outlineOpen: false,
-      repoRoot: null,
-      readMode: false,
-      fsWritable: true,
-      styleToolbarOpen: false,
-      syntaxHighlight: true,
-      highlightTrailingWhitespace: false,
-      codeBlocksCollapsed: false,
-    };
+    return fileTab({ id: `file-${path}`, path, content: "", saved: "" });
   }
 
   test("empty pane falls back to workspace root", () => {

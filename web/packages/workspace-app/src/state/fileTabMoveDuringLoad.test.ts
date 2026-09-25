@@ -46,6 +46,7 @@ import {
   type LeafNode,
   type Tab,
 } from "./tabs.svelte";
+import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 const PANE_ID = "pane-load-move";
 const PATH = "notes/slow.md";
@@ -58,17 +59,7 @@ afterEach(() => {
 });
 
 function resetLayout(): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: PANE_ID,
-    tabs: [],
-    activeTabId: null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return layout.nodes[pane.id] as LeafNode;
+  return harnessResetLayout([], { id: PANE_ID });
 }
 
 /// A read that parks partway and finishes only when released, so a test can

@@ -65,6 +65,7 @@ import {
   type Tab,
 } from "../state/tabs.svelte";
 import { ui } from "../state/store.svelte";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 
 globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
 globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
@@ -111,28 +112,13 @@ function demoData(): MockWorkspaceData {
 }
 
 function fileTab(id: string): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
+  return harnessFileTab({
     id,
     path: "README.md",
     content: "hello",
     saved: "hello",
-    savedMtime: 1,
     mode: "source",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-  };
+  });
 }
 
 function browserTab(id: string): BrowserTab {

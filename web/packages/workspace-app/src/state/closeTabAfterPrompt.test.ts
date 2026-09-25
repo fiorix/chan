@@ -28,6 +28,11 @@ import {
   type LeafNode,
   type TerminalTab,
 } from "./tabs.svelte";
+import {
+  fileTab as harnessFileTab,
+  resetLayout as harnessResetLayout,
+  terminalTab as harnessTerminalTab,
+} from "../__tests__/tabs";
 
 const PANE_ID = "close-after-prompt-pane";
 const unregisterSinks: Array<() => void> = [];
@@ -40,55 +45,18 @@ afterEach(() => {
 });
 
 function fileTab(id: string): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id,
-    path: `notes/${id}.md`,
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-  };
+  return harnessFileTab({ id, path: `notes/${id}.md` });
 }
 
 /// A terminal with a live input sink reads as a running shell, which is what
 /// makes the close path raise its confirm and hold there.
 function liveTerminalTab(id: string): TerminalTab {
   unregisterSinks.push(registerTerminalInputSink(id, () => true));
-  return {
-    kind: "terminal",
-    id,
-    title: id,
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-  };
+  return harnessTerminalTab({ id, title: id });
 }
 
 function resetLayout(tabs: Array<FileTab | TerminalTab>): LeafNode {
-  const node: LeafNode = {
-    kind: "leaf",
-    id: PANE_ID,
-    tabs: [...tabs],
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.nodes = { [PANE_ID]: node };
-  layout.rootId = PANE_ID;
-  layout.activePaneId = PANE_ID;
-  return layout.nodes[PANE_ID] as LeafNode;
+  return harnessResetLayout(tabs, { id: PANE_ID });
 }
 
 function pane(): LeafNode {

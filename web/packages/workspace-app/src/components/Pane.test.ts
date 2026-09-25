@@ -35,9 +35,9 @@ import {
   type GraphTab,
   type LeafNode,
   type Tab,
-  type TerminalTab,
 } from "../state/tabs.svelte";
 import { ui } from "../state/store.svelte";
+import { terminalTab } from "../__tests__/tabs";
 
 const mounted: Array<Record<string, any>> = [];
 
@@ -69,18 +69,6 @@ afterEach(() => {
   cancelPaneMode();
   paneSideToggleFlash.versions = {};
 });
-
-function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
 
 function graphTab(partial: Partial<GraphTab> = {}): GraphTab {
   return {

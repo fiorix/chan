@@ -63,6 +63,7 @@ import {
 import { layout, tabsForPath } from "../state/tabs.svelte";
 import { setNotifyHandler } from "../state/notify.svelte";
 import type { FileTab, LeafNode } from "../state/tabs.svelte";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 
 const INSTANCE = "fb-multimove-test";
 const TREE_MOVE_MIME = "application/x-chan-tree-move";
@@ -71,25 +72,7 @@ const mounted: Array<Record<string, unknown>> = [];
 const notices: string[] = [];
 
 function fileTab(path: string): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: `tab-${path}`,
-    path,
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-  } as unknown as FileTab;
+  return harnessFileTab({ id: `tab-${path}`, path });
 }
 
 function seedLayoutWithTab(path: string): void {

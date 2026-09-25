@@ -137,7 +137,6 @@ import {
   type FileTab,
   type GraphTab,
   type LeafNode,
-  type Tab,
   type TerminalTab,
 } from "./tabs.svelte";
 
@@ -146,58 +145,7 @@ import {
 // open) without a storage polyfill.
 vi.mock("./caretIndex");
 import { readCaret, recordCaret } from "./caretIndex";
-
-function resetLayout(tabs: Tab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
-}
-
-function fileTab(partial: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/a.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...partial,
-  };
-}
-
-function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
+import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 
 afterEach(() => {
   vi.restoreAllMocks();

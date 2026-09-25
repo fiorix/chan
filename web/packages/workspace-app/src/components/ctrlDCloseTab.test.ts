@@ -12,57 +12,12 @@ import {
   activePane,
   cancelPaneMode,
   closeTab,
-  layout,
   openBrowserInActivePane,
   openGraphInActivePane,
-  type FileTab,
-  type LeafNode,
-  type TerminalTab,
 } from "../state/tabs.svelte";
 import { clearRecentlyClosedTabsForTest } from "../state/tabs.svelte";
 import app from "../App.svelte?raw";
-
-function fileTab(partial: Partial<FileTab> = {}): FileTab {
-  // content equal to saved keeps the tab clean so the close-tab path
-  // does not pop the unsaved-changes confirmation modal.
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/a.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...partial,
-  };
-}
-
-function resetLayout(tabs: Array<FileTab | TerminalTab>): LeafNode {
-  const paneId = "pane-1";
-  const node: LeafNode = {
-    kind: "leaf",
-    id: paneId,
-    tabs: [...tabs],
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.nodes = { [paneId]: node };
-  layout.rootId = paneId;
-  layout.activePaneId = paneId;
-  return node;
-}
+import { fileTab, resetLayout } from "../__tests__/tabs";
 
 afterEach(() => {
   cancelPaneMode();

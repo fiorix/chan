@@ -18,6 +18,7 @@ import {
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
+import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 
 /// Wait long enough for `scheduleMissingFileCheck`'s 150 ms
 /// debounce + the awaited api.read / api.search calls to
@@ -30,59 +31,6 @@ async function flushDebounce(): Promise<void> {
 
 function recoveryHit(path: string): SearchHit {
   return { path, is_dir: false, mtime: null, size: 0 };
-}
-
-/// Read a tab fresh from the $state proxy. Svelte 5 proxies
-/// don't reflect mutations onto the raw object reference
-/// captured BEFORE the put-into-layout step; always read via
-/// the proxy after async work.
-function readTab(id: string): FileTab | undefined {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const t = node.tabs.find((t) => t.id === id);
-    if (t && t.kind === "file") return t;
-  }
-  return undefined;
-}
-
-function fileTab(partial: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/a.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...partial,
-  };
-}
-
-function resetLayout(tabs: FileTab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
 }
 
 const ENOENT = new Error("io error: No such file or directory (os error 2)");

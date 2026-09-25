@@ -29,12 +29,12 @@ import {
 } from "../state/store.svelte";
 import { registerCommands } from "../state/commands";
 import {
-  layout,
   type BrowserTab,
   type ExtensionTab,
   type LeafNode,
   type TerminalTab,
 } from "../state/tabs.svelte";
+import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -219,17 +219,7 @@ const librarySnapshot = {
 const mounted: Array<Record<string, unknown>> = [];
 
 function resetLayout(): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "command-launcher-pane",
-    tabs: [],
-    activeTabId: null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
+  return harnessResetLayout([], { id: "command-launcher-pane" });
 }
 
 function setActiveBrowserTab(): void {

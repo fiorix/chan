@@ -32,12 +32,12 @@ import {
   isDocAttached,
   isDocSavePaused,
   isDocUnflushed,
-  layout,
   reorderTab,
   saveTab,
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
+import { fileTab, readTab, resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 // ---- fake socket ------------------------------------------------------------
 
@@ -97,56 +97,20 @@ const SCENE_BUFFER = JSON.stringify({
 
 function sceneTab(partial: Partial<FileTab> = {}): FileTab {
   nextTabId += 1;
-  return {
-    kind: "file",
+  return fileTab({
     fileKind: "text",
     id: `scene-tab-${nextTabId}`,
     path: "boards/b.excalidraw",
     content: SCENE_BUFFER,
     saved: SCENE_BUFFER,
-    savedMtime: 1,
     savedMtimeNs: "1000000000",
     mode: "canvas",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
     ...partial,
-  };
+  });
 }
 
 function resetLayout(tabs: FileTab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-scene-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
-}
-
-/// Read a tab back through the $state proxy. `layout` is $state, so it
-/// wraps every tab it is handed: a write through the raw object and a
-/// write through the proxy do not meet.
-function readTab(id: string): FileTab | undefined {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const t = node.tabs.find((t) => t.id === id);
-    if (t && t.kind === "file") return t;
-  }
-  return undefined;
+  return harnessResetLayout(tabs, { id: "pane-scene-test" });
 }
 
 /// Install these tabs and hand back the objects the layout holds. Every

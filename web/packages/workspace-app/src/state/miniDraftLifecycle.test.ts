@@ -32,6 +32,9 @@ function serveMeta(name: string, on: boolean): void {
 }
 
 let tabs: typeof import("./tabs.svelte");
+// Imported after the reset with the state modules, so it writes the layout
+// of the store instance this window booted.
+let harness: typeof import("../__tests__/tabs");
 let api: typeof import("../api/client").api;
 
 async function bootMiniWindow(): Promise<void> {
@@ -46,46 +49,16 @@ async function bootMiniWindow(): Promise<void> {
   workspaceState.standaloneDrafts.dir = DRAFTS_DIR;
   fileContext.filesContext.current = fileContext.filesContextFrom("home/u");
   tabs = await import("./tabs.svelte");
+  harness = await import("../__tests__/tabs");
   api = (await import("../api/client")).api;
 }
 
 function draftTab(content: string, saved = content): import("./tabs.svelte").FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "draft-tab",
-    path: DRAFT_PATH,
-    content,
-    saved,
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-  };
+  return harness.fileTab({ id: "draft-tab", path: DRAFT_PATH, content, saved });
 }
 
 function resetLayout(tab: import("./tabs.svelte").FileTab) {
-  const pane = {
-    kind: "leaf" as const,
-    id: "pane-mini",
-    tabs: [tab],
-    activeTabId: tab.id,
-  };
-  tabs.layout.rootId = pane.id;
-  tabs.layout.activePaneId = pane.id;
-  tabs.layout.nodes = { [pane.id]: pane };
-  tabs.layout.focusColor = "blue";
-  return pane;
+  return harness.resetLayout([tab], { id: "pane-mini" });
 }
 
 function inspection(overrides: Partial<{ has_attachments: boolean }> = {}) {

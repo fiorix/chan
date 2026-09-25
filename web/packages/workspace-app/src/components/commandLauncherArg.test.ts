@@ -23,7 +23,7 @@ import {
   openCommandLauncher,
 } from "../state/store.svelte";
 import { registerCommands } from "../state/commands";
-import { layout, type LeafNode } from "../state/tabs.svelte";
+import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -53,16 +53,7 @@ registerCommands([
 const mounted: Array<Record<string, unknown>> = [];
 
 function resetLayout(): void {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "launcher-arg-pane",
-    tabs: [],
-    activeTabId: null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
+  harnessResetLayout([], { id: "launcher-arg-pane" });
 }
 
 /// Mount + open, then settle the open effect (which resets the highlight

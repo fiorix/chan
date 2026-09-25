@@ -28,6 +28,7 @@ vi.mock("../api/client", async (orig) => {
 
 import RichPrompt from "./RichPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
+import { terminalTab } from "../__tests__/tabs";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -41,18 +42,6 @@ afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
 });
-
-function terminalTab(overrides: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...overrides,
-  } as TerminalTab;
-}
 
 function render(tab: TerminalTab): HTMLElement {
   const target = document.createElement("div");

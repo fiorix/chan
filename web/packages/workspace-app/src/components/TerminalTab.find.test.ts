@@ -18,6 +18,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import { terminalTab } from "../__tests__/tabs";
 
 const mounted: Array<Record<string, any>> = [];
 const terminalOptions: Array<Record<string, unknown>> = [];
@@ -118,18 +119,6 @@ afterEach(() => {
   findPreviousCalls.splice(0);
   document.body.innerHTML = "";
 });
-
-function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
 
 async function renderTerminal(tab: TerminalTabState, focused: boolean) {
   const target = document.createElement("div");

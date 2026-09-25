@@ -25,64 +25,12 @@ import {
   type Tab,
   type TerminalTab,
 } from "./tabs.svelte";
+import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 
-function fileTab(partial: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/a.md",
-    content: "saved",
-    saved: "saved",
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...partial,
-  };
-}
-
-function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
-
-// Both reset helpers return the LIVE nodes read back from `layout.nodes`:
-// a tab or pane object pushed into `$state` is only observable through its
-// Svelte proxy -- in-place mutations never land on the raw pre-push object
+// Returns the LIVE nodes read back from `layout.nodes`, as `resetLayout`
+// does: a tab or pane object pushed into `$state` is only observable through
+// its Svelte proxy -- in-place mutations never land on the raw pre-push object
 // (see the applyGlobalTerminalName note in tabs.svelte.ts).
-function resetLayout(tabs: Tab[], partial: Partial<LeafNode> = {}): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-    ...partial,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return layout.nodes[pane.id] as LeafNode;
-}
-
 function resetSplitLayout(
   aTabs: Tab[],
   bTabs: Tab[],

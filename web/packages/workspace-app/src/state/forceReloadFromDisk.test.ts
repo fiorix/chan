@@ -24,12 +24,16 @@ import { confirmState, resolveConfirm } from "./confirm.svelte";
 import { acquireSceneSession, resetSceneSyncForTests } from "./sceneSync.svelte";
 import {
   forceReloadFromDisk,
-  layout,
   overwriteDiskConflict,
   registerLiveSessionKind,
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
+import {
+  fileTab as harnessFileTab,
+  readTab,
+  resetLayout as harnessResetLayout,
+} from "../__tests__/tabs";
 
 /// Per-test control over the unflushed query (registered once,
 /// module-global, like the real ones). A kind registers all five members,
@@ -46,55 +50,22 @@ registerLiveSessionKind({
 
 let nextTabId = 0;
 
+/// A clean source-mode tab with an id of its own, so the tabs of one test
+/// never share one.
 function fileTab(partial: Partial<FileTab> = {}): FileTab {
   nextTabId += 1;
-  return {
-    kind: "file",
-    fileKind: "document",
+  return harnessFileTab({
     id: `frd-tab-${nextTabId}`,
-    path: "notes/a.md",
     content: "hello",
     saved: "hello",
-    savedMtime: 1,
     savedMtimeNs: "1000000000",
     mode: "source",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    repoRoot: null,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
     ...partial,
-  };
+  });
 }
 
 function resetLayout(tabs: FileTab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-frd",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
-}
-
-function readTab(id: string): FileTab | undefined {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    const t = node.tabs.find((t) => t.id === id);
-    if (t && t.kind === "file") return t;
-  }
-  return undefined;
+  return harnessResetLayout(tabs, { id: "pane-frd" });
 }
 
 const DISK: FileResponse = {
