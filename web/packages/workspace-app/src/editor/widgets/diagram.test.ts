@@ -13,14 +13,23 @@ import {
   mermaidDecorations,
 } from "./diagram";
 import { writeClipboardPayload } from "../../api/clipboard";
-import diagramSrc from "./diagram.ts?raw";
-import mermaidRenderSrc from "../mermaid_render.ts?raw";
-import excalidrawRenderSrc from "../excalidraw_render.ts?raw";
-import wysiwygSrc from "../Wysiwyg.svelte?raw";
+import { openDiagramZoom } from "../../state/diagramZoom";
+import { hybridSurfaceThemes } from "../../state/store.svelte";
+import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../../__tests__/wysiwyg";
 
 vi.mock("../../api/clipboard", () => ({
   writeClipboardPayload: vi.fn(async () => {}),
 }));
+
+vi.mock("../../state/diagramZoom", () => ({ openDiagramZoom: vi.fn() }));
+
+// The mermaid library, standing in for the real one so a render resolves in
+// jsdom with a recognisable face.
+const mermaidLib = vi.hoisted(() => ({
+  initialize: vi.fn(),
+  render: vi.fn(async (_id: string, _source: string) => ({ svg: '<svg id="mermaid-face"></svg>' })),
+}));
+vi.mock("mermaid", () => ({ default: mermaidLib }));
 
 // Excalidraw + React are heavy; mock the two libraries so mounting an
 // excalidraw block in jsdom never pulls the real React runtime. The widget
@@ -28,10 +37,16 @@ vi.mock("../../api/clipboard", () => ({
 vi.mock("@excalidraw/mermaid-to-excalidraw", () => ({
   parseMermaidToExcalidraw: async () => ({ elements: [], files: {} }),
 }));
+const exportToSvg = vi.hoisted(() =>
+  vi.fn(async (_opts: unknown) => document.createElementNS("http://www.w3.org/2000/svg", "svg")),
+);
 vi.mock("@excalidraw/excalidraw", () => ({
   convertToExcalidrawElements: (els: unknown) => els,
-  exportToSvg: async () => document.createElementNS("http://www.w3.org/2000/svg", "svg"),
+  exportToSvg,
+  restore: (scene: unknown) => scene,
 }));
+
+installEditorDom();
 
 const MERMAID_DOC = [
   "before",
@@ -426,21 +441,38 @@ describe("errored diagram face click-through", () => {
 });
 
 describe("diagram bundle composition", () => {
-  // Bundle composition is not observable from a mounted view: the point is
-  // which modules the initial chunk pulls, which only the import graph
-  // shows. These two read the source deliberately.
+  // Which modules the initial chunk pulls shows in when each library is
+  // evaluated: a fresh import of a renderer evaluates none of its library,
+  // and its first render does.
 
-  test("mermaid is dynamic-imported (never in the initial bundle)", () => {
-    expect(mermaidRenderSrc).toMatch(/import\("mermaid"\)/);
-    expect(mermaidRenderSrc).not.toMatch(/^import .* from "mermaid"/m);
+  test("the mermaid renderer loads mermaid on its first render, not on import", async () => {
+    vi.resetModules();
+    let loads = 0;
+    vi.doMock("mermaid", () => {
+      loads += 1;
+      return { default: mermaidLib };
+    });
+    const { renderMermaid } = await import("../mermaid_render");
+    expect(loads).toBe(0);
+    await expect(renderMermaid("pie title Pets", false)).resolves.toMatchObject({ ok: true });
+    expect(loads).toBe(1);
   });
 
-  test("excalidraw is dynamic-imported (never in the initial bundle)", () => {
-    // Both heavy libraries are pulled only when an excalidraw block first
-    // renders; a static import would drag React into the eager editor bundle.
-    expect(excalidrawRenderSrc).toMatch(/import\("@excalidraw\/mermaid-to-excalidraw"\)/);
-    expect(excalidrawRenderSrc).toMatch(/import\("@excalidraw\/excalidraw"\)/);
-    expect(excalidrawRenderSrc).not.toMatch(/^import .* from "@excalidraw\//m);
+  test("the excalidraw renderer loads both of its libraries on its first render, not on import", async () => {
+    vi.resetModules();
+    const loads = { convert: 0, excalidraw: 0 };
+    vi.doMock("@excalidraw/mermaid-to-excalidraw", () => {
+      loads.convert += 1;
+      return { parseMermaidToExcalidraw: async () => ({ elements: [], files: {} }) };
+    });
+    vi.doMock("@excalidraw/excalidraw", () => {
+      loads.excalidraw += 1;
+      return { convertToExcalidrawElements: (els: unknown) => els, exportToSvg, restore: (scene: unknown) => scene };
+    });
+    const { renderExcalidraw } = await import("../excalidraw_render");
+    expect(loads).toEqual({ convert: 0, excalidraw: 0 });
+    await expect(renderExcalidraw("flowchart TD\n  A --> B", false)).resolves.toMatchObject({ ok: true });
+    expect(loads).toEqual({ convert: 1, excalidraw: 1 });
   });
 });
 
@@ -582,49 +614,163 @@ describe("the View affordance", () => {
   });
 });
 
-describe("mechanisms this environment cannot drive", () => {
-  // Each of these needs something jsdom does not have: real layout for the
-  // vertical-motion tests, the Web Animations API for the flip, and a
-  // mounted Wysiwyg for the wiring. They are browser-verified, and the
-  // assertions below pin the mechanism so it cannot silently drop out.
+describe("vertical caret entry", () => {
+  // jsdom has no layout, so each test decides where CodeMirror's vertical
+  // motion would land; a move that crosses a rendered block past it is the
+  // case the keymap redirects.
+  const FROM = MERMAID_DOC.indexOf("```mermaid");
+  const TO = MERMAID_DOC.indexOf("```\n\nafter") + 3;
 
-  test("vertical arrow keys step INTO a rendered block (no widget skip)", () => {
-    // A block-replace widget has no internal lines, so ArrowUp/Down skip it
-    // (atomicRanges snaps the caret past the atom). The fix is an
-    // ArrowUp/ArrowDown keymap that redirects a crossing move onto the block
-    // edge so scan() de-renders it. moveVertically needs real layout.
-    expect(diagramSrc).toMatch(/key:\s*"ArrowUp",\s*run:\s*stepInto\(false\)/);
-    expect(diagramSrc).toMatch(/key:\s*"ArrowDown",\s*run:\s*stepInto\(true\)/);
-    expect(diagramSrc).toMatch(/view\.moveVertically\(range, forward\)/);
-    expect(diagramSrc).toMatch(/EditorSelection\.cursor\(enter\)/);
+  function rendered(): { parent: HTMLElement; view: EditorView } {
+    const deco = diagramDecorations({
+      lang: "mermaid",
+      label: "Mermaid",
+      render: async () => ({ ok: true as const, svg: "<svg></svg>" }),
+      isDark: () => false,
+    });
+    return mount(deco, MERMAID_DOC, 0);
+  }
+
+  function press(view: EditorView, key: string): void {
+    view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
   });
 
-  test("reverse flip: cursor-enter ghosts the cached face and folds it out", () => {
-    // The forward flip plays on widget mount; the reverse needs a ghost
-    // because CM removes the widget DOM instantly on enter. The ghost
-    // rotateX-folds from 0 to +90, CONTINUING the forward rotation the mount
-    // flip started (-90 -> 0) rather than mirroring it, over the same
-    // duration. Needs real layout and WAAPI.
-    expect(diagramSrc).toMatch(/cacheFace\(this\.spec, this\.source, this\.dark, res\.svg\)/);
-    expect(diagramSrc).toMatch(/function flipOutGhost/);
-    expect(diagramSrc).toMatch(/rotateX\(0deg\)/);
-    expect(diagramSrc).toMatch(/rotateX\(90deg\)/);
-    expect(diagramSrc).toMatch(/if \(update\.docChanged \|\| !update\.selectionSet\) return/);
-    expect(diagramSrc).toMatch(/flipOutGhost\(update\.view, it\.from, widget\)/);
+  test("ArrowDown that would step over a rendered block lands on its first line, showing the source", () => {
+    const { parent, view } = rendered();
+    view.dispatch({ selection: EditorSelection.cursor(FROM - 1) });
+    vi.spyOn(view, "moveVertically").mockReturnValue(EditorSelection.cursor(MERMAID_DOC.indexOf("after")));
+    press(view, "ArrowDown");
+    expect(view.state.selection.main.head).toBe(FROM);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    view.destroy();
   });
 
-  test("Wysiwyg wires BOTH renderers and the diagram-zoom opener", () => {
-    // Both decoration fields are registered, each reads the editor theme and
-    // passes the pan/zoom opener as onView.
-    expect(wysiwygSrc).toMatch(
-      /mermaidDecorations\([\s\S]{1,120}effectiveHybridSurfaceTheme\(surface\) === "dark"/,
+  test("ArrowUp that would step over it from below lands on its last line", () => {
+    const { parent, view } = rendered();
+    view.dispatch({ selection: EditorSelection.cursor(MERMAID_DOC.indexOf("after")) });
+    vi.spyOn(view, "moveVertically").mockReturnValue(EditorSelection.cursor(0));
+    press(view, "ArrowUp");
+    expect(view.state.selection.main.head).toBe(TO);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    view.destroy();
+  });
+
+  test("a vertical move that stays clear of the block leaves it rendered", () => {
+    const { parent, view } = rendered();
+    vi.spyOn(view, "moveVertically").mockReturnValue(EditorSelection.cursor(FROM - 1));
+    press(view, "ArrowDown");
+    expect(view.state.selection.main.head).not.toBe(FROM);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).not.toBeNull();
+    view.destroy();
+  });
+});
+
+describe("the reverse flip", () => {
+  // A caret entering a rendered block drops the widget at once, so the face
+  // is rebuilt from its cached render as a ghost and folded away. jsdom has
+  // neither layout nor the Web Animations API; the block's coordinates and
+  // animate() are stubbed, and animate() keeps the ghost until released.
+  const FACE = '<svg id="cached-face"></svg>';
+  const INSIDE = MERMAID_DOC.indexOf("pie title");
+  let animations: Array<{ ghost: Element; keyframes: Keyframe[]; finish: () => void }>;
+
+  beforeEach(() => {
+    animations = [];
+    (Element.prototype as unknown as { animate: unknown }).animate = function (this: Element, keyframes: Keyframe[]) {
+      let finish!: () => void;
+      const finished = new Promise<void>((r) => (finish = r));
+      animations.push({ ghost: this, keyframes, finish });
+      return { finished };
+    };
+  });
+
+  afterEach(() => {
+    delete (Element.prototype as unknown as { animate?: unknown }).animate;
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  async function renderedWithFace(render = async () => ({ ok: true as const, svg: FACE })) {
+    const deco = diagramDecorations({ lang: "mermaid", label: "Mermaid", render, isDark: () => false });
+    const mounted = mount(deco, MERMAID_DOC, 0);
+    vi.spyOn(mounted.view, "coordsAtPos").mockReturnValue({ left: 0, right: 0, top: 30, bottom: 50 });
+    return mounted;
+  }
+
+  test("entering a rendered block ghosts its cached face and folds it out", async () => {
+    const { parent, view } = await renderedWithFace();
+    await vi.waitFor(() => expect(parent.innerHTML).toContain("cached-face"));
+
+    view.dispatch({ selection: EditorSelection.cursor(INSIDE) });
+    await vi.waitFor(() => expect(animations).toHaveLength(1));
+    const [flip] = animations;
+    expect(flip!.ghost.classList.contains("cm-md-diagram-ghost")).toBe(true);
+    expect(flip!.ghost.innerHTML).toContain("cached-face");
+    expect(flip!.ghost.isConnected).toBe(true);
+    expect(flip!.keyframes.map((k) => k.transform)).toEqual([
+      "perspective(1200px) rotateX(0deg)",
+      "perspective(1200px) rotateX(90deg)",
+    ]);
+
+    flip!.finish();
+    await vi.waitFor(() => expect(flip!.ghost.isConnected).toBe(false));
+    view.destroy();
+  });
+
+  test("an edit that lands the caret inside does not flip", async () => {
+    const { parent, view } = await renderedWithFace();
+    await vi.waitFor(() => expect(parent.innerHTML).toContain("cached-face"));
+
+    view.dispatch({ changes: { from: INSIDE, insert: " " }, selection: EditorSelection.cursor(INSIDE + 1) });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(animations).toHaveLength(0);
+    view.destroy();
+  });
+
+  test("entering before the first render lands has no face to flip", async () => {
+    const { view } = await renderedWithFace(() => new Promise(() => {}));
+    view.dispatch({ selection: EditorSelection.cursor(INSIDE) });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(animations).toHaveLength(0);
+    view.destroy();
+  });
+});
+
+describe("in the Wysiwyg editor", () => {
+  afterEach(() => {
+    unmountWysiwygs();
+    delete hybridSurfaceThemes.editor;
+    document.body.innerHTML = "";
+  });
+
+  test("both kinds of block render in the editor surface's theme", async () => {
+    hybridSurfaceThemes.editor = "dark";
+    mermaidLib.initialize.mockClear();
+    exportToSvg.mockClear();
+    const { content } = await mountWysiwyg({ value: `${MERMAID_DOC}\n\n${EXCALIDRAW_DOC}` });
+
+    await vi.waitFor(() => expect(content.querySelectorAll(".cm-md-diagram-rendered")).toHaveLength(2));
+    await vi.waitFor(() => expect(exportToSvg).toHaveBeenCalled());
+    expect(mermaidLib.initialize).toHaveBeenCalledWith(expect.objectContaining({ theme: "dark" }));
+    expect(exportToSvg).toHaveBeenCalledWith(
+      expect.objectContaining({ appState: expect.objectContaining({ exportWithDarkMode: true }) }),
     );
-    expect(wysiwygSrc).toMatch(
-      /excalidrawDecorations\([\s\S]{1,120}effectiveHybridSurfaceTheme\(surface\) === "dark"/,
-    );
-    expect(wysiwygSrc).toMatch(/openDiagramZoom\(svg\)/);
-    // The actions row the widget builds is the hook the editor's stylesheet
-    // targets; the rendered DOM half is asserted above.
-    expect(wysiwygSrc).toMatch(/cm-md-diagram-actions/);
+  });
+
+  test("View opens the pan and zoom viewer on the diagram", async () => {
+    vi.mocked(openDiagramZoom).mockClear();
+    const { content } = await mountWysiwyg({ value: MERMAID_DOC });
+    const view = await vi.waitFor(() => {
+      const btn = content.querySelector<HTMLButtonElement>(".cm-md-diagram-view:not(.cm-md-diagram-copy)");
+      expect(btn?.style.display).toBe("");
+      return btn!;
+    });
+    view.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await vi.waitFor(() => expect(openDiagramZoom).toHaveBeenCalledWith('<svg id="mermaid-face"></svg>'));
   });
 });
