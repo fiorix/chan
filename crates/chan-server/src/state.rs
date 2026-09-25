@@ -329,8 +329,34 @@ pub(crate) mod test_support {
     /// so work behind a yield or another await that needs no pool thread
     /// completes, and fails, while the pool is held. Work done inline right
     /// before or right after the handler awaits a pool task is invisible
-    /// here: the handler is pending either way.
+    /// here: the handler is pending either way. A route whose work has an
+    /// effect a test can observe proves those two cases with
+    /// [`assert_uses_blocking_pool_with_effect`].
     pub async fn assert_uses_blocking_pool<F: std::future::Future>(future: F) -> F::Output {
+        pin_blocking_pool(future, None).await
+    }
+
+    /// [`assert_uses_blocking_pool`], plus proof from the handler's effect
+    /// that its work ran on the pool and nowhere else. `effect` reports
+    /// whether that work has happened (the created file exists, the deleted
+    /// one is gone). It must be false once the handler has been driven with
+    /// the pool held, which fails work done inline before a pool await. The
+    /// pool is then released and drained while the handler goes unpolled,
+    /// and it must be true, which fails work done inline after a pool await:
+    /// that runs only when the handler is polled again. The handler must
+    /// queue its blocking work while the pool is held, as a route that
+    /// awaits `run_blocking` directly does.
+    pub async fn assert_uses_blocking_pool_with_effect<F: std::future::Future>(
+        future: F,
+        effect: impl Fn() -> bool,
+    ) -> F::Output {
+        pin_blocking_pool(future, Some(&effect)).await
+    }
+
+    async fn pin_blocking_pool<F: std::future::Future>(
+        future: F,
+        effect: Option<&dyn Fn() -> bool>,
+    ) -> F::Output {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let blocker = tokio::task::spawn_blocking(move || {
@@ -342,15 +368,35 @@ pub(crate) mod test_support {
         let completed_while_held = tokio::time::timeout(HELD_FOR, future.as_mut())
             .await
             .is_ok();
+        let effect_while_held = effect.is_some_and(|effect| effect());
         release_tx.send(()).unwrap();
         assert!(
             !completed_while_held,
             "blocking handler completed on the runtime thread while the blocking pool was occupied"
         );
+        assert!(
+            !effect_while_held,
+            "blocking handler's work took effect while the blocking pool was occupied, \
+             so it ran on the runtime thread"
+        );
         tokio::time::timeout(Duration::from_secs(5), blocker)
             .await
             .unwrap()
             .unwrap();
+        if let Some(effect) = effect {
+            // One blocking thread runs its queue in order, so a task queued
+            // now runs after everything the handler queued while the pool was
+            // held, and the handler is not polled while this waits.
+            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                effect(),
+                "blocking handler's work had not taken effect once the blocking pool drained, \
+                 so it runs on the runtime thread when the handler is polled"
+            );
+        }
         tokio::time::timeout(Duration::from_secs(5), future)
             .await
             .expect("handler did not complete after the blocking pool was released")
@@ -625,5 +671,79 @@ pub(crate) mod test_support {
         one_blocking_thread_runtime().block_on(assert_uses_blocking_pool(yield_then_write_inline(
             dir.path().join("target.md"),
         )));
+    }
+
+    /// A wrong handler: its filesystem work runs on the runtime thread and it
+    /// then awaits a pool task, so it is pending with its work already done.
+    async fn write_inline_then_await_the_pool(target: PathBuf) {
+        std::fs::write(target, "inline").unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+    }
+
+    /// A wrong handler: it awaits a pool task and then does its filesystem
+    /// work on the runtime thread, once it is polled again.
+    async fn await_the_pool_then_write_inline(target: PathBuf) {
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        std::fs::write(target, "inline").unwrap();
+    }
+
+    /// The shape the pins exist to accept: the filesystem work is the pool
+    /// task itself.
+    async fn write_on_the_pool(target: PathBuf) {
+        tokio::task::spawn_blocking(move || std::fs::write(target, "pooled").unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// The plain pin's documented limit, pinned so its doc cannot drift from
+    /// it: inline work beside a pool await leaves the handler pending while
+    /// the pool is held, so the pin passes both wrong handlers.
+    #[test]
+    fn the_plain_pin_passes_inline_work_beside_a_pool_await() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = dir.path().join("before.md");
+        let after = dir.path().join("after.md");
+        let runtime = one_blocking_thread_runtime();
+        runtime.block_on(assert_uses_blocking_pool(write_inline_then_await_the_pool(
+            before.clone(),
+        )));
+        runtime.block_on(assert_uses_blocking_pool(await_the_pool_then_write_inline(
+            after.clone(),
+        )));
+        assert_eq!(std::fs::read_to_string(before).unwrap(), "inline");
+        assert_eq!(std::fs::read_to_string(after).unwrap(), "inline");
+    }
+
+    #[test]
+    #[should_panic(expected = "work took effect while the blocking pool was occupied")]
+    fn the_effect_pin_fails_inline_work_before_a_pool_await() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        one_blocking_thread_runtime().block_on(assert_uses_blocking_pool_with_effect(
+            write_inline_then_await_the_pool(target.clone()),
+            || target.exists(),
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "work had not taken effect once the blocking pool drained")]
+    fn the_effect_pin_fails_inline_work_after_a_pool_await() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        one_blocking_thread_runtime().block_on(assert_uses_blocking_pool_with_effect(
+            await_the_pool_then_write_inline(target.clone()),
+            || target.exists(),
+        ));
+    }
+
+    #[test]
+    fn the_effect_pin_passes_work_done_on_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        one_blocking_thread_runtime().block_on(assert_uses_blocking_pool_with_effect(
+            write_on_the_pool(target.clone()),
+            || target.exists(),
+        ));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "pooled");
     }
 }
