@@ -1,78 +1,168 @@
-import { describe, expect, test } from "vitest";
-import client from "../../api/client.ts?raw";
-import contact from "./contact.ts?raw";
-import wysiwyg from "../Wysiwyg.svelte?raw";
+// @vitest-environment jsdom
+//
+// The contact bubble offers the mention corpus beside contact files. It is
+// opened on a real editor view over the typed trigger, with the contacts and
+// mentions lookups stubbed; the assertions read the rows it renders, the
+// lookups it makes and what a pick inserts. api.mentions itself is driven
+// against a stubbed fetch.
 
-describe("api.mentions client method", () => {
-  test("api.mentions hits /api/mentions with the q+limit query string", () => {
-    expect(client).toMatch(
-      /mentions: \(q = "", limit = 10\) => \{[\s\S]*?qs\.set\("limit", String\(limit\)\);[\s\S]*?req<Array<\{ label: string \}>>\([\s\S]*?"GET",[\s\S]*?`\/api\/mentions\?\$\{qs\.toString\(\)\}`/,
-    );
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+type Contact = { path: string; label: string; emails?: string[]; aliases?: string[] };
+
+const lookups = vi.hoisted(() => ({
+  contacts: [] as Contact[] | Promise<Contact[]>,
+  mentions: [] as Array<{ label: string }>,
+  mentionsFail: false,
+}));
+
+vi.mock("../../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      contacts: vi.fn(async () => lookups.contacts),
+      mentions: vi.fn(async () => {
+        if (lookups.mentionsFail) throw new Error("no mentions route");
+        return lookups.mentions;
+      }),
+    },
+  };
+});
+
+import { api } from "../../api/client";
+import { openContactBubble, type ContactBubbleMode } from "./contact";
+
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+
+const views: EditorView[] = [];
+const handles: Array<{ dismiss(): void }> = [];
+
+const AMY: Contact = { path: "Contacts/amy.md", label: "Amy Adams", aliases: ["AA"] };
+
+beforeEach(() => {
+  lookups.contacts = [AMY];
+  lookups.mentions = [{ label: "@@amy" }, { label: "@@aa" }, { label: "@@ambrose" }];
+  lookups.mentionsFail = false;
+});
+
+afterEach(() => {
+  for (const h of handles.splice(0)) h.dismiss();
+  for (const v of views.splice(0)) v.destroy();
+  document.body.innerHTML = "";
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+});
+
+/// Open the bubble over `typed` (the whole doc) and wait out its lookup.
+async function openOn(typed: string, mode: ContactBubbleMode) {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const view = new EditorView({
+    state: EditorState.create({ doc: typed, selection: { anchor: typed.length } }),
+    parent,
+  });
+  views.push(view);
+  const onDismiss = vi.fn();
+  const handle = openContactBubble({
+    view,
+    triggerStart: 0,
+    triggerEnd: typed.length,
+    initialQuery: typed.replace(/^@+/, ""),
+    onDismiss,
+    mode,
+  });
+  handles.push(handle);
+  await new Promise((r) => setTimeout(r, 80));
+  return { view, handle, onDismiss };
+}
+
+function rows(): Array<[string, "contact" | "mention"]> {
+  return [...document.querySelectorAll(".md-contact-bubble .md-bubble-row")].map((row) => [
+    row.firstElementChild?.textContent ?? "",
+    row.classList.contains("md-bubble-row-mention-only") ? "mention" : "contact",
+  ]);
+}
+
+function key(name: string): KeyboardEvent {
+  return new KeyboardEvent("keydown", { key: name });
+}
+
+describe("the rows", () => {
+  test("list contacts, then the mention tokens no contact already names, the latter marked", async () => {
+    await openOn("@@am", "mention");
+    expect(rows(), "@@amy is the contact's file name and @@aa its alias").toEqual([
+      ["Amy Adams", "contact"],
+      ["@@ambrose", "mention"],
+    ]);
   });
 
-  test("doc comment pins the mentions-route contract (@@ sigil composition)", () => {
-    expect(client).toMatch(/Mention-corpus prefix lookup/);
-    expect(client).toMatch(/Labels[\s\S]{1,40}arrive WITH the `@@` sigil/i);
+  test("come from both lookups, under either trigger", async () => {
+    for (const [typed, mode] of [
+      ["@am", "wiki"],
+      ["@@am", "mention"],
+    ] as const) {
+      vi.clearAllMocks();
+      await openOn(typed, mode);
+      expect(api.contacts).toHaveBeenCalledWith("am", 8);
+      expect(api.mentions, mode).toHaveBeenCalledWith("am", 8);
+    }
+  });
+
+  test("ask for the mentions without waiting on the contacts", async () => {
+    lookups.contacts = new Promise<Contact[]>(() => {});
+    await openOn("@@am", "mention");
+    expect(api.mentions).toHaveBeenCalledTimes(1);
+  });
+
+  test("still list the contacts when the mentions lookup fails", async () => {
+    lookups.mentionsFail = true;
+    await openOn("@@am", "mention");
+    expect(rows()).toEqual([["Amy Adams", "contact"]]);
   });
 });
 
-describe("contact bubble merges mention corpus", () => {
-  test("`Suggestion` discriminated union covers contact + mention", () => {
-    expect(contact).toMatch(
-      /type Suggestion =[\s\S]*?\| \{ kind: "contact"; contact: Contact \}[\s\S]*?\| \{ kind: "mention"; mention: MentionHit \};/,
-    );
+describe("a pick", () => {
+  test("of a mention row inserts its token as listed, under either trigger", async () => {
+    for (const [typed, mode] of [
+      ["@am", "wiki"],
+      ["@@am", "mention"],
+    ] as const) {
+      const { view, handle, onDismiss } = await openOn(typed, mode);
+      handle.handleKey(key("ArrowDown"));
+      expect(handle.handleKey(key("Enter"))).toBe(true);
+      expect(view.state.doc.toString(), mode).toBe("@@ambrose");
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+    }
   });
 
-  test("mention corpus surfaced under BOTH triggers", () => {
-    // Both the single-`@` (wiki) and `@@` triggers fetch the
-    // mention corpus; insertion shape follows the picked row's
-    // kind, not the trigger.
-    expect(contact).toMatch(
-      /const includeMentions = true;/,
-    );
-  });
+  test("of a contact row inserts a wiki link, or a mention under the @@ trigger", async () => {
+    const wiki = await openOn("@am", "wiki");
+    wiki.handle.handleKey(key("Enter"));
+    expect(wiki.view.state.doc.toString()).toBe("[[Contacts/amy.md|Amy Adams]]");
 
-  test("fan-out queries contacts + mentions in parallel", () => {
-    expect(contact).toMatch(
-      /const contactsP = api\.contacts\(query, PAGE_LIMIT\);[\s\S]*?const mentionsP = includeMentions[\s\S]*?api\.mentions\(query, PAGE_LIMIT\)\.catch\(\(\) => \[\] as MentionHit\[\]\)[\s\S]*?Promise\.all\(\[contactsP, mentionsP\]\)/,
-    );
-  });
-
-  test("mergeSuggestions dedups mention tokens against contact basename + aliases", () => {
-    expect(contact).toMatch(
-      /function mergeSuggestions\([\s\S]*?const seen = new Set<string>\(\);[\s\S]*?for \(const c of contactRows\) \{[\s\S]*?seen\.add\(basenameStem\(c\.path\)\);[\s\S]*?for \(const a of c\.aliases\) seen\.add\(a\.toLowerCase\(\)\);/,
-    );
-  });
-
-  test("commitMention inserts the @@<Name> token verbatim", () => {
-    expect(contact).toMatch(
-      /function commitMention\(m: MentionHit\): void \{[\s\S]*?opts\.view\.dispatch\(\{[\s\S]*?insert: m\.label/,
-    );
-  });
-
-  test("Enter key routes contact vs mention to the right commit path", () => {
-    expect(contact).toMatch(
-      /if \(event\.key === "Enter"\) \{[\s\S]*?if \(hit\.kind === "contact"\) commit\(hit\.contact\);[\s\S]*?else commitMention\(hit\.mention\);/,
-    );
-  });
-
-  test("mention-only row gets the dim class", () => {
-    expect(contact).toMatch(
-      /if \(hit\.kind === "mention"\) \{[\s\S]*?row\.classList\.add\("md-bubble-row-mention-only"\);/,
-    );
+    const mention = await openOn("@@am", "mention");
+    mention.handle.handleKey(key("Enter"));
+    expect(mention.view.state.doc.toString()).toBe("@@amy");
   });
 });
 
-describe("Wysiwyg CSS dims mention-only rows", () => {
-  test(".md-bubble-row-mention-only opacity rule present", () => {
-    expect(wysiwyg).toMatch(
-      /:global\(\.md-bubble \.md-bubble-row-mention-only\) \{[\s\S]*?opacity: 0\.7;/,
+describe("api.mentions", () => {
+  test("asks /api/mentions for the prefix and the page size", async () => {
+    const { api: real } = await vi.importActual<typeof import("../../api/client")>("../../api/client");
+    const fetchMock = vi.fn(
+      async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
     );
-  });
+    vi.stubGlobal("fetch", fetchMock);
 
-  test("selected mention-only row restores full opacity", () => {
-    expect(wysiwyg).toMatch(
-      /:global\(\.md-bubble \.md-bubble-row-mention-only\.md-bubble-row-selected\) \{[\s\S]*?opacity: 1;/,
-    );
+    await real.mentions("am", 8);
+    await real.mentions();
+    const urls = fetchMock.mock.calls.map((c) => String((c as unknown[])[0]));
+    expect(urls[0]).toMatch(/\/api\/mentions\?q=am&limit=8$/);
+    expect(urls[1]).toMatch(/\/api\/mentions\?limit=10$/);
   });
 });
