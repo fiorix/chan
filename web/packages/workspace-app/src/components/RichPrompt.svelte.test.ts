@@ -1,7 +1,55 @@
-import { beforeEach, describe, expect, test } from "vitest";
-import richPromptSrc from "./RichPrompt.svelte?raw";
-import app from "../App.svelte?raw";
-import tabs from "../state/tabs.svelte.ts?raw";
+// @vitest-environment jsdom
+//
+// The Rich Prompt: a Drafts-backed composer over a terminal that submits into
+// that terminal's write queue and keeps the text as a greyed card until the
+// agent takes it. RichPrompt is mounted with its draft api stubbed and a real
+// prompt sink registered for its terminal; the assertions read the editor,
+// the sink, the draft writes and the strip. The control strip's own cases
+// live in richPromptPendingMachine.svelte.test.ts, Tab in
+// richPromptTabKeymap.test.ts, and the message id in
+// richPromptInsecureContext.svelte.test.ts.
+
+import { EditorView } from "@codemirror/view";
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+const drafts = vi.hoisted(() => ({
+  content: "",
+  created: 0,
+  writes: [] as Array<[string, string]>,
+}));
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      createDraft: vi.fn(async () => {
+        drafts.created += 1;
+        return { path: ".Drafts/rp/draft.md" };
+      }),
+      read: vi.fn(async () => ({ content: drafts.content })),
+      write: vi.fn(async (path: string, content: string) => {
+        drafts.writes.push([path, content]);
+        return {};
+      }),
+    },
+  };
+});
+
+import App from "../App.svelte";
+import RichPrompt from "./RichPrompt.svelte";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
+import { trackTimers } from "../demo/timers";
 import {
   hideRichPromptForTab,
   isRichPromptVisible,
@@ -9,23 +57,108 @@ import {
   showRichPromptForTab,
   toggleRichPromptForTab,
 } from "../state/richPrompt.svelte";
+import { workspace } from "../state/store.svelte";
+import {
+  layout,
+  registerTerminalCancelSink,
+  registerTerminalPromptSink,
+  sendPromptToTerminal,
+  type LeafNode,
+  type Tab,
+  type TerminalTab,
+} from "../state/tabs.svelte";
+import { installEditorDom, press } from "../__tests__/wysiwyg";
+import { installTerminalDom, terminalTab } from "../__tests__/terminalTab";
 
-// Rich Prompt - the Drafts-backed bubble + its toggle + the sender. The
-// terminal wiring (mount / menu / sink registration / close-discard) is covered
-// in richPromptTerminalWiring.test.ts. Component markup is asserted as source
-// shape (it is a Svelte component, not pure); the real interaction (paste ->
-// Drafts, submit carries the ref, close deletes the folder) is browser-smoked.
+installTerminalDom();
+installEditorDom();
+// The editors measure on animation frames; a synchronous frame (the terminal
+// harness's default) runs those measures inside an update.
+globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+  setTimeout(() => cb(0), 0) as unknown as number) as typeof requestAnimationFrame;
 
-describe("richPrompt state module", () => {
-  beforeEach(() => {
-    richPrompt.byTab = {};
+type Sent = { data: string; agent?: string; id?: string };
+
+const mounted: Array<Record<string, unknown>> = [];
+const unregister: Array<() => void> = [];
+let sent: Sent[];
+let cancelled: string[];
+
+beforeEach(() => {
+  sent = [];
+  cancelled = [];
+  drafts.content = "";
+  drafts.created = 0;
+  drafts.writes = [];
+});
+
+afterEach(() => {
+  for (const c of mounted.splice(0)) unmount(c);
+  for (const off of unregister.splice(0)) off();
+  richPrompt.byTab = {};
+  workspace.info = null;
+  document.body.innerHTML = "";
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+/// A `$state` tab, so the pending phase the component reads follows changes.
+function makeTab(over: Partial<TerminalTab> = {}): TerminalTab {
+  const tab = $state({
+    kind: "terminal",
+    id: "term-rp",
+    title: "t",
+    createdAt: 1,
+    broadcastEnabled: false,
+    broadcastTargetIds: [],
+    ...over,
   });
+  return tab as TerminalTab;
+}
 
-  test("per-terminal toggle / show / hide keyed by tab id (text lives in the draft)", () => {
+async function composer(tab: TerminalTab): Promise<{ target: HTMLElement; view: EditorView; content: HTMLElement }> {
+  unregister.push(
+    registerTerminalPromptSink(tab.id, (data, agent, id) => {
+      sent.push({ data, agent, id });
+      return true;
+    }),
+    registerTerminalCancelSink(tab.id, (id) => {
+      cancelled.push(id);
+      return true;
+    }),
+  );
+  showRichPromptForTab(tab.id);
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(RichPrompt, { target, props: { tab } }) as Record<string, unknown>);
+  for (let i = 0; i < 20 && !target.querySelector(".cm-content"); i += 1) {
+    await tick();
+    await Promise.resolve();
+  }
+  const content = target.querySelector<HTMLElement>(".cm-content")!;
+  const view = EditorView.findFromDOM(content)!;
+  for (let i = 0; i < 20 && view.state.doc.toString() !== drafts.content; i += 1) await tick();
+  await tick();
+  return { target, view, content };
+}
+
+/// Mod+Enter: Ctrl off the Mac, which is what jsdom reports.
+function submit(content: HTMLElement): KeyboardEvent {
+  return press(content, "Enter", { ctrlKey: true });
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    await Promise.resolve();
+  }
+}
+
+describe("the per-terminal toggle", () => {
+  test("shows, hides and toggles one terminal's composer at a time", () => {
     expect(isRichPromptVisible("t1")).toBe(false);
     toggleRichPromptForTab("t1");
     expect(isRichPromptVisible("t1")).toBe(true);
-    // Independent per terminal: opening t1 does not affect t2.
     expect(isRichPromptVisible("t2")).toBe(false);
     toggleRichPromptForTab("t1");
     expect(isRichPromptVisible("t1")).toBe(false);
@@ -36,243 +169,265 @@ describe("richPrompt state module", () => {
   });
 });
 
-describe("RichPrompt.svelte component", () => {
-  test("uses Wysiwyg as the editor implementation", () => {
-    expect(richPromptSrc).toMatch(/import Wysiwyg from "\.\.\/editor\/Wysiwyg\.svelte"/);
-    expect(richPromptSrc).toMatch(/<Wysiwyg[\s\S]{1,500}bind:value=\{content\}/);
-    expect(richPromptSrc).toMatch(/currentPath=\{draftPath\}/);
-    // Rich Prompt delegates markdown parsing, image paste/drop, and image
-    // widgets to Wysiwyg; the bubble only supplies terminal-specific behavior.
-    expect(richPromptSrc).not.toMatch(/@codemirror\/lang-markdown/);
-    expect(richPromptSrc).not.toMatch(/from "\.\.\/editor\/bubbles\/image_drop"/);
+describe("the draft behind the composer", () => {
+  test("is created on first open, bound to the terminal and started empty", async () => {
+    const tab = makeTab();
+    await composer(tab);
+    expect(drafts.created).toBe(1);
+    expect(tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md");
+    expect(drafts.writes[0]).toEqual([".Drafts/rp/draft.md", ""]);
   });
 
-  test("main-editor editing: Wysiwyg owns Enter/lists; Rich Prompt adds Mod+Enter submit", () => {
-    expect(richPromptSrc).toMatch(
-      /extraExtensions=\{editorExtensions\}/,
-    );
-    // stopPropagation: the submit chord must not bubble to the image
-    // widget's document-level View chord (paste image + Mod-Enter used to
-    // submit AND open the fullscreen zoom in one press).
-    expect(richPromptSrc).toMatch(
-      /\{ key: "Mod-Enter", run: submitFromView, stopPropagation: true \}/,
-    );
-    expect(richPromptSrc).not.toMatch(/key: "Enter"[\s\S]{1,80}submit/);
-  });
+  test("is reused when the terminal has one, and edits are written back to it", async () => {
+    drafts.content = "kept text";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/old/draft.md" });
+    const { view, target } = await composer(tab);
+    expect(drafts.created).toBe(0);
+    expect(view.state.doc.toString()).toBe("kept text");
+    expect(target.querySelector(".md-wysiwyg-cm6"), "the composer is the Wysiwyg editor").not.toBeNull();
 
-  test("Drafts-backed: per-terminal draft.md is edited as a markdown file", () => {
-    // Bound to the terminal's draft (a prop), created lazily, content loaded
-    // from + written back to draft.md. Wysiwyg receives currentPath=draftPath,
-    // so pasted images upload into the draft folder as markdown embeds and
-    // render in-place.
-    expect(richPromptSrc).toMatch(
-      /let \{ tab, focused = false \}: \{ tab: TerminalTab; focused\?: boolean \} =\s*\$props\(\)/,
-    );
-    expect(richPromptSrc).toMatch(/currentPath=\{draftPath\}/);
-    expect(richPromptSrc).not.toMatch(/getTerminalCwdRel/);
-    expect(richPromptSrc).toMatch(/await api\.createDraft\(\)/);
-    expect(richPromptSrc).toMatch(/tab\.richPromptDraftPath = path/);
-    expect(richPromptSrc).toMatch(/await api\.read\(path\)/);
-    expect(richPromptSrc).toMatch(/await api\.write\(draftPath, content\)/);
-  });
-
-  test("submit routes to THIS terminal, then KEEPS the text as the greyed read-only card", () => {
-    // Routes to the bubble's OWN tab with the chord THIS terminal reads
-    // (submitAgent()). The message id it carries, and the data-loss guard that
-    // begins a pending only once the frame went out, are asserted as behaviour
-    // in richPromptInsecureContext.svelte.test.ts.
-    expect(richPromptSrc).toMatch(
-      /import \{ rewriteImagePathsForDelivery \} from "\.\.\/editor\/deliver_images"/,
-    );
-    // The editor backing markdown stays draft-relative for preview, while the
-    // prompt frame payload is rewritten to bare absolute on-disk image paths.
-    expect(richPromptSrc).toMatch(
-      /const delivered = rewriteImagePathsForDelivery\(\s*text,\s*draftPath,[\s\S]{1,400}workspace\.info\?\.root \?\? filesContext\.current\?\.rootDisplay \?\? null,/,
-    );
-    expect(richPromptSrc).toMatch(
-      /if \(!sendPromptToTerminal\(tab\.id, delivered, submitAgent\(\), id\)\) return true;/,
-    );
-    expect(richPromptSrc).toMatch(/beginPendingPrompt\(tab, id\);/);
-    const submitBody = richPromptSrc.match(/function submitFromView\(view: EditorView\): boolean \{[\s\S]*?\n  \}/)?.[0];
-    expect(submitBody).toBeTruthy();
-    // Submit KEEPS the text (the greyed card), so it does NOT clear the
-    // composer; it guards re-submit while the card is up (no double-deliver),
-    // persists the text (reload-restores the card), and remembers it for recall.
-    expect(submitBody).not.toContain('insert: ""');
-    expect(submitBody).toContain("if (isPending) return true;");
-    expect(submitBody).toContain("lastQueued = { id, text };");
-    expect(submitBody).toContain("void flushWrite();");
-    expect(richPromptSrc).not.toMatch(/type: "input"/);
-    expect(richPromptSrc).not.toMatch(/discardDraft/);
-  });
-
-  test("delivered CLEARS the greyed card; rejected/failed un-grey + keep the text + warn", () => {
-    const consumeBody = richPromptSrc.match(/function consumeTerminalPhase\([\s\S]*?\n  \}/)?.[0];
-    expect(consumeBody).toBeTruthy();
-    // Delivered: the agent consumed the message, so the card clears (text +
-    // draft) back to an empty editable composer and refocuses the Wysiwyg editor.
-    const deliveredBranch = consumeBody?.match(
-      /if \(phase === "delivered"\)[\s\S]*?\n    \} else \{/,
-    )?.[0];
-    expect(deliveredBranch).toBeTruthy();
-    expect(deliveredBranch).toContain('content = ""');
-    expect(deliveredBranch).toContain("queueMicrotask(() => editor?.focusAt(0))");
-    // Rejected/failed: clearing pending below un-greys; the text stays for a
-    // retry; warn honestly.
-    expect(richPromptSrc).toMatch(/queue full, try again/);
-    expect(richPromptSrc).toMatch(/connection lost, message may still be queued/);
-  });
-
-  test("the greyed read-only card: readOnly lock + caret hidden, reconciled by type-to-move-on", () => {
-    // The read-only/greyed/caret-hidden card is applied via a lock
-    // compartment, but reconciles back-to-back by exiting on the first keystroke
-    // (beforeinput move-on) rather than dropping the lock -- so it never STICKS.
-    expect(richPromptSrc).toMatch(/lockCompartment/);
-    expect(richPromptSrc).toMatch(/EditorState\.readOnly\.of\(locked\)/);
-    expect(richPromptSrc).toMatch(/caret-color: transparent/);
-    // Type to move on: a user text input while pending clears the card + seeds a
-    // fresh composer with what was typed.
-    expect(richPromptSrc).toMatch(
-      /beforeinput: \(event, view\) => \{[\s\S]{1,400}if \(!isPending\) return false;[\s\S]{1,400}enterLocalEdit\(\);/,
-    );
-    expect(richPromptSrc).toMatch(/insert: seed/);
-  });
-
-  test("↑ edits the queued message (from the card or an empty composer); Esc drops it", () => {
-    expect(richPromptSrc).toMatch(/\{ key: "ArrowUp", run: recallFromView \}/);
-    // From the greyed card, recall un-greys (the text is already shown); from an
-    // empty composer it restores the buffer. Both best-effort cancel.
-    expect(richPromptSrc).toMatch(/if \(isPending\) \{[\s\S]{1,200}enterLocalEdit\(\);/);
-    // The card-up recall MUST fold the readOnly->editable reconfigure into its
-    // own dispatch and DEFER focus to a microtask -- same WKWebView flip the
-    // delivered path folds. Leaning on the out-of-band lock $effect + a
-    // synchronous focus leaves the card un-typeable until a remount (the
-    // ArrowUp-stuck-read-only regression).
-    const recallPending = richPromptSrc.match(
-      /if \(isPending\) \{[\s\S]*?return true;\n    \}/,
-    )?.[0];
-    expect(recallPending).toBeTruthy();
-    expect(recallPending).toContain("lockCompartment.reconfigure(lockExtensions(false))");
-    expect(recallPending).toContain("queueMicrotask(() => view.focus())");
-    expect(richPromptSrc).toMatch(/content\.length > 0 \|\| !lastQueued\) return false/);
-    expect(richPromptSrc).toMatch(/const \{ id, text \} = lastQueued;/);
-    expect(richPromptSrc).toMatch(/sendCancelToTerminal\(tab\.id, id\)/);
-    // Stopping a send is ONE action whichever route runs it, so Esc delegates
-    // to the recall path rather than carrying its own cancel-and-clear: the
-    // message leaves the queue and its text stays in the composer. Esc only
-    // abandons the draft when there is nothing queued to stop.
-    const dropBody = richPromptSrc.match(
-      /function dropOrAbandonFromView\(view: EditorView\): boolean \{[\s\S]*?\n  \}/,
-    )?.[0];
-    expect(dropBody).toContain("if (isPending) return recallFromView(view);");
-    expect(dropBody).toContain("abandonDraft();");
-    expect(richPromptSrc).toMatch(/function abandonDraft\(\): void/);
-    expect(richPromptSrc).toMatch(/hideRichPromptForTab\(tab\.id\)/);
-    // The strip's stop runs the same recall path. It must never reach the
-    // abandon fallthrough, which hides the whole bubble.
-    const primaryClickBody = richPromptSrc.match(
-      /function onPrimaryClick\(\): void \{[\s\S]*?\n  \}/,
-    )?.[0];
-    expect(primaryClickBody).toContain("if (isPending) recallFromView(promptView);");
-    expect(primaryClickBody).not.toContain("abandonDraft");
-    expect(primaryClickBody).not.toContain("dropOrAbandonFromView");
-  });
-
-  test("fast-path grace + ack timeout constants gate the chip and the dead-socket fail", () => {
-    // 300ms: an idle agent drains within ~1 tick -- no chip flash on routine
-    // submits. 5s: no ack means the socket is effectively dead.
-    expect(richPromptSrc).toMatch(/PENDING_CHIP_GRACE_MS = 300/);
-    expect(richPromptSrc).toMatch(/PROMPT_ACK_TIMEOUT_MS = 5000/);
-    expect(richPromptSrc).toMatch(/failPendingPrompt\(tab\);/);
-  });
-
-  test("strip surfaces the queue depth (server + the local just-submitted) beside its controls", () => {
-    // queuedCount = max(server queueDepth, the local just-submitted message
-    // after the grace window) -- so a teammate `cs terminal write` and the
-    // user's own queued messages both show.
-    expect(richPromptSrc).toMatch(
-      /Math\.max\(tab\.queueDepth \?\? 0, isPending && pendingChipVisible \? 1 : 0\)/,
-    );
-    // The count and a transient note share one advisory text slot; a note
-    // takes the slot without disturbing either control.
-    expect(richPromptSrc).toMatch(
-      /transientNote \?\? \(queuedCount > 0 \? `\$\{queuedCount\} queued` : null\)/,
-    );
-    // The affordances are controls, not label text. The primary carries the
-    // pending state: submit becomes stop and back again. Recall is a control
-    // only when nothing is pending, because stopping a send already returns
-    // the text to the composer and a second control would repeat it.
-    expect(richPromptSrc).toMatch(
-      /if \(isPending\) return null;[\s\S]{1,120}\{ label: "↑ recall", disabled: content\.length > 0 \}/,
-    );
-    expect(richPromptSrc).toMatch(
-      /\{ label: "esc cancel", disabled: false \}/,
-    );
-    expect(richPromptSrc).toMatch(
-      /\{ label: submitLabel, disabled: content\.trim\(\)\.length === 0 \}/,
-    );
-    expect(richPromptSrc).not.toMatch(/label: "↑ edit"/);
-  });
-
-  test("submitAgent prefers server identity and delegates protocol fallback", () => {
-    // The session frame's spawn-derived identity is authoritative. The shared
-    // helper retains negotiated-protocol inference for old servers and agents
-    // launched manually from a shell.
-    expect(richPromptSrc).toMatch(/function submitAgent\(\): SubmitAgent/);
-    expect(richPromptSrc).toMatch(
-      /return submitAgentForTerminal\(tab\.submitAgent, tab\.keyboardProtocol\);/,
-    );
-  });
-
-  test("adds only a never-escape composer Tab; Wysiwyg owns the rest of the keymap", () => {
-    // Tab in the composer indents and must never escape to the browser's focus
-    // nav, so RichPrompt binds it with an indentMore fallback. It does NOT
-    // reimplement Enter continuation or markdown backspace (Wysiwyg owns those).
-    expect(richPromptSrc).toMatch(/indentListItem\(v\) \|\| indentMore\(v\)/);
-    expect(richPromptSrc).not.toMatch(/insertNewlineContinueMarkup/);
-    expect(richPromptSrc).not.toMatch(/deleteMarkupBackward/);
-  });
-
-  test("floating bubble with the submit-with-cmd+enter label", () => {
-    expect(richPromptSrc).toMatch(/class="rich-prompt"/);
-    expect(richPromptSrc).toMatch(/submit with cmd\+enter/);
-    expect(richPromptSrc).toMatch(/position: absolute/);
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
+    await new Promise((r) => setTimeout(r, 450));
+    expect(drafts.writes.at(-1)).toEqual([".Drafts/old/draft.md", "kept text!"]);
   });
 });
 
-describe("App.svelte Rich Prompt toggle", () => {
-  test("imports + binds the per-terminal toggle on a KeyP chord", () => {
-    expect(app).toMatch(
-      /import \{ toggleRichPromptForTab \} from "\.\/state\/richPrompt\.svelte"/,
-    );
-    // Cmd+Shift+P on macOS; off mac the Win/Super key is ruled out, so both
-    // the desktop webview and the browser take Ctrl+Shift+P. Resolved into a
-    // `richPromptChord` boolean gated on currentOS().
-    expect(app).toMatch(/const richPromptChord =[\s\S]{1,40}currentOS\(\) === "mac"/);
-    // mac path keeps metaKey; off mac it is ctrlKey (both surfaces).
-    expect(app).toMatch(/e\.metaKey && !e\.ctrlKey && !e\.altKey && e\.shiftKey/);
-    expect(app).toMatch(/e\.ctrlKey && !e\.metaKey && !e\.altKey && e\.shiftKey/);
-    // Toggles ONLY the focused terminal; no-op when it isn't a terminal.
-    expect(app).toMatch(
-      /if \(richPromptChord\)[\s\S]{1,200}activeTerminalTab\(\)[\s\S]{1,80}toggleRichPromptForTab\(term\.id\)/,
-    );
+describe("the keymap", () => {
+  test("Enter continues a list as the editor does, and does not submit", async () => {
+    drafts.content = "- first";
+    const { view, content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    press(content, "Enter");
+    await settle();
+    expect(view.state.doc.toString()).toBe("- first\n- ");
+    expect(sent).toEqual([]);
+  });
+
+  test("Mod+Enter submits once and stops there, so no outer listener sees it", async () => {
+    drafts.content = "run the tests";
+    const { content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    submit(content);
+    document.removeEventListener("keydown", outer);
+
+    expect(sent.map((s) => s.data)).toEqual(["run the tests"]);
+    expect(outer).not.toHaveBeenCalled();
   });
 });
 
-describe("prompt-sink sender (tabs.svelte.ts)", () => {
-  test("registry + per-terminal sender exist, distinct from the input sink", () => {
-    expect(tabs).toMatch(/export function registerTerminalPromptSink\(/);
-    // The trailing id is optional: the team orchestrator's lead-identity
-    // call sites pass none and stay legacy fire-and-forget.
-    expect(tabs).toMatch(
-      /export function sendPromptToTerminal\(\s*tabId: string,\s*data: string,\s*agent\?: string,\s*id\?: string,\s*\): boolean/,
-    );
-    expect(tabs).toMatch(/const terminalPromptSinks = new Map/);
+describe("a submit", () => {
+  test("delivers draft images as their absolute path on disk", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    drafts.content = "see ![](shot.png)";
+    const { content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
+    submit(content);
+    expect(sent[0]!.data).toMatch(/^see \/home\/me\/ws\/\.Drafts\/rp\/shot\.png\s*$/);
   });
 
-  test("per-terminal draft path is a tab field + persisted (rpd) for leak-free cleanup", () => {
-    expect(tabs).toMatch(/richPromptDraftPath\?: string;/);
-    expect(tabs).toMatch(/rpd\?: string;/);
-    expect(tabs).toMatch(/rpd: t\.richPromptDraftPath/);
+  test("names the agent the server identified, else the one the keyboard protocol implies", async () => {
+    drafts.content = "hi";
+    const named = await composer(makeTab({ id: "term-a", richPromptDraftPath: ".Drafts/rp/draft.md", submitAgent: "codex" }));
+    submit(named.content);
+    const inferred = await composer(
+      makeTab({
+        id: "term-b",
+        richPromptDraftPath: ".Drafts/rp/draft.md",
+        keyboardProtocol: {
+          xtermModifyOtherKeys: 2,
+          kitty: { screen: "main", mainFlags: 0, alternateFlags: 0, mainStack: [], alternateStack: [] },
+        } as unknown as TerminalTab["keyboardProtocol"],
+      }),
+    );
+    submit(inferred.content);
+    expect(sent.map((s) => s.agent)).toEqual(["codex", "claude"]);
+  });
+
+  test("keeps the text as a greyed card, saved, and a second submit sends nothing", async () => {
+    drafts.content = "careful now";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content, target } = await composer(tab);
+    submit(content);
+    await settle();
+
+    expect(view.state.doc.toString()).toBe("careful now");
+    expect(target.querySelector(".rich-prompt")!.classList.contains("pending"), "greyed").toBe(true);
+    expect(drafts.writes.at(-1)).toEqual([".Drafts/rp/draft.md", "careful now"]);
+    submit(content);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a card restored while its message is still queued opens read-only", async () => {
+    drafts.content = "from before the reload";
+    const tab = makeTab({
+      richPromptDraftPath: ".Drafts/rp/draft.md",
+      pendingPrompt: { id: "p-1", phase: "sent" } as TerminalTab["pendingPrompt"],
+    });
+    const { view } = await composer(tab);
+    expect(view.state.readOnly).toBe(true);
+  });
+
+  test("typing over the card starts a fresh composer with what was typed", async () => {
+    drafts.content = "queued text";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    submit(content);
+    await settle();
+
+    content.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "n", bubbles: true, cancelable: true }));
+    await settle();
+    expect(view.state.doc.toString()).toBe("n");
+    expect(view.state.readOnly).toBe(false);
+    expect(tab.pendingPrompt).toBeUndefined();
+  });
+});
+
+describe("the card's fate", () => {
+  test("delivered clears the composer and the draft", async () => {
+    drafts.content = "going out";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    submit(content);
+    tab.pendingPrompt = { id: sent[0]!.id!, phase: "delivered" };
+    flushSync();
+    await settle();
+
+    expect(view.state.doc.toString()).toBe("");
+    expect(view.state.readOnly).toBe(false);
+    expect(drafts.writes.at(-1)).toEqual([".Drafts/rp/draft.md", ""]);
+  });
+
+  test("a failure un-greys the card, keeps the text and says so", async () => {
+    drafts.content = "might be lost";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content, target } = await composer(tab);
+    submit(content);
+    tab.pendingPrompt = { id: sent[0]!.id!, phase: "failed" };
+    flushSync();
+    await settle();
+
+    expect(view.state.doc.toString()).toBe("might be lost");
+    expect(view.state.readOnly).toBe(false);
+    expect(target.querySelector(".rp-text")?.textContent).toBe("connection lost, message may still be queued");
+  });
+
+  test("no answer within 5s fails the send; the queued chip shows only after 300ms", async () => {
+    drafts.content = "into the void";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { content, target } = await composer(tab);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    submit(content);
+    await settle();
+    const slot = () => target.querySelector(".rp-text")?.textContent ?? null;
+
+    await vi.advanceTimersByTimeAsync(299);
+    expect(slot(), "no chip for a send that drains at once").toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(slot()).toBe("1 queued");
+    await vi.advanceTimersByTimeAsync(4700);
+    expect(slot()).toBe("connection lost, message may still be queued");
+  });
+});
+
+describe("recall", () => {
+  test("from an emptied composer, ArrowUp takes the queued message back for editing", async () => {
+    drafts.content = "second thoughts";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content } = await composer(tab);
+    submit(content);
+    await settle();
+    content.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true }));
+    await settle();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
+    await settle();
+
+    press(content, "ArrowUp");
+    await settle();
+    expect(cancelled).toEqual([sent[0]!.id]);
+    expect(view.state.doc.toString()).toBe("second thoughts");
+  });
+
+  test("the strip offers recall for a queued message, disabled while the composer has text", async () => {
+    drafts.content = "later";
+    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { view, content, target } = await composer(tab);
+    submit(content);
+    await settle();
+    content.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: "y", bubbles: true, cancelable: true }));
+    tab.queueDepth = 1;
+    flushSync();
+    await settle();
+
+    const recall = () =>
+      [...target.querySelectorAll<HTMLButtonElement>(".rp-action")].find((b) => b.textContent?.trim() === "↑ recall");
+    expect(recall()?.disabled).toBe(true);
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
+    await settle();
+    expect(recall()?.disabled).toBe(false);
+  });
+});
+
+describe("the prompt sender", () => {
+  test("reaches only a terminal with a live sink, and passes the agent and id", () => {
+    const got: Sent[] = [];
+    unregister.push(
+      registerTerminalPromptSink("term-live", (data, agent, id) => {
+        got.push({ data, agent, id });
+        return true;
+      }),
+    );
+    expect(sendPromptToTerminal("term-live", "hello", "claude", "m-1")).toBe(true);
+    expect(sendPromptToTerminal("term-gone", "hello")).toBe(false);
+    expect(got).toEqual([{ data: "hello", agent: "claude", id: "m-1" }]);
+  });
+});
+
+describe("the Rich Prompt chord", () => {
+  async function appWith(tab: Tab): Promise<() => Promise<void>> {
+    const timers = trackTimers();
+    const app: Array<Record<string, unknown>> = [];
+    installDemoWorkspace({
+      metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 0, textCount: 0 },
+      files: [],
+    });
+    const target = document.createElement("div");
+    document.body.append(target);
+    app.push(mount(App, { target }));
+    await settle();
+    const pane: LeafNode = { kind: "leaf", id: "chord-pane", tabs: [tab], activeTabId: tab.id };
+    layout.nodes = { [pane.id]: pane };
+    layout.rootId = pane.id;
+    layout.activePaneId = pane.id;
+    await settle();
+    return () => teardownDemoApp({ mounted: app, timers });
+  }
+
+  function chord(): void {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }),
+    );
+  }
+
+  test("Ctrl+Shift+P toggles the focused terminal's composer", async () => {
+    const tab = terminalTab({ id: "term-chord" });
+    const teardown = await appWith(tab);
+    try {
+      chord();
+      expect(isRichPromptVisible("term-chord")).toBe(true);
+      chord();
+      expect(isRichPromptVisible("term-chord")).toBe(false);
+    } finally {
+      await teardown();
+    }
+  });
+
+  test("does nothing when the focused tab is not a terminal", async () => {
+    const teardown = await appWith({ kind: "dashboard", id: "dash-chord", title: "Dashboard" });
+    try {
+      chord();
+      expect(richPrompt.byTab).toEqual({});
+    } finally {
+      await teardown();
+    }
   });
 });
