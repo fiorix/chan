@@ -24,6 +24,7 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
+use crate::root_locks::RootLocks;
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
@@ -359,14 +360,17 @@ pub struct WorkspaceHost {
     /// window-ops channel and the title map. `DesktopBridge::default()`
     /// (no channel, empty map) when the embedder is not chan-desktop.
     desktop: DesktopBridge,
-    /// Serializes idempotent re-registration so two callers racing the same
-    /// root resolve to one mount. The winner holds the per-workspace flock
-    /// from its `Library::open_workspace` but only lands in `workspaces`
-    /// after `build_app`; without this gate a concurrent loser would see
-    /// neither the flock-free map nor the not-yet-inserted winner and fail
-    /// its own open. Held across the open's `.await`, so it is a tokio
-    /// mutex; registration is infrequent, so serializing it is cheap.
-    register_lock: tokio::sync::Mutex<()>,
+    /// One lock per canonical workspace root, taken by the idempotent
+    /// registration, the close by root and the removal, so callers racing
+    /// one root serialize and callers of different roots do not. A mount
+    /// holds the per-workspace flock from its `Library::open_workspace` but
+    /// only lands in `workspaces` after its tenant build; without the lock a
+    /// concurrent caller of that root would see neither the flock-free map
+    /// nor the not-yet-inserted runtime, so a second mount would fail its
+    /// open and a close or removal would act on the gap. Held across the
+    /// open, the release budget and the blocking hops, so it is asynchronous;
+    /// the lock order is stated on [`RootLocks`].
+    root_locks: RootLocks,
     /// The route layer's tenant constructor, inverted so the host builds tenants
     /// without depending on chan-server. chan-server's `RouteLayer` implements
     /// it; `open_*` call through it.
@@ -742,7 +746,7 @@ impl WorkspaceHost {
             library,
             workspaces: RwLock::new(HashMap::new()),
             desktop,
-            register_lock: tokio::sync::Mutex::new(()),
+            root_locks: RootLocks::default(),
             #[cfg(test)]
             open_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1206,10 +1210,16 @@ impl WorkspaceHost {
     /// mounted root would fail `WorkspaceAlreadyOpen` anyway). A different
     /// root that collides on `config.prefix` is still an error.
     ///
-    /// Race-safe via the host's registration lock: callers racing the same
-    /// root serialize, so the first mounts and the rest observe that mount
-    /// in the pre-check and return it. A distinct root that collides on
-    /// `config.prefix` falls through to `open_registered_workspace` and its
+    /// Race-safe via the root's lock in [`root_locks`](Self::root_locks),
+    /// keyed by the canonical root computed on the blocking pool before the
+    /// lock is awaited: callers racing one root, under any spelling,
+    /// serialize, so the first mounts and the rest observe that mount in the
+    /// pre-check and return it, while a mount, close or removal of another
+    /// root never waits on this one. A distinct root that collides on
+    /// `config.prefix` holds a lock of its own, so the two mounts run at
+    /// once; [`open_workspace`](Self::open_workspace) checks the prefix and
+    /// publishes the runtime under one write guard, and the loser shuts its
+    /// tenant down, releasing the workspace it opened, before returning the
     /// duplicate-prefix error.
     ///
     /// An existing mount is revalidated before it is handed back, so a caller
@@ -1222,8 +1232,9 @@ impl WorkspaceHost {
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
-        let _registering = self.register_lock.lock().await;
-        if let Some(existing) = self.hosted_for_root(root)? {
+        let key = self.canonical_key_off_runtime(root).await?;
+        let _root_lock = self.root_locks.lock(&key).await;
+        if let Some(existing) = self.hosted_for_key(&key)? {
             self.revalidate_mounted_root(root).await;
             return Ok(existing);
         }
@@ -1275,18 +1286,17 @@ impl WorkspaceHost {
         }
     }
 
-    /// The existing mount for `root`, matched by canonical form, or `None`
-    /// when no tenant owns that path. One read lock; the returned
+    /// The existing mount whose canonical root is `key`, or `None` when no
+    /// tenant owns that root. One read lock; the returned
     /// [`HostedWorkspace`] is rebuilt from the handle captured at mount.
-    fn hosted_for_root(&self, root: &Path) -> Result<Option<HostedWorkspace>, Error> {
-        let target = canonical_key(root);
+    fn hosted_for_key(&self, key: &Path) -> Result<Option<HostedWorkspace>, Error> {
         let workspaces = self
             .workspaces
             .read()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
         Ok(workspaces
             .values()
-            .find(|runtime| runtime.canonical_root == target)
+            .find(|runtime| runtime.canonical_root == key)
             .map(hosted_from_runtime))
     }
 
@@ -2854,8 +2864,9 @@ impl WorkspaceHost {
     /// workspace key is a filesystem lookup, and the registry reads and
     /// writes beside it touch the disk too; on a slow or cloud-synced root
     /// they must stall a pool thread, never the runtime worker every tenant
-    /// shares, the way `Library::open_workspace` runs for a mount. The
-    /// caller holds only the asynchronous registration mutex across the hop.
+    /// shares, the way `Library::open_workspace` runs for a mount. A caller
+    /// holds at most its root's lock across the hop, and the hop that
+    /// computes the key choosing that lock runs before any lock is taken.
     /// A closure takes no host guard, except the removal's unregister, which
     /// takes the mount-state mutex alone after the registry call returns, so
     /// no hop adds an edge to the lock order.
@@ -2891,25 +2902,30 @@ impl WorkspaceHost {
     /// launcher off-toggle, the control-socket close) records off so a devserver
     /// restart does not bring the just-closed workspace back up; a shutdown close
     /// preserves the overlay so the next boot restores the same on-set.
+    ///
+    /// Computes `root`'s canonical key on the blocking pool, then holds that
+    /// root's lock in [`root_locks`](Self::root_locks) for the whole close,
+    /// release budget included, so only callers of the same root wait on it.
     async fn close_workspace_for_root_impl(
         &self,
         root: &Path,
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let _registering = self.register_lock.lock().await;
         let target = self.canonical_key_off_runtime(root).await?;
+        let _root_lock = self.root_locks.lock(&target).await;
         self.close_workspace_for_root_locked(root, &target, force, record_off)
             .await
     }
 
-    /// Close-by-root body while [`register_lock`](Self::register_lock) is held.
+    /// Close-by-root body while the lock of the root keyed `target` is held.
     ///
-    /// Serializing registration with teardown prevents a close from observing
-    /// the gap after a mount starts but before its runtime enters `workspaces`.
-    /// `remove_workspace_for_root` also calls this body under the same guard so
-    /// unregister cannot race a workspace open. `target` is `root`'s canonical
-    /// key, which the caller computed off the runtime thread.
+    /// Sharing that lock with registration keeps a close from observing the
+    /// gap after a mount of the same root starts but before its runtime
+    /// enters `workspaces`. `remove_workspace_for_root` also calls this body
+    /// under the same guard so its unregister cannot race an open of that
+    /// root. `target` is `root`'s canonical key, which the caller computed off
+    /// the runtime thread before taking the lock.
     async fn close_workspace_for_root_locked(
         &self,
         root: &Path,
@@ -2977,13 +2993,21 @@ impl WorkspaceHost {
     /// the host process so the host's in-memory library + the persisted overlay
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
+    ///
+    /// Holds the root's lock in [`root_locks`](Self::root_locks) from the
+    /// unmount through the unregister, keyed by the canonical root computed
+    /// on the blocking pool first, so a mount of the same root cannot slip in
+    /// between and a caller of another root never waits on this one. The
+    /// shared stores it writes (the overlay, the window registry, the library
+    /// registry) serialize their writes under locks of their own, which is
+    /// what keeps removals of different roots safe beside each other.
     pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let _registering = self.register_lock.lock().await;
         let target = self.canonical_key_off_runtime(root).await?;
+        let _root_lock = self.root_locks.lock(&target).await;
         // Unmount first (releases the per-workspace flock before the unregister's
         // reset); a no-op when the workspace is registered-but-off or not held
         // here. Refusal leaves the runtime, registry, overlay, and windows intact.
@@ -4029,9 +4053,6 @@ mod tests {
         check("live_workspace", &|| {
             assert!(host.live_workspace(&missing).is_none());
         });
-        check("hosted_for_root", &|| {
-            assert!(host.hosted_for_root(&missing).expect("lookup").is_none());
-        });
         check("mounted_prefix_for_root", &|| {
             assert!(host.mounted_prefix_for_root(&missing).is_none());
         });
@@ -4048,15 +4069,6 @@ mod tests {
             assert_eq!(
                 host.mounted_prefix_for_root(&mounted).as_deref(),
                 Some("/workspace-0")
-            );
-        });
-        check("hosted root match", &|| {
-            assert_eq!(
-                host.hosted_for_root(&mounted)
-                    .expect("lookup")
-                    .expect("mounted")
-                    .prefix,
-                "/workspace-0"
             );
         });
     }

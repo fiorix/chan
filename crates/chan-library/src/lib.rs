@@ -21,6 +21,7 @@ pub mod host;
 pub mod participant_names;
 pub mod pending_window_commands;
 pub mod prefix;
+mod root_locks;
 pub mod serve_config;
 pub mod session_presence;
 pub mod tenant;
