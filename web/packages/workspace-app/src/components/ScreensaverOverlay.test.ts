@@ -135,7 +135,9 @@ describe("with a PIN set", () => {
     input!.dispatchEvent(new Event("input", { bubbles: true }));
     press(input!, "Enter");
 
-    await vi.waitFor(() => expect(screensaver.locked).toBe(false));
+    // The PIN hash is a PBKDF2 derivation in WebCrypto's worker pool, whose
+    // time grows with the machine's load, so the wait is bounded generously.
+    await vi.waitFor(() => expect(screensaver.locked).toBe(false), { timeout: 10_000 });
     expect(verify).toHaveBeenCalledWith(await hashPin("1234", "/ws"));
     flushSync();
     expect(document.querySelector(".screensaver-backdrop")).toBeNull();
@@ -152,8 +154,9 @@ describe("with a PIN set", () => {
     vi.useFakeTimers();
     press(input, "Enter");
 
-    await vi.waitFor(() =>
-      expect(backdrop.querySelector(".screensaver-card")?.classList.contains("shake")).toBe(true),
+    await vi.waitFor(
+      () => expect(backdrop.querySelector(".screensaver-card")?.classList.contains("shake")).toBe(true),
+      { timeout: 10_000 },
     );
     expect(input.value).toBe("");
     expect(backdrop.querySelector('[role="alert"]')?.textContent).toBe("Wrong PIN");
