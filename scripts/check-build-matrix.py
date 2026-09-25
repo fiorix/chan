@@ -1078,6 +1078,13 @@ CARGO_NON_BUILDING = frozenset(
 # Commands that can run cargo with a selection this check cannot read.
 OPAQUE_RUNNERS = frozenset({"bash", "eval", "gmake", "just", "make", "sh", "xargs"})
 
+# A word that names cargo: the bare program, a path to it, or either one at
+# the edge of a backtick command substitution.
+CARGO_WORD = re.compile(r"(?:^|[/`])cargo(?:`|$)")
+
+# The characters that end a word in bash, so a `#` after one starts a comment.
+SHELL_WORD_ENDS = " \t;&|()<>"
+
 
 def shell_function(text: str, name: str, path: str) -> list[tuple[int, str]]:
     """The body of shell function NAME in TEXT, as (line number, line) pairs.
@@ -1103,12 +1110,45 @@ def shell_function(text: str, name: str, path: str) -> list[tuple[int, str]]:
     raise ContractError(f"{path}: {name}() is not closed by a `}}` line")
 
 
+def shell_code(text: str) -> tuple[str, bool]:
+    """TEXT up to the comment bash would see in it, and whether it continues.
+
+    bash starts a comment only at a `#` that begins a word, outside quotes,
+    and a backslash continues the line only when it is the last character,
+    unescaped and outside single quotes; a backslash inside a comment is
+    part of the comment and continues nothing.
+    """
+    quote = ""
+    escaped = False
+    previous = " "
+    for index, character in enumerate(text):
+        if escaped:
+            # An escaped character belongs to the word, so a `#` after it
+            # does not begin one.
+            escaped = False
+            previous = "\\"
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if character == quote:
+                quote = ""
+        elif character in "'\"":
+            quote = character
+        elif character == "#" and previous in SHELL_WORD_ENDS:
+            return text[:index], False
+        previous = character
+    return text, escaped
+
+
 def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, list[str]]]:
     """The simple commands in BODY as (first line number, words) pairs.
 
-    Backslash continuations are joined and `;`, `&&`, `||`, `|` and
-    parentheses end a command, so a cargo call chained after another one is
-    read on its own. Leading `NAME=value` assignments are dropped.
+    Lines are joined where bash joins them, removing the backslash and the
+    newline outright, so a word split across two lines is one word. `;`,
+    `&&`, `||`, `|` and parentheses end a command, so a cargo call chained
+    after another one is read on its own. Leading `NAME=value` assignments
+    are dropped.
     """
     commands = []
     pending = ""
@@ -1116,20 +1156,20 @@ def shell_commands(body: list[tuple[int, str]], path: str) -> list[tuple[int, li
     for number, line in body:
         if not pending:
             pending_line = number
-        if line.endswith("\\"):
-            pending += line[:-1] + " "
+        code, continues = shell_code(pending + line)
+        if continues:
+            pending = code[:-1]
             continue
-        pending += line
-        lexer = shlex.shlex(pending, posix=True, punctuation_chars=True)
+        pending = ""
+        lexer = shlex.shlex(code, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
-        lexer.commenters = "#"
+        lexer.commenters = ""
         try:
             tokens = list(lexer)
         except ValueError as error:
             raise ContractError(
                 f"{path}:{pending_line}: cannot split the command: {error}"
             ) from error
-        pending = ""
         words: list[str] = []
         for token in tokens + [";"]:
             if token and all(character in ";&|()" for character in token):
@@ -1225,9 +1265,6 @@ def check_aur_recipe(path: str, recipe: str) -> None:
     cargo_calls = 0
     for number, words in shell_commands(shell_function(recipe, "check", path), path):
         program = words[0]
-        if program in ("command", "env", "exec", "time") and len(words) > 1:
-            words = words[1:]
-            program = words[0]
         where = f"{path}:{number}: check() runs `{' '.join(words)}`"
         if program.startswith("$"):
             raise ContractError(
@@ -1239,7 +1276,18 @@ def check_aur_recipe(path: str, recipe: str) -> None:
                 f"{where}, which can run cargo with a package selection "
                 f"this check cannot read; call cargo with `-p {package}`"
             )
-        if Path(program).name != "cargo":
+        if program != "cargo" and not program.endswith("/cargo"):
+            # A command that names cargo anywhere but as its program runs it
+            # through something this check does not read (a wrapper such as
+            # timeout, env or sudo, `!`, a brace group, the body of an if or
+            # a for, a command substitution), so it is refused rather than
+            # guessed at: the contract holds only for calls it can read.
+            if any(CARGO_WORD.search(word) for word in words):
+                raise ContractError(
+                    f"{where}, which runs cargo behind `{program}`, a shape "
+                    "this check cannot read; call cargo as the command itself "
+                    f"with `-p {package}`"
+                )
             continue
         arguments = words[1:]
         if arguments and arguments[0].startswith("+"):

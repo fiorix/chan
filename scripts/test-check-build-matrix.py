@@ -122,6 +122,12 @@ CASES = (
     beside("in backticks", "    : `cargo test --frozen --release --workspace`"),
     # bash starts a comment only at the beginning of a word.
     beside("a # inside a word", "    cargo test --frozen --release -p chan#x --workspace"),
+    # An escaped space is part of the word, so the `#` after it is too and
+    # the `;` still ends the command.
+    beside(
+        "an escaped space before #",
+        "    cargo test --frozen --release -p chan -- x\\ #; cargo test --frozen --release --workspace",
+    ),
     # A backslash inside a comment continues nothing, so the next line is a
     # command of its own.
     Case(
