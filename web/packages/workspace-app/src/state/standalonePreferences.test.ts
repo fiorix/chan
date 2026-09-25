@@ -12,7 +12,6 @@ import { EditorView } from "@codemirror/view";
 import { flushSync, mount, tick, unmount, type ComponentProps } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import type { Preferences } from "../api/types";
 import { __testSetStandalonePreferences, currentPreferences, workspace } from "./store.svelte";
 import { allCommands } from "./commands";
 import "./commands/install";
@@ -25,6 +24,7 @@ import App from "../App.svelte";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers } from "../demo/timers";
+import { preferences } from "../__tests__/standalone";
 import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../__tests__/wysiwyg";
 
 vi.mock("@xterm/xterm", () => ({
@@ -57,15 +57,6 @@ Object.defineProperty(document, "fonts", {
   value: { load: vi.fn(async () => [{}]), ready: Promise.resolve() },
 });
 
-function machinePreferences(over: Partial<Preferences>): Preferences {
-  return {
-    date_format: "mdy-slash",
-    line_spacing: "relaxed",
-    terminal: { ghostty: false },
-    ...over,
-  } as unknown as Preferences;
-}
-
 const mounted: Array<Record<string, unknown>> = [];
 const views: EditorView[] = [];
 
@@ -83,26 +74,26 @@ afterEach(() => {
 describe("a window with no workspace still reads its machine preferences", () => {
   test("currentPreferences falls back to what the standalone tenant served", () => {
     expect(currentPreferences()).toBeNull();
-    __testSetStandalonePreferences(machinePreferences({}));
+    __testSetStandalonePreferences(preferences({ date_format: "mdy-slash" }));
     expect(currentPreferences()?.date_format).toBe("mdy-slash");
   });
 
   test("the date macros honour the standalone date_format", () => {
     expect(defaultDateFormatId()).toBe("iso");
-    __testSetStandalonePreferences(machinePreferences({}));
+    __testSetStandalonePreferences(preferences({ date_format: "mdy-slash" }));
     expect(defaultDateFormatId()).toBe("mdy-slash");
   });
 });
 
 describe("each reader of a setting", () => {
   test("Wysiwyg takes its line spacing", async () => {
-    __testSetStandalonePreferences(machinePreferences({ line_spacing: "compact" }));
+    __testSetStandalonePreferences(preferences({ line_spacing: "compact" }));
     const { target } = await mountWysiwyg({ value: "text" });
     expect(target.querySelector<HTMLElement>(".md-wysiwyg-cm6")?.dataset.density).toBe("compact");
   });
 
   test("Source takes its line spacing", () => {
-    __testSetStandalonePreferences(machinePreferences({ line_spacing: "compact" }));
+    __testSetStandalonePreferences(preferences({ line_spacing: "compact" }));
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(
@@ -128,14 +119,14 @@ describe("each reader of a setting", () => {
       views.push(view);
       return [...parent.querySelectorAll<HTMLElement>(".cm-md-date-pill")].map((p) => p.dataset.formatId!);
     };
-    __testSetStandalonePreferences(machinePreferences({ date_format: "dmy-slash" }));
+    __testSetStandalonePreferences(preferences({ date_format: "dmy-slash" }));
     expect(pillFormats()).toEqual(["dmy-slash"]);
-    __testSetStandalonePreferences(machinePreferences({ date_format: "mdy-slash" }));
+    __testSetStandalonePreferences(preferences({ date_format: "mdy-slash" }));
     expect(pillFormats()).toEqual(["mdy-slash"]);
   });
 
   test("Settings applies the editor font size while closed", () => {
-    __testSetStandalonePreferences(machinePreferences({ editor_font_size: 18 }));
+    __testSetStandalonePreferences(preferences({ editor_font_size: 18 }));
     const target = document.createElement("div");
     document.body.append(target);
     mounted.push(mount(SettingsOverlay, { target }));
@@ -146,9 +137,7 @@ describe("each reader of a setting", () => {
   test("the terminal engine command names the configured engine", () => {
     const title = () => allCommands().find((c) => c.id === "app.terminal.backend.toggle")!.title;
     expect(title()).toMatch(/^Terminal engine: xterm /);
-    __testSetStandalonePreferences(
-      machinePreferences({ terminal: { ghostty: true } as Preferences["terminal"] }),
-    );
+    __testSetStandalonePreferences(preferences({ terminal: { ...preferences().terminal, ghostty: true } }));
     expect(title()).toMatch(/^Terminal engine: ghostty /);
   });
 
@@ -167,7 +156,7 @@ describe("each reader of a setting", () => {
       for (let i = 0; i < 4; i += 1) await tick();
 
       workspace.info = null;
-      __testSetStandalonePreferences(machinePreferences({ editor_theme: "word" }));
+      __testSetStandalonePreferences(preferences({ editor_theme: "word" }));
       for (let i = 0; i < 4; i += 1) await tick();
       expect(document.documentElement.getAttribute("data-editor-theme")).toBe("word");
     } finally {
