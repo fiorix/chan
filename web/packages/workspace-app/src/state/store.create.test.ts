@@ -11,8 +11,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { setNotifyHandler } from "./notify.svelte";
-import { browserSelection, fileOps, pathPromptState, resolvePathPrompt } from "./store.svelte";
+import {
+  browserSelection,
+  fileOps,
+  pathPromptState,
+  resolvePathPrompt,
+  ui,
+} from "./store.svelte";
 import {
   activePane,
   activeTabInPane,
@@ -20,8 +25,6 @@ import {
   type FileTab,
 } from "./tabs.svelte";
 import { resetLayout } from "../__tests__/tabs";
-
-const notices: string[] = [];
 
 beforeEach(() => {
   installDemoWorkspace({
@@ -32,13 +35,12 @@ beforeEach(() => {
     ],
   });
   resetLayout([]);
-  setNotifyHandler((message) => notices.push(message));
 });
 
 afterEach(() => {
   uninstallDemoWorkspace();
-  setNotifyHandler(null);
-  notices.length = 0;
+  ui.status = null;
+  ui.statusKind = null;
   vi.restoreAllMocks();
 });
 
@@ -104,6 +106,6 @@ describe("opening a file whose extension is not known to be text", () => {
     await openInActivePane("photo.raw");
 
     expect(activePane().tabs).toEqual([]);
-    expect(notices).toEqual(["'photo.raw' cannot be opened in the editor"]);
+    expect(ui.status).toBe("'photo.raw' cannot be opened in the editor");
   });
 });
