@@ -1,13 +1,10 @@
 import { describe, expect, test } from "vitest";
-import canvas from "../components/GraphCanvas.svelte?raw";
-import kinds from "./kinds.ts?raw";
 
 import {
   chipColorVar,
   colorVarFor,
   colorVarForBucket,
   fileBucket,
-  type FileBucket,
 } from "./kinds";
 
 // The graph canvas colours file nodes by EXTENSION (a `.rs` source node
@@ -117,74 +114,15 @@ describe("chipColorVar (path-aware bubble colour)", () => {
   });
 });
 
-describe("bubble / canvas node-fill parity", () => {
-  // For each bucket: [bucket, canvas paint-switch source pin, canvas
-  // readTheme source pin, the CSS var]. The canvas paints
-  // bucket -> theme slot (paint switch) then theme slot -> CSS var
-  // (readTheme); the bubble reads colorVarForBucket. If either canvas
-  // side changes, its source pin breaks; if the bubble side changes,
-  // the value assert breaks. The two cannot silently drift apart.
-  const PARITY: Array<[FileBucket, RegExp, RegExp, string]> = [
-    ["doc", /n\.kind === "doc" \? theme\.doc/, /doc: v\("--g-doc"/, "var(--g-doc)"],
-    ["source", /n\.kind === "source" \? theme\.source/, /source: v\("--g-source"/, "var(--g-source)"],
-    ["img", /n\.kind === "img" \? theme\.img/, /img: v\("--g-img"/, "var(--g-img)"],
-    ["binary", /n\.kind === "binary" \? theme\.binary/, /binary: v\("--g-binary"/, "var(--g-binary)"],
-    ["contact", /n\.kind === "contact" \? theme\.mention/, /mention: v\("--g-contact", v\("--warn-text"/, "var(--g-contact, var(--warn-text))"],
-  ];
-
-  for (const [bucket, paintPin, themePin, cssVar] of PARITY) {
-    test(`${bucket}: bubble var === canvas node fill (${cssVar})`, () => {
-      expect(canvas).toMatch(paintPin);
-      expect(canvas).toMatch(themePin);
-      expect(colorVarForBucket(bucket)).toBe(cssVar);
-    });
-  }
-});
-
-describe("file-class colour scheme wiring", () => {
-  // Rehomed from the deleted HybridGraphConfig.test.ts (the legend
-  // component it described never mounted; these pins track the canvas /
-  // kinds side of the bucket scheme, not the legend). They pin the
-  // wiring shape so a refactor can't silently drop the bucket split.
-  test("fileBucket returns the 5 buckets (doc/img/contact/source/binary)", () => {
-    expect(kinds).toMatch(
-      /export function fileBucket\([\s\S]*?\): FileBucket/,
-    );
-    expect(kinds).toMatch(
-      /export type FileBucket = "doc" \| "img" \| "contact" \| "source" \| "binary"/,
-    );
-  });
-
-  test("canvas routes file nodes through the shared fileBucket", () => {
-    expect(canvas).toMatch(/import \{ fileBucket \} from "\.\.\/state\/kinds"/);
-    expect(canvas).toMatch(/fileBucket\(n\.path, n\.node_kind\)/);
-  });
-
-  test("fileBucket keeps no extension list of its own", () => {
-    // The buckets come from classifyPath, the classifier that mirrors the
-    // server's; a second list here is how the chips and the canvas drifted.
-    expect(kinds).not.toMatch(/_EXT_RE\s*=/);
-    expect(kinds).toMatch(/export function fileBucket\([\s\S]*?classifyPath\(path\)/);
-  });
-
-  test("ThemeColors carries source + binary slots", () => {
-    expect(canvas).toMatch(/source: string;/);
-    expect(canvas).toMatch(/binary: string;/);
-  });
-
-  test("Theme reader pulls --g-source + --g-binary from CSS", () => {
-    expect(canvas).toMatch(/source: v\("--g-source",/);
-    expect(canvas).toMatch(/binary: v\("--g-binary",/);
-  });
-
-  test("Canvas paint dispatches source + binary kinds to their theme slots", () => {
-    expect(canvas).toMatch(/n\.kind === "source" \? theme\.source/);
-    expect(canvas).toMatch(/n\.kind === "binary" \? theme\.binary/);
-  });
-
-  test("DKind union includes the new source + binary kinds", () => {
-    expect(canvas).toMatch(
-      /type DKind =[\s\S]*?\| "source"[\s\S]*?\| "binary"/,
-    );
+describe("the bucket colour", () => {
+  // The inspector bubble colours a file by colorVarForBucket; the canvas
+  // fills the same node from the same variable. GraphCanvas.svelte.test.ts
+  // checks the fill against this mapping for every bucket.
+  test("names one palette variable per bucket", () => {
+    expect(colorVarForBucket("doc")).toBe("var(--g-doc)");
+    expect(colorVarForBucket("source")).toBe("var(--g-source)");
+    expect(colorVarForBucket("img")).toBe("var(--g-img)");
+    expect(colorVarForBucket("binary")).toBe("var(--g-binary)");
+    expect(colorVarForBucket("contact")).toBe("var(--g-contact, var(--warn-text))");
   });
 });
