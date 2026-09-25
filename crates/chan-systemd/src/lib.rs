@@ -6,6 +6,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 /// Relationship between an installed devserver unit and chan's renderer.
@@ -23,7 +24,8 @@ pub enum DevserverUnitClass {
 ///
 /// Callers own the deployment-specific `ExecStart` and optional environment
 /// assignments. Supervision directives and their ordering live only in
-/// [`render`](Self::render).
+/// [`render`](Self::render), and the shape of the `PATH` assignment only in
+/// [`with_search_path`](Self::with_search_path).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DevserverUnit {
     exec_start: String,
@@ -42,6 +44,39 @@ impl DevserverUnit {
     pub fn with_environment(mut self, assignment: impl Into<String>) -> Self {
         self.environment.push(assignment.into());
         self
+    }
+
+    /// Add a `PATH` assignment built from `search_path`, the installing
+    /// process's own `PATH`, in emission order.
+    ///
+    /// systemd starts a user service with the user manager's environment, not
+    /// the environment of the shell that installed it, so without this line
+    /// the devserver and every extension it spawns resolve commands through
+    /// the manager's default `PATH`. Entries are split on `:` because the
+    /// unit is a Linux file whatever host renders it. Only absolute entries
+    /// are kept (an empty or relative one would search the service's working
+    /// directory), the first occurrence of a repeated entry wins, and an entry
+    /// systemd's quoting cannot carry raw (a `"`, a `\`, a control character,
+    /// or bytes that are not UTF-8) is dropped rather than escaped, so the
+    /// line reads back byte for byte. `%` is written as `%%` so systemd's
+    /// specifier expansion hands the service the literal directory. Nothing
+    /// is added when no entry survives.
+    pub fn with_search_path(self, search_path: &OsStr) -> Self {
+        let search_path = search_path.to_string_lossy();
+        let mut entries: Vec<&str> = Vec::new();
+        for entry in search_path.split(':') {
+            if entry.starts_with('/')
+                && !entry.contains(['"', '\\', char::REPLACEMENT_CHARACTER])
+                && !entry.chars().any(char::is_control)
+                && !entries.contains(&entry)
+            {
+                entries.push(entry);
+            }
+        }
+        if entries.is_empty() {
+            return self;
+        }
+        self.with_environment(format!("PATH={}", entries.join(":").replace('%', "%%")))
     }
 
     /// Render the canonical systemd user unit.
@@ -102,6 +137,7 @@ impl DevserverUnit {
                         | "CHAN_TUNNEL_TOKEN"
                         | "CHAN_TUNNEL_URL"
                         | "CHAN_TUNNEL_DEVSERVER_NAME"
+                        | "PATH"
                 ) || environment_keys.contains(&key)
                 {
                     return None;
@@ -222,6 +258,7 @@ pub use unsupported::{
 #[cfg(test)]
 mod unit_tests {
     use super::{DevserverUnit, DevserverUnitClass};
+    use std::ffi::OsStr;
 
     #[test]
     fn devserver_unit_renderer_owns_supervision_directives() {
@@ -343,6 +380,94 @@ mod unit_tests {
                 desired.classify_installed(&installed),
                 DevserverUnitClass::Foreign,
                 "{exec} must not be treated as chan-owned"
+            );
+        }
+    }
+
+    #[test]
+    fn devserver_unit_renders_the_install_time_search_path() {
+        let unit = DevserverUnit::new("/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787")
+            .with_environment("CHAN_HOME=/tmp/chan")
+            .with_search_path(OsStr::new(
+                "/home/dev/.local/bin::bin:./tools:/usr/bin:/home/dev/.local/bin\
+                 :/opt/100%/bin:/opt/quo\"te:/opt/back\\slash:/opt/line\nbreak\
+                 :/mnt/c/Program Files/Git/cmd:/usr/local/bin:/usr/bin",
+            ))
+            .render();
+        let environment: Vec<_> = unit
+            .lines()
+            .filter(|line| line.starts_with("Environment="))
+            .collect();
+        assert_eq!(
+            environment,
+            [
+                "Environment=\"CHAN_HOME=/tmp/chan\"",
+                "Environment=\"PATH=/home/dev/.local/bin:/usr/bin:/opt/100%%/bin\
+                 :/mnt/c/Program Files/Git/cmd:/usr/local/bin\"",
+            ],
+            "absolute entries only, first occurrence first, `%` escaped for \
+             systemd, and entries its quoting cannot carry raw dropped: {unit}"
+        );
+
+        // A search path with no absolute entry adds no line, so the service
+        // keeps the user manager's default PATH rather than an empty one.
+        let bare = DevserverUnit::new("/usr/bin/chan devserver run");
+        assert_eq!(
+            bare.clone()
+                .with_search_path(OsStr::new("::bin:."))
+                .render(),
+            bare.render()
+        );
+    }
+
+    #[test]
+    fn devserver_unit_with_a_search_path_stays_chan_owned() {
+        let exec = "/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787";
+        let desired = DevserverUnit::new(exec)
+            .with_environment("CHAN_HOME=/tmp/chan")
+            .with_search_path(OsStr::new("/home/dev/.local/bin:/usr/bin"));
+        let current = desired.render();
+        assert_eq!(
+            desired.classify_installed(&current),
+            DevserverUnitClass::Current
+        );
+
+        // A unit installed from a shell with another PATH is chan's own
+        // render, so re-running the install refreshes it instead of
+        // refusing it.
+        let other_shell = DevserverUnit::new(exec)
+            .with_environment("CHAN_HOME=/tmp/chan")
+            .with_search_path(OsStr::new("/usr/local/bin:/usr/bin"))
+            .render();
+        assert_eq!(
+            desired.classify_installed(&other_shell),
+            DevserverUnitClass::KnownLegacy
+        );
+
+        // A unit an older chan rendered before it carried a PATH is still
+        // chan-owned, so an upgrade rewrites it with one.
+        let before_path = DevserverUnit::new(exec)
+            .with_environment("CHAN_HOME=/tmp/chan")
+            .render();
+        assert_eq!(
+            desired.classify_installed(&before_path),
+            DevserverUnitClass::KnownLegacy
+        );
+        assert_eq!(
+            desired.classify_installed(&before_path.replace("TimeoutStartSec=10min\n", "")),
+            DevserverUnitClass::KnownLegacy
+        );
+
+        // Accepting PATH accepts no other key, and not PATH twice.
+        for edit in [
+            "Environment=\"LD_PRELOAD=/tmp/hook.so\"\n",
+            "Environment=\"PATH=/tmp/second\"\n",
+        ] {
+            let edited = current.replace("ExecStart=", &format!("{edit}ExecStart="));
+            assert_eq!(
+                desired.classify_installed(&edited),
+                DevserverUnitClass::Foreign,
+                "{edit:?} is an administrator edit"
             );
         }
     }
