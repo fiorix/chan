@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import FileEditorTab from "./FileEditorTab.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { chordFor } from "../state/shortcuts";
 import type { MockWorkspaceStore } from "../demo/store";
 import { fileOps, refreshTree, refreshWorkspace } from "../state/store.svelte";
@@ -465,5 +466,113 @@ describe("the body menu", () => {
     const [opts] = vi.mocked(openLinkPreview).mock.calls[0]!;
     expect(opts.hit).toEqual({ target: "notes/other.md", anchorEl });
     expect(opts.fromPath).toBe("notes/plan.md");
+  });
+});
+
+describe("recovering unsaved work from an earlier page load", () => {
+  /// A buffer another page load left behind for the tab's path. It is dated
+  /// ahead of any save the doc session reports, so only the component's own
+  /// decisions can retire it.
+  function strandBuffer(path: string, content: string): void {
+    localStorage.setItem(
+      bufferKey(path),
+      JSON.stringify({
+        content,
+        updatedAt: Date.now() + 86_400_000,
+        path,
+        sessionId: "an-earlier-load",
+      }),
+    );
+  }
+
+  function banner(target: HTMLElement): HTMLElement | null {
+    return target.querySelector<HTMLElement>(".recovery-banner");
+  }
+
+  test("offers a diverging buffer, and Restore puts it in the editor", async () => {
+    strandBuffer("notes/plan.md", "# Plan\n\nWork that never reached disk.\n");
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+
+    expect(banner(target)?.textContent).toContain("Unsaved changes from a previous session");
+    [...banner(target)!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restore")!.click();
+    await settle(2);
+    expect(tab.content).toBe("# Plan\n\nWork that never reached disk.\n");
+    expect(banner(target)).toBeNull();
+  });
+
+  test("typing after a restore does not raise the banner again", async () => {
+    // The decision reads the disk content, so it runs per load, not per
+    // keystroke; an edit before the restored buffer is re-persisted must not
+    // be mistaken for the earlier session's work.
+    strandBuffer("notes/plan.md", "# Plan\n\nRecovered.\n");
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    [...banner(target)!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restore")!.click();
+    await settle(2);
+
+    tab.content = "# Plan\n\nRecovered, then edited.\n";
+    await settle(2);
+    expect(banner(target)).toBeNull();
+  });
+
+  test("Discard drops the stored buffer for the path at once", async () => {
+    strandBuffer("notes/plan.md", "stale work");
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    // A dirty editor: the persistence effect only queues a debounced write,
+    // so what storage holds right after Discard is Discard's own doing.
+    tab.content = "# Plan\n\nDirty.\n";
+    await settle(2);
+
+    [...banner(target)!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Discard")!.click();
+    await tick();
+    expect(banner(target)).toBeNull();
+    expect(localStorage.getItem(bufferKey("notes/plan.md"))).toBeNull();
+  });
+
+  test("an offered buffer survives the clean editor, so a remount offers it again", async () => {
+    strandBuffer("notes/plan.md", "stale work");
+    const tab = seat(fileTab());
+    const first = await render(tab);
+    expect(banner(first.target)).not.toBeNull();
+
+    unmount(mounted.pop()!);
+    const second = await render(tab);
+    expect(banner(second.target), "still offered after a tab switch").not.toBeNull();
+  });
+
+  test("nothing is offered or stored while the file is still loading", async () => {
+    strandBuffer("notes/plan.md", "stale work");
+    const tab = seat(fileTab({ loading: true, saved: undefined, content: "" }));
+    const { target } = await render(tab);
+    expect(banner(target)).toBeNull();
+
+    tab.saved = DOC;
+    tab.content = DOC;
+    tab.loading = false;
+    await settle(2);
+    expect(banner(target), "offered once the disk content is in").not.toBeNull();
+  });
+
+  test("an edit is kept under the tab's path, and a close cancels the pending write", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+
+    tab.content = "# Plan\n\nUnsaved edit.\n";
+    await settle(2);
+    await new Promise((r) => setTimeout(r, 650));
+    const kept = readEditorBuffer("notes/plan.md");
+    expect(kept?.content).toBe("# Plan\n\nUnsaved edit.\n");
+    expect(kept?.path).toBe("notes/plan.md");
+    expect(kept?.sessionId).toBe(SESSION_ID);
+
+    tab.content = "# Plan\n\nA later edit.\n";
+    await settle(2);
+    unmount(mounted.pop()!);
+    await new Promise((r) => setTimeout(r, 650));
+    expect(readEditorBuffer("notes/plan.md")?.content, "the write queued before the close was cancelled").toBe(
+      "# Plan\n\nUnsaved edit.\n",
+    );
   });
 });
