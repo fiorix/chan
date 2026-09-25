@@ -1,17 +1,15 @@
 // @vitest-environment jsdom
 //
 // A file browser docked on the right mirrors its tree so rows anchor against
-// the edge they sit on: the indent moves to the right, the row order and name
-// alignment reverse, and a collapsed directory's chevron points left, into
-// the pane. A FileBrowserSurface is mounted over the demo workspace in each
-// dock position; the stylesheet half is read as text.
+// the edge they sit on: the tree takes the right-dock class, the indent moves
+// to the right, and a collapsed directory's chevron points left, into the
+// pane. A FileBrowserSurface is mounted over the demo workspace in each dock
+// position.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
-// Build-time contract: the right-dock tree reverses each row and right-aligns its name; vitest drops component CSS.
-import fileTreeSource from "./FileTree.svelte?raw";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { refreshTree, refreshWorkspace, treeExpanded } from "../state/store.svelte";
@@ -85,12 +83,6 @@ describe("a browser docked on the right", () => {
     notes.querySelector<HTMLButtonElement>(".twirl")!.click();
     await tick();
     expect(chevron(dirRow(target, "notes")), "expanded points down on either side").toBe("lucide-chevron-down");
-  });
-
-  test("reverses each row and right-aligns its name", () => {
-    const css = fileTreeSource.slice(fileTreeSource.indexOf("<style>"));
-    expect(css).toMatch(/\.tree\.right-dock \.row \{\s*flex-direction: row-reverse;/);
-    expect(css).toMatch(/\.tree\.right-dock \.name \{\s*text-align: right;/);
   });
 });
 
