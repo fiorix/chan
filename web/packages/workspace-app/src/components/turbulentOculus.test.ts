@@ -1,21 +1,33 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import TurbulentOculus from "./TurbulentOculus.svelte";
 import {
   TURBULENT_OCULUS_FRAGMENT_SHADER,
   TURBULENT_OCULUS_TWIGL_SOURCE,
 } from "./turbulentOculus";
+import { startAnimation, stopAnimations } from "../__tests__/canvas";
+
+const renderer = vi.hoisted(() => ({ draw: vi.fn(), destroy: vi.fn() }));
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./turbulentOculus", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./turbulentOculus")>()),
+  createTurbulentOculusRenderer: () => renderer,
+}));
+
+afterEach(() => {
+  stopAnimations();
+  renderer.draw.mockClear();
+});
 
 describe("Turbulent Oculus", () => {
-  test("keeps the source attribution and an independent component", async () => {
-    const renderer = (await import("./TurbulentOculus.svelte?raw"))
-      .default as string;
-    const shader = (await import("./turbulentOculus.ts?raw"))
-      .default as string;
+  test("renders its own shader through the WebGL2 runner", () => {
+    const { run, callbacks } = startAnimation(TurbulentOculus, {});
+    callbacks.resize(800, 600, false, 0);
 
-    expect(shader).toContain(
-      "https://x.com/YoheiNishitsuji/status/2081184095376441620",
-    );
-    expect(renderer).toContain("runWebgl2Animation");
-    expect(renderer).not.toContain("SpiralSpokes");
+    expect(run.runner).toBe("webgl2");
+    expect(renderer.draw).toHaveBeenCalled();
   });
 
   test("copies the post's Twigl program verbatim", () => {
@@ -45,12 +57,43 @@ describe("Turbulent Oculus", () => {
     );
   });
 
-  test("caps the expensive shader and provides a reduced-motion frame", async () => {
-    const renderer = (await import("./TurbulentOculus.svelte?raw"))
-      .default as string;
+  test("caps the expensive shader at 160,000 pixels and 24 frames a second", () => {
+    const { run } = startAnimation(TurbulentOculus, {});
 
-    expect(renderer).toContain("const MAX_RENDER_PIXELS = 160_000;");
-    expect(renderer).toContain("const STATIC_TIME_SECONDS = 4.5;");
-    expect(renderer).toMatch(/reducedMotion: \(\) => draw\(STATIC_TIME_SECONDS\)/);
+    expect(run.options).toMatchObject({
+      frameRate: 24,
+      maxDpr: 1,
+      maxPixels: 160000,
+    });
   });
+
+  test("runs its shader clock at animation time", () => {
+    const { callbacks } = startAnimation(TurbulentOculus, {});
+    callbacks.resize(800, 600, false, 0);
+    renderer.draw.mockClear();
+    callbacks.frame(4000);
+
+    expect(renderer.draw.mock.calls[0]?.[0]).toBeCloseTo(4.0, 9);
+  });
+
+  test("holds one still frame at 4.5 seconds under reduced motion", () => {
+    const { callbacks } = startAnimation(TurbulentOculus, {});
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, true, 4000);
+    callbacks.reducedMotion();
+
+    expect(renderer.draw.mock.calls.map(([time]) => time)).toEqual([4.5, 4.5]);
+  });
+
+  test("draws with the field its theme tokens name", () => {
+    const { run, callbacks } = startAnimation(TurbulentOculus, {});
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--turbulent-oculus-tone", "0.5");
+    host.style.setProperty("--turbulent-oculus-opacity", "0.25");
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, false, 0);
+
+    expect(renderer.draw).toHaveBeenLastCalledWith(0, 0.5, 0.25);
+  });
+
 });
