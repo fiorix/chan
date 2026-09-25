@@ -1,23 +1,34 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import AmberRecursion from "./AmberRecursion.svelte";
 import {
   AMBER_RECURSION_FRAGMENT_SHADER,
   AMBER_RECURSION_TWIGL_SOURCE,
   AMBER_RECURSION_WEBGL_SOURCE,
 } from "./amberRecursion";
+import { startAnimation, stopAnimations } from "../__tests__/canvas";
+
+const renderer = vi.hoisted(() => ({ draw: vi.fn(), destroy: vi.fn() }));
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./amberRecursion", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./amberRecursion")>()),
+  createAmberRecursionRenderer: () => renderer,
+}));
+
+afterEach(() => {
+  stopAnimations();
+  renderer.draw.mockClear();
+});
 
 describe("Amber Recursion", () => {
-  test("keeps the source attribution and an independent component", async () => {
-    const renderer = (await import("./AmberRecursion.svelte?raw"))
-      .default as string;
-    const shader = (await import("./amberRecursion.ts?raw"))
-      .default as string;
+  test("renders its own shader through the WebGL2 runner", () => {
+    const { run, callbacks } = startAnimation(AmberRecursion, {});
+    callbacks.resize(800, 600, false, 0);
 
-    expect(shader).toContain(
-      "https://x.com/YoheiNishitsuji/status/2078117522638004265",
-    );
-    expect(renderer).toContain("runWebgl2Animation");
-    expect(renderer).not.toContain("SpiralSpokes");
-    expect(renderer).not.toContain("StellarOutburst");
+    expect(run.runner).toBe("webgl2");
+    expect(renderer.draw).toHaveBeenCalled();
   });
 
   test("copies the post's Twigl program verbatim", () => {
@@ -50,17 +61,45 @@ describe("Amber Recursion", () => {
     );
   });
 
-  test("caps the expensive shader and provides a reduced-motion frame", async () => {
-    const renderer = (await import("./AmberRecursion.svelte?raw"))
-      .default as string;
+  test("caps the expensive shader at 130,000 pixels and 20 frames a second", () => {
+    const { run } = startAnimation(AmberRecursion, {});
 
-    expect(renderer).toContain("const MAX_RENDER_PIXELS = 130_000;");
-    expect(renderer).toContain("const STATIC_TIME_SECONDS = 3.25;");
-    expect(renderer).toContain("const TIME_SCALE = 0.25;");
-    expect(renderer).toContain("--amber-recursion-field-scale: 1;");
-    expect(renderer).toContain("--amber-recursion-tone: 0.855;");
-    expect(renderer).toContain("--amber-recursion-opacity: 0.41;");
-    expect(renderer).toContain("background-color: rgb(28, 28, 30);");
-    expect(renderer).toMatch(/reducedMotion: \(\) => draw\(STATIC_TIME_SECONDS\)/);
+    expect(run.options).toMatchObject({
+      frameRate: 20,
+      maxDpr: 1,
+      maxPixels: 130000,
+    });
   });
+
+  test("runs its shader clock at a quarter of animation time", () => {
+    const { callbacks } = startAnimation(AmberRecursion, {});
+    callbacks.resize(800, 600, false, 0);
+    renderer.draw.mockClear();
+    callbacks.frame(4000);
+
+    expect(renderer.draw.mock.calls[0]?.[0]).toBeCloseTo(1.0, 9);
+  });
+
+  test("holds one still frame at 3.25 seconds under reduced motion", () => {
+    const { callbacks } = startAnimation(AmberRecursion, {});
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, true, 4000);
+    callbacks.reducedMotion();
+
+    expect(renderer.draw.mock.calls.map(([time]) => time)).toEqual([3.25, 3.25]);
+  });
+
+  test("draws with the field its theme tokens name", () => {
+    const { run, callbacks } = startAnimation(AmberRecursion, {});
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--amber-recursion-field-scale", "2");
+    host.style.setProperty("--amber-recursion-tone", "0.5");
+    host.style.setProperty("--amber-recursion-opacity", "0.25");
+    host.style.setProperty("--amber-recursion-exposure", "3");
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, false, 0);
+
+    expect(renderer.draw).toHaveBeenLastCalledWith(0, 2, 0.5, 0.25, 3);
+  });
+
 });
