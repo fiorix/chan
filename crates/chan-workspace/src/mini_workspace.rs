@@ -994,6 +994,48 @@ mod tests {
         assert!(temp_leftovers(&fx).is_empty(), "the staged copy is removed");
     }
 
+    /// The atomic writer decides whether to validate UTF-8 from the path it
+    /// writes, so a single-file copy must write under a name that classifies
+    /// like its destination.
+    #[test]
+    fn copy_plain_to_a_markdown_name_refuses_non_utf8_bytes() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("blob.bin"), b"\xff\xfe not text").unwrap();
+        stdfs::write(fx.root.join("plain.bin"), "text").unwrap();
+
+        let refused = fx.mini.copy_plain("blob.bin", "note.md");
+        eprintln!(
+            "copy_plain={refused:?}; note.md exists={}",
+            fx.root.join("note.md").exists()
+        );
+
+        assert!(
+            matches!(refused, Err(ChanError::NonUtf8EditableText(_))),
+            "a markdown destination must refuse non-UTF-8 bytes: {refused:?}"
+        );
+        assert!(!fx.root.join("note.md").exists());
+        fx.mini.copy_plain("plain.bin", "copied.md").unwrap();
+        assert_eq!(
+            stdfs::read_to_string(fx.root.join("copied.md")).unwrap(),
+            "text"
+        );
+        assert!(temp_leftovers(&fx).is_empty(), "no copy stage remains");
+    }
+
+    #[test]
+    fn copy_plain_names_the_destination_in_a_utf8_refusal() {
+        let fx = fixture();
+        stdfs::write(fx.root.join("blob.bin"), b"\xff\xfe not text").unwrap();
+
+        let refused = fx.mini.copy_plain("blob.bin", "note.md");
+
+        assert!(
+            matches!(&refused, Err(ChanError::NonUtf8EditableText(message))
+                if message.ends_with(": note.md") && !message.contains("chan-copy")),
+            "the refusal names the destination, not the stage: {refused:?}"
+        );
+    }
+
     #[test]
     fn cross_device_move_refuses_a_file_created_inside_the_race_window() {
         let fx = fixture();
