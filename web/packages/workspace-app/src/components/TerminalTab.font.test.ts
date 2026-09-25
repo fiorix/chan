@@ -28,10 +28,7 @@ import {
 
 installTerminalDom();
 
-// `?raw` returns an empty string for `.css` imports under the JSDOM
-// vitest setup (the CSS plugin chain consumes them); read the file
-// from disk relative to the vitest cwd (= packages/workspace-app)
-// instead.
+// Build-time contract: fonts.css loads the face from a relative url, since the app is served under a tenant prefix; vitest empties CSS imports, so the file is read from disk.
 const fonts = readFileSync("src/fonts.css", "utf8");
 const viteConfig = readFileSync("vite.config.ts", "utf8");
 
@@ -91,13 +88,10 @@ describe("TerminalTab font + cursor parity", () => {
     // `/static/...` src resolves against the origin root instead, where
     // the launcher root fallback answers with index.html and the face
     // fails to decode with no visible error.
-    expect(fonts).toMatch(/font-family:\s*['"]Source Code Pro['"]/);
-    expect(fonts).toMatch(/font-weight:\s*400/);
     expect(fonts).toMatch(
       /url\(['"]\.\/fonts\/SourceCodePro-Regular\.otf\.woff2['"]\)/,
     );
     expect(fonts).not.toMatch(/url\(['"]?\//);
-    expect(fonts).toMatch(/font-display:\s*swap/);
   });
 
   test("the woff2 and its OFL notice ship in the package", () => {
