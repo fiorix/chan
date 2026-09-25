@@ -27,28 +27,11 @@ import { trackTimers } from "../demo/timers";
 import { preferences } from "../__tests__/standalone";
 import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../__tests__/wysiwyg";
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
-    loadAddon() {}
-    open() {}
-    attachCustomKeyEventHandler() {}
-    onData() {}
-    onResize() {}
-    write() {}
-    writeln() {}
-    resize() {}
-    focus() {}
-    blur() {}
-    dispose() {}
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {} }));
-vi.mock("@xterm/addon-serialize", () => ({ SerializeAddon: class { serialize() { return ""; } } }));
-vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
 installEditorDom();
 HTMLCanvasElement.prototype.getContext = (() => null) as unknown as HTMLCanvasElement["getContext"];
