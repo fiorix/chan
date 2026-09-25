@@ -695,6 +695,13 @@ describe("the reverse flip", () => {
     document.body.innerHTML = "";
   });
 
+  /// Resolves after CodeMirror's next measure cycle. A flip builds its ghost
+  /// in the write half of a measure it requests during the update, so once a
+  /// request made after that update has written, no flip is still to come.
+  function nextMeasure(view: EditorView): Promise<void> {
+    return new Promise((resolve) => view.requestMeasure({ read: () => null, write: () => resolve() }));
+  }
+
   async function renderedWithFace(render = async () => ({ ok: true as const, svg: FACE })) {
     const deco = diagramDecorations({ lang: "mermaid", label: "Mermaid", render, isDark: () => false });
     const mounted = mount(deco, MERMAID_DOC, 0);
@@ -727,7 +734,7 @@ describe("the reverse flip", () => {
     await vi.waitFor(() => expect(parent.innerHTML).toContain("cached-face"));
 
     view.dispatch({ changes: { from: INSIDE, insert: " " }, selection: EditorSelection.cursor(INSIDE + 1) });
-    await new Promise((r) => setTimeout(r, 50));
+    await nextMeasure(view);
     expect(animations).toHaveLength(0);
     view.destroy();
   });
@@ -735,7 +742,7 @@ describe("the reverse flip", () => {
   test("entering before the first render lands has no face to flip", async () => {
     const { view } = await renderedWithFace(() => new Promise(() => {}));
     view.dispatch({ selection: EditorSelection.cursor(INSIDE) });
-    await new Promise((r) => setTimeout(r, 50));
+    await nextMeasure(view);
     expect(animations).toHaveLength(0);
     view.destroy();
   });
