@@ -12,6 +12,7 @@ import fileInfoSource from "./FileInfoBody.svelte?raw";
 import { classifyFileActions } from "../state/fileActions";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
+import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
 
 type Entry = {
   path: string;
@@ -462,6 +463,43 @@ describe("the Drafts directory", () => {
     const notice = styleRule(".drafts-notice");
     expect(notice).toContain("background: var(--fb-drafts-bg);");
     expect(notice).toContain("border-left: 3px solid var(--fb-drafts-fg);");
+  });
+});
+
+describe("the audio preview", () => {
+  test("plays inline through a tokenized source, on demand", async () => {
+    h.entries = [file("sound/a b.mp3", "media")];
+    const target = await render({ path: "sound/a b.mp3" });
+
+    const audio = target.querySelector<HTMLAudioElement>(".audio-preview audio");
+    expect(audio).not.toBeNull();
+    expect(audio!.getAttribute("src")).toBe("/api/fs/sound/a%20b.mp3?token=inspector-test");
+    expect(audio!.hasAttribute("controls")).toBe(true);
+    expect(audio!.getAttribute("preload")).toBe("metadata");
+    expect(audio!.hasAttribute("autoplay"), "never starts on its own").toBe(false);
+    expect(target.querySelector("video, .image-preview"), "audio is not another media kind").toBeNull();
+  });
+
+  test("a decode error stays on the inline player and clears on load or a new selection", async () => {
+    h.entries = [file("sound/a.ogg", "media"), file("sound/b.ogg", "media")];
+    const props = $state<Props>({ path: "sound/a.ogg" });
+    const target = await render(props);
+    const status = () => target.querySelector(".audio-preview [role='status']");
+
+    target.querySelector("audio")!.dispatchEvent(new Event("error"));
+    flushSync();
+    expect(status()?.textContent).toBe(AUDIO_UNSUPPORTED_MESSAGE);
+
+    target.querySelector("audio")!.dispatchEvent(new Event("loadedmetadata"));
+    flushSync();
+    expect(status()).toBeNull();
+
+    target.querySelector("audio")!.dispatchEvent(new Event("error"));
+    flushSync();
+    expect(status()).not.toBeNull();
+    props.path = "sound/b.ogg";
+    await settle();
+    expect(status(), "a new selection starts clean").toBeNull();
   });
 });
 
