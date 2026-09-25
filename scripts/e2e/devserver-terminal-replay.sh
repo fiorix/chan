@@ -11,7 +11,11 @@
 # window, writes more output, and after each restart asserts, per terminal:
 #   1. a client that stayed attached (terminal-replay-client.mjs --mode keep,
 #      redialing from its byte cursor across the restart) holds exactly the
-#      file, byte for byte, and printed nothing of its own;
+#      file, byte for byte, and printed nothing of its own. These are verdicts
+#      on the server's attach contract, not on the SPA: on closed{shutdown}
+#      the SPA's TerminalTab drops its cached snapshot and its session id,
+#      writes "session ended (shutdown)" and schedules a session save, while
+#      the keep client redials silently from its cursor;
 #   2. a fresh attach (since=0, no generation, --mode fresh) reports the
 #      session's seq as the file's length, replays the file's tail, accounts
 #      for every byte it does not replay in missed_bytes, and reports none
