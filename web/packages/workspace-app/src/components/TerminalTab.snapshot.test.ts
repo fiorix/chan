@@ -1,48 +1,103 @@
-import { describe, expect, test } from "vitest";
-import terminalTab from "./TerminalTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// The scrollback snapshot a terminal writes to localStorage when the page is
+// hidden, so a reload resumes from it. A control terminal never writes one:
+// its output carries the devserver token the desktop re-scrapes. A
+// TerminalTab is mounted over the stand-in xterm and attached on its socket;
+// the assertions read the snapshot cache.
 
-// The control terminal must never write a scrollback snapshot: its PTY output
-// carries the CHAN_DEVSERVER_TOKEN= marker the desktop re-scrapes, and a
-// localStorage copy would keep that credential on disk until the token next
-// rotates. The RULE lives in state/windowMode.windowModeAllowsSnapshot
-// (unit-tested there); these pins
-// assert TerminalTab actually consults it, in the source-pin shape of
-// confirmCloseDispatch.test.ts. Red mutation: delete the guard call from
-// captureSnapshot.
-describe("control terminals write no scrollback snapshot", () => {
-  test("captureSnapshot consults windowModeAllowsSnapshot before writing", () => {
-    const body = terminalTab
-      .split("function captureSnapshot()")
-      .at(1)
-      ?.split("function ")
-      .at(0);
-    expect(body).toBeTruthy();
-    expect(body).toContain(
-      "windowModeAllowsSnapshot({ terminalControl: ui.terminalControl })",
-    );
-    // The guard must run BEFORE the write, not after it.
-    const guardAt = body?.indexOf("windowModeAllowsSnapshot") ?? -1;
-    const writeAt = body?.indexOf("writeTerminalSnapshot") ?? -1;
-    expect(guardAt).toBeGreaterThanOrEqual(0);
-    expect(writeAt).toBeGreaterThan(guardAt);
+import { unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+import { ui } from "../state/store.svelte";
+import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  TerminalSocket,
+  xterm,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+const SESSION = "sess-1";
+const startControl = ui.terminalControl;
+
+beforeEach(() => {
+  localStorage.clear();
+  xterm.serialized = "$ ls\r\nnotes\r\n";
+});
+
+afterEach(() => {
+  resetTerminals();
+  ui.terminalControl = startControl;
+  localStorage.clear();
+});
+
+async function attached() {
+  const [tab] = seatTerminals([terminalTab()]);
+  const mounted = await mountTerminal(TerminalTab, tab!);
+  await attach(TerminalSocket.all.at(-1)!, { id: SESSION, generation: 3, seq: 42 });
+  return mounted;
+}
+
+function leftover(): void {
+  writeTerminalSnapshot(SESSION, { ansi: "old", generation: 1, lastSeq: 1, cols: 80, rows: 24, updatedAt: 1 });
+}
+
+describe("hiding the page", () => {
+  test("snapshots an ordinary terminal's screen at its cursor", async () => {
+    ui.terminalControl = false;
+    await attached();
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(readTerminalSnapshot(SESSION)).toMatchObject({
+      ansi: "$ ls\r\nnotes\r\n",
+      generation: 3,
+      lastSeq: 42,
+      cols: 80,
+      rows: 24,
+    });
   });
 
-  test("the guard is the shared windowMode rule, not a local re-derivation", () => {
-    expect(terminalTab).toContain(
-      'import { windowModeAllowsSnapshot } from "../state/windowMode";',
-    );
+  test("writes no snapshot for a control terminal", async () => {
+    ui.terminalControl = true;
+    await attached();
+    window.dispatchEvent(new Event("pagehide"));
+    window.dispatchEvent(new Event("beforeunload"));
+
+    expect(readTerminalSnapshot(SESSION)).toBeNull();
+  });
+});
+
+describe("a control terminal", () => {
+  test("clears a snapshot left for its session when it attaches, and again when it goes", async () => {
+    ui.terminalControl = true;
+    leftover();
+    const { component } = await attached();
+    expect(readTerminalSnapshot(SESSION), "cleared on attach").toBeNull();
+
+    leftover();
+    unmount(component);
+    expect(readTerminalSnapshot(SESSION), "cleared on teardown").toBeNull();
   });
 
-  test("a control window clears its own persisted snapshot on attach and teardown", () => {
-    // The $effect that removes pre-guard leftovers for this session: gated on
-    // ui.terminalControl, clears now and again in its cleanup.
-    const effect = terminalTab
-      .split("if (!ui.terminalControl || !sessionId) return;")
-      .at(1)
-      ?.split("$effect")
-      .at(0);
-    expect(effect).toBeTruthy();
-    expect(effect).toContain("clearTerminalSnapshot(sessionId);");
-    expect(effect).toContain("return () => clearTerminalSnapshot(sessionId);");
+  test("an ordinary terminal keeps its snapshot", async () => {
+    ui.terminalControl = false;
+    leftover();
+    await attached();
+    expect(readTerminalSnapshot(SESSION)).not.toBeNull();
   });
 });
