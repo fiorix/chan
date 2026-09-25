@@ -1,22 +1,33 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import StellarOutburst from "./StellarOutburst.svelte";
 import {
   STELLAR_OUTBURST_FRAGMENT_SHADER,
   STELLAR_OUTBURST_TWIGL_SOURCE,
 } from "./stellarOutburst";
+import { startAnimation, stopAnimations } from "../__tests__/canvas";
+
+const renderer = vi.hoisted(() => ({ draw: vi.fn(), destroy: vi.fn() }));
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./stellarOutburst", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./stellarOutburst")>()),
+  createStellarOutburstRenderer: () => renderer,
+}));
+
+afterEach(() => {
+  stopAnimations();
+  renderer.draw.mockClear();
+});
 
 describe("Stellar Outburst", () => {
-  test("keeps the source attribution and an independent component", async () => {
-    const renderer = (await import("./StellarOutburst.svelte?raw"))
-      .default as string;
-    const shader = (await import("./stellarOutburst.ts?raw"))
-      .default as string;
+  test("renders its own shader through the WebGL2 runner", () => {
+    const { run, callbacks } = startAnimation(StellarOutburst, {});
+    callbacks.resize(800, 600, false, 0);
 
-    expect(shader).toContain(
-      "https://x.com/YoheiNishitsuji/status/2081001408665715188",
-    );
-    expect(renderer).toContain("runWebgl2Animation");
-    expect(renderer).not.toContain("SpiralSpokes");
-    expect(renderer).not.toContain("TurbulentOculus");
+    expect(run.runner).toBe("webgl2");
+    expect(renderer.draw).toHaveBeenCalled();
   });
 
   test("copies the post's Twigl program verbatim", () => {
@@ -49,17 +60,44 @@ describe("Stellar Outburst", () => {
     );
   });
 
-  test("caps the expensive shader and provides a reduced-motion frame", async () => {
-    const renderer = (await import("./StellarOutburst.svelte?raw"))
-      .default as string;
+  test("caps the expensive shader at 130,000 pixels and 20 frames a second", () => {
+    const { run } = startAnimation(StellarOutburst, {});
 
-    expect(renderer).toContain("const MAX_RENDER_PIXELS = 130_000;");
-    expect(renderer).toContain("const STATIC_TIME_SECONDS = 3.75;");
-    expect(renderer).toContain("const TIME_SCALE = 0.25;");
-    expect(renderer).toContain("--stellar-outburst-field-scale");
-    expect(renderer).toContain("--stellar-outburst-tone: 0.855;");
-    expect(renderer).toContain("--stellar-outburst-opacity: 0.352;");
-    expect(renderer).toContain("background-color: rgb(28, 28, 30);");
-    expect(renderer).toMatch(/reducedMotion: \(\) => draw\(STATIC_TIME_SECONDS\)/);
+    expect(run.options).toMatchObject({
+      frameRate: 20,
+      maxDpr: 1,
+      maxPixels: 130000,
+    });
   });
+
+  test("runs its shader clock at a quarter of animation time", () => {
+    const { callbacks } = startAnimation(StellarOutburst, {});
+    callbacks.resize(800, 600, false, 0);
+    renderer.draw.mockClear();
+    callbacks.frame(4000);
+
+    expect(renderer.draw.mock.calls[0]?.[0]).toBeCloseTo(1.0, 9);
+  });
+
+  test("holds one still frame at 3.75 seconds under reduced motion", () => {
+    const { callbacks } = startAnimation(StellarOutburst, {});
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, true, 4000);
+    callbacks.reducedMotion();
+
+    expect(renderer.draw.mock.calls.map(([time]) => time)).toEqual([3.75, 3.75]);
+  });
+
+  test("draws with the field its theme tokens name", () => {
+    const { run, callbacks } = startAnimation(StellarOutburst, {});
+    const host = run.canvas.parentElement!;
+    host.style.setProperty("--stellar-outburst-field-scale", "2");
+    host.style.setProperty("--stellar-outburst-tone", "0.5");
+    host.style.setProperty("--stellar-outburst-opacity", "0.25");
+    renderer.draw.mockClear();
+    callbacks.resize(800, 600, false, 0);
+
+    expect(renderer.draw).toHaveBeenLastCalledWith(0, 2, 0.5, 0.25);
+  });
+
 });
