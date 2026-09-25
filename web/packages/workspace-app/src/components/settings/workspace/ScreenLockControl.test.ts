@@ -197,6 +197,25 @@ describe("with the lock on", () => {
     expect(target.querySelector(".preview-box canvas")).not.toBeNull();
   });
 
+  test("previews the chosen theme inside the lock's settings, and names it", async () => {
+    const target = await render({ enabled: true, theme: "plain" });
+    const preview = target.querySelector(".screensaver-preview")!;
+    expect(preview.querySelector(".preview-title")?.textContent).toBe("Screensaver preview");
+    expect(preview.querySelector(".preview-box .plain-screensaver-preview .mark")).not.toBeNull();
+    expect(preview.querySelector(".hint")?.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Preview of the Default lock theme.",
+    );
+
+    const select = target.querySelector("select")!;
+    select.value = "matrix";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+
+    expect(target.querySelector(".screensaver-preview .hint")?.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Preview of the Matrix lock theme.",
+    );
+  });
+
   test("Set PIN asks twice, refuses a mismatch and saves the workspace-salted hash", async () => {
     const target = await render({ enabled: true });
     button(target, "Set PIN").click();
