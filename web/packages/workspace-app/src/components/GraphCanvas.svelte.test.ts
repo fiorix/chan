@@ -587,6 +587,33 @@ describe("the palette source", () => {
   });
 });
 
+describe("a graph body's theme", () => {
+  test("a flip of the graph surface's data-theme re-reads the palette", async () => {
+    const palette: Record<string, string> = { "--g-doc": "#333333" };
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation(
+      () => ({ getPropertyValue: (name: string) => palette[name] ?? "" }) as CSSStyleDeclaration,
+    );
+    const surface = document.createElement("div");
+    surface.className = "graph-tab";
+    document.body.append(surface);
+    const target = document.createElement("div");
+    surface.append(target);
+    const component = mount(GraphCanvas, { target, props: props() });
+    mounted.push(component as Record<string, unknown>);
+    flushSync();
+    runFrames(2);
+    const api = component as unknown as CanvasApi;
+    expect(discOf(api, lastFrame(target), "notes/a.md").fill).toBe("#333333");
+
+    palette["--g-doc"] = "#444444";
+    surface.setAttribute("data-theme", "light");
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    runFrames(1);
+    expect(discOf(api, lastFrame(target), "notes/a.md").fill).toBe("#444444");
+  });
+});
+
 describe("pausing", () => {
   test("a paused canvas stops painting and resumes with its layout and view untouched", () => {
     const p = props();
