@@ -43,8 +43,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-stalled-reader-parks-a-pool-thread][stall] | landed | GA |
 | [one-root-blocks-every-other-mount][rlock] | raised | accept |
 | [a-non-utf8-text-file-loses-its-backlinks][nutf] | landed | GA |
-| [two-copies-to-one-free-name-can-collide][copy2] | raised | accept |
-| [a-blocking-pool-pin-passes-without-proof][bpin] | raised | accept |
+| [two-copies-to-one-free-name-can-collide][copy2] | landed | GA |
+| [a-blocking-pool-pin-passes-without-proof][bpin] | landed | GA |
 | [stale-sentences-outlive-their-code][prose] | raised | accept |
 | [a-service-spawned-extension-gets-a-bare-path][extp] | raised | accept |
 | [the-aur-check-could-ship-a-test-only-feature][aurc] | raised | accept |
@@ -117,6 +117,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-scripted-reports-disable-exits-zero-having-changed-nothing][rsyes] | raised | decide |
 | [a-keychain-failure-freezes-a-connected-gateways-roster][kring] | raised | decide |
 | [a-graceful-restarts-session-save-drops-the-terminals-session-id][resave] | raised | decide |
+| [a-single-file-copy-skips-the-utf8-gate][cpsk] | landed | GA |
+| [a-cut-paste-can-replace-the-first-moved-file][mvrep] | landed | GA |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -186,6 +188,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [rsyes]: v0.101.0/a-scripted-reports-disable-exits-zero-having-changed-nothing.md
 [kring]: v0.101.0/a-keychain-failure-freezes-a-connected-gateways-roster.md
 [resave]: v0.101.0/a-graceful-restarts-session-save-drops-the-terminals-session-id.md
+[cpsk]: v0.101.0/a-single-file-copy-skips-the-utf8-gate.md
+[mvrep]: v0.101.0/a-cut-paste-can-replace-the-first-moved-file.md
 
 ## Completed
 
