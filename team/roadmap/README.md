@@ -108,7 +108,8 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 | [a-graceful-restart-drops-output-past-its-snapshot][gdrop] | raised | decide |
 | [a-failed-dial-makes-the-next-replay-from-zero][fdial] | raised | decide |
 | [the-served-index-forgets-a-lone-rename][srename] | landed | GA |
-| [a-case-only-rename-leaves-a-phantom-row][casef] | raised | decide |
+| [a-case-only-rename-leaves-a-phantom-row][casef] | landed | GA |
+| [the-apps-wake-path-outlives-its-mount][wgap] | landed | GA |
 
 [rawt]: v0.101.0/source-text-tests-pin-spelling-not-behaviour.md
 [dedup]: v0.101.0/one-question-is-answered-in-many-places.md
@@ -170,6 +171,7 @@ Opened 2026-09-20 to hold what was phased out of v0.100.0, and what that round r
 [fdial]: v0.101.0/a-failed-dial-makes-the-next-replay-from-zero.md
 [srename]: v0.101.0/the-served-index-forgets-a-lone-rename.md
 [casef]: v0.101.0/a-case-only-rename-leaves-a-phantom-row.md
+[wgap]: v0.101.0/the-apps-wake-path-outlives-its-mount.md
 
 ## Completed
 
