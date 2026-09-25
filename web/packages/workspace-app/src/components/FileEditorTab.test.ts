@@ -12,6 +12,7 @@ import FileEditorTab from "./FileEditorTab.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
+import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import type { MockWorkspaceStore } from "../demo/store";
 import { fileOps, refreshTree, refreshWorkspace } from "../state/store.svelte";
@@ -21,6 +22,14 @@ import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
 const h = vi.hoisted(() => ({
   urlUnderCursor: null as string | null,
   wikiUnderCursor: null as { target: string; anchorEl: HTMLElement } | null,
+  previews: [] as Array<{ mode?: string; onClose?: () => void }>,
+}));
+
+vi.mock("../state/slidePreview", () => ({
+  openSlidePreview: vi.fn((opts: { mode?: string; onClose?: () => void }) => {
+    h.previews.push(opts);
+    return { update() {}, close() {} };
+  }),
 }));
 
 vi.mock("../editor/external_links", async (importOriginal) => {
@@ -196,6 +205,7 @@ beforeEach(async () => {
   await refreshWorkspace();
   h.urlUnderCursor = null;
   h.wikiUnderCursor = null;
+  h.previews = [];
   localStorage.clear();
 });
 
@@ -574,5 +584,88 @@ describe("recovering unsaved work from an earlier page load", () => {
     expect(readEditorBuffer("notes/plan.md")?.content, "the write queued before the close was cancelled").toBe(
       "# Plan\n\nUnsaved edit.\n",
     );
+  });
+});
+
+describe("the slide chord", () => {
+  const DECK = "---\nchan:\n  kind: slides\n---\n\n# One\n\n---\n\n# Two\n";
+
+  function press(el: Element, init: KeyboardEventInit): KeyboardEvent {
+    const e = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+    el.dispatchEvent(e);
+    return e;
+  }
+
+  test("Mod+Enter previews a deck and Mod+Shift+Enter presents it, ahead of the editor", async () => {
+    const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+    const { target } = await render(tab);
+    const content = target.querySelector(".cm-content")!;
+
+    const preview = press(content, { ctrlKey: true });
+    await settle(2);
+    expect(preview.defaultPrevented).toBe(true);
+    expect(h.previews.map((p) => p.mode)).toEqual(["preview"]);
+    expect(tab.slidePreview?.open).toBe(true);
+    expect(editorView(target).state.doc.toString(), "the editor never saw the Enter").toBe(DECK);
+
+    press(content, { ctrlKey: true, shiftKey: true });
+    await settle(2);
+    expect(tab.slidePreview?.mode).toBe("play");
+  });
+
+  test("stands down off a deck, while loading, with Alt, or on the other platform's Mod", async () => {
+    const plain = seat(fileTab());
+    const a = await render(plain);
+    press(a.target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+
+    const deck = seat(fileTab({ id: "deck", path: "talks/deck.md", content: DECK, saved: DECK }));
+    const b = await render(deck);
+    const content = b.target.querySelector(".cm-content")!;
+    press(content, { ctrlKey: true, altKey: true });
+    press(content, { metaKey: true });
+    deck.loading = true;
+    await settle(2);
+    press(content, { ctrlKey: true });
+    await settle(2);
+
+    expect(h.previews).toEqual([]);
+  });
+
+  test("ignores a form control in the editor host outside the editor", async () => {
+    const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+    const { target } = await render(tab);
+    const input = document.createElement("input");
+    target.querySelector(".editor-host")!.append(input);
+
+    press(input, { ctrlKey: true });
+    await settle(2);
+    expect(h.previews).toEqual([]);
+  });
+
+  test("a user chord for the preview supersedes the built-in one", async () => {
+    const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+    const { target } = await render(tab);
+    assignOverride("app.slides.preview", "Mod+J");
+    try {
+      press(target.querySelector(".cm-content")!, { ctrlKey: true });
+      await settle(2);
+      expect(h.previews).toEqual([]);
+    } finally {
+      clearOverride("app.slides.preview");
+    }
+  });
+
+  test("closing the preview gives the editor its focus back", async () => {
+    const tab = seat(fileTab({ path: "talks/deck.md", content: DECK, saved: DECK }));
+    const { target } = await render(tab, { focused: true });
+    press(target.querySelector(".cm-content")!, { ctrlKey: true });
+    await settle(2);
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    h.previews[0]!.onClose!();
+    await settle(2);
+    expect(tab.slidePreview?.open).toBe(false);
+    expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
   });
 });
