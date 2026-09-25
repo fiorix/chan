@@ -2,7 +2,8 @@
 //
 // Double-clicking a Files row and pressing Enter on it do the same thing: a
 // media file opens in its viewer, and anything else opens in an editor tab.
-// Media rows answer both gestures; nothing gates them off.
+// Media rows answer both gestures; nothing gates them off. The viewer's
+// Close shuts it and gives Escape back to the page.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -32,9 +33,15 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  document.querySelectorAll(".md-video-viewer").forEach((el) => el.remove());
+  closeViewers();
   await unmountApp();
 });
+
+/// Close every open video viewer with its own Close button, which also takes
+/// its Escape listener off the document.
+function closeViewers(): void {
+  document.querySelectorAll<HTMLButtonElement>(".md-video-viewer button").forEach((close) => close.click());
+}
 
 function row(path: string): HTMLElement | undefined {
   return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find((el) => {
@@ -71,6 +78,18 @@ describe("opening a Files row", () => {
 
     expect(document.querySelector(".md-video-viewer")).not.toBeNull();
     expect(openFileTabs()).toEqual([]);
+  });
+
+  test("the viewer's Close shuts it and gives Escape back to the page", async () => {
+    name("clip.mp4").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await settle();
+
+    closeViewers();
+    const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(escape);
+
+    expect(document.querySelector(".md-video-viewer")).toBeNull();
+    expect(escape.defaultPrevented).toBe(false);
   });
 
   test("a double-click on a document opens it in an editor tab", async () => {

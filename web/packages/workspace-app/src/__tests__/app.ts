@@ -22,7 +22,8 @@ import "../state/commands/install";
 /// The browser surface jsdom lacks and the app reaches for: resize
 /// observation, animation frames, a canvas with no context (the answer a
 /// browser without one gives), text-range geometry for CodeMirror's measure,
-/// font loading, media queries, and scrolling an element into view.
+/// pausing and reloading a media element, font loading, media queries, and
+/// scrolling an element into view.
 export function stubAppEnvironment(): void {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -60,6 +61,8 @@ export function stubAppEnvironment(): void {
   Element.prototype.scrollIntoView = () => {};
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Range.prototype.getBoundingClientRect = () => new DOMRect();
+  HTMLMediaElement.prototype.pause = () => {};
+  HTMLMediaElement.prototype.load = () => {};
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: (query: string) => ({

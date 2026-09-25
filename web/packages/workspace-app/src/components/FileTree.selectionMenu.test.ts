@@ -54,7 +54,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  document.querySelectorAll(".md-video-viewer").forEach((el) => el.remove());
+  // The viewer's own Close also takes its Escape listener off the document.
+  document.querySelectorAll<HTMLButtonElement>(".md-video-viewer button").forEach((close) => close.click());
   browserSidePanes.left = false;
   await unmountApp();
 });
