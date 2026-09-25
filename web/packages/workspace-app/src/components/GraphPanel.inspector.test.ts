@@ -119,6 +119,7 @@ beforeEach(async () => {
       { path: "README.md", kind: "document", size: 5, mtime: 100, content: "hello" },
       { path: "notes/a.md", kind: "document", size: 5, mtime: 100, content: "# a" },
       { path: "notes/deep/d.md", kind: "document", size: 5, mtime: 100, content: "# d" },
+      { path: "notes/bundle.zip", kind: "binary", size: 2, mtime: 100, content: "PK" },
       { path: "Contacts/alice.md", kind: "contact", size: 5, mtime: 100, content: "# Alice" },
     ],
   });
@@ -213,6 +214,43 @@ describe("a file node", () => {
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace" });
+  });
+});
+
+describe("a file the editor cannot open", () => {
+  test("offers no Open: its inspector leads with Download", async () => {
+    graphServer.view.nodes.push(g.file("notes/bundle.zip"));
+    graphServer.view.edges.push(g.edge(NOTES, "notes/bundle.zip", "contains"));
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await select("notes/bundle.zip");
+
+    const main = await inspectorButton(target, "Download file");
+    expect(main.classList.contains("pill-main")).toBe(true);
+    await expect(inspectorButton(target, "Open")).rejects.toThrow("no inspector action Open");
+    expect(paneTabs().some((t) => t.kind === "file"), "no editor tab").toBe(false);
+  });
+});
+
+describe("the scope breadcrumb", () => {
+  test("lists the scope's ancestors, and a crumb re-scopes this tab in place", async () => {
+    const { tab, target } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "file:notes/deep/d.md", depth: 2, inspectorOpen: true }),
+    );
+    const crumbs = [...target.querySelectorAll<HTMLElement>(".scope-crumbs .crumb")];
+    expect(crumbs.map((c) => [c.textContent?.trim(), c.classList.contains("current")])).toEqual([
+      ["workspace", false],
+      ["notes", false],
+      ["deep", false],
+      ["d.md", true],
+    ]);
+
+    crumbs[1]!.click();
+    await settle();
+    expect(tab.scopeId).toBe("dir:notes");
+    expect(tab.depth).toBe(1);
+    expect(newGraphTabs(tab.id), "no new tab").toEqual([]);
   });
 });
 

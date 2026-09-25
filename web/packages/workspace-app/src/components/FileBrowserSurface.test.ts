@@ -8,6 +8,20 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+const caps = vi.hoisted(() => ({ workspace: true }));
+
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: {
+    get workspace() {
+      return caps.workspace;
+    },
+    files: true,
+    drafts: true,
+    terminal: true,
+  },
+}));
+
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
 import Pane from "./Pane.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -31,6 +45,8 @@ class TestResizeObserver {
   disconnect() {}
 }
 globalThis.ResizeObserver = TestResizeObserver as unknown as typeof ResizeObserver;
+// A selected row scrolls itself into view; jsdom has no layout to scroll.
+Element.prototype.scrollIntoView = () => {};
 Object.defineProperty(window, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
@@ -128,6 +144,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  caps.workspace = true;
   closeTabMenu();
   if (pathPromptState.open) resolvePathPrompt(null);
   for (const app of mounted.splice(0)) unmount(app);
@@ -258,6 +275,60 @@ describe("clicking a row", () => {
     clickRow(target, "README.md");
     await settle();
     expect(target.querySelector(".inspector")).not.toBeNull();
+  });
+});
+
+describe("graphs from the browser", () => {
+  async function workspaceInspector(): Promise<HTMLElement> {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    await openFromTabStrip(tab);
+    menuButton(workspace.info!.root).click();
+    await settle();
+    return target;
+  }
+
+  async function inspectorActions(target: HTMLElement): Promise<string[]> {
+    const caret = target.querySelector<HTMLButtonElement>(".inspector .pill-caret");
+    caret?.click();
+    await settle(2);
+    return [...target.querySelectorAll(".inspector .action-menu-item")].map((b) => b.textContent?.trim() ?? "");
+  }
+
+  test("the workspace's Graph from here opens the workspace graph in a new tab", async () => {
+    const target = await workspaceInspector();
+    expect(await inspectorActions(target)).toContain("Graph from here");
+    [...target.querySelectorAll<HTMLButtonElement>(".inspector .action-menu-item")]
+      .find((b) => b.textContent?.trim() === "Graph from here")!
+      .click();
+    await settle();
+    const graph = (layout.nodes[PANE] as LeafNode).tabs.find((t) => t.kind === "graph");
+    expect(graph).toMatchObject({ mode: "semantic", scopeId: "workspace" });
+  });
+
+  test("a window without a workspace offers no graph from the inspector or the tree", async () => {
+    caps.workspace = false;
+    const target = await workspaceInspector();
+    expect(await inspectorActions(target)).not.toContain("Graph from here");
+
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+      (el) => el.querySelector(".name")?.textContent?.trim() === "notes/",
+    );
+    row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const labels = [...document.body.querySelectorAll(".ctx .menu-row-label")].map((el) => el.textContent);
+    expect(labels).toContain("Delete");
+    expect(labels).not.toContain("New Graph");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    const readme = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+      (el) => el.querySelector(".name")?.textContent?.trim() === "README.md",
+    );
+    readme!.querySelector<HTMLElement>(".name")!.click();
+    await settle();
+    const fileActions = await inspectorActions(target);
+    expect(fileActions).toContain("Download file");
+    expect(fileActions).not.toContain("Graph from here");
   });
 });
 
