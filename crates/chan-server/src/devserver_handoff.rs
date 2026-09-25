@@ -350,6 +350,13 @@ impl ListenerHandle {
 }
 
 #[cfg(any(unix, windows))]
+impl ListenerHandle {
+    /// Stop the listener: abort its accept loop and unlink the socket, as
+    /// dropping the handle does.
+    pub async fn shutdown(self) {}
+}
+
+#[cfg(any(unix, windows))]
 impl Drop for ListenerHandle {
     fn drop(&mut self) {
         if let Some(h) = self.accept_loop.take() {
@@ -1419,6 +1426,60 @@ mod tests {
 
         assert!(probe_instance(sock, Duration::from_secs(1)).await.is_none());
         old_server.await.unwrap();
+    }
+
+    /// A listener stop owes an accepted connection its reply: it may not
+    /// return while the handler is still answering, and the client still
+    /// reads the reply afterwards.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_stop_waits_for_an_in_flight_reply() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("stop.sock");
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let answering = Arc::clone(&release);
+        let handle = start_listener(sock.clone(), move |_req| {
+            let entered = entered_tx.lock().unwrap().take();
+            let release = Arc::clone(&answering);
+            async move {
+                if let Some(entered) = entered {
+                    let _ = entered.send(());
+                }
+                let _permit = release.acquire().await.unwrap();
+                Response::Registered {
+                    devserver_version: CHAN_VERSION.into(),
+                    prefix: "/workspace".into(),
+                }
+            }
+        })
+        .unwrap();
+        let client_sock = sock.clone();
+        let client = tokio::spawn(async move { request_over(&client_sock, "/tmp/notes").await });
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .expect("the request never reached the handler")
+            .unwrap();
+
+        let stop = tokio::spawn(handle.shutdown());
+        // The listener has taken the stop once it refuses a new peer.
+        while tokio::net::UnixStream::connect(&sock).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !stop.is_finished(),
+            "the listener stop returned while an accepted connection still owed its reply"
+        );
+
+        release.add_permits(1);
+        assert!(matches!(client.await.unwrap(), Response::Registered { .. }));
+        tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("the stop outlived its last connection")
+            .unwrap();
     }
 
     #[cfg(unix)]
