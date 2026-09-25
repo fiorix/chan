@@ -28,7 +28,7 @@ afterEach(() => {
 // Admission belongs to the server, so there is no client-side concurrency
 // suite here any more. What the browser still owns is the record: progress
 // coalescing, cancellation, failure, and reload recovery. The server-reported
-// half lives in transferQueueReporting.test.ts.
+// half lives in transfers.queue.test.ts.
 describe("transfer records", () => {
   test("progress is coalesced and never persists every producer tick", async () => {
     vi.useFakeTimers();

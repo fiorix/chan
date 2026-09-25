@@ -122,8 +122,8 @@ describe("local extensions", () => {
 
 // A devserver restart re-mints every per-process entry capability; a
 // surviving page must converge without a manual reload. The catalog
-// re-resolves on watch reconnect (store.onWatchReady wiring is pinned in
-// serverInstanceReload.test.ts) and mounted frames follow reactively.
+// re-resolves on watch reconnect (store.serverInstance.test.ts drives the
+// store's reconnect) and mounted frames follow reactively.
 describe("catalog refresh across a devserver restart", () => {
   const capA = "a".repeat(64);
   const capB = "b".repeat(64);

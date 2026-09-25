@@ -7,8 +7,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 // The flake was the dynamic import inside `renderPane` timing out (30s)
 // under the full parallel suite, where Svelte-component transform/import
 // is contended across workers - not an assertion or shared-state race.
-// Resolving the module once at module-eval matches the non-flaky
-// TerminalTeamWork.test.ts pattern and takes the import off the timed
+// Resolving the module once at module-eval takes the import off the timed
 // path.
 import Pane from "./Pane.svelte";
 import paneSource from "./Pane.svelte?raw";
