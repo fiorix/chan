@@ -37,49 +37,22 @@ import RichPrompt from "./RichPrompt.svelte";
 import TerminalTabComponent from "./TerminalTab.svelte";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { installEditorDom } from "../__tests__/wysiwyg";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { installTerminalDom, mountTerminal, resetTerminals } from "../__tests__/terminalTab";
 import {
   activePane,
   bumpTabFocusPulse,
   hydrateTerminalSessionsFromLayout,
-  layout,
   restoreLayout,
   serializeLayout,
   setRichPromptCaret,
   setRichPromptHeight,
-  type LeafNode,
   type TerminalTab,
 } from "../state/tabs.svelte";
 
 // The per-file caret index is a localStorage-backed store; mock it the same
 // way tabs.test.ts does so importing the tabs store never touches storage.
 vi.mock("../state/caretIndex");
-
-function resetLayout(tabs: TerminalTab[]): LeafNode {
-  const pane: LeafNode = {
-    kind: "leaf",
-    id: "pane-rp-test",
-    tabs,
-    activeTabId: tabs[0]?.id ?? null,
-  };
-  layout.rootId = pane.id;
-  layout.activePaneId = pane.id;
-  layout.nodes = { [pane.id]: pane };
-  layout.focusColor = "blue";
-  return pane;
-}
-
-function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    kind: "terminal",
-    id: "term-rp-1",
-    title: "Terminal",
-    createdAt: 1,
-    broadcastEnabled: false,
-    broadcastTargetIds: [],
-    ...partial,
-  };
-}
 
 installTerminalDom();
 installEditorDom();
