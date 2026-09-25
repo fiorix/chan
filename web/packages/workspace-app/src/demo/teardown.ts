@@ -3,7 +3,10 @@
 // order matters: let the bootstrap settle against the demo backend, unmount,
 // stop the index poll (it refuses to re-arm while its handle is set), release
 // the timers the test tracked, uninstall the demo, and reset the URL hash and
-// sessionStorage the next mount's bootstrap would restore a layout from.
+// sessionStorage. The settle yields to the event loop with the app still
+// mounted, so a debounce that comes due there can write the test's layout into
+// either, and the next mount's bootstrap would restore it over the layout that
+// test seeds.
 
 import { unmount } from "svelte";
 

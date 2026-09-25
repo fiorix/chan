@@ -12,12 +12,14 @@
 // because Pane.svelte carries its own Escape branch, which is the duplicate a
 // fix deletes once the primitive owns the key. It has to keep passing.
 
-import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { mount, tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
 import type { MockWorkspaceData } from "../demo/data";
-import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import { searchPanel } from "../state/store.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
 
@@ -155,12 +157,21 @@ async function mountApp() {
   await tick();
 }
 
-afterEach(() => {
-  for (const c of mounted.splice(0)) unmount(c);
-  uninstallDemoWorkspace();
-  document.body.innerHTML = "";
-  searchPanel.open = false;
-  searchPanel.query = "";
+let timers: TimerTrack | null = null;
+
+beforeEach(() => {
+  timers = trackTimers();
+});
+
+afterEach(async () => {
+  try {
+    await teardownDemoApp({ mounted, timers });
+  } finally {
+    timers = null;
+    document.body.innerHTML = "";
+    searchPanel.open = false;
+    searchPanel.query = "";
+  }
 });
 
 async function settle(): Promise<void> {

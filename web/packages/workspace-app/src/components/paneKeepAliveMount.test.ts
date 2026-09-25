@@ -13,8 +13,8 @@
 // instead: GraphPanel paints a real canvas, jsdom has none, and the second
 // instance throws before it can be compared.
 
-import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { mount, tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 class TestResizeObserver {
   observe() {}
@@ -66,7 +66,9 @@ vi.mock("./canvasAnimation", async (importOriginal) => ({
 
 import App from "../App.svelte";
 import type { MockWorkspaceData } from "../demo/data";
-import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import {
   layout,
@@ -168,13 +170,22 @@ async function mountWith(tabs: Tab[]): Promise<HTMLElement> {
   return target;
 }
 
-afterEach(() => {
-  for (const c of mounted.splice(0)) unmount(c);
-  uninstallDemoWorkspace();
-  document.body.innerHTML = "";
-  ui.authMissing = false;
-  ui.disconnectBlocking = false;
-  vi.restoreAllMocks();
+let timers: TimerTrack | null = null;
+
+beforeEach(() => {
+  timers = trackTimers();
+});
+
+afterEach(async () => {
+  try {
+    await teardownDemoApp({ mounted, timers });
+  } finally {
+    timers = null;
+    document.body.innerHTML = "";
+    ui.authMissing = false;
+    ui.disconnectBlocking = false;
+    vi.restoreAllMocks();
+  }
 });
 
 function paneEl(target: HTMLElement): HTMLElement {

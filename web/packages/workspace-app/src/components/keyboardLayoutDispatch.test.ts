@@ -10,13 +10,15 @@
 // A Linux browser client (jsdom's own user agent), so `Mod` is Ctrl and the
 // web chord set applies.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
 import { api } from "../api/client";
 import type { MockWorkspaceData } from "../demo/data";
-import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 import { EXTENSION_KEYDOWN_MESSAGE } from "../state/extensionBridge";
 import { refreshExtensions } from "../state/extensions.svelte";
@@ -167,15 +169,24 @@ async function mountApp(): Promise<void> {
   await tick();
 }
 
-afterEach(() => {
-  for (const c of mounted.splice(0)) unmount(c);
-  uninstallDemoWorkspace();
-  document.body.innerHTML = "";
-  settingsPanel.open = false;
-  if (paneMode.active) cancelPaneMode();
-  hydrateOverrides(null);
-  paneModalGuard.openCount = 0;
-  vi.restoreAllMocks();
+let timers: TimerTrack | null = null;
+
+beforeEach(() => {
+  timers = trackTimers();
+});
+
+afterEach(async () => {
+  try {
+    await teardownDemoApp({ mounted, timers });
+  } finally {
+    timers = null;
+    document.body.innerHTML = "";
+    settingsPanel.open = false;
+    if (paneMode.active) cancelPaneMode();
+    hydrateOverrides(null);
+    paneModalGuard.openCount = 0;
+    vi.restoreAllMocks();
+  }
 });
 
 function press(init: KeyboardEventInit & { altGraph?: boolean }): KeyboardEvent {

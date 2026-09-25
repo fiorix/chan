@@ -9,19 +9,16 @@
 // The app is mounted for real because the claim is about what survives: the
 // strip, the pane's other tab bodies and the other pane.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
 import type { MockWorkspaceData } from "../demo/data";
-import {
-  demoTransportSettled,
-  installDemoWorkspace,
-  uninstallDemoWorkspace,
-} from "../demo/install";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
-import { stopIndexStatusPoller, ui } from "../state/store.svelte";
+import { ui } from "../state/store.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
 
 class TestResizeObserver {
@@ -168,22 +165,15 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await demoTransportSettled();
-  for (const c of mounted.splice(0)) unmount(c);
-  stopIndexStatusPoller();
-  timers?.release();
-  timers = null;
-  uninstallDemoWorkspace();
-  // The settle above yields to the event loop with the app still mounted, so
-  // a debounce that came due there can have written this test's layout into
-  // the URL hash or the reload snapshot. The next mount's bootstrap restores
-  // from either, after that test has seeded its own layout.
-  history.replaceState(null, "", window.location.pathname + window.location.search);
-  sessionStorage.clear();
-  document.body.innerHTML = "";
-  ui.authMissing = false;
-  ui.disconnectBlocking = false;
-  vi.restoreAllMocks();
+  try {
+    await teardownDemoApp({ mounted, timers });
+  } finally {
+    timers = null;
+    document.body.innerHTML = "";
+    ui.authMissing = false;
+    ui.disconnectBlocking = false;
+    vi.restoreAllMocks();
+  }
 });
 
 function paneEl(target: HTMLElement, id: string): HTMLElement {

@@ -16,18 +16,15 @@
 // the native menu) waits on the owner ruling about what the screensaver lock
 // is, and the desktop close button's fast path is a separate acceptance.
 
-import { mount, tick, unmount } from "svelte";
+import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import App from "../App.svelte";
 import PreflightOverlay from "./PreflightOverlay.svelte";
 import { api } from "../api/client";
 import type { MockWorkspaceData } from "../demo/data";
-import {
-  demoTransportSettled,
-  installDemoWorkspace,
-  uninstallDemoWorkspace,
-} from "../demo/install";
+import { installDemoWorkspace } from "../demo/install";
+import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   allCommands,
@@ -42,7 +39,6 @@ import {
   FULL_WINDOW_COVERS,
   raisedCoverKeys,
   setCoverBlocking,
-  stopIndexStatusPoller,
   ui,
   type FullWindowCover,
 } from "../state/store.svelte";
@@ -191,34 +187,21 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Real timers first: the settle below runs on them, and the release must
-  // not put the tracked functions back over a fake clock.
+  // Real timers first: the teardown's settle runs on them, and its release
+  // must not put the tracked functions back over a fake clock.
   vi.useRealTimers();
-  // Unmounting cancels nothing the bootstrap still has in flight, so let it
-  // settle against the demo backend before the backend goes away.
-  await demoTransportSettled();
-  for (const c of mounted.splice(0)) unmount(c);
-  // What the app armed and unmounting did not stop (the wake-gap probe and
-  // the resume it drives, the index poll, the hash and session debounces,
-  // the watcher's timers) is cleared here, not left to fire into the next
-  // test or past the file's environment.
-  stopIndexStatusPoller();
-  timers?.release();
-  timers = null;
-  uninstallDemoWorkspace();
-  // The settle above yields to the event loop with the app still mounted, so
-  // a debounce that came due there can have written this test's layout into
-  // the URL hash or the reload snapshot. The next mount's bootstrap restores
-  // from either, after that test has seeded its own layout.
-  history.replaceState(null, "", window.location.pathname + window.location.search);
-  sessionStorage.clear();
-  document.body.innerHTML = "";
-  screensaver.locked = false;
-  screensaver.pin_set = false;
-  windowLifecycle.ended = null;
-  ui.authMissing = false;
-  ui.disconnectBlocking = false;
-  vi.restoreAllMocks();
+  try {
+    await teardownDemoApp({ mounted, timers });
+  } finally {
+    timers = null;
+    document.body.innerHTML = "";
+    screensaver.locked = false;
+    screensaver.pin_set = false;
+    windowLifecycle.ended = null;
+    ui.authMissing = false;
+    ui.disconnectBlocking = false;
+    vi.restoreAllMocks();
+  }
 });
 
 function pane(): LeafNode {
