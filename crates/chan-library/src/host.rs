@@ -6332,41 +6332,30 @@ mod tests {
         assert!(matches!(err, Error::Config(_)));
     }
 
-    #[tokio::test]
-    async fn open_or_get_concurrent_same_root_resolves_to_one_mount() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace");
-        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        lib.register_workspace(root.path()).expect("register");
-        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
-
-        // Two callers race the same fresh root. The registration lock
-        // serializes them: one mounts, the other observes that mount in the
-        // pre-check. Both resolve to a single tenant with the same prefix.
-        let (a, b) = tokio::join!(
-            host.open_or_get_registered_workspace(root.path(), serve_config("/race")),
-            host.open_or_get_registered_workspace(root.path(), serve_config("/race")),
-        );
-        assert_eq!(a.expect("first resolves").prefix, "/race");
-        assert_eq!(b.expect("second resolves").prefix, "/race");
-        assert_eq!(
-            host.mounted_prefixes().expect("prefixes"),
-            vec!["/race".to_string()],
-            "exactly one tenant mounted despite the race"
-        );
+    /// Let every task the test started run until each one is parked on
+    /// something other than the clock. On a paused clock time advances only
+    /// when the runtime has no runnable task and no blocking-pool work in
+    /// flight, so this sleep returns once the host has gone quiet: a caller
+    /// still pending then is waiting on a lock, not on work in progress.
+    async fn quiesce() {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
     }
 
-    #[tokio::test]
-    async fn close_for_root_waits_for_inflight_registration_then_unmounts() {
-        let cfg = tempfile::tempdir().expect("config dir");
-        let root = tempfile::tempdir().expect("workspace");
-        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        let key = lib
-            .register_workspace(root.path())
-            .expect("register")
-            .root_path
-            .to_string_lossy()
-            .into_owned();
+    /// Mount `root` through a [`GatedWorkspaceBuilder`] and return once the
+    /// mount is parked in its tenant build: its open holds the workspace and
+    /// its runtime is not yet published, the gap a same-root caller must not
+    /// observe. Adding a permit to the returned semaphore lets it finish.
+    async fn park_a_mount_in_its_build(
+        host_cfg: &Path,
+        root: &Path,
+        prefix: &'static str,
+    ) -> (
+        Arc<WorkspaceHost>,
+        Arc<tokio::sync::Semaphore>,
+        tokio::task::JoinHandle<Result<HostedWorkspace, Error>>,
+    ) {
+        let lib = Library::open_at(host_cfg.join("config.toml")).expect("library");
+        lib.register_workspace(root).expect("register");
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let host = Arc::new(WorkspaceHost::new(
@@ -6376,28 +6365,93 @@ mod tests {
                 release: Arc::clone(&release),
             }),
         ));
+        let mount_host = Arc::clone(&host);
+        let mount_root = root.to_path_buf();
+        let mount = tokio::spawn(async move {
+            mount_host
+                .open_or_get_registered_workspace(mount_root, serve_config(prefix))
+                .await
+        });
+        entered_rx
+            .await
+            .expect("the mount entered its tenant build");
+        (host, release, mount)
+    }
+
+    /// Two callers racing one root resolve to one mount: the second waits
+    /// for the first rather than opening the same root beside it, then finds
+    /// its mount.
+    async fn same_root_registrations_resolve_to_one_mount(
+        second_spelling: impl FnOnce(&Path) -> PathBuf,
+    ) {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let second_root = second_spelling(root.path());
+        let (host, release, first) =
+            park_a_mount_in_its_build(cfg.path(), root.path(), "/race").await;
+
+        let second_host = Arc::clone(&host);
+        let second = tokio::spawn(async move {
+            second_host
+                .open_or_get_registered_workspace(second_root, serve_config("/race"))
+                .await
+        });
+        quiesce().await;
+        assert!(
+            !second.is_finished(),
+            "the second caller did not wait for the in-flight mount of its root"
+        );
+
+        release.add_permits(1);
+        let first = first.await.expect("first task").expect("first resolves");
+        let second = second.await.expect("second task").expect("second resolves");
+        assert_eq!(first.prefix, "/race");
+        assert_eq!(second.prefix, "/race");
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/race".to_string()],
+            "exactly one tenant mounted despite the race"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn open_or_get_concurrent_same_root_resolves_to_one_mount() {
+        same_root_registrations_resolve_to_one_mount(Path::to_path_buf).await;
+    }
+
+    /// Two spellings of one root are one root: the alias resolves only
+    /// through canonicalization, so it must meet the first caller anyway.
+    #[tokio::test(start_paused = true)]
+    async fn open_or_get_racing_two_spellings_of_one_root_resolves_to_one_mount() {
+        same_root_registrations_resolve_to_one_mount(|root| {
+            std::fs::create_dir(root.join("sub")).expect("alias hop");
+            root.join("sub").join("..")
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_for_root_waits_for_inflight_registration_then_unmounts() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let (host, release, mount) =
+            park_a_mount_in_its_build(cfg.path(), root.path(), "/inflight").await;
+        let key = canonical_key(root.path()).to_string_lossy().into_owned();
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
         overlay.set(&key, true);
         host.install_workspace_overlay(Arc::clone(&overlay));
 
-        let mount_host = Arc::clone(&host);
-        let mount_root = root.path().to_path_buf();
-        let mount = tokio::spawn(async move {
-            mount_host
-                .open_or_get_registered_workspace(mount_root, serve_config("/inflight"))
+        let close_host = Arc::clone(&host);
+        let close_root = root.path().to_path_buf();
+        let close = tokio::spawn(async move {
+            close_host
+                .close_workspace_for_root(&close_root, false)
                 .await
         });
-        entered_rx.await.expect("tenant build entered");
-
-        let mut close = std::pin::pin!(host.close_workspace_for_root(root.path(), false));
-        let close_was_pending = std::future::poll_fn(|cx| {
-            let pending = std::future::Future::poll(close.as_mut(), cx).is_pending();
-            std::task::Poll::Ready(pending)
-        })
-        .await;
+        quiesce().await;
         assert!(
-            close_was_pending,
-            "close bypassed the in-flight registration boundary"
+            !close.is_finished(),
+            "close observed the in-flight mount before its runtime was published"
         );
 
         release.add_permits(1);
@@ -6405,7 +6459,11 @@ mod tests {
             .await
             .expect("mount task")
             .expect("in-flight mount completes");
-        assert!(close.await.expect("close after mount").completed());
+        assert!(close
+            .await
+            .expect("close task")
+            .expect("close after mount")
+            .completed());
         assert!(host.mounted_prefixes().expect("prefixes").is_empty());
         let row = overlay
             .entries()
@@ -6413,6 +6471,239 @@ mod tests {
             .find(|row| row.path == key)
             .expect("overlay row");
         assert!(!row.desired_on, "the serialized close persists off");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remove_for_root_waits_for_inflight_registration_then_unregisters() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let (host, release, mount) =
+            park_a_mount_in_its_build(cfg.path(), root.path(), "/inflight").await;
+
+        let remove_host = Arc::clone(&host);
+        let remove_root = root.path().to_path_buf();
+        let remove = tokio::spawn(async move {
+            remove_host
+                .remove_workspace_for_root(&remove_root, false)
+                .await
+        });
+        quiesce().await;
+        assert!(
+            !remove.is_finished(),
+            "remove observed the in-flight mount before its runtime was published"
+        );
+
+        release.add_permits(1);
+        mount
+            .await
+            .expect("mount task")
+            .expect("in-flight mount completes");
+        assert!(remove
+            .await
+            .expect("remove task")
+            .expect("remove after mount")
+            .completed());
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+        assert!(
+            host.library().workspace_paths_for(root.path()).is_none(),
+            "the serialized remove unregisters the root it unmounted"
+        );
+    }
+
+    /// Builds tenants as [`FakeBuilder`] does, except that the tenant of
+    /// `gated_root` owns one task whose shutdown parks until `release` gets a
+    /// permit or the tenant's shutdown grace runs out.
+    struct ShutdownGatedBuilder {
+        gated_root: PathBuf,
+        entered: tokio::sync::mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Semaphore>,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TenantBuilder for ShutdownGatedBuilder {
+        async fn build_workspace(
+            &self,
+            library: Library,
+            workspace: Arc<Workspace>,
+            config: &ServeConfig,
+            desktop: DesktopBridge,
+            unserve: UnserveMode,
+            control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            let gated = workspace.root() == self.gated_root.as_path();
+            let mut artifacts = FakeBuilder
+                .build_workspace(
+                    library,
+                    workspace,
+                    config,
+                    desktop,
+                    unserve,
+                    control_identity,
+                )
+                .await?;
+            if gated {
+                artifacts.tasks = fake_artifacts_with_gated_shutdown(
+                    self.entered.clone(),
+                    Arc::clone(&self.release),
+                    Arc::clone(&self.completed),
+                )
+                .tasks;
+            }
+            Ok(artifacts)
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: DesktopBridge,
+            _unserve: UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<TenantArtifacts, Error> {
+            unreachable!("workspace-only test")
+        }
+    }
+
+    /// One root's close must not hold up a mount of another. The close of
+    /// `closing` parks inside its tenant's shutdown grace, part of its
+    /// release budget, while `mounting` mounts. On a paused clock that grace
+    /// can run out only once nothing else can make progress, so the close
+    /// finishing first means the mount was waiting on it.
+    #[tokio::test(start_paused = true)]
+    async fn a_mount_completes_while_another_roots_close_is_in_its_release_budget() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let closing = tempfile::tempdir().expect("closing workspace");
+        let mounting = tempfile::tempdir().expect("mounting workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let gated_root = lib
+            .register_workspace(closing.path())
+            .expect("register the closing root")
+            .root_path;
+        lib.register_workspace(mounting.path())
+            .expect("register the mounting root");
+        let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = Arc::new(WorkspaceHost::new(
+            lib,
+            Arc::new(ShutdownGatedBuilder {
+                gated_root,
+                entered: entered_tx,
+                release: Arc::clone(&release),
+                completed: Arc::clone(&completed),
+            }),
+        ));
+        host.open_or_get_registered_workspace(closing.path(), serve_config("/closing"))
+            .await
+            .expect("mount the closing root");
+
+        let close_host = Arc::clone(&host);
+        let close_root = closing.path().to_path_buf();
+        let mut close = tokio::spawn(async move {
+            close_host
+                .close_workspace_for_root(&close_root, false)
+                .await
+        });
+        entered
+            .recv()
+            .await
+            .expect("the close entered its tenant's shutdown");
+
+        let mount =
+            host.open_or_get_registered_workspace(mounting.path(), serve_config("/mounting"));
+        let mounted = tokio::select! {
+            biased;
+            closed = &mut close => panic!(
+                "the mount of one root waited for another root's close to leave its \
+                 release budget: {closed:?}"
+            ),
+            mounted = mount => mounted.expect("mount the other root"),
+        };
+        assert_eq!(mounted.prefix, "/mounting");
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the closing tenant finished its shutdown before the other mount returned"
+        );
+        assert_eq!(
+            host.workspace_status(closing.path()).0,
+            WorkspaceStatus::Closing
+        );
+
+        release.add_permits(1);
+        assert!(close.await.expect("close task").expect("close").completed());
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/mounting".to_string()]
+        );
+    }
+
+    /// Two different roots racing onto one prefix do not wait on each other,
+    /// so the prefix check and the publication are one step: both builds run
+    /// at once (the builder's barrier needs both), exactly one tenant is
+    /// published, and the loser is shut down and its workspace released
+    /// before its mount returns.
+    #[tokio::test(start_paused = true)]
+    async fn two_roots_racing_one_prefix_publish_one_and_release_the_other() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let first = tempfile::tempdir().expect("first workspace");
+        let second = tempfile::tempdir().expect("second workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(first.path())
+            .expect("register first");
+        lib.register_workspace(second.path())
+            .expect("register second");
+        let stopped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = WorkspaceHost::new(
+            lib,
+            Arc::new(RacingWorkspaceBuilder {
+                barrier: tokio::sync::Barrier::new(2),
+                stopped: Arc::clone(&stopped),
+            }),
+        );
+
+        let (first_mount, second_mount) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(
+                host.open_or_get_registered_workspace(first.path(), serve_config("/shared")),
+                host.open_or_get_registered_workspace(second.path(), serve_config("/shared")),
+            )
+        })
+        .await
+        .expect("the two roots never built at the same time: one mount waited on the other");
+        let (winner, loser_root, failure) = match (&first_mount, &second_mount) {
+            (Ok(winner), Err(failure)) => (winner, second.path(), failure),
+            (Err(failure), Ok(winner)) => (winner, first.path(), failure),
+            _ => panic!(
+                "exactly one root may take the prefix: {:?} / {:?}",
+                first_mount.as_ref().map(|hosted| &hosted.prefix),
+                second_mount.as_ref().map(|hosted| &hosted.prefix),
+            ),
+        };
+        assert_eq!(winner.prefix, "/shared");
+        assert!(
+            failure
+                .to_string()
+                .contains("workspace prefix already mounted"),
+            "{failure}"
+        );
+        assert_eq!(
+            stopped.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the losing tenant must be shut down before its mount returns"
+        );
+        assert_eq!(
+            host.workspace_status(loser_root),
+            (WorkspaceStatus::Error, Some(failure.to_string()))
+        );
+        drop(
+            host.library()
+                .open_workspace(loser_root)
+                .expect("the losing mount released the workspace it opened"),
+        );
     }
 
     // The removal this simulates cannot be constructed on Windows:
