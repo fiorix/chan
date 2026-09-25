@@ -1,157 +1,179 @@
-import { describe, expect, test } from "vitest";
-import source from "./screensaver.svelte.ts?raw";
-import overlay from "../components/ScreensaverOverlay.svelte?raw";
-import app from "../App.svelte?raw";
+// @vitest-environment jsdom
+//
+// The screen lock's state machine: it loads the workspace's screensaver
+// settings, locks after `timeout_secs` without activity, stays off while
+// something pauses it, and unlocks with a PIN the server verifies or, when
+// the workspace has no PIN, with any input.
 
-// Screensaver state machine + overlay component. Tests pin the
-// architectural shape; behavioral testing of the inactivity timer
-// happens via empirical walk.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { ScreensaverTheme } from "./screensaver";
 
-describe("screensaver: state singleton shape", () => {
-  test("singleton declared with the 5 expected fields", () => {
-    expect(source).toMatch(
-      /export const screensaver = \$state<ScreensaverState>\(\{[\s\S]*?enabled: false,[\s\S]*?timeout_secs: SCREENSAVER_DEFAULT_TIMEOUT_SECS,[\s\S]*?theme: SCREENSAVER_DEFAULT_THEME,[\s\S]*?pin_set: false,[\s\S]*?locked: false,[\s\S]*?loaded: false,/,
-    );
+type State = {
+  enabled: boolean;
+  timeout_secs: number;
+  theme: ScreensaverTheme;
+  pin_set: boolean;
+};
+
+let machine: typeof import("./screensaver.svelte");
+let api: typeof import("../api/client").api;
+let defaults: typeof import("./screensaver");
+
+async function load(over: Partial<State> = {}): Promise<void> {
+  vi.spyOn(api, "screensaverState").mockResolvedValue({
+    enabled: true,
+    timeout_secs: 60,
+    theme: "matrix",
+    pin_set: true,
+    ...over,
+  });
+  await machine.loadScreensaverState();
+}
+
+beforeEach(async () => {
+  // A fresh module per test: the countdown and the pause count are module
+  // state.
+  vi.resetModules();
+  vi.useFakeTimers();
+  machine = await import("./screensaver.svelte");
+  api = (await import("../api/client")).api;
+  defaults = await import("./screensaver");
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("before the settings load", () => {
+  test("the lock is off, unlocked and not loaded, on the defaults", () => {
+    expect({ ...machine.screensaver }).toEqual({
+      enabled: false,
+      timeout_secs: defaults.SCREENSAVER_DEFAULT_TIMEOUT_SECS,
+      theme: defaults.SCREENSAVER_DEFAULT_THEME,
+      pin_set: false,
+      locked: false,
+      loaded: false,
+    });
   });
 
-  test("ScreensaverState interface carries enabled / timeout / pin_set / locked / loaded", () => {
-    expect(source).toMatch(/export interface ScreensaverState \{[\s\S]*?enabled: boolean;[\s\S]*?timeout_secs: number;[\s\S]*?theme: ScreensaverTheme;[\s\S]*?pin_set: boolean;[\s\S]*?locked: boolean;[\s\S]*?loaded: boolean;/);
+  test("locking now does nothing", () => {
+    machine.lockNow();
+    expect(machine.screensaver.locked).toBe(false);
   });
 });
 
-describe("screensaver: state machine helpers", () => {
-  test("loadScreensaverState calls api.screensaverState + arms the timer", () => {
-    expect(source).toMatch(
-      /export async function loadScreensaverState\(\): Promise<void> \{[\s\S]*?const s = await api\.screensaverState\(\);[\s\S]*?screensaver\.loaded = true;[\s\S]*?armInactivityTimer\(\);/,
-    );
+describe("loading the settings", () => {
+  test("applies the workspace's settings", async () => {
+    await load();
+    expect({ ...machine.screensaver }).toEqual({
+      enabled: true,
+      timeout_secs: 60,
+      theme: "matrix",
+      pin_set: true,
+      locked: false,
+      loaded: true,
+    });
   });
 
-  test("noteScreensaverActivity short-circuits when locked or disabled", () => {
-    expect(source).toMatch(
-      /export function noteScreensaverActivity\(\): void \{[\s\S]*?if \(screensaver\.locked\) return;[\s\S]*?if \(!screensaver\.enabled\) return;[\s\S]*?armInactivityTimer\(\);/,
-    );
-  });
-
-  test("lockNow flips locked + cancels timer", () => {
-    expect(source).toMatch(
-      /export function lockNow\(\): void \{[\s\S]*?screensaver\.locked = true;[\s\S]*?cancelInactivityTimer\(\);/,
-    );
-  });
-
-  test("unlockWithPin hashes + verifies + flips locked on success", () => {
-    expect(source).toMatch(
-      /export async function unlockWithPin\([\s\S]*?const hash = await hashPin\(pin, workspaceSalt\);[\s\S]*?const result = await api\.screensaverVerify\(hash\);[\s\S]*?if \(result\.verified\) \{[\s\S]*?screensaver\.locked = false;[\s\S]*?armInactivityTimer\(\);/,
-    );
-  });
-
-  test("pauseScreensaverTimer returns idempotent release fn", () => {
-    expect(source).toMatch(
-      /export function pauseScreensaverTimer\(\): \(\) => void \{[\s\S]*?pauseCount \+= 1;[\s\S]*?cancelInactivityTimer\(\);[\s\S]*?let released = false;[\s\S]*?if \(released\) return;[\s\S]*?released = true;[\s\S]*?pauseCount = Math\.max\(0, pauseCount - 1\);[\s\S]*?if \(pauseCount === 0\) armInactivityTimer\(\);/,
-    );
-  });
-
-  test("installScreensaverTracker registers the wider event set", () => {
-    expect(source).toMatch(
-      /const events = \[[\s\S]*?"keydown",[\s\S]*?"mousedown",[\s\S]*?"touchstart",[\s\S]*?"click",[\s\S]*?"scroll",[\s\S]*?"wheel",[\s\S]*?"pointermove",[\s\S]*?\] as const;/,
-    );
-  });
-
-  test("timer arming guards on enabled + locked + pause count", () => {
-    expect(source).toMatch(
-      /function armInactivityTimer\(\): void \{[\s\S]*?if \(!screensaver\.enabled\) return;[\s\S]*?if \(screensaver\.locked\) return;[\s\S]*?if \(pauseCount > 0\) return;/,
-    );
+  test("a failed read leaves it unloaded", async () => {
+    vi.spyOn(api, "screensaverState").mockRejectedValue(new Error("offline"));
+    await machine.loadScreensaverState();
+    expect(machine.screensaver.loaded).toBe(false);
   });
 });
 
-describe("screensaver: overlay component", () => {
-  test("renders only when screensaver.locked is true", () => {
-    expect(overlay).toMatch(/\{#if screensaver\.locked\}/);
+describe("the countdown", () => {
+  test("locks after the timeout without activity", async () => {
+    await load();
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(machine.screensaver.locked).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(machine.screensaver.locked).toBe(true);
   });
 
-  test("overlay has aria-modal + role=dialog", () => {
-    // The backdrop carries any-input dismiss handlers
-    // (onkeydown/onclick/tabindex) for the no-PIN branch.
-    // Match role + aria attrs without pinning the full opening tag.
-    expect(overlay).toMatch(
-      /class="screensaver-backdrop"[\s\S]{0,400}role="dialog"[\s\S]{0,80}aria-modal="true"[\s\S]{0,80}aria-label="Screen locked"/,
-    );
+  test("restarts on every kind of input the tracker listens for", async () => {
+    await load();
+    const uninstall = machine.installScreensaverTracker();
+    for (const type of ["keydown", "mousedown", "touchstart", "click", "scroll", "wheel", "pointermove"]) {
+      await vi.advanceTimersByTimeAsync(50_000);
+      window.dispatchEvent(new Event(type));
+    }
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(machine.screensaver.locked).toBe(false);
+
+    uninstall();
+    window.dispatchEvent(new Event("keydown"));
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(machine.screensaver.locked).toBe(false);
   });
 
-  test("PIN input is password-type + auto-focused after wake", () => {
-    expect(overlay).toMatch(/type="password"/);
-    expect(overlay).toMatch(
-      /\$effect\(\(\) => \{[\s\S]*?if \(!screensaver\.locked \|\| !cardVisible\) return;[\s\S]*?inputEl\?\.focus\(\);[\s\S]*?inputEl\?\.select\(\);/,
-    );
+  test("never runs while the lock is disabled", async () => {
+    await load({ enabled: false });
+    machine.noteScreensaverActivity();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(machine.screensaver.locked).toBe(false);
   });
 
-  test("fresh lock hides the card and focuses the backdrop", () => {
-    expect(overlay).toMatch(/let cardVisible = \$state\(false\);/);
-    expect(overlay).toMatch(
-      /if \(!locked\) \{[\s\S]{1,200}cardVisible = false;[\s\S]{1,400}cardVisible = false;[\s\S]{1,200}backdropEl\?\.focus\(\);/,
-    );
-  });
+  test("stays off while anything holds a pause, until the last release", async () => {
+    await load();
+    const first = machine.pauseScreensaverTimer();
+    const second = machine.pauseScreensaverTimer();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    first();
+    first();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(machine.screensaver.locked).toBe(false);
 
-  test("Enter key triggers submit", () => {
-    expect(overlay).toMatch(
-      /function onKey\(e: KeyboardEvent\): void \{[\s\S]*?if \(e\.key === "Enter"\) \{[\s\S]*?void submit\(\);/,
-    );
-  });
-
-  test("submit calls unlockWithPin with the workspace root salt", () => {
-    expect(overlay).toMatch(
-      /const salt = workspace\.info\?\.root \?\? "";[\s\S]*?const ok = await unlockWithPin\(pin, salt\);/,
-    );
-  });
-
-  test("wrong PIN triggers shake + clears input", () => {
-    expect(overlay).toMatch(
-      /if \(!ok\) \{[\s\S]*?shake = true;[\s\S]*?pin = "";[\s\S]*?setTimeout\(\(\) => \{[\s\S]*?shake = false;[\s\S]*?\}, 400\);/,
-    );
-  });
-
-  test("CSS animation `screensaver-shake` defined", () => {
-    expect(overlay).toMatch(
-      /@keyframes screensaver-shake \{[\s\S]*?transform: translateX/,
-    );
-  });
-
-  test("backdrop z-index is 2000 (above every other overlay)", () => {
-    expect(overlay).toMatch(/z-index: 39000;/);
-  });
-
-  test("overlay renders Matrix only when the matrix theme is active", () => {
-    expect(overlay).toMatch(/import MatrixRain from "\.\/screensaver\/MatrixRain\.svelte";/);
-    expect(overlay).toMatch(
-      /\{#if screensaver\.theme === "matrix"\}[\s\S]{1,80}<MatrixRain \/>[\s\S]{1,80}\{\/if\}/,
-    );
-  });
-
-  test("plain theme renders the same masked chan mark as the empty pane", () => {
-    expect(overlay).toMatch(
-      /\{#if screensaver\.theme !== "matrix"\}[\s\S]{1,120}class="screensaver-mark"/,
-    );
-    expect(overlay).toContain("url('/chan-mark.png') center / contain no-repeat");
-    expect(overlay).toMatch(/background-color: var\(--text-secondary\);/);
+    second();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(machine.screensaver.locked).toBe(true);
   });
 });
 
-describe("screensaver: App.svelte wiring", () => {
-  test("App imports installScreensaverTracker + loadScreensaverState", () => {
-    expect(app).toMatch(
-      /import \{[\s\S]*?installScreensaverTracker,[\s\S]*?loadScreensaverState,[\s\S]*?\} from "\.\/state\/screensaver\.svelte";/,
-    );
+describe("locking and unlocking", () => {
+  test("locking now locks at once and ignores activity until unlocked", async () => {
+    await load();
+    machine.lockNow();
+    expect(machine.screensaver.locked).toBe(true);
+    machine.noteScreensaverActivity();
+    expect(machine.screensaver.locked).toBe(true);
   });
 
-  test("App imports + mounts ScreensaverOverlay", () => {
-    expect(app).toMatch(/import ScreensaverOverlay from "\.\/components\/ScreensaverOverlay\.svelte";/);
-    expect(app).toMatch(/<ScreensaverOverlay \/>/);
+  test("a PIN the server verifies unlocks and restarts the countdown", async () => {
+    await load();
+    machine.lockNow();
+    const verify = vi.spyOn(api, "screensaverVerify").mockResolvedValue({ verified: true });
+
+    await expect(machine.unlockWithPin("1234", "/ws")).resolves.toBe(true);
+    expect(verify).toHaveBeenCalledWith(await defaults.hashPin("1234", "/ws"));
+    expect(machine.screensaver.locked).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(machine.screensaver.locked).toBe(true);
   });
 
-  test("App calls installScreensaverTracker at onMount", () => {
-    expect(app).toMatch(/installScreensaverTracker\(\);/);
+  test("a wrong or empty PIN keeps it locked", async () => {
+    await load();
+    machine.lockNow();
+    const verify = vi.spyOn(api, "screensaverVerify").mockResolvedValue({ verified: false });
+
+    await expect(machine.unlockWithPin("9999", "/ws")).resolves.toBe(false);
+    await expect(machine.unlockWithPin("", "/ws")).resolves.toBe(false);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(machine.screensaver.locked).toBe(true);
   });
 
-  test("App calls loadScreensaverState after bootstrap", () => {
-    expect(app).toMatch(/void loadScreensaverState\(\);/);
+  test("with no PIN set any input unlocks; with one set it cannot", async () => {
+    await load({ pin_set: true });
+    machine.lockNow();
+    machine.unlockWithoutPin();
+    expect(machine.screensaver.locked).toBe(true);
+
+    await load({ pin_set: false });
+    machine.lockNow();
+    machine.unlockWithoutPin();
+    expect(machine.screensaver.locked).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(machine.screensaver.locked).toBe(true);
   });
 });
