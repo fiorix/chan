@@ -5477,14 +5477,18 @@ mod write_tests {
     fn api_create_file_runs_off_runtime_thread() {
         one_blocking_thread_runtime().block_on(async {
             let (_cfg, root, state) = super::doc_divert_tests::divert_app();
-            let response = crate::state::test_support::assert_uses_blocking_pool(api_create_file(
-                State(state),
-                Json(CreateBody {
-                    path: "created.md".to_string(),
-                    is_dir: false,
-                    content: Some("made".to_string()),
-                }),
-            ))
+            let created = root.path().join("created.md");
+            let response = crate::state::test_support::assert_uses_blocking_pool_with_effect(
+                api_create_file(
+                    State(state),
+                    Json(CreateBody {
+                        path: "created.md".to_string(),
+                        is_dir: false,
+                        content: Some("made".to_string()),
+                    }),
+                ),
+                || created.exists(),
+            )
             .await;
             assert_eq!(response.status(), StatusCode::CREATED);
             assert_eq!(
@@ -5498,11 +5502,12 @@ mod write_tests {
     fn api_delete_file_runs_off_runtime_thread() {
         one_blocking_thread_runtime().block_on(async {
             let (_cfg, root, state) = super::doc_divert_tests::divert_app();
-            std::fs::write(root.path().join("doomed.md"), "x").unwrap();
-            let response = crate::state::test_support::assert_uses_blocking_pool(api_delete_file(
-                State(state),
-                AxumPath("doomed.md".to_string()),
-            ))
+            let doomed = root.path().join("doomed.md");
+            std::fs::write(&doomed, "x").unwrap();
+            let response = crate::state::test_support::assert_uses_blocking_pool_with_effect(
+                api_delete_file(State(state), AxumPath("doomed.md".to_string())),
+                || !doomed.exists(),
+            )
             .await;
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(!root.path().join("doomed.md").exists());
