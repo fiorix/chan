@@ -290,3 +290,22 @@ describe("the filesystem graph", () => {
     expect(visibleIds().length).toBe(canvas.props!.nodes.length);
   });
 });
+
+describe("the tab menu", () => {
+  test("is the scope row, the depth slider, the filters and Close, each group behind a separator", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
+    await settle(2);
+    const bubble = document.body.querySelector(".tab-menu-bubble")!;
+    const shape = [...bubble.querySelectorAll(".msep, .mbtn")].map((el) => {
+      if (el.classList.contains("msep")) return "---";
+      if (el.classList.contains("graph-scope-row")) return "scope";
+      if (el.classList.contains("depth-row")) return "depth";
+      if (el.classList.contains("filter-row")) return "filter";
+      return el.querySelector(".mbtn-label")?.textContent?.trim() ?? "";
+    });
+    const collapsed = shape.filter((row, i) => !(row === "filter" && shape[i - 1] === "filter"));
+    expect(collapsed).toEqual(["scope", "---", "depth", "---", "filter", "---", "Close"]);
+    closeTabMenu();
+  });
+});

@@ -142,3 +142,19 @@ describe("the body menu", () => {
     expect(setItem.mock.calls.filter(([key]) => /mask/i.test(String(key)))).toEqual([]);
   });
 });
+
+describe("both menus", () => {
+  test("leave Search and Settings to the global commands", async () => {
+    const { tab, target } = await attached();
+    await openTerminalMenu(tab);
+    const tabMenu = menuShape();
+    closeTabMenu();
+    await openBodyMenu(target);
+    const bodyMenu = menuShape();
+    for (const label of ["Search", "Settings"]) {
+      expect(tabMenu).not.toContain(label);
+      expect(bodyMenu).not.toContain(label);
+    }
+    expect(bodyMenu).toContain("Find");
+  });
+});

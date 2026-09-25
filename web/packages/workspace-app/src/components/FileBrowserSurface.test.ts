@@ -236,6 +236,31 @@ describe("the tab variant", () => {
   });
 });
 
+describe("clicking a row", () => {
+  function clickRow(target: HTMLElement, name: string): void {
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+      (el) => el.querySelector(".name")?.textContent?.trim() === name,
+    );
+    row!.querySelector<HTMLElement>(".name")!.click();
+  }
+
+  test("opens the inspector in a Files tab", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    clickRow(target, "README.md");
+    await settle();
+    expect(tab.inspectorOpen).toBe(true);
+  });
+
+  test("opens the inspector in the overlay", async () => {
+    const target = await render({ variant: "overlay" });
+    expect(target.querySelector(".inspector")).toBeNull();
+    clickRow(target, "README.md");
+    await settle();
+    expect(target.querySelector(".inspector")).not.toBeNull();
+  });
+});
+
 describe("the tree's row menu", () => {
   async function rowMenu(target: HTMLElement, name: string): Promise<string[]> {
     const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
