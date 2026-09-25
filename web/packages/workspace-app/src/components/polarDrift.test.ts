@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import PolarDrift from "./PolarDrift.svelte";
 import {
   advancePolarDriftParticles,
   createPolarDriftParticles,
@@ -8,18 +9,33 @@ import {
   POLAR_DRIFT_POINT_VERTEX_SHADER,
   POLAR_DRIFT_SURFACE_FRAGMENT_SHADER,
 } from "./polarDrift";
+import { recordingWebgl2, startAnimation, stopAnimations } from "../__tests__/canvas";
+
+vi.mock("./canvasAnimation", async (importOriginal) =>
+  (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
+);
+vi.mock("./polarDrift", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./polarDrift")>();
+  return {
+    ...actual,
+    advancePolarDriftParticles: vi.fn(actual.advancePolarDriftParticles),
+  };
+});
+
+afterEach(stopAnimations);
 
 describe("Polar Drift", () => {
-  test("keeps the source timing and attribution", async () => {
-    const renderer = (await import("./PolarDrift.svelte?raw"))
-      .default as string;
-    const motion = (await import("./polarDrift.ts?raw"))
-      .default as string;
+  test("turns its drift 0.06 radians per second of animation time", () => {
+    const { callbacks } = startAnimation(PolarDrift, recordingWebgl2().gl);
+    callbacks.resize(800, 800, false, 0);
+    const advance = vi.mocked(advancePolarDriftParticles);
+    advance.mockClear();
+    callbacks.frame(1000);
+    callbacks.frame(3000);
 
-    expect(renderer).toMatch(/const PHASE_SPEED = 0\.06;/);
-    expect(motion).toContain(
-      "https://x.com/hisadan/status/1997466751832059960",
-    );
+    const phases = advance.mock.calls.map(([, phase]) => phase);
+    expect(phases[0]).toBeCloseTo(0.06, 9);
+    expect(phases.at(-1)).toBeCloseTo(0.18, 9);
   });
 
   test("creates the source sketch's 9,999 particles", () => {
@@ -51,17 +67,19 @@ describe("Polar Drift", () => {
     expect([...particles]).toEqual([200, 200]);
   });
 
-  test("renders through WebGL2 with ping-pong trail surfaces", async () => {
+  test("renders through WebGL2, trailing into an off-screen surface", () => {
     // The 2D path collected 9,999 ctx.rect() calls into one fill per frame,
-    // which Linux software-rasterizes. Losing any of these puts it back.
-    const renderer = (await import("./PolarDrift.svelte?raw"))
-      .default as string;
-    const motion = (await import("./polarDrift.ts?raw")).default as string;
+    // which Linux software-rasterizes.
+    const { gl, calls } = recordingWebgl2();
+    const { run, callbacks } = startAnimation(PolarDrift, gl);
+    expect(run.runner).toBe("webgl2");
+    callbacks.resize(800, 800, false, 0);
 
-    expect(renderer).toContain("runWebgl2Animation");
-    expect(renderer).not.toContain("ctx.rect(");
-    expect(motion).toContain("framebufferTexture2D");
-    expect(motion).toContain("gl.DYNAMIC_DRAW");
+    expect(calls.map(({ op }) => op)).toContain("framebufferTexture2D");
+    expect(calls).toContainEqual({
+      op: "bufferData",
+      args: ["ARRAY_BUFFER", expect.any(Float32Array), "DYNAMIC_DRAW"],
+    });
     expect(POLAR_DRIFT_SURFACE_FRAGMENT_SHADER).toContain(
       "mix(previous, uBackgroundColor, uFade)",
     );
@@ -80,18 +98,27 @@ describe("Polar Drift", () => {
     expect(transform.scaleX).not.toBe(transform.scaleY);
   });
 
-  test("fades once per frame, not once per simulation sub-step", async () => {
+  test("fades once per frame, not once per simulation sub-step", () => {
     // A slow frame runs several sub-steps onto one surface. The 2D version
     // faded once and then drew each sub-step over it; fading per sub-step
     // would decay the trails by frameScale times as much on exactly the
     // frames that are already struggling.
-    const renderer = (await import("./PolarDrift.svelte?raw"))
-      .default as string;
-    const drawBody = renderer.match(
-      /function draw\(phase: number, frameScale: number\): void \{([\s\S]*?)\n {6}\}/,
-    )?.[1];
+    const { gl, calls } = recordingWebgl2();
+    const { callbacks } = startAnimation(PolarDrift, gl);
+    callbacks.resize(800, 800, false, 0);
+    callbacks.frame(1000);
+    calls.length = 0;
+    // 50 ms is three source frames at 60 per second.
+    callbacks.frame(1050);
 
-    expect(drawBody).toBeDefined();
-    expect(drawBody).toContain("step === 0 ? fade : 0");
+    const fades = calls
+      .filter(
+        ({ op, args }) =>
+          op === "uniform1f" && (args[0] as { uniform: string }).uniform === "uFade",
+      )
+      .map(({ args }) => args[1]);
+    expect(fades.filter((fade) => fade !== 0)).toEqual([
+      expect.closeTo(1 - (1 - 5 / 255) ** 3, 9),
+    ]);
   });
 });
