@@ -1,60 +1,108 @@
-import { describe, expect, test } from "vitest";
-import terminal from "./TerminalTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// What xterm sends back while it parses PTY output: answers to the running
+// program's queries, and the keyboard protocol that program negotiates. A
+// TerminalTab is mounted over the stand-in xterm, which can answer during a
+// write and runs the parser handlers the component registered; the
+// assertions read the frames sent on the socket.
 
-describe("TerminalTab generated reply routing", () => {
-  test("installs xterm OSC color report guards", () => {
-    expect(terminal).toContain(
-      'import { installTerminalReportGuards } from "../terminal/xtermReports";',
-    );
-    // The keyboard-protocol state lives on the tab (survives a remount on
-    // reattach); start() resets it only on a fresh spawn, then installs
-    // the report guards on the xterm branch (the ghostty backend's WASM
-    // parser owns device reports itself).
-    expect(terminal).toMatch(
-      /const keyboardProtocol = ensureTerminalKeyboardProtocol\([\s\S]*?\);[\s\S]*?term = new Terminal\([\s\S]*?\);\s*installTerminalReportGuards\(term\);/,
-    );
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  output,
+  pressInTerminal,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  sentFrames,
+  terminalTab,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+const CPR = "\x1b[12;1R";
+
+afterEach(() => {
+  resetTerminals();
+});
+
+async function attached(over: Partial<TerminalTabState> = {}, ready = true) {
+  const [tab] = seatTerminals([terminalTab(over)]);
+  const { term } = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket, { id: over.terminalSessionId ?? "sess-1" });
+  if (ready) await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  socket.sent.splice(0);
+  return { term, socket };
+}
+
+function frames(socket: TerminalSocket, type: string): unknown[] {
+  return sentFrames(socket)
+    .filter((f) => f.type === type)
+    .map((f) => f.data);
+}
+
+describe("answers xterm generates while parsing output", () => {
+  test("a live answer goes to this PTY only, even with broadcast on", async () => {
+    const { term, socket } = await attached({ broadcastEnabled: true });
+    term.replyDuringWrite = CPR;
+    await output(socket, "\x1b[6n");
+
+    expect(frames(socket, "input")).toEqual([CPR]);
+    expect(frames(socket, "broadcast-input")).toEqual([]);
   });
 
-  test("installs keyboard protocol tracking before xterm input handlers", () => {
-    expect(terminal).toMatch(
-      /installKeyboardProtocolHandlers\(term, keyboardProtocol, sendGeneratedTerminalInput\);[\s\S]*?term\.attachCustomKeyEventHandler\(handleTerminalKeyEvent\);/,
-    );
+  test("an answer to history replayed into a reattached terminal is dropped", async () => {
+    const { term, socket } = await attached({ terminalSessionId: "sess-9" }, false);
+    term.replyDuringWrite = CPR;
+    await output(socket, "\x1b[6n");
+
+    expect(frames(socket, "input")).toEqual([]);
   });
 
-  test("PTY output uses a tracked xterm write", () => {
-    expect(terminal).toContain("PtyWriteTracker");
-    expect(terminal).toContain("const ptyWrites = new PtyWriteTracker();");
-    expect(terminal).toMatch(
-      /function writePtyOutput\(bytes: Uint8Array, origin: PtyWriteOrigin = "live"\): void \{[\s\S]*?writeParsedPtyOutput\(bytes, origin\);/,
-    );
-    expect(terminal).toMatch(
-      /function writeParsedPtyOutput\([\s\S]*?ptyWrites\.write\(termWriter, bytes, origin,/,
-    );
-    expect(terminal).toMatch(/const bytes = await terminalMessageBytes\(event\.data\);[\s\S]*?writePtyOutput\(bytes, attachPtyWriteOrigin\(\)\);/);
+  test("typing reaches the PTY and, with broadcast on, the broadcast group", async () => {
+    const { term, socket } = await attached({ broadcastEnabled: true });
+    term.type("ls");
+
+    expect(frames(socket, "input")).toEqual(["ls"]);
+    expect(frames(socket, "broadcast-input")).toEqual(["ls"]);
+  });
+});
+
+describe("the parser handlers", () => {
+  test("color queries are consumed without answering the PTY", async () => {
+    const { term, socket } = await attached();
+    for (const ident of [4, 10, 11, 12]) {
+      expect(term.parser.osc.get(ident)?.(ident === 4 ? "1;?" : "?"), `OSC ${ident}`).toBe(true);
+    }
+    expect(sentFrames(socket)).toEqual([]);
   });
 
-  test("xterm-generated replies bypass broadcast fan-out", () => {
-    expect(terminal).toContain("term.onData(handleXtermData);");
-    expect(terminal).toMatch(
-      /function handleXtermData\(data: string\): void \{[\s\S]*?routeXtermData\(data, ptyWrites, sendInput, sendUserInput\);/,
-    );
+  test("a program's modifyOtherKeys request changes what Shift+Enter sends", async () => {
+    const { term, socket } = await attached();
+    pressInTerminal(term, { key: "Enter", shiftKey: true });
+    term.csi(">", "m", [4, 2]);
+    pressInTerminal(term, { key: "Enter", shiftKey: true });
+
+    expect(frames(socket, "input")).toEqual(["\n", "\x1b[27;2;13~"]);
   });
 
-  test("suppresses duplicate reattach replay replies without blocking live replies", () => {
-    // Full reattach replay feeds historical PTY queries into a brand-new
-    // xterm. Re-answering those old queries leaks raw CPR/DA/DCS reply bytes
-    // into the shell prompt after refresh, so only duplicate replay-origin
-    // generated replies are suppressed; live output still answers through
-    // the owning PTY and bypasses broadcast.
-    expect(terminal).toContain("let attachReplayActive = false;");
-    expect(terminal).toContain("let suppressAttachReplayGeneratedReplies = false;");
-    expect(terminal).toMatch(
-      /const duplicateReplay = reattaching && !sawSessionControl;[\s\S]*?attachReplayActive = true;[\s\S]*?suppressAttachReplayGeneratedReplies = duplicateReplay;/,
-    );
-    expect(terminal).toMatch(
-      /frame\.type === "ready"[\s\S]*?attachReplayActive = false;[\s\S]*?suppressAttachReplayGeneratedReplies = false;/,
-    );
-    expect(terminal).toContain("shouldForwardGeneratedTerminalInput(ptyWrites)");
-    expect(terminal).toContain("routeXtermData(data, ptyWrites, sendInput, sendUserInput);");
+  test("a keyboard-protocol query is answered on the PTY", async () => {
+    const { term, socket } = await attached();
+    term.csi("?", "u", []);
+    expect(frames(socket, "input")).toEqual(["\x1b[?0u"]);
   });
 });

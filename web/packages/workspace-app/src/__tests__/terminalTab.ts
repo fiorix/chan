@@ -23,6 +23,8 @@ export const xterm = {
   webgl: [] as Array<{ loadedInto: FakeTerminal | null; onContextLoss: (() => void) | null; disposed: boolean }>,
 };
 
+type CsiId = { prefix?: string; intermediates?: string; final: string };
+
 export class FakeTerminal {
   cols = 80;
   rows = 24;
@@ -36,6 +38,23 @@ export class FakeTerminal {
   selection = "";
   focusCount = 0;
   disposed = false;
+  /// When set, the next writes answer with this reply the way xterm answers
+  /// a query in the output it parses: during the write.
+  replyDuringWrite: string | null = null;
+  /// The escape-sequence handlers the component registered with xterm's parser.
+  parser = {
+    osc: new Map<number, (data: string) => boolean>(),
+    csi: [] as Array<{ id: CsiId; handler: (params: Array<number | number[]>) => boolean }>,
+    registerOscHandler: (ident: number, handler: (data: string) => boolean) => {
+      this.parser.osc.set(ident, handler);
+      return { dispose() {} };
+    },
+    registerCsiHandler: (id: CsiId, handler: (params: Array<number | number[]>) => boolean) => {
+      this.parser.csi.push({ id, handler });
+      return { dispose() {} };
+    },
+    registerEscHandler: () => ({ dispose() {} }),
+  };
 
   constructor(options: Record<string, unknown> = {}) {
     this.options = { ...options };
@@ -62,7 +81,19 @@ export class FakeTerminal {
   }
   write(data: string | Uint8Array, done?: () => void): void {
     this.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+    if (this.replyDuringWrite !== null) this.type(this.replyDuringWrite);
     done?.();
+  }
+  /// Emit data from xterm, as typing or a generated reply does.
+  type(data: string): void {
+    for (const handler of this.dataHandlers) handler(data);
+  }
+  /// Run the CSI handler registered for this prefix and final, as xterm's
+  /// parser does when the program writes the sequence.
+  csi(prefix: string, final: string, params: Array<number | number[]>): boolean {
+    const entry = this.parser.csi.find((c) => c.id.prefix === prefix && c.id.final === final);
+    if (!entry) throw new Error(`no CSI handler for ${prefix}${final}`);
+    return entry.handler(params);
   }
   writeln(data: string): void {
     this.written.push(`${data}\r\n`);
@@ -318,6 +349,14 @@ export async function attach(
     bytes_since_focus: 0,
     ...prelude,
   });
+}
+
+/// Deliver PTY output on the socket, as an ArrayBuffer of this realm.
+export async function output(socket: TerminalSocket, text: string): Promise<void> {
+  const bytes = new TextEncoder().encode(text);
+  const buffer = new ArrayBuffer(bytes.length);
+  new Uint8Array(buffer).set([...bytes]);
+  await socket.onmessage?.({ data: buffer });
 }
 
 /// Frames the component sent on the socket, parsed.
