@@ -2,16 +2,14 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import LorenzConstellation from "./LorenzConstellation.svelte";
-import { LORENZ_CONSTELLATION_POINT_COUNT } from "./lorenzConstellation";
-import {
-  YURUYURAU_POINT_CLOUD_FRAGMENT_SHADER,
-  YURUYURAU_POINT_CLOUD_VERTEX_SHADER,
-} from "./yuruyurauPointCloud";
+import { LORENZ_CONSTELLATION_BOUNDS, LORENZ_CONSTELLATION_POINT_COUNT } from "./lorenzConstellation";
+import { fitPointCloudCover } from "./pointCloudCover";
 import {
   mountAnimation,
   recordingWebgl2,
   startAnimation,
   stopAnimations,
+  uniformsSet,
 } from "../__tests__/canvas";
 
 vi.mock("./canvasAnimation", async (importOriginal) =>
@@ -24,17 +22,22 @@ afterEach(() => {
 });
 
 describe("Yuruyurau point cloud", () => {
-  test("places and sizes points on the GPU", () => {
-    const { run } = startAnimation(LorenzConstellation, recordingWebgl2().gl);
+  test("places its points on the GPU by the cover fit of its bounds, at about a pixel", () => {
+    const { gl, calls } = recordingWebgl2();
+    const { run, callbacks } = startAnimation(LorenzConstellation, gl);
+    run.canvas.parentElement!.style.setProperty("--yuruyurau-point-alpha", "0.5");
+    callbacks.resize(800, 800, false, 0);
 
+    // The recording context's drawing buffer is 100 by 100.
+    const fit = fitPointCloudCover(100, 100, LORENZ_CONSTELLATION_BOUNDS);
     expect(run.runner).toBe("webgl2");
-    expect(YURUYURAU_POINT_CLOUD_VERTEX_SHADER).toContain("uCenter");
-    expect(YURUYURAU_POINT_CLOUD_VERTEX_SHADER).toContain("uSourceCenter");
-    expect(YURUYURAU_POINT_CLOUD_VERTEX_SHADER).toContain("uScale");
-    expect(YURUYURAU_POINT_CLOUD_VERTEX_SHADER).toContain(
-      "gl_PointSize = uPointSize;",
-    );
-    expect(YURUYURAU_POINT_CLOUD_FRAGMENT_SHADER).toContain("uPointAlpha");
+    expect(uniformsSet(calls, "uCenter")).toEqual([[fit.centerX, fit.centerY]]);
+    expect(uniformsSet(calls, "uSourceCenter")).toEqual([[fit.sourceCenterX, fit.sourceCenterY]]);
+    expect(uniformsSet(calls, "uScale")).toEqual([[fit.scale]]);
+    const [[size]] = uniformsSet(calls, "uPointSize") as number[][];
+    expect(size).toBeGreaterThanOrEqual(0.75);
+    expect(size).toBeLessThanOrEqual(1.25);
+    expect(uniformsSet(calls, "uPointAlpha")).toEqual([[0.5]]);
   });
 
   test("draws the whole cloud in a single pass", () => {

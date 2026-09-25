@@ -8,13 +8,12 @@ import {
   fitSixfoldVortex,
   isSixfoldVortexPointDrawable,
   SIXFOLD_VORTEX_PARTICLE_COUNT,
-  SIXFOLD_VORTEX_POINT_VERTEX_SHADER,
-  SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER,
 } from "./sixfoldVortex";
 import {
   recordingWebgl2,
   startAnimation,
   stopAnimations,
+  uniformsSet,
   type CanvasOp,
 } from "../__tests__/canvas";
 
@@ -101,10 +100,11 @@ describe("Sixfold Vortex", () => {
     expect(next).toBe(back);
   });
 
-  test("renders through WebGL2, trailing into an off-screen surface", () => {
+  test("renders through WebGL2, trailing into an off-screen surface that fades toward the background", () => {
     const { gl, calls } = recordingWebgl2();
     const { run, callbacks } = startAnimation(SixfoldVortex, gl);
     expect(run.runner).toBe("webgl2");
+    run.canvas.parentElement!.style.setProperty("--sixfold-vortex-background-rgb", "51, 102, 153");
     callbacks.resize(800, 800, false, 0);
 
     expect(calls.map(({ op }) => op)).toContain("framebufferTexture2D");
@@ -112,12 +112,9 @@ describe("Sixfold Vortex", () => {
       op: "bufferData",
       args: ["ARRAY_BUFFER", expect.any(Float32Array), "DYNAMIC_DRAW"],
     });
-    expect(SIXFOLD_VORTEX_SURFACE_FRAGMENT_SHADER).toContain(
-      "mix(previous, uBackgroundColor, uFade)",
-    );
-    expect(SIXFOLD_VORTEX_POINT_VERTEX_SHADER).toContain(
-      "gl_PointSize = 1.0;",
-    );
+    // A source frame fades the trail 9/255 of the way to the background.
+    expect(uniformsSet(calls, "uFade")).toContainEqual([expect.closeTo(9 / 255, 9)]);
+    expect(uniformsSet(calls, "uBackgroundColor")).toContainEqual([0.2, 0.4, 0.6]);
   });
 
   test("creates the source sketch's 30,000 Gaussian particles", () => {

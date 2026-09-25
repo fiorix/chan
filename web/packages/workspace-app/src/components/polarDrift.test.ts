@@ -6,10 +6,8 @@ import {
   fitPolarDrift,
   POLAR_DRIFT_HALF_SIZE,
   POLAR_DRIFT_PARTICLE_COUNT,
-  POLAR_DRIFT_POINT_VERTEX_SHADER,
-  POLAR_DRIFT_SURFACE_FRAGMENT_SHADER,
 } from "./polarDrift";
-import { recordingWebgl2, startAnimation, stopAnimations } from "../__tests__/canvas";
+import { recordingWebgl2, startAnimation, stopAnimations, uniformsSet } from "../__tests__/canvas";
 
 vi.mock("./canvasAnimation", async (importOriginal) =>
   (await import("../__tests__/canvas")).recordedRunners(await importOriginal()),
@@ -73,6 +71,7 @@ describe("Polar Drift", () => {
     const { gl, calls } = recordingWebgl2();
     const { run, callbacks } = startAnimation(PolarDrift, gl);
     expect(run.runner).toBe("webgl2");
+    run.canvas.parentElement!.style.setProperty("--polar-drift-background-rgb", "51, 102, 153");
     callbacks.resize(800, 800, false, 0);
 
     expect(calls.map(({ op }) => op)).toContain("framebufferTexture2D");
@@ -80,10 +79,9 @@ describe("Polar Drift", () => {
       op: "bufferData",
       args: ["ARRAY_BUFFER", expect.any(Float32Array), "DYNAMIC_DRAW"],
     });
-    expect(POLAR_DRIFT_SURFACE_FRAGMENT_SHADER).toContain(
-      "mix(previous, uBackgroundColor, uFade)",
-    );
-    expect(POLAR_DRIFT_POINT_VERTEX_SHADER).toContain("gl_PointSize = 1.0;");
+    // A source frame fades the trail 5/255 of the way to the background.
+    expect(uniformsSet(calls, "uFade")).toContainEqual([expect.closeTo(5 / 255, 9)]);
+    expect(uniformsSet(calls, "uBackgroundColor")).toContainEqual([0.2, 0.4, 0.6]);
   });
 
   test("stretches the field to the pane on both axes", () => {

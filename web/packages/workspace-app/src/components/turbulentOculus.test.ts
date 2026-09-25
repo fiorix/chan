@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import TurbulentOculus from "./TurbulentOculus.svelte";
-import {
-  TURBULENT_OCULUS_FRAGMENT_SHADER,
-  TURBULENT_OCULUS_TWIGL_SOURCE,
-} from "./turbulentOculus";
-import { startAnimation, stopAnimations } from "../__tests__/canvas";
+import { TURBULENT_OCULUS_TWIGL_SOURCE } from "./turbulentOculus";
+import { recordingWebgl2, shaderSources, startAnimation, stopAnimations, uniformsSet } from "../__tests__/canvas";
 
 const renderer = vi.hoisted(() => ({ draw: vi.fn(), destroy: vi.fn() }));
 
@@ -34,27 +31,19 @@ describe("Turbulent Oculus", () => {
     expect(TURBULENT_OCULUS_TWIGL_SOURCE).toBe(
       "for(float i=0.,z=0.,d=0.,s=0.;i++<3e2;){vec3 q=z*normalize(vec3(FC.xy*2.-r,r.y));q.zx=abs(q.zx*.8);q.yx*=rotate2D(q.z*.01);for(s=.5;s<22.;s/=.5)q+=cos(q.yzx*s+t)/s;z+=d=.01+abs((length(q.yx)-23.))/6.;o+=.2/d;}o=tanh(o/9e2);",
     );
-    expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      TURBULENT_OCULUS_TWIGL_SOURCE,
-    );
-    expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      "return mat2(cos(r), sin(r), -sin(r), cos(r));",
-    );
   });
 
-  test("masks a pupil rather than a hole at the center", () => {
-    // The mask is a radius, not a darkening: inside it the pattern is cut
-    // away and the pane's background shows through, so the constant IS how
-    // much of the middle is missing. It shipped at 2.0 and read as a hole.
-    expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      "const float BASE_CENTER_MASS_RADIUS = 0.08;",
-    );
-    expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      "const float CENTER_MASS_SCALE = 0.4;",
-    );
-    expect(TURBULENT_OCULUS_FRAGMENT_SHADER).toContain(
-      "float alpha = o.r * centerReveal * uOpacity;",
-    );
+  test("compiles that program and draws it over the pane at the tone and opacity it is given", async () => {
+    const { createTurbulentOculusRenderer } =
+      await vi.importActual<typeof import("./turbulentOculus")>("./turbulentOculus");
+    const { gl, calls } = recordingWebgl2();
+
+    createTurbulentOculusRenderer(gl).draw(1, 0.5, 0.25);
+
+    expect(shaderSources(calls)).toContainEqual(expect.stringContaining(TURBULENT_OCULUS_TWIGL_SOURCE));
+    expect(uniformsSet(calls, "uTone")).toEqual([[0.5]]);
+    expect(uniformsSet(calls, "uOpacity")).toEqual([[0.25]]);
+    expect(calls).toContainEqual({ op: "drawArrays", args: ["TRIANGLES", 0, 3] });
   });
 
   test("caps the expensive shader at 160,000 pixels and 24 frames a second", () => {

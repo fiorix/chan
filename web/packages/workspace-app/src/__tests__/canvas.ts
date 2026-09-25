@@ -134,6 +134,23 @@ export function recordingWebgl2(
   return { gl: gl as unknown as WebGL2RenderingContext, calls };
 }
 
+/// The values each `uniform*` call in `calls` set the uniform `name` to, one
+/// array per call: `uniform1f(location, 2)` reads `[2]`, `uniform3f(location,
+/// r, g, b)` reads `[r, g, b]`.
+export function uniformsSet(calls: CanvasOp[], name: string): unknown[][] {
+  return calls
+    .filter(
+      ({ op, args }) =>
+        op.startsWith("uniform") && (args[0] as { uniform?: string } | null)?.uniform === name,
+    )
+    .map(({ args }) => args.slice(1));
+}
+
+/// The source of every shader `calls` handed to `shaderSource`.
+export function shaderSources(calls: CanvasOp[]): string[] {
+  return calls.filter(({ op }) => op === "shaderSource").map(({ args }) => args[1] as string);
+}
+
 const mounted: Array<() => void> = [];
 
 /// Mount `component` and return the one animation it asked a runner for,

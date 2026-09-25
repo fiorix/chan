@@ -3,11 +3,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
 import YuruyurauRotationalField from "./YuruyurauRotationalField.svelte";
-import {
-  YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER,
-  YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER,
-  YURUYURAU_ROTATIONAL_SOURCE_SIZE,
-} from "./yuruyurauRotationalField";
+import { YURUYURAU_ROTATIONAL_SOURCE_SIZE } from "./yuruyurauRotationalField";
 import {
   recordingWebgl2,
   startAnimation,
@@ -45,18 +41,27 @@ function fieldProps(centerFadeRadius: number) {
 }
 
 describe("Yuruyurau rotational field", () => {
-  test("keeps the source space size and rotational WebGL2 rendering", () => {
-    const { run } = startAnimation(FourteenfoldBloom, recordingWebgl2().gl);
+  test("draws its trace once per rotation, each turned by an equal share of a full turn", () => {
+    const { gl, calls } = recordingWebgl2();
+    const { run, callbacks } = startAnimation(YuruyurauRotationalField, gl, fieldProps(140));
+    callbacks.resize(800, 800, false, 0);
 
     expect(run.runner).toBe("webgl2");
+    expect(uniformValues(calls, "uRotation")).toEqual([
+      0,
+      expect.closeTo((2 * Math.PI) / 3, 9),
+      expect.closeTo((4 * Math.PI) / 3, 9),
+    ]);
+    expect(calls.filter(({ op, args }) => op === "drawArrays" && args[0] === "POINTS")).toHaveLength(3);
+  });
+
+  test("scales its 400-unit source space to cover the drawing buffer", () => {
+    const { gl, calls } = recordingWebgl2();
+    startAnimation(YuruyurauRotationalField, gl, fieldProps(140)).callbacks.resize(800, 800, false, 0);
+
+    // The recording context's drawing buffer is 100 by 100.
     expect(YURUYURAU_ROTATIONAL_SOURCE_SIZE).toBe(400);
-    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain("uRotation");
-    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain(
-      "uCoverScale",
-    );
-    expect(YURUYURAU_ROTATIONAL_POINT_VERTEX_SHADER).toContain(
-      "gl_PointSize = 1.0;",
-    );
+    expect(uniformValues(calls, "uCoverScale")).toEqual([100 / 400]);
   });
 
   test("draws its points at the opacity the theme token names", () => {
@@ -91,16 +96,6 @@ describe("Yuruyurau rotational field", () => {
     expect(uniformValues(wide.calls, "uFadeOuterRadius")).toEqual([140]);
     expect(uniformValues(narrow.calls, "uFadeInnerRadius")).toEqual([expect.closeTo(55, 9)]);
     expect(uniformValues(narrow.calls, "uFadeOuterRadius")).toEqual([100]);
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.192");
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.164");
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("0.55");
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain("clamp(");
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain(
-      "uFadeInnerRadius",
-    );
-    expect(YURUYURAU_ROTATIONAL_FADE_FRAGMENT_SHADER).toContain(
-      "uFadeOuterRadius",
-    );
   });
 
   test("holds the trace at source time 0 under reduced motion", () => {

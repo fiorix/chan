@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import AmberRecursion from "./AmberRecursion.svelte";
-import {
-  AMBER_RECURSION_FRAGMENT_SHADER,
-  AMBER_RECURSION_TWIGL_SOURCE,
-  AMBER_RECURSION_WEBGL_SOURCE,
-} from "./amberRecursion";
-import { startAnimation, stopAnimations } from "../__tests__/canvas";
+import { AMBER_RECURSION_TWIGL_SOURCE, AMBER_RECURSION_WEBGL_SOURCE } from "./amberRecursion";
+import { recordingWebgl2, shaderSources, startAnimation, stopAnimations, uniformsSet } from "../__tests__/canvas";
 
 const renderer = vi.hoisted(() => ({ draw: vi.fn(), destroy: vi.fn() }));
 
@@ -35,30 +31,21 @@ describe("Amber Recursion", () => {
     expect(AMBER_RECURSION_TWIGL_SOURCE).toBe(
       "for(float i,g,e,s;++i<99.;o.rgb+=hsv(.09,.5,i*s/2e4)){vec3 p=vec3((FC.xy-.5*r)/r.x*.3,g-.05*sin(t));p.zx*=rotate2D(t*.5);s=1.5;for(int i;i++<9;p=vec3(2)-abs(p*e-.4/e)-sin(t)*.1)s*=e=max(1.07,4.5/dot(p*(3.-sin(t*.5)*.4),p*2.));g+=distance(p.xz,p.yx)/s;s=log(s)/g*.1;}",
     );
-    expect(AMBER_RECURSION_FRAGMENT_SHADER).toContain(
-      AMBER_RECURSION_WEBGL_SOURCE,
-    );
   });
 
-  test("initializes Twigl's implicit loop locals for WebGL", () => {
-    expect(AMBER_RECURSION_WEBGL_SOURCE).toContain(
-      "for(float i=0.,g=0.,e=0.,s=0.;",
-    );
-    expect(AMBER_RECURSION_WEBGL_SOURCE).toContain(
-      "for(int i=0;i++<9;",
-    );
-  });
+  test("compiles its WebGL form and draws it over the pane at the field, tone, opacity and exposure it is given", async () => {
+    const { createAmberRecursionRenderer } =
+      await vi.importActual<typeof import("./amberRecursion")>("./amberRecursion");
+    const { gl, calls } = recordingWebgl2();
 
-  test("fits and composites the source field across the pane", () => {
-    expect(AMBER_RECURSION_FRAGMENT_SHADER).toContain(
-      "centered * (r.x / min(r.x, r.y)) / uFieldScale",
-    );
-    expect(AMBER_RECURSION_FRAGMENT_SHADER).toContain(
-      "float alpha = (1.0 - exp(-intensity * uExposure)) * uOpacity;",
-    );
-    expect(AMBER_RECURSION_FRAGMENT_SHADER).toContain(
-      "o = vec4(vec3(uTone) * alpha, alpha);",
-    );
+    createAmberRecursionRenderer(gl).draw(1, 2, 0.5, 0.25, 3);
+
+    expect(shaderSources(calls)).toContainEqual(expect.stringContaining(AMBER_RECURSION_WEBGL_SOURCE));
+    expect(uniformsSet(calls, "uFieldScale")).toEqual([[2]]);
+    expect(uniformsSet(calls, "uTone")).toEqual([[0.5]]);
+    expect(uniformsSet(calls, "uOpacity")).toEqual([[0.25]]);
+    expect(uniformsSet(calls, "uExposure")).toEqual([[3]]);
+    expect(calls).toContainEqual({ op: "drawArrays", args: ["TRIANGLES", 0, 3] });
   });
 
   test("caps the expensive shader at 130,000 pixels and 20 frames a second", () => {
