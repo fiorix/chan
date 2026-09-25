@@ -214,26 +214,43 @@ describe("runTeamBootstrap: lead-first flow", () => {
     );
     expect(settledLead?.title).toBe("@@Lead-2");
     expect(allTerminalTabs().some((tab) => tab.title === "@@Lead")).toBe(false);
+    // The settled label is adopted as it came back, not proposed back to the
+    // server as a rename.
+    expect(
+      allTerminalTabs().every(
+        (tab) => tab.terminalMetadataDraft === undefined && tab.terminalMetadataError === undefined,
+      ),
+    ).toBe(true);
   });
 
-  test("auto-delivers the identity prompt to the lead through the write queue", async () => {
-    // The Team Work bubble is gone: the lead is a normal terminal whose identity
-    // prompt the orchestrator delivers via the prompt frame
-    // (sendPromptToTerminal), retried until the freshly-spawned lead's WS
-    // connects - NOT primed into a bubble buffer. The prompt CONTENT is pinned
-    // in teamLeadPrompt.test.ts; this pins the delivery wiring (the async retry
-    // against a live WS is fragile to fake-time in a unit test, so assert the
-    // source-level wiring; the live lead bootstrap is validated by hand on a rebuild).
-    const src = (await import("../state/teamOrchestrator.svelte?raw"))
-      .default as string;
-    expect(src).toMatch(/void deliverLeadIdentity\(\s*leadTab\.id,\s*prompt,/);
-    expect(src).toMatch(
-      /async function deliverLeadIdentity\([\s\S]*?sendPromptToTerminal\(tabId, text, agent\)/,
-    );
-    expect(src).toMatch(
-      /const leadAgent = leadDraft[\s\S]{1,180}agentForMember\(leadDraft\.command, leadDraft\.env\)[\s\S]{1,220}deliverLeadIdentity\([\s\S]{1,100}leadAgent === "none" \? undefined : leadAgent/,
-    );
-    expect(src).not.toMatch(/primeTeamWork/);
+  test("delivers the identity prompt to the lead with the lead's agent", async () => {
+    // The lead is a normal terminal: its identity prompt reaches the terminal's
+    // prompt sink, retried until the freshly spawned lead's socket connects,
+    // with the agent the lead's command names so the prompt is submitted with
+    // that agent's chord.
+    for (const [command, env, agent] of [
+      ["opencode --model test", "", "opencode"],
+      ["bash", "CHAN_AGENT=none", undefined],
+    ] as const) {
+      resetLayoutWithLead(leadTerminalTab());
+      mockApi();
+      const config = tabsConfig();
+      config.members[0] = { ...config.members[0], command, env };
+      const delivered: Array<{ text: string; agent?: string }> = [];
+      let unregister = () => {};
+      try {
+        await runTeamBootstrap(config, { leadTabId: "lead-tab", leadPaneId: "pane-test" });
+        unregister = registerTerminalPromptSink(leadFromLayout().id, (text, submitAgent) => {
+          delivered.push({ text, agent: submitAgent });
+          return true;
+        });
+        await vi.waitFor(() => expect(delivered).toHaveLength(1), { timeout: 5000, interval: 50 });
+      } finally {
+        unregister();
+      }
+      expect(delivered[0]!.agent, command).toBe(agent);
+      expect(delivered[0]!.text, command).toContain("bootstrap.md");
+    }
   });
 
   test("delivers a lead prompt naming bootstrap.md under the workspace root", async () => {
