@@ -185,6 +185,7 @@ describe("edgeSplitAllowed", () => {
     expect(edgeSplitAllowed("top", 240, 331)).toBe(false);
   });
 
+  // Source-text contract: the gate's chrome is the pane margin and split divider the Pane and Workspace stylesheets set, which jsdom never lays out.
   test("the size gate tracks the pane margin and divider in the CSS", () => {
     // The main-axis chrome is a hand-derived duplicate of two CSS values
     // living in two other components, with nothing linking them. Editing

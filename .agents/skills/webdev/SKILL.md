@@ -129,6 +129,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
   - `tauri_invoke_centralization.test.ts`: `tauriInvoke` is called only in `api/desktop.ts` and the Tauri globals are reached only from the audited modules, because the desktop ACL parity test reads the invoke vocabulary from those files with `include_str!`.
   - `editor/widgets/widgetWritable.test.ts`: every widget module that dispatches a document change imports the write predicate, so a widget added later is checked the moment it lands.
   - The launcher's `themeTokens.test.ts`: both themes define the same tokens and no source spells a token's colour as a literal, which `var()` resolution hides from every runtime check.
+  - `state/paneMouseSplit.test.ts`: the edge-split size gate's chrome constant equals one split divider plus two pane margins as the Workspace and Pane stylesheets set them, and jsdom lays out nothing, so no mounted test can measure either.
 - A new allowed case is added to this list in the same commit as the pin it justifies, and a surviving pin carries a one-line comment above it naming its contract.
 - No assertion on comment text. A comment is documentation; rewording it to follow the writing rules must never turn the suite red.
 - No absence assertion on an identifier that exists nowhere in the tree: a `not.toMatch` on a name nobody spells passes against an empty file and cannot fail for a real reason. A negative stays only where it guards a shape someone could plausibly re-add and no positive assertion can express it.
