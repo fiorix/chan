@@ -4,6 +4,7 @@
 // the nodes out for real; a test finds them through nodeScreenCircle, points
 // at them with mouse events, and reads what each frame painted.
 
+import { timerFlush } from "d3-timer";
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -281,8 +282,9 @@ describe("pointing at a node", () => {
 
     mouse(canvas, "mousedown", a0.x + a0.r - 1, a0.y);
     mouse(canvas, "mousemove", a0.x + a0.r + 39, a0.y);
-    // The simulation ticks on its own timer; give it a few.
-    await new Promise((r) => setTimeout(r, 150));
+    // The simulation ticks on d3's timer: run a few ticks now rather than
+    // wait for them.
+    for (let i = 0; i < 3; i += 1) timerFlush();
 
     const aMoved = circle(api, "notes/a.md").x - a0.x;
     const bMoved = Math.abs(circle(api, "notes/b.md").x - b0.x);
