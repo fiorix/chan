@@ -9,6 +9,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileEditorTab from "./FileEditorTab.svelte";
+import Pane from "./Pane.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
@@ -17,7 +18,12 @@ import { chordFor } from "../state/shortcuts";
 import type { MockWorkspaceStore } from "../demo/store";
 import { fileOps, paneWidths, refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
-import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
+import {
+  bumpTabFocusPulse,
+  layout,
+  type FileTab,
+  type LeafNode,
+} from "../state/tabs.svelte";
 
 const h = vi.hoisted(() => ({
   urlUnderCursor: null as string | null,
@@ -724,5 +730,46 @@ describe("the side panels' widths", () => {
     expect(tab.outlineWidth).toBe(sharedOutline + 30);
     expect(paneWidths.inspector).toBe(sharedInspector);
     expect(paneWidths.outline).toBe(sharedOutline);
+  });
+});
+
+describe("focus follows the active pane", () => {
+  test("a focus pulse focuses only the editor of a focused tab", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab, { focused: false });
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    bumpTabFocusPulse();
+    await settle(2);
+    expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(false);
+  });
+
+  test("in two panes, the pulse lands in the active pane's editor", async () => {
+    const left = fileTab({ id: "left-file" });
+    const right = fileTab({ id: "right-file", path: "notes/other.md" });
+    layout.nodes = {
+      root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "pane-left", b: "pane-right" },
+      "pane-left": { kind: "leaf", id: "pane-left", tabs: [left], activeTabId: left.id },
+      "pane-right": { kind: "leaf", id: "pane-right", tabs: [right], activeTabId: right.id },
+    } as typeof layout.nodes;
+    layout.rootId = "root";
+    layout.activePaneId = "pane-right";
+    const hosts: Record<string, HTMLElement> = {};
+    for (const id of ["pane-left", "pane-right"]) {
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(Pane, { target, props: { pane: layout.nodes[id] as LeafNode } }));
+      hosts[id] = target;
+    }
+    await settle();
+
+    bumpTabFocusPulse();
+    await settle(2);
+    expect(hosts["pane-right"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+    expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(false);
+
+    layout.activePaneId = "pane-left";
+    await settle(2);
+    expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
   });
 });

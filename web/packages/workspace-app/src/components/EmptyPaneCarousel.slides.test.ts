@@ -1,97 +1,105 @@
-import { describe, expect, test } from "vitest";
-import fileEditorTab from "./FileEditorTab.svelte?raw";
-import pane from "./Pane.svelte?raw";
-import graphCanvas from "./GraphCanvas.svelte?raw";
-import carousel from "./EmptyPaneCarousel.svelte?raw";
-import indexingStatus from "../state/indexingStatus.svelte.ts?raw";
-
-// Regression locks for two flip-related fixes (see the bug bodies inline).
-// All assertions are source-pattern based, matching the existing
-// `tabSwitchFocusFollow.test.ts` style: the browser is the source of
-// truth for behavior, these pin the wiring so a refactor can't silently
-// drop it.
-
-// --- Bug #1: editor DOM focus must follow the active pane -------------
+// @vitest-environment jsdom
 //
-// `TerminalTab` already takes a `focused` prop and gates its xterm focus
-// on it, so terminals follow pane focus. `FileEditorTab` did not: its
-// pulse-driven focus effect was ungated, so in a multi-pane layout a
-// single global `tabFocusPulse` bump focused EVERY mounted editor
-// (last microtask wins), leaving the caret in a different pane from the
-// focus highlight. The fix gives FileEditorTab the same `focused` gate
-// and Pane.svelte feeds it `activePaneId === pane.id`.
-describe("FileEditorTab focus follows the active pane", () => {
-  test("declares a `focused` prop (defaulting false for non-pane hosts)", () => {
-    // `active` joined `focused` with the keep-alive change (see
-    // paneFileTabKeepAlive.test.ts); both default false so non-pane
-    // hosts stay hidden-safe and never pull focus.
-    expect(fileEditorTab).toMatch(
-      /let \{ tab, active = false, focused = false \}: \{\s*tab: FileTab;\s*active\?: boolean;\s*focused\?: boolean;\s*\} = \$props\(\);/,
-    );
+// The Dashboard carousel's slides, mounted: the Search slide's indexing graph
+// survives a flip because the carousel seeds it from a shared cache, and the
+// Workspace slide shows the read-only dashboard view of the workspace
+// inspector. GraphCanvas is replaced by the graph helpers' stand-in, so the
+// test reads the nodes the slide hands it.
+
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("./GraphCanvas.svelte", async () =>
+  (await import("../__tests__/graphPanel")).canvasProbeModule(),
+);
+
+const poll = vi.hoisted(() => ({
+  next: null as Promise<unknown> | null,
+}));
+
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      indexingState: vi.fn(() => poll.next ?? new Promise(() => {})),
+      inspector: vi.fn(async () => null),
+      reportDir: vi.fn(async () => null),
+      graphStream: vi.fn(async () => ({ nodes: [], edges: [] })),
+    },
+  };
+});
+
+import EmptyPaneCarousel from "./EmptyPaneCarousel.svelte";
+import { canvas, installGraphDom, resetGraphServer } from "../__tests__/graphPanel";
+import type { IndexingStateResponse } from "../api/types";
+import { trackTimers, type TimerTrack } from "../demo/timers";
+import { graphData } from "../state/graphData.svelte";
+import { indexingCache } from "../state/indexingStatus.svelte";
+
+installGraphDom();
+
+const mounted: Array<Record<string, unknown>> = [];
+let timers: TimerTrack;
+
+beforeEach(() => {
+  timers = trackTimers();
+  resetGraphServer();
+  graphData.view = { nodes: [], edges: [] };
+  indexingCache.last = null;
+  poll.next = null;
+});
+
+afterEach(() => {
+  for (const app of mounted.splice(0)) unmount(app);
+  document.body.innerHTML = "";
+  indexingCache.last = null;
+  timers.release();
+});
+
+async function render(slide: number): Promise<HTMLElement> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(EmptyPaneCarousel, { target, props: { slide, autoRotate: false } }));
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  return target;
+}
+
+const cached: IndexingStateResponse = {
+  root: "/ws",
+  nodes: [
+    { path: "", state: "indexed" },
+    { path: "notes", state: "indexing" },
+  ],
+};
+
+describe("the Search slide", () => {
+  test("draws the cached indexing graph at once, before its first poll answers", async () => {
+    indexingCache.last = cached;
+    const target = await render(1);
+
+    expect(target.querySelector(".slide-indexing .indexing-stub"), "no loading stub").toBeNull();
+    expect(canvas.props?.nodes.map((n) => n.id)).toEqual(expect.arrayContaining(["", "directory:notes"]));
   });
 
-  test("focus effect bails when the pane is not active, before and inside the microtask", () => {
-    // The leading `if (!focused) return;` makes `focused` a tracked dep
-    // (so the effect re-runs on pane-focus change and flip-back); the
-    // inner guard covers focus lost between the bump and the deferred
-    // call. Both must be present.
-    expect(fileEditorTab).toMatch(
-      /\$effect\(\(\) => \{\s*if \(!focused\) return;\s*tabFocusPulse\.value;\s*queueMicrotask\(\(\) => \{\s*if \(!focused\) return;\s*focusActiveEditor\(\);/,
-    );
-    expect(fileEditorTab).toMatch(
-      /function focusActiveEditor\(\): void \{\s*if \(tab\.mode === "wysiwyg"\) wysiwygRef\?\.focus\(\);\s*else if \(tab\.mode === "canvas"\) canvasRef\?\.focusCanvas\(\);\s*else sourceRef\?\.focus\(\);/,
-    );
-  });
+  test("keeps each poll's answer for the next mount", async () => {
+    const fresh: IndexingStateResponse = { root: "/ws", nodes: [{ path: "", state: "indexed" }] };
+    poll.next = Promise.resolve(fresh);
+    await render(1);
 
-  test("Pane.svelte gates FileEditorTab focus on active pane and visible side", () => {
-    // With the keep-alive each-block (see paneFileTabKeepAlive.test.ts)
-    // the gate short-circuits on pane mode, hidden A/B sides, non-active
-    // sibling tabs, and non-active panes, mirroring terminals.
-    expect(pane).toMatch(
-      /<FileEditorTab\s+tab=\{t\}\s+active=\{[^}]*\}\s+focused=\{isLiveActive\(t\) && viewLayout\.activePaneId === pane\.id\}\s*\/>/,
-    );
+    expect(indexingCache.last).toEqual(fresh);
   });
 });
 
-// --- Bug #2: indexing graph must survive a flip ----------------------
-//
-// A Hybrid flip unmounts the whole front face (carousel + GraphCanvas).
-// The poll result lived in local component state that reset to null on
-// remount, so the flip-back mounted GraphCanvas on an empty node set,
-// `start()` fit to nothing, and the async re-fetch never re-fit -> blank
-// graph until a full window reload. Two complementary fixes:
-//   1. a shared cache so the remount has data synchronously, and
-//   2. a GraphCanvas empty->non-empty refit guard so any graph opened
-//      before its data lands still frames itself.
-describe("indexing graph survives a Hybrid flip", () => {
-  test("shared indexingCache module exposes a last-response slot", () => {
-    expect(indexingStatus).toMatch(
-      /export const indexingCache = \$state<\{ last: IndexingStateResponse \| null \}>\(\{\s*last: null,\s*\}\);/,
-    );
-  });
-
-  test("carousel seeds local indexing state from the cache on mount", () => {
-    expect(carousel).toMatch(
-      /import \{ indexingCache \} from "\.\.\/state\/indexingStatus\.svelte";/,
-    );
-    expect(carousel).toMatch(
-      /let indexing = \$state<IndexingStateResponse \| null>\(indexingCache\.last\);/,
-    );
-  });
-
-  test("carousel writes each successful poll back to the cache", () => {
-    expect(carousel).toMatch(
-      /indexing = await api\.indexingState\(\);\s*\/\/[^\n]*\n\s*indexingCache\.last = indexing;/,
-    );
-  });
-
-  test("GraphCanvas refits when the node set transitions empty -> non-empty", () => {
-    // Captures emptiness BEFORE rebuildWorkingSet reassigns dNodes, then
-    // re-fits once the nodes have landed. This is what un-blanks a canvas
-    // that opened (or remounted post-flip) before its data arrived.
-    expect(graphCanvas).toMatch(/const wasEmpty = dNodes\.length === 0;/);
-    expect(graphCanvas).toMatch(
-      /if \(wasEmpty && dNodes\.length > 0\) \{\s*fitToContent\(24\);\s*\}/,
-    );
+describe("the Workspace slide", () => {
+  test("shows the workspace inspector's dashboard view, without its action row", async () => {
+    const target = await render(0);
+    const slide = target.querySelector(".slide-workspace");
+    expect(slide?.querySelector(".kind-chip.workspace")).not.toBeNull();
+    expect(slide?.querySelector(".actions-section")).toBeNull();
   });
 });
