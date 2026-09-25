@@ -10,7 +10,7 @@
 
 import { EditorView } from "@codemirror/view";
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -83,6 +83,14 @@ function terminalTab(partial: Partial<TerminalTab> = {}): TerminalTab {
 
 installTerminalDom();
 installEditorDom();
+
+// The editors measure on animation frames; a synchronous frame (the terminal
+// harness's default, which resetTerminals restores) runs those measures
+// inside an update.
+beforeEach(() => {
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+    setTimeout(() => cb(0), 0) as unknown as number) as typeof requestAnimationFrame;
+});
 
 const mounted: Array<Record<string, unknown>> = [];
 
