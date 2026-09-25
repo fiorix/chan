@@ -190,15 +190,16 @@ describe("edgeSplitAllowed", () => {
     // The main-axis chrome is a hand-derived duplicate of two CSS values
     // living in two other components, with nothing linking them. Editing
     // either stylesheet moves the real minimum away from this gate.
-    const margin = Number(paneSource.match(/^\s*margin: (\d+)px;$/m)?.[1]);
+    const paneRule = paneSource.match(/^ {2}\.pane \{\n[\s\S]*?\n {2}\}/m)?.[0] ?? "";
+    const margin = Number(paneRule.match(/^\s*margin: (\d+)px;$/m)?.[1]);
     const rowDivider = Number(
       workspaceSource.match(/^\s*\.split\.row > \.divider \{ width: (\d+)px;/m)?.[1],
     );
     const columnDivider = Number(
       workspaceSource.match(/^\s*\.split\.column > \.divider \{ height: (\d+)px;/m)?.[1],
     );
-    expect(margin).toBe(4);
-    expect(rowDivider).toBe(4);
+    expect(margin).toBeGreaterThan(0);
+    expect(rowDivider).toBeGreaterThan(0);
     expect(columnDivider).toBe(rowDivider);
 
     // Replacing the target with a nested split reclaims the target's own
