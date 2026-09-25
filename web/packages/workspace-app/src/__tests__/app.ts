@@ -17,9 +17,9 @@ import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
 
-/// The browser surface jsdom lacks and the app reaches for at mount: resize
+/// The browser surface jsdom lacks and the app reaches for: resize
 /// observation, animation frames (run synchronously), a canvas context, font
-/// loading and media queries.
+/// loading, media queries, and scrolling an element into view.
 export function stubAppEnvironment(): void {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -36,6 +36,7 @@ export function stubAppEnvironment(): void {
     configurable: true,
     value: { load: vi.fn(async () => [{}]), ready: Promise.resolve() },
   });
+  Element.prototype.scrollIntoView = () => {};
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: (query: string) => ({
