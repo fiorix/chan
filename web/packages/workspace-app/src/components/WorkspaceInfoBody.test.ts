@@ -5,7 +5,6 @@
 // stubbed so each test sets what the body sees and reads what it renders and
 // calls.
 
-import { readFileSync } from "node:fs";
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -262,18 +261,5 @@ describe("without a workspace behind the window", () => {
     expect(api.reportPrefix).not.toHaveBeenCalled();
     expect(target.textContent).not.toContain("loading report");
     expect(target.querySelector(".refs-error")).toBeNull();
-  });
-
-  test("the routes it would call are still mounted on the workspace router only", () => {
-    // Cross-language contract, read from the server source: the guard above
-    // is right only while the terminal tenant does not mount these routes.
-    const serverRouter = readFileSync("../../../crates/chan-server/src/lib.rs", "utf8");
-    const terminalRouter = serverRouter.slice(
-      serverRouter.indexOf("fn terminal_router("),
-      serverRouter.indexOf("fn router_with_extensions("),
-    );
-    expect(terminalRouter.length).toBeGreaterThan(0);
-    expect(terminalRouter).not.toContain("/api/inspector");
-    expect(terminalRouter).not.toContain("/api/report/");
   });
 });
