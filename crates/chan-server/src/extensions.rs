@@ -785,8 +785,10 @@ mod tests {
     /// per field, so a test can read the warning an operator would find in
     /// the journal. chan-server has plain `tracing` only, and a subscriber
     /// crate would be a new dependency edge for one assertion.
+    #[cfg(unix)]
     struct CapturedLogs(Arc<Mutex<Vec<String>>>);
 
+    #[cfg(unix)]
     impl tracing::Subscriber for CapturedLogs {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
@@ -822,6 +824,7 @@ mod tests {
     /// Install [`CapturedLogs`] for the current thread until the guard drops.
     /// A current-thread tokio test runs every future it awaits on this
     /// thread, so the runtime's own warnings land here too.
+    #[cfg(unix)]
     fn capture_logs() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
