@@ -2810,6 +2810,47 @@ pub(crate) mod tunnel_test_support {
 }
 
 #[cfg(test)]
+pub(crate) mod hung_root_support {
+    //! Drive an operation on one root while another root's filesystem hangs
+    //! under `chan_workspace::paths::root_stall`, and name the calls held on
+    //! the hung root when the operation does not finish.
+
+    use std::future::Future;
+    use std::time::Duration;
+
+    use chan_workspace::paths::root_stall::RootStall;
+
+    /// How long an operation that needs only healthy roots may take. Far
+    /// above any such operation's cost on a loaded host; an operation that
+    /// waits on the hung root never finishes, so the bound only decides how
+    /// soon the test reports it.
+    pub(crate) const HEALTHY_ROOT_BOUND: Duration = Duration::from_secs(30);
+
+    /// Run `operation` as a task of its own, so a runtime worker it pins in a
+    /// filesystem call cannot also pin the bound, and return its output; panic
+    /// naming `what` and the calls `stall` holds if it does not finish within
+    /// [`HEALTHY_ROOT_BOUND`].
+    pub(crate) async fn completes_beside<F>(
+        stall: &RootStall,
+        what: &str,
+        operation: F,
+    ) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let task = tokio::spawn(operation);
+        match tokio::time::timeout(HEALTHY_ROOT_BOUND, task).await {
+            Ok(joined) => joined.expect("operation task"),
+            Err(_) => panic!(
+                "{what} did not finish while another root hung; calls held on the hung root: {:#?}",
+                stall.entered()
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     /// The cadence is a contract, not an implementation detail: the desktop's
     /// embedded host drives the same probe, and callers that reason in terms of
@@ -2825,11 +2866,13 @@ mod tests {
         );
     }
 
+    use super::hung_root_support::completes_beside;
     use super::tunnel_test_support::{
         test_gateway_assertion, test_tunnel_assertion, test_tunnel_registration,
     };
     use super::*;
     use chan_library::workspace_slug;
+    use chan_workspace::paths::root_stall;
     use std::sync::atomic::AtomicBool;
 
     /// Coordinates process-env access across this test binary: the fdstore
@@ -4791,6 +4834,257 @@ mod tests {
             persist_serial: Mutex::new(()),
             bound_port: AtomicU16::new(0),
         })
+    }
+
+    /// [`test_state`] with a window registry, past startup.
+    async fn devserver_with_windows(home: &Path) -> Arc<DevserverState> {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.join("windows.json"))),
+            "lib-test".into(),
+        );
+        complete_test_startup(&state).await;
+        state
+    }
+
+    fn register_request(root: &Path) -> crate::devserver_handoff::Request {
+        crate::devserver_handoff::Request::RegisterWorkspace {
+            protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+            cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+            workspace_path: root.display().to_string(),
+        }
+    }
+
+    /// Give `root` what a registered root the devserver knows carries before
+    /// its filesystem stops answering: a registry row, an off row in the
+    /// overlay, and a window record. It is the latest registration, so it
+    /// comes first in the registry's list.
+    async fn register_off_with_a_window(state: &DevserverState, root: &Path) {
+        state
+            .host
+            .library()
+            .register_workspace(root)
+            .expect("register");
+        let prefix = allocate_workspace_prefix(root).expect("prefix");
+        state
+            .set_workspace_on(&prefix, false, false)
+            .await
+            .expect("turn off");
+        state
+            .host
+            .mint_window(
+                WindowKind::Workspace,
+                Some(canonical_root(root).to_string_lossy().into_owned()),
+            )
+            .expect("mint a window");
+        assert_eq!(
+            state.host.library().list_workspaces()[0].root_path,
+            canonical_root(root),
+            "fixture: the latest registration is not first in the registry"
+        );
+    }
+
+    /// A devserver mount of one root completes while another root's
+    /// filesystem hangs under a mount attempt of its own.
+    ///
+    /// The hung root has a registry row, a desired-on row in the overlay and a
+    /// window record, and its attempt is in flight when every canonicalization
+    /// of it starts to hang. A serve request for the other, registered root
+    /// through the discovery entry point must still mount it: nothing that
+    /// mount waits on may be held by the hung root's attempt or wait on the
+    /// hung root's filesystem.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_mount_completes_while_another_roots_attempt_hangs() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        let hung_prefix = allocate_workspace_prefix(hung.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(hung.path(), &hung_prefix)
+            .expect("prepare the hung root's mount")
+            .expect("a fresh attempt");
+        state.persist_state();
+        state
+            .host
+            .mint_window(
+                WindowKind::Workspace,
+                Some(canonical_root(hung.path()).to_string_lossy().into_owned()),
+            )
+            .expect("mint a window");
+
+        let stall = root_stall::stall(hung.path());
+        let attempting = Arc::clone(&state);
+        let hung_attempt = tokio::spawn(async move {
+            attempting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the hung root's attempt never reached its filesystem"
+        );
+
+        let serving = Arc::clone(&state);
+        let other_root = other.path().to_path_buf();
+        let response = completes_beside(&stall, "a devserver mount of another root", async move {
+            handle_discovery_request(&serving, 8787, register_request(&other_root)).await
+        })
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the other root's serve request failed: {response:?}"
+        );
+        assert!(
+            state.host.is_root_mounted(other.path()),
+            "the other root is not mounted"
+        );
+
+        drop(stall);
+        hung_attempt
+            .await
+            .expect("the hung root's attempt task")
+            .expect("the hung root mounts once it answers");
+    }
+
+    /// Registering a new root through the devserver completes while another
+    /// registered root's filesystem hangs, and neither that registration nor
+    /// the registry reload the devserver runs after every registry save holds
+    /// up a mount of a third, registered root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_registration_completes_while_another_root_hangs() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let registered = tempfile::tempdir().expect("registered root");
+        let fresh = tempfile::tempdir().expect("new root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(registered.path())
+            .expect("register");
+        register_off_with_a_window(&state, hung.path()).await;
+        let registered_prefix = allocate_workspace_prefix(registered.path()).expect("prefix");
+
+        let stall = root_stall::stall(hung.path());
+        let registering = Arc::clone(&state);
+        let fresh_root = fresh.path().to_path_buf();
+        let registration = tokio::spawn(async move {
+            handle_discovery_request(&registering, 8787, register_request(&fresh_root)).await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: registering a new root never consulted the hung root"
+        );
+
+        let mounting = Arc::clone(&state);
+        completes_beside(
+            &stall,
+            "a devserver mount of a registered root while a new root registers",
+            async move {
+                mounting
+                    .set_workspace_on(&registered_prefix, true, false)
+                    .await
+            },
+        )
+        .await
+        .expect("the registered root mounts");
+        assert!(
+            state.host.is_root_mounted(registered.path()),
+            "the registered root is not mounted"
+        );
+
+        let library = state.host.library().clone();
+        completes_beside(&stall, "the registry reload after a save", async move {
+            tokio::task::spawn_blocking(move || library.reload_registry())
+                .await
+                .expect("reload task")
+        })
+        .await
+        .expect("the registry reloads");
+
+        let response = completes_beside(&stall, "registering a new root", async move {
+            registration.await.expect("registration task")
+        })
+        .await;
+        assert!(
+            matches!(
+                response,
+                crate::devserver_handoff::Response::Registered { .. }
+            ),
+            "the new root's serve request failed: {response:?}"
+        );
+        assert!(
+            state.host.is_root_mounted(fresh.path()),
+            "the new root is not mounted"
+        );
+    }
+
+    /// The devserver's on, off and forget of one registered root complete
+    /// while another registered root's filesystem hangs.
+    ///
+    /// The hung root comes first in the registry's list and has an off row
+    /// and a window record, so resolving the other root's prefix, persisting
+    /// the on/off rows and the removal's window discard all meet it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn devserver_on_off_and_forget_complete_while_another_root_hangs() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let hung = tempfile::tempdir().expect("hung root");
+        let other = tempfile::tempdir().expect("other root");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(other.path())
+            .expect("register the other root");
+        register_off_with_a_window(&state, hung.path()).await;
+        let prefix = allocate_workspace_prefix(other.path()).expect("prefix");
+        let other_key = canonical_root(other.path());
+
+        let stall = root_stall::stall(hung.path());
+        for on in [true, false] {
+            let toggling = Arc::clone(&state);
+            let toggled = prefix.clone();
+            let outcome = completes_beside(
+                &stall,
+                &format!("turning the other root {}", if on { "on" } else { "off" }),
+                async move { toggling.set_workspace_on(&toggled, on, false).await },
+            )
+            .await
+            .expect("toggle");
+            match outcome {
+                SetWorkspaceOnResult::Updated(Some(entry)) => assert_eq!(entry.on, on),
+                other => panic!("the toggle did not update the other root's row: {other:?}"),
+            }
+        }
+        let forgetting = Arc::clone(&state);
+        let forgotten = prefix.clone();
+        let outcome = completes_beside(&stall, "forgetting the other root", async move {
+            forgetting.forget_workspace(&forgotten, false).await
+        })
+        .await
+        .expect("forget");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
+        assert!(
+            !state
+                .host
+                .library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == other_key),
+            "the other root is still registered"
+        );
     }
 
     #[tokio::test]

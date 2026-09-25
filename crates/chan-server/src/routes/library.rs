@@ -2731,6 +2731,158 @@ mod devserver_route_tests {
         (host, router)
     }
 
+    /// [`mutable_router`] over a library whose last registration is `hung`,
+    /// so it comes first in the registry's list, with an overlay and a window
+    /// registry installed and a window and an off row recorded for `hung`.
+    #[cfg(unix)]
+    fn router_beside_a_hung_root(
+        cfg: &std::path::Path,
+        registered: &[&std::path::Path],
+        hung: &std::path::Path,
+    ) -> (Arc<WorkspaceHost>, axum::Router) {
+        let lib = Library::open_at(cfg.join("config.toml")).unwrap();
+        for root in registered {
+            lib.register_workspace(root).unwrap();
+        }
+        lib.register_workspace(hung).unwrap();
+        let hung_key = chan_workspace::paths::canonicalize_normalized(hung);
+        assert_eq!(
+            lib.list_workspaces()[0].root_path,
+            hung_key,
+            "fixture: the latest registration is not first in the registry"
+        );
+        let (host, router) = mutable_router(lib);
+        host.install_workspace_overlay(Arc::new(chan_library::WorkspaceOverlay::open(
+            cfg.join("workspaces.json"),
+        )));
+        host.install_window_registry(
+            Arc::new(WindowRegistry::open(cfg.join("windows.json"))),
+            "lib-test".into(),
+        );
+        host.workspace_overlay()
+            .unwrap()
+            .set(&hung_key.to_string_lossy(), false);
+        host.mint_window(
+            chan_library::windows::WindowKind::Workspace,
+            Some(hung_key.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        (host, router)
+    }
+
+    /// The launcher's on, off and remove routes for one registered root answer
+    /// while another registered root's filesystem hangs.
+    ///
+    /// The hung root comes first in the registry's list and has an off row
+    /// and a window record, so resolving the other root's id, the removal's
+    /// window discard and its unregister all meet it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_on_off_and_remove_answer_while_another_root_hangs() {
+        use crate::devserver::hung_root_support::completes_beside;
+        let cfg = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let hung = tempfile::tempdir().unwrap();
+        let (host, router) = router_beside_a_hung_root(cfg.path(), &[other.path()], hung.path());
+        let id = allocate_workspace_prefix(other.path())
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+        let other_key = chan_workspace::paths::canonicalize_normalized(other.path());
+
+        let stall = chan_workspace::paths::root_stall::stall(hung.path());
+        for (method, uri, expected) in [
+            (
+                "POST",
+                format!("/api/library/workspaces/{id}/on"),
+                StatusCode::OK,
+            ),
+            (
+                "POST",
+                format!("/api/library/workspaces/{id}/off"),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "DELETE",
+                format!("/api/library/workspaces/{id}"),
+                StatusCode::NO_CONTENT,
+            ),
+        ] {
+            let route = router.clone();
+            let what = format!("{method} {uri} for another root");
+            let (status, body) = completes_beside(&stall, &what, async move {
+                request(&route, method, &uri, None).await
+            })
+            .await;
+            assert_eq!(status, expected, "{what}: {body}");
+        }
+        assert!(
+            !host
+                .library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == other_key),
+            "the removed root is still registered"
+        );
+    }
+
+    /// The launcher's add of a new root answers while another registered
+    /// root's filesystem hangs, and a registered root's on route is not held
+    /// up behind that registration.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_add_of_a_new_root_answers_while_another_root_hangs() {
+        use crate::devserver::hung_root_support::completes_beside;
+        let cfg = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        let hung = tempfile::tempdir().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        let (host, router) =
+            router_beside_a_hung_root(cfg.path(), &[registered.path()], hung.path());
+        let registered_id = allocate_workspace_prefix(registered.path())
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+
+        let stall = chan_workspace::paths::root_stall::stall(hung.path());
+        let adding = router.clone();
+        let body = serde_json::json!({ "path": fresh.path().to_string_lossy() }).to_string();
+        let add = tokio::spawn(async move {
+            request(&adding, "POST", "/api/library/workspaces", Some(&body)).await
+        });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: registering a new root never consulted the hung root"
+        );
+
+        let turning_on = router.clone();
+        let (status, body) = completes_beside(
+            &stall,
+            "the on route of a registered root while a new root registers",
+            async move {
+                request(
+                    &turning_on,
+                    "POST",
+                    &format!("/api/library/workspaces/{registered_id}/on"),
+                    None,
+                )
+                .await
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on: {body}");
+
+        let (status, body) = completes_beside(&stall, "adding a new root", async move {
+            add.await.expect("add task")
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK, "add: {body}");
+        assert!(
+            host.is_root_mounted(fresh.path()),
+            "the new root is not mounted"
+        );
+    }
+
     // Unix-only: Windows refuses to delete a tree while the tenant holds
     // handles inside it, so the replacement cannot be staged there, and
     // `RootedFs::revalidate`'s non-unix arm has no inode check to observe.
