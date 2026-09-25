@@ -1,38 +1,69 @@
-import { describe, expect, test } from "vitest";
-import pane from "./Pane.svelte?raw";
+// @vitest-environment jsdom
+//
+// Hybrid Nav never unmounts a terminal: that would dispose its xterm and drop
+// the scrollback. While Hybrid Nav is on, the terminal stays mounted and is
+// hidden from assistive tech, and when it ends the same terminal is active
+// again. A terminal on a pane's hidden side is hidden the same way.
 
-// Hybrid Nav (Cmd+.) must not unmount TerminalTab instances.
-// Unmounting disposes the xterm.js EditorView and drops the scrollback
-// buffer. Instead the `active` prop flips to false and the existing CSS
-// visibility rule hides the terminal. These pins catch any regression
-// that re-introduces an outer `{#if !paneMode.active}` guard.
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("TerminalTabs survive Hybrid NAV toggles", () => {
-  test("terminal each-block does not sit under a {#if !paneMode.active}", () => {
-    // The pre-fix pattern was: `{#if !paneMode.active}` immediately
-    // followed by the terminal each-block, with only whitespace and
-    // {/if} between them. Asserting the absence of that exact
-    // adjacency catches the regression without false-matching the
-    // separate `{#if paneMode.active}` block above (which renders
-    // the pane-mode-preview).
-    const banned = /\{#if\s+!paneMode\.active\}\s+\{#each everyTab\.filter\(\(t\) => t\.kind === "terminal"\) as t \(t\.id\)\}/;
-    expect(pane).not.toMatch(banned);
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xterm);
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/xterm")).fit);
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).search);
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
+
+import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { xterm } from "../__tests__/xterm";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { cancelPaneMode, flipHybrid } from "../state/tabs.svelte";
+
+stubAppEnvironment();
+
+beforeEach(async () => {
+  await mountApp();
+});
+
+afterEach(async () => {
+  cancelPaneMode();
+  vi.restoreAllMocks();
+  await unmountApp();
+});
+
+function terminal(): HTMLElement {
+  return document.querySelector<HTMLElement>(".terminal-tab")!;
+}
+
+describe("a terminal tab", () => {
+  test("stays mounted through Hybrid Nav, hidden while it is on", async () => {
+    resetLayout([terminalTab({ id: "term" })]);
+    await settle();
+    await vi.waitFor(() => expect(terminal()).not.toBeNull());
+    const mounted = terminal();
+    const dispose = vi.spyOn(xterm.Terminal.prototype, "dispose");
+    expect(mounted.getAttribute("aria-hidden")).toBe("false");
+
+    press({ key: ".", code: "Period", ctrlKey: true });
+    await settle();
+    expect(terminal()).toBe(mounted);
+    expect(mounted.getAttribute("aria-hidden")).toBe("true");
+    expect(mounted.classList.contains("active")).toBe(false);
+
+    press({ key: "Escape", code: "Escape" });
+    await settle();
+    expect(terminal()).toBe(mounted);
+    expect(mounted.getAttribute("aria-hidden")).toBe("false");
+    expect(dispose).not.toHaveBeenCalled();
   });
 
-  test("active prop is gated by pane mode + visible-side active tab", () => {
-    // The prop short-circuits on pane mode so the visibility-hidden
-    // CSS fires during Hybrid NAV. isLiveActive() keeps only the active
-    // tab on the visible A/B side live.
-    expect(pane).toMatch(
-      /active=\{isLiveActive\(t\)\}/,
-    );
-  });
+  test("is hidden on the pane's hidden side", async () => {
+    resetLayout([terminalTab({ id: "term" })]);
+    await settle();
+    await vi.waitFor(() => expect(terminal()).not.toBeNull());
 
-  test("focused prop is gated by visible-side active tab and active pane", () => {
-    // Same gates on focused so focus is never pulled into a hidden
-    // xterm during pane mode, from a hidden side, or from another pane.
-    expect(pane).toMatch(
-      /focused=\{isLiveActive\(t\) && viewLayout\.activePaneId === pane\.id\}/,
-    );
+    flipHybrid("pane-test");
+    await settle();
+
+    expect(terminal().getAttribute("aria-hidden")).toBe("true");
   });
 });
