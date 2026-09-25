@@ -12,20 +12,21 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
-import terminalSource from "./TerminalTab.svelte?raw";
-import docSyncSource from "../state/docSync.svelte.ts?raw";
-import sceneSyncSource from "../state/sceneSync.svelte.ts?raw";
 import {
+  setSocketFactory,
   WS_CONNECT_DEADLINE_MS,
   WS_PING_MS,
   WS_READ_DEADLINE_MS,
   WS_RECONNECT_BACKOFF_MIN_MS,
   WS_RECONNECT_BACKOFF_MAX_MS,
 } from "../api/transport";
+import { acquireDocSession, resetDocSyncForTests } from "../state/docSync.svelte";
+import { acquireSceneSession, resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { ui } from "../state/store.svelte";
 import { WAKE_PROBE_MS } from "../wakeGap";
 import {
   bumpTabFocusPulse,
+  type FileTab,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
 
@@ -394,37 +395,100 @@ describe("wake recycle", () => {
   });
 });
 
-describe("heartbeat source pins", () => {
-  test("the kit rides the shared transport constants, no duplicated literals", () => {
-    expect(terminalSource).toContain(
-      'pingTimer = setInterval(() => send({ type: "ping" }), WS_PING_MS);',
-    );
-    expect(terminalSource).toMatch(/deadlineTimer = setTimeout\([\s\S]{0,200}WS_READ_DEADLINE_MS\)/);
-    expect(terminalSource).toMatch(
-      /deadlineTimer = setTimeout\([\s\S]{0,200}WS_CONNECT_DEADLINE_MS\)/,
-    );
-    expect(terminalSource).toContain('ws.binaryType = "arraybuffer";\n    armConnectDeadline();');
-    expect(terminalSource).toContain(
-      "reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, WS_RECONNECT_BACKOFF_MAX_MS);",
-    );
-    expect(terminalSource).toContain("let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;");
-    // The single-dial guard: an explicit connect supersedes a scheduled
-    // redial before the socket teardown.
-    expect(terminalSource).toMatch(
-      /async function connect\(\): Promise<void> \{\n    if \(!term\) return;\n    \/\/ Single-dial guard/,
-    );
-    expect(terminalSource).toContain("cancelReconnect();");
+describe("the shared reconnect backoff", () => {
+  afterEach(() => {
+    resetDocSyncForTests();
+    resetSceneSyncForTests();
+    setSocketFactory(null);
+    localStorage.clear();
   });
 
-  test("doc-sync and scene-sync backoffs ride the same shared constants", () => {
-    for (const source of [docSyncSource, sceneSyncSource]) {
-      expect(source).toContain("private backoffMs = WS_RECONNECT_BACKOFF_MIN_MS;");
-      expect(source).toContain(
-        "this.backoffMs = Math.min(this.backoffMs * 2, WS_RECONNECT_BACKOFF_MAX_MS);",
-      );
-      // No local literals left to drift.
-      expect(source).not.toMatch(/RECONNECT_BASE_MS|RECONNECT_MAX_MS/);
+  function fileTab(path: string, mode: FileTab["mode"], content: string): FileTab {
+    return {
+      kind: "file",
+      fileKind: mode === "canvas" ? "text" : "document",
+      id: `sync-${path}`,
+      path,
+      content,
+      saved: content,
+      savedMtime: 1,
+      savedMtimeNs: "1000000000",
+      mode,
+      loading: false,
+      error: null,
+      fileMissing: null,
+      inspectorOpen: false,
+      outlineOpen: false,
+      repoRoot: null,
+      readMode: false,
+      fsWritable: true,
+      styleToolbarOpen: false,
+      syntaxHighlight: true,
+      highlightTrailingWhitespace: false,
+      codeBlocksCollapsed: false,
+    };
+  }
+
+  /// With every redial failing, the delay before each next dial.
+  async function redialDelays(count: number): Promise<number[]> {
+    const delays: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const before = sockets.length;
+      let waited = 0;
+      while (sockets.length === before && waited < WS_RECONNECT_BACKOFF_MAX_MS * 2) {
+        await vi.advanceTimersByTimeAsync(100);
+        waited += 100;
+      }
+      delays.push(waited);
+      lastSocket().failDial();
     }
+    return delays;
+  }
+
+  const EXPECTED = [500, 1000, 2000, 4000, 8000, 8000];
+
+  test("the terminal socket reads its frames as ArrayBuffers", async () => {
+    await renderTerminal(terminalTab());
+    expect(lastSocket().binaryType).toBe("arraybuffer");
+  });
+
+  test("a live document session redials from the shared minimum, doubling to the shared maximum", async () => {
+    expect([WS_RECONNECT_BACKOFF_MIN_MS, WS_RECONNECT_BACKOFF_MAX_MS]).toEqual([500, 8000]);
+    localStorage.setItem("chan.docsync", "1");
+    setSocketFactory((url) => new TestWebSocket(url) as unknown as WebSocket);
+    acquireDocSession(fileTab("notes/a.md", "source", "hello"));
+    const first = lastSocket();
+    first.open();
+    await first.onmessage?.({
+      data: JSON.stringify({ type: "snapshot", path: "notes/a.md", version: 0, doc: "hello", dirty: false, mtime_ns: null, cursors: [] }),
+    });
+    first.close();
+
+    expect(await redialDelays(EXPECTED.length)).toEqual(EXPECTED);
+  });
+
+  test("a live scene session redials on the same schedule", async () => {
+    localStorage.setItem("chan.scenesync", "1");
+    setSocketFactory((url) => new TestWebSocket(url) as unknown as WebSocket);
+    acquireSceneSession(fileTab("boards/b.excalidraw", "canvas", '{"type":"excalidraw","elements":[]}'));
+    const first = lastSocket();
+    first.open();
+    await first.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        path: "boards/b.excalidraw",
+        version: 0,
+        elements: [],
+        appState: {},
+        files: {},
+        dirty: false,
+        mtime_ns: null,
+        cursors: [],
+      }),
+    });
+    first.close();
+
+    expect(await redialDelays(EXPECTED.length)).toEqual(EXPECTED);
   });
 });
 
