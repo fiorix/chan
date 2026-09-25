@@ -4,13 +4,14 @@
 
 import { mount, tick, unmount } from "svelte";
 
+import type { Preferences } from "../api/types";
 import SettingsOverlay from "../components/SettingsOverlay.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
 import { settingsPanel } from "../state/store.svelte";
 import { json, recordRequests, stopRecordingRequests, type RecordedRequest } from "./fetch";
 
 /// A whole preferences record, as a fresh config holds it.
-export function settingsPreferences(): Record<string, unknown> {
+export function settingsPreferences(): Preferences {
   return {
     editor_theme: "github",
     editor_font_size: null,
