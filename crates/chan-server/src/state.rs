@@ -586,4 +586,31 @@ pub(crate) mod test_support {
             Err(super::StateAccessError::Busy)
         ));
     }
+
+    /// The runtime the blocking-pool pins need: one blocking thread.
+    fn one_blocking_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+    }
+
+    /// A wrong handler: its filesystem work runs on the runtime thread behind
+    /// one yield, so it is pending when first polled.
+    async fn yield_then_write_inline(target: PathBuf) {
+        tokio::task::yield_now().await;
+        std::fs::write(target, "inline").unwrap();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "blocking handler completed on the runtime thread while the blocking pool was occupied"
+    )]
+    fn the_pin_fails_a_handler_that_yields_before_working_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        one_blocking_thread_runtime().block_on(assert_uses_blocking_pool(yield_then_write_inline(
+            dir.path().join("target.md"),
+        )));
+    }
 }
