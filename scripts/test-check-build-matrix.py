@@ -100,6 +100,21 @@ CASES = (
         "    cargo test --frozen --release -p chan `echo --workspace`",
         says="is a shell expansion",
     ),
+    # A feature flag is how a test-only feature would reach the relinked
+    # binary without widening the selection, so check() selects none.
+    replaced(
+        "--features",
+        "    cargo test --frozen --release -p chan --features chan-workspace/test-hooks",
+        says="--features",
+    ),
+    replaced(
+        "--features=",
+        "    cargo test --frozen --release -p chan --features=chan-workspace/test-hooks",
+        says="--features",
+    ),
+    replaced("-F", "    cargo test --frozen --release -p chan -F chan-workspace/test-hooks", says="-F"),
+    replaced("-FX", "    cargo test --frozen --release -p chan -Fchan-workspace/test-hooks", says="-F"),
+    replaced("--all-features", "    cargo test --frozen --release -p chan --all-features", says="--all-features"),
     # Round one's red copies: the pinned call widened in place.
     replaced("--workspace", "    cargo test --frozen --release --workspace", says="--workspace"),
     replaced(
