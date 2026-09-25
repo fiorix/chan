@@ -1,9 +1,8 @@
 // The screen flip: the launcher's main area turns over like a workspace pane
 // when it swaps between the Computers and Gateways screens. The axis algorithm
-// and the -180deg turn are a deliberate COPY of the workspace-app Pane.svelte
-// side flip (its ?raw source pins forbid extracting a shared module);
-// flip.test.ts pins the same load-bearing strings here so the two copies
-// cannot drift apart silently.
+// and the -180deg turn are a copy of the workspace-app Pane.svelte side flip,
+// and nothing ties the two: flip.test.ts tests this copy's behaviour and the
+// pane's tests test the pane's, so a change to one does not reach the other.
 
 export type FlipAxis = "horizontal" | "vertical";
 

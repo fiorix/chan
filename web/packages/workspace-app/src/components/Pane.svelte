@@ -520,9 +520,8 @@
   /// Side flips animate on the axis that matches the pane's shape:
   /// wide panes turn horizontally, tall panes turn vertically, and a
   /// square pane chooses either axis so both orientations stay possible.
-  // Tracks the 520ms CSS literal on the `pane-side-flip` animation below; a
-  // cross-package share with the launcher's flip.ts is off the table (its
-  // ?raw pins forbid extraction), so the two copies pin each other instead.
+  // Tracks the 520ms CSS literal on the `pane-side-flip` animation below. The
+  // launcher's flip.ts is a copy of this flip, and nothing ties the two.
   const SIDE_FLIP_DURATION_MS = 520;
   let sideFlipActive = $state(false);
   let sideFlipAxis = $state<PaneFlipAxis>("horizontal");
@@ -1685,9 +1684,8 @@
           {/each}
         {:else}
           <!-- The one spawn command a terminal-only window CAN run (the
-               window-mode gate allows app.terminal.toggle). A hardcoded row,
-               NOT an appRows entry: the appRows table is regex-pinned to the
-               workspace-window set. -->
+               window-mode gate allows app.terminal.toggle), as a hardcoded
+               row rather than an appRows entry. -->
           <li class="sep" role="separator"></li>
           <li>
             <button role="menuitem" onclick={() => runAppRow("app.terminal.toggle")}>

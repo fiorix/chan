@@ -936,10 +936,7 @@
            "workspace" is in an unnamed state. Declining is the server's
            contract, enforced at routes/search.rs and re-asserted in
            api/client.ts; partial hits during a reconcile would be wrong in both
-           directions with no way to tell which. Kept ABOVE the branch, not
-           inside it: searchReadiness.test.ts pins the copy with a bounded gap
-           from the `{:else if}` anchor, and a comment in between spends that
-           budget on prose. -->
+           directions with no way to tell which. -->
       <div class="status-line">
         {#if loading}
           <span>searching...</span>
