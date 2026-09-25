@@ -34,7 +34,7 @@ import {
 } from "../__tests__/graphPanel";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { IndexStatus } from "../api/types";
-import { indexStatus } from "../state/store.svelte";
+import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
 
 installGraphDom();
@@ -282,5 +282,43 @@ describe("while the workspace index is not ready", () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\) \{\s*\.indexing \{\s*animation: none;/,
     );
+  });
+});
+
+describe("watching the directories it shows", () => {
+  test("subscribes to them, follows what it shows, and lets them go on unmount", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    const id = `graph-tab-${tab.id}`;
+    const watched = () => Object.keys(fbTreeInstance(id)?.subscribedDirs ?? {}).filter(Boolean).sort();
+    expect(watched()).toEqual(["notes"]);
+
+    tab.scopeId = "workspace";
+    tab.mode = "filesystem";
+    await settle();
+    expect(watched(), "the filesystem graph of the workspace shows src and docs too").toEqual([
+      "docs",
+      "notes",
+      "src",
+    ]);
+
+    unmountGraphPanels();
+    expect(fbTreeInstance(id)).toBeNull();
+  });
+
+  test("a change inside the scope reloads it; one outside does not", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    const change = async (paths: string[]) => {
+      graphReloadSignal.paths = paths;
+      graphReloadSignal.nonce += 1;
+      await settle();
+      await new Promise((r) => setTimeout(r, 300));
+      await settle();
+    };
+
+    const before = graphServer.graphStreamCalls;
+    await change(["src/other.rs"]);
+    expect(graphServer.graphStreamCalls, "src is not in dir:notes").toBe(before);
+    await change(["notes/new.md"]);
+    expect(graphServer.graphStreamCalls).toBe(before + 1);
   });
 });
