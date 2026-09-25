@@ -1038,7 +1038,7 @@ fn spawn_watcher_loop(
                                 entry.is_dir = change.is_dir;
                                 // Any lone rename in the window asks for the
                                 // name check, which a path spelled as its
-                                // directory stores it passes.
+                                // directories store it passes.
                                 entry.lone_rename |= change.lone_rename;
                                 entry.last_seen = change.last_seen;
                             }
@@ -1091,7 +1091,8 @@ struct PendingChange {
     deleted: bool,
     is_dir: bool,
     /// The path came from a rename that named it alone, so it is present
-    /// only when its parent lists it by that exact name.
+    /// only when each of its components is listed byte for byte by the
+    /// directory above it.
     lone_rename: bool,
     last_seen: Instant,
 }
@@ -1134,10 +1135,11 @@ enum ApplyOutcome {
 }
 
 /// Apply one debounced change. A lone rename's path is present only when
-/// its parent lists it by that exact name: on a case-insensitive volume a
-/// lookup also finds the old spelling of a case-only rename, which the
-/// listing no longer holds, so that spelling is forgotten as gone. Every
-/// other change goes to [`apply_watch_change`] as it is.
+/// each of its components is listed byte for byte by the directory above
+/// it: on a case-insensitive volume a lookup also finds the old spelling of
+/// a case-only rename, which the listings no longer hold, so that spelling
+/// is forgotten as gone. Every other change goes to [`apply_watch_change`]
+/// as it is.
 fn apply_pending_change(
     workspace: &Workspace,
     change: &PendingChange,
@@ -1258,12 +1260,12 @@ fn classify_watch_event(event: &WatchEvent, context: WatchContext) -> WatchActio
                     // FSEvents reports each end of a move, and the target of
                     // an editor's atomic save, as its own event with the path
                     // in this slot. Queued as a lone-rename change, not a
-                    // delete, it is checked when applied: a file its parent
-                    // lists by that exact name is indexed, and anything else
-                    // is forgotten, including the old spelling of a
-                    // case-only rename that a lookup still finds on a
-                    // case-insensitive volume. Only a paired rename's source
-                    // is known to be gone.
+                    // delete, it is checked when applied: a file whose every
+                    // component its directory lists byte for byte is indexed,
+                    // and anything else is forgotten, including the old
+                    // spelling of a case-only rename that a lookup still
+                    // finds on a case-insensitive volume. Only a paired
+                    // rename's source is known to be gone.
                     changes.push(PendingChange {
                         path: from.to_owned(),
                         deleted: event.to.is_some(),

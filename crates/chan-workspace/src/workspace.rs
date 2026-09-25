@@ -1886,13 +1886,16 @@ impl Workspace {
         self.fs.is_dir(rel)
     }
 
-    /// True iff `rel`'s parent directory lists `rel`'s file name byte for
-    /// byte. On a case-insensitive volume a lookup finds a file under any
-    /// spelling of its name, while the listing holds only the spelling the
-    /// directory stores, so this is what tells a stale spelling from the
-    /// file after a case-only rename. On a case-sensitive volume it is true
-    /// exactly when the path exists, whatever its type. Reads the parent
-    /// once; a parent that cannot be listed answers false.
+    /// True iff every component of `rel`, from the root down, is listed byte
+    /// for byte by the directory above it. On a case-insensitive volume a
+    /// lookup finds a file under any spelling of its name or of a directory
+    /// above it, while each listing holds only the spelling the directory
+    /// stores, so this is what tells a stale spelling from the file after a
+    /// case-only rename of the file or of any directory on its path. On a
+    /// case-sensitive volume it is true exactly when the path exists,
+    /// whatever its type. Reads each directory on the path once, the root
+    /// alone for a path at the root; a directory that cannot be listed
+    /// answers false.
     pub fn parent_lists_name(&self, rel: &str) -> bool {
         ListedNames::new(self.fs.dir()).lists(rel) == Some(true)
     }
@@ -4062,12 +4065,13 @@ impl Workspace {
                 match self.fs.dir().symlink_metadata(rel) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
                     // On a case-insensitive volume the lookup also succeeds
-                    // for the spelling a case-only rename replaced; only the
-                    // parent's listing says which spelling it stores.
+                    // for a spelling a case-only rename replaced, of the file
+                    // or of a directory above it; only the listings say which
+                    // spellings are stored.
                     Ok(_) if listed.lists(rel) == Some(false) => {
                         tracing::debug!(
                             rel = %rel,
-                            "reconcile: the parent no longer lists this spelling; forgetting it",
+                            "reconcile: a listing no longer holds this spelling; forgetting it",
                         );
                         true
                     }
@@ -5179,14 +5183,14 @@ fn split_anchor(target: &str) -> (String, Option<String>) {
     }
 }
 
-/// Parent directory listings, each read once, for asking of many paths
-/// whether their parent lists their file name byte for byte (see
-/// [`Workspace::parent_lists_name`]). A pass that checks paths grouped under
-/// few parents pays one `read_dir` per parent, not one per path.
+/// Directory listings, each read once, for asking of many paths whether
+/// every component is listed byte for byte by the directory above it (see
+/// [`Workspace::parent_lists_name`]). A pass that checks paths under few
+/// directories pays one `read_dir` per directory, not one per path.
 struct ListedNames {
     dir: Arc<cap_std::fs::Dir>,
-    /// Entry names by parent path; `None` for a parent that could not be
-    /// listed.
+    /// Entry names by directory path, `""` for the root; `None` for a
+    /// directory that could not be listed.
     parents: HashMap<String, Option<HashSet<std::ffi::OsString>>>,
 }
 
@@ -5198,18 +5202,31 @@ impl ListedNames {
         }
     }
 
-    /// Whether `rel`'s parent lists `rel`'s file name byte for byte, or
-    /// `None` when the parent cannot be listed.
+    /// Whether every component of `rel`, from the root down, is listed byte
+    /// for byte by the directory above it, or `None` when a directory on the
+    /// way cannot be listed. It stops at the first component its directory
+    /// does not list, so it never lists a directory under a spelling the
+    /// directory above does not hold; a path at the root reads the root
+    /// alone.
     fn lists(&mut self, rel: &str) -> Option<bool> {
-        let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
         let dir = &self.dir;
-        let names = self
-            .parents
-            .entry(parent.to_owned())
-            .or_insert_with(|| list_names(dir, parent));
-        names
-            .as_ref()
-            .map(|names| names.contains(std::ffi::OsStr::new(name)))
+        let mut start = 0;
+        loop {
+            let end = rel[start..].find('/').map_or(rel.len(), |at| start + at);
+            let parent = if start == 0 { "" } else { &rel[..start - 1] };
+            let names = self
+                .parents
+                .entry(parent.to_owned())
+                .or_insert_with(|| list_names(dir, parent))
+                .as_ref()?;
+            if !names.contains(std::ffi::OsStr::new(&rel[start..end])) {
+                return Some(false);
+            }
+            if end == rel.len() {
+                return Some(true);
+            }
+            start = end + 1;
+        }
     }
 }
 
@@ -11037,7 +11054,7 @@ mod tests {
         assert!(!workspace.parent_lists_name("missing.md"));
         assert!(
             !workspace.parent_lists_name("gone/Deep.md"),
-            "a parent that cannot be listed lists nothing"
+            "a path under a directory the root does not list is not listed"
         );
         assert!(
             !workspace.parent_lists_name("note.md"),
@@ -11060,7 +11077,11 @@ mod tests {
             Some(false),
             "the parent was listed once, before two.md existed"
         );
-        assert_eq!(listed.lists("missing/x.md"), None);
+        assert_eq!(
+            listed.lists("a/one.md/x"),
+            None,
+            "a listed entry that cannot be read as a directory leaves the answer unknown"
+        );
     }
 
     /// A case-only rename made with no events, as while nothing was

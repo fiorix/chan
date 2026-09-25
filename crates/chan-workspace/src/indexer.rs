@@ -29,16 +29,16 @@
 //     deadline).
 //   * A `Renamed` that names a single path in the source slot can
 //     name either end (FSEvents reports each end of a move alone),
-//     so the path is checked first. It is present only when its
-//     parent directory lists its name byte for byte, since on a
-//     case-insensitive volume a lookup also finds the old spelling
-//     of a case-only rename. One that is not present is forgotten as
-//     a source. One that is present is indexed by what it is on disk,
-//     not by the event's directory flag, which can be stale by then:
-//     a file is scheduled like a create, and a directory asks for a
-//     reconcile, because the files under it raise no events of their
-//     own. Reconcile asks debounce like a path, so a burst of them
-//     runs one reconcile.
+//     so the path is checked first. It is present only when every
+//     component is listed byte for byte by the directory above it,
+//     since on a case-insensitive volume a lookup also finds the old
+//     spelling of a case-only rename. One that is not present is
+//     forgotten as a source. One that is present is indexed by what
+//     it is on disk, not by the event's directory flag, which can be
+//     stale by then: a file is scheduled like a create, and a
+//     directory asks for a reconcile, because the files under it
+//     raise no events of their own. Reconcile asks debounce like a
+//     path, so a burst of them runs one reconcile.
 //   * `ProviderError` and path-less events (the watcher's "scope
 //     unknown" signal) clear everything pending and trigger a full
 //     `Workspace::reconcile`. The reconcile is the same convergence
@@ -404,11 +404,12 @@ fn apply_event(
             // directory flag can be stale by the time it is handled; any
             // other is a source to forget.
             //
-            // Present means its parent lists its name byte for byte. On a
-            // case-insensitive volume a case-only rename (`mv Note.md
-            // note.md`) arrives as two lone events and a lookup finds the
-            // file under either name, but the listing holds only `note.md`,
-            // so `Note.md` is forgotten and one row stays.
+            // Present means every component is listed byte for byte by the
+            // directory above it. On a case-insensitive volume a case-only
+            // rename (`mv Note.md note.md`) arrives as two lone events and a
+            // lookup finds the file under either name, but the listing holds
+            // only `note.md`, so `Note.md` is forgotten and one row stays;
+            // the same holds for a renamed directory on the path.
             let lone = event.to.is_none();
             if let Some(from) = event.path {
                 let listed = lone && workspace.parent_lists_name(&from);
