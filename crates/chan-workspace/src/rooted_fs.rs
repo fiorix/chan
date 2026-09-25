@@ -1067,10 +1067,10 @@ impl RootedFs {
                 path: self.root_path.join(&from_rel),
             });
         }
-        // Refuse to clobber: paste-collision resolution happens in the
-        // server (it picks a free name); a bare copy onto an existing
-        // path is a programming error, not a silent overwrite.
-        self.ensure_copy_destination_absent(&to_rel)?;
+        // Refuse to clobber. The server picks a free name for a paste, so a
+        // destination that exists here was taken by another writer: a
+        // conflict, answered like any other already-exists refusal.
+        self.ensure_copy_destination_absent(to, &to_rel)?;
         let to_canon = canonical_posix(to);
         let mut created = Vec::new();
         if src_ft.is_file() {
@@ -1087,7 +1087,7 @@ impl RootedFs {
             self.dir().create_dir(&stage_rel)?;
             let result = (|| {
                 self.copy_subtree(&from_rel, &stage_rel, &to_canon, &mut created)?;
-                self.ensure_copy_destination_absent(&to_rel)?;
+                self.ensure_copy_destination_absent(to, &to_rel)?;
                 #[cfg(test)]
                 copy_window::open();
                 self.dir().rename(&stage_rel, &self.dir(), &to_rel)?;
@@ -1178,12 +1178,9 @@ impl RootedFs {
         Ok(())
     }
 
-    fn ensure_copy_destination_absent(&self, rel: &std::path::Path) -> Result<()> {
+    fn ensure_copy_destination_absent(&self, to: &str, rel: &std::path::Path) -> Result<()> {
         match self.dir().symlink_metadata(rel) {
-            Ok(_) => Err(ChanError::Io(format!(
-                "copy destination already exists: {}",
-                rel.display()
-            ))),
+            Ok(_) => Err(ChanError::PathAlreadyExists(to.to_string())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(map_cap_err(error, rel)),
         }
