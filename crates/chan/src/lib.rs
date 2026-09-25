@@ -5865,23 +5865,59 @@ fn write_devserver_unit(
     addr: SocketAddr,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<DevserverUnitUpdate> {
+    use std::io::IsTerminal;
     let exe = resolve_relaunchable_exe()?;
     let dir = systemd_user_unit_dir()?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let unit_path = dir.join(DEVSERVER_SYSTEMD_UNIT);
-    // The service runs with the user manager's environment, so the PATH of
-    // the shell running this command is recorded in the unit: without it an
-    // extension that resolves a helper by name fails at every service start.
-    // A PATH that differs from the recorded one rewrites the unit, so a
-    // `chan devserver restart` is how a user refreshes it.
-    let unit = devserver_systemd_unit_spec(
-        &exe,
-        addr,
-        devserver_chan_home().as_deref(),
-        tunnel.as_ref(),
-    )
-    .with_search_path(&std::env::var_os("PATH").unwrap_or_default());
+    // The service runs with the user manager's environment, so the unit
+    // records a PATH: without it an extension that resolves a helper by name
+    // fails at every service start. An unreadable unit is left to
+    // write_rendered_devserver_unit, which reports it.
+    let installed = std::fs::read_to_string(&unit_path).ok();
+    let unit = with_devserver_unit_search_path(
+        devserver_systemd_unit_spec(
+            &exe,
+            addr,
+            devserver_chan_home().as_deref(),
+            tunnel.as_ref(),
+        ),
+        &std::env::var_os("PATH").unwrap_or_default(),
+        installed.as_deref(),
+        std::io::stdin().is_terminal(),
+    );
     write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
+}
+
+/// Whether a rewrite of the devserver's service definition keeps the `PATH`
+/// the installed one records rather than `current`, this process's own.
+///
+/// The recorded `PATH` is the service's `PATH` for every extension and
+/// terminal it spawns, so only a render from a terminal replaces it. A
+/// render with no terminal on standard input (a desktop connect script, any
+/// other script) keeps it, so a non-interactive `PATH` never replaces a login
+/// one, and so does a terminal render whose `PATH` has no usable entry,
+/// rather than dropping the line. With nothing recorded, every render records
+/// its own.
+fn keeps_recorded_service_path(current: &std::ffi::OsStr, interactive: bool) -> bool {
+    !interactive || chan_systemd::service_search_path(current).is_none()
+}
+
+/// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
+/// it replaces `installed`: the one `installed` records, verbatim, or one
+/// built from `current`.
+fn with_devserver_unit_search_path(
+    unit: chan_systemd::DevserverUnit,
+    current: &std::ffi::OsStr,
+    installed: Option<&str>,
+    interactive: bool,
+) -> chan_systemd::DevserverUnit {
+    match installed.and_then(chan_systemd::DevserverUnit::recorded_search_path) {
+        Some(recorded) if keeps_recorded_service_path(current, interactive) => {
+            unit.with_environment(format!("PATH={recorded}"))
+        }
+        _ => unit.with_search_path(current),
+    }
 }
 
 #[derive(Debug)]
@@ -11654,6 +11690,59 @@ mod tests {
         let again = write_rendered_devserver_unit(&path, &other_shell, false)
             .expect("the unit chan just wrote is its own");
         assert!(!again.changed, "the same PATH must be a no-op");
+    }
+
+    #[test]
+    fn a_render_without_a_terminal_keeps_the_recorded_search_path() {
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec = || devserver_systemd_unit_spec(Path::new("/usr/bin/chan"), addr, None, None);
+        let path_line = |unit: &chan_systemd::DevserverUnit| {
+            unit.render()
+                .lines()
+                .find(|line| line.starts_with("Environment=\"PATH="))
+                .map(str::to_string)
+        };
+        let login = std::ffi::OsStr::new("/home/dev/.local/bin:/usr/bin");
+        let script = std::ffi::OsStr::new("/usr/bin:/bin");
+        let installed = spec().with_search_path(login).render();
+
+        // A connect script's render keeps the login PATH the unit records.
+        let scripted = with_devserver_unit_search_path(spec(), script, Some(&installed), false);
+        assert_eq!(
+            scripted.render(),
+            installed,
+            "a render without a terminal must keep the recorded PATH"
+        );
+
+        // A render from a terminal replaces it.
+        let interactive = with_devserver_unit_search_path(spec(), script, Some(&installed), true);
+        assert_eq!(
+            path_line(&interactive).as_deref(),
+            Some("Environment=\"PATH=/usr/bin:/bin\""),
+            "a render from a terminal must record its own PATH"
+        );
+
+        // With nothing recorded, a render without a terminal records its own,
+        // over a unit an older chan wrote and on a first install alike.
+        for installed in [Some(spec().render()), None] {
+            let first =
+                with_devserver_unit_search_path(spec(), script, installed.as_deref(), false);
+            assert_eq!(
+                path_line(&first).as_deref(),
+                Some("Environment=\"PATH=/usr/bin:/bin\""),
+                "a unit with no recorded PATH must gain one"
+            );
+        }
+
+        // A terminal render with no usable entry keeps the recorded line
+        // rather than deleting it.
+        let unusable = std::ffi::OsStr::new("::bin:.");
+        let emptied = with_devserver_unit_search_path(spec(), unusable, Some(&installed), true);
+        assert_eq!(
+            emptied.render(),
+            installed,
+            "a PATH with no usable entry must not delete the recorded one"
+        );
     }
 
     #[test]
