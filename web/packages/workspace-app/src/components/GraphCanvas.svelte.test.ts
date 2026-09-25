@@ -230,6 +230,38 @@ describe("the hierarchy layout", () => {
       expect(spread(DEFAULT_FORCE.parentXStrength, seed), `seed ${seed}`).toBeLessThan(spread(0, seed));
     }
   });
+
+  test("holds tag, mention and language nodes near the root's level", () => {
+    // Nodes outside the directory tree have no depth to anchor them; a weak
+    // pull toward the centre line keeps them level with the root instead of
+    // riding their links up to the files. The same layout with and without
+    // that pull, from the same start.
+    const graph = (): { nodes: CanvasNode[]; edges: CanvasEdge[] } => {
+      const g = tree();
+      g.nodes.push(
+        { kind: "mention", id: "@@alice", label: "@@alice" },
+        { kind: "language", id: "lang:Rust", label: "Rust", language: "Rust", files: 1, code: 10 },
+      );
+      g.edges.push(n.edge("notes/b.md", "@@alice", "mention"), n.edge("src/c.rs", "lang:Rust", "language"));
+      return g;
+    };
+    const drift = (strength: number, seed: number): number => {
+      vi.restoreAllMocks();
+      seedRandom(seed);
+      const { api } = render(props(graph(), { force: { ...DEFAULT_FORCE, centerStrength: strength } }));
+      // In units of the root's radius, so the fit's zoom cancels out.
+      const root = circle(api, "");
+      const total = ["#t", "@@alice", "lang:Rust"].reduce(
+        (sum, id) => sum + Math.abs(circle(api, id).y - root.y) / root.r,
+        0,
+      );
+      unmount(mounted.pop()!);
+      return total;
+    };
+    for (const seed of [1, 2, 3]) {
+      expect(drift(DEFAULT_FORCE.centerStrength, seed), `seed ${seed}`).toBeLessThan(drift(0, seed));
+    }
+  });
 });
 
 describe("pointing at a node", () => {
