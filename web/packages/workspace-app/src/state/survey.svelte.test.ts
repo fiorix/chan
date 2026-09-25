@@ -1,6 +1,8 @@
+import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { api, type SurveySpec } from "../api/client";
+import BubbleOverlay from "../components/BubbleOverlay.svelte";
 import {
   surveyState,
   showSurvey,
@@ -135,17 +137,28 @@ describe("survey store", () => {
     expect(surveyFor("t1")?.surveyId).toBe("survey-a");
   });
 
-  test("BubbleOverlay binds X alongside Escape to dismiss and labels the button", async () => {
-    // Source pin (?raw): the overlay card's keydown routes x/X/Escape to
-    // dismissSurvey and the button surfaces the key the way [F] does.
-    // Live keyboard behavior is exercised in the standalone-server
-    // walkthrough; this pins the binding against accidental removal.
-    const src = (await import("../components/BubbleOverlay.svelte?raw"))
-      .default as string;
-    expect(src).toMatch(
-      /e\.key === "x" \|\| e\.key === "X" \|\| e\.key === "Escape"/,
-    );
-    expect(src).toContain("[X] Dismiss");
+  test("x, X and Escape on the survey card dismiss it, and the button names its key", async () => {
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    for (const key of ["x", "X", "Escape"]) {
+      showSurvey(spec({ surveyId: `survey-${key}` }), "t1");
+      const target = document.createElement("div");
+      document.body.append(target);
+      const overlay = mount(BubbleOverlay, { target, props: { tabId: "t1" } });
+      flushSync();
+      expect(target.querySelector(".survey-dismiss")?.textContent?.trim()).toBe("[X] Dismiss");
+
+      target
+        .querySelector(".survey-card")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(surveyFor("t1")).toBeNull());
+      unmount(overlay);
+      target.remove();
+    }
+    expect(reply.mock.calls.map(([sent]) => [sent.surveyId, sent.kind])).toEqual([
+      ["survey-x", "dismissed"],
+      ["survey-X", "dismissed"],
+      ["survey-Escape", "dismissed"],
+    ]);
   });
 
   test("a failed dismiss keeps the survey up and clears busy", async () => {
