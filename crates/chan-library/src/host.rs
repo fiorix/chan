@@ -1210,8 +1210,8 @@ impl WorkspaceHost {
     /// mounted root would fail `WorkspaceAlreadyOpen` anyway). A different
     /// root that collides on `config.prefix` is still an error.
     ///
-    /// Race-safe via the root's lock in [`root_locks`](Self::root_locks),
-    /// keyed by the canonical root computed on the blocking pool before the
+    /// Race-safe via the root's lock in the host's `root_locks`, keyed by
+    /// the canonical root computed on the blocking pool before the
     /// lock is awaited: callers racing one root, under any spelling,
     /// serialize, so the first mounts and the rest observe that mount in the
     /// pre-check and return it, while a mount, close or removal of another
@@ -2994,8 +2994,8 @@ impl WorkspaceHost {
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
     ///
-    /// Holds the root's lock in [`root_locks`](Self::root_locks) from the
-    /// unmount through the unregister, keyed by the canonical root computed
+    /// Holds the root's lock in the host's `root_locks` from the unmount
+    /// through the unregister, keyed by the canonical root computed
     /// on the blocking pool first, so a mount of the same root cannot slip in
     /// between and a caller of another root never waits on this one. The
     /// shared stores it writes (the overlay, the window registry, the library
