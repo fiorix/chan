@@ -21,7 +21,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import type { Preferences } from "../api/types";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { closeTabMenu } from "../state/tabMenu.svelte";
+import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
 import {
   attach,
@@ -85,6 +85,17 @@ describe("the tab menu", () => {
     expect(shape.slice(-2)).toEqual(["---", "Close"]);
     expect(document.body.querySelector(".from-cwd-label")).toBeNull();
     expect(document.body.textContent).not.toContain("Set MCP env vars");
+  });
+
+  test("is portaled to the page body and kept on screen", async () => {
+    const { tab } = await attached();
+    openTabMenu(tab.id, { left: 5000, top: 10, right: 5000, bottom: 20 });
+    await tick();
+    await tick();
+    const bubble = document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
+    expect(bubble.parentElement).toBe(document.body);
+    expect(bubble.style.position).toBe("fixed");
+    expect(parseFloat(bubble.style.left)).toBeLessThanOrEqual(window.innerWidth - 8);
   });
 
   test("Close asks about the live terminal, then closes this tab in its pane", async () => {

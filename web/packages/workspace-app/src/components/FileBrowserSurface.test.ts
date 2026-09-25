@@ -370,6 +370,7 @@ describe("the tree's row menu", () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
     const rows = await rowMenu(target, "README.md");
+    expect(document.body.querySelector(".ctx")!.parentElement, "portaled to the page body").toBe(document.body);
     expect(rows.some((r) => /^New (File|Directory)/.test(r))).toBe(false);
     expect(rows.slice(-2)).toEqual(["---", "Flip"]);
   });
@@ -386,6 +387,7 @@ describe("the dock variant", () => {
       .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 80 }));
     await settle();
     expect(menu()).not.toBeNull();
+    expect(menu()!.parentElement, "portaled to the page body").toBe(document.body);
     expect(menu()!.style.left).toBe("120px");
     expect(menu()!.style.top).toBe("80px");
   });

@@ -293,6 +293,7 @@ describe("the tab menu", () => {
       "---",
       "Close",
     ]);
+    expect(bubble()!.parentElement, "portaled to the page body").toBe(document.body);
     expect(bubble()!.querySelector<HTMLInputElement>(".name-input")!.value).toBe("notes/plan.md");
     expect(row("Close").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.tab.close") ?? "");
   });

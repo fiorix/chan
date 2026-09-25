@@ -297,6 +297,7 @@ describe("the tab menu", () => {
     openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
     await settle(2);
     const bubble = document.body.querySelector(".tab-menu-bubble")!;
+    expect(bubble.parentElement, "portaled to the page body").toBe(document.body);
     const shape = [...bubble.querySelectorAll(".msep, .mbtn")].map((el) => {
       if (el.classList.contains("msep")) return "---";
       if (el.classList.contains("graph-scope-row")) return "scope";
