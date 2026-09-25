@@ -1,26 +1,18 @@
 import { describe, expect, test } from "vitest";
-import shortcuts from "./shortcuts.ts?raw";
+import { renderTable } from "./shortcuts";
 
-// Pins the title-case "Hybrid Nav" label in shortcuts.ts: no
-// "NAV" (all-caps) variant should remain anywhere in the registry.
+// The shortcut table is the help a user reads (and `chan serve --help`
+// prints), and it names the mode in title case: "Hybrid Nav".
 
-describe("shortcuts.ts Hybrid Nav label casing", () => {
-  test("no `Hybrid NAV` literal remains in shortcuts.ts", () => {
-    expect(shortcuts).not.toContain("Hybrid NAV");
+describe("the shortcut table names Hybrid Nav in title case", () => {
+  test("the mode's own row", () => {
+    expect(renderTable("web", "linux")).toMatch(/^Hybrid Nav +Ctrl\+\.$/m);
+    expect(renderTable("native", "mac")).toMatch(/^Hybrid Nav +Cmd\+\.$/m);
   });
 
-  test("no `Hybrid NaV` (intermediate case) literal remains", () => {
-    expect(shortcuts).not.toContain("Hybrid NaV");
-  });
-
-  test("registry notes carry the title-case `Hybrid Nav` form", () => {
-    // Spot-check a surviving Hybrid Nav note: the spawn-alt notes went with
-    // their commands in the no-defaults round, but New terminal is kept and
-    // keeps its Mod+. t alias in the title-case form.
-    expect(shortcuts).toContain("Mod+. t (Hybrid Nav)");
-  });
-
-  test("`Hybrid Nav` label reads title-case", () => {
-    expect(shortcuts).toContain('"Hybrid Nav"');
+  test("the New terminal row's Hybrid Nav alternate", () => {
+    expect(renderTable("web", "linux")).toMatch(
+      /^New terminal +Ctrl\+Shift\+T +\(Cmd\+T on macOS desktop; or Mod\+\. t \(Hybrid Nav\)\)$/m,
+    );
   });
 });
