@@ -182,11 +182,11 @@ const DSR_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
 const DSR_ANSWER_GRACE_MS: i64 = 150;
 #[cfg(target_os = "linux")]
 const FDSTORE_REPLAY_BYTES: usize = 128 * 1024;
-/// How long a PTY reader waits for output before it looks for a restart
-/// seal's stop request again. It bounds how long an idle reader keeps the seal
-/// waiting.
+/// How long a PTY reader that cannot watch its registry's [`ReaderWake`]
+/// waits for output before it looks for a stop request again. It bounds how
+/// long such a reader keeps a restart seal waiting.
 #[cfg(target_os = "linux")]
-const READER_STOP_POLL: Duration = Duration::from_millis(200);
+const READER_STOP_FALLBACK_POLL: Duration = Duration::from_secs(1);
 /// Reads a stopping reader may still take from a PTY that keeps producing
 /// output, so a child that never pauses cannot hold the seal. What it leaves
 /// stays in the PTY for the next process.
@@ -246,6 +246,87 @@ impl ReaderStop {
         }
         true
     }
+}
+
+/// One stop descriptor per [`Registry`], the read end of a pipe that every PTY
+/// reader thread the registry starts, native and imported, polls beside its
+/// master with no timeout. [`Registry::request_parked_reader_stop`] marks the
+/// parked sessions' [`ReaderStop`]s and then writes one byte that nobody reads,
+/// so the read end stays readable and every reader wakes at once to look at
+/// its own session's request. An idle reader takes no other wake.
+#[derive(Debug)]
+struct ReaderWake {
+    /// `None` when the pipe could not be created; every reader then falls back
+    /// to `READER_STOP_FALLBACK_POLL`.
+    #[cfg(target_os = "linux")]
+    pipe: Option<ReaderWakePipe>,
+    #[cfg(target_os = "linux")]
+    fired: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ReaderWakePipe {
+    read: filedescriptor::FileDescriptor,
+    write: Mutex<filedescriptor::FileDescriptor>,
+}
+
+impl ReaderWake {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            pipe: match filedescriptor::Pipe::new() {
+                Ok(pipe) => Some(ReaderWakePipe {
+                    read: pipe.read,
+                    write: Mutex::new(pipe.write),
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "no PTY reader stop pipe; readers look for a stop request once a second"
+                    );
+                    None
+                }
+            },
+            #[cfg(target_os = "linux")]
+            fired: AtomicBool::new(false),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ReaderWake {
+    /// The descriptor a reader polls for the wake, if there is one.
+    fn fd(&self) -> Option<RawFd> {
+        self.pipe.as_ref().map(|pipe| pipe.read.as_raw_fd())
+    }
+
+    /// Make the descriptor readable, once; it stays readable from then on.
+    fn wake(&self) {
+        if self.fired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(pipe) = self.pipe.as_ref() else {
+            return;
+        };
+        let mut write = pipe.write.lock().expect("terminal reader wake poisoned");
+        if let Err(error) = write.write_all(&[1]) {
+            tracing::warn!(
+                error = %error,
+                "PTY reader stop pipe write failed; idle readers keep the seal waiting"
+            );
+        }
+    }
+}
+
+/// A PTY reader's own view of its wait: how many reads it took after a stop
+/// request, and whether it has seen its registry's wake without a request of
+/// its own.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct ReaderWait {
+    drained: usize,
+    wake_seen: bool,
 }
 
 /// Marks a session's PTY reader running for as long as the thread that owns
@@ -374,6 +455,8 @@ pub struct Registry {
     /// `None` on every non-systemd serving path.
     #[cfg(target_os = "linux")]
     fd_parker: Mutex<Option<FdStoreParker>>,
+    /// The stop descriptor every PTY reader this registry starts polls.
+    reader_wake: Arc<ReaderWake>,
     /// Per-PTY-life epoch source. Each spawn (create OR restart) takes the next
     /// value and stamps it on the session, so a reattach can prove its cached
     /// scrollback belongs to the SAME incarnation: a restart reuses the session
@@ -1394,6 +1477,7 @@ impl Registry {
             blob_reaper: Mutex::new(None),
             #[cfg(target_os = "linux")]
             fd_parker: Mutex::new(None),
+            reader_wake: Arc::new(ReaderWake::new()),
             generation_counter: AtomicU64::new(0),
             #[cfg(test)]
             spawn_barrier: Mutex::new(None),
@@ -1899,6 +1983,7 @@ impl Registry {
             announce_command,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
             self.last_exit.clone(),
+            self.reader_wake.clone(),
         )
         .map_err(CreateError::Spawn)?;
         let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -1996,6 +2081,7 @@ impl Registry {
             false,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
             self.last_exit.clone(),
+            self.reader_wake.clone(),
         )
         .map_err(CreateError::Spawn)?;
         let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
@@ -2811,15 +2897,20 @@ impl Registry {
     }
 
     /// Ask the PTY reader of every parked session to stop once it has read
-    /// what the PTY already holds. [`wait_parked_readers`](Self::wait_parked_readers)
+    /// what the PTY already holds, then wake every reader this registry
+    /// started through its one stop descriptor, so an idle reader sees the
+    /// request at once. [`wait_parked_readers`](Self::wait_parked_readers)
     /// waits for them; the two are split so a host stops every tenant's
     /// readers at once and waits once.
     #[cfg(target_os = "linux")]
     pub fn request_parked_reader_stop(&self) {
-        let sessions = self.sessions.lock().expect("terminal registry poisoned");
-        for session in sessions.values().filter(|s| s.is_fdstore_parked()) {
-            session.reader_stop.request();
+        {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            for session in sessions.values().filter(|s| s.is_fdstore_parked()) {
+                session.reader_stop.request();
+            }
         }
+        self.reader_wake.wake();
     }
 
     /// Wait until `deadline` for every parked session whose reader was asked
@@ -3078,14 +3169,18 @@ impl Registry {
                 None
             };
             let generation = meta.generation;
-            let session =
-                match Session::from_imported(self.config.clone(), import, self.last_exit.clone()) {
-                    Ok(session) => session,
-                    Err(e) => {
-                        report.skip_session(&meta, e.to_string());
-                        continue;
-                    }
-                };
+            let session = match Session::from_imported(
+                self.config.clone(),
+                import,
+                self.last_exit.clone(),
+                self.reader_wake.clone(),
+            ) {
+                Ok(session) => session,
+                Err(e) => {
+                    report.skip_session(&meta, e.to_string());
+                    continue;
+                }
+            };
             self.generation_counter
                 .fetch_max(generation.saturating_add(1), Ordering::Relaxed);
             let window_id = session.window_id();
@@ -3566,6 +3661,9 @@ struct Session {
     /// Stops the PTY reader ahead of a restart seal's final manifest write.
     #[cfg(target_os = "linux")]
     reader_stop: ReaderStop,
+    /// The registry's stop descriptor, which this session's reader polls.
+    #[cfg(target_os = "linux")]
+    reader_wake: Arc<ReaderWake>,
     /// The PTY's exit state, set once its child process exits (the same value
     /// broadcast as [`SessionEvent::Exit`]). `None` while the process runs.
     /// Stored -- not only broadcast -- so a poller (the desktop's control-script
@@ -3592,6 +3690,8 @@ impl Session {
         announce_command: bool,
         generation: u64,
         registry_last_exit: Arc<Mutex<Option<TerminalExit>>>,
+        // Only a Linux reader polls the registry's stop descriptor.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] reader_wake: Arc<ReaderWake>,
     ) -> anyhow::Result<Arc<Self>> {
         #[cfg(test)]
         if opts.env.contains_key("CHAN_TEST_FAIL_TERMINAL_SPAWN") {
@@ -3824,6 +3924,8 @@ impl Session {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
+            #[cfg(target_os = "linux")]
+            reader_wake,
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
@@ -3852,11 +3954,11 @@ impl Session {
                     #[cfg(target_os = "linux")]
                     let _running = running;
                     #[cfg(target_os = "linux")]
-                    let mut drained = 0;
+                    let mut wait = ReaderWait::default();
                     let mut buf = [0u8; 8192];
                     loop {
                         #[cfg(target_os = "linux")]
-                        if !session.reader_may_read(&mut drained) {
+                        if !session.reader_may_read(&mut wait) {
                             break;
                         }
                         match reader.read(&mut buf) {
@@ -4064,6 +4166,7 @@ impl Session {
         config: RegistryConfig,
         import: FdStoreSessionImport,
         registry_last_exit: Arc<Mutex<Option<TerminalExit>>>,
+        reader_wake: Arc<ReaderWake>,
     ) -> anyhow::Result<Arc<Self>> {
         let FdStoreSessionImport {
             meta,
@@ -4146,6 +4249,8 @@ impl Session {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
+            #[cfg(target_os = "linux")]
+            reader_wake,
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
@@ -4158,10 +4263,10 @@ impl Session {
                 .name("chan-terminal-fdstore-reader".into())
                 .spawn(move || {
                     let _running = running;
-                    let mut drained = 0;
+                    let mut wait = ReaderWait::default();
                     let mut buf = [0u8; 8192];
                     loop {
-                        if !session.reader_may_read(&mut drained) {
+                        if !session.reader_may_read(&mut wait) {
                             break;
                         }
                         match reader.read(&mut buf) {
@@ -4263,40 +4368,67 @@ impl Session {
 
     /// Wait until the PTY has output for the reader. False once a restart
     /// seal has asked the reader to stop and it has read what the PTY already
-    /// held, or `READER_STOP_DRAIN_READS` more reads, whichever comes first;
-    /// `drained` counts those. Without a master fd to poll the reader blocks
-    /// in its read as it always would, and the seal's wait runs out.
+    /// held, or `READER_STOP_DRAIN_READS` more reads, whichever comes first.
+    /// The wait polls the master beside the registry's [`ReaderWake`] with no
+    /// timeout, so an idle reader sleeps until output or a stop request. A
+    /// reader that cannot watch the wake (no pipe, or it has already seen the
+    /// wake fire for a request that was not its own, and a descriptor that
+    /// stays readable would turn the wait into a spin) looks for a request
+    /// every `READER_STOP_FALLBACK_POLL` instead. Without a master fd to poll
+    /// the reader blocks in its read as it always would, and the seal's wait
+    /// runs out.
     #[cfg(target_os = "linux")]
-    fn reader_may_read(&self, drained: &mut usize) -> bool {
+    fn reader_may_read(&self, wait: &mut ReaderWait) -> bool {
         let Some(fd) = self.master_fd.as_ref() else {
             return true;
         };
         loop {
             let stopping = self.reader_stop.requested();
-            if stopping && *drained >= READER_STOP_DRAIN_READS {
+            if stopping && wait.drained >= READER_STOP_DRAIN_READS {
                 return false;
             }
-            let mut poll = [filedescriptor::pollfd {
-                fd: fd.as_raw_fd(),
-                events: filedescriptor::POLLIN,
-                revents: 0,
-            }];
-            let wait = if stopping {
-                Duration::ZERO
+            let wake_fd = if stopping || wait.wake_seen {
+                None
             } else {
-                READER_STOP_POLL
+                self.reader_wake.fd()
             };
-            match filedescriptor::poll(&mut poll, Some(wait)) {
+            // poll(2) skips an entry with a negative fd.
+            let mut poll = [
+                filedescriptor::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: filedescriptor::POLLIN,
+                    revents: 0,
+                },
+                filedescriptor::pollfd {
+                    fd: wake_fd.unwrap_or(-1),
+                    events: filedescriptor::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let timeout = if stopping {
+                Some(Duration::ZERO)
+            } else if wake_fd.is_some() {
+                None
+            } else {
+                Some(READER_STOP_FALLBACK_POLL)
+            };
+            match filedescriptor::poll(&mut poll, timeout) {
                 Ok(0) if stopping => return false,
-                Ok(0) => {
-                    #[cfg(any(test, feature = "test-util"))]
-                    fire_attach_seam(&self.id, AttachSeam::ReaderIdleWake);
-                    continue;
+                Ok(_) if poll[0].revents == 0 => {
+                    if poll[1].revents != 0 {
+                        wait.wake_seen = true;
+                    }
+                    // A request this reader has not seen yet is picked up at
+                    // the top of the loop.
+                    if !self.reader_stop.requested() {
+                        #[cfg(any(test, feature = "test-util"))]
+                        fire_attach_seam(&self.id, AttachSeam::ReaderIdleWake);
+                    }
                 }
                 // Readable, hung up or failed: the read reports which.
                 _ => {
                     if stopping {
-                        *drained += 1;
+                        wait.drained += 1;
                     }
                     return true;
                 }
@@ -5619,6 +5751,8 @@ mod tests {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
+            #[cfg(target_os = "linux")]
+            reader_wake: Arc::new(ReaderWake::new()),
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
@@ -7765,6 +7899,7 @@ mod tests {
                 replay: Vec::new(),
             },
             registry_last_exit.clone(),
+            Arc::new(ReaderWake::new()),
         )
         .expect("import session");
         let mut rx = session.output_tx.subscribe();
