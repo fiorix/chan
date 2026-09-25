@@ -1086,11 +1086,6 @@ impl RootedFs {
             let staged = stage.rel().join(leaf);
             if let Err(error) = self
                 .copy_one_file(&from_rel, &staged, &to_canon, &mut created)
-                // The writer names the staged path; the caller asked for `to`.
-                .map_err(|error| match error {
-                    ChanError::NonUtf8EditableText(_) => non_utf8_editable_text(to),
-                    error => error,
-                })
                 .and_then(|()| self.publish_copy(&staged, &to_rel, to))
             {
                 return Err(stage.discard(error));
@@ -1352,7 +1347,9 @@ impl RootedFs {
 
     /// Copy one regular file from `src_rel` to `dst_rel` (both relative
     /// to `self.dir()`), recording the destination's workspace-rooted POSIX
-    /// path in `created`.
+    /// path in `created`. `dst_canon` is the file's final path: `dst_rel` is
+    /// inside a copy stage, so the final path is also what a non-UTF-8
+    /// refusal names.
     fn copy_one_file(
         &self,
         src_rel: &std::path::Path,
@@ -1366,7 +1363,11 @@ impl RootedFs {
         let dst_str = dst_rel
             .to_str()
             .ok_or_else(|| ChanError::Io("destination contains a non-UTF-8 name".into()))?;
-        self.copy_file_stream(src_str, dst_str)?;
+        self.copy_file_stream(src_str, dst_str)
+            .map_err(|error| match error {
+                ChanError::NonUtf8EditableText(_) => non_utf8_editable_text(dst_canon),
+                error => error,
+            })?;
         created.push(dst_canon.to_string());
         Ok(())
     }
