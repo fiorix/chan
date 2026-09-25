@@ -2436,10 +2436,11 @@ impl Workspace {
     /// cut-into-a-name-collision both resolve to a fresh name rather
     /// than overwriting (we never silently clobber).
     ///
-    /// The check is best-effort against the live tree; the actual write
-    /// (copy / rename) is the TOCTOU-authoritative step and will fail on
-    /// a lost race, at which point the caller can retry with the next
-    /// suffix.
+    /// The check is best-effort against the live tree. The copy or rename
+    /// that then uses the name commits with a rename that refuses an
+    /// existing destination, so a name another writer takes after this
+    /// check is kept and the operation is `PathAlreadyExists`; the server's
+    /// paste answers that as a conflict rather than retrying.
     pub fn resolve_free_name(&self, dest_dir: &str, name: &str) -> Result<String> {
         self.fs.resolve_free_name(dest_dir, name)
     }

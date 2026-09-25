@@ -980,9 +980,10 @@ impl RootedFs {
         Ok(())
     }
 
-    /// Validate a rename without mutation. Returns whether the destination
-    /// already identifies the source directory, which needs no write probe.
-    pub(crate) fn preflight_rename(&self, from: &str, to: &str) -> Result<bool> {
+    /// Validate a rename without mutation and report what the destination
+    /// holds: nothing, or the source itself. Anything else there is refused
+    /// with `PathAlreadyExists`.
+    pub(crate) fn preflight_rename(&self, from: &str, to: &str) -> Result<RenameDestination> {
         self.ensure_root_available()?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
@@ -1002,7 +1003,7 @@ impl RootedFs {
                 path: self.root_path.join(&from_rel),
             });
         }
-        let same_file = match self.dir().symlink_metadata(&to_rel) {
+        let destination = match self.dir().symlink_metadata(&to_rel) {
             Ok(dst_meta) => {
                 if dst_meta.file_type().is_symlink() {
                     return Err(ChanError::PathAlreadyExists(to.to_string()));
@@ -1020,20 +1021,28 @@ impl RootedFs {
                 if !same {
                     return Err(ChanError::PathAlreadyExists(to.to_string()));
                 }
-                true
+                RenameDestination::Source {
+                    directory: src_ft.is_dir(),
+                }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => RenameDestination::Absent,
             Err(error) => return Err(map_cap_err(error, &to_rel)),
         };
-        Ok(same_file && src_ft.is_dir())
+        Ok(destination)
     }
 
-    /// Rename within the root through the capability handle.
+    /// Rename within the root through the capability handle. A destination
+    /// the preflight found absent is committed with a rename that refuses an
+    /// existing name, so one created after the check is kept and the rename
+    /// is `PathAlreadyExists`: of two moves to one free name, one lands and
+    /// the other keeps its source.
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let same_directory = self.preflight_rename(from, to)?;
+        let destination = self.preflight_rename(from, to)?;
         let from_rel = self.rel(from)?;
         let to_rel = self.rel(to)?;
-        if !same_directory {
+        // A directory renamed onto its own other spelling needs no write
+        // probe; everything else is checked like any write target.
+        if destination != (RenameDestination::Source { directory: true }) {
             self.ensure_writable(to)?;
         }
         if let Some(parent) = to_rel.parent() {
@@ -1041,14 +1050,24 @@ impl RootedFs {
                 self.dir().create_dir_all(parent).map_err(ChanError::from)?;
             }
         }
-        // Both paths resolve through the capability handle. The destination
-        // check still assumes no concurrent external creator before rename.
         #[cfg(test)]
         rename_window::open();
-        self.dir()
-            .rename(&from_rel, &self.dir(), &to_rel)
-            .map_err(ChanError::from)?;
-        Ok(())
+        match destination {
+            RenameDestination::Absent => match self.rename_no_replace(&from_rel, &to_rel) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(ChanError::PathAlreadyExists(to.to_string()))
+                }
+                Err(error) => Err(ChanError::from(error)),
+            },
+            // The destination is the source under another spelling or link.
+            // A no-replace rename would refuse that, or not, by platform (see
+            // `no_replace`), so these cases keep the plain rename they mean.
+            RenameDestination::Source { .. } => self
+                .dir()
+                .rename(&from_rel, &self.dir(), &to_rel)
+                .map_err(ChanError::from),
+        }
     }
 
     /// Duplicate a regular file or subtree; the destination must not exist.
@@ -1478,6 +1497,17 @@ impl RootedFs {
         };
         self.dir().symlink_metadata(&rel_path).is_ok()
     }
+}
+
+/// What `RootedFs::preflight_rename` found at a rename's destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenameDestination {
+    /// Nothing: the commit must refuse whatever appears there meanwhile.
+    Absent,
+    /// The source itself: the same path, a case-only spelling of it, or on
+    /// Unix a hard link to it (identity is device and inode there);
+    /// `directory` says whether the source is a directory.
+    Source { directory: bool },
 }
 
 /// A copy's stage directory beside its destination. Dropping it removes the
