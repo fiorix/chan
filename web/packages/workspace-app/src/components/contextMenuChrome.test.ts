@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "vitest";
 
-// Build-time contract: Hybrid Nav dims unfocused panes with no filter or opacity on their bodies; vitest drops component CSS.
+// Build-time contract: Hybrid Nav's pane rules put no filter or opacity on a pane; vitest drops component CSS.
 import app from "../App.svelte?raw";
 // Build-time contract: the editor tab menu stacks at z-index 25500 and its rows pop on the tab pill's curve; vitest drops component CSS.
 import editor from "./FileEditorTab.svelte?raw";
@@ -69,16 +69,14 @@ describe("the pane stylesheet", () => {
       /\.pane\.focused\.wobble \{[\s\S]*?animation: pane-wobble-once 360ms cubic-bezier\(0\.34, 1\.56, 0\.64, 1\)/,
     );
     // A scaled ancestor corrupts xterm's WebGL glyph atlas, so no rule on
-    // the pane element itself scales it.
-    expect(styles).not.toMatch(/\.pane\s*\{[^}]*transform:\s*scale/);
-    expect(styles).not.toMatch(/\.pane:hover\s*\{[^}]*transform:\s*scale/);
-    expect(styles).not.toMatch(/\.pane\.focused\s*\{[^}]*transform:\s*scale/);
-    expect(styles).not.toMatch(/\.pane\.focused\.wobble\s*\{[^}]*transform:\s*scale/);
+    // the pane element itself, in any state, scales it.
+    expect(styles).toMatch(/\n\s*\.pane \{/);
+    expect(styles).not.toMatch(/(?:^|[\n,])\s*\.pane(?:\.[\w-]+|:[\w-]+(?:\([^)]*\))?)*\s*\{[^}]*transform:\s*scale/);
   });
 
   test("Hybrid Nav's focus chrome composites no pane body", () => {
     const styles = css(app);
-    expect(styles).not.toMatch(/\.app\.pane-mode\s+:global\(\.pane:not\(\.focused\)\)\s*\{[\s\S]*?filter:/);
-    expect(styles).not.toMatch(/\.app\.pane-mode\s+:global\(\.pane:not\(\.focused\)\)\s*\{[\s\S]*?opacity:/);
+    expect(styles).toMatch(/\.app\.pane-mode :global\(\.pane\) \{/);
+    expect(styles).not.toMatch(/\.app\.pane-mode\s+:global\(\.pane[^{]*\)\s*\{[^}]*\b(?:filter|opacity):/);
   });
 });
