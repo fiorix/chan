@@ -9,9 +9,27 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 // static import still sees the mocked xterm modules.
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
-import terminalSource from "./TerminalTab.svelte?raw";
-import { layout, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import type { SurveySpec } from "../api/client";
+import { openExternalUrl } from "../editor/external_links";
+import { showSurvey, surveyState } from "../state/survey.svelte";
+import {
+  bumpTabFocusPulse,
+  layout,
+  type TerminalTab as TerminalTabState,
+} from "../state/tabs.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
+
+/// What TerminalTab registered with xterm: its key handler and the link
+/// handler it gave the web-links addon.
+const registered = vi.hoisted(() => ({
+  keyHandler: null as ((e: KeyboardEvent) => boolean) | null,
+  linkHandler: null as ((event: MouseEvent, uri: string) => void) | null,
+}));
+
+vi.mock("../editor/external_links", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../editor/external_links")>()),
+  openExternalUrl: vi.fn(async () => {}),
+}));
 
 const fitMock = vi.hoisted(() => ({
   calls: 0,
@@ -65,7 +83,9 @@ vi.mock("@xterm/xterm", () => ({
       if (addon.testFitAddon) addon.activate?.(this);
     }
     open() {}
-    attachCustomKeyEventHandler() {}
+    attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean) {
+      registered.keyHandler = handler;
+    }
     onData() {}
     onResize() {}
     write() {}
@@ -117,7 +137,11 @@ vi.mock("@xterm/addon-serialize", () => ({
 }));
 
 vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {},
+  WebLinksAddon: class {
+    constructor(handler: (event: MouseEvent, uri: string) => void) {
+      registered.linkHandler = handler;
+    }
+  },
 }));
 
 globalThis.ResizeObserver = TestResizeObserver as any;
@@ -151,6 +175,11 @@ afterEach(() => {
   fitMock.size = null;
   globalThis.requestAnimationFrame = immediateAnimationFrame;
   setTerminalTabsInLayout([]);
+  surveyState.byTab = {};
+  surveyState.windowWide = null;
+  registered.keyHandler = null;
+  registered.linkHandler = null;
+  vi.clearAllMocks();
 });
 
 function terminalTab(partial: Partial<TerminalTabState> = {}): TerminalTabState {
@@ -502,73 +531,59 @@ describe("TerminalTab menu", () => {
   });
 });
 
-describe("TerminalTab Team Work revamp (source contract)", () => {
-  // The Team Work prompt and bubble overlay were rewritten. These pin
-  // the load-bearing structural changes at the source level (the prompt
-  // component is not mounted in the runtime tests above).
+describe("TerminalTab and the app around it", () => {
+  const SURVEY: SurveySpec = { surveyId: "survey-1", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] };
 
-  test("App chords use the central terminal-escape registry", () => {
-    // Code-based families such as Alt+Shift+[/] live in shortcuts.ts beside
-    // every other App chord; TerminalTab owns no parallel shortcut list.
-    expect(terminalSource).toMatch(
-      /if \(shouldEscapeTerminal\(e\)\) return false;/,
-    );
-    expect(terminalSource).not.toMatch(
-      /e\.code === "BracketLeft" \|\| e\.code === "BracketRight"/,
-    );
+  test("an app chord is left to the app: xterm skips it and the PTY gets nothing", async () => {
+    await renderTerminal(terminalTab(), true);
+    const socket = openSocket();
+    socket.sent.splice(0);
+
+    // The command launcher's chord off the Mac, flagged to escape terminals.
+    const event = new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true, altKey: true });
+    expect(registered.keyHandler!(event)).toBe(false);
+    expect(socket.sent.filter((f) => JSON.parse(f).type === "input")).toEqual([]);
   });
 
-  test("the Team Work bubble composer is fully removed", () => {
-    // The Team Work bubble is deleted entirely. No <TeamWork> mount, no
-    // submitTeamWork/teamWorkUsesAgentSubmit helpers, no tab.teamWork, no raw
-    // AGENT_SUBMIT_CHORD path. Per-terminal text input is the Rich Prompt.
-    expect(terminalSource).not.toMatch(/<TeamWork\b/);
-    expect(terminalSource).not.toMatch(/submitTeamWork/);
-    expect(terminalSource).not.toMatch(/teamWorkUsesAgentSubmit/);
-    expect(terminalSource).not.toMatch(/tab\.teamWork/);
-    expect(terminalSource).not.toMatch(/AGENT_SUBMIT_CHORD/);
+  test("a survey raised for this terminal shows over it, and one for another terminal does not", async () => {
+    const tab = terminalTab();
+    const { target } = await renderTerminal(tab, true);
+
+    showSurvey(SURVEY, "another-terminal");
+    await tick();
+    expect(target.querySelector(".survey-overlay")).toBeNull();
+
+    showSurvey(SURVEY, tab.id);
+    await tick();
+    expect(target.querySelector(".survey-overlay .survey-title")?.textContent).toBe("Pick one");
   });
 
-  test("mounts a PER-TERMINAL survey overlay, keyed by tab.id", () => {
-    // Surveys are per-terminal, not window-wide. Each visible
-    // terminal owns an always-mounted BubbleOverlay, anchored over it. Keeping
-    // the component mounted preserves its return-focus target while `shown`
-    // makes a hidden survey inert; restoreFocus covers a survey first revealed
-    // from a hidden tab. The App-root mount (tabId null) is the window-wide
-    // fallback.
-    expect(terminalSource).toMatch(
-      /import BubbleOverlay from "\.\/BubbleOverlay\.svelte"/,
-    );
-    expect(terminalSource).toMatch(
-      /<BubbleOverlay[\s\S]{1,120}tabId=\{tab\.id\}[\s\S]{1,120}shown=\{active\}[\s\S]{1,120}restoreFocus=\{focusTerminal\}/,
-    );
+  test("while its survey is up, the terminal does not take focus back", async () => {
+    const tab = terminalTab();
+    await renderTerminal(tab, true);
+    await tick();
+    terminalFocuses.splice(0);
+
+    showSurvey(SURVEY, tab.id);
+    bumpTabFocusPulse();
+    await tick();
+    await Promise.resolve();
+    expect(terminalFocuses, "the survey keeps the keyboard").toEqual([]);
+
+    surveyState.byTab = {};
+    await tick();
+    await Promise.resolve();
+    expect(terminalFocuses, "closing the survey hands focus back").not.toEqual([]);
+    terminalFocuses.splice(0);
+    bumpTabFocusPulse();
+    await tick();
+    await Promise.resolve();
+    expect(terminalFocuses).toEqual(["focus"]);
   });
 
-  test("all xterm focus paths share the active-survey guard", () => {
-    expect(terminalSource).toMatch(
-      /function focusTerminal\(\): void \{[\s\S]*?if \(surveyFor\(tab\.id\)\) return;[\s\S]*?term\?\.focus\(\);/,
-    );
-    expect(terminalSource.match(/term\?\.focus\(\)/g)).toHaveLength(1);
-  });
-
-  test("the deleted watcher + team-work-workspace plumbing is gone", () => {
-    expect(terminalSource).not.toMatch(/refreshWatcherEvents/);
-    expect(terminalSource).not.toMatch(/ensureTeamWorkWorkspace/);
-    expect(terminalSource).not.toMatch(/persistTeamWorkSubmission/);
-    expect(terminalSource).not.toMatch(/readWatcherEvents/);
-    expect(terminalSource).not.toMatch(/watcherPollTimer/);
-  });
-
-  test("terminal links route clicks through openExternalUrl (LINKS)", () => {
-    // WebLinksAddon gets a custom handler instead of its default
-    // window.open(_blank), which is inert / opens in-app under the
-    // chan-desktop Tauri webview. openExternalUrl gives a real browser
-    // tab on web and the OS default browser on desktop.
-    expect(terminalSource).toMatch(
-      /new WebLinksAddon\(\(_event, uri\) => \{[\s\S]*?void openExternalUrl\(uri\);/,
-    );
-    expect(terminalSource).toMatch(
-      /import \{ openExternalUrl \} from "\.\.\/editor\/external_links";/,
-    );
+  test("a clicked link opens through the external-link path", async () => {
+    await renderTerminal(terminalTab(), true);
+    registered.linkHandler!(new MouseEvent("click"), "https://example.com/docs");
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
   });
 });
