@@ -1,98 +1,130 @@
-import { describe, expect, test } from "vitest";
-import tabs from "./tabs.svelte.ts?raw";
-import pane from "../components/Pane.svelte?raw";
+// @vitest-environment jsdom
+//
+// Hybrid Nav stages its changes in a draft layout: T / O / G / B add tabs to
+// the draft, N / I queue a draft editor for materialization, Enter commits and
+// Esc discards. A staged tab renders in its pane marked as staged, and a staged
+// terminal renders, so it spawns a real PTY: Esc must kill that shell before
+// the draft stops rendering, or it lingers in the registry until idle-prune.
 
-// Hybrid Nav transactional staging. T / O / G / B stage tab additions into the
-// draft layout; N / I queue draft-editor materialization. Enter materializes,
-// Esc discards. Tests pin the state machine + helper shape.
+import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import Pane from "../components/Pane.svelte";
+import {
+  cancelPaneMode,
+  commitPaneMode,
+  enterPaneMode,
+  layout,
+  paneMode,
+  paneModeOpenBrowser,
+  paneModeOpenTerminal,
+  paneModeSplit,
+  paneModeStageDiagramEditor,
+  paneModeStageDraftEditor,
+  paneModeStagedDraftEditorsFor,
+  paneModeStagedTabIds,
+  registerTerminalCloseSink,
+  type LeafNode,
+} from "./tabs.svelte";
+import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 
-describe("paneMode state: stagedDraftEditors field", () => {
-  test("paneMode singleton carries stagedDraftEditors as an array field", () => {
-    expect(tabs).toMatch(
-      /stagedDraftEditors: PaneModeStagedDraftEditor\[\];[\s\S]{1,600}stagedDraftEditors: \[\],/,
-    );
+// jsdom has no ResizeObserver, which Pane uses to measure its editor column.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof ResizeObserver;
+
+const mounted: Array<Record<string, unknown>> = [];
+
+afterEach(() => {
+  for (const component of mounted.splice(0)) unmount(component);
+  document.body.innerHTML = "";
+  cancelPaneMode();
+});
+
+describe("staging a draft editor", () => {
+  test("records the pane and side it was pressed in", () => {
+    const pane = resetLayout([fileTab()]);
+    enterPaneMode();
+    paneModeStageDraftEditor();
+    paneModeSplit("row");
+    const split = paneMode.draft!.activePaneId;
+    paneModeStageDiagramEditor();
+
+    expect(split).not.toBe(pane.id);
+    expect(paneModeStagedDraftEditorsFor(pane.id, "a")).toEqual([
+      expect.objectContaining({ paneId: pane.id, side: "a", kind: "draft" }),
+    ]);
+    expect(paneModeStagedDraftEditorsFor(split, "a")).toEqual([
+      expect.objectContaining({ paneId: split, side: "a", kind: "diagram" }),
+    ]);
   });
 
-  test("enterPaneMode resets stagedDraftEditors to []", () => {
-    expect(tabs).toMatch(
-      /export function enterPaneMode\(\): void \{[\s\S]{1,800}paneMode\.stagedDraftEditors = \[\];/,
-    );
-  });
+  test("entering, committing and cancelling each start from none staged", () => {
+    resetLayout([fileTab()]);
+    enterPaneMode();
+    paneModeStageDraftEditor();
+    commitPaneMode();
+    expect(paneMode.stagedDraftEditors).toEqual([]);
 
-  test("commitPaneMode clears stagedDraftEditors as part of teardown", () => {
-    expect(tabs).toMatch(
-      /export function commitPaneMode\(\): void \{[\s\S]{1,1800}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(\);\s*\}/,
-    );
-  });
-
-  test("cancelPaneMode clears stagedDraftEditors as part of teardown", () => {
-    expect(tabs).toMatch(
-      /export function cancelPaneMode\(\): void \{[\s\S]{1,900}paneMode\.stagedDraftEditors = \[\];\s*notifyPaneModeSettled\(pendingRemoteLayout\);\s*\}/,
-    );
+    enterPaneMode();
+    expect(paneMode.stagedDraftEditors).toEqual([]);
+    paneModeStageDraftEditor();
+    cancelPaneMode();
+    expect(paneMode.stagedDraftEditors).toEqual([]);
   });
 });
 
-describe("paneMode staging: spawn helpers", () => {
-  test("there is no pane-mode Team Work bubble spawn", () => {
-    // The Team Work bubble renders only on a team LEAD terminal via the
-    // Cmd+P workflow; pane mode spawns plain terminals via
-    // paneModeOpenTerminal, never a bare bubble terminal.
-    expect(tabs).not.toMatch(/export function paneModeOpenTeamWorkTerminal\b/);
+describe("staged tabs", () => {
+  test("are exactly the tabs the draft adds over the live layout", () => {
+    resetLayout([fileTab({ id: "live" })]);
+    enterPaneMode();
+    paneModeOpenTerminal();
+    paneModeOpenBrowser();
+
+    const staged = paneModeStagedTabIds();
+    expect(staged.size).toBe(2);
+    expect(staged.has("live")).toBe(false);
+    commitPaneMode();
+    expect(paneModeStagedTabIds().size).toBe(0);
   });
 
-  test("paneModeStageDraftEditor pushes pane id, side, and kind pinned at press time", () => {
-    expect(tabs).toMatch(
-      /export function paneModeStageDraftEditor\(kind: PaneModeDraftEditorKind = "draft"\): void \{[\s\S]{1,260}const paneId = paneMode\.draft\.activePaneId;[\s\S]{1,180}const node = leafPaneFrom\(paneMode\.draft, paneId\);[\s\S]{1,260}paneMode\.stagedDraftEditors\.push\(\{\s*id: id\("staged-editor"\),\s*paneId,\s*side: node \? paneSide\(node\) : "a",\s*kind,/,
+  test("render in their pane marked as staged", async () => {
+    const pane = resetLayout([fileTab({ id: "live" })]);
+    enterPaneMode();
+    paneModeOpenBrowser();
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(
+      mount(Pane, {
+        target,
+        props: { pane: paneMode.draft!.nodes[pane.id] as LeafNode },
+      }) as Record<string, unknown>,
     );
+    await tick();
+
+    const tabs = [...target.querySelectorAll<HTMLElement>(".tab")];
+    expect(tabs).toHaveLength(2);
+    expect(tabs.map((tab) => tab.classList.contains("staged"))).toEqual([false, true]);
   });
 
-  test("paneModeStageDiagramEditor stages a diagram editor intent", () => {
-    expect(tabs).toMatch(
-      /export function paneModeStageDiagramEditor\(\): void \{\s*paneModeStageDraftEditor\("diagram"\);\s*\}/,
-    );
-  });
+  test("Esc kills a staged terminal's shell and leaves a live one", () => {
+    const live = terminalTab({ id: "term-live" });
+    resetLayout([live]);
+    const liveSink = vi.fn(async () => true);
+    const unregisterLive = registerTerminalCloseSink(live.id, liveSink);
+    enterPaneMode();
+    paneModeOpenTerminal();
+    const [stagedId] = [...paneModeStagedTabIds()];
+    const stagedSink = vi.fn(async () => true);
+    const unregisterStaged = registerTerminalCloseSink(stagedId!, stagedSink);
 
-  test("paneModeStagedTabIds derives the staged set by diffing draft against live", () => {
-    expect(tabs).toMatch(
-      /export function paneModeStagedTabIds\(\): Set<string> \{[\s\S]{1,400}if \(!paneMode\.active \|\| !paneMode\.draft\) return new Set\(\);[\s\S]{1,2000}return staged;/,
-    );
-  });
-});
+    cancelPaneMode();
 
-describe("paneMode staging: ghost-tab rendering in Pane.svelte", () => {
-  test("Pane imports paneModeStagedTabIds + derives a Set", () => {
-    expect(pane).toMatch(/paneModeStagedTabIds,/);
-    expect(pane).toMatch(
-      /const paneModeStagedSet = \$derived\(paneModeStagedTabIds\(\)\);/,
-    );
-  });
-
-  test("tab DOM carries class:staged bound to the derived set", () => {
-    expect(pane).toMatch(/class:staged=\{paneModeStagedSet\.has\(t\.id\)\}/);
-  });
-
-  test("CSS defines a dimmed dashed-border .tab.staged style", () => {
-    expect(pane).toMatch(
-      /\.tab\.staged \{[\s\S]{1,400}opacity: 0\.65;[\s\S]{1,200}border: 1px dashed/,
-    );
-  });
-});
-
-describe("paneMode staging: Esc kills staged terminal sessions", () => {
-  // Staged panes RENDER, so a staged terminal mounts and spawns a real
-  // PTY; dropping the draft on Esc would otherwise orphan that shell
-  // in the registry until idle-prune. Cancel must run the
-  // staged terminals' close sinks (the closeTab kill path) BEFORE the
-  // draft stops rendering, while the sinks are still mounted.
-  test("cancelPaneMode kills draft-only terminals first", () => {
-    expect(tabs).toMatch(
-      /export function cancelPaneMode\(\): void \{\s*killStagedTerminalSessions\(\);/,
-    );
-  });
-
-  test("the kill targets exactly the staged set via the close sinks", () => {
-    expect(tabs).toMatch(
-      /function killStagedTerminalSessions\(\): void \{[\s\S]{1,1400}paneModeStagedTabIds\(\);[\s\S]{1,800}runTerminalCloseSink\(t\);/,
-    );
+    expect(stagedSink).toHaveBeenCalledTimes(1);
+    expect(liveSink).not.toHaveBeenCalled();
+    expect(Object.keys(layout.nodes)).toHaveLength(1);
+    unregisterLive();
+    unregisterStaged();
   });
 });
