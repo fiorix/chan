@@ -4488,10 +4488,13 @@ mod tests {
                 .begin_mount(ws.path(), &prefix)
                 .expect("prepare mount")
                 .expect("fresh attempt");
-            let error = state
-                .execute_mount_attempt(attempt, Duration::from_millis(50))
-                .await
-                .expect_err("the bound expires");
+            let error = expire_with_the_pool_parked(
+                state.execute_mount_attempt(attempt, Duration::from_millis(50)),
+                Duration::from_millis(50),
+                unpark,
+            )
+            .await
+            .expect_err("the bound expires");
             assert!(
                 error.to_string().contains("timed out"),
                 "expected a timeout: {error}"
@@ -4521,7 +4524,6 @@ mod tests {
                 row.error, None,
                 "a serving tenant carries no failure reason"
             );
-            unpark.send(()).expect("unpark the blocking thread");
             parked.await.expect("parked blocking task");
         });
     }
@@ -4642,7 +4644,9 @@ mod tests {
                 let _ = parked_thread.recv();
             });
             drop(serialization);
-            let error = attempt.await.expect_err("the bound expires");
+            let error = expire_with_the_pool_parked(attempt, Duration::from_millis(200), unpark)
+                .await
+                .expect_err("the bound expires");
             assert!(
                 error.to_string().contains("timed out"),
                 "expected a timeout: {error}"
@@ -4660,9 +4664,42 @@ mod tests {
                 WorkspaceStatus::Running,
                 "a serving tenant must not wear this attempt's failure"
             );
-            unpark.send(()).expect("unpark the blocking thread");
             parked.await.expect("parked blocking task");
         });
+    }
+
+    /// Run a mount attempt to its expiry while the runtime's only blocking
+    /// thread is parked, so it cannot get past the host's first blocking hop.
+    /// The first poll starts the attempt's bound; the poll after `bound` has
+    /// passed is the one that expires it. Only then is the thread let go, so
+    /// whatever the expiry itself runs on the pool can finish.
+    async fn expire_with_the_pool_parked<F>(
+        attempt: F,
+        bound: Duration,
+        unpark: std::sync::mpsc::Sender<()>,
+    ) -> Result<String, Error>
+    where
+        F: std::future::Future<Output = Result<String, Error>>,
+    {
+        let mut attempt = std::pin::pin!(attempt);
+        let started = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(attempt.as_mut(), cx))
+        })
+        .await;
+        assert!(
+            started.is_pending(),
+            "the attempt finished with the blocking pool parked"
+        );
+        tokio::time::sleep(bound).await;
+        let expired = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(attempt.as_mut(), cx))
+        })
+        .await;
+        unpark.send(()).expect("unpark the blocking thread");
+        match expired {
+            std::task::Poll::Ready(outcome) => outcome,
+            std::task::Poll::Pending => attempt.await,
+        }
     }
 
     /// The other side of the same rule: with nothing serving the root, the
