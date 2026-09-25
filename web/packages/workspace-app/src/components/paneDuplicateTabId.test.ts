@@ -184,6 +184,8 @@ function paneEl(target: HTMLElement, id: string): HTMLElement {
 
 /// What a pane shows: the tabs in its strip (a file tab's title is its path),
 /// how many file bodies it drew, and whether a failure card replaced them.
+/// A test's file tab holds its own path as its text, so a body's text says
+/// which copy drew it.
 function drawn(pane: HTMLElement): { strip: string[]; bodies: number; failed: boolean } {
   return {
     strip: [...pane.querySelectorAll(".tabs .tab")].map((tab) => tab.getAttribute("title") ?? ""),
@@ -192,10 +194,18 @@ function drawn(pane: HTMLElement): { strip: string[]; bodies: number; failed: bo
   };
 }
 
+/// The warnings the pane gave for a repeated id, one per dropped copy.
+function duplicateWarnings(warn: ReturnType<typeof vi.spyOn>): string[] {
+  return warn.mock.calls
+    .map((call) => String(call[0]))
+    .filter((message) => message.includes("lists tab"));
+}
+
 describe("a pane whose tab lists repeat an id", () => {
   test("keeps its bodies when the id is on both Hybrid sides", async () => {
     // `allPaneTabs` concatenates both sides, so the body lists see the id
     // twice while each side's strip sees it once.
+    const warn = vi.spyOn(console, "warn");
     const target = await mountApp({
       kind: "leaf",
       id: PANE_A,
@@ -211,9 +221,13 @@ describe("a pane whose tab lists repeat an id", () => {
       failed: false,
     });
     expect(drawn(paneEl(target, PANE_B))).toEqual({ strip: ["other.md"], bodies: 1, failed: false });
+    expect(duplicateWarnings(warn)[0]).toBe(
+      `[chan] pane ${PANE_A} lists tab dup twice; drawing the first copy`,
+    );
   });
 
   test("keeps its strip and its bodies when the id is twice on one side", async () => {
+    const warn = vi.spyOn(console, "warn");
     const target = await mountApp({
       kind: "leaf",
       id: PANE_A,
@@ -231,6 +245,39 @@ describe("a pane whose tab lists repeat an id", () => {
       failed: false,
     });
     expect(drawn(paneEl(target, PANE_B))).toEqual({ strip: ["other.md"], bodies: 1, failed: false });
+    expect(duplicateWarnings(warn)[0]).toBe(
+      `[chan] pane ${PANE_A} lists tab dup twice; drawing the first copy`,
+    );
+  });
+
+  test("draws the first copy when the two differ, and the other stays in the layout", async () => {
+    // Nothing is known to produce a repeated id, so the pane masks it rather
+    // than repairing the layout: side A's copy draws, and side B's copy,
+    // with other content, is neither drawn nor dropped.
+    const warn = vi.spyOn(console, "warn");
+    const target = await mountApp({
+      kind: "leaf",
+      id: PANE_A,
+      tabs: [fileTab("dup", "README.md"), fileTab("dup-sibling", "notes.md")],
+      activeTabId: "dup",
+      bTabs: [fileTab("dup", "other.md")],
+      bActiveTabId: "dup",
+    });
+
+    const bodies = [...paneEl(target, PANE_A).querySelectorAll(".editor-tab")].map(
+      (body) => body.textContent ?? "",
+    );
+    expect({
+      drawsFirstCopy: bodies.some((text) => text.includes("README.md")),
+      drawsSecondCopy: bodies.some((text) => text.includes("other.md")),
+      secondCopyKept: (layout.nodes[PANE_A] as LeafNode).bTabs?.[0]?.path,
+      warned: duplicateWarnings(warn)[0],
+    }).toEqual({
+      drawsFirstCopy: true,
+      drawsSecondCopy: false,
+      secondCopyKept: "other.md",
+      warned: `[chan] pane ${PANE_A} lists tab dup twice; drawing the first copy`,
+    });
   });
 
   test("keeps its strip following the layout after a one-side duplicate", async () => {
