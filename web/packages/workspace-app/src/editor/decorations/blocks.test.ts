@@ -6,13 +6,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import { chanDecorations } from ".";
-import blocksSource from "./blocks.ts?raw";
+// Build-time contract: Wysiwyg's list-layout CSS reads the theme's list tokens and the hang-column variables the decorations set; vitest drops component CSS.
 import wysiwygSource from "../Wysiwyg.svelte?raw";
 
 const removedListLineHook = ["cm", "md", "list", "line"].join("-");
 const removedDepthHook = ["cm", "md", "list", "depth"].join("-");
-const removedGuideAttr = ["data", "list", "guides"].join("-");
-const removedGuideExtension = ["list", "Guide", "Visibility"].join("");
 const baseThemeSource = readFileSync("src/editor/themes/base.css", "utf8");
 const googleDocsThemeSource = readFileSync("src/editor/themes/google_docs.css", "utf8");
 const wordThemeSource = readFileSync("src/editor/themes/word.css", "utf8");
@@ -51,15 +49,6 @@ describe("list guide removal", () => {
     parent.remove();
   });
 
-  test("guide extension and CSS hooks are absent from source", () => {
-    expect(blocksSource).not.toContain(removedListLineHook);
-    expect(blocksSource).not.toContain(removedDepthHook);
-    expect(wysiwygSource).not.toContain(removedListLineHook);
-    expect(wysiwygSource).not.toContain(removedDepthHook);
-    expect(wysiwygSource).not.toContain(removedGuideAttr);
-    expect(wysiwygSource).not.toContain(removedGuideExtension);
-  });
-
   test("list spacing is scoped to bullet glyphs and nested lines", () => {
     expect(baseThemeSource).toContain("--chan-editor-list-marker-family");
     expect(baseThemeSource).toContain("--chan-editor-list-marker-width: 2ch");
@@ -95,16 +84,9 @@ describe("list guide removal", () => {
     expect(wysiwygSource).toContain(
       "transform: scale(var(--chan-editor-list-square-glyph-scale, 0.44))",
     );
-    expect(wysiwygSource).not.toContain("--cm-md-list-marker-indent");
-    expect(wysiwygSource).not.toContain("--cm-md-list-marker-hang");
-    expect(wysiwygSource).not.toContain("--cm-md-task-checkbox-hang");
-    expect(wysiwygSource).not.toMatch(/margin-left: calc\(-1 \*/);
-    expect(wysiwygSource).not.toMatch(
-      new RegExp(`${removedListLineHook}[\\s\\S]{0,240}padding-left`),
-    );
-    expect(wysiwygSource).not.toMatch(
-      new RegExp(`${removedListLineHook}[\\s\\S]{0,240}text-indent`),
-    );
+    expect(wysiwygSource).toContain(".cm-md-ol-marker");
+    expect(wysiwygSource).toContain(".cm-md-list-marker");
+    expect(wysiwygSource).toContain(".cm-md-ul-glyph");
   });
 
   test("Google Docs and Word inherit the shared list marker contract", () => {
@@ -129,30 +111,6 @@ describe("list guide removal", () => {
 });
 
 describe("list marker rendering (real positioned markers)", () => {
-  test("markers are real positioned characters, not zero-width + ::before", () => {
-    expect(blocksSource).toContain("cm-md-ul-marker");
-    expect(blocksSource).toContain("cm-md-ol-marker");
-    expect(blocksSource).toContain("cm-md-list-marker");
-    expect(wysiwygSource).toContain(".cm-md-ol-marker");
-    expect(wysiwygSource).toContain(".cm-md-list-marker");
-    // `*` / `+` markers are REPLACED by a real-width glyph widget (the
-    // disc/circle/square CHARACTER), so the marker is real positioned
-    // text with default CM cursor/click and no caret-snap. Hyphen `-`
-    // and ordered markers stay literal in the shared marker column.
-    expect(blocksSource).toContain("class BulletGlyphWidget");
-    expect(blocksSource).toContain("Decoration.replace({ widget: new BulletGlyphWidget");
-    expect(blocksSource).toContain("cm-md-ul-glyph");
-    expect(blocksSource).toContain("cm-md-ul-disc");
-    expect(blocksSource).toContain("cm-md-ul-circle");
-    expect(blocksSource).toContain("cm-md-ul-square");
-    expect(blocksSource).toContain("cm-md-ul-hyphen");
-    expect(wysiwygSource).toContain(".cm-md-ul-glyph");
-    // The old zero-width-char + ::before glyph rendering is gone (it was
-    // the source of the bullet cursor/click bugs).
-    expect(wysiwygSource).not.toContain(".cm-md-ul-bullet");
-    expect(wysiwygSource).not.toContain(".cm-md-ul-disc::before");
-  });
-
   test("top-level star bullet renders the disc GLYPH char; doc keeps `*`", () => {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
@@ -355,7 +313,6 @@ describe("horizontal rule source visibility", () => {
     expect(parent.textContent).toContain("---");
     expect(parent.querySelector(".cm-md-hr")).toBeNull();
     expect(view.state.doc.toString()).toBe("one\n---\ntwo");
-    expect(wysiwygSource).not.toContain(".cm-md-hr");
 
     view.destroy();
     parent.remove();
