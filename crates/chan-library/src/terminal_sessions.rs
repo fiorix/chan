@@ -1047,6 +1047,9 @@ pub enum AttachSeam {
     /// In a PTY reader thread, between a read and recording its bytes: the
     /// output is out of the PTY and not yet in the ring.
     ReaderBeforeRecord,
+    /// In a PTY reader thread, when its wait for output returns with nothing
+    /// to read and no stop request to act on.
+    ReaderIdleWake,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -4285,7 +4288,11 @@ impl Session {
             };
             match filedescriptor::poll(&mut poll, Some(wait)) {
                 Ok(0) if stopping => return false,
-                Ok(0) => continue,
+                Ok(0) => {
+                    #[cfg(any(test, feature = "test-util"))]
+                    fire_attach_seam(&self.id, AttachSeam::ReaderIdleWake);
+                    continue;
+                }
                 // Readable, hung up or failed: the read reports which.
                 _ => {
                     if stopping {
@@ -9850,6 +9857,37 @@ mod tests {
 
             assert!(registry.close(&id, CloseReason::Explicit));
             assert_eq!(hook.unpark_calls(), vec![format!("unpark:{name}")]);
+        }
+
+        // A quiet shell's reader sleeps in its wait until output arrives or
+        // the registry asks it to stop: it takes no timed wake while idle, and
+        // one stop request ends it at once.
+        #[test]
+        fn an_idle_reader_sleeps_until_a_stop_request_wakes_it() {
+            let hook = RecordingPark::default();
+            let registry = parked_registry(&hook);
+            let handle = registry
+                .create(opts(Some("w1"), Some("exec sleep 86397")))
+                .unwrap();
+            let id = handle.id().to_string();
+            hook.wait_for_call("park:");
+
+            let (woke_tx, woke_rx) = std::sync::mpsc::channel::<()>();
+            arm_attach_seam(&id, AttachSeam::ReaderIdleWake, move || {
+                let _ = woke_tx.send(());
+            });
+            assert!(
+                woke_rx.recv_timeout(Duration::from_millis(1500)).is_err(),
+                "an idle reader woke with no output to read and no stop request"
+            );
+
+            registry.request_parked_reader_stop();
+            assert_eq!(
+                registry.wait_parked_readers(std::time::Instant::now() + Duration::from_secs(5)),
+                0,
+                "the stop request woke the idle reader and it stopped"
+            );
+            registry.close_all(CloseReason::Shutdown);
         }
 
         #[test]
