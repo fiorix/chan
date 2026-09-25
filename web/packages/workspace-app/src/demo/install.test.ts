@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import { isTransientApiError } from "../api/errors";
 import { chanFetch } from "../api/transport";
 import type { MockWorkspaceData } from "./data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "./install";
@@ -44,6 +45,19 @@ describe("the demo transport after uninstall", () => {
       name: "DemoTransportUninstalledError",
       message: expect.stringContaining("/api/workspace"),
     });
+  });
+
+  test("fails a late call with an error no retrying caller treats as transient", async () => {
+    // The store's retrying reads (the workspace fetch, the server-instance
+    // health check) and the extension catalog retry only what
+    // isTransientApiError calls transient. A late call must stop them at
+    // once, not arm their backoff sleeps after the teardown.
+    installDemoWorkspace(demoData());
+    uninstallDemoWorkspace();
+
+    const error = await chanFetch("/api/health").catch((e: unknown) => e);
+
+    expect(isTransientApiError(error), String(error)).toBe(false);
   });
 
   test("fails a late call the same way when it carries a request init", async () => {
