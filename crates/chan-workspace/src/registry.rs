@@ -693,4 +693,71 @@ mod tests {
             }) if rejected == value
         ));
     }
+
+    /// A row whose cached canonical path went stale still matches the
+    /// directory its root resolves to now. The root's parent moved and a
+    /// symlink took its place, so the row caches the old spelling while its
+    /// root resolves to the new one: a lookup and a removal of the new
+    /// spelling find the row, and a touch refreshes it instead of adding a
+    /// second one.
+    #[cfg(unix)]
+    #[test]
+    fn a_row_whose_cached_canonical_path_went_stale_still_matches() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let mut reg = Registry::default();
+        reg.touch(&parent.join("ws"));
+        let key = reg.workspaces[0].metadata_key.clone();
+
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let relinked = moved.join("ws");
+
+        assert_eq!(
+            reg.find(&relinked).map(|row| row.metadata_key.as_str()),
+            Some(key.as_str()),
+            "a lookup missed the row whose cached path went stale"
+        );
+        let mut removing = reg.clone();
+        assert!(
+            removing.remove(&relinked),
+            "a removal missed the row whose cached path went stale"
+        );
+        assert!(removing.workspaces.is_empty());
+        let idx = reg.touch(&relinked);
+        assert_eq!(
+            reg.workspaces.len(),
+            1,
+            "a touch registered the relinked root a second time"
+        );
+        assert_eq!(reg.workspaces[idx].metadata_key, key);
+    }
+
+    /// A lookup that has to re-resolve the other rows gives a row whose root
+    /// has stopped answering a bounded wait, and takes it not to be the root
+    /// looked up.
+    #[test]
+    fn a_lookup_does_not_wait_on_a_row_whose_root_hangs() {
+        let tmp = TempDir::new().unwrap();
+        let hung = tmp.path().join("hung");
+        let fresh = tmp.path().join("fresh");
+        std::fs::create_dir_all(&hung).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        let mut reg = Registry::default();
+        reg.touch(&hung);
+
+        let stall = crate::paths::root_stall::stall(hung);
+        let reg = stall.finishes_beside(
+            "registering a new root",
+            std::time::Duration::from_secs(30),
+            move || {
+                reg.touch(&fresh);
+                reg
+            },
+        );
+        assert_eq!(reg.workspaces.len(), 2, "the new root was not registered");
+    }
 }

@@ -460,18 +460,33 @@ pub mod root_stall {
 
     /// A stalled root. Dropping it releases every call it holds.
     pub struct RootStall {
-        root: PathBuf,
+        roots: Vec<PathBuf>,
         gate: Arc<Gate>,
     }
 
-    /// Stall every canonicalization of `root` and of the paths under it until
-    /// the returned guard drops. Panics when `root` is already stalled.
+    /// Stall every canonicalization of `root` and of the paths under it, by
+    /// the spelling given or by its canonical one, until the returned guard
+    /// drops. Panics when `root` is already stalled.
     pub fn stall(root: impl Into<PathBuf>) -> RootStall {
         let root = root.into();
+        let mut roots = vec![root.clone()];
+        if let Ok(canonical) = dunce::canonicalize(&root) {
+            if canonical != root {
+                roots.push(canonical);
+            }
+        }
         let gate = Arc::new(Gate::default());
-        let previous = stalls().insert(root.clone(), Arc::clone(&gate));
-        assert!(previous.is_none(), "{} is already stalled", root.display());
-        RootStall { root, gate }
+        let mut map = stalls();
+        for spelling in &roots {
+            let previous = map.insert(spelling.clone(), Arc::clone(&gate));
+            assert!(
+                previous.is_none(),
+                "{} is already stalled",
+                spelling.display()
+            );
+        }
+        drop(map);
+        RootStall { roots, gate }
     }
 
     impl RootStall {
@@ -509,11 +524,36 @@ pub mod root_stall {
                 .entered
                 .clone()
         }
+
+        /// Run `operation` on a thread of its own and return its output;
+        /// panic naming `what` and the calls this stall holds when it has
+        /// not finished within `bound`.
+        pub fn finishes_beside<T: Send + 'static>(
+            &self,
+            what: &str,
+            bound: Duration,
+            operation: impl FnOnce() -> T + Send + 'static,
+        ) -> T {
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(operation());
+            });
+            finished.recv_timeout(bound).unwrap_or_else(|_| {
+                panic!(
+                    "{what} did not finish while another root hung; calls held on the hung root: {:#?}",
+                    self.entered()
+                )
+            })
+        }
     }
 
     impl Drop for RootStall {
         fn drop(&mut self) {
-            stalls().remove(&self.root);
+            let mut map = stalls();
+            for spelling in &self.roots {
+                map.remove(spelling);
+            }
+            drop(map);
             let mut state = self
                 .gate
                 .state

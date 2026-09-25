@@ -1375,4 +1375,78 @@ mod tests {
         let d = lib.open_workspace(workspace.path()).unwrap();
         assert_eq!(d.trash_list().unwrap().len(), 1);
     }
+
+    /// A registered root that moved under a symlink keeps its row through
+    /// the Library's lookups, whose alias matching runs without the
+    /// registry's mutex.
+    #[cfg(unix)]
+    #[test]
+    fn a_relinked_root_keeps_its_row() {
+        use std::os::unix::fs::symlink;
+        let (lib, _cfg, holder) = lib();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let first = lib.register_workspace(&parent.join("ws")).unwrap();
+
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let relinked = moved.join("ws");
+
+        assert!(
+            lib.workspace_paths_for(&relinked).is_some(),
+            "a lookup missed the relinked root"
+        );
+        let again = lib.register_workspace(&relinked).unwrap();
+        assert_eq!(again.metadata_key, first.metadata_key);
+        assert_eq!(
+            lib.list_workspaces().len(),
+            1,
+            "the relinked root was registered a second time"
+        );
+    }
+
+    /// While one registered root hangs, registering a new root does not hold
+    /// the registry: a lookup of another registered root and the reload a
+    /// registry watcher runs answer while the registration waits, and the
+    /// registration itself finishes.
+    #[test]
+    fn a_hung_root_does_not_hold_the_registry() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, registered) = lib();
+        let hung = TempDir::new().unwrap();
+        let fresh = TempDir::new().unwrap();
+        lib.register_workspace(registered.path()).unwrap();
+        lib.register_workspace(hung.path()).unwrap();
+
+        let stall = crate::paths::root_stall::stall(hung.path());
+        let registering = lib.clone();
+        let fresh_root = fresh.path().to_path_buf();
+        let registration = std::thread::spawn(move || registering.register_workspace(&fresh_root));
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: registering a new root never consulted the hung root"
+        );
+
+        let looking = lib.clone();
+        let registered_root = registered.path().to_path_buf();
+        let found = stall.finishes_beside(
+            "a lookup of a registered root while a new root registers",
+            BOUND,
+            move || looking.workspace_paths_for(&registered_root),
+        );
+        assert!(found.is_some(), "the registered root was not found");
+        let reloading = lib.clone();
+        stall
+            .finishes_beside("a registry reload", BOUND, move || {
+                reloading.reload_registry()
+            })
+            .expect("reload");
+        stall
+            .finishes_beside("registering a new root", BOUND, move || {
+                registration.join().expect("registration thread")
+            })
+            .expect("register the new root");
+        assert_eq!(lib.list_workspaces().len(), 3);
+    }
 }
