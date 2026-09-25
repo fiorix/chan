@@ -1,32 +1,91 @@
-import { describe, expect, test } from "vitest";
-import tab from "./TerminalTab.svelte?raw";
+// @vitest-environment jsdom
+//
+// TerminalTab sizes xterm's scrollback from the persisted MB setting when it
+// spawns, and its copy actions serialize that much. The component is mounted
+// over the stand-in xterm with the setting served as machine preferences.
 
-// TerminalTab reads its xterm.js scrollback cap from the persisted
-// MB setting at construction time. A regression that re-hardcodes
-// the cap or drops the spawn-time read shows up here.
+import { tick } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-describe("TerminalTab scrollback wiring", () => {
-  test("scrollback line cap is held on the component, not inline-literal in the xterm config", () => {
-    expect(tab).toMatch(/let scrollbackLines = scrollbackLinesFromMb\(/);
-    expect(tab).toMatch(/scrollback: scrollbackLines,/);
-    // The bare-20000 literal in `new Terminal({ scrollback: 20_000 })`
-    // is exactly what this task removes.
-    expect(tab).not.toMatch(/scrollback: 20_000/);
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+import type { Preferences } from "../api/types";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { clampScrollbackMb, scrollbackLinesFromMb } from "../terminal/scrollback";
+import {
+  installTerminalDom,
+  menuRow,
+  mountTerminal,
+  openBodyMenu,
+  resetTerminals,
+  seatTerminals,
+  terminalTab,
+  xterm,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
+Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+
+function serveScrollbackMb(mb: number): void {
+  __testSetStandalonePreferences({ terminal: { scrollback_mb: mb } } as unknown as Preferences);
+}
+
+beforeEach(() => {
+  clipboard.writeText.mockClear();
+});
+
+afterEach(() => {
+  resetTerminals();
+  __testSetStandalonePreferences(null);
+});
+
+describe("the scrollback cap", () => {
+  test("comes from the setting when the terminal spawns", async () => {
+    serveScrollbackMb(50);
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    expect(term.options.scrollback).toBe(scrollbackLinesFromMb(50));
   });
 
-  test("start() recomputes the line cap from current Preferences", () => {
-    expect(tab).toMatch(
-      /const terminalPrefs = currentPreferences\(\)\?\.terminal;[\s\S]*?scrollbackLines = scrollbackLinesFromMb\(\s*clampScrollbackMb\(terminalPrefs\?\.scrollback_mb\),?\s*\)/,
-    );
+  test("falls back to the clamped default without a setting", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { term } = await mountTerminal(TerminalTab, tab!);
+    expect(term.options.scrollback).toBe(scrollbackLinesFromMb(clampScrollbackMb(undefined)));
+  });
+});
+
+describe("the copy actions", () => {
+  test("Copy Scrollback serializes the configured cap", async () => {
+    serveScrollbackMb(30);
+    xterm.serialized = "line one\nline two";
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = await mountTerminal(TerminalTab, tab!);
+    await openBodyMenu(target);
+    menuRow("Copy Scrollback").click();
+    await tick();
+
+    expect(xterm.serializeCalls).toEqual([{ scrollback: scrollbackLinesFromMb(30) }]);
+    expect(clipboard.writeText).toHaveBeenCalledWith("line one\nline two");
   });
 
-  test("copy-scrollback actions use the configured cap, not a hardcoded constant", () => {
-    // Both copy actions thread the per-component value through the
-    // shared scrollbackText() helper, so the "copy scrollback" menu
-    // matches the buffer actually held on either backend (ghostty's
-    // branch dumps its WASM buffer instead of serializing).
-    expect(tab).toMatch(/serialize\?\.serialize\(\{ scrollback: scrollbackLines \}\)/);
-    const actions = tab.match(/const text = (term\?\.getSelection\(\) \|\| )?scrollbackText\(\);/g) ?? [];
-    expect(actions.length).toBeGreaterThanOrEqual(2);
+  test("Copy with no selection serializes the same cap", async () => {
+    serveScrollbackMb(30);
+    xterm.serialized = "all of it";
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = await mountTerminal(TerminalTab, tab!);
+    await openBodyMenu(target);
+    menuRow("Copy").click();
+    await tick();
+
+    expect(xterm.serializeCalls).toEqual([{ scrollback: scrollbackLinesFromMb(30) }]);
+    expect(clipboard.writeText).toHaveBeenCalledWith("all of it");
   });
 });
