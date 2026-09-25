@@ -1,49 +1,143 @@
-import { describe, expect, test } from "vitest";
-import overlay from "./CloseConfirmOverlay.svelte?raw";
+// @vitest-environment jsdom
+//
+// The desktop's close prompt is a decision, not a wait: no spinner, and three
+// actions. Hide buries the window through the desktop and keeps its session,
+// Close discards the session and has the desktop close the window, and Cancel
+// keeps everything. Escape cancels, and focus starts on Cancel, so Enter
+// never closes a window by default.
 
-// The desktop red-dot close prompt. Shaped like DisconnectOverlay but a
-// DECISION, not a live wait: three actions, no spinner, stacked at 30002, with a
-// destructive Close that is neither the default focus nor an Enter target.
-describe("CloseConfirmOverlay", () => {
-  test("offers exactly the three Hide / Close / Cancel actions", () => {
-    expect(overlay).toMatch(/class="hide"[\s\S]{0,80}onclick=\{hide\}/);
-    expect(overlay).toMatch(/class="close"[\s\S]{0,80}onclick=\{close\}/);
-    expect(overlay).toMatch(/class="cancel"[\s\S]{0,80}onclick=\{cancel\}/);
-    expect(overlay).toContain("> Hide <");
-    expect(overlay).toContain("> Close <");
-    expect(overlay).toContain("> Cancel <");
+import { mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("../api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/desktop")>()),
+  hideWindowFromCloseConfirm: vi.fn(async () => {}),
+  requestCloseWindow: vi.fn(async () => {}),
+}));
+
+vi.mock("../state/store.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/store.svelte")>()),
+  discardWindowSession: vi.fn(async () => {}),
+}));
+
+import { hideWindowFromCloseConfirm, requestCloseWindow } from "../api/desktop";
+import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
+import { discardWindowSession, ui } from "../state/store.svelte";
+import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
+
+type TauriWindow = { __TAURI_INTERNALS__?: unknown };
+
+let view: Record<string, unknown> | null = null;
+let target: HTMLElement;
+
+beforeEach(async () => {
+  (window as TauriWindow).__TAURI_INTERNALS__ = { invoke: async () => {} };
+  ui.ws = "open";
+  target = document.createElement("div");
+  document.body.append(target);
+  view = mount(CloseConfirmOverlay, { target });
+  await tick();
+});
+
+afterEach(() => {
+  resolveCloseConfirm("cancel");
+  if (view) unmount(view);
+  view = null;
+  document.body.innerHTML = "";
+  delete (window as TauriWindow).__TAURI_INTERNALS__;
+  ui.ws = "connecting";
+  vi.clearAllMocks();
+});
+
+/// Raise the prompt and let it draw; answers the pending choice.
+async function ask(): Promise<{ answer: Promise<string> }> {
+  const answer = uiCloseConfirm();
+  await tick();
+  await Promise.resolve();
+  return { answer };
+}
+
+function action(label: string): HTMLButtonElement {
+  return [...target.querySelectorAll<HTMLButtonElement>(".actions button")].find(
+    (button) => button.textContent?.trim() === label,
+  )!;
+}
+
+describe("the close prompt", () => {
+  test("offers Hide, Close and Cancel, with no spinner", async () => {
+    await ask();
+
+    expect([...target.querySelectorAll(".actions button")].map((b) => b.textContent?.trim())).toEqual([
+      "Hide",
+      "Close",
+      "Cancel",
+    ]);
+    expect(target.querySelector(".spinner")).toBeNull();
   });
 
-  test("stacks at 30002, above reconnect (30000) and session-ended (30001)", () => {
-    expect(overlay).toMatch(/z-index:\s*30002/);
+  test("Hide buries the window through the desktop and keeps its session", async () => {
+    const { answer } = await ask();
+
+    action("Hide").click();
+
+    await expect(answer).resolves.toBe("hide");
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
   });
 
-  test("is a decision, not a live wait: no spinner", () => {
-    expect(overlay).not.toMatch(/class="spinner"/);
-    expect(overlay).not.toMatch(/@keyframes/);
+  test("Close discards the session and has the desktop close the window", async () => {
+    const { answer } = await ask();
+
+    action("Close").click();
+
+    await expect(answer).resolves.toBe("close");
+    expect(discardWindowSession).toHaveBeenCalledWith({ reap: true });
+    expect(requestCloseWindow).toHaveBeenCalledTimes(1);
   });
 
-  test("Hide buries via the IPC, Close discards + destroys the window", () => {
-    expect(overlay).toMatch(/hideWindowFromCloseConfirm\(\)/);
-    expect(overlay).toMatch(/discardWindowSession\(\{ reap: true \}\)/);
-    expect(overlay).toMatch(/requestCloseWindow\(\)/);
+  test("Close in a browser discards the session and leaves the tab to the browser", async () => {
+    delete (window as TauriWindow).__TAURI_INTERNALS__;
+    const { answer } = await ask();
+
+    action("Close").click();
+
+    await expect(answer).resolves.toBe("close");
+    expect(discardWindowSession).toHaveBeenCalledWith({ reap: true });
+    expect(requestCloseWindow).not.toHaveBeenCalled();
   });
 
-  test("Close carries the destructive --danger accent (not the default)", () => {
-    expect(overlay).toMatch(/\.close:hover\s*\{[\s\S]{0,120}var\(--danger\)/);
+  test("Cancel keeps everything", async () => {
+    const { answer } = await ask();
+
+    action("Cancel").click();
+
+    await expect(answer).resolves.toBe("cancel");
+    expect(hideWindowFromCloseConfirm).not.toHaveBeenCalled();
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
   });
 
-  test("Escape maps to Cancel and default focus lands on Cancel (no Enter-to-Close)", () => {
-    expect(overlay).toMatch(/e\.key === "Escape"[\s\S]{0,80}cancel\(\)/);
-    // Default focus parks on the Cancel button, never Close.
-    expect(overlay).toMatch(/cancelBtn \?\? overlayEl\)\?\.focus\(\)/);
-    // No default/autofocus on Close and no Enter handler that closes.
-    expect(overlay).not.toMatch(/autofocus/);
+  test("Escape cancels", async () => {
+    const { answer } = await ask();
+
+    target
+      .querySelector(".overlay")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+
+    await expect(answer).resolves.toBe("cancel");
   });
 
-  test("resolves the shared close-confirm state on every action", () => {
-    expect(overlay).toMatch(/resolveCloseConfirm\("hide"\)/);
-    expect(overlay).toMatch(/resolveCloseConfirm\("close"\)/);
-    expect(overlay).toMatch(/resolveCloseConfirm\("cancel"\)/);
+  test("focus starts on Cancel, and Enter on the prompt closes nothing", async () => {
+    await ask();
+
+    expect(document.activeElement).toBe(action("Cancel"));
+    target
+      .querySelector(".overlay")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await tick();
+
+    expect(target.querySelector(".overlay")).not.toBeNull();
+    expect(discardWindowSession).not.toHaveBeenCalled();
   });
 });
