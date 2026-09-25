@@ -956,6 +956,19 @@
     return best;
   }
 
+  /// The disc of node `id` in canvas pixels, the space pointer events resolve
+  /// in, or null when the node is not laid out. Pointer tests aim with it: the
+  /// layout comes from the force simulation, so no caller can know it upfront.
+  export function nodeScreenCircle(id: string): { x: number; y: number; r: number } | null {
+    const n = nodeById.get(id);
+    if (!n || n.x == null || n.y == null) return null;
+    return {
+      x: n.x * transform.k + transform.x,
+      y: n.y * transform.k + transform.y,
+      r: n.radius * transform.k,
+    };
+  }
+
   // ---- paint ------------------------------------------------------------
 
   /// Edges grouped for painting: one bucket per kind, so the stroke style
