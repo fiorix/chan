@@ -1590,17 +1590,38 @@ mod tests {
     }
 
     #[test]
-    fn mcp_error_message_keeps_actionable_numbers() {
-        // WriteConflict carries a numeric mtime; that's
-        // model-actionable and stays in the scrubbed output.
-        let err = mcp_safe_message(&LlmError::WriteConflict {
-            current_mtime_ns: Some(123_456_789),
-        });
-        assert!(
-            err.contains("123456789") || err.contains("123_456_789") || err.contains("123456_789"),
-            "should keep mtime numeric in: {err}",
+    fn mcp_error_message_forwards_exact_write_error_texts() {
+        // These three variants reach the model through their own Display,
+        // whose text lives in the `#[error]` attributes in error.rs. Pin the
+        // whole string so an edit there cannot change what the model reads
+        // (the kind and the actionable numbers) without failing here.
+        assert_eq!(
+            mcp_safe_message(&LlmError::WriteConflict {
+                current_mtime_ns: Some(123_456_789),
+            }),
+            "write conflict: file changed on disk (current mtime ns: Some(123456789))",
         );
-        assert!(err.to_lowercase().contains("conflict"));
+        assert_eq!(
+            mcp_safe_message(&LlmError::WriteConflict {
+                current_mtime_ns: None,
+            }),
+            "write conflict: file changed on disk (current mtime ns: None)",
+        );
+        assert_eq!(
+            mcp_safe_message(&LlmError::WriteTooLarge {
+                kind: "text".into(),
+                size: 2_000_000,
+                limit: 1_048_576,
+            }),
+            "write too large: 2000000 bytes exceeds 1048576 byte cap for text",
+        );
+        assert_eq!(
+            mcp_safe_message(&LlmError::ListingTooLarge {
+                observed: 50_001,
+                limit: 50_000,
+            }),
+            "listing too large: 50001 entries (cap 50000)",
+        );
     }
 
     #[tokio::test]
