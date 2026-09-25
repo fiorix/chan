@@ -211,6 +211,9 @@ describe("with the lock on", () => {
 
     type(confirm!, "1234");
     button(target, "Save").click();
+    // The PIN hash is a PBKDF2 derivation in WebCrypto's worker pool, whose
+    // time grows with the machine's load, so wait for the save itself.
+    await vi.waitFor(() => expect(api.screensaverSetPin).toHaveBeenCalled(), { timeout: 10_000 });
     await settle();
 
     expect(api.screensaverSetPin).toHaveBeenCalledWith(await hashPin("1234", "/ws"));
