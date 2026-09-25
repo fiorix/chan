@@ -103,8 +103,12 @@ export function recordingContext2d(): {
 /// A stand-in WebGL2 context that records every call. Enums read back as
 /// their own names (`gl.DYNAMIC_DRAW` is `"DYNAMIC_DRAW"`), every `create*`
 /// returns a fresh object, a uniform location is `{ uniform: <name> }`, and
-/// shaders and programs always compile and link.
-export function recordingWebgl2(): {
+/// shaders and programs always compile and link. `overrides` answers named
+/// calls instead, after recording them: `{ createProgram: () => null }` is a
+/// driver that cannot link.
+export function recordingWebgl2(
+  overrides: Record<string, (...args: unknown[]) => unknown> = {},
+): {
   gl: WebGL2RenderingContext;
   calls: CanvasOp[];
 } {
@@ -116,6 +120,7 @@ export function recordingWebgl2(): {
       if (key === "drawingBufferWidth" || key === "drawingBufferHeight") return 100;
       return (...args: unknown[]): unknown => {
         calls.push({ op: key, args });
+        if (key in overrides) return overrides[key]!(...args);
         if (key.startsWith("create")) return { created: key };
         if (key === "getUniformLocation") return { uniform: args[1] };
         if (key === "getAttribLocation") return 0;
@@ -131,13 +136,12 @@ export function recordingWebgl2(): {
 
 const mounted: Array<() => void> = [];
 
-/// Mount `component` and return the one animation it started, its callbacks
-/// created over `context`.
-export function startAnimation<Props extends Record<string, unknown>>(
+/// Mount `component` and return the one animation it asked a runner for,
+/// not yet created.
+export function mountAnimation<Props extends Record<string, unknown>>(
   component: Component<Props>,
-  context: unknown,
   props: Props = {} as Props,
-): { run: AnimationRun; callbacks: CanvasAnimationCallbacks } {
+): AnimationRun {
   runs.length = 0;
   const target = document.createElement("div");
   document.body.append(target);
@@ -150,13 +154,23 @@ export function startAnimation<Props extends Record<string, unknown>>(
   if (runs.length !== 1) {
     throw new Error(`expected one animation, the component started ${runs.length}`);
   }
-  const run = runs[0]!;
+  return runs[0]!;
+}
+
+/// Mount `component` and return the one animation it started, its callbacks
+/// created over `context`.
+export function startAnimation<Props extends Record<string, unknown>>(
+  component: Component<Props>,
+  context: unknown,
+  props: Props = {} as Props,
+): { run: AnimationRun; callbacks: CanvasAnimationCallbacks } {
+  const run = mountAnimation(component, props);
   const callbacks = run.create(context as never);
   if (!callbacks) throw new Error("the animation declined to start");
   return { run, callbacks };
 }
 
-/// Unmount every component `startAnimation` mounted.
+/// Unmount every component `mountAnimation` mounted.
 export function stopAnimations(): void {
   for (const stop of mounted.splice(0)) stop();
   runs.length = 0;
