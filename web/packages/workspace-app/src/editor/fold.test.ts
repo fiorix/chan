@@ -10,15 +10,12 @@
 // code and frontmatter must never be a heading; a real heading must, and its
 // fold range must not be truncated by a fenced `#` comment.
 
-import foldSrc from "./fold.ts?raw";
-import formatSrc from "./commands/format.ts?raw";
-import slidesSrc from "./slides.ts?raw";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { ensureSyntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, foldedRanges } from "@codemirror/language";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "./markdown/grammar";
-import { headingLevelAt, headingFoldRange } from "./fold";
+import { headingFold, headingLevelAt, headingFoldRange } from "./fold";
 import { setBlockKind, toggleBulletList } from "./commands/format";
 import { firstSlideHeadingCaret } from "./slides";
 
@@ -256,35 +253,28 @@ describe("firstSlideHeadingCaret skips a fenced comment", () => {
   });
 });
 
-describe("structural guarantees (source pins)", () => {
-  test("fold.ts decides headings from the tree, not a raw-line regex", () => {
-    expect(foldSrc).not.toMatch(/HEADING_RE/);
-    expect(foldSrc).toMatch(/ATXHeading/);
-  });
+describe("the fold gutter", () => {
+  const DOC = "## Top\nbody line\n### Sub\nsub body\n## Next\ntail";
 
-  test("9. the service and the click handler share one fold-range walk", () => {
-    const calls = foldSrc.match(/headingFoldRange\(/g) ?? [];
-    // definition + service call + click call
-    expect(calls.length).toBeGreaterThanOrEqual(3);
-  });
+  test("a click on a heading's chevron folds exactly its section", () => {
+    const parent = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({ doc: DOC, extensions: [chanMarkdown(), headingFold()] }),
+    });
+    ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+    const marker = parent.querySelector<HTMLElement>(".cm-gutterElement:not(.cm-gutterElement[style*='height: 0'])")
+      ?? parent.querySelector<HTMLElement>(".cm-gutterElement");
+    // jsdom has no layout, so every gutter click resolves to the first line.
+    marker!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 1, clientY: 1 }));
+    marker!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: 1, clientY: 1 }));
 
-  test("11 (pin). the forward walk forces the parse past the viewport", () => {
-    expect(foldSrc).toMatch(/ensureSyntaxTree\(/);
-  });
-
-  test("11b (pin). both consumers map incomplete to no fold", () => {
-    // The service adapter (foldService's contract is `{from,to} | null`) and
-    // the gutter click must both refuse to fold on an incomplete answer.
-    expect(foldSrc).toMatch(/range === "incomplete" \? null : range/);
-    expect(foldSrc).toMatch(/range === "incomplete" \|\| !range/);
-  });
-
-  test("12 (pin). both formatting chords guard on a code node", () => {
-    const guards = formatSrc.match(/caretInsideCode\(/g) ?? [];
-    expect(guards.length).toBeGreaterThanOrEqual(2);
-  });
-
-  test("13 (pin). firstSlideHeadingCaret tracks fences", () => {
-    expect(slidesSrc).toMatch(/inFence/);
+    const folded: Array<{ from: number; to: number }> = [];
+    foldedRanges(view.state).between(0, view.state.doc.length, (from, to) => {
+      folded.push({ from, to });
+    });
+    expect(folded).toEqual([headingFoldRange(view.state, 0)]);
+    view.destroy();
+    parent.remove();
   });
 });
