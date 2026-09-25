@@ -234,3 +234,39 @@ describe("move mode", () => {
     expect(okButton(target).disabled).toBe(true);
   });
 });
+
+describe("the file-or-directory kind", () => {
+  test("invites both shapes in its placeholder", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "either", mode: "create" }, "");
+    expect(target.querySelector("input")!.placeholder).toBe("file/path or directory/path/");
+  });
+
+  test("a trailing slash is a directory, taken as typed", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "either", mode: "create" }, "docs/new/");
+
+    expect(statusText(target)).toBe("→ new directory docs/new/");
+    expect(target.querySelector(".status .seg.auto")).toBeNull();
+    okButton(target).click();
+    await expect(promise).resolves.toBe("docs/new/");
+  });
+
+  test("no trailing slash is a file, with .md added when no extension is typed", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(target, { kind: "either", mode: "create" }, "docs/plan");
+
+    expect(statusText(target)).toBe("→ new file docs/plan.md");
+    expect(target.querySelector(".status .seg.auto")?.textContent).toBe(".md");
+    okButton(target).click();
+    await expect(promise).resolves.toBe("docs/plan.md");
+  });
+
+  test("a directory over an existing file is a kind mismatch", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "either", mode: "create" }, "notes.md/");
+
+    expect(statusText(target)).toBe("✗ 'notes.md' is an existing file, can't create a directory");
+    expect(okButton(target).disabled).toBe(true);
+  });
+});

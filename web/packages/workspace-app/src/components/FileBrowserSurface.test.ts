@@ -16,7 +16,9 @@ import { chordFor } from "../state/shortcuts";
 import {
   browserSelection,
   browserSidePanes,
+  pathPromptState,
   refreshTree,
+  resolvePathPrompt,
   refreshWorkspace,
   workspace,
 } from "../state/store.svelte";
@@ -127,6 +129,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   closeTabMenu();
+  if (pathPromptState.open) resolvePathPrompt(null);
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
   await settle(2);
@@ -230,6 +233,49 @@ describe("the tab variant", () => {
     expect(flip).toBeDefined();
     flip!.click();
     expect(onFlip).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the tree's row menu", () => {
+  async function rowMenu(target: HTMLElement, name: string): Promise<string[]> {
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+      (el) => el.querySelector(".name")?.textContent?.trim() === name,
+    );
+    expect(row, `the tree listed ${name}`).toBeDefined();
+    row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await settle();
+    return [...document.body.querySelectorAll(".ctx > button, .ctx > .ctx-sep")].map((el) =>
+      el.classList.contains("ctx-sep")
+        ? "---"
+        : (el.querySelector(".menu-row-label") ?? el).textContent!.replace(/\s+/g, " ").trim(),
+    );
+  }
+
+  test("a directory row offers one New File or Directory entry, which opens the file-or-directory prompt there", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
+    const rows = await rowMenu(target, "notes/");
+    expect(rows.filter((r) => /^New (File|Directory)/.test(r)), "no separate New File or New Directory").toEqual([
+      "New File or Directory",
+    ]);
+
+    const entry = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx > button")].find(
+      (b) => b.textContent?.trim() === "New File or Directory",
+    );
+    entry!.click();
+    await settle();
+    expect(pathPromptState.open).toBe(true);
+    expect(pathPromptState.kind).toBe("either");
+    expect(pathPromptState.defaultValue).toBe("notes/");
+    expect(document.body.querySelector(".ctx"), "the menu closed").toBeNull();
+  });
+
+  test("a file row has no create entry, and Flip is the last row after a separator", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
+    const rows = await rowMenu(target, "README.md");
+    expect(rows.some((r) => /^New (File|Directory)/.test(r))).toBe(false);
+    expect(rows.slice(-2)).toEqual(["---", "Flip"]);
   });
 });
 

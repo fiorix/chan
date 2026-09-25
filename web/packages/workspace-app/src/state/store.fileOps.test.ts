@@ -6,12 +6,14 @@
 // disk and the status line.
 
 import { tick } from "svelte";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { api } from "../api/client";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import type { MockWorkspaceStore } from "../demo/store";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
+  browserSelection,
   fileOps,
   pathPromptState,
   refreshTree,
@@ -58,6 +60,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (pathPromptState.open) resolvePathPrompt(null);
   await settle(2);
   uninstallDemoWorkspace();
@@ -100,4 +103,40 @@ describe("the create prompts", () => {
       await created;
     });
   }
+});
+
+describe("New File or Directory", () => {
+  test("opens one prompt at the parent that takes either shape", async () => {
+    const created = fileOps.createFileOrDir("notes");
+    await settle(2);
+
+    expect(pathPromptState.kind).toBe("either");
+    expect(pathPromptState.mode).toBe("create");
+    expect(pathPromptState.defaultValue).toBe("notes/");
+    resolvePathPrompt(null);
+    await created;
+  });
+
+  test("a trailing-slash answer creates a directory and selects it", async () => {
+    const created = fileOps.createFileOrDir("notes");
+    await settle(2);
+    const create = vi.spyOn(api, "create");
+    resolvePathPrompt("notes/new/");
+    await created;
+
+    expect(create).toHaveBeenCalledWith("notes/new/", true);
+    expect(ui.status).toBeNull();
+    expect(browserSelection.path?.replace(/\/$/, "")).toBe("notes/new");
+  });
+
+  test("an answer without an extension creates a Markdown file", async () => {
+    const created = fileOps.createFileOrDir("notes");
+    await settle(2);
+    const create = vi.spyOn(api, "create");
+    resolvePathPrompt("notes/plain");
+    await created;
+
+    expect(create).toHaveBeenCalledWith("notes/plain.md", false, "");
+    expect(disk.get("notes/plain.md")?.content).toBe("");
+  });
 });
