@@ -56,6 +56,39 @@ vi.mock("../editor/link_preview", async (importOriginal) => {
   };
 });
 
+/// The board island, replaced by a probe that keeps the props FileEditorTab
+/// hands it.
+const island = vi.hoisted(() => {
+  const island = {
+    props: null as Record<string, unknown> | null,
+    session: null as object | null,
+    module: {
+      default: (_anchor: unknown, props: Record<string, unknown>) => {
+        island.props = props;
+      },
+    },
+  };
+  return island;
+});
+
+vi.mock("../editor/ExcalidrawCanvas.svelte", () => island.module);
+
+/// With `island.session` set, a canvas tab is eligible for a live scene
+/// session and gets that object as its session.
+vi.mock("../state/sceneSync.svelte", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/sceneSync.svelte")>();
+  return {
+    ...actual,
+    isSceneSyncEligible: (tab: { mode: string }) =>
+      island.session ? tab.mode === "canvas" : actual.isSceneSyncEligible(tab as never),
+    acquireSceneSession: (tab: { mode: string }) =>
+      island.session ?? actual.acquireSceneSession(tab as never),
+    releaseSceneSession: (id: string) => {
+      if (!island.session) actual.releaseSceneSession(id);
+    },
+  };
+});
+
 vi.mock("../state/tabs.svelte", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../state/tabs.svelte")>();
   return { ...actual, saveDraftTabToWorkspace: vi.fn(async () => false) };
@@ -214,6 +247,8 @@ beforeEach(async () => {
   h.urlUnderCursor = null;
   h.wikiUnderCursor = null;
   h.previews = [];
+  island.props = null;
+  island.session = null;
   localStorage.clear();
 });
 
@@ -771,5 +806,80 @@ describe("focus follows the active pane", () => {
     layout.activePaneId = "pane-left";
     await settle(2);
     expect(hosts["pane-left"]!.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe("a canvas tab", () => {
+  const BOARD = '{"type":"excalidraw","elements":[]}';
+
+  function canvasTab(over: Partial<FileTab> = {}): FileTab {
+    return fileTab({
+      id: "canvas-1",
+      path: "notes/board.excalidraw",
+      fileKind: "text",
+      mode: "canvas",
+      content: BOARD,
+      saved: BOARD,
+      ...over,
+    });
+  }
+
+  test("reaches the board island only through a dynamic import", async () => {
+    // A fresh module graph, with the island counting its evaluations.
+    vi.resetModules();
+    let loads = 0;
+    vi.doMock("../editor/ExcalidrawCanvas.svelte", () => {
+      loads += 1;
+      return island.module;
+    });
+    await import("./FileEditorTab.svelte");
+    expect(loads, "importing the tab does not evaluate the island").toBe(0);
+  });
+
+  test("loads the island the first time the tab is shown, not while it is hidden", async () => {
+    const hidden = seat(canvasTab());
+    await render(hidden, { active: false });
+    expect(island.props).toBeNull();
+
+    const shown = seat(canvasTab({ id: "canvas-2" }));
+    await render(shown, { active: true });
+    expect(island.props?.content).toBe(BOARD);
+    expect(island.props?.active).toBe(true);
+  });
+
+  test("hands the island its read-only state and the live scene session", async () => {
+    // A class instance: $state keeps it as is, where it would proxy a plain object.
+    island.session = new (class LiveSession {})();
+    const tab = seat(canvasTab({ readMode: true }));
+    await render(tab);
+    expect(island.props?.readonly).toBe(true);
+    expect(island.props?.session).toBe(island.session);
+
+    tab.readMode = false;
+    await settle(2);
+    expect(island.props?.readonly).toBe(false);
+  });
+
+  test("tells the island when its tab is hidden in the pane, and takes its scene into the buffer", async () => {
+    const board = canvasTab();
+    layout.nodes = {
+      [PANE]: { kind: "leaf", id: PANE, tabs: [board, fileTab({ id: "doc-1" })], activeTabId: board.id },
+    };
+    layout.rootId = PANE;
+    layout.activePaneId = PANE;
+    const pane = layout.nodes[PANE] as LeafNode;
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane } }));
+    await settle();
+    expect(island.props?.active).toBe(true);
+
+    pane.activeTabId = "doc-1";
+    await settle(2);
+    expect(island.props?.active).toBe(false);
+
+    const next = '{"type":"excalidraw","elements":[{"id":"a"}]}';
+    (island.props?.onSceneChange as (json: string) => void)(next);
+    expect((pane.tabs[0] as FileTab).content).toBe(next);
   });
 });

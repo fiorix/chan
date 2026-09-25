@@ -4,8 +4,8 @@ import { mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ExcalidrawCanvas, { noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
+// Build-time contract: the shell's CSS and its stylesheet import (page-width token, offscreen display: none); vitest drops CSS.
 import canvasSrc from "./ExcalidrawCanvas.svelte?raw";
-import fileEditorSrc from "../components/FileEditorTab.svelte?raw";
 import type {
   SceneCanvasBinding,
   SceneSession,
@@ -17,47 +17,50 @@ import type {
 // React runtime (mirrors diagram.test.ts). vi.mock is hoisted and
 // intercepts dynamic imports too; the spies go through vi.hoisted so the
 // hoisted mock factory can reference them without a TDZ error.
-const { createRootMock, renderMock, unmountMock } = vi.hoisted(() => {
+const { createRootMock, renderMock, unmountMock, modules } = vi.hoisted(() => {
   const renderMock = vi.fn();
   const unmountMock = vi.fn();
   const createRootMock = vi.fn(() => ({ render: renderMock, unmount: unmountMock }));
-  return { createRootMock, renderMock, unmountMock };
+  const modules = {
+    "react-dom/client": { createRoot: createRootMock },
+    react: { createElement: (type: unknown, props: unknown) => ({ type, props }) },
+    "@excalidraw/excalidraw": {
+      Excalidraw: () => null,
+      // Mimics the real cleaner's shape: elements + a cleaned appState
+      // (selection dropped) so the appState-baseline logic is testable.
+      serializeAsJSON: (elements: unknown, appState: Record<string, unknown>) =>
+        JSON.stringify({
+          elements,
+          appState: Object.fromEntries(
+            Object.entries(appState).filter(([k]) => k !== "selectedElementIds"),
+          ),
+          files: {},
+        }),
+      CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
+      // Test double of the vendored LWW reconcile, id-keyed with the
+      // version core of the real rule (the exact rule is pinned by the
+      // server port and its tests); enough to observe which side survives.
+      reconcileElements: (
+        local: readonly Record<string, unknown>[],
+        remote: readonly Record<string, unknown>[],
+      ) => {
+        const out = new Map<string, Record<string, unknown>>();
+        for (const el of local) out.set(el.id as string, el);
+        for (const el of remote) {
+          const mine = out.get(el.id as string);
+          if (!mine || (mine.version as number) <= (el.version as number)) {
+            out.set(el.id as string, el);
+          }
+        }
+        return [...out.values()];
+      },
+    },
+  };
+  return { createRootMock, renderMock, unmountMock, modules };
 });
-vi.mock("react-dom/client", () => ({ createRoot: createRootMock }));
-vi.mock("react", () => ({
-  createElement: (type: unknown, props: unknown) => ({ type, props }),
-}));
-vi.mock("@excalidraw/excalidraw", () => ({
-  Excalidraw: () => null,
-  // Mimics the real cleaner's shape: elements + a cleaned appState
-  // (selection dropped) so the appState-baseline logic is testable.
-  serializeAsJSON: (elements: unknown, appState: Record<string, unknown>) =>
-    JSON.stringify({
-      elements,
-      appState: Object.fromEntries(
-        Object.entries(appState).filter(([k]) => k !== "selectedElementIds"),
-      ),
-      files: {},
-    }),
-  CaptureUpdateAction: { IMMEDIATELY: "IMMEDIATELY", EVENTUALLY: "EVENTUALLY", NEVER: "NEVER" },
-  // Test double of the vendored LWW reconcile, id-keyed with the
-  // version core of the real rule (the exact rule is pinned by the
-  // server port and its tests); enough to observe which side survives.
-  reconcileElements: (
-    local: readonly Record<string, unknown>[],
-    remote: readonly Record<string, unknown>[],
-  ) => {
-    const out = new Map<string, Record<string, unknown>>();
-    for (const el of local) out.set(el.id as string, el);
-    for (const el of remote) {
-      const mine = out.get(el.id as string);
-      if (!mine || (mine.version as number) <= (el.version as number)) {
-        out.set(el.id as string, el);
-      }
-    }
-    return [...out.values()];
-  },
-}));
+vi.mock("react-dom/client", () => modules["react-dom/client"]);
+vi.mock("react", () => modules.react);
+vi.mock("@excalidraw/excalidraw", () => modules["@excalidraw/excalidraw"]);
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -99,7 +102,6 @@ describe("ExcalidrawCanvas island", () => {
 
   test("the board host follows the shared page-width cap", () => {
     expect(canvasSrc).toContain("width: min(100%, var(--chan-page-max-width, 100%))");
-    expect(canvasSrc).toContain(".excalidraw-shell");
     expect(canvasSrc).toContain("var(--page-shade)");
   });
 });
@@ -108,13 +110,8 @@ describe("inactive canvas tab hides via display:none (WKWebView island leak)", (
   // A GPU-composited Excalidraw island (the zoom/undo footer) leaks through
   // an ancestor's visibility:hidden in WKWebView; hiding the shell with
   // display:none stops it.
-  test("the shell gains an offscreen hook toggled off the active prop", () => {
-    expect(canvasSrc).toContain("class:offscreen={!active}");
+  test("the offscreen shell is display: none, not merely invisible", () => {
     expect(canvasSrc).toMatch(/\.excalidraw-shell\.offscreen \{\s*display: none;\s*\}/);
-  });
-
-  test("FileEditorTab passes active into the canvas island", () => {
-    expect(fileEditorSrc).toMatch(/<ExcalidrawCanvas[\s\S]*?\{active\}/);
   });
 
   test("mounting with active:false applies the offscreen class", () => {
@@ -183,34 +180,39 @@ describe("a read-only canvas tab", () => {
     await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
     expect(renderProps().viewModeEnabled).toBe(false);
   });
-
-  test("FileEditorTab passes its read-only state into the canvas island", () => {
-    // Bounded to the element: an unbounded `[\s\S]*?` reaches the `readonly`
-    // on the source editor further down and passes either way.
-    const island = fileEditorSrc.match(/<ExcalidrawCanvas[\s\S]*?\/>/)?.[0] ?? "";
-    expect(island, "the canvas island is mounted here").toContain("ExcalidrawCanvas");
-    expect(island).toContain("readonly={readOnly}");
-  });
 });
 
 describe("excalidraw stays out of the eager bundle", () => {
-  test("the wrapper dynamic-imports react-dom, react, and excalidraw", () => {
-    expect(canvasSrc).toMatch(/import\("react-dom\/client"\)/);
-    expect(canvasSrc).toMatch(/import\("react"\)/);
-    expect(canvasSrc).toMatch(/import\("@excalidraw\/excalidraw"\)/);
-    // A static runtime import would drag React into the eager editor bundle.
-    expect(canvasSrc).not.toMatch(/from "react"/);
-    expect(canvasSrc).not.toMatch(/from "react-dom\/client"/);
-    expect(canvasSrc).not.toMatch(/from "@excalidraw\/excalidraw"/);
+  // FileEditorTab.test.ts covers the tab reaching this module only through a
+  // dynamic import; this module in turn loads React and excalidraw on mount.
+  test("importing the island loads no React or excalidraw; mounting it does", async () => {
+    // A fresh module graph, with each runtime module counting its evaluations.
+    vi.resetModules();
+    const loaded: Record<string, number> = {};
+    for (const [id, module] of Object.entries(modules)) {
+      loaded[id] = 0;
+      vi.doMock(id, () => {
+        loaded[id]! += 1;
+        return module;
+      });
+    }
+    await import("./ExcalidrawCanvas.svelte");
+    expect(loaded).toEqual({ "react-dom/client": 0, react: 0, "@excalidraw/excalidraw": 0 });
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(
+      mount(ExcalidrawCanvas, {
+        target,
+        props: { content: "", dark: false, onSceneChange: () => {} },
+      }),
+    );
+    await vi.waitFor(() => expect(renderMock).toHaveBeenCalled());
+    expect(loaded).toEqual({ "react-dom/client": 1, react: 1, "@excalidraw/excalidraw": 1 });
   });
 
-  test("index.css is a side-effect import so it rides the async chunk", () => {
+  test("the stylesheet is imported by the island, so it rides the island's chunk", () => {
     expect(canvasSrc).toMatch(/import "@excalidraw\/excalidraw\/index\.css"/);
-  });
-
-  test("FileEditorTab reaches the wrapper only via dynamic import", () => {
-    expect(fileEditorSrc).toMatch(/import\("\.\.\/editor\/ExcalidrawCanvas\.svelte"\)/);
-    expect(fileEditorSrc).not.toMatch(/from "\.\.\/editor\/ExcalidrawCanvas\.svelte"/);
   });
 });
 
@@ -445,11 +447,26 @@ describe("scene session binding loop safety", () => {
     expect(session.unbindCanvas).toHaveBeenCalledTimes(1);
   });
 
-  test("the collab path pins its load-bearing calls in source", () => {
-    expect(canvasSrc).toContain("getSceneElementsIncludingDeleted");
-    expect(canvasSrc).toContain("CaptureUpdateAction.NEVER");
-    expect(canvasSrc).toMatch(/reconcileElements\(/);
-    expect(fileEditorSrc).toMatch(/<ExcalidrawCanvas[\s\S]*?session=\{sceneSession\}/);
+  test("a local delete pushes its tombstone", async () => {
+    const { api, session, binding } = await mountBound([wireEl("a", 3)]);
+    binding.flushPendingLocal();
+    session.pushScene.mockClear();
+
+    api.setElements([wireEl("a", 4, { isDeleted: true })]);
+    binding.flushPendingLocal();
+    expect(session.pushScene).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "a", version: 4, isDeleted: true })],
+      undefined,
+      undefined,
+    );
+  });
+
+  test("a local delete beats a slower remote update of the same element", async () => {
+    const { api, binding } = await mountBound([wireEl("x", 8, { isDeleted: true })]);
+    binding.applyUpdate({ elements: [wireEl("x", 6)] });
+    expect(api.getSceneElementsIncludingDeleted()).toEqual([
+      expect.objectContaining({ id: "x", version: 8, isDeleted: true }),
+    ]);
   });
 });
 
