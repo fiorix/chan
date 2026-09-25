@@ -5,7 +5,8 @@
 // switch; paneKeepAliveMount.test.ts compares the nodes). Only the live tab
 // on the pane's visible side is active, and Hybrid Nav makes none active. A
 // dashboard that is not active is hidden from assistive tech and goes quiet:
-// its carousel stops rotating and stops polling the index.
+// its carousel stops rotating and stops polling the index. It is hidden by
+// visibility over its full box, never display: none, so it keeps its size.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -21,6 +22,7 @@ import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__te
 import { fileTab, resetLayout } from "../__tests__/tabs";
 import { cancelPaneMode, layout, type DashboardTab as Dashboard, type LeafNode } from "../state/tabs.svelte";
 import DashboardTab from "./DashboardTab.svelte";
+import dashboardSource from "./DashboardTab.svelte?raw";
 
 stubAppEnvironment();
 
@@ -113,5 +115,19 @@ describe("a dashboard that is not active", () => {
     show(shown, true);
     vi.advanceTimersByTime(5_000);
     expect(shown.carouselSlide).toBe(1);
+  });
+});
+
+describe("the dashboard's stylesheet", () => {
+  // Source-text contract: a hidden dashboard keeps its box through visibility, never display: none, which would refit its index graph to nothing; jsdom lays out nothing.
+  test("hidden dashboards keep layout via visibility, not display:none", () => {
+    const hidden = dashboardSource.match(/^ {2}\.dashboard \{\n[\s\S]*?\n {2}\}/m)?.[0] ?? "";
+    const shown = dashboardSource.match(/^ {2}\.dashboard\.active \{\n[\s\S]*?\n {2}\}/m)?.[0] ?? "";
+
+    expect(hidden).toMatch(/^\s+position: absolute;$/m);
+    expect(hidden).toMatch(/^\s+inset: 0;$/m);
+    expect(hidden).toMatch(/^\s+visibility: hidden;$/m);
+    expect(hidden).not.toMatch(/display: none/);
+    expect(shown).toMatch(/^\s+visibility: visible;$/m);
   });
 });

@@ -5,7 +5,9 @@
 // compares the nodes). Only the live tab on the pane's visible side is
 // active, and Hybrid Nav makes none active; an editor that is not active is
 // hidden from assistive tech. Only the active editor of the focused pane
-// takes the caret. The editors run their view plugins without a crash.
+// takes the caret. The editors run their view plugins without a crash. A
+// hidden editor is hidden by visibility over its full box, never display:
+// none, so CodeMirror keeps its layout.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -18,6 +20,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { fileTab, resetLayout } from "../__tests__/tabs";
 import { cancelPaneMode, layout, splitPane, type LeafNode } from "../state/tabs.svelte";
+import editorSource from "./FileEditorTab.svelte?raw";
 
 stubAppEnvironment();
 
@@ -101,5 +104,19 @@ describe("a file tab's editor", () => {
 
     await vi.waitFor(() => expect(editorOf("a.md").contains(document.activeElement)).toBe(true));
     expect(editorOf("b.md").contains(document.activeElement)).toBe(false);
+  });
+});
+
+describe("the editor's stylesheet", () => {
+  // Source-text contract: a hidden editor keeps its box through visibility, never display: none, so CodeMirror keeps real layout geometry; jsdom lays out nothing.
+  test("hidden editors keep layout via visibility, not display:none", () => {
+    const hidden = editorSource.match(/^ {2}\.editor-tab \{\n[\s\S]*?\n {2}\}/m)?.[0] ?? "";
+    const shown = editorSource.match(/^ {2}\.editor-tab\.active \{\n[\s\S]*?\n {2}\}/m)?.[0] ?? "";
+
+    expect(hidden).toMatch(/^\s+position: absolute;$/m);
+    expect(hidden).toMatch(/^\s+inset: 0;$/m);
+    expect(hidden).toMatch(/^\s+visibility: hidden;$/m);
+    expect(hidden).not.toMatch(/display: none/);
+    expect(shown).toMatch(/^\s+visibility: visible;$/m);
   });
 });
