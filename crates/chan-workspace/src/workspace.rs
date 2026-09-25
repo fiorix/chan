@@ -1886,6 +1886,17 @@ impl Workspace {
         self.fs.is_dir(rel)
     }
 
+    /// True iff `rel`'s parent directory lists `rel`'s file name byte for
+    /// byte. On a case-insensitive volume a lookup finds a file under any
+    /// spelling of its name, while the listing holds only the spelling the
+    /// directory stores, so this is what tells a stale spelling from the
+    /// file after a case-only rename. On a case-sensitive volume it is true
+    /// exactly when the path exists, whatever its type. Reads the parent
+    /// once; a parent that cannot be listed answers false.
+    pub fn parent_lists_name(&self, rel: &str) -> bool {
+        ListedNames::new(self.fs.dir()).lists(rel) == Some(true)
+    }
+
     /// Stat the path using `lstat` semantics (so a symlink reports
     /// as such, not as its target). Refuses paths that escape the
     /// workspace root through a mid-path symlink. Drafts under
@@ -5155,6 +5166,53 @@ fn split_anchor(target: &str) -> (String, Option<String>) {
         Some((p, a)) if !a.is_empty() => (p.to_string(), Some(a.to_string())),
         _ => (target.to_string(), None),
     }
+}
+
+/// Parent directory listings, each read once, for asking of many paths
+/// whether their parent lists their file name byte for byte (see
+/// [`Workspace::parent_lists_name`]). A pass that checks paths grouped under
+/// few parents pays one `read_dir` per parent, not one per path.
+struct ListedNames {
+    dir: Arc<cap_std::fs::Dir>,
+    /// Entry names by parent path; `None` for a parent that could not be
+    /// listed.
+    parents: HashMap<String, Option<HashSet<std::ffi::OsString>>>,
+}
+
+impl ListedNames {
+    fn new(dir: Arc<cap_std::fs::Dir>) -> Self {
+        Self {
+            dir,
+            parents: HashMap::new(),
+        }
+    }
+
+    /// Whether `rel`'s parent lists `rel`'s file name byte for byte, or
+    /// `None` when the parent cannot be listed.
+    fn lists(&mut self, rel: &str) -> Option<bool> {
+        let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let dir = &self.dir;
+        let names = self
+            .parents
+            .entry(parent.to_owned())
+            .or_insert_with(|| list_names(dir, parent));
+        names
+            .as_ref()
+            .map(|names| names.contains(std::ffi::OsStr::new(name)))
+    }
+}
+
+fn list_names(dir: &cap_std::fs::Dir, parent: &str) -> Option<HashSet<std::ffi::OsString>> {
+    let entries = if parent.is_empty() {
+        dir.entries()
+    } else {
+        dir.read_dir(parent)
+    }
+    .ok()?;
+    entries
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()
+        .ok()
 }
 
 /// The case-folding directory named by `CHAN_CASEFOLD_TEST_DIR`, for the
@@ -10951,6 +11009,47 @@ mod tests {
             !workspace.recovery_is_unowned(),
             "a driver is exactly what makes the pass claimable"
         );
+    }
+
+    #[test]
+    fn parent_lists_name_answers_by_the_stored_spelling() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.write_text("Note.md", "# Note\n").unwrap();
+        workspace.write_text("sub/Deep.md", "# Deep\n").unwrap();
+
+        assert!(workspace.parent_lists_name("Note.md"));
+        assert!(workspace.parent_lists_name("sub/Deep.md"));
+        assert!(
+            workspace.parent_lists_name("sub"),
+            "a directory is listed by its parent"
+        );
+        assert!(!workspace.parent_lists_name("missing.md"));
+        assert!(
+            !workspace.parent_lists_name("gone/Deep.md"),
+            "a parent that cannot be listed lists nothing"
+        );
+        assert!(
+            !workspace.parent_lists_name("note.md"),
+            "a spelling that differs only in case is not the listed name"
+        );
+        assert!(!workspace.parent_lists_name("sub/deep.md"));
+    }
+
+    #[test]
+    fn listed_names_reads_each_parent_once() {
+        let (_cfg, root, workspace) = fixture();
+        workspace.write_text("a/one.md", "# One\n").unwrap();
+        let mut listed = ListedNames::new(workspace.fs.dir());
+
+        assert_eq!(listed.lists("a/one.md"), Some(true));
+        std::fs::write(root.path().join("a/two.md"), "# Two\n").unwrap();
+
+        assert_eq!(
+            listed.lists("a/two.md"),
+            Some(false),
+            "the parent was listed once, before two.md existed"
+        );
+        assert_eq!(listed.lists("missing/x.md"), None);
     }
 
     /// A case-only rename made with no events, as while nothing was
