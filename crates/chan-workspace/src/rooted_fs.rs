@@ -507,9 +507,7 @@ impl RootedFs {
                         if message == "invalid UTF-8 in streamed text write"
                 )
             {
-                return Err(ChanError::NonUtf8EditableText(format!(
-                    "refusing to write non-UTF-8 bytes to editable text file: {rel}"
-                )));
+                return Err(non_utf8_editable_text(rel));
             }
             return Err(error);
         }
@@ -1088,6 +1086,11 @@ impl RootedFs {
             let staged = stage_rel.join(leaf);
             if let Err(error) = self
                 .copy_one_file(&from_rel, &staged, &to_canon, &mut created)
+                // The writer names the staged path; the caller asked for `to`.
+                .map_err(|error| match error {
+                    ChanError::NonUtf8EditableText(_) => non_utf8_editable_text(to),
+                    error => error,
+                })
                 .and_then(|()| self.publish_copy(&staged, &to_rel, to))
             {
                 return Err(self.discard_copy_stage(&stage, error));
@@ -1464,6 +1467,13 @@ impl RootedFs {
         };
         self.dir().symlink_metadata(&rel_path).is_ok()
     }
+}
+
+/// The refusal for non-UTF-8 bytes bound for the editable text file `rel`.
+fn non_utf8_editable_text(rel: &str) -> ChanError {
+    ChanError::NonUtf8EditableText(format!(
+        "refusing to write non-UTF-8 bytes to editable text file: {rel}"
+    ))
 }
 
 fn emit_valid_utf8_chunks<F>(rel: &str, pending: &mut Vec<u8>, on_event: &mut F) -> Result<bool>
