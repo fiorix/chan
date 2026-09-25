@@ -5,7 +5,8 @@
 // either. The entry's actions follow (the same set the inspector offers):
 // Open, which opens a file in an editor and a folder in a new Files tab
 // with its inspector open, New Terminal and New Graph with their chords, and
-// the transfer and viewer rows. After a separator come the tree's own Copy
+// the transfer and viewer rows, and for a document Export to PDF, which
+// renders it and downloads the PDF. After a separator come the tree's own Copy
 // Path, Rename / Move and Delete, which asks before it deletes, and in a
 // Files tab a Flip row for the pane. A docked tree offers the same rows,
 // without Flip.
@@ -18,7 +19,18 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serialize);
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinks);
 
+// The PDF engine and the browser download stand in; the export between them
+// runs for real.
+const PDF = vi.hoisted(() => new Uint8Array([37, 80, 68, 70]));
+vi.mock("../editor/pdf_export", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../editor/pdf_export")>()),
+  exportMarkdownToPdf: vi.fn(async () => PDF),
+}));
+vi.mock("../api/download", () => ({ downloadBytes: vi.fn() }));
+
 import { api } from "../api/client";
+import { downloadBytes } from "../api/download";
+import { exportMarkdownToPdf } from "../editor/pdf_export";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { chordFor } from "../state/shortcuts";
@@ -140,6 +152,14 @@ describe("a file's menu", () => {
     await settle();
 
     expect(document.querySelector(".md-video-viewer")).not.toBeNull();
+  });
+
+  test("Export to PDF renders the document and downloads the PDF", async () => {
+    item(await menuFor("a.md"), "Export to PDF").click();
+
+    await vi.waitFor(() => expect(downloadBytes).toHaveBeenCalledWith(PDF, "a.pdf", "application/pdf"));
+    expect(exportMarkdownToPdf).toHaveBeenCalledWith(expect.objectContaining({ path: "a.md", markdown: "hello" }));
+    expect(document.querySelector(".ctx")).toBeNull();
   });
 
   test("Delete shows its chord and deletes only after a destructive confirm", async () => {
