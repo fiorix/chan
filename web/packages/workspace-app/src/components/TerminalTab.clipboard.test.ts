@@ -1,60 +1,113 @@
-import { describe, expect, test, vi } from "vitest";
-import shortcuts from "../state/shortcuts.ts?raw";
-import { handleTerminalClipboardChord } from "../terminal/clipboardChord";
-import terminalTab from "./TerminalTab.svelte?raw";
-
+// @vitest-environment jsdom
+//
 // Terminal copy / paste chords. macOS binds Cmd+C / Cmd+V (Cmd never
 // collides with a control code); Linux / Windows bind Ctrl+Shift+C /
-// Ctrl+Shift+V so bare Ctrl+C/V stay the shell's SIGINT / EOF. Same
-// divergence shape as the reload Ctrl+R clash (cmdRWindowReload.test.ts).
+// Ctrl+Shift+V so bare Ctrl+C/V stay the shell's SIGINT / EOF. The registry
+// entries and the chord handler are read directly; the handler's wiring is
+// driven through a mounted TerminalTab over the stand-in xterm.
 
-describe("terminal copy/paste chord registry entries", () => {
-  test("terminal.copy descriptor present (Cmd+C, Terminal group)", () => {
-    expect(shortcuts).toMatch(
-      /id: "terminal\.copy",[\s\S]*?label: "Copy selection",[\s\S]*?web: "Cmd\+C",[\s\S]*?native: "Cmd\+C",[\s\S]*?group: "Terminal",/,
-    );
+import { tick } from "svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
+import TerminalTab from "./TerminalTab.svelte";
+import { chordFor, osChord, SHORTCUTS } from "../state/shortcuts";
+import { handleTerminalClipboardChord } from "../terminal/clipboardChord";
+import {
+  attach,
+  installTerminalDom,
+  menuRow,
+  mountTerminal,
+  openBodyMenu,
+  pressInTerminal,
+  resetTerminals,
+  seatTerminals,
+  sentFrames,
+  terminalTab,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+
+installTerminalDom();
+
+const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
+Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+
+afterEach(() => {
+  resetTerminals();
+  clipboard.writeText.mockClear();
+});
+
+describe("the chord registry", () => {
+  const entry = (id: string) => SHORTCUTS.find((s) => s.id === id)!;
+
+  test("binds copy and paste to Cmd+C and Cmd+V in the Terminal group, noting the other OSes", () => {
+    expect(entry("terminal.copy")).toMatchObject({
+      label: "Copy selection",
+      web: "Cmd+C",
+      native: "Cmd+C",
+      group: "Terminal",
+      note: "Ctrl+Shift+C on Linux / Windows",
+    });
+    expect(entry("terminal.paste")).toMatchObject({
+      label: "Paste",
+      web: "Cmd+V",
+      native: "Cmd+V",
+      group: "Terminal",
+      note: "Ctrl+Shift+V on Linux / Windows",
+    });
   });
 
-  test("terminal.paste descriptor present (Cmd+V, Terminal group)", () => {
-    expect(shortcuts).toMatch(
-      /id: "terminal\.paste",[\s\S]*?label: "Paste",[\s\S]*?web: "Cmd\+V",[\s\S]*?native: "Cmd\+V",[\s\S]*?group: "Terminal",/,
-    );
-  });
-
-  test("descriptors document the Linux/Windows Ctrl+Shift divergence", () => {
-    expect(shortcuts).toMatch(
-      /id: "terminal\.copy",[\s\S]*?note: "Ctrl\+Shift\+C on Linux \/ Windows",/,
-    );
-    expect(shortcuts).toMatch(
-      /id: "terminal\.paste",[\s\S]*?note: "Ctrl\+Shift\+V on Linux \/ Windows",/,
-    );
+  test("moves them to Mod+Shift off the Mac", () => {
+    for (const platform of ["web", "native"] as const) {
+      expect(osChord(entry("terminal.copy"), platform, "linux")).toBe("Mod+Shift+C");
+      expect(osChord(entry("terminal.paste"), platform, "windows")).toBe("Mod+Shift+V");
+      expect(osChord(entry("terminal.copy"), platform, "mac")).toBe("Cmd+C");
+    }
   });
 });
 
-describe("osChord per-OS divergence", () => {
-  test("osChord moves copy/paste off Cmd+ to Ctrl+Shift+ on non-macOS", () => {
-    // Mod+Shift+C/V -> Ctrl+Shift+C/V once Mod renders as Ctrl; the stored
-    // Cmd+ form is the macOS display.
-    expect(shortcuts).toMatch(
-      /TERMINAL_COPY_ID && os !== "mac"\) return "Mod\+Shift\+C";/,
-    );
-    expect(shortcuts).toMatch(
-      /TERMINAL_PASTE_ID && os !== "mac"\) return "Mod\+Shift\+V";/,
-    );
-  });
-});
+describe("in a mounted terminal off the Mac", () => {
+  async function attached() {
+    const [tab] = seatTerminals([terminalTab()]);
+    const mounted = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    socket.sent.splice(0);
+    return { ...mounted, socket };
+  }
 
-describe("TerminalTab wiring", () => {
-  test("clipboard chord detection branches per-OS (Cmd vs Ctrl+Shift)", () => {
-    // macOS: bare Cmd. Non-macOS: Ctrl+Shift (so bare Ctrl+C/V stays SIGINT).
-    expect(terminalTab).toMatch(
-      /handleTerminalClipboardChord\(e, \{[\s\S]*?os: currentOS\(\)/,
-    );
+  test("Ctrl+Shift+C copies the selection and xterm skips the key", async () => {
+    const { term, socket } = await attached();
+    term.selection = "selected text";
+    const { event, handled } = pressInTerminal(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    await tick();
+
+    expect(handled).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboard.writeText).toHaveBeenCalledWith("selected text");
+    expect(sentFrames(socket)).toEqual([]);
   });
 
-  test("context-menu Copy/Paste hints read the chord from the registry", () => {
-    expect(terminalTab).toMatch(/chordFor\("terminal\.copy"\)/);
-    expect(terminalTab).toMatch(/chordFor\("terminal\.paste"\)/);
+  test("bare Ctrl+C is left to xterm, which sends the shell its interrupt", async () => {
+    const { term } = await attached();
+    term.selection = "selected text";
+    const { handled } = pressInTerminal(term, { key: "c", code: "KeyC", ctrlKey: true });
+    expect(handled).toBe(true);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+  });
+
+  test("the body menu's Copy and Paste rows show the registry's chords", async () => {
+    const { target } = await attached();
+    await openBodyMenu(target);
+    expect(menuRow("Copy").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.copy"));
+    expect(menuRow("Paste").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.paste"));
+    expect(chordFor("terminal.copy")).toBe("Ctrl+Shift+C");
   });
 });
 
