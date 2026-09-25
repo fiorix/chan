@@ -754,6 +754,53 @@ pub(crate) fn empty_catalog() -> Arc<ExtensionCatalog> {
 mod tests {
     use super::*;
 
+    /// Collects one line per event on the calling thread, `LEVEL name=value`
+    /// per field, so a test can read the warning an operator would find in
+    /// the journal. chan-server has plain `tracing` only, and a subscriber
+    /// crate would be a new dependency edge for one assertion.
+    struct CapturedLogs(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for CapturedLogs {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Line(String);
+            impl tracing::field::Visit for Line {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+            let mut line = Line(event.metadata().level().to_string());
+            event.record(&mut line);
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Install [`CapturedLogs`] for the current thread until the guard drops.
+    /// A current-thread tokio test runs every future it awaits on this
+    /// thread, so the runtime's own warnings land here too.
+    fn capture_logs() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let guard = tracing::subscriber::set_default(CapturedLogs(Arc::clone(&lines)));
+        (lines, guard)
+    }
+
     #[test]
     fn discovery_is_sorted_and_ignores_invalid_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1008,5 +1055,49 @@ mod tests {
         assert!(gone.is_ok(), "invalid extension left a descendant running");
 
         runtime.shutdown().await;
+    }
+
+    /// The failure a service-started devserver produces: the extension runs a
+    /// helper its PATH cannot resolve and exits before the handshake. The one
+    /// warning chan logs has to say so, or the operator is left with "reading
+    /// handshake" and nothing else.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_closed_stdout_is_logged_with_its_cause_and_exit_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("helperless.toml"),
+            "name = \"Helperless\"\ncommand = \"/bin/sh\"\nargs = [\"extension.sh\"]\n",
+        )
+        .expect("write config");
+        std::fs::write(
+            dir.path().join("extension.sh"),
+            "printf 'booting\\n'\nexec chan-extension-helper-that-is-not-installed\n",
+        )
+        .expect("write extension script");
+
+        let (logs, _guard) = capture_logs();
+        let runtime = ExtensionRuntime::start_in(dir.path()).await;
+        assert!(runtime.catalog.views().is_empty());
+        runtime.shutdown().await;
+
+        let logs = logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let ignored = logs
+            .iter()
+            .find(|line| line.contains("extension ignored"))
+            .unwrap_or_else(|| panic!("no ignored-extension warning in {logs:?}"));
+        assert!(
+            ignored.contains("extension stdout closed before the handshake marker"),
+            "the warning must name why the handshake failed: {ignored}"
+        );
+        // sh exits 127 for a command it cannot find, which is the quickest
+        // pointer at PATH an operator gets from one log line.
+        assert!(
+            ignored.contains("exit status: 127"),
+            "the warning must carry the child's exit status: {ignored}"
+        );
     }
 }
