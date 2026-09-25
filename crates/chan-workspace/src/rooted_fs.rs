@@ -2030,6 +2030,41 @@ mod mutation_tests {
         );
     }
 
+    /// A panic between creating the stage and publishing it, which
+    /// `run_blocking` surfaces as a `JoinError`, must not strand the stage
+    /// beside the destination.
+    #[test]
+    fn a_copy_that_panics_before_publishing_leaves_no_stage() {
+        let mut left_behind = Vec::new();
+        for (from, to) in [("mine.txt", "copied.txt"), ("src", "dst")] {
+            let root = tempfile::tempdir().unwrap();
+            let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+            fs::write(root.path().join("mine.txt"), "mine").unwrap();
+            fs::create_dir(root.path().join("src")).unwrap();
+            fs::write(root.path().join("src/inner.txt"), "inner").unwrap();
+            copy_window::set(|| panic!("copy interrupted inside the publish window"));
+
+            let unwound =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rooted.copy(from, to)));
+
+            assert!(
+                unwound.is_err(),
+                "the hook panics inside the copy of {from}"
+            );
+            assert!(!root.path().join(to).exists());
+            left_behind.extend(
+                copy_stages(root.path())
+                    .into_iter()
+                    .map(|stage| format!("{from}: {stage}")),
+            );
+        }
+        assert_eq!(
+            left_behind,
+            Vec::<String>::new(),
+            "a copy that panicked left its stage behind"
+        );
+    }
+
     /// The atomic writer decides whether to validate UTF-8 from the path it
     /// writes, so a file copy must write under a name that classifies like
     /// its destination.
