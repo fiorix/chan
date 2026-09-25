@@ -3489,7 +3489,6 @@ struct Session {
     command_tx: std::sync::mpsc::Sender<PtyCommand>,
     output_tx: broadcast::Sender<SessionEvent>,
     ring: Mutex<RingBuffer>,
-    seq: AtomicU64,
     last_activity: AtomicI64,
     /// Wall-clock millis of the most recent VISIBLE output (the agent
     /// rendering / generating), distinct from `last_activity` (which bumps on
@@ -3796,7 +3795,6 @@ impl Session {
             command_tx,
             output_tx,
             ring: Mutex::new(RingBuffer::new(config.terminal.ring_bytes)),
-            seq: AtomicU64::new(0),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             // Seed output-idle at spawn time so a brand-new session is not
             // treated as instantly idle before it has rendered anything.
@@ -4022,8 +4020,8 @@ impl Session {
         fire_attach_seam(&self.id, AttachSeam::ManifestBeforeReplayTail);
         // The PTY reader keeps running while the manifest is rewritten, and the
         // next process rebuilds the ring as this tail ending at this `seq`, so
-        // both come from one snapshot under the ring lock `record_output`
-        // pushes and advances `seq` under.
+        // both come from one snapshot under the ring lock, the lock
+        // `record_output` pushes under.
         let (seq, replay) = self.fdstore_replay_tail();
         let meta = FdStoreSessionMeta {
             tenant_prefix: tenant_prefix.to_string(),
@@ -4121,7 +4119,6 @@ impl Session {
                 meta.seq,
                 &replay,
             )),
-            seq: AtomicU64::new(meta.seq),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -4955,7 +4952,6 @@ impl Session {
         // its replay if it attaches after the push, on its receiver if before.
         let mut ring = self.ring.lock().expect("terminal ring poisoned");
         ring.push(bytes);
-        self.seq.store(ring.end_seq(), Ordering::Relaxed);
         // The tab activity dot trips on the same visible text, for the same
         // reason.
         if visible > 0 && !self.focused.load(Ordering::Relaxed) {
@@ -5592,7 +5588,6 @@ mod tests {
             command_tx,
             output_tx,
             ring: Mutex::new(RingBuffer::new(ring_bytes)),
-            seq: AtomicU64::new(0),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
