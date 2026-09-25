@@ -14,7 +14,7 @@ import FileEditorTab from "./FileEditorTab.svelte";
 import Pane from "./Pane.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import { bufferKey, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
+import { bufferKey, flushPendingBufferWrites, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import { allCommands } from "../state/commands";
@@ -636,7 +636,9 @@ describe("recovering unsaved work from an earlier page load", () => {
     tab.content = "# Plan\n\nA later edit.\n";
     await settle(2);
     unmount(mounted.pop()!);
-    await new Promise((r) => setTimeout(r, 650));
+    // Write whatever is still queued now, however long its debounce: the
+    // close must have left nothing for this tab.
+    flushPendingBufferWrites();
     expect(readEditorBuffer("notes/plan.md")?.content, "the write queued before the close was cancelled").toBe(
       "# Plan\n\nUnsaved edit.\n",
     );
