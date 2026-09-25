@@ -9,11 +9,11 @@ import {
 
 // The graph canvas colours file nodes by EXTENSION (a `.rs` source node
 // is royalblue) while the server projects a coarser wire kind (`.rs` and
-// `.txt` both ride `text`). The inspector kind bubble used to colour by
-// wire kind, so a blue source node opened an orange bubble. `fileBucket`
-// is the shared extension classifier both surfaces now read; these tests
-// pin its buckets, the path-aware chip colour, and a parity assertion
-// that the bubble var equals the canvas node-fill var for every bucket.
+// `.txt` both ride `text`). `fileBucket` is the extension classifier the
+// canvas and the inspector kind bubble both read, so a blue source node
+// opens a blue bubble. These tests pin its buckets, the path-aware chip
+// colour, and a parity assertion that the bubble var equals the canvas
+// node-fill var for every bucket.
 
 describe("fileBucket", () => {
   test("markdown extensions bucket as doc", () => {
@@ -109,7 +109,7 @@ describe("chipColorVar (path-aware bubble colour)", () => {
     for (const kind of ["document", "text", "media", "binary", "contact", "tag", "mention", "folder", "date", "pending"] as const) {
       expect(chipColorVar(kind)).toBe(colorVarFor(kind));
     }
-    // The specific regression: a pathless `text` chip is still orange.
+    // A pathless `text` chip keeps the document colour.
     expect(chipColorVar("text")).toBe("var(--g-doc)");
   });
 });

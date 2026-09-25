@@ -153,7 +153,7 @@ const immediateAnimationFrame = ((cb: FrameRequestCallback) => {
 globalThis.requestAnimationFrame = immediateAnimationFrame;
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 // jsdom does not implement the CSS Font Loading API. Chan's supported browser
-// runtimes do, and TerminalTab now waits for the bundled terminal face before
+// runtimes do, and TerminalTab waits for the bundled terminal face before
 // constructing either canvas renderer. Model that runtime contract here; the
 // loader's unavailable/rejected branches are covered directly in font.test.ts.
 Object.defineProperty(document, "fonts", {

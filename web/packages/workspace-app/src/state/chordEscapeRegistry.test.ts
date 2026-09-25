@@ -95,8 +95,7 @@ describe("shouldEscapeTerminal lookup", () => {
 
   test("Ctrl+Shift+T (new terminal web chord) escapes", () => {
     // Test env runs as web platform (no Tauri global). New terminal's web chord
-    // is the literal Ctrl+Shift+T after the no-defaults round, and it keeps its
-    // escapeTerminal flag.
+    // is the literal Ctrl+Shift+T, and it keeps its escapeTerminal flag.
     const e = new KeyboardEvent("keydown", {
       key: "t",
       ctrlKey: true,
